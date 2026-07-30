@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -247,45 +249,122 @@ def test_undeterminable_timer_probe_counts_as_active(tmp_path: Path) -> None:
     assert error.value.details["timer"]["verdict"] == "undeterminable"
 
 
-def test_fresh_journal_lock_refuses(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-    lock_dir = fixture["journal_root"] / ".locks"
-    lock_dir.mkdir()
-    (lock_dir / "scheduler.lock").write_text("{}", encoding="utf-8")
-    with pytest.raises(ResetRefused) as error:
-        _run(fixture, enforce=True)
-    assert error.value.reason == "journal_lock_activity"
-    assert fixture["nfs_index"].read_bytes() == fixture["nfs_bytes"]
+def _make_lock_file(fixture: dict[str, Any], relative: str, *, stale: bool = False) -> Path:
+    """A journal cycle lock exactly as the journal leaves it: created, never touched."""
+
+    lock_file = fixture["journal_root"] / ".locks" / relative
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file.write_bytes(b"")
+    if stale:
+        moment = datetime.now(tz=UTC).timestamp() - (reset_module.LOCK_FRESHNESS_SECONDS + 60)
+        os.utime(lock_file, (moment, moment))
+    return lock_file
 
 
-def test_a_nested_fresh_journal_lock_refuses(tmp_path: Path) -> None:
-    """B-P2-6: the real layout is ``.locks/<source>/<cycle>.lock``.
+@contextmanager
+def _held_flock(path: Path) -> Any:
+    """Hold ``LOCK_EX`` on ``path`` through a SEPARATE open file description.
 
-    A first-level scan sees only the source directory and reports "no locks"
-    while a scheduler pass holds one — the probe must recurse.
+    ``flock`` locks are per-open-file-description, so a second ``os.open`` in
+    this process contends with the probe exactly like another process would.
+    """
+
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield descriptor
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def test_a_held_lock_on_a_stale_mtime_file_refuses(tmp_path: Path) -> None:
+    """B2-3: journal locks are created once and never touched again.
+
+    ``file_orchestration_journal.py:6314-6360`` opens the cycle lock with
+    ``O_CREAT`` and ``flock``s it; nothing ever writes, touches or unlinks it.
+    Its mtime is therefore the moment the cycle was FIRST locked -- weeks old for
+    a replay-window cycle -- while a pass holding it right now is perfectly
+    invisible to any freshness test.  Liveness is the signal.
     """
 
     fixture = _fixture(tmp_path)
-    lock_dir = fixture["journal_root"] / ".locks" / "gfs"
-    lock_dir.mkdir(parents=True)
-    (lock_dir / "2026070500.lock").write_text("{}", encoding="utf-8")
+    lock_file = _make_lock_file(fixture, "gfs/2026070500.lock", stale=True)
+
+    with _held_flock(lock_file):
+        with pytest.raises(ResetRefused) as error:
+            _run(fixture, enforce=True)
+
+    assert error.value.reason == "journal_lock_activity"
+    locks = error.value.details["journal_locks"]
+    assert locks["status"] == "present"
+    assert locks["held_locks"][0]["name"] == "gfs/2026070500.lock"
+    assert locks["content_recency"]["status"] == "absent"
+    assert fixture["nfs_index"].read_bytes() == fixture["nfs_bytes"]
+    assert fixture["scratch_index"].read_bytes() == fixture["scratch_bytes"]
+
+
+def test_an_unheld_lock_file_does_not_refuse_however_fresh(tmp_path: Path) -> None:
+    """The complement: a lock file nobody holds is a leftover, not a live pass."""
+
+    fixture = _fixture(tmp_path)
+    _make_lock_file(fixture, "gfs/2026070500.lock")
+    _make_lock_file(fixture, "ifs/2026070512.lock", stale=True)
+
+    receipt = _run(fixture, enforce=False)
+
+    locks = receipt["preflight"]["journal_locks"]
+    assert locks["status"] == "absent"
+    assert locks["held_locks"] == []
+
+
+def test_the_lock_probe_never_creates_a_lock_file(tmp_path: Path) -> None:
+    """``O_CREAT`` is not passed: the probe must not leave a lock behind."""
+
+    fixture = _fixture(tmp_path)
+    lock_root = fixture["journal_root"] / ".locks" / "gfs"
+    lock_root.mkdir(parents=True)
+
+    receipt = _run(fixture, enforce=False)
+
+    assert receipt["preflight"]["journal_locks"]["status"] == "absent"
+    assert list(lock_root.iterdir()) == []
+
+
+def test_recent_journal_content_counts_as_an_active_pass(tmp_path: Path) -> None:
+    """Secondary signal: a pass that just released its locks still wrote rows."""
+
+    fixture = _fixture(tmp_path)
+    row = fixture["journal_root"] / "latest" / "gfs" / "gfs_2026070500" / "cycle.json"
+    row.parent.mkdir(parents=True)
+    row.write_text("{}", encoding="utf-8")
+
     with pytest.raises(ResetRefused) as error:
         _run(fixture, enforce=True)
+
     assert error.value.reason == "journal_lock_activity"
-    assert error.value.details["journal_locks"]["fresh_locks"][0]["name"] == "gfs/2026070500.lock"
+    locks = error.value.details["journal_locks"]
+    assert locks["status"] == "present"
+    assert locks["held_locks"] == []
+    assert locks["content_recency"]["status"] == "present"
+    assert locks["content_recency"]["newest_age_seconds"] < reset_module.LOCK_FRESHNESS_SECONDS
     assert fixture["nfs_index"].read_bytes() == fixture["nfs_bytes"]
 
 
-def test_a_nested_stale_journal_lock_does_not_refuse(tmp_path: Path) -> None:
+def test_stale_journal_content_does_not_refuse(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
-    lock_dir = fixture["journal_root"] / ".locks" / "ifs"
-    lock_dir.mkdir(parents=True)
-    lock_file = lock_dir / "2026070512.lock"
-    lock_file.write_text("{}", encoding="utf-8")
     stale = datetime.now(tz=UTC).timestamp() - (reset_module.LOCK_FRESHNESS_SECONDS + 60)
-    os.utime(lock_file, (stale, stale))
+    for relative in ("latest/gfs/gfs_2026070500/cycle.json", "pipeline-jobs/job-a.json"):
+        path = fixture["journal_root"] / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    for path in sorted((fixture["journal_root"]).rglob("*")):
+        os.utime(path, (stale, stale))
+
     receipt = _run(fixture, enforce=False)
+
     assert receipt["preflight"]["journal_locks"]["status"] == "absent"
+    assert receipt["preflight"]["journal_locks"]["content_recency"]["status"] == "absent"
 
 
 def test_a_journal_lock_tree_deeper_than_the_bound_counts_as_active(tmp_path: Path) -> None:

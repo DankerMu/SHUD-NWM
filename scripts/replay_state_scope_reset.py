@@ -12,9 +12,11 @@ everything it is about to make unreachable.
 Order and safety posture (design D4):
 
 1. **Pre-refusals, zero writes**: the scheduler timer must be provably inactive
-   (an undeterminable probe counts as ACTIVE), no journal lock file may be fresh,
-   both lane indexes must be readable, and the archive root must be a writable
-   directory with enough free space.
+   (an undeterminable probe counts as ACTIVE), no journal cycle lock may be HELD
+   (non-blocking ``flock`` probe -- lock mtimes are fixed at creation and prove
+   nothing) and no journal cycle-row/pipeline-job write may be fresher than
+   ``LOCK_FRESHNESS_SECONDS``, both lane indexes must be readable, and the
+   archive root must be a writable directory with enough free space.
 2. **Archive first**: byte snapshots of both lanes, the removed-entry list, and
    for every affected ``states/`` object a three-way stat, a sha256 and a byte
    archive.  A missing or unreadable object is recorded three-way and does NOT
@@ -89,8 +91,14 @@ OBJECT_STORE_ROOT_ENV = "OBJECT_STORE_ROOT"
 OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
 
 TIMER_UNIT = "nhms-compute-scheduler.timer"
-#: A journal lock file touched inside this window counts as a live scheduler.
+#: Journal CONTENT written inside this window counts as a live scheduler.  It is
+#: deliberately not applied to the lock files themselves: their mtime is fixed
+#: at first creation (round-2 B2-3), so liveness is decided by NB-flock instead.
 LOCK_FRESHNESS_SECONDS = 600
+#: Journal subtrees a scheduler pass writes: cycle rows and pipeline jobs.
+JOURNAL_CONTENT_RECENCY_DIRS = ("latest", "pipeline-jobs")
+MAX_JOURNAL_CONTENT_ENTRIES = 500_000
+MAX_JOURNAL_CONTENT_DEPTH = 8
 #: Free-space headroom over the measured archive payload.
 ARCHIVE_FREE_SPACE_FACTOR = 2.0
 MAX_JOURNAL_LOCK_ENTRIES = 4096
@@ -164,26 +172,60 @@ def default_timer_probe(unit: str = TIMER_UNIT) -> tuple[str, str]:
 
 
 def journal_lock_probe(journal_root: Path | None, *, now: float) -> dict[str, Any]:
-    """Fresh journal lock files mean a scheduler pass is (or just was) running.
+    """Is a scheduler pass holding a journal cycle lock right now?
 
-    The real layout is nested -- ``.locks/<source>/<cycle>.lock`` -- so a
-    first-level scan sees only directories and reports "no locks" while a pass
-    holds one (round-1 B-P2-6).  The walk is bounded (``MAX_JOURNAL_LOCK_DEPTH``
-    levels, ``MAX_JOURNAL_LOCK_ENTRIES`` names) and never follows symlinks; any
-    probe that cannot be completed is ``undeterminable``, which the caller
+    Liveness, not freshness (round-2 B2-3).  The journal's cycle locks are
+    ``O_CREAT`` + ``flock`` and are never written to, touched or unlinked
+    (``file_orchestration_journal.py:6314-6360``), so a lock file's mtime is the
+    moment it was FIRST created -- a pass holding the lock on a cycle first
+    written weeks ago is invisible to any mtime test.  Each lock file is
+    therefore probed directly: opened ``O_RDWR`` WITHOUT ``O_CREAT`` and offered
+    a non-blocking ``LOCK_EX``.  ``EWOULDBLOCK`` means somebody holds it; any
+    other error is undeterminable; a lock that can be taken is released
+    immediately and counts as free.
+
+    A second, independent signal covers the pass that just finished (its locks
+    are released but its writes are seconds old): the newest mtime under the
+    journal's cycle-row and pipeline-job trees, compared against
+    ``LOCK_FRESHNESS_SECONDS``.
+
+    The walk is bounded (``MAX_JOURNAL_LOCK_DEPTH`` levels,
+    ``MAX_JOURNAL_LOCK_ENTRIES`` names) and never follows symlinks.  Any probe
+    that cannot be completed anywhere is ``undeterminable``, which the caller
     treats as ACTIVE.
     """
 
     if journal_root is None:
         return {"status": PROBE_UNDETERMINABLE, "detail": f"{JOURNAL_ROOT_ENV} is not set"}
     lock_dir = journal_root / ".locks"
+    recency = _journal_content_recency(journal_root, now=now)
+    base: dict[str, Any] = {
+        "lock_dir": str(lock_dir),
+        "freshness_seconds": LOCK_FRESHNESS_SECONDS,
+        "max_depth": MAX_JOURNAL_LOCK_DEPTH,
+        "content_recency": recency,
+    }
+    if recency["status"] == PROBE_UNDETERMINABLE:
+        return {**base, "status": PROBE_UNDETERMINABLE, "detail": recency.get("detail")}
+    held, lock_detail = _held_journal_locks(lock_dir)
+    if lock_detail is not None:
+        return {**base, "status": PROBE_UNDETERMINABLE, "held_locks": held, "detail": lock_detail}
+    base["held_locks"] = held
+    if held or recency["status"] == PROBE_PRESENT:
+        return {**base, "status": PROBE_PRESENT}
+    return {**base, "status": PROBE_ABSENT}
+
+
+def _held_journal_locks(lock_dir: Path) -> tuple[list[dict[str, Any]], str | None]:
+    """Walk ``.locks`` and NB-flock every lock file; ``(held, undeterminable)``."""
+
+    held: list[dict[str, Any]] = []
     try:
         list_directory_no_follow_limited(lock_dir, max_entries=MAX_JOURNAL_LOCK_ENTRIES)
     except FileNotFoundError:
-        return {"status": PROBE_ABSENT, "lock_dir": str(lock_dir), "fresh_locks": []}
+        return [], None
     except (OSError, SafeFilesystemError) as error:
-        return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
-    fresh: list[dict[str, Any]] = []
+        return [], str(error)
     inspected = 0
     pending: list[tuple[Path, int]] = [(lock_dir, 0)]
     while pending:
@@ -193,46 +235,144 @@ def journal_lock_probe(journal_root: Path | None, *, now: float) -> dict[str, An
         except FileNotFoundError:
             continue
         except (OSError, SafeFilesystemError) as error:
-            return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
+            return held, str(error)
         for name in sorted(names):
             path = current / name
             inspected += 1
             if inspected > MAX_JOURNAL_LOCK_ENTRIES:
-                return {
-                    "status": PROBE_UNDETERMINABLE,
-                    "lock_dir": str(lock_dir),
-                    "detail": "journal lock fan-out exceeds the probe bound",
-                }
+                return held, "journal lock fan-out exceeds the probe bound"
             try:
                 metadata = stat_no_follow(path)
             except FileNotFoundError:
                 continue
             except (OSError, SafeFilesystemError) as error:
-                return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
+                return held, str(error)
             if stat.S_ISDIR(metadata.st_mode):
                 if depth + 1 > MAX_JOURNAL_LOCK_DEPTH:
-                    return {
-                        "status": PROBE_UNDETERMINABLE,
-                        "lock_dir": str(lock_dir),
-                        "detail": f"journal lock tree deeper than {MAX_JOURNAL_LOCK_DEPTH} levels",
-                    }
+                    return held, f"journal lock tree deeper than {MAX_JOURNAL_LOCK_DEPTH} levels"
                 pending.append((path, depth + 1))
                 continue
-            age_seconds = now - float(metadata.st_mtime)
-            if age_seconds < LOCK_FRESHNESS_SECONDS:
-                fresh.append(
-                    {
-                        "name": path.relative_to(lock_dir).as_posix(),
-                        "age_seconds": round(age_seconds, 3),
-                    }
-                )
+            if not stat.S_ISREG(metadata.st_mode):
+                return held, f"journal lock path is not a regular file: {path}"
+            verdict, detail = _lock_file_liveness(path)
+            if verdict == PROBE_UNDETERMINABLE:
+                return held, detail
+            if verdict == "held":
+                held.append({"name": path.relative_to(lock_dir).as_posix(), "detail": detail})
+    return sorted(held, key=lambda item: str(item["name"])), None
+
+
+def _lock_file_liveness(path: Path) -> tuple[str, str | None]:
+    """``('held' | 'free' | 'undeterminable', detail)`` for one lock file.
+
+    ``O_CREAT`` is deliberately NOT passed: the probe must never create a lock
+    file the scheduler would then inherit.
+    """
+
+    import fcntl
+
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError:
+        return "free", "lock file disappeared during the probe"
+    except OSError as error:
+        return PROBE_UNDETERMINABLE, f"lock open failed: {error}"
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held", "flock is held by another process"
+        except OSError as error:
+            return PROBE_UNDETERMINABLE, f"flock probe failed: {error}"
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError as error:  # pragma: no cover - unlock of an owned lock
+            return PROBE_UNDETERMINABLE, f"flock release failed: {error}"
+        return "free", None
+    finally:
+        os.close(descriptor)
+
+
+def _journal_content_recency(journal_root: Path, *, now: float) -> dict[str, Any]:
+    """Newest mtime under the cycle-row / pipeline-job trees.
+
+    The pass that has just released its locks is still a pass that ran; its
+    writes are what this signal sees.  ``present`` means "younger than
+    ``LOCK_FRESHNESS_SECONDS``" = active.
+    """
+
+    newest_age: float | None = None
+    newest_path: str | None = None
+    for relative in JOURNAL_CONTENT_RECENCY_DIRS:
+        root = journal_root / relative
+        age, path, detail = _newest_mtime_age(root, now=now)
+        if detail is not None:
+            return {
+                "status": PROBE_UNDETERMINABLE,
+                "detail": detail,
+                "roots": list(JOURNAL_CONTENT_RECENCY_DIRS),
+            }
+        if age is None:
+            continue
+        if newest_age is None or age < newest_age:
+            newest_age = age
+            newest_path = path
     return {
-        "status": PROBE_PRESENT if fresh else PROBE_ABSENT,
-        "lock_dir": str(lock_dir),
-        "fresh_locks": sorted(fresh, key=lambda item: str(item["name"])),
-        "freshness_seconds": LOCK_FRESHNESS_SECONDS,
-        "max_depth": MAX_JOURNAL_LOCK_DEPTH,
+        "status": (
+            PROBE_PRESENT
+            if newest_age is not None and newest_age < LOCK_FRESHNESS_SECONDS
+            else PROBE_ABSENT
+        ),
+        "newest_age_seconds": round(newest_age, 3) if newest_age is not None else None,
+        "newest_path": newest_path,
+        "roots": list(JOURNAL_CONTENT_RECENCY_DIRS),
     }
+
+
+def _newest_mtime_age(root: Path, *, now: float) -> tuple[float | None, str | None, str | None]:
+    """``(age_seconds, path, undeterminable_detail)`` for the newest entry."""
+
+    try:
+        list_directory_no_follow_limited(root, max_entries=MAX_JOURNAL_CONTENT_ENTRIES)
+    except FileNotFoundError:
+        return None, None, None
+    except (OSError, SafeFilesystemError) as error:
+        return None, None, f"journal content tree unreadable: {error}"
+    inspected = 0
+    newest_age: float | None = None
+    newest_path: str | None = None
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    while pending:
+        current, depth = pending.pop(0)
+        try:
+            names = list_directory_no_follow_limited(current, max_entries=MAX_JOURNAL_CONTENT_ENTRIES)
+        except FileNotFoundError:
+            continue
+        except (OSError, SafeFilesystemError) as error:
+            return None, None, f"journal content tree unreadable: {error}"
+        for name in sorted(names):
+            path = current / name
+            inspected += 1
+            if inspected > MAX_JOURNAL_CONTENT_ENTRIES:
+                return None, None, "journal content fan-out exceeds the probe bound"
+            try:
+                metadata = stat_no_follow(path)
+            except FileNotFoundError:
+                continue
+            except (OSError, SafeFilesystemError) as error:
+                return None, None, f"journal content stat failed: {error}"
+            age = now - float(metadata.st_mtime)
+            if newest_age is None or age < newest_age:
+                newest_age = age
+                newest_path = str(path)
+            if stat.S_ISDIR(metadata.st_mode):
+                if depth + 1 > MAX_JOURNAL_CONTENT_DEPTH:
+                    return None, None, f"journal content tree deeper than {MAX_JOURNAL_CONTENT_DEPTH} levels"
+                pending.append((path, depth + 1))
+    return newest_age, newest_path, None
 
 
 # ---------------------------------------------------------------------------
