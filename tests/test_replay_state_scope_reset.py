@@ -258,6 +258,49 @@ def test_fresh_journal_lock_refuses(tmp_path: Path) -> None:
     assert fixture["nfs_index"].read_bytes() == fixture["nfs_bytes"]
 
 
+def test_a_nested_fresh_journal_lock_refuses(tmp_path: Path) -> None:
+    """B-P2-6: the real layout is ``.locks/<source>/<cycle>.lock``.
+
+    A first-level scan sees only the source directory and reports "no locks"
+    while a scheduler pass holds one — the probe must recurse.
+    """
+
+    fixture = _fixture(tmp_path)
+    lock_dir = fixture["journal_root"] / ".locks" / "gfs"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "2026070500.lock").write_text("{}", encoding="utf-8")
+    with pytest.raises(ResetRefused) as error:
+        _run(fixture, enforce=True)
+    assert error.value.reason == "journal_lock_activity"
+    assert error.value.details["journal_locks"]["fresh_locks"][0]["name"] == "gfs/2026070500.lock"
+    assert fixture["nfs_index"].read_bytes() == fixture["nfs_bytes"]
+
+
+def test_a_nested_stale_journal_lock_does_not_refuse(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    lock_dir = fixture["journal_root"] / ".locks" / "ifs"
+    lock_dir.mkdir(parents=True)
+    lock_file = lock_dir / "2026070512.lock"
+    lock_file.write_text("{}", encoding="utf-8")
+    stale = datetime.now(tz=UTC).timestamp() - (reset_module.LOCK_FRESHNESS_SECONDS + 60)
+    os.utime(lock_file, (stale, stale))
+    receipt = _run(fixture, enforce=False)
+    assert receipt["preflight"]["journal_locks"]["status"] == "absent"
+
+
+def test_a_journal_lock_tree_deeper_than_the_bound_counts_as_active(tmp_path: Path) -> None:
+    """Fail-closed: an unwalkable lock tree is undeterminable, i.e. active."""
+
+    fixture = _fixture(tmp_path)
+    deep = fixture["journal_root"] / ".locks" / "gfs" / "2026070500" / "extra" / "deeper"
+    deep.mkdir(parents=True)
+    (deep / "held.lock").write_text("{}", encoding="utf-8")
+    with pytest.raises(ResetRefused) as error:
+        _run(fixture, enforce=True)
+    assert error.value.reason == "journal_lock_activity"
+    assert error.value.details["journal_locks"]["status"] == "undeterminable"
+
+
 def test_stale_journal_lock_does_not_refuse(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     lock_dir = fixture["journal_root"] / ".locks"

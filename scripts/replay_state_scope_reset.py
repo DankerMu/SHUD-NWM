@@ -94,6 +94,9 @@ LOCK_FRESHNESS_SECONDS = 600
 #: Free-space headroom over the measured archive payload.
 ARCHIVE_FREE_SPACE_FACTOR = 2.0
 MAX_JOURNAL_LOCK_ENTRIES = 4096
+#: ``.locks/<source>/<cycle>.lock`` is two levels; the walk allows one spare
+#: level and reports anything deeper as undeterminable (= active).
+MAX_JOURNAL_LOCK_DEPTH = 3
 MAX_STATE_OBJECT_BYTES = 512 * 1024 * 1024
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 #: Lane order is load-bearing: scratch first, NFS (admission read surface) last.
@@ -161,34 +164,74 @@ def default_timer_probe(unit: str = TIMER_UNIT) -> tuple[str, str]:
 
 
 def journal_lock_probe(journal_root: Path | None, *, now: float) -> dict[str, Any]:
-    """Fresh journal lock files mean a scheduler pass is (or just was) running."""
+    """Fresh journal lock files mean a scheduler pass is (or just was) running.
+
+    The real layout is nested -- ``.locks/<source>/<cycle>.lock`` -- so a
+    first-level scan sees only directories and reports "no locks" while a pass
+    holds one (round-1 B-P2-6).  The walk is bounded (``MAX_JOURNAL_LOCK_DEPTH``
+    levels, ``MAX_JOURNAL_LOCK_ENTRIES`` names) and never follows symlinks; any
+    probe that cannot be completed is ``undeterminable``, which the caller
+    treats as ACTIVE.
+    """
 
     if journal_root is None:
         return {"status": PROBE_UNDETERMINABLE, "detail": f"{JOURNAL_ROOT_ENV} is not set"}
     lock_dir = journal_root / ".locks"
     try:
-        names = list_directory_no_follow_limited(lock_dir, max_entries=MAX_JOURNAL_LOCK_ENTRIES)
+        list_directory_no_follow_limited(lock_dir, max_entries=MAX_JOURNAL_LOCK_ENTRIES)
     except FileNotFoundError:
         return {"status": PROBE_ABSENT, "lock_dir": str(lock_dir), "fresh_locks": []}
     except (OSError, SafeFilesystemError) as error:
         return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
     fresh: list[dict[str, Any]] = []
-    for name in sorted(names)[:MAX_JOURNAL_LOCK_ENTRIES]:
-        path = lock_dir / name
+    inspected = 0
+    pending: list[tuple[Path, int]] = [(lock_dir, 0)]
+    while pending:
+        current, depth = pending.pop(0)
         try:
-            metadata = stat_no_follow(path)
+            names = list_directory_no_follow_limited(current, max_entries=MAX_JOURNAL_LOCK_ENTRIES)
         except FileNotFoundError:
             continue
         except (OSError, SafeFilesystemError) as error:
             return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
-        age_seconds = now - float(metadata.st_mtime)
-        if age_seconds < LOCK_FRESHNESS_SECONDS:
-            fresh.append({"name": name, "age_seconds": round(age_seconds, 3)})
+        for name in sorted(names):
+            path = current / name
+            inspected += 1
+            if inspected > MAX_JOURNAL_LOCK_ENTRIES:
+                return {
+                    "status": PROBE_UNDETERMINABLE,
+                    "lock_dir": str(lock_dir),
+                    "detail": "journal lock fan-out exceeds the probe bound",
+                }
+            try:
+                metadata = stat_no_follow(path)
+            except FileNotFoundError:
+                continue
+            except (OSError, SafeFilesystemError) as error:
+                return {"status": PROBE_UNDETERMINABLE, "lock_dir": str(lock_dir), "detail": str(error)}
+            if stat.S_ISDIR(metadata.st_mode):
+                if depth + 1 > MAX_JOURNAL_LOCK_DEPTH:
+                    return {
+                        "status": PROBE_UNDETERMINABLE,
+                        "lock_dir": str(lock_dir),
+                        "detail": f"journal lock tree deeper than {MAX_JOURNAL_LOCK_DEPTH} levels",
+                    }
+                pending.append((path, depth + 1))
+                continue
+            age_seconds = now - float(metadata.st_mtime)
+            if age_seconds < LOCK_FRESHNESS_SECONDS:
+                fresh.append(
+                    {
+                        "name": path.relative_to(lock_dir).as_posix(),
+                        "age_seconds": round(age_seconds, 3),
+                    }
+                )
     return {
         "status": PROBE_PRESENT if fresh else PROBE_ABSENT,
         "lock_dir": str(lock_dir),
-        "fresh_locks": fresh,
+        "fresh_locks": sorted(fresh, key=lambda item: str(item["name"])),
         "freshness_seconds": LOCK_FRESHNESS_SECONDS,
+        "max_depth": MAX_JOURNAL_LOCK_DEPTH,
     }
 
 
