@@ -111,13 +111,27 @@ _REPLAY_CLAMP_MODE_REPAIR_CONVERT = "replay_repair_convert_restart"
 #: Evidence keys each clamp mode owns.  Values are captured from the decision /
 #: evidence that was actually applied, so the clamp restores what this pass
 #: decided rather than a second copy of the literals.
+#:
+#: The set is DERIVED FROM THE CONSUMERS that read the evidence, not from the
+#: prose of the invariant (design D3.5 v7, round-4 A4-1): ``decision`` is what
+#: ``chain_forecast_orchestrator_cycle._terminal_stage_needs_forced_resubmit``
+#: matches against ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` — read as an antecedent
+#: it looks like a stable premise, but it is itself a merge target, and a merge
+#: that lowers it to ``retry_failed`` makes the chain rerun parse/publish on the
+#: OLD outputs while the clamp receipt claims a repair.  ``durable_output_reused``
+#: and ``durable_shud_output_reused`` are read by
+#: ``scheduler_candidate_manifest``, which flips ``native_shud_resubmitted`` to
+#: False whenever the latter survives as True (the ``retry_downstream`` shape).
 _REPLAY_RESUBMIT_CLAMPED_KEYS = (
+    "decision",
     "restart_stage",
     "restart_from_stage",
     "native_shud_resubmitted",
     "durable_output_reused",
+    "durable_shud_output_reused",
 )
 _REPLAY_REPAIR_CLAMPED_KEYS = (
+    "decision",
     "restart_stage",
     "restart_from_stage",
     "fresh_ingestion",

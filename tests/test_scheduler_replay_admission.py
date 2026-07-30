@@ -34,12 +34,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from services.orchestrator import chain as _chain  # noqa: F401  (import order: chain owns the cycle mixin)
 from services.orchestrator import chain_forecast_orchestrator_cycle as chain_cycle_module
+from services.orchestrator import scheduler_candidate_manifest as scheduler_candidate_manifest_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_replay as scheduler_replay_module
 from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -1453,6 +1455,10 @@ def test_post_sync_rebuild_cannot_clobber_the_repair_convert_restart(tmp_path: P
     assert evidence["restart_stage"] == "convert"
     assert evidence["restart_from_stage"] == "convert"
     assert evidence["fresh_ingestion"]["mode"] == "reuse_raw_then_convert"
+    # A4-1 symmetry: the repair's decision token is clamp-owned too, and it is
+    # what the chain gate matches for THIS leg's forced resubmission
+    assert evidence["decision"] == "retry_repair_missing_forcing"
+    assert evidence["decision"] in chain_cycle_module._FORCE_TERMINAL_RESUBMIT_DECISIONS
     # the merge itself is NOT skipped: its audit evidence is the point of it
     assert orchestrator.calls == [cycle_id_for("gfs", REPAIR_CYCLE)]
     assert evidence["slurm_state_sync"]["status"] == "synced"
@@ -1466,6 +1472,77 @@ def test_post_sync_rebuild_cannot_clobber_the_repair_convert_restart(tmp_path: P
     assert clamp["pre_clamp"]["restart_from_stage"] == "forcing"
     assert clamp["pre_clamp"]["fresh_ingestion"]["mode"] == "repair_missing_forcing"
     assert clamp["restored"]["restart_stage"] == "convert"
+
+
+SUCCEEDED_FORECAST_JOB = {
+    "job_id": "job_cycle_gfs_2026070600_forecast",
+    "status": "succeeded",
+    "stage": "forecast",
+    "job_type": "run_shud_forecast_array",
+}
+
+
+def _chain_gate_forces_resubmit(candidate: Any) -> bool:
+    """Drive the REAL chain gate with an admitted candidate's evidence (A4-1).
+
+    ``_terminal_stage_needs_forced_resubmit`` (``chain_forecast_orchestrator_cycle``
+    :802) is the consumer that decides whether a succeeded forecast job gets
+    resubmitted; it matches ``state_evidence["decision"]`` against
+    ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` literally.  ``restart_stage=None`` on
+    the context is the honest shape: the chain has no restart stage of its own
+    here, the candidate evidence is the only source.
+    """
+
+    basin = {
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "candidate_id": candidate.candidate_id,
+        "orchestration_run_id": candidate.cycle_id,
+        "state_evidence": dict(candidate.state_evidence),
+    }
+    return chain_cycle_module._terminal_stage_needs_forced_resubmit(
+        SimpleNamespace(active_basins=[basin], restart_stage=None),
+        dict(SUCCEEDED_FORECAST_JOB),
+    )
+
+
+def _post_sync_downstream_retry_decision() -> CandidateStateDecision:
+    """The ``retry_downstream`` decision shape (``scheduler_state_failure`` :246-262).
+
+    The post-sync journal read can just as well land here: a durable SHUD output
+    exists and a downstream stage failed.  Its evidence says the exact opposite
+    of a replay on both SHUD keys — reusing the durable output, not resubmitting
+    the native run.
+    """
+
+    return CandidateStateDecision(
+        "retry",
+        "resume_downstream_after_durable_shud",
+        {
+            "decision": "retry_downstream",
+            "reason": "resume_downstream_after_durable_shud",
+            "restart_stage": "parse",
+            "restart_from_stage": "parse",
+            "native_shud_resubmitted": False,
+            "durable_shud_output_reused": True,
+            "durable_output_uri": "s3://nhms/runs/fcst_gfs_2026070600_dg_dth_ls_gfs/output",
+            "force_native_shud_rerun": False,
+            "failure": {
+                "classifier": "chain_stage_failed",
+                "error_code": "PARSE_FAILED",
+                "retryable": True,
+                "permanent": False,
+                "attempt": 1,
+                "retry_limit": 3,
+            },
+            "retry_policy": {
+                "automatic_retry_allowed": True,
+                "manual_retry_required": False,
+                "attempt": 1,
+                "retry_limit": 3,
+            },
+        },
+    )
 
 
 def test_post_sync_rebuild_cannot_clobber_the_replay_resubmit_forecast_restart() -> None:
@@ -1499,18 +1576,94 @@ def test_post_sync_rebuild_cannot_clobber_the_replay_resubmit_forecast_restart()
     evidence = candidates[0].state_evidence
     assert evidence["restart_stage"] == "forecast"
     assert evidence["restart_from_stage"] == "forecast"
+    # A4-1: the decision token itself is a merge target, not a stable premise —
+    # the retry_failed rebuild overwrites it and the chain gate matches it
+    # literally, so the clamp owns it too.
+    assert evidence["decision"] == "replay_resubmit"
     # the override's own keys were never clobbered and stay exactly as decided
     assert evidence["native_shud_resubmitted"] is True
     assert evidence["durable_output_reused"] is False
     assert evidence["slurm_state_sync"]["status"] == "synced"
     clamp = evidence["replay_invariant_clamp_applied"]
     assert clamp["mode"] == "replay_resubmit"
-    assert clamp["clobbered_keys"] == ["restart_from_stage", "restart_stage"]
-    assert clamp["pre_clamp"] == {"restart_stage": "convert", "restart_from_stage": "convert"}
+    assert clamp["clobbered_keys"] == ["decision", "restart_from_stage", "restart_stage"]
+    assert clamp["pre_clamp"] == {
+        "decision": "retry_failed",
+        "restart_stage": "convert",
+        "restart_from_stage": "convert",
+    }
+
+    # CONSUMER ORACLE (A4-1): producer-side key equality is not the property
+    # under test — "the replay actually resubmits" is.  Drive the real chain
+    # gate with the admitted candidate's evidence and a succeeded forecast job:
+    # False here means parse/publish rerun over the OLD forecast outputs.
+    assert _chain_gate_forces_resubmit(candidates[0]) is True
+
+
+def test_post_sync_downstream_retry_cannot_flip_the_manifest_shud_projection() -> None:
+    """A4-1 secondary: the ``retry_downstream`` shape lands on the same merge.
+
+    ``durable_shud_output_reused=True`` is not merely a stale flag: the emitted
+    basin manifest reads it and REWRITES ``native_shud_resubmitted`` to False
+    (``scheduler_candidate_manifest`` :236-238).  Unclamped, the replay ships a
+    manifest that says the SHUD run is reused while the restart stage says the
+    forecast is rerun — self-contradictory evidence downstream consumers act on.
+    """
+
+    decider = _DecisionSequence([_replay_terminal_decision(), _post_sync_downstream_retry_decision()])
+    repository = _FakeRepository(RAW_MANIFEST_READY_STATE, slurm_jobs_script=[[ACTIVE_SLURM_JOB]])
+    orchestrator = _SyncingOrchestrator([TERMINAL_SYNC_UPDATE])
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        decider=decider,
+        repository=repository,
+        orchestrator=orchestrator,
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    admitted = candidates[0]
+    evidence = admitted.state_evidence
+    assert evidence["decision"] == "replay_resubmit"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_shud_output_reused"] is False
+    assert evidence["durable_output_reused"] is False
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["mode"] == "replay_resubmit"
+    assert clamp["clobbered_keys"] == [
+        "decision",
+        "durable_shud_output_reused",
+        "native_shud_resubmitted",
+        "restart_from_stage",
+        "restart_stage",
+    ]
+    assert clamp["pre_clamp"]["durable_shud_output_reused"] is True
+    assert clamp["pre_clamp"]["native_shud_resubmitted"] is False
+
+    # CONSUMER ORACLE: the manifest the scheduler actually emits, and the chain
+    # gate that decides whether the forecast is resubmitted at all.
+    manifest = scheduler_candidate_manifest_module._candidate_basin_manifest(
+        admitted,
+        output_uri="s3://nhms/runs/replayed/output",
+    )
+    assert manifest["state_evidence"]["native_shud_resubmitted"] is True
+    assert manifest["state_evidence"]["durable_shud_output_reused"] is False
+    # the flip-to-reuse projection never fires: neither key is asserted at the
+    # manifest's top level, which is what a downstream reader consults
+    assert "durable_shud_output_reused" not in manifest
+    assert manifest.get("native_shud_resubmitted") is not False
+    assert manifest["restart_stage"] == "forecast"
+    assert _chain_gate_forces_resubmit(admitted) is True
 
 
 def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobber() -> None:
-    """The backstop itself: all four owned keys, whatever clobbered them.
+    """The backstop itself: every owned key, whatever clobbered them.
 
     Stands in for the merge leg nobody has written yet — the retro's whole point
     is that the invariant must not depend on enumerating those legs.
@@ -1541,29 +1694,39 @@ def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobb
     clobbered = scheduler_candidates_module._candidate_with_state_evidence(
         admitted,
         {
+            "decision": "retry_failed",
             "restart_stage": "convert",
             "restart_from_stage": "convert",
             "native_shud_resubmitted": False,
             "durable_output_reused": True,
+            "durable_shud_output_reused": True,
         },
     )
     clamped = [clobbered]
     scheduler_candidates_module._clamp_replay_invariants(clamped, {clobbered.candidate_id: expectation})
 
     evidence = clamped[0].state_evidence
+    assert evidence["decision"] == "replay_resubmit"
     assert evidence["restart_stage"] == "forecast"
     assert evidence["restart_from_stage"] == "forecast"
     assert evidence["native_shud_resubmitted"] is True
     assert evidence["durable_output_reused"] is False
+    assert evidence["durable_shud_output_reused"] is False
     clamp = evidence["replay_invariant_clamp_applied"]
     assert clamp["clobbered_keys"] == [
+        "decision",
         "durable_output_reused",
+        "durable_shud_output_reused",
         "native_shud_resubmitted",
         "restart_from_stage",
         "restart_stage",
     ]
     assert clamp["pre_clamp"]["native_shud_resubmitted"] is False
     assert clamp["pre_clamp"]["durable_output_reused"] is True
+    assert clamp["pre_clamp"]["decision"] == "retry_failed"
+    # the whole owned set is what the consumers read, nothing narrower
+    assert set(scheduler_candidates_module._REPLAY_RESUBMIT_CLAMPED_KEYS) == set(clamp["clobbered_keys"])
+    assert _chain_gate_forces_resubmit(clamped[0]) is True
 
 
 def test_the_clamp_is_a_pure_no_op_without_replay_admission() -> None:
@@ -1701,6 +1864,18 @@ def test_replay_window_repair_needs_a_genuine_zero_row_canonical_evaluation(tmp_
 #: * ``self-guarded`` -- outside the admitted-candidate path (blocked/skipped
 #:   entries, decision-level evidence, or the clamp's own repair merge), so the
 #:   clamp neither can nor needs to cover it.
+#:
+#: SCOPE OF THIS AUDIT (round-4 lane A): ``upstream of clamp`` is a POSITION
+#: assertion and nothing more.  A merge site being lexically before the clamp
+#: does NOT by itself mean the keys it clobbers get restored; coverage also
+#: requires (a) an invariant expectation to have been registered for that
+#: candidate and (b) the clobbered key to be a member of that mode's owned set
+#: (``_REPLAY_RESUBMIT_CLAMPED_KEYS`` / ``_REPLAY_REPAIR_CLAMPED_KEYS``).  A4-1
+#: was exactly that hole: the merge site was correctly classified here while
+#: ``decision`` sat outside the owned set.  The owned sets are pinned by the
+#: consumer-side oracles above, not by this audit.  The audit also scans only
+#: ``scheduler_candidates.py``; merges performed by other modules on a returned
+#: candidate (e.g. ``scheduler_execution.py:256``) are invisible to it.
 MERGE_CALL_SITE_ALLOWLIST: dict[tuple[str, str, int], str] = {
     ("build_candidates", "_merge_state_evidence", 1): "self-guarded (skipped entry, not a candidate)",
     ("build_candidates", "_candidate_with_state_evidence", 1): "upstream of clamp (strict warm start)",
