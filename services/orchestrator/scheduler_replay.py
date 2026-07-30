@@ -317,6 +317,7 @@ def _forcing_package_probe(
     model_id: str,
 ) -> dict[str, Any]:
     undeterminable: str | None = None
+    empty_package_dir: str | None = None
     for parent in package_parents:
         package_dir = cycle_root / parent / model_id
         try:
@@ -345,20 +346,26 @@ def _forcing_package_probe(
                 "package_dir": str(package_dir),
                 "entry_count": len(entries),
             }
-        if undeterminable is not None:
-            # An empty package directory under one basin version is not proof of
-            # absence once an earlier parent could not be probed: the package may
-            # well live behind the unreadable one.  Presence still wins (returned
-            # above); an uncompletable probe never folds into a negative (#1190).
-            return {
-                "status": PROBE_UNDETERMINABLE,
-                "package_dir": str(package_dir),
-                "detail": undeterminable,
-                "empty_package_dir": str(package_dir),
-            }
-        return {"status": PROBE_MISSING, "package_dir": str(package_dir), "detail": "package directory is empty"}
+        # An empty package directory under one basin version is not proof of
+        # absence: the package may live under a later parent, or behind one that
+        # could not be probed at all.  Record it and keep walking so the verdict
+        # never depends on the order the parents happen to sort in (#1164 A2-2);
+        # presence still short-circuits above, and an uncompletable probe never
+        # folds into a negative (#1190).
+        if empty_package_dir is None:
+            empty_package_dir = str(package_dir)
     if undeterminable is not None:
-        return {"status": PROBE_UNDETERMINABLE, "detail": undeterminable}
+        evidence: dict[str, Any] = {"status": PROBE_UNDETERMINABLE, "detail": undeterminable}
+        if empty_package_dir is not None:
+            evidence["package_dir"] = empty_package_dir
+            evidence["empty_package_dir"] = empty_package_dir
+        return evidence
+    if empty_package_dir is not None:
+        return {
+            "status": PROBE_MISSING,
+            "package_dir": empty_package_dir,
+            "detail": "package directory is empty",
+        }
     return {"status": PROBE_MISSING, "detail": "no forcing package directory for this model"}
 
 

@@ -27,6 +27,7 @@ active AND ``model_id`` in the closed set AND cycle inside the replay window.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -214,6 +215,8 @@ def _build(
     canonical_readiness: Mapping[str, Any] | None = None,
     discovery_classifier: str | None = None,
     discovery_evidence: Mapping[str, Any] | None = None,
+    config_overrides: Mapping[str, Any] | None = None,
+    resource_profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
     discovery = CycleDiscovery(
         cycle_id=cycle_id_for("gfs", cycle_time),
@@ -226,7 +229,7 @@ def _build(
         evidence=dict(discovery_evidence or {}),
     )
     context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
-        config=_FakeConfig(replay_admission=admission),
+        config=_FakeConfig(replay_admission=admission, **dict(config_overrides or {})),
         active_repository=_FakeRepository(raw_state),
         canonical_readiness_for_candidate=lambda candidate, cycle: (
             dict(canonical_readiness) if canonical_readiness is not None else None
@@ -247,7 +250,13 @@ def _build(
     )
     candidates, blocked, skipped, _duplicates, _sync = scheduler_candidates_module.build_candidates(
         context,
-        models=[_FakeModel(model_id=model_id) for model_id in model_ids],
+        models=[
+            _FakeModel(
+                model_id=model_id,
+                resource_profile=dict((resource_profiles or {}).get(model_id) or {}),
+            )
+            for model_id in model_ids
+        ],
         cycles=[_FakeCycle(discovery=discovery)],
     )
     return candidates, blocked, skipped
@@ -890,6 +899,402 @@ def test_canonical_readiness_ready_leaves_the_replay_candidate_alone() -> None:
 
 
 # --------------------------------------------------------------------------
+# 1.2c repair leg of the canonical gate + raw-less substitute verification
+# (round-2 A2-1 / A2-3, design D3.5 v5)
+# --------------------------------------------------------------------------
+
+#: GFS 2026070712 — the cycle whose five basins lost their forcing packages and
+#: whose repair candidates hit the canonical gate's FIRST leg.
+REPAIR_CYCLE = datetime(2026, 7, 7, 12, tzinfo=UTC)
+REPAIR_MODEL_IDS = (
+    "dg_dth_ls_gfs",
+    "dg_hhe_gfs",
+    "dg_lsh_gfs",
+    "dg_nsh_gfs",
+    "dg_swh_gfs",
+)
+#: huai_main kept its forcing package: it rides the ordinary replay override.
+OVERRIDE_MODEL_ID = "dg_huai_main_gfs"
+REPAIR_PASS_MODEL_IDS = (*REPAIR_MODEL_IDS, OVERRIDE_MODEL_ID)
+
+
+def _repair_admission(cycle_model_ids: Sequence[str] = REPAIR_PASS_MODEL_IDS) -> ReplayAdmission:
+    admission = parse_replay_admission(mode=True, model_ids=list(cycle_model_ids), window=WINDOW)
+    assert admission is not None
+    return admission
+
+
+def _direct_grid_profile(source_id: str = "gfs") -> dict[str, Any]:
+    grid_id = f"{source_id.lower()}_0p25"
+    return {
+        "runnable": True,
+        "memory_gb": 8,
+        "forcing_mapping_mode": "direct_grid",
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "binding_uri": f"s3://nhms/mappings/{source_id.lower()}/binding.json",
+            "binding_checksum": "sha256:" + "a" * 64,
+            "model_input_package_id": f"input-{source_id.lower()}",
+            "sp_att_path": "input/mesh/SpatialData/sp.att",
+            "sp_att_checksum": "sha256:" + "b" * 64,
+            "applicable_source_ids": [source_id],
+            "grid_id": grid_id,
+            "grid_signature": "c" * 64,
+            "stations": [
+                {
+                    "station_id": f"{source_id.lower()}-station-1",
+                    "shud_forcing_index": 1,
+                    "forcing_filename": "X100Y30.csv",
+                    "longitude": 100.0,
+                    "latitude": 30.0,
+                    "x": 100.0,
+                    "y": 30.0,
+                    "z": 0.0,
+                    "grid_id": grid_id,
+                    "grid_cell_id": "100:30",
+                }
+            ],
+        },
+    }
+
+
+def _write_raw_manifest(root: Path, *, source_id: str = "gfs", cycle_time: datetime) -> dict[str, Any]:
+    """Write the on-disk NFS raw manifest the repair policy verifies present."""
+
+    from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
+
+    compact = cycle_time.strftime("%Y%m%d%H")
+    raw_key = f"raw/{source_id.lower()}/{compact}/{source_id.lower()}.f000.grib2"
+    raw_path = root / raw_key
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_bytes(b"verified-raw-input")
+    manifest_path = root / f"raw/{source_id.lower()}/{compact}/manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "source_id": source_id,
+                "cycle_time": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "manifest_uri": f"s3://nhms/raw/{source_id.lower()}/{compact}/manifest.json",
+                "entries": [
+                    {
+                        "remote_url": f"https://example.invalid/{source_id.lower()}",
+                        "local_key": raw_key,
+                        "variable": "prcp_rate_or_amount",
+                        "forecast_hour": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness = nfs_raw_manifest_readiness(
+        source_id=source_id,
+        cycle_time=cycle_time,
+        object_store_root=root,
+        object_store_prefix="s3://nhms",
+        required=True,
+    )
+    assert readiness["status"] == "ready"
+    return readiness
+
+
+def _repair_raw_state(cycle_time: datetime) -> dict[str, Any]:
+    """Journal candidate state for a cycle whose raw manifest survived (070712+)."""
+
+    compact = cycle_time.strftime("%Y%m%d%H")
+    return {
+        "nfs_raw_manifest": {
+            "status": "ready",
+            "ready": True,
+            "required": True,
+            "source": "node27_nfs_raw_manifest",
+            "manifest_uri": f"s3://nhms/raw/gfs/{compact}/manifest.json",
+            "source_id": "gfs",
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "cycle_time": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    }
+
+
+def _missing_forcing_blocked_decision() -> CandidateStateDecision:
+    """The stable missing-forcing blocker the repair policy reclassifies."""
+
+    return CandidateStateDecision(
+        "blocked",
+        "missing_forcing_package_uri",
+        {
+            "decision": "blocked_missing_upstream_artifact",
+            "error_code": "FORCING_PACKAGE_URI_MISSING",
+            "classifier": "missing_upstream_artifact",
+            "restart_stage": "forecast",
+            "replacement_submitted": False,
+            "artifact_guard": {
+                "artifact_type": "forcing_package_uri",
+                "artifact_uri": "forcing/gfs/2026070712/model/package.json",
+                "artifact_exists": False,
+                "unsafe_reason": None,
+                "stable_classifier": "FORCING_PACKAGE_URI_MISSING",
+                "planned_retry_decision": "retry_failed",
+                "planned_retry_reason": "retry_failed_candidate",
+            },
+        },
+    )
+
+
+def _repair_warm_state(cycle_time: datetime) -> dict[str, Any]:
+    """A verified warm state: the 070700 replay state, valid at 070712."""
+
+    return {
+        "ready": True,
+        "candidate_state": {
+            "state_id": "state-replay-2026070700",
+            "state_uri": "s3://nhms/states/gfs/2026070700/state.cfg.ic",
+            "checksum": "sha256:" + "d" * 64,
+            "valid_time": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "init_state_quality": "warm_hydrologic_state",
+            "init_state_lineage": {"start_mode": "warm_start", "generation": 4},
+        },
+    }
+
+
+def _repair_pass(
+    *,
+    admission: ReplayAdmission | None,
+    cycle_time: datetime,
+    raw_root: Path,
+    canonical_readiness: Mapping[str, Any] | None = FRESH_ZERO_ROW_READINESS,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """The production 070712 pass shape: 5 repair candidates + 1 override candidate."""
+
+    terminal_reason = "terminal_hydro_success"
+    decisions: dict[str, CandidateStateDecision | None] = {
+        model_id: _missing_forcing_blocked_decision() for model_id in REPAIR_MODEL_IDS
+    }
+    decisions[OVERRIDE_MODEL_ID] = CandidateStateDecision(
+        "skip",
+        terminal_reason,
+        _terminal_evidence(terminal_reason),
+    )
+    return _build(
+        admission=admission,
+        decision=None,
+        decisions_by_model=decisions,
+        strict_warm_start=_repair_warm_state(cycle_time),
+        canonical_readiness=canonical_readiness,
+        cycle_time=cycle_time,
+        model_ids=REPAIR_PASS_MODEL_IDS,
+        raw_state=_repair_raw_state(cycle_time),
+        resource_profiles={model_id: _direct_grid_profile() for model_id in REPAIR_PASS_MODEL_IDS},
+        config_overrides={
+            "repair_missing_forcing": True,
+            "repair_missing_forcing_cycle_time": cycle_time,
+            "require_direct_grid": True,
+            "nfs_raw_manifest_root": raw_root,
+            "nfs_raw_manifest_prefix": "s3://nhms",
+        },
+    )
+
+
+def test_replay_window_repair_candidates_are_admitted_with_a_convert_restart(tmp_path: Path) -> None:
+    """A2-1: the canonical gate's first leg halted Phase-2 GFS at cycle 6/33.
+
+    The five 070712 repair candidates carry an authorized missing-forcing repair
+    decision; canonical readiness inside the replay window is a genuine
+    zero-row evaluation (retention purged the products), and the pre-change leg
+    blocked all five unconditionally — with 070500..070700 already overwritten.
+    Simply lifting the block is not enough: the repair restarts at ``forcing``,
+    which has no inputs without canonical, so the raw-manifest restart is merged
+    in full and the chain rebuilds convert -> forcing -> forecast from raw.
+    """
+
+    _write_raw_manifest(tmp_path, cycle_time=REPAIR_CYCLE)
+    candidates, blocked, skipped = _repair_pass(
+        admission=_repair_admission(),
+        cycle_time=REPAIR_CYCLE,
+        raw_root=tmp_path,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    by_model = {candidate.model_id: candidate for candidate in candidates}
+    assert set(by_model) == set(REPAIR_PASS_MODEL_IDS)
+
+    for model_id in REPAIR_MODEL_IDS:
+        evidence = by_model[model_id].state_evidence
+        assert evidence["decision"] == "retry_repair_missing_forcing"
+        assert evidence["restart_stage"] == "convert"
+        assert evidence["restart_from_stage"] == "convert"
+        assert evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+        assert evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+        # The repair decision's own evidence survives the merge.
+        assert evidence["missing_forcing_repair"]["status"] == "authorized"
+        assert evidence["raw_manifest_reuse"]["status"] == "ready"
+        assert evidence["canonical_readiness"]["candidate_row_count"] == 0
+        guard = evidence["replay_canonical_readiness_guard"]
+        assert guard["leg"] == "authorized_missing_forcing_repair"
+        assert guard["status"] == "admitted"
+        assert guard["reason"] == "replay_repair_rebuilds_canonical_from_raw"
+        assert guard["repair_restart_stage"] == "forcing"
+        assert guard["restart_stage"] == "convert"
+
+    override_evidence = by_model[OVERRIDE_MODEL_ID].state_evidence
+    assert override_evidence["decision"] == "replay_resubmit"
+    assert override_evidence["restart_stage"] == "forecast"
+    assert override_evidence["restart_from_stage"] == "forecast"
+    assert override_evidence["replay_canonical_readiness_guard"]["leg"] == "raw_manifest_ready"
+
+
+def test_repair_candidates_outside_the_replay_window_stay_blocked(tmp_path: Path) -> None:
+    """must-preserve 3 / fail-closed: the leg is byte-identical off the replay path."""
+
+    out_of_window = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    _write_raw_manifest(tmp_path, cycle_time=out_of_window)
+
+    for admission in (None, _repair_admission()):
+        candidates, blocked, skipped = _repair_pass(
+            admission=admission,
+            cycle_time=out_of_window,
+            raw_root=tmp_path,
+        )
+        assert skipped == []
+        blocked_by_model = {candidate.model_id: candidate for candidate in blocked}
+        for model_id in REPAIR_MODEL_IDS:
+            candidate = blocked_by_model[model_id]
+            assert candidate.reason == "missing_forcing_package_uri"
+            evidence = candidate.state_evidence
+            assert evidence["missing_forcing_repair"]["status"] == "rejected"
+            assert evidence["missing_forcing_repair"]["reason"] == "canonical_not_ready"
+            assert evidence["restart_stage"] == "forecast"
+            assert "replay_canonical_readiness_guard" not in evidence
+        # huai_main is out of the window too: the ordinary raw-ready leg applies.
+        assert [candidate.model_id for candidate in candidates] == [OVERRIDE_MODEL_ID]
+        assert candidates[0].state_evidence["restart_stage"] == "convert"
+
+
+def test_replay_window_repair_without_raw_restart_evidence_stays_blocked(tmp_path: Path) -> None:
+    """Fail-closed: no raw evidence in the journal state means no convert restart.
+
+    ``_source_raw_manifest_restart_evidence`` returns ``None`` when the journal
+    candidate state carries neither a matching ``nfs_raw_manifest`` nor a ready
+    ``forecast_cycle`` manifest URI; the leg must keep the pre-change block
+    rather than admit a rebuild with nothing to rebuild from.
+    """
+
+    _write_raw_manifest(tmp_path, cycle_time=REPAIR_CYCLE)
+    model_id = REPAIR_MODEL_IDS[0]
+    repair_config = _FakeConfig(
+        replay_admission=_repair_admission(),
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=REPAIR_CYCLE,
+        require_direct_grid=True,
+        nfs_raw_manifest_root=tmp_path,
+        nfs_raw_manifest_prefix="s3://nhms",
+    )
+    candidate = _candidate_factory(
+        discovery=CycleDiscovery(
+            cycle_id=cycle_id_for("gfs", REPAIR_CYCLE),
+            source_id="gfs",
+            cycle_time=REPAIR_CYCLE,
+            cycle_hour=REPAIR_CYCLE.hour,
+            available=True,
+            status="discovered",
+        ),
+        model=_FakeModel(model_id=model_id, resource_profile=_direct_grid_profile()),
+        horizon={},
+    )
+    warm_state = _repair_warm_state(REPAIR_CYCLE)
+    authorized = scheduler_candidates_module._apply_explicit_missing_forcing_repair_policy(
+        repair_config,
+        candidate,
+        _repair_raw_state(REPAIR_CYCLE),
+        _missing_forcing_blocked_decision(),
+        strict_warm_start=warm_state,
+    )
+    assert authorized is not None
+    assert authorized.reason == "operator_repair_missing_forcing"
+    assert scheduler_candidates_module._decision_is_authorized_missing_forcing_repair(authorized) is True
+
+    # Replay the same authorized decision against a journal candidate state that
+    # carries no raw evidence at all: nothing to rebuild canonical from.
+    candidates, blocked, skipped = _build(
+        admission=_repair_admission(),
+        decision=None,
+        decisions_by_model={model_id: authorized},
+        strict_warm_start=warm_state,
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        cycle_time=REPAIR_CYCLE,
+        model_ids=(model_id,),
+        raw_state={},
+        resource_profiles={model_id: _direct_grid_profile()},
+    )
+
+    assert skipped == []
+    assert candidates == []
+    assert blocked[0].reason == "missing_forcing_package_uri"
+    evidence = blocked[0].state_evidence
+    assert evidence["missing_forcing_repair"]["status"] == "rejected"
+    assert evidence["missing_forcing_repair"]["reason"] == "canonical_not_ready"
+    assert "replay_canonical_readiness_guard" not in evidence
+
+
+def test_raw_less_leg_blocks_a_replay_candidate_whose_substitute_is_not_ready() -> None:
+    """A2-3: the guard must verify the substitute, not just the decision token."""
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state={},
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={
+            "replay_forcing_evidence": {
+                "source": "replay_forcing_evidence",
+                "status": "undeterminable",
+                "reason": "replay_forcing_evidence_undeterminable",
+                "model_ids": [REPLAY_MODEL_ID],
+            }
+        },
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "replay_forcing_substitute_not_ready"
+    guard = blocked[0].state_evidence["replay_canonical_readiness_guard"]
+    assert guard["status"] == "blocked"
+    assert guard["reason"] == "replay_forcing_substitute_not_ready"
+    assert guard["substitute_present"] is False
+    assert guard["replay_forcing_evidence"]["status"] == "undeterminable"
+
+
+def test_raw_less_leg_blocks_a_replay_candidate_from_another_discovery_provenance() -> None:
+    """Phase-2 raw-path discovery + a journal state with no usable raw evidence.
+
+    The candidate reaches the raw-less leg with no ``replay_forcing_evidence`` at
+    all: nothing probed this cycle's forcing packages, so the guard has no
+    substitute to lean on and must block rather than claim one.
+    """
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state={},
+        discovery_classifier="nfs_raw_manifest",
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "replay_raw_manifest_substitute_unavailable"
+    guard = blocked[0].state_evidence["replay_canonical_readiness_guard"]
+    assert guard["status"] == "blocked"
+    assert guard["reason"] == "replay_raw_manifest_substitute_unavailable"
+    assert guard["substitute_present"] is False
+    # The guard never claims a substitute it does not have.
+    assert "replay_forcing_evidence" not in guard
+    assert guard["nfs_raw_manifest"]["status"] == "missing"
+
+
+# --------------------------------------------------------------------------
 # 1.3 discovery admission on forcing evidence
 # --------------------------------------------------------------------------
 
@@ -988,6 +1393,87 @@ def test_forcing_readiness_empty_package_after_an_unreadable_parent_is_undetermi
     assert model_evidence["empty_package_dir"].endswith(f"basins_bbb_vbasins/{REPLAY_MODEL_ID}")
     assert evidence["status"] == "undeterminable"
     assert evidence["reason"] == "replay_forcing_evidence_undeterminable"
+
+
+def test_forcing_readiness_empty_parent_before_a_complete_one_is_present(tmp_path: Path) -> None:
+    """A2-2: an empty first parent must not decide the probe.
+
+    ``basins_aaa_vbasins`` sorts before ``basins_bbb_vbasins``; the real package
+    lives under the second one.  Returning ``missing`` at the first empty
+    directory is a proven-wrong negative that rejects the whole cycle.
+    """
+
+    cycle_root = tmp_path / "forcing" / "gfs" / "2026070600"
+    (cycle_root / "basins_aaa_vbasins" / REPLAY_MODEL_ID).mkdir(parents=True)
+    package = cycle_root / "basins_bbb_vbasins" / REPLAY_MODEL_ID
+    package.mkdir(parents=True)
+    (package / "forcing.csv").write_text("t,q\n0,1\n", encoding="utf-8")
+
+    evidence = replay_forcing_readiness(
+        object_store_root=tmp_path,
+        source_id="gfs",
+        cycle_time=IN_WINDOW_CYCLE,
+        model_ids=[REPLAY_MODEL_ID],
+    )
+    model_evidence = evidence["models"][REPLAY_MODEL_ID]
+    assert model_evidence["status"] == "present"
+    assert model_evidence["package_dir"].endswith(f"basins_bbb_vbasins/{REPLAY_MODEL_ID}")
+    assert evidence["status"] == "ready"
+
+
+def test_forcing_readiness_empty_parent_before_an_unreadable_package_is_undeterminable(
+    tmp_path: Path,
+) -> None:
+    """A2-2: the empty-then-unreadable order must match the unreadable-then-empty one."""
+
+    cycle_root = tmp_path / "forcing" / "gfs" / "2026070600"
+    (cycle_root / "basins_aaa_vbasins" / REPLAY_MODEL_ID).mkdir(parents=True)
+    unreadable_package = cycle_root / "basins_bbb_vbasins" / REPLAY_MODEL_ID
+    unreadable_package.mkdir(parents=True)
+    (unreadable_package / "forcing.csv").write_text("t,q\n0,1\n", encoding="utf-8")
+    os.chmod(unreadable_package, 0o000)
+    try:
+        evidence = replay_forcing_readiness(
+            object_store_root=tmp_path,
+            source_id="gfs",
+            cycle_time=IN_WINDOW_CYCLE,
+            model_ids=[REPLAY_MODEL_ID],
+        )
+    finally:
+        os.chmod(unreadable_package, 0o700)
+    model_evidence = evidence["models"][REPLAY_MODEL_ID]
+    assert model_evidence["status"] == "undeterminable"
+    assert "package unreadable" in model_evidence["detail"]
+    assert model_evidence["empty_package_dir"].endswith(f"basins_aaa_vbasins/{REPLAY_MODEL_ID}")
+    assert evidence["status"] == "undeterminable"
+    assert evidence["reason"] == "replay_forcing_evidence_undeterminable"
+
+
+def test_forcing_readiness_empty_parent_before_an_unreadable_parent_is_undeterminable(
+    tmp_path: Path,
+) -> None:
+    """A2-2: the same, with the LATER parent directory itself unreadable."""
+
+    cycle_root = tmp_path / "forcing" / "gfs" / "2026070600"
+    (cycle_root / "basins_aaa_vbasins" / REPLAY_MODEL_ID).mkdir(parents=True)
+    unreadable_parent = cycle_root / "basins_zzz_vbasins"
+    (unreadable_parent / REPLAY_MODEL_ID).mkdir(parents=True)
+    (unreadable_parent / REPLAY_MODEL_ID / "forcing.csv").write_text("t,q\n0,1\n", encoding="utf-8")
+    os.chmod(unreadable_parent, 0o000)
+    try:
+        evidence = replay_forcing_readiness(
+            object_store_root=tmp_path,
+            source_id="gfs",
+            cycle_time=IN_WINDOW_CYCLE,
+            model_ids=[REPLAY_MODEL_ID],
+        )
+    finally:
+        os.chmod(unreadable_parent, 0o700)
+    model_evidence = evidence["models"][REPLAY_MODEL_ID]
+    assert model_evidence["status"] == "undeterminable"
+    assert "basins_zzz_vbasins" in model_evidence["detail"]
+    assert model_evidence["empty_package_dir"].endswith(f"basins_aaa_vbasins/{REPLAY_MODEL_ID}")
+    assert evidence["status"] == "undeterminable"
 
 
 def test_forcing_readiness_present_package_wins_over_an_unreadable_parent(tmp_path: Path) -> None:

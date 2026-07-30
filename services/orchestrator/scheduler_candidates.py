@@ -79,6 +79,15 @@ _STRICT_WARM_START_TERMINAL_RESTART_STAGE = "forecast"
 _REPLAY_READINESS_GUARD_KEY = "replay_canonical_readiness_guard"
 _REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON = "replay_forcing_evidence_substitutes_raw_manifest"
 _REPLAY_RESTART_PRESERVED_REASON = "replay_resubmit_restart_preserved"
+#: Discovery classifier of the replay forcing-evidence admission branch (D2);
+#: the only provenance whose substitute the raw-less guard leg may lean on.
+_REPLAY_FORCING_DISCOVERY_CLASSIFIER = "replay_forcing_evidence"
+#: Typed blocks emitted when the raw-less leg has no usable substitute (A2-3).
+_REPLAY_SUBSTITUTE_NOT_READY_REASON = "replay_forcing_substitute_not_ready"
+_REPLAY_SUBSTITUTE_UNAVAILABLE_REASON = "replay_raw_manifest_substitute_unavailable"
+#: Reason recorded when a replay-window repair candidate is admitted with the
+#: raw-manifest restart merged in full (design D3.5 v5, A2-1).
+_REPLAY_REPAIR_CONVERT_RESTART_REASON = "replay_repair_rebuilds_canonical_from_raw"
 #: Keys of ``_source_raw_manifest_restart_evidence`` that would lower a replay
 #: candidate's forecast restart back to ``convert``; the guard merges the rest.
 _REPLAY_SUPPRESSED_RESTART_KEYS = (
@@ -759,34 +768,38 @@ def build_candidates(
             canonical_readiness = context.canonical_readiness_for_candidate(candidate, cycle)
             if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
                 if _decision_is_authorized_missing_forcing_repair(state_decision):
-                    state_evidence = dict(state_decision.evidence)
-                    repair = dict(state_evidence.get("missing_forcing_repair") or {})
-                    repair.update(
-                        {
-                            "status": "rejected",
-                            "reason": "canonical_not_ready",
-                            "canonical_readiness": _evidence_safe(canonical_readiness),
-                        }
+                    replay_repair_evidence = _replay_repair_raw_restart_evidence(
+                        context.config,
+                        candidate,
+                        state_decision,
+                        raw_manifest_restart,
+                        canonical_readiness,
                     )
-                    state_evidence["missing_forcing_repair"] = repair
-                    state_evidence.update(
-                        {
-                            "decision": "blocked_missing_forcing_package_uri",
-                            "reason": "missing_forcing_package_uri",
-                            "classifier": "missing_upstream_artifact",
-                            "restart_stage": "forecast",
-                            "restart_from_stage": "forecast",
-                        }
-                    )
-                    blocked.append(
-                        _blocked_candidate(
-                            candidate,
-                            "missing_forcing_package_uri",
-                            state_evidence=state_evidence,
+                    if replay_repair_evidence is not None:
+                        # Replay-window repair candidate (#1164 change 2, design
+                        # D3.5 v5): canonical was purged by retention, so the
+                        # repair's `forcing` restart has no inputs.  Merging the
+                        # raw-manifest restart in full lowers it to `convert` and
+                        # rebuilds canonical -> forcing -> forecast from the raw
+                        # manifest the repair policy already verified present.
+                        candidate = _candidate_with_state_evidence(candidate, replay_repair_evidence)
+                        # The merged evidence already carries the repair decision's
+                        # own keys; re-merging it below would restore the `forcing`
+                        # restart this leg deliberately lowered.
+                        raw_manifest_restart_applied = True
+                    else:
+                        blocked.append(
+                            _blocked_candidate(
+                                candidate,
+                                "missing_forcing_package_uri",
+                                state_evidence=_repair_canonical_not_ready_evidence(
+                                    state_decision,
+                                    canonical_readiness,
+                                ),
+                            )
                         )
-                    )
-                    continue
-                if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
+                        continue
+                elif _canonical_evidence_is_fresh_zero_row(canonical_readiness):
                     # Replay candidates reach this merge point with the terminal
                     # override already applied (#1164 change 2, design D3.5).
                     # Both legs below would otherwise undo it: the raw-less leg
@@ -806,9 +819,24 @@ def build_candidates(
                             state_evidence.update(raw_manifest_restart)
                             raw_manifest_restart_applied = True
                     elif replay_covered:
-                        state_evidence.update(
-                            _replay_raw_manifest_substitute_evidence(discovery, raw_candidate_state)
+                        substitute_evidence, substitute_block = _replay_raw_manifest_substitute_evidence(
+                            discovery,
+                            raw_candidate_state,
                         )
+                        state_evidence.update(substitute_evidence)
+                        if substitute_block is not None:
+                            # The substitute the guard would lean on is absent or
+                            # not ready (#1164 change 2, A2-3): fail closed rather
+                            # than admit a cycle whose forcing packages nobody
+                            # proved present.
+                            blocked.append(
+                                _blocked_candidate(
+                                    candidate,
+                                    substitute_block,
+                                    state_evidence=state_evidence,
+                                )
+                            )
+                            continue
                     else:
                         state_evidence.update(_production_raw_manifest_missing_evidence(raw_candidate_state))
                         blocked.append(
@@ -1867,7 +1895,7 @@ def _replay_raw_manifest_restart_suppressed_evidence(
 def _replay_raw_manifest_substitute_evidence(
     discovery: CycleDiscovery,
     raw_state: Mapping[str, Any] | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str | None]:
     """Raw-less leg of the replay guard: forcing evidence stands in for raw.
 
     The raw objects and their manifest are gone for the pre-070712 replay
@@ -1875,23 +1903,124 @@ def _replay_raw_manifest_substitute_evidence(
     cycle was admitted on the direct-grid forcing packages instead (design D2),
     so the same evidence substitutes for the raw manifest here rather than
     blocking every pre-raw cycle (design D3.5 leg a).
+
+    The substitute must actually be there (round-2 A2-3): the decision token
+    alone proves only that the cycle was admitted somehow, not that this cycle's
+    forcing packages were probed.  A candidate whose discovery came from the
+    replay forcing branch is admitted only with a ``ready`` probe result; a
+    candidate that reaches this leg with any other provenance has no substitute
+    at all and is blocked.  Returns ``(evidence, block_reason)`` where a non-None
+    block reason means the caller must block instead of admitting; the evidence
+    never claims a substitute that is absent.
     """
 
+    classifier = str(getattr(discovery, "classifier", "") or "")
+    discovery_evidence = getattr(discovery, "evidence", None)
+    forcing_evidence = (
+        discovery_evidence.get("replay_forcing_evidence")
+        if isinstance(discovery_evidence, Mapping)
+        else None
+    )
     guard: dict[str, Any] = {
         "leg": "raw_manifest_absent",
-        "status": "admitted",
-        "reason": _REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON,
         "decision": REPLAY_RESUBMIT_DECISION,
-        "restart_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
-        "discovery_classifier": str(getattr(discovery, "classifier", "") or ""),
+        "discovery_classifier": classifier,
         **_production_raw_manifest_missing_evidence(raw_state),
     }
-    discovery_evidence = getattr(discovery, "evidence", None)
-    if isinstance(discovery_evidence, Mapping):
-        forcing_evidence = discovery_evidence.get("replay_forcing_evidence")
-        if isinstance(forcing_evidence, Mapping):
-            guard["replay_forcing_evidence"] = _evidence_safe(dict(forcing_evidence))
-    return {_REPLAY_READINESS_GUARD_KEY: guard}
+    if isinstance(forcing_evidence, Mapping):
+        guard["replay_forcing_evidence"] = _evidence_safe(dict(forcing_evidence))
+    block_reason: str | None = None
+    if classifier != _REPLAY_FORCING_DISCOVERY_CLASSIFIER:
+        block_reason = _REPLAY_SUBSTITUTE_UNAVAILABLE_REASON
+    elif not isinstance(forcing_evidence, Mapping) or str(forcing_evidence.get("status") or "") != "ready":
+        block_reason = _REPLAY_SUBSTITUTE_NOT_READY_REASON
+    if block_reason is not None:
+        guard["status"] = "blocked"
+        guard["reason"] = block_reason
+        guard["substitute_present"] = False
+    else:
+        guard["status"] = "admitted"
+        guard["reason"] = _REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON
+        guard["substitute_present"] = True
+        guard["restart_stage"] = _STRICT_WARM_START_TERMINAL_RESTART_STAGE
+    return {_REPLAY_READINESS_GUARD_KEY: guard}, block_reason
+
+
+def _replay_repair_raw_restart_evidence(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    state_decision: CandidateStateDecision,
+    raw_manifest_restart: Mapping[str, Any] | None,
+    canonical_readiness: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Repair leg of the replay guard: rebuild canonical from raw (D3.5 v5).
+
+    The canonical gate's first leg blocks an authorized missing-forcing repair
+    whenever canonical readiness is not ready.  Inside the replay window that is
+    a hard stop for the 070712 GFS repair cycle, whose canonical products were
+    purged by retention on purpose.  Lifting the block alone would not work
+    either: the repair restarts at ``forcing``, which has no inputs without
+    canonical (``chain_stages.py`` orders convert before forcing).  So the raw
+    manifest restart — the same evidence the production leg merges — is merged in
+    FULL, lowering the restart to ``convert`` so the chain rebuilds
+    canonical -> forcing -> forecast from the raw manifest that
+    ``_verified_repair_raw_manifest`` already proved present.
+
+    Returns ``None`` (caller keeps the pre-change block) when replay does not
+    cover this candidate or when no raw-manifest restart evidence exists — with
+    the replay triple absent this is always ``None`` and the leg is
+    byte-identical (must-preserve 3).
+    """
+
+    admission = getattr(config, "replay_admission", None)
+    if not isinstance(admission, ReplayAdmission):
+        return None
+    if not admission.covers(model_id=candidate.model_id, cycle_time=candidate.cycle_time_utc):
+        return None
+    if not isinstance(raw_manifest_restart, Mapping):
+        return None
+    repair_evidence = dict(state_decision.evidence)
+    evidence: dict[str, Any] = dict(repair_evidence)
+    evidence["canonical_readiness"] = _evidence_safe(dict(canonical_readiness))
+    evidence.update(dict(raw_manifest_restart))
+    evidence[_REPLAY_READINESS_GUARD_KEY] = {
+        "leg": "authorized_missing_forcing_repair",
+        "status": "admitted",
+        "reason": _REPLAY_REPAIR_CONVERT_RESTART_REASON,
+        "decision": str(repair_evidence.get("decision") or ""),
+        "restart_stage": str(raw_manifest_restart.get("restart_stage") or ""),
+        "repair_restart_stage": str(repair_evidence.get("restart_stage") or ""),
+        "replay_admission": admission.to_evidence(),
+    }
+    return evidence
+
+
+def _repair_canonical_not_ready_evidence(
+    state_decision: CandidateStateDecision,
+    canonical_readiness: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Pre-change block evidence for an authorized repair with canonical not ready."""
+
+    state_evidence = dict(state_decision.evidence)
+    repair = dict(state_evidence.get("missing_forcing_repair") or {})
+    repair.update(
+        {
+            "status": "rejected",
+            "reason": "canonical_not_ready",
+            "canonical_readiness": _evidence_safe(canonical_readiness),
+        }
+    )
+    state_evidence["missing_forcing_repair"] = repair
+    state_evidence.update(
+        {
+            "decision": "blocked_missing_forcing_package_uri",
+            "reason": "missing_forcing_package_uri",
+            "classifier": "missing_upstream_artifact",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+        }
+    )
+    return state_evidence
 
 
 def _nfs_raw_manifest_matches_source_cycle(
