@@ -2680,6 +2680,8 @@ def _package_manifest(
     ic_relative_path: str = "alias-a.cfg.ic",
     include_ic: bool = True,
     included_files: list[dict[str, Any]] | None = None,
+    shud_input_name: str | None = None,
+    extra_ic_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return a Basins package manifest shaped like ``basins_package.py`` writes."""
     files: list[dict[str, Any]] = [
@@ -2690,6 +2692,11 @@ def _package_manifest(
             "sha256": _hex("e"),
         }
     ]
+    # ``basins_package.py`` sorts ``included_files`` by ``(role, relative_path)``,
+    # so ``calibration`` (``CALIB/…``) entries land BEFORE the canonical
+    # ``runtime_input`` IC — the ordering that made a first-match classifier read
+    # the wrong entry.
+    files.extend(extra_ic_entries or [])
     if include_ic:
         entry: dict[str, Any] = {"relative_path": ic_relative_path, "role": "shud_input"}
         if ic_size_bytes is not None:
@@ -2697,12 +2704,25 @@ def _package_manifest(
         if ic_sha256 is not None:
             entry["sha256"] = ic_sha256
         files.append(entry)
-    return {
+    manifest: dict[str, Any] = {
         "schema_version": "nhms.basins_package_manifest.v1",
         "model_id": "model_new",
         "version": "vbasins-test",
         "package_checksum": NEW_CHECKSUM,
         "included_files": included_files if included_files is not None else files,
+    }
+    if shud_input_name is not None:
+        manifest["shud_input_name"] = shud_input_name
+    return manifest
+
+
+def _calib_ic_entry(*, sha256: str = _hex("c"), size_bytes: int = 4096) -> dict[str, Any]:
+    """A stray calibration-directory ``*.cfg.ic`` entry (never the canonical IC)."""
+    return {
+        "relative_path": "CALIB/alias-a.cfg.ic",
+        "role": "calibration",
+        "size_bytes": size_bytes,
+        "sha256": sha256,
     }
 
 
@@ -2750,6 +2770,54 @@ def test_packaged_ic_manifest_classification_rejects_empty_digest_and_zero_size(
     )
 
 
+def test_packaged_ic_classification_blocks_ambiguous_inventories() -> None:
+    """A stray ``CALIB/*.cfg.ic`` must never qualify a package by sort order.
+
+    Gate/runtime symmetry: the runtime searches the staged tree recursively and
+    refuses anything but exactly one candidate, so a package whose inventory
+    lists two ``*.cfg.ic`` entries is blocked at planning time instead of being
+    submitted into a run doomed to ``PACKAGED_IC_CONSUMPTION_FAILED``.  Neither
+    the stray digest nor a stray 0-byte placeholder may decide the verdict.
+    """
+    non_empty_calib = generation.classify_packaged_initial_condition(
+        _package_manifest(extra_ic_entries=[_calib_ic_entry()])
+    )
+    assert non_empty_calib.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert non_empty_calib.detail == "packaged_initial_condition_ambiguous"
+    # The wrong entry's digest must not leak into the signal the runtime verifies.
+    assert non_empty_calib.ic_sha256 == ""
+
+    zero_byte_calib = generation.classify_packaged_initial_condition(
+        _package_manifest(extra_ic_entries=[_calib_ic_entry(sha256=EMPTY_FILE_SHA256, size_bytes=0)])
+    )
+    assert zero_byte_calib.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert zero_byte_calib.detail == "packaged_initial_condition_ambiguous"
+
+
+def test_packaged_ic_classification_requires_the_canonical_entry() -> None:
+    """Only the canonical top-level ``<shud_input_name>.cfg.ic`` can qualify."""
+    calib_only = generation.classify_packaged_initial_condition(
+        _package_manifest(include_ic=False, extra_ic_entries=[_calib_ic_entry()])
+    )
+    assert calib_only.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert calib_only.detail == "packaged_initial_condition_not_canonical"
+    assert calib_only.ic_sha256 == ""
+
+    # When the manifest names the SHUD input directory the basename must match it.
+    named_mismatch = generation.classify_packaged_initial_condition(
+        _package_manifest(shud_input_name="alias-a", ic_relative_path="other.cfg.ic")
+    )
+    assert named_mismatch.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert named_mismatch.detail == "packaged_initial_condition_not_canonical"
+
+    named_match = generation.classify_packaged_initial_condition(
+        _package_manifest(shud_input_name="alias-a")
+    )
+    assert named_match.status == generation.PACKAGED_IC_QUALIFIED
+    assert named_match.ic_sha256 == PACKAGE_IC_SHA256
+    assert named_match.ic_relative_path == "alias-a.cfg.ic"
+
+
 def test_first_cycle_qualified_signal_admits_packaged_ic_bootstrap() -> None:
     """判定表 row 1: QUALIFIED -> PACKAGED_IC_BOOTSTRAP carrying the IC digest."""
     evaluation = _first_cycle_evaluation(
@@ -2774,8 +2842,14 @@ def test_first_cycle_qualified_signal_admits_packaged_ic_bootstrap() -> None:
             _package_manifest(ic_sha256=EMPTY_FILE_SHA256)
         ),
         lambda: generation.classify_packaged_initial_condition(_package_manifest(ic_size_bytes=0)),
+        lambda: generation.classify_packaged_initial_condition(
+            _package_manifest(extra_ic_entries=[_calib_ic_entry()])
+        ),
+        lambda: generation.classify_packaged_initial_condition(
+            _package_manifest(include_ic=False, extra_ic_entries=[_calib_ic_entry()])
+        ),
     ],
-    ids=["missing_entry", "empty_digest", "zero_size"],
+    ids=["missing_entry", "empty_digest", "zero_size", "ambiguous_entries", "non_canonical_entry"],
 )
 def test_first_cycle_unqualified_signal_blocks_with_typed_reason(signal_factory: Any) -> None:
     """判定表 row 3: UNQUALIFIED -> fail-closed block, never a silent cold start."""

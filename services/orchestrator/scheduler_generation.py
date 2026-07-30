@@ -335,6 +335,18 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
     A payload that is not a manifest object at all is
     :data:`PACKAGED_IC_UNREADABLE` — never "no IC" — so an unreadable manifest
     can never be mistaken for a package that ships no calibrated state.
+
+    Qualification is decided on the CANONICAL entry only, symmetrically with the
+    runtime's exactly-one check: the canonical entry is
+    ``<shud_input_name>.cfg.ic`` when the manifest names the SHUD input directory
+    (``basins_package.py`` publishes ``shud_input_name`` next to
+    ``included_files``), otherwise any top-level ``*.cfg.ic``.  Entries under a
+    subdirectory (``CALIB/…``, which sorts BEFORE the canonical entry) are never
+    the qualification subject: a stray calibration IC must not lend its digest to
+    the run manifest nor let a 0-byte placeholder block a sound model.  When the
+    inventory lists more than one ``*.cfg.ic`` anywhere the package is ambiguous
+    and is blocked here rather than submitted into the runtime's exactly-one
+    failure (the runtime searches the staged tree recursively).
     """
     if not isinstance(package_manifest, Mapping):
         return PackagedIcSignal(
@@ -347,34 +359,59 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
             status=PACKAGED_IC_UNQUALIFIED,
             detail="package_manifest_included_files_absent",
         )
-    for entry in included_files:
-        if not isinstance(entry, Mapping):
-            continue
-        relative_path = str(entry.get("relative_path") or "")
-        if not relative_path.endswith(_PACKAGED_IC_SUFFIX):
-            continue
-        sha256 = str(entry.get("sha256") or "").strip().lower()
-        try:
-            size_bytes = int(entry.get("size_bytes") or 0)
-        except (TypeError, ValueError):
-            size_bytes = 0
-        if not sha256 or sha256 == EMPTY_FILE_SHA256 or size_bytes <= 0:
-            return PackagedIcSignal(
-                status=PACKAGED_IC_UNQUALIFIED,
-                ic_relative_path=relative_path,
-                ic_size_bytes=max(size_bytes, 0),
-                detail="packaged_initial_condition_empty",
-            )
+    ic_entries = [
+        entry
+        for entry in included_files
+        if isinstance(entry, Mapping) and str(entry.get("relative_path") or "").endswith(_PACKAGED_IC_SUFFIX)
+    ]
+    if not ic_entries:
         return PackagedIcSignal(
-            status=PACKAGED_IC_QUALIFIED,
-            ic_sha256=sha256,
+            status=PACKAGED_IC_UNQUALIFIED,
+            detail="packaged_initial_condition_entry_absent",
+        )
+    if len(ic_entries) > 1:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            detail="packaged_initial_condition_ambiguous",
+        )
+    entry = ic_entries[0]
+    relative_path = str(entry.get("relative_path") or "")
+    if not _is_canonical_packaged_ic_path(relative_path, package_manifest.get("shud_input_name")):
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
             ic_relative_path=relative_path,
-            ic_size_bytes=size_bytes,
+            detail="packaged_initial_condition_not_canonical",
+        )
+    sha256 = str(entry.get("sha256") or "").strip().lower()
+    try:
+        size_bytes = int(entry.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+    if not sha256 or sha256 == EMPTY_FILE_SHA256 or size_bytes <= 0:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            ic_relative_path=relative_path,
+            ic_size_bytes=max(size_bytes, 0),
+            detail="packaged_initial_condition_empty",
         )
     return PackagedIcSignal(
-        status=PACKAGED_IC_UNQUALIFIED,
-        detail="packaged_initial_condition_entry_absent",
+        status=PACKAGED_IC_QUALIFIED,
+        ic_sha256=sha256,
+        ic_relative_path=relative_path,
+        ic_size_bytes=size_bytes,
     )
+
+
+def _is_canonical_packaged_ic_path(relative_path: str, shud_input_name: Any) -> bool:
+    """Return whether ``relative_path`` is the package's canonical IC entry.
+
+    ``role`` is deliberately NOT part of the rule: the planned and written
+    manifests label the same file differently (``shud_input`` vs
+    ``runtime_input``), so only the path is a stable identity.
+    """
+    if isinstance(shud_input_name, str) and shud_input_name.strip():
+        return relative_path == f"{shud_input_name.strip()}{_PACKAGED_IC_SUFFIX}"
+    return "/" not in relative_path
 
 
 @dataclass(frozen=True)
