@@ -87,12 +87,17 @@ When a run manifest declares `quality=packaged_calibrated_state` — in either f
 
 ### Requirement: A read-only audit SHALL reconcile packaged-IC qualification against first-run evidence
 
-An operator-invoked read-only audit tool SHALL enumerate registered models × sources, determine packaged-IC qualification with the same two-source criteria as the scheduler (inventory: exactly-one canonical `*.cfg.ic` entry with non-empty `sha256` and positive `size_bytes`; inventory-less variant shape: bounded probe of the canonical packaged-IC object), locate the earliest business run's manifest evidence, and emit a schema-versioned receipt classifying each row as `consumed_package_ic`, `cold_start_with_qualified_ic` (defect), `cold_start_no_ic`, or `undetermined` (evidence missing). The receipt SHALL carry a limits field stating the qualification source used per row (inventory-recorded digest vs probed object digest) and that inventory-tier package objects are not re-hashed. The tool SHALL NOT modify any production state, package, index, or journal content.
+An operator-invoked read-only audit tool SHALL enumerate registered models × sources, determine packaged-IC qualification with the same two-source criteria as the scheduler (inventory: exactly-one canonical `*.cfg.ic` entry with non-empty `sha256` and positive `size_bytes`; inventory-less variant shape: bounded probe of the canonical packaged-IC object), locate the earliest business run's manifest evidence, and emit a schema-versioned receipt classifying each row as `consumed_package_ic`, `cold_start_with_qualified_ic` (defect), `cold_start_no_ic`, or `undetermined` (evidence missing or undecidable). The receipt SHALL carry a limits field stating the qualification source used per row (inventory-recorded digest vs probed object digest) and that inventory-tier package objects are not re-hashed. Every filesystem check the audit performs SHALL distinguish three outcomes — success, confirmed absence, and undecidable — and SHALL NOT report an undecidable check as a negative result: a canonical packaged-IC object key that cannot be stat-ed or is not a regular file SHALL be `unreadable` rather than a missing IC, and a row whose run-evidence sweep could not be completed (a `runs/` lane that could not be enumerated, or an earlier cycle whose manifest was present but unparseable, so the located run is not provably the earliest) SHALL be recorded as an incomplete sweep and classified `undetermined` rather than carrying a `consumed_package_ic` / `cold_start_no_ic` / `cold_start_with_qualified_ic` verdict. The tool SHALL NOT modify any production state, package, index, or journal content.
 
 #### Scenario: Stock defect rows are reproduced
 
 - **WHEN** the audit runs against the production registry and run evidence containing basins whose qualified packaged IC was not consumed on their first cycle
 - **THEN** each such basin × source appears as a `cold_start_with_qualified_ic` row in the receipt and no file outside the receipt root is written
+
+#### Scenario: An undecidable check is never reported as a negative result
+
+- **WHEN** the audit probes a canonical packaged-IC object key that is a symlink or a directory, or sweeps run evidence whose `runs/` lane cannot be enumerated or whose earliest cycle's manifest is present but unparseable
+- **THEN** the row is `undetermined` — the IC qualification is `unreadable` with the probe tier recorded, or the row is marked as an incomplete evidence sweep — and no `cold_start_no_ic` or `consumed_package_ic` verdict is claimed; a run directory that simply carries no manifest remains confirmed absence and does not degrade the sweep
 
 ## MODIFIED Requirements
 

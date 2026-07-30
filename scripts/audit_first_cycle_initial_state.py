@@ -24,7 +24,8 @@ two independent facts and writes a schema-versioned receipt:
       single canonical IC object ``{model_package_uri}{shud_input_name}.cfg.ic``
       and a bounded no-follow stat + sha256 read of THAT object decides:
       present and non-empty qualifies (carrying the probed digest), missing or
-      empty does not, and a failed read stays unreadable rather than "no IC".
+      empty does not, and a failed stat or read stays unreadable rather than
+      "no IC".
 
    Each row records which tier produced its verdict (``ic_qualification_source``).
 2. **What the earliest business run actually did** — the earliest cycle's run
@@ -42,8 +43,10 @@ Each row lands on one of four verdicts:
 ``cold_start_no_ic``
     First run cold-started and the package genuinely ships no usable IC.
 ``undetermined``
-    Evidence is missing or does not describe either case (no run manifest found,
-    the package manifest is unreadable, or the first run warm-started from a
+    Evidence is missing, undecidable, or does not describe either case (no run
+    manifest found, the package manifest is unreadable, the run-evidence sweep
+    could not be completed so the earliest cycle is not provably the earliest —
+    ``first_run_evidence_complete=false`` — or the first run warm-started from a
     state snapshot rather than bootstrapping).
 
 Read-only by construction: every filesystem access is a no-follow read or a
@@ -152,11 +155,17 @@ def classify_verdict(
     ic_qualified: bool | None,
     first_run_quality: str | None,
     first_run_init_mode: int | None,
+    first_run_evidence_complete: bool = True,
 ) -> str:
     """Return the verdict for one model x source row.
 
     Total and order-sensitive:
 
+    0. The run-evidence sweep could not be completed (a lane could not be
+       enumerated, or an earlier cycle's manifest could not be parsed) →
+       ``undetermined``.  Whatever run was found is not provably the FIRST one,
+       so neither a defect nor a clean verdict may be claimed from it — this is
+       the same three-way discipline the qualification lanes apply.
     1. No run evidence at all → ``undetermined`` (never guess from the package).
     2. The run declared a packaged bootstrap → ``consumed_package_ic``.
     3. ``init_mode == 1`` (a cold start) → the defect verdict when the package
@@ -167,6 +176,8 @@ def classify_verdict(
        snapshot (``init_mode == 3`` with a snapshot quality) — is
        ``undetermined``: it is neither a package consumption nor a cold start.
     """
+    if not first_run_evidence_complete:
+        return "undetermined"
     if first_run_quality is None and first_run_init_mode is None:
         return "undetermined"
     if str(first_run_quality or "") == PACKAGED_IC_QUALITY:
@@ -290,6 +301,26 @@ def _canonical_ic_object_probe(
     ``read_bytes_limited_no_follow`` under the object-store containment root.
     A probe that cannot complete reports ``unreadable_detail`` so the row stays
     ``undetermined`` instead of being reported as a clean cold start.
+
+    The stat is deliberately inlined here instead of delegating to
+    :func:`_is_regular_file`, which is a two-way predicate: it folds
+    ``SafeFilesystemError`` / ``OSError`` into the same ``False`` as a genuine
+    ``FileNotFoundError``.  On this call site that collapse is fail-OPEN — a
+    symlink at the key, a directory at the key, an unreadable parent or an NFS
+    ``EIO`` would read as ``exists=False``, the classifier would emit
+    ``packaged_initial_condition_object_missing``, and the row would be reported
+    as a CLEAN ``cold_start_no_ic``.  So the three outcomes stay distinct:
+
+    - ``FileNotFoundError`` → the object is genuinely absent (``exists=False``);
+    - ``SafeFilesystemError`` / ``OSError`` → the probe could not complete;
+    - stat succeeded but the entry is not a regular file → it exists and is
+      unusable as an IC object.
+
+    Both non-absence failures carry ``unreadable_detail``, which
+    ``_classify_packaged_ic_by_object_probe`` evaluates BEFORE ``exists``, so
+    either lands on ``PACKAGED_IC_UNREADABLE``.  The detail is a fixed token —
+    no exception text — so the receipt never inlines filesystem contents or
+    paths.
     """
     key = _safe_relative_key(_object_key(object_uri, object_store_prefix))
     if key is None:
@@ -298,8 +329,20 @@ def _canonical_ic_object_probe(
             unreadable_detail="packaged initial condition object escapes the object-store root",
         )
     path = object_store_root / key
-    if not _is_regular_file(path, containment_root=object_store_root):
+    try:
+        entry_stat = stat_no_follow(path, containment_root=object_store_root)
+    except FileNotFoundError:
         return PackagedIcObjectProbe(exists=False)
+    except (SafeFilesystemError, OSError):
+        return PackagedIcObjectProbe(
+            exists=False,
+            unreadable_detail="packaged initial condition object could not be inspected",
+        )
+    if not stat.S_ISREG(entry_stat.st_mode):
+        return PackagedIcObjectProbe(
+            exists=True,
+            unreadable_detail="packaged initial condition object is not a regular file",
+        )
     try:
         content = read_bytes_limited_no_follow(
             path, max_bytes=MAX_PACKAGED_IC_PROBE_BYTES, containment_root=object_store_root
@@ -411,12 +454,34 @@ def _run_lane_candidates(
     *,
     source: str,
     model_id: str,
-) -> list[tuple[str, str]]:
-    """Return ``(cycle, run_id)`` pairs for ``source``/``model_id`` under ``runs_root``."""
+) -> tuple[list[tuple[str, str]], bool]:
+    """Return ``((cycle, run_id) pairs, enumerable)`` for ``source``/``model_id``.
+
+    Three-way, because "this lane holds no runs" and "this lane could not be
+    listed" are different facts and only the first one may inform a verdict:
+
+    - ``FileNotFoundError`` — the lane genuinely does not exist (a workspace
+      that never ran, an object store without a ``runs/`` prefix): confirmed
+      absence, ``enumerable=True`` with no candidates.
+    - ``SafeFilesystemError`` / ``OSError`` (symlinked or non-directory lane
+      root, EACCES, NFS EIO), or a listing that hit
+      :data:`MAX_RUN_DIRECTORY_ENTRIES` and was therefore truncated — the lane
+      could not be enumerated: ``enumerable=False``.  Collapsing this into "no
+      runs here" would let the audit report a LATER cycle as the first one, and
+      with it a confident ``consumed_package_ic`` / ``cold_start_no_ic``.
+    - otherwise the matching ``(cycle, run_id)`` pairs with ``enumerable=True``.
+    """
     try:
         names = list_directory_no_follow_limited(runs_root, max_entries=MAX_RUN_DIRECTORY_ENTRIES)
-    except (FileNotFoundError, NotADirectoryError, SafeFilesystemError, OSError):
-        return []
+    except FileNotFoundError:
+        return [], True
+    except (NotADirectoryError, SafeFilesystemError, OSError):
+        return [], False
+    if len(names) > MAX_RUN_DIRECTORY_ENTRIES:
+        # ``list_directory_no_follow_limited`` returns one sentinel entry past
+        # the bound: the lane is larger than the audit will read, so the earliest
+        # cycle may not be in hand.
+        return [], False
     candidates: list[tuple[str, str]] = []
     for name in names:
         match = _RUN_ID_RE.match(name)
@@ -427,7 +492,7 @@ def _run_lane_candidates(
         if normalize_source_id(match.group("source")) != source:
             continue
         candidates.append((match.group("cycle"), name))
-    return sorted(candidates)
+    return sorted(candidates), True
 
 
 def earliest_run_evidence(
@@ -444,15 +509,27 @@ def earliest_run_evidence(
     cycle whose manifest cannot be read is skipped and the next cycle is
     considered — the row is only ``undetermined`` when NO lane yields readable
     evidence.
+
+    ``first_run_evidence_complete`` reports whether that sweep could actually be
+    completed.  It is ``False`` when a lane could not be enumerated or when an
+    EARLIER cycle's manifest was present but unparseable, i.e. when the returned
+    run is not provably the first one.  The verdict table refuses to draw either
+    a defect or a clean conclusion from an incomplete sweep instead of silently
+    promoting a later cycle to "first".
     """
     lanes: list[tuple[str, Path]] = [(OBJECT_STORE_LANE, object_store_root / "runs")]
     if workspace_root is not None:
         lanes.append((WORKSPACE_LANE, workspace_root / "runs"))
     candidates: list[tuple[str, str, str, Path]] = []
+    evidence_complete = True
     for lane, runs_root in lanes:
         containment_root = object_store_root if lane == OBJECT_STORE_LANE else workspace_root
         assert containment_root is not None
-        for cycle, run_id in _run_lane_candidates(runs_root, source=source, model_id=model_id):
+        lane_candidates, enumerable = _run_lane_candidates(
+            runs_root, source=source, model_id=model_id
+        )
+        evidence_complete = evidence_complete and enumerable
+        for cycle, run_id in lane_candidates:
             candidates.append((cycle, lane, run_id, containment_root))
     empty = {
         "first_cycle": None,
@@ -460,6 +537,7 @@ def earliest_run_evidence(
         "first_run_quality": None,
         "first_run_init_mode": None,
         "first_run_evidence_lane": None,
+        "first_run_evidence_complete": evidence_complete,
     }
     if not candidates:
         return empty
@@ -482,8 +560,14 @@ def earliest_run_evidence(
             json.JSONDecodeError,
             RecursionError,
         ):
+            # The manifest IS there but could not be read or parsed, so this
+            # cycle's behavior is undecidable.  Skipping to the next cycle is
+            # still the useful thing to do, but the row can no longer claim the
+            # cycle it lands on is the first one.
+            evidence_complete = False
             continue
         if not isinstance(payload, Mapping):
+            evidence_complete = False
             continue
         initial_state = payload.get("initial_state")
         runtime = payload.get("runtime")
@@ -504,8 +588,9 @@ def earliest_run_evidence(
             "first_run_quality": quality,
             "first_run_init_mode": init_mode,
             "first_run_evidence_lane": lane,
+            "first_run_evidence_complete": evidence_complete,
         }
-    return empty
+    return {**empty, "first_run_evidence_complete": evidence_complete}
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +635,7 @@ def build_receipt(
                     ic_qualified=qualification["ic_qualified"],
                     first_run_quality=evidence["first_run_quality"],
                     first_run_init_mode=evidence["first_run_init_mode"],
+                    first_run_evidence_complete=evidence["first_run_evidence_complete"],
                 ),
             }
             detail = qualification.get("detail")

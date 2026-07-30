@@ -34,6 +34,11 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _variant_package_key(model_id: str) -> str:
+    """Store-relative package directory of a direct-grid variant registry row."""
+    return f"models/direct_grid_variants/{model_id}/dg-gfs-abcdef123456/package"
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -145,7 +150,7 @@ class _Fixture:
         probe of ``{model_package_uri}{shud_input_name}.cfg.ic``.  This is the
         shape all 36 production registry rows currently have.
         """
-        package_key = f"models/direct_grid_variants/{model_id}/dg-gfs-abcdef123456/package"
+        package_key = _variant_package_key(model_id)
         manifest_key = f"{package_key}/manifest.json"
         _write_json(
             self.object_store_root / manifest_key,
@@ -180,6 +185,10 @@ class _Fixture:
                 },
             }
         )
+
+    def variant_ic_path(self, model_id: str, shud_input_name: str) -> Path:
+        """Absolute path of the canonical IC object probed for a variant row."""
+        return self.object_store_root / _variant_package_key(model_id) / f"{shud_input_name}.cfg.ic"
 
     def add_object_store_run(self, manifest: dict[str, Any]) -> None:
         _write_json(
@@ -274,6 +283,9 @@ def test_audit_reproduces_stock_defect_rows_per_model_and_source(tmp_path: Path)
         assert row["first_cycle"] == "2026070500"
         assert row["first_run_quality"] == "cold_start_no_state"
         assert row["first_run_init_mode"] == 1
+        # A sweep that enumerated both lanes and read the earliest manifest is
+        # complete, so the verdict is allowed to be a confident one.
+        assert row["first_run_evidence_complete"] is True
     assert receipt["totals"]["cold_start_with_qualified_ic"] == 2
 
 
@@ -375,6 +387,122 @@ def test_audit_picks_the_earliest_cycle_across_workspace_and_object_store(tmp_pa
     assert row["verdict"] == "cold_start_with_qualified_ic"
 
 
+def test_audit_unlistable_run_lane_does_not_promote_a_later_cycle_to_first(tmp_path: Path) -> None:
+    """An un-enumerable lane is not "this lane holds no runs".
+
+    The object-store lane holds the TRUE first cycle (a defect cold start) but
+    its lane root cannot be listed (the no-follow lister refuses a symlinked
+    directory, the same class as EACCES / NFS EIO).  Folding that into an empty
+    lane promotes the later workspace cycle to "first" and reports a confident
+    ``consumed_package_ic`` — a clean verdict for a basin whose real first cycle
+    was never read.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_sha256 = _sha256(b"calibrated-ic")
+    fixture.add_model("hidden_lane", _package_manifest("hidden_lane", ic_sha256=ic_sha256))
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070500_hidden_lane",
+            model_id="hidden_lane",
+            source_id="GFS",
+            cycle_time="2026-07-05T00:00:00Z",
+            quality="cold_start_no_state",
+            init_mode=1,
+        )
+    )
+    runs_root = fixture.object_store_root / "runs"
+    detached = fixture.object_store_root / "runs-detached"
+    runs_root.rename(detached)
+    runs_root.symlink_to(detached)
+    fixture.add_workspace_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070512_hidden_lane",
+            model_id="hidden_lane",
+            source_id="GFS",
+            cycle_time="2026-07-05T12:00:00Z",
+            quality="packaged_calibrated_state",
+            init_mode=3,
+            packaged_ic_checksum=ic_sha256,
+        )
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "hidden_lane", "gfs")
+    assert row["verdict"] == "undetermined"
+    assert row["first_run_evidence_complete"] is False
+
+
+def test_audit_unparseable_earlier_run_manifest_does_not_promote_a_later_cycle(
+    tmp_path: Path,
+) -> None:
+    """A present-but-unparseable earlier manifest leaves the sweep incomplete."""
+    fixture = _Fixture(tmp_path)
+    ic_sha256 = _sha256(b"calibrated-ic")
+    fixture.add_model("broken_first_run", _package_manifest("broken_first_run", ic_sha256=ic_sha256))
+    broken = (
+        fixture.object_store_root
+        / "runs"
+        / "fcst_gfs_2026070500_broken_first_run"
+        / "input"
+        / "manifest.json"
+    )
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{ not json", encoding="utf-8")
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070512_broken_first_run",
+            model_id="broken_first_run",
+            source_id="GFS",
+            cycle_time="2026-07-05T12:00:00Z",
+            quality="packaged_calibrated_state",
+            init_mode=3,
+            packaged_ic_checksum=ic_sha256,
+        )
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "broken_first_run", "gfs")
+    assert row["verdict"] == "undetermined"
+    assert row["first_run_evidence_complete"] is False
+
+
+def test_audit_run_directory_without_a_manifest_keeps_the_sweep_complete(tmp_path: Path) -> None:
+    """The absence side of the same three-way: a manifest-less run dir is decidable.
+
+    A run directory that never got a manifest is confirmed absence of evidence
+    for that cycle, not an undecidable read — skipping to the next cycle must
+    NOT degrade the row, otherwise the completeness flag would fire on ordinary
+    partially-materialized runs and every verdict would become useless.
+    """
+    fixture = _Fixture(tmp_path)
+    fixture.add_model("empty_run_dir", _package_manifest("empty_run_dir"))
+    (fixture.object_store_root / "runs" / "fcst_gfs_2026070500_empty_run_dir" / "input").mkdir(
+        parents=True, exist_ok=True
+    )
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070512_empty_run_dir",
+            model_id="empty_run_dir",
+            source_id="GFS",
+            cycle_time="2026-07-05T12:00:00Z",
+            quality="cold_start_no_state",
+            init_mode=1,
+        )
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "empty_run_dir", "gfs")
+    assert row["first_run_evidence_complete"] is True
+    assert row["first_cycle"] == "2026070512"
+    assert row["verdict"] == "cold_start_with_qualified_ic"
+
+
 def test_audit_qualifies_a_direct_grid_variant_row_through_the_object_probe(tmp_path: Path) -> None:
     """The production 36/36 shape: no inventory, qualification from the IC object.
 
@@ -435,6 +563,56 @@ def test_audit_variant_row_without_a_usable_ic_object_is_not_qualified(
     assert row["ic_qualified"] is False
     assert row["ic_qualification_source"] == "object_probe"
     assert row["ic_sha256"] is None
+
+
+@pytest.mark.parametrize("obstruction", ["directory", "symlink"], ids=["directory_at_key", "symlink_at_key"])
+def test_audit_undecidable_canonical_ic_stat_is_undetermined_not_no_ic(
+    tmp_path: Path, obstruction: str
+) -> None:
+    """Tier-(b) symmetry with the manifest lane: a stat that cannot decide is undetermined.
+
+    A canonical IC key that is a DIRECTORY (stat succeeds, not a regular file) or
+    a SYMLINK (``stat_no_follow`` refuses by policy) is not evidence that the
+    package ships no IC — the probe simply could not complete.  Collapsing either
+    into ``exists=False`` makes the classifier emit
+    ``packaged_initial_condition_object_missing`` and reports a CLEAN
+    ``cold_start_no_ic`` for a basin whose IC was merely unreadable, which is the
+    same fail-open shape #1164 exists to prevent.  Same treatment as the
+    unreadable-manifest lane above.
+    """
+    fixture = _Fixture(tmp_path)
+    fixture.add_direct_grid_variant_model(
+        "obstructed_dg", shud_input_name="obstructed_basin", ic_content=None
+    )
+    ic_path = fixture.variant_ic_path("obstructed_dg", "obstructed_basin")
+    ic_path.parent.mkdir(parents=True, exist_ok=True)
+    if obstruction == "directory":
+        ic_path.mkdir()
+    else:
+        ic_path.symlink_to(fixture.object_store_root / "elsewhere.cfg.ic")
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070500_obstructed_dg",
+            model_id="obstructed_dg",
+            source_id="GFS",
+            cycle_time="2026-07-05T00:00:00Z",
+            quality="cold_start_no_state",
+            init_mode=1,
+        )
+    )
+    fixture.publish_registry()
+
+    # Exit 0 also proves the receipt still validates against its schema: a
+    # receipt that does not is raised as ``RECEIPT_INVALID`` and exits 1.
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "obstructed_dg", "gfs")
+    assert row["verdict"] == "undetermined"
+    assert row["ic_qualified"] is None
+    assert row["ic_status"] == "unreadable"
+    assert row["ic_qualification_source"] == "object_probe"
+    assert row["ic_sha256"] is None
+    assert row["detail"]
 
 
 def test_audit_receipt_declares_per_row_qualification_source_limits(tmp_path: Path) -> None:
@@ -518,4 +696,23 @@ def test_audit_verdict_table(
             first_run_init_mode=init_mode,
         )
         == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("quality", "init_mode"),
+    [("packaged_calibrated_state", 3), ("cold_start_no_state", 1), (None, None)],
+)
+def test_audit_verdict_table_refuses_an_incomplete_evidence_sweep(
+    quality: str | None, init_mode: int | None
+) -> None:
+    """An incomplete sweep outranks every other row of the table."""
+    assert (
+        audit.classify_verdict(
+            ic_qualified=True,
+            first_run_quality=quality,
+            first_run_init_mode=init_mode,
+            first_run_evidence_complete=False,
+        )
+        == "undetermined"
     )

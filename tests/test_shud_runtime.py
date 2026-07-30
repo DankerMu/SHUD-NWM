@@ -3539,6 +3539,40 @@ def test_packaged_ic_legacy_form_with_two_siblings_raises_instead_of_consuming_a
     assert "packaged_initial_state" not in manifest.get("runtime", {})
 
 
+def test_packaged_ic_unclearable_staged_states_are_a_typed_consumption_failure(
+    tmp_path: Path,
+) -> None:
+    """The pre-staging clear fails closed under the packaged-IC code, not silently.
+
+    A symlink inside the staged model input makes the recursive clear refuse
+    (``ARTIFACT_UNSAFE``).  "The clear could not be completed" must never be read
+    as "there was nothing to clear", because that is exactly what would let a
+    previous attempt's materialization survive into the exactly-one search.
+
+    This also pins the reason ``_consume_packaged_initial_state``'s pre-tail
+    candidate search needs no wrapper of its own: the clear walks the SAME
+    directory first, with the same no-follow enumerator and under the same
+    declaration predicate, so a staged tree the search could not enumerate is
+    already refused here — under the packaged-IC error code.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    ic_sha256 = _write_packaged_ic(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    model_input_dir = input_dir / "alias-a"
+    model_input_dir.mkdir(parents=True)
+    (model_input_dir / "stale-link.cfg.ic").symlink_to(tmp_path / "object-store")
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "could not be cleared" in excinfo.value.message
+
+
 def test_undeclared_packaged_ic_path_keeps_cold_start_regression(tmp_path: Path) -> None:
     """Runs that do NOT declare packaged-IC bootstrap keep byte-identical behavior."""
     object_root = tmp_path / "object-store"

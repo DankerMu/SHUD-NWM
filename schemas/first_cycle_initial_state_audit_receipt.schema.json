@@ -105,6 +105,7 @@
         "first_run_quality",
         "first_run_init_mode",
         "first_run_evidence_lane",
+        "first_run_evidence_complete",
         "verdict"
       ],
       "properties": {
@@ -126,6 +127,10 @@
         "first_run_evidence_lane": {
           "type": ["string", "null"],
           "enum": ["workspace_runs", "object_store_runs", null]
+        },
+        "first_run_evidence_complete": {
+          "type": "boolean",
+          "description": "False when the run-evidence sweep could not be completed for this row: a lane could not be enumerated (symlinked/non-directory lane root, EACCES, IO error, or a listing past the audit bound) or an earlier cycle's manifest was present but unparseable. The reported first_cycle is then not provably the earliest, so the verdict is forced to 'undetermined' rather than claiming a defect or a clean cold start."
         },
         "verdict": {
           "type": "string",
