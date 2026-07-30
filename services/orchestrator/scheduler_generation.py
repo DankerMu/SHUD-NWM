@@ -15,9 +15,12 @@ Decision surface
 Admit:
   - ``warm_continue`` — same-generation exact predecessor exists.
   - ``cold_new_model`` — no prior state history for this ``model_id`` in ANY
-    generation.
+    generation AND no packaged-IC qualification signal was supplied (the
+    legacy carve-out; see ``packaged_initial_condition`` below).
   - ``cold_declared_cutover`` — a valid declaration admits a cold start at
     exactly ``effective_cycle_utc``.
+  - ``packaged_ic_bootstrap`` — first cycle (no history in ANY generation) and
+    the model package ships a qualified calibrated ``*.cfg.ic`` (#1164).
 
 Block (each maps 1:1 to a typed reason surfaced in candidate evidence):
   - ``block_predecessor_pending`` →
@@ -30,6 +33,10 @@ Block (each maps 1:1 to a typed reason surfaced in candidate evidence):
     ``registry_cutover_cold_start_out_of_window``.
   - ``block_wrong_generation`` →
     ``state_snapshot_index_generation_mismatch``.
+  - ``block_first_cycle_initial_state_undecided`` →
+    ``first_cycle_initial_state_undecided`` (#1164: the model package's
+    calibrated IC is unqualified or its manifest is unreadable — the first
+    cycle must never silently cold-start).
 
 Design constraints
 ------------------
@@ -53,7 +60,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -62,6 +69,12 @@ from typing import Any
 import jsonschema
 
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
+
+# ``PACKAGED_IC_QUALITY`` lives in the shared leaf so the decision layer, the
+# manifest assembler, and the SHUD runtime cannot drift apart on the token; it is
+# re-exported here (see ``__all__``) because orchestrator callers reach for it
+# alongside the transition-decision surface.
+from packages.common.state_lineage import PACKAGED_IC_QUALITY
 
 # ``cycle_id_for`` is deliberately taken from ``state_manager``'s module
 # surface (it re-exports the adapter helper) rather than from
@@ -75,10 +88,18 @@ __all__ = (
     "CUTOVER_DECLARATION_ENV",
     "CUTOVER_DECLARATION_SCHEMA_VERSION",
     "CUTOVER_TRANSITION_MODES",
+    "EMPTY_FILE_SHA256",
     "MAX_CUTOVER_DECLARATION_BYTES",
+    "PACKAGED_IC_BOOTSTRAP_MODE",
+    "PACKAGED_IC_QUALIFIED",
+    "PACKAGED_IC_UNQUALIFIED",
+    "PACKAGED_IC_UNREADABLE",
+    "PACKAGED_IC_QUALITY",
+    "PackagedIcSignal",
     "TransitionDecision",
     "TRANSITION_DECISION_REASONS",
     "TransitionEvaluation",
+    "classify_packaged_initial_condition",
     "derive_generation",
     "evaluate_transition_decision",
     "expected_journal_init_state_tokens",
@@ -182,13 +203,19 @@ class TransitionDecision:
     WARM_CONTINUE = "warm_continue"
     COLD_NEW_MODEL = "cold_new_model"
     COLD_DECLARED_CUTOVER = "cold_declared_cutover"
+    #: #1164: first cycle consumes the calibrated IC shipped in the package.
+    PACKAGED_IC_BOOTSTRAP = "packaged_ic_bootstrap"
     BLOCK_PREDECESSOR_PENDING = "block_predecessor_pending"
     BLOCK_DECLARATION_MISSING = "block_declaration_missing"
     BLOCK_DECLARATION_STALE = "block_declaration_stale"
     BLOCK_COLD_START_OUT_OF_WINDOW = "block_cold_start_out_of_window"
     BLOCK_WRONG_GENERATION = "block_wrong_generation"
+    #: #1164: first cycle whose packaged IC is unqualified / unreadable.
+    BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED = "block_first_cycle_initial_state_undecided"
 
-    ADMIT = frozenset({WARM_CONTINUE, COLD_NEW_MODEL, COLD_DECLARED_CUTOVER})
+    ADMIT = frozenset(
+        {WARM_CONTINUE, COLD_NEW_MODEL, COLD_DECLARED_CUTOVER, PACKAGED_IC_BOOTSTRAP}
+    )
     BLOCK = frozenset(
         {
             BLOCK_PREDECESSOR_PENDING,
@@ -196,6 +223,7 @@ class TransitionDecision:
             BLOCK_DECLARATION_STALE,
             BLOCK_COLD_START_OUT_OF_WINDOW,
             BLOCK_WRONG_GENERATION,
+            BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED,
         }
     )
     ALL = ADMIT | BLOCK
@@ -218,7 +246,135 @@ TRANSITION_DECISION_REASONS: Mapping[str, str] = {
     TransitionDecision.BLOCK_WRONG_GENERATION: (
         "state_snapshot_index_generation_mismatch"
     ),
+    TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED: (
+        "first_cycle_initial_state_undecided"
+    ),
 }
+
+
+# ---------------------------------------------------------------------------
+# #1164: packaged calibrated-IC qualification signal
+# ---------------------------------------------------------------------------
+
+
+#: SHA-256 of a zero-byte file.  A package ``included_files`` entry carrying
+#: this digest is a placeholder, never a calibrated initial condition.
+EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+#: Candidate ``state_evidence.mode`` emitted by the gate for an admitted
+#: packaged-IC bootstrap.  Declared on this leaf module (rather than on the
+#: gate) so the cohort carrier in ``chain_forecast_cycle`` can share the single
+#: source of truth without importing the scheduler package.
+PACKAGED_IC_BOOTSTRAP_MODE = "db_free_packaged_ic_bootstrap"
+
+PACKAGED_IC_QUALIFIED = "qualified"
+PACKAGED_IC_UNQUALIFIED = "unqualified"
+PACKAGED_IC_UNREADABLE = "unreadable"
+
+#: Suffix of the SHUD initial-condition file inside a Basins model package.
+_PACKAGED_IC_SUFFIX = ".cfg.ic"
+
+
+@dataclass(frozen=True)
+class PackagedIcSignal:
+    """Machine-decidable verdict on a model package's calibrated IC (D1).
+
+    The signal is computed by the gate (all IO lives there) and injected into
+    the otherwise-pure :func:`evaluate_transition_decision`.  ``None`` — as
+    opposed to any instance of this class — means "no published package
+    manifest reference", which is the legacy carve-out: the decision then stays
+    byte-identical to the pre-#1164 ``cold_new_model`` behavior.
+
+    Attributes
+    ----------
+    status:
+        One of :data:`PACKAGED_IC_QUALIFIED` / :data:`PACKAGED_IC_UNQUALIFIED`
+        / :data:`PACKAGED_IC_UNREADABLE`.  Anything that is not exactly
+        ``qualified`` fails closed at the decision layer.
+    ic_sha256:
+        The manifest-recorded digest of the packaged ``*.cfg.ic`` (only set
+        when ``status`` is qualified).  This is the value that threads through
+        candidate evidence → basin marker → run manifest → runtime verification.
+    """
+
+    status: str
+    ic_sha256: str = ""
+    ic_relative_path: str = ""
+    ic_size_bytes: int = 0
+    detail: str = ""
+
+    @property
+    def qualified(self) -> bool:
+        return self.status == PACKAGED_IC_QUALIFIED
+
+    def evidence(self) -> dict[str, Any]:
+        """Return a bounded evidence view (no manifest contents are inlined)."""
+        payload: dict[str, Any] = {"status": self.status}
+        if self.ic_relative_path:
+            payload["ic_relative_path"] = self.ic_relative_path
+        if self.ic_sha256:
+            payload["ic_sha256"] = self.ic_sha256
+        if self.ic_size_bytes:
+            payload["ic_size_bytes"] = self.ic_size_bytes
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
+
+
+def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSignal:
+    """Classify a Basins package manifest's calibrated-IC qualification (D1).
+
+    TOTAL and side-effect free: the caller has already performed the IO, so
+    every malformed shape maps to a signal rather than an exception.  The
+    criteria read ONLY fields the publisher already writes
+    (``workers/model_registry/basins_package.py``): an ``included_files``
+    entry whose ``relative_path`` ends with ``.cfg.ic``, whose ``sha256``
+    differs from :data:`EMPTY_FILE_SHA256`, and whose ``size_bytes`` is
+    positive.
+
+    A payload that is not a manifest object at all is
+    :data:`PACKAGED_IC_UNREADABLE` — never "no IC" — so an unreadable manifest
+    can never be mistaken for a package that ships no calibrated state.
+    """
+    if not isinstance(package_manifest, Mapping):
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNREADABLE,
+            detail="package_manifest_not_object",
+        )
+    included_files = package_manifest.get("included_files")
+    if not isinstance(included_files, Sequence) or isinstance(included_files, str | bytes):
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            detail="package_manifest_included_files_absent",
+        )
+    for entry in included_files:
+        if not isinstance(entry, Mapping):
+            continue
+        relative_path = str(entry.get("relative_path") or "")
+        if not relative_path.endswith(_PACKAGED_IC_SUFFIX):
+            continue
+        sha256 = str(entry.get("sha256") or "").strip().lower()
+        try:
+            size_bytes = int(entry.get("size_bytes") or 0)
+        except (TypeError, ValueError):
+            size_bytes = 0
+        if not sha256 or sha256 == EMPTY_FILE_SHA256 or size_bytes <= 0:
+            return PackagedIcSignal(
+                status=PACKAGED_IC_UNQUALIFIED,
+                ic_relative_path=relative_path,
+                ic_size_bytes=max(size_bytes, 0),
+                detail="packaged_initial_condition_empty",
+            )
+        return PackagedIcSignal(
+            status=PACKAGED_IC_QUALIFIED,
+            ic_sha256=sha256,
+            ic_relative_path=relative_path,
+            ic_size_bytes=size_bytes,
+        )
+    return PackagedIcSignal(
+        status=PACKAGED_IC_UNQUALIFIED,
+        detail="packaged_initial_condition_entry_absent",
+    )
 
 
 @dataclass(frozen=True)
@@ -251,6 +407,11 @@ class TransitionEvaluation:
     declaration_evidence:
         Bounded slice of the bound declaration entry (or the loader error) —
         never inlined raw file contents.
+    packaged_ic_checksum:
+        #1164: the manifest-recorded SHA-256 of the packaged calibrated
+        ``*.cfg.ic`` when ``decision`` is ``packaged_ic_bootstrap``; ``None``
+        on every other decision.  Carried end-to-end so the runtime can verify
+        the staged file it is about to consume.
     """
 
     decision: str
@@ -260,6 +421,7 @@ class TransitionEvaluation:
     selected_predecessor: dict[str, Any] | None = None
     cold_start_reason: str | None = None
     declaration_evidence: dict[str, Any] = field(default_factory=dict)
+    packaged_ic_checksum: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +714,7 @@ def evaluate_transition_decision(
     required_lead_hours: int,
     history: _HistorySignal,
     declaration: Mapping[str, Any] | None,
+    packaged_initial_condition: PackagedIcSignal | None = None,
 ) -> TransitionEvaluation:
     """Return the ``TransitionEvaluation`` for one candidate.
 
@@ -562,6 +725,13 @@ def evaluate_transition_decision(
     2. Look for a declaration entry for this ``model_id``.
     3. Compute the generation token from ``package_checksum``.
     4. Emit the decision along the matrix documented in :class:`TransitionEvaluation`.
+
+    ``packaged_initial_condition`` (#1164) is OPTIONAL and only consulted on the
+    first-cycle branch (no history in ANY generation).  Its default of ``None``
+    is load-bearing: every caller that cannot produce a qualification signal —
+    legacy models without a published package-manifest reference, and the two
+    named gate bypasses — keeps the pre-#1164 ``cold_new_model`` decision with
+    zero rebaselining.  The function stays pure: all IO happens in the gate.
     """
     candidate_generation = derive_generation(package_checksum)
     checksum_text = str(package_checksum or "").strip()
@@ -622,8 +792,45 @@ def evaluate_transition_decision(
             declaration_evidence=declaration_evidence,
         )
 
-    # (c) No prior history in ANY generation → cold_new_model.
+    # (c) No prior history in ANY generation — the FIRST CYCLE branch.
     if not history.exists_any_generation:
+        # (c1) #1164: a qualification signal was produced for this candidate,
+        # i.e. the registry publishes a package-manifest reference we could
+        # read.  The packaged calibrated IC then decides the first cycle:
+        # qualified → consume it; anything else → fail closed.  No silent
+        # unlabeled cold start is reachable from here.
+        if packaged_initial_condition is not None:
+            if packaged_initial_condition.qualified:
+                return TransitionEvaluation(
+                    decision=TransitionDecision.PACKAGED_IC_BOOTSTRAP,
+                    generation=candidate_generation,
+                    package_checksum=checksum_text,
+                    typed_reason=None,
+                    selected_predecessor=None,
+                    cold_start_reason=None,
+                    declaration_evidence={
+                        **declaration_evidence,
+                        "bound_entry": entry_evidence,
+                        "packaged_initial_condition": packaged_initial_condition.evidence(),
+                    },
+                    packaged_ic_checksum=packaged_initial_condition.ic_sha256,
+                )
+            return TransitionEvaluation(
+                decision=TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED,
+                generation=candidate_generation,
+                package_checksum=checksum_text,
+                typed_reason=TRANSITION_DECISION_REASONS[
+                    TransitionDecision.BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED
+                ],
+                selected_predecessor=None,
+                cold_start_reason=None,
+                declaration_evidence={
+                    **declaration_evidence,
+                    "bound_entry": entry_evidence,
+                    "packaged_initial_condition": packaged_initial_condition.evidence(),
+                },
+            )
+        # (c2) No signal at all → legacy labeled cold start (carve-out).
         return TransitionEvaluation(
             decision=TransitionDecision.COLD_NEW_MODEL,
             generation=candidate_generation,
@@ -870,7 +1077,7 @@ def generation_evidence(evaluation: TransitionEvaluation) -> dict[str, Any]:
     scheduler candidates so downstream evidence readers can decide the
     outcome without re-parsing the declaration file.
     """
-    return {
+    evidence: dict[str, Any] = {
         "decision": evaluation.decision,
         "generation": evaluation.generation,
         "package_checksum_prefix": evaluation.package_checksum[:12],
@@ -879,6 +1086,13 @@ def generation_evidence(evaluation: TransitionEvaluation) -> dict[str, Any]:
         "cold_start_reason": evaluation.cold_start_reason,
         "declaration": evaluation.declaration_evidence,
     }
+    # #1164: the first-cycle verdict is hoisted out of ``declaration`` so
+    # operators do not have to know it was computed alongside the cutover
+    # declaration to find it.
+    packaged = evaluation.declaration_evidence.get("packaged_initial_condition")
+    if isinstance(packaged, Mapping):
+        evidence["packaged_initial_condition"] = dict(packaged)
+    return evidence
 
 
 # ---------------------------------------------------------------------------

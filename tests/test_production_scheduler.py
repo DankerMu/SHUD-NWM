@@ -21281,7 +21281,18 @@ def _db_free_model_manifest_fixture(
     model: Mapping[str, Any],
     *,
     package_checksum: str = "package-model-a",
+    packaged_ic_sha256: str | None = None,
+    packaged_ic_size_bytes: int = 131072,
 ) -> tuple[dict[str, Any], str]:
+    """Publish a model package manifest + registry row for the DB-free fixtures.
+
+    The manifest carries an ``included_files`` inventory with a non-empty
+    ``*.cfg.ic`` entry because that is what every real Basins package manifest
+    publishes (``workers/model_registry/basins_package.py``).  #1164 makes that
+    inventory load-bearing: the scheduler qualifies a first cycle's packaged
+    calibrated IC from these two fields, so a fixture without them would be
+    testing a shape production never emits.
+    """
     store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
     model_id = str(model["model_id"])
     manifest_key = f"models/{model_id}/manifest.json"
@@ -21292,6 +21303,14 @@ def _db_free_model_manifest_fixture(
                 "schema_version": "nhms.model_package_manifest.v1",
                 "model_id": model_id,
                 "package_checksum": package_checksum,
+                "included_files": [
+                    {
+                        "relative_path": f"{model_id}.cfg.ic",
+                        "role": "shud_input",
+                        "size_bytes": packaged_ic_size_bytes,
+                        "sha256": packaged_ic_sha256 or sha256_bytes(f"{model_id}-cfg-ic".encode()),
+                    }
+                ],
             },
             sort_keys=True,
         ).encode("utf-8"),
