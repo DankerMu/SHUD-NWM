@@ -345,7 +345,17 @@ def _forcing_package_probe(
                 "package_dir": str(package_dir),
                 "entry_count": len(entries),
             }
-        undeterminable = None
+        if undeterminable is not None:
+            # An empty package directory under one basin version is not proof of
+            # absence once an earlier parent could not be probed: the package may
+            # well live behind the unreadable one.  Presence still wins (returned
+            # above); an uncompletable probe never folds into a negative (#1190).
+            return {
+                "status": PROBE_UNDETERMINABLE,
+                "package_dir": str(package_dir),
+                "detail": undeterminable,
+                "empty_package_dir": str(package_dir),
+            }
         return {"status": PROBE_MISSING, "package_dir": str(package_dir), "detail": "package directory is empty"}
     if undeterminable is not None:
         return {"status": PROBE_UNDETERMINABLE, "detail": undeterminable}

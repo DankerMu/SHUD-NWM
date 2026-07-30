@@ -41,6 +41,7 @@ from services.orchestrator import chain_forecast_orchestrator_cycle as chain_cyc
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_replay as scheduler_replay_module
 from services.orchestrator.scheduler import ProductionSchedulerConfig
+from services.orchestrator.scheduler_generation import PACKAGED_IC_BOOTSTRAP_MODE
 from services.orchestrator.scheduler_replay import (
     REPLAY_MODE_ENV,
     REPLAY_MODEL_IDS_ENV,
@@ -59,6 +60,37 @@ OUT_OF_SET_MODEL_ID = "dg_other_basin_gfs"
 WINDOW = "2026070500..2026072100"
 IN_WINDOW_CYCLE = datetime(2026, 7, 6, 0, tzinfo=UTC)
 OUT_OF_WINDOW_CYCLE = datetime(2026, 7, 22, 0, tzinfo=UTC)
+#: Replay-sequence origin: the first business cycle, whose state chain the reset
+#: clears and whose IC therefore comes from the model package.
+FIRST_CYCLE = datetime(2026, 7, 5, 0, tzinfo=UTC)
+
+#: Production canonical readiness inside the replay window: retention removed the
+#: canonical products, so a genuine evaluation returns zero candidate rows
+#: (``_canonical_evidence_is_fresh_zero_row`` is True) — the merge point at
+#: ``scheduler_candidates.py:745-810`` is live for every replay candidate.
+FRESH_ZERO_ROW_READINESS: dict[str, Any] = {
+    "ready": False,
+    "status": "canonical_incomplete",
+    "reason": "canonical_incomplete",
+    "candidate_row_count": 0,
+    "expected_leads": [0, 12, 24],
+    "product_id": "canonical_gfs_2026070600",
+}
+
+#: Journal candidate state for a cycle whose NFS raw manifest is still on disk
+#: (070712 onwards): the raw-ready leg of the fresh-zero-row merge.
+RAW_MANIFEST_READY_STATE: dict[str, Any] = {
+    "nfs_raw_manifest": {
+        "status": "ready",
+        "ready": True,
+        "required": True,
+        "source": "node27_nfs_raw_manifest",
+        "manifest_uri": "s3://nhms/raw/gfs/2026070600/manifest.json",
+        "source_id": "gfs",
+        "cycle_id": cycle_id_for("gfs", IN_WINDOW_CYCLE),
+        "cycle_time": "2026-07-06T00:00:00Z",
+    }
+}
 
 SELECTED_STATE = {
     "state_id": "state-dth-ls-2026070600",
@@ -179,6 +211,9 @@ def _build(
     cycle_time: datetime = IN_WINDOW_CYCLE,
     raw_state: Mapping[str, Any] | None = None,
     decisions_by_model: Mapping[str, CandidateStateDecision | None] | None = None,
+    canonical_readiness: Mapping[str, Any] | None = None,
+    discovery_classifier: str | None = None,
+    discovery_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
     discovery = CycleDiscovery(
         cycle_id=cycle_id_for("gfs", cycle_time),
@@ -187,11 +222,15 @@ def _build(
         cycle_hour=cycle_time.hour,
         available=True,
         status="discovered",
+        classifier=discovery_classifier,
+        evidence=dict(discovery_evidence or {}),
     )
     context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
         config=_FakeConfig(replay_admission=admission),
         active_repository=_FakeRepository(raw_state),
-        canonical_readiness_for_candidate=lambda candidate, cycle: None,
+        canonical_readiness_for_candidate=lambda candidate, cycle: (
+            dict(canonical_readiness) if canonical_readiness is not None else None
+        ),
         strict_warm_start_for_candidate=lambda candidate, cycle: (
             dict(strict_warm_start) if strict_warm_start is not None else None
         ),
@@ -544,31 +583,82 @@ def test_non_completed_state_decisions_are_not_overridden() -> None:
     assert blocked[0].reason == "missing_upstream_artifact"
 
 
-def test_first_cycle_bootstrap_branch_is_untouched_by_replay() -> None:
-    """Change-1 contract: a cleared state scope keeps its own decision path.
+def test_first_cycle_bootstrap_evidence_survives_the_replay_override() -> None:
+    """070500 production shape: journal survives the reset, evidence is bootstrap.
 
-    With the state chain cleared there is no completed-type terminal decision to
-    override (``candidate_state`` yields ``None``), so the candidate reaches the
-    submission set exactly as it does without replay admission and carries no
-    replay evidence.  The ``PACKAGED_IC_BOOTSTRAP`` decision itself lives in
-    ``scheduler_generation`` and is never consulted here.
+    Round-1 A-P2-4: the scoped reset clears only the state INDEX; the journal
+    keeps the succeeded hydro run, so the first cycle's state decision is still
+    ``terminal_hydro_success`` and the override fires like any other cycle.
+    What is special about 070500 is the strict warm-start payload: the
+    ``PACKAGED_IC_BOOTSTRAP`` shape emitted by
+    ``scheduler_generation_gate.py:535-553`` — ready, packaged-IC mode, a
+    ``packaged_ic_checksum`` and NO ``candidate_state``.  That payload must
+    reach the candidate unaltered, and
+    ``_upgrade_retry_for_strict_warm_start_manifest`` must not relabel the
+    decision (no ``candidate_state`` means no run-manifest match to prove).
     """
 
-    with_replay, blocked, skipped = _build(
+    reason = "terminal_hydro_success"
+    bootstrap_strict = {
+        "status": "ready",
+        "ready": True,
+        "reason": None,
+        "mode": PACKAGED_IC_BOOTSTRAP_MODE,
+        "model_id": REPLAY_MODEL_ID,
+        "source_id": "gfs",
+        "generation": 1,
+        "cold_start_reason": None,
+        "packaged_ic_checksum": "sha256:packaged-ic-070500",
+    }
+    candidates, blocked, skipped = _build(
         admission=_admission(),
-        decision=None,
-        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
-    )
-    without_replay, _blocked, _skipped = _build(
-        admission=None,
-        decision=None,
-        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        decision=CandidateStateDecision("skip", reason, _terminal_evidence(reason)),
+        strict_warm_start=bootstrap_strict,
+        cycle_time=FIRST_CYCLE,
     )
     assert blocked == []
     assert skipped == []
-    assert len(with_replay) == 1
-    assert with_replay[0].to_dict() == without_replay[0].to_dict()
-    assert "replay_terminal_override" not in with_replay[0].state_evidence
+    assert len(candidates) == 1
+    _assert_replay_shape(
+        candidates[0],
+        overridden_skip_reason=reason,
+        overridden_branch="strict_warm_start_terminal_init_state_mismatch",
+    )
+    evidence = candidates[0].state_evidence
+    # The bootstrap payload carries no selected warm state; nothing may invent one.
+    assert "candidate_state" not in evidence
+    strict_evidence = evidence["strict_warm_start"]
+    assert strict_evidence["mode"] == PACKAGED_IC_BOOTSTRAP_MODE
+    assert strict_evidence["packaged_ic_checksum"] == "sha256:packaged-ic-070500"
+    assert strict_evidence["ready"] is True
+    assert "candidate_state" not in strict_evidence
+    # The upgrade hook ran inside build_candidates (the decision token above
+    # proves it did not relabel); assert the same directly on the seam.
+    decision = scheduler_candidates_module._replay_terminal_override_decision(
+        _FakeConfig(replay_admission=_admission()),
+        _candidate_factory(
+            discovery=CycleDiscovery(
+                cycle_id=cycle_id_for("gfs", FIRST_CYCLE),
+                source_id="gfs",
+                cycle_time=FIRST_CYCLE,
+                cycle_hour=0,
+                available=True,
+                status="discovered",
+            ),
+            model=_FakeModel(model_id=REPLAY_MODEL_ID),
+            horizon={},
+        ),
+        CandidateStateDecision("skip", reason, _terminal_evidence(reason)),
+        strict_warm_start=bootstrap_strict,
+        successor_state=None,
+    )
+    assert decision is not None
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        decision,
+        bootstrap_strict,
+    )
+    assert upgraded is decision
+    assert upgraded.evidence["strict_warm_start"]["packaged_ic_checksum"] == "sha256:packaged-ic-070500"
 
 
 def test_replay_resubmit_is_in_the_chain_force_terminal_resubmit_whitelist() -> None:
@@ -651,6 +741,155 @@ def test_replay_override_does_not_bypass_the_required_raw_manifest_candidate_gat
 
 
 # --------------------------------------------------------------------------
+# 1.2b canonical-readiness fresh-zero-row merge point (design D3.5)
+# --------------------------------------------------------------------------
+
+
+def _replay_terminal_decision() -> CandidateStateDecision:
+    reason = "terminal_hydro_success"
+    return CandidateStateDecision("skip", reason, _terminal_evidence(reason))
+
+
+def test_fresh_zero_row_merge_admits_the_raw_less_replay_candidate() -> None:
+    """A-P1-1: replay forcing evidence substitutes for the deleted raw manifest.
+
+    070500..070700 x 2 sources have no raw manifest at all (the objects were
+    retired) and no canonical rows, so both fresh-zero-row conditions hold.  The
+    pre-change merge blocked them unconditionally — ``required`` is never
+    consulted on this leg — which submitted exactly nothing for ten cycle-passes,
+    including the packaged-IC acceptance point.
+    """
+
+    forcing_evidence = {
+        "source": "replay_forcing_evidence",
+        "status": "ready",
+        "model_ids": [REPLAY_MODEL_ID],
+    }
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state={},
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": forcing_evidence},
+    )
+    assert blocked == []
+    assert skipped == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    assert evidence["decision"] == "replay_resubmit"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    assert evidence["canonical_readiness"]["candidate_row_count"] == 0
+    guard = evidence["replay_canonical_readiness_guard"]
+    assert guard["leg"] == "raw_manifest_absent"
+    assert guard["status"] == "admitted"
+    assert guard["reason"] == "replay_forcing_evidence_substitutes_raw_manifest"
+    assert guard["discovery_classifier"] == "replay_forcing_evidence"
+    assert guard["replay_forcing_evidence"]["status"] == "ready"
+    # The absent manifest is recorded, not silently dropped.
+    assert guard["nfs_raw_manifest"]["status"] == "missing"
+
+
+def test_fresh_zero_row_merge_keeps_the_forecast_restart_when_the_raw_manifest_is_ready() -> None:
+    """A-P1-2: the raw-ready leg must not lower the replay restart to ``convert``.
+
+    ``_source_raw_manifest_restart_evidence`` describes a full-chain restart from
+    ``convert`` with ``raw_manifest_ready_without_canonical``; merged over a
+    replay candidate it makes the chain force-resubmit convert/forcing stages that
+    already succeeded (~18/33 cycles per source, raw from 070712 vs canonical
+    from 071612).
+    """
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    assert blocked == []
+    assert skipped == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    assert evidence["decision"] == "replay_resubmit"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    assert evidence.get("restart_reason") != "raw_manifest_ready_without_canonical"
+    assert "fresh_ingestion" not in evidence
+    # The raw manifest itself stays on the record — only the restart downgrade is
+    # suppressed.
+    assert evidence["raw_manifest_reuse"]["status"] == "ready"
+    guard = evidence["replay_canonical_readiness_guard"]
+    assert guard["leg"] == "raw_manifest_ready"
+    assert guard["status"] == "restart_preserved"
+    assert guard["restart_stage"] == "forecast"
+    assert guard["suppressed_restart"]["restart_stage"] == "convert"
+    assert guard["suppressed_restart"]["restart_from_stage"] == "convert"
+    assert guard["suppressed_restart"]["restart_reason"] == "raw_manifest_ready_without_canonical"
+
+
+def test_fresh_zero_row_merge_is_unchanged_without_replay_admission() -> None:
+    """must-preserve 3: both legs keep their pre-change behaviour when replay is off."""
+
+    raw_less_candidates, raw_less_blocked, raw_less_skipped = _build(
+        admission=None,
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state={},
+    )
+    assert raw_less_candidates == []
+    assert raw_less_skipped == []
+    assert raw_less_blocked[0].reason == "nfs_raw_manifest_required"
+    blocked_evidence = raw_less_blocked[0].state_evidence
+    assert blocked_evidence["nfs_raw_manifest"]["status"] == "missing"
+    assert "replay_canonical_readiness_guard" not in blocked_evidence
+
+    raw_ready_candidates, raw_ready_blocked, raw_ready_skipped = _build(
+        admission=None,
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    assert raw_ready_blocked == []
+    assert raw_ready_skipped == []
+    evidence = raw_ready_candidates[0].state_evidence
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+    assert evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+    assert evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+    assert "replay_canonical_readiness_guard" not in evidence
+
+
+def test_canonical_readiness_ready_leaves_the_replay_candidate_alone() -> None:
+    """A ready canonical evaluation never reaches the fresh-zero-row legs."""
+
+    ready_readiness = {
+        "ready": True,
+        "status": "canonical_ready",
+        "candidate_row_count": 3,
+        "expected_leads": [0, 12, 24],
+    }
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=_replay_terminal_decision(),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=ready_readiness,
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    assert blocked == []
+    assert skipped == []
+    evidence = candidates[0].state_evidence
+    assert evidence["decision"] == "replay_resubmit"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["canonical_readiness"]["ready"] is True
+    assert "replay_canonical_readiness_guard" not in evidence
+
+
+# --------------------------------------------------------------------------
 # 1.3 discovery admission on forcing evidence
 # --------------------------------------------------------------------------
 
@@ -717,6 +956,61 @@ def test_forcing_readiness_uncompletable_probe_is_not_a_completed_negative(tmp_p
         os.chmod(cycle_root, 0o700)
     assert evidence["status"] == "undeterminable"
     assert evidence["reason"] == "replay_forcing_evidence_undeterminable"
+
+
+def test_forcing_readiness_empty_package_after_an_unreadable_parent_is_undeterminable(
+    tmp_path: Path,
+) -> None:
+    """A-P2-5: an empty sibling never converts an uncompletable probe into absence.
+
+    The package may well live under the parent that could not be read; only a
+    completed negative may report ``missing`` (module invariant, #1190).
+    """
+
+    cycle_root = tmp_path / "forcing" / "gfs" / "2026070600"
+    unreadable_parent = cycle_root / "basins_aaa_vbasins"
+    (unreadable_parent / REPLAY_MODEL_ID).mkdir(parents=True)
+    (unreadable_parent / REPLAY_MODEL_ID / "forcing.csv").write_text("t,q\n0,1\n", encoding="utf-8")
+    (cycle_root / "basins_bbb_vbasins" / REPLAY_MODEL_ID).mkdir(parents=True)
+    os.chmod(unreadable_parent, 0o000)
+    try:
+        evidence = replay_forcing_readiness(
+            object_store_root=tmp_path,
+            source_id="gfs",
+            cycle_time=IN_WINDOW_CYCLE,
+            model_ids=[REPLAY_MODEL_ID],
+        )
+    finally:
+        os.chmod(unreadable_parent, 0o700)
+    model_evidence = evidence["models"][REPLAY_MODEL_ID]
+    assert model_evidence["status"] == "undeterminable"
+    assert "basins_aaa_vbasins" in model_evidence["detail"]
+    assert model_evidence["empty_package_dir"].endswith(f"basins_bbb_vbasins/{REPLAY_MODEL_ID}")
+    assert evidence["status"] == "undeterminable"
+    assert evidence["reason"] == "replay_forcing_evidence_undeterminable"
+
+
+def test_forcing_readiness_present_package_wins_over_an_unreadable_parent(tmp_path: Path) -> None:
+    """Presence still short-circuits: a readable, non-empty package is ``present``."""
+
+    cycle_root = tmp_path / "forcing" / "gfs" / "2026070600"
+    unreadable_parent = cycle_root / "basins_aaa_vbasins"
+    (unreadable_parent / REPLAY_MODEL_ID).mkdir(parents=True)
+    package = cycle_root / "basins_bbb_vbasins" / REPLAY_MODEL_ID
+    package.mkdir(parents=True)
+    (package / "forcing.csv").write_text("t,q\n0,1\n", encoding="utf-8")
+    os.chmod(unreadable_parent, 0o000)
+    try:
+        evidence = replay_forcing_readiness(
+            object_store_root=tmp_path,
+            source_id="gfs",
+            cycle_time=IN_WINDOW_CYCLE,
+            model_ids=[REPLAY_MODEL_ID],
+        )
+    finally:
+        os.chmod(unreadable_parent, 0o700)
+    assert evidence["models"][REPLAY_MODEL_ID]["status"] == "present"
+    assert evidence["status"] == "ready"
 
 
 def test_forcing_readiness_without_object_store_root_is_undeterminable() -> None:

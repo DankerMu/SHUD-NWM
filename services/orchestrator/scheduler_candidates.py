@@ -74,6 +74,20 @@ _STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_
 #: therefore the stage whose retry budget governs it (Issue #1173).
 _STRICT_WARM_START_TERMINAL_RESTART_STAGE = "forecast"
 
+#: Typed guard evidence emitted at the canonical-readiness fresh-zero-row merge
+#: point for an overridden replay candidate (#1164 change 2, design D3.5).
+_REPLAY_READINESS_GUARD_KEY = "replay_canonical_readiness_guard"
+_REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON = "replay_forcing_evidence_substitutes_raw_manifest"
+_REPLAY_RESTART_PRESERVED_REASON = "replay_resubmit_restart_preserved"
+#: Keys of ``_source_raw_manifest_restart_evidence`` that would lower a replay
+#: candidate's forecast restart back to ``convert``; the guard merges the rest.
+_REPLAY_SUPPRESSED_RESTART_KEYS = (
+    "restart_stage",
+    "restart_from_stage",
+    "restart_reason",
+    "fresh_ingestion",
+)
+
 #: Completed-type terminal skip reasons that the §8.7 journal predecessor
 #: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
 #: is included deliberately: it is the only completed-type skip reachable with
@@ -773,13 +787,28 @@ def build_candidates(
                     )
                     continue
                 if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
+                    # Replay candidates reach this merge point with the terminal
+                    # override already applied (#1164 change 2, design D3.5).
+                    # Both legs below would otherwise undo it: the raw-less leg
+                    # blocks unconditionally (ignoring `required`) and the
+                    # raw-ready leg lowers the forecast restart to `convert`.
+                    replay_covered = _decision_is_replay_resubmit(state_decision)
                     state_evidence = {}
                     if state_decision is not None and state_decision.action == "retry":
                         state_evidence.update(state_decision.evidence)
                     state_evidence["canonical_readiness"] = canonical_readiness
                     if raw_manifest_restart is not None:
-                        state_evidence.update(raw_manifest_restart)
-                        raw_manifest_restart_applied = True
+                        if replay_covered:
+                            state_evidence.update(
+                                _replay_raw_manifest_restart_suppressed_evidence(raw_manifest_restart)
+                            )
+                        else:
+                            state_evidence.update(raw_manifest_restart)
+                            raw_manifest_restart_applied = True
+                    elif replay_covered:
+                        state_evidence.update(
+                            _replay_raw_manifest_substitute_evidence(discovery, raw_candidate_state)
+                        )
                     else:
                         state_evidence.update(_production_raw_manifest_missing_evidence(raw_candidate_state))
                         blocked.append(
@@ -1781,6 +1810,88 @@ def _source_raw_manifest_restart_evidence(
             "manifest_uri": str(manifest_uri),
         },
     }
+
+
+def _decision_is_replay_resubmit(state_decision: CandidateStateDecision | None) -> bool:
+    """True only for a candidate the replay terminal override already claimed.
+
+    The guard reads the decision token, not the replay configuration: a
+    candidate carrying ``replay_resubmit`` is by construction inside the closed
+    model set and the replay window (``_replay_terminal_override_decision`` is
+    the only producer).  With the replay triple absent no candidate ever carries
+    the token, so the merge point below stays byte-identical (must-preserve 3).
+    """
+
+    if state_decision is None or state_decision.action != "retry":
+        return False
+    if str(state_decision.reason or "") != REPLAY_TERMINAL_OVERRIDE_REASON:
+        return False
+    evidence = state_decision.evidence
+    if not isinstance(evidence, Mapping):
+        return False
+    return str(evidence.get("decision") or "") == REPLAY_RESUBMIT_DECISION
+
+
+def _replay_raw_manifest_restart_suppressed_evidence(
+    raw_manifest_restart: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Raw-ready leg of the replay guard: merge without the restart downgrade.
+
+    The raw manifest is real and its reuse evidence is kept for the audit trail,
+    but the ``convert`` restart keys are dropped so the override's
+    ``forecast`` restart survives (design D3.5 leg b): the chain would otherwise
+    force-resubmit convert/forcing stages that already succeeded.
+    """
+
+    suppressed = {
+        key: raw_manifest_restart[key]
+        for key in _REPLAY_SUPPRESSED_RESTART_KEYS
+        if key in raw_manifest_restart
+    }
+    evidence = {
+        key: value
+        for key, value in dict(raw_manifest_restart).items()
+        if key not in _REPLAY_SUPPRESSED_RESTART_KEYS
+    }
+    evidence[_REPLAY_READINESS_GUARD_KEY] = {
+        "leg": "raw_manifest_ready",
+        "status": "restart_preserved",
+        "reason": _REPLAY_RESTART_PRESERVED_REASON,
+        "decision": REPLAY_RESUBMIT_DECISION,
+        "restart_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        "suppressed_restart": _evidence_safe(suppressed),
+    }
+    return evidence
+
+
+def _replay_raw_manifest_substitute_evidence(
+    discovery: CycleDiscovery,
+    raw_state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Raw-less leg of the replay guard: forcing evidence stands in for raw.
+
+    The raw objects and their manifest are gone for the pre-070712 replay
+    cycles, and conversion could not run even if the block were lifted; the
+    cycle was admitted on the direct-grid forcing packages instead (design D2),
+    so the same evidence substitutes for the raw manifest here rather than
+    blocking every pre-raw cycle (design D3.5 leg a).
+    """
+
+    guard: dict[str, Any] = {
+        "leg": "raw_manifest_absent",
+        "status": "admitted",
+        "reason": _REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON,
+        "decision": REPLAY_RESUBMIT_DECISION,
+        "restart_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        "discovery_classifier": str(getattr(discovery, "classifier", "") or ""),
+        **_production_raw_manifest_missing_evidence(raw_state),
+    }
+    discovery_evidence = getattr(discovery, "evidence", None)
+    if isinstance(discovery_evidence, Mapping):
+        forcing_evidence = discovery_evidence.get("replay_forcing_evidence")
+        if isinstance(forcing_evidence, Mapping):
+            guard["replay_forcing_evidence"] = _evidence_safe(dict(forcing_evidence))
+    return {_REPLAY_READINESS_GUARD_KEY: guard}
 
 
 def _nfs_raw_manifest_matches_source_cycle(
