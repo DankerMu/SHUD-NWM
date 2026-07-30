@@ -740,6 +740,54 @@ def test_an_interrupt_mid_unlink_still_leaves_a_receipt(
     assert json.loads(capsys.readouterr().out.strip())["failure"]["reason"] == "interrupted_after_file_unlink"
 
 
+class _DeleteInterruptedConnection(_FakeConnection):
+    """The DELETE is staged into the transaction, then the operator hits Ctrl-C."""
+
+    def cursor(self) -> _FakeCursor:
+        connection = self
+
+        class _Cursor(_FakeCursor):
+            def execute(self, statement: str, params: Mapping[str, Any] | None = None) -> None:
+                if statement == tool.DELETE_SQL:
+                    raise KeyboardInterrupt
+                super().execute(statement, params)
+
+        return _Cursor(connection)
+
+
+def test_an_interrupt_with_a_staged_delete_and_no_unlinks_still_leaves_a_receipt(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    """C4-2 rider: the no-file-cache exit-4 shape the runbook table names.
+
+    ``--no-file-cache`` means nothing is ever unlinked, so an interrupt with the
+    DELETE scope already in the transaction leaves an EMPTY
+    ``unlinked_file_cache_paths`` -- and the DB's fate is still unknown.  The
+    reason must not claim an unlink, and ``deleted_rows`` must stay ``null``
+    rather than being reported as a verified zero.
+    """
+
+    rows = _site(tmp_path)[0].rows
+    connection = _DeleteInterruptedConnection(rows)
+    receipt_path = tmp_path / "interrupted-receipt.json"
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(connection, None, receipt_path, execute=True)
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "failed_partial_mutation"
+    assert receipt["failure"]["reason"] == "interrupted_delete_scope_uncertain"
+    assert receipt["unlinked_file_cache_paths"] == []
+    assert receipt["totals"]["deleted_rows"] is None
+    assert connection.committed is False
+    assert connection.rolled_back is True
+    # the same record is echoed for an operator watching the terminal
+    echoed = json.loads(capsys.readouterr().out.strip())
+    assert echoed["failure"]["reason"] == "interrupted_delete_scope_uncertain"
+    assert echoed["totals"]["deleted_rows"] is None
+
+
 def test_every_bounded_receipt_list_declares_whether_it_was_cut(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

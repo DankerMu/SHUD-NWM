@@ -264,11 +264,15 @@ uv run python -m scripts.node27_invalidate_tiles \
 (`file_cache_dir_absent` / `file_cache_dir_undeterminable`),不会退化成"每个 key 都判缺失"。
 删除顺序是「先文件后 DB 行」,某个 key 的文件腿判不了(exit 3 `incomplete`)时两腿都
 不动,receipt 列出 `blocked_cache_keys`,修因后原样重跑即可。exit 4
-(`failed_partial_mutation`)表示**已经删过文件**但 DB 删除或 receipt 落盘没完成:
-stdout 上的 receipt 里 `unlinked_file_cache_paths` 是权威清单,按它核对后再决定重跑。
+(`failed_partial_mutation`)表示**可能已经发生变更**——删过文件,**或者**一个文件都没删
+但 DELETE scope 已经进了这笔事务。**先看 receipt 里的 `failure.reason` 定分支**(下表六
+种),再决定处置;`unlinked_file_cache_paths` 只是 `_after_file_unlink` 那一族的权威清单,
+**空列表 ≠ DB 没变**(`--no-file-cache` 部署的 exit 4 天然是空清单)。
 读它之前先看同名的 `*_truncated` 标志(`unlinked_file_cache_paths_truncated` /
 `blocked_cache_keys_truncated` / `entries_truncated`):为 `true` 说明列表被 20000 条
-上限截断,清单不完整,不能当全量对账用。
+上限截断,清单不完整,不能当全量对账用。exit 4 而 receipt 里 `failure` 为 `null` 时,
+去读 stderr 的 `failure_reason=receipt_write_failed_after_commit`——那表示删除**已经
+commit**,只是 receipt 没写出去(stdout 上那份要手工存档)。
 
 `failure.reason` 分六种,别混为一谈(带 `_after_file_unlink` 的三种表示**确实删过
 文件**;不带的三种是"没删文件、但 DELETE scope 已经在这笔事务里",典型是
@@ -287,7 +291,8 @@ stdout 上的 receipt 里 `unlinked_file_cache_paths` 是权威清单,按它核�
 > 并回显 stdout,然后**原样再抛**信号异常——进程按信号默认退出(SIGINT = 130)并打印
 > traceback。所以判"删过什么"的权威依据是那份 receipt,不是退出码;看到 130 + traceback
 > 时不要以为"什么都没发生",先去读 receipt 的 `failure.reason` 与
-> `unlinked_file_cache_paths`。
+> `unlinked_file_cache_paths`。反过来也成立:**dry-run 的中断、以及尚未进入删除 scope
+> 前的中断不写 receipt**——这两种情形下不可能有任何变更,裸 traceback 就是全部事实。
 
 其余步骤见 `openspec/changes/six-basin-production-replay/tasks.md` §6 与
 design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4 风格。
@@ -327,9 +332,17 @@ bootstrap 断言未 violated)、且当前索引中对应 state 在场且 checksu
 
 `--resume-from` 必须指向**持有目标 cycle 旧半(pre-image)的那份 receipt**,正常就是
 **上一份**。resume receipt 的每一行都会被原样结转进新 receipt(新 receipt 顶层的
-`resume_from {path, sha256}` 记录来源),所以即使中间某次续跑只跑了窗口的一段,链条
-也不会断;但若跳过中间那份、直接拿更早/更晚的 receipt 续跑,就可能拿不到某些 cycle
-的旧半,那些 cycle 会从**已被回放覆盖**的 run 树重采,旧半从此失真。
+`resume_from {path, sha256}` 记录来源),只有**本次 pass 真正跑出**该 (cycle, model)
+行时才替换结转值,所以无论中间那次是"窗口收窄只跑了一段"还是"跑到一半停机",链条
+都不会断;但若跳过中间那份、直接拿更早/更晚的 receipt 续跑,就可能拿不到某些 cycle
+的旧半,那些 cycle 会从**已被回放覆盖**的 run 树重采,旧半从此失真。resume receipt
+必须是**同一 (source, models) scope** 的:源不符、或本次 model 集合不被 receipt 覆盖
+(子集合法,超集不合法)一律 `resume_receipt_scope_mismatch` 拒跑(exit 2,零提交)——
+IFS/GFS 的行键 `(cycle, model)` 完全重合,串源续跑会把另一源的旧半冒充本源的。
+
+顶层 `outcome` 是**本 pass** 的结论,不是全窗口的:`completed` 只说明这一次调用把它
+要跑的 cycle 跑完了,rows 里仍可能有从上一份结转过来的 `halted` 行。判断"整个窗口是否
+落地"要逐行看 `status`,不要只看 `outcome`。
 
 `--receipt-path` 必须是**另一个**路径(见 §2.2):被中断那一轮的 receipt 是旧 run
 的唯一 pre-image 记录。重做的 cycle 不再重新采集旧半——run 树此时装的已经是上一轮
