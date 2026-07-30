@@ -28,8 +28,10 @@
       落盘,mode 0600,`NHMS_RETENTION_ENABLED=false`,replay 三元组已填本次
       source 的 6 个 model id。
 - [ ] `NHMS_REPLAY_ARCHIVE_ROOT` 所在文件系统可写且余量充足(清场工具会 df 预检)。
-- [ ] 没有正在跑的 scheduler pass(`journal` 根下无新鲜 `.locks`;清场工具会检查,
-      600s 内更新的锁视为活跃并拒绝)。
+- [ ] 没有正在跑的 scheduler pass。清场工具自己会查两件事:`.locks/<source>/<cycle>.lock`
+      是否**被持有**(非阻塞 flock 探测;锁文件的 mtime 恒为首次创建时间,不作判据),
+      以及 journal 的 `latest/`、`pipeline-jobs/` 树里有没有 600s 内的新写入。
+      任一命中即拒绝;探测失败同样按 active 处理。
 
 ## 2. 执行序(单源串行:先 IFS 全序列,再 GFS;两源不并行)
 
@@ -44,7 +46,7 @@ set -a; . infra/env/compute.replay.env; set +a
 #     且看起来"成功"。用重定向 + 显式 rc,stderr 一并落盘(拒绝理由写在 stderr)。
 .venv/bin/python -m scripts.replay_state_scope_reset \
   --source IFS --model-id <id1> ... --model-id <id6> \
-  > /ghdc/data/nwm/recovery/ifs-reset-dryrun.json 2>&1; rc=$?; echo "rc=$rc"
+  > /ghdc/data/nwm/recovery/ifs-reset-dryrun.log 2>&1; rc=$?; echo "rc=$rc"
 
 # (b) 人审 dry-run 输出:条目数 = 6 scope 的历史时次数;
 #     确认没有任何非目标 scope / legacy basins_* 条目出现在移除清单里
@@ -56,14 +58,15 @@ set -a; . infra/env/compute.replay.env; set +a
 ```
 
 `rc` 必须逐次读:0 才继续,2/3 按下表处置。工具自己写的 receipt 在归档目录里
-(`.../six-basin-replay-<ts>/reset-receipt.json`),上面那个 `.log` 只是 stdout/stderr 抄本。
+(`.../six-basin-replay-<ts>/reset-receipt.json`);上面两个 `.log` 只是 stdout/stderr
+抄本(dry-run 的那份也是抄本,不是 receipt,故用 `.log` 而非 `.json`)。
 
 退出码语义:
 
 | exit | 含义 | 处置 |
 |---|---|---|
 | 0 | `completed`,双 lane 已写回并读回校验通过 | 继续回放 |
-| 2 | `refused`,**零变更**(timer 活跃 / 探测失败 / 索引不可读 / 归档不可写 / 空间不足 / journal 锁新鲜) | 修掉 reason 再重跑,不要绕 |
+| 2 | `refused`,**零变更**(timer 活跃 / 探测失败 / 索引不可读 / 归档不可写 / 空间不足 / journal 锁被持有 / journal 内容新鲜) | 修掉 reason 再重跑,不要绕 |
 | 3 | `commit_uncertain`,已有 lane 写入但读回校验没通过 | **不得重跑**;先按 §4 回滚,人工核对两 lane 一致后再决定 |
 
 清场只移除**索引条目**并归档其字节;`states/` 下的状态对象一律不删(归档目录里
@@ -112,6 +115,24 @@ Phase 1 跑完把 env 里的 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` 改回 `t
 `--receipt-path`)。GFS 序列同法;`gfs` + `2026070712` 由驱动器自动切 repair 参数组
 (`NHMS_SCHEDULER_REPAIR_MISSING_FORCING=1` + `_CYCLE_TIME`),无需人工干预。
 
+两源两阶段 = **4 份替换 receipt**,路径固定如下(node-27 的瓦片失效要按这四个路径
+取并集,别改名):
+
+| 序列 | `--receipt-path`(node-22 视角) |
+|---|---|
+| IFS Phase 1 | `/ghdc/data/nwm/recovery/ifs-replay-phase1.json` |
+| IFS Phase 2 | `/ghdc/data/nwm/recovery/ifs-replay-phase2.json` |
+| GFS Phase 1 | `/ghdc/data/nwm/recovery/gfs-replay-phase1.json` |
+| GFS Phase 2 | `/ghdc/data/nwm/recovery/gfs-replay-phase2.json` |
+
+`--receipt-path` 不得与 `--resume-from` 指向同一文件(工具拒跑
+`receipt_path_is_resume_source`):续跑源 receipt 是被中断那一轮"旧半"证据的唯一
+留存,写覆盖它就等于销毁 pre-image。续跑时给一个新路径,例如
+`.../ifs-replay-phase2-attempt2.json`。驱动器在**第一次提交之前**先落一份
+`in_progress` receipt 当写权限预检:路径不可写 → exit 2
+(`receipt_path_unwritable`)且零提交;中途写失败 → exit 3
+(`receipt_write_failed`),绝不静默继续。
+
 每个 cycle 的驱动器内部序列(全自动,失败即停):
 预捕获(旧 manifest/输出 sha256 + **无条件**记 forcing 包与模型包 checksum +
 旧终态 job id 基线)
@@ -142,8 +163,12 @@ Phase 1 跑完把 env 里的 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` 改回 `t
 
 ```sql
 -- 普查:与回放展示窗口相交的压缩 chunk(两张表一起出)
+-- range_start/range_end 直接以解压工具要求的 ISO-Z 文本输出:psql 默认按会话时区
+-- 打印 timestamptz(如 `2026-05-28 08:00:00+08`),而工具做的是 ISO-Z 字符串比对,
+-- 原样贴过去会被判成 range 不匹配。
 SELECT chunk_schema, chunk_name, hypertable_schema, hypertable_name,
-       range_start, range_end
+       to_char(range_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_start,
+       to_char(range_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_end
 FROM timescaledb_information.chunks
 WHERE hypertable_schema || '.' || hypertable_name
         IN ('hydro.river_timeseries', 'met.forcing_station_timeseries')
@@ -154,7 +179,8 @@ ORDER BY hypertable_name, range_start;
 ```
 
 命中行为空 → 跳过本节。非空则**逐 chunk**调用解压工具(它一次只处理一个 chunk,
-六个 target 参数全部必填,取值逐字来自上面普查结果的同名列):
+六个 target 参数全部必填,取值取自上面普查结果的同名列——`--range-start` /
+`--range-end` 必须正是上面 `to_char` 产出的 `YYYY-MM-DDTHH:MM:SSZ` 形式):
 
 ```bash
 # 每个 chunk 一次调用;--receipt-path 必须是全新路径(工具对已存在的 receipt 路径拒跑)
@@ -177,6 +203,11 @@ uv run python -m scripts.node27_timeseries_decompression_replay \
 
 #### 2.3.2 瓦片失效
 
+**只跑一次,scope 是四份替换 receipt 的并集**——`--from-replacement-receipt` 可重复
+传,run_id 取并集。少传一份就等于把那一段回放 run 的旧瓦片留在缓存里继续服务。
+四份 receipt 就在 NFS 上,node-27 直接按 `/home/ghdc/nwm/recovery/...` 读(与 node-22
+的 `/ghdc/data/nwm/recovery/...` 是同一份 NFS),**不需要**任何拷贝步骤。
+
 ```bash
 # 瓦片失效:dry-run 默认;删除范围 = (source_id, valid_time ∈ 回放展示窗口)
 # 注意:hydro 图层的 map.tile_cache.source_id 存的是 **run_id**
@@ -185,12 +216,20 @@ uv run python -m scripts.node27_timeseries_decompression_replay \
 # 全国聚合图层(`/` 默认视图)另有固定 source_id `hydro-national`,必须显式补上,
 # 否则它会继续吐由旧数据 join 出来的瓦片。
 uv run python -m scripts.node27_invalidate_tiles \
-  --from-replacement-receipt ~/receipts/ifs-replay-phase2.json \
+  --from-replacement-receipt /home/ghdc/nwm/recovery/ifs-replay-phase1.json \
+  --from-replacement-receipt /home/ghdc/nwm/recovery/ifs-replay-phase2.json \
+  --from-replacement-receipt /home/ghdc/nwm/recovery/gfs-replay-phase1.json \
+  --from-replacement-receipt /home/ghdc/nwm/recovery/gfs-replay-phase2.json \
   --source-id hydro-national \
   --window-start 2026-07-05T00:00Z --window-end 2026-07-28T00:00Z \
-  --receipt-path ~/receipts/ifs-tile-invalidation.json
+  --receipt-path ~/receipts/tile-invalidation.json
 # 复核 dry-run 的 candidate_rows / file_cache_* 计数后加 --execute
 ```
+
+每份替换 receipt 的 `outcome` 必须是 `completed`,否则工具 exit 2 拒跑
+(`replacement_receipt_not_completed`):`in_progress` / `halted` 的 receipt 只列出
+中断前跑完的时次,拿它当 scope 会静默漏掉其余 run。先把那一段回放跑完(或续跑到
+`completed`)再来失效瓦片。
 
 `--window-end` 取 `末次 cycle 2026072100 + FORECAST_HORIZON_HOURS(168h) = 2026-07-28T00Z`,
 不是末次 cycle 本身:末次 run 的预报瓦片 valid_time 一直铺到 T+168h,按 cycle 时间截断
@@ -210,6 +249,17 @@ uv run python -m scripts.node27_invalidate_tiles \
 不动,receipt 列出 `blocked_cache_keys`,修因后原样重跑即可。exit 4
 (`failed_partial_mutation`)表示**已经删过文件**但 DB 删除或 receipt 落盘没完成:
 stdout 上的 receipt 里 `unlinked_file_cache_paths` 是权威清单,按它核对后再决定重跑。
+读它之前先看同名的 `*_truncated` 标志(`unlinked_file_cache_paths_truncated` /
+`blocked_cache_keys_truncated` / `entries_truncated`):为 `true` 说明列表被 20000 条
+上限截断,清单不完整,不能当全量对账用。
+
+`failure.reason` 三分,别混为一谈:
+
+| failure.reason | 含义 | 处置 |
+|---|---|---|
+| `db_delete_failed_after_file_unlink` | DELETE 语句本身失败,事务未提交,`deleted_rows: 0` 是**已知事实** | 文件已删、DB 行尚在;修因后重跑(换新 receipt 路径) |
+| `db_commit_uncertain_after_file_unlink` | DELETE 已发出、commit 没得到应答,`deleted_rows: null`(**判不了**,不是 0) | 先查 DB 里这些 cache_key 是否还在,再决定重跑;不要假定"没删成" |
+| `interrupted_after_file_unlink` | 删文件途中被 Ctrl-C / 信号打断 | receipt 已落盘并回显 stdout;按 `unlinked_file_cache_paths` 核对后重跑 |
 
 其余步骤见 `openspec/changes/six-basin-production-replay/tasks.md` §6 与
 design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4 风格。
@@ -228,6 +278,7 @@ design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4
 | `state_index_undeterminable` | NFS 状态索引读不了(不是"没有新条目",是判不了) | 查 NFS 挂载与索引文件完整性;判不了绝不当作未收敛以外的任何结论,修好再续跑 |
 | `first_cycle_bootstrap_assertion_failed` | `--origin-cycle`(070500)行新半不是 bootstrap 形态 | 严重:说明 packaged-IC 契约没生效。停止全序列,回滚该源,查变更 1 契约 |
 | `key_consistency_drift` | 新 run 的 `river_network_version_id` / 输出段数 / 输出文件清单与旧半不一致 | 严重(R3):旧键行不会被 parser 删除条件覆盖,会残留。停止,人工介入;**不要**自动删旧键行 |
+| `receipt_write_failed` | 替换 receipt 写不下去(目录权限 / 空间 / 路径被占) | 停机原因就是"这一轮已经没有可信记录了"。修好写入面后**带 `--resume-from` 上一份可读 receipt** 续跑;stdout 上那份 receipt 先手工存档 |
 
 续跑时还可能撞上**调度侧**的拒绝(不是驱动器停机原因,出现在 pass stdout 里):
 
@@ -244,6 +295,12 @@ scripts/ops/node22_six_basin_replay.sh ... --resume-from <上次 receipt 路径>
 续跑是**证据校验后跳过**,不是盲跳:只有当 receipt 里该 (model, cycle) 行已
 `completed`、且当前索引中对应 state 在场且 checksum 与 receipt 记录一致时才跳过;
 校验不过就重做该 cycle。
+
+`--receipt-path` 必须是**另一个**路径(见 §2.2):被中断那一轮的 receipt 是旧 run
+的唯一 pre-image 记录。重做的 cycle 不再重新采集旧半——run 树此时装的已经是上一轮
+写进去的回放结果,重采等于把回放当成自己的"旧值"。驱动器直接沿用 resume receipt 里
+该行的 `prior`/`inputs`,并在 receipt 上标 `prior.prior_source = "resumed_receipt"`
+(正常采集的行是 `"captured"`)。
 
 ## 4. 回滚(从归档恢复)
 
@@ -266,7 +323,8 @@ scripts/ops/node22_six_basin_replay.sh ... --resume-from <上次 receipt 路径>
 
 ## 5. 收尾清单
 
-- [ ] 全部 receipt(reset ×2、replacement ×N、tile invalidation、node-27 live)归档并回贴 #1164。
+- [ ] 全部 receipt(reset ×2、replacement ×4(两源 × 两阶段)、tile invalidation ×1
+      (全量 scope,4 receipt 并集)、node-27 live)归档并回贴 #1164。
 - [ ] 负验证在案:六流域外 12 模型的 run / 索引条目抽样 sha256 回放前后一致。
 - [ ] node-22:`systemctl --user start nhms-compute-scheduler.timer`;确认次一自然 pass
       frontier 前进、回放时次走 `completed_duplicate_pipeline` 跳过、无 replay env 泄漏。

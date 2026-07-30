@@ -49,18 +49,18 @@
 
 ## 4R2. Round-2 评审修复(head 9836bfe9 的 15 项裁决,见 `.workplans/issue-1164-change2/review/round2-verdicts.md`)
 
-- [ ] 4R2.1 repair 腿 guard(A2-1,design D3.5 v5):replay 窗口内 authorized-repair 候选不被 canonical 门第一腿 block,以 raw-manifest-restart **完整合并**放行(restart 降至 `convert`);窗口外 byte-identical;测试:070712 形态 5 repair + 1 override 同 pass,repair 候选 admitted 且 restart_stage=convert。
-- [ ] 4R2.2 raw-less 腿替代证据验证(A2-3):discovery provenance 为 replay forcing 分支 → 要求 `status=="ready"` 否则 typed block;其他 provenance 落该腿一律 typed block;guard 记录不声称不存在的证据;测试两种 provenance。
-- [ ] 4R2.3 `_forcing_package_probe` 循环序无关(A2-2,重开 4R.2):空包目录不立即 return,记录后继续;循环后 present > undeterminable > missing;三种排列 + shadow 用例。
-- [ ] 4R2.4 续跑保真(B2-1):`_load_resume_rows` 导入非 completed 行的 prior/inputs,`_pre_capture_row` 沿用(`prior_source=resumed_receipt`);`--receipt-path`==`--resume-from` 拒跑;测试:两次 attempt 后 prior 仍为原始值且旧 receipt 未销毁。
-- [ ] 4R2.5 receipt 写韧性(B2-2):循环前预写 `in_progress` receipt,不可写 → `receipt_path_unwritable` refused exit 2 零提交;中途写失败 → typed halt 非零;测试只读父目录。
-- [ ] 4R2.6 锁探针活性(B2-3,design D4 v5):NB-flock(O_RDWR 无 O_CREAT,EWOULDBLOCK=active,异常=undeterminable=active)+ 内容新鲜度辅信号;测试:持有 flock 的 stale-mtime 锁 → refuse。
-- [ ] 4R2.7 reset receipt scope 校验(B2-4):装载校验 `scopes[]` 覆盖本次 (source, 全部 model),不覆盖 → `reset_receipt_scope_mismatch` refuse;测试:IFS receipt 跑 GFS config → refused。
-- [ ] 4R2.8 cohort 形态钉住(B2-6):`terminal_completion_job_ids`/`default_journal_probe` 直接单测(model_id=None 归属、stage/status 过滤、空 job_id、去重)+ 经真 journal repo 的端到端形状测试;修 `:495` docstring。
-- [ ] 4R2.9 tiles 多 receipt + outcome 门(C2-1):`--from-replacement-receipt` append 并集;装载校验 `outcome=="completed"`;runbook 列全 4 receipt 真实 NFS 路径 + §5 清单改"tile invalidation ×1(全量 scope)";测试:两 receipt 并集、in_progress 拒绝。
-- [ ] 4R2.10 tiles 收尾三件(C2-3/C2-5/C2-6):`*_truncated` 标志 ×2;commit 独立 try → `db_commit_uncertain_after_file_unlink`+`deleted_rows:null`(迁移既有测试);`except BaseException` 出 receipt 再 re-raise;各补测试。
-- [ ] 4R2.11 runbook census SQL `to_char` ISO-Z 输出(C2-4)+ 去"逐字"注意语;顺手:§2.1(a) `ifs-reset-dryrun.json`→`.log`(C2-2 DISCARD 并入)。
-- [ ] 4R2.12 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿 + 触及共享合并点的附带回归(test_production_scheduler)绿。
+- [x] 4R2.1 repair 腿 guard(A2-1,design D3.5 v5):replay 窗口内 authorized-repair 候选不被 canonical 门第一腿 block,以 raw-manifest-restart **完整合并**放行(restart 降至 `convert`);窗口外 byte-identical;测试:070712 形态 5 repair + 1 override 同 pass,repair 候选 admitted 且 restart_stage=convert。
+- [x] 4R2.2 raw-less 腿替代证据验证(A2-3):discovery provenance 为 replay forcing 分支 → 要求 `status=="ready"` 否则 typed block;其他 provenance 落该腿一律 typed block;guard 记录不声称不存在的证据;测试两种 provenance。
+- [x] 4R2.3 `_forcing_package_probe` 循环序无关(A2-2,重开 4R.2):空包目录不立即 return,记录后继续;循环后 present > undeterminable > missing;三种排列 + shadow 用例。
+- [x] 4R2.4 续跑保真(B2-1):`_load_resume_rows` 导入非 completed 行的 prior/inputs,`_pre_capture_row` 沿用(`prior_source=resumed_receipt`);`--receipt-path`==`--resume-from` 拒跑;测试:两次 attempt 后 prior 仍为原始值且旧 receipt 未销毁。
+- [x] 4R2.5 receipt 写韧性(B2-2):循环前预写 `in_progress` receipt,不可写 → `receipt_path_unwritable` refused exit 2 零提交;中途写失败 → typed halt 非零;测试只读父目录。
+- [x] 4R2.6 锁探针活性(B2-3,design D4 v5):NB-flock(O_RDWR 无 O_CREAT,EWOULDBLOCK=active,异常=undeterminable=active)+ 内容新鲜度辅信号;测试:持有 flock 的 stale-mtime 锁 → refuse。
+- [x] 4R2.7 reset receipt scope 校验(B2-4):装载校验 `scopes[]` 覆盖本次 (source, 全部 model),不覆盖 → `reset_receipt_scope_mismatch` refuse;测试:IFS receipt 跑 GFS config → refused。
+- [x] 4R2.8 cohort 形态钉住(B2-6):`terminal_completion_job_ids`/`default_journal_probe` 直接单测(model_id=None 归属、stage/status 过滤、空 job_id、去重)+ 经真 journal repo 的端到端形状测试;修 `:495` docstring。
+- [x] 4R2.9 tiles 多 receipt + outcome 门(C2-1):`--from-replacement-receipt` append 并集;装载校验 `outcome=="completed"`;runbook 列全 4 receipt 真实 NFS 路径 + §5 清单改"tile invalidation ×1(全量 scope)";测试:两 receipt 并集、in_progress 拒绝。
+- [x] 4R2.10 tiles 收尾三件(C2-3/C2-5/C2-6):`*_truncated` 标志 ×2;commit 独立 try → `db_commit_uncertain_after_file_unlink`+`deleted_rows:null`(迁移既有测试);`except BaseException` 出 receipt 再 re-raise;各补测试。
+- [x] 4R2.11 runbook census SQL `to_char` ISO-Z 输出(C2-4)+ 去"逐字"注意语;顺手:§2.1(a) `ifs-reset-dryrun.json`→`.log`(C2-2 DISCARD 并入)。
+- [x] 4R2.12 复验:定向 pytest 绿 + ruff 绿 + openspec strict 绿 + 触及共享合并点的附带回归(test_production_scheduler)绿。
 
 ## 5. node-22 实机执行(merge 后,timer 保持停机)
 
