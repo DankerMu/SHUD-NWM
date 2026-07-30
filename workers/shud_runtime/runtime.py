@@ -954,7 +954,11 @@ class SHUDRuntime:
         """
 
         expected_checksum = _packaged_ic_checksum(manifest)
-        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
+        target_path = (
+            _materialized_model_input_dir(manifest, input_dir, self.config.command_style)
+            / f"{_project_name(manifest)}.cfg.ic"
+        )
+        matches = self._packaged_ic_candidates(input_dir, target_path)
         if not matches:
             raise SHUDRuntimeError(
                 PACKAGED_IC_CONSUMPTION_FAILED,
@@ -968,43 +972,57 @@ class SHUDRuntime:
                 f"input holds {len(matches)} candidate *.cfg.ic files; exactly one is required.",
             )
         staged_path = matches[0]
+        # Design D4: "any failure -> PACKAGED_IC_CONSUMPTION_FAILED".  Everything
+        # from here to the end of normalization is wrapped, so a non-UTF-8/binary
+        # packaged IC (``UnicodeDecodeError``), an unsafe-path refusal
+        # (``SafeFilesystemError``), an IO error, or the shared residual-policy
+        # refusal (``WARM_START_STATE_RESIDUALS_EXCEED_POLICY``, raised by the
+        # helper this path deliberately reuses) can no longer escape as an
+        # untyped ``RUNTIME_ERROR``.  The original error code / reason is kept in
+        # the message so the residual-policy diagnosis is not lost.
         try:
             content = _read_staged_bytes(staged_path, root=input_dir)
-        except SHUDRuntimeError as error:
-            raise SHUDRuntimeError(
-                PACKAGED_IC_CONSUMPTION_FAILED,
-                f"Packaged calibrated initial condition could not be read: {error.message}",
-            ) from error
-        except OSError as error:
-            raise SHUDRuntimeError(
-                PACKAGED_IC_CONSUMPTION_FAILED,
-                f"Packaged calibrated initial condition could not be read: {error}",
-            ) from error
-        actual_checksum = sha256_bytes(content)
-        warnings: list[str] = []
-        if expected_checksum:
-            if not _checksum_matches(expected_checksum, actual_checksum):
+            actual_checksum = sha256_bytes(content)
+            warnings: list[str] = []
+            if expected_checksum:
+                if not _checksum_matches(expected_checksum, actual_checksum):
+                    raise SHUDRuntimeError(
+                        PACKAGED_IC_CONSUMPTION_FAILED,
+                        "Packaged calibrated initial condition checksum mismatch: manifest recorded "
+                        f"{_checksum_value(expected_checksum)}, staged file is {actual_checksum}.",
+                    )
+            else:
+                warnings.append(
+                    "packaged initial condition consumed without a recorded checksum "
+                    "(manifest declares packaged_calibrated_state with no packaged_ic_checksum); "
+                    "only non-emptiness and header parseability were verified"
+                )
+
+            target = self._materialize_packaged_ic_to_project_name(manifest, staged_path, input_dir)
+            header_minute_time = _read_cfg_ic_header_minute(target)
+            if header_minute_time is None:
                 raise SHUDRuntimeError(
                     PACKAGED_IC_CONSUMPTION_FAILED,
-                    "Packaged calibrated initial condition checksum mismatch: manifest recorded "
-                    f"{_checksum_value(expected_checksum)}, staged file is {actual_checksum}.",
+                    "Packaged calibrated initial condition header is not parseable: the first line "
+                    "carries no <counts...> <minute-time> pair.",
                 )
-        else:
-            warnings.append(
-                "packaged initial condition consumed without a recorded checksum "
-                "(manifest declares packaged_calibrated_state with no packaged_ic_checksum); "
-                "only non-emptiness and header parseability were verified"
-            )
-
-        target = self._materialize_packaged_ic_to_project_name(manifest, staged_path, input_dir)
-        header_minute_time = _read_cfg_ic_header_minute(target)
-        if header_minute_time is None:
+            normalize_staged_ic_negative_residuals(manifest, target, input_dir)
+        except SHUDRuntimeError as error:
+            if error.error_code == PACKAGED_IC_CONSUMPTION_FAILED:
+                raise
             raise SHUDRuntimeError(
                 PACKAGED_IC_CONSUMPTION_FAILED,
-                "Packaged calibrated initial condition header is not parseable: the first line "
-                "carries no <counts...> <minute-time> pair.",
-            )
-        normalize_staged_ic_negative_residuals(manifest, target, input_dir)
+                f"Packaged calibrated initial condition could not be consumed ({error.error_code}): "
+                f"{error.message}",
+            ) from error
+        except (SafeFilesystemError, OSError, ValueError) as error:
+            # ``UnicodeDecodeError`` is a ``ValueError``: a binary packaged IC is a
+            # consumption failure, not an internal error.
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                "Packaged calibrated initial condition could not be consumed "
+                f"({type(error).__name__}): {error}",
+            ) from error
 
         manifest["initial_state"] = {
             # Preserve whichever state_id the declaration carried: the
@@ -1029,6 +1047,45 @@ class SHUDRuntime:
         }
         _set_runtime_init_mode(manifest, 3)
         self._sync_init_state_id(manifest)
+
+    def _packaged_ic_candidates(self, input_dir: Path, target_path: Path) -> list[Path]:
+        """Return the staged packaged-IC candidates, dropping a stale re-materialization.
+
+        ``prepare_workspace`` is re-runnable on a cycle-stable workspace (the warm
+        path keeps that property by calling ``_clear_staged_initial_states`` before
+        it re-stages).  For a package whose IC basename differs from the project
+        name, attempt 1 materializes ``<pkg>.cfg.ic`` -> ``<project>.cfg.ic``
+        (copy + unlink) while attempt 2 re-stages ``<pkg>.cfg.ic`` from the
+        package: without this step both files are then present and the exactly-one
+        check below would wedge the workspace forever.
+
+        The drop is deliberately narrow — the re-materialized ``<project>.cfg.ic``
+        is removed only when it is one of EXACTLY two candidates and the other is
+        its sibling in the same model-input directory (which is where package
+        staging puts a top-level packaged IC).  A second candidate in a
+        subdirectory (e.g. ``CALIB/``) or any higher multiplicity is left intact so
+        genuinely ambiguous staged input still fails closed; the scheduler-side
+        qualification blocks such packages before submission.
+        """
+
+        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
+        if len(matches) != 2:
+            return matches
+        target = target_path.resolve()
+        stale = [path for path in matches if path.resolve() == target]
+        others = [path for path in matches if path.resolve() != target]
+        if len(stale) != 1 or len(others) != 1:
+            return matches
+        if others[0].resolve().parent != target.parent:
+            return matches
+        try:
+            unlink_no_follow(stale[0], containment_root=input_dir, missing_ok=True)
+        except SafeFilesystemError as error:
+            raise SHUDRuntimeError(
+                PACKAGED_IC_CONSUMPTION_FAILED,
+                f"Unsafe previously materialized packaged initial condition {stale[0]}: {error}",
+            ) from error
+        return others
 
     def _materialize_packaged_ic_to_project_name(
         self,
