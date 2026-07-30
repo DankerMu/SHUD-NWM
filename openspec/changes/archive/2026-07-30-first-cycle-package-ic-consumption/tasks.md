@@ -29,8 +29,8 @@
 
 ## 5. 实机验收(merge 后,node-22;变更 2 前置)
 
-- [ ] 5.1 部署后在 node-22 只读运行审计工具,产出 receipt:6 个 070500 流域 × GFS/IFS = 12 行 `cold_start_with_qualified_ic`(同时正式确立"18 包全带非零 IC"的现场观察);receipt 回贴 #1164。
-- [ ] 5.2 确认 timer 保持停止(用户指令);本变更不触发任何生产 run——首时次新路径的实弹验证由变更 2(六流域回放)承担。
+- [x] 5.1 部署后在 node-22 只读运行审计工具,产出 receipt:6 个 070500 流域 × GFS/IFS = 12 行 `cold_start_with_qualified_ic`(同时正式确立"18 包全带非零 IC"的现场观察);receipt 回贴 #1164。
+- [x] 5.2 确认 timer 保持停止(用户指令);本变更不触发任何生产 run——首时次新路径的实弹验证由变更 2(六流域回放)承担。
 
 ## Evidence Floor
 
