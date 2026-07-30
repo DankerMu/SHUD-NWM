@@ -1,0 +1,205 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Replay State-Scope Reset Receipt",
+  "description": "Dual-lane, archive-first removal of state-index entries for a closed (model_id, source) scope set, ahead of the six-basin production replay (#1164 change 2, design D4). A refused run proves zero mutation; a commit-uncertain run states that a lane write may already stand and MUST NOT be reported as a refusal (#1190 invariant).",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "outcome",
+        "enforced",
+        "started_at",
+        "finished_at",
+        "scopes",
+        "archive_dir",
+        "preflight",
+        "lanes",
+        "objects",
+        "totals",
+        "commit_uncertain_reason"
+      ],
+      "properties": {
+        "schema_version": { "const": "nhms.replay_state_scope_reset.v1" },
+        "outcome": { "type": "string", "enum": ["completed", "commit_uncertain"] },
+        "enforced": { "type": "boolean" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_id", "source_id"],
+            "properties": {
+              "model_id": { "type": "string", "minLength": 1 },
+              "source_id": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "archive_dir": { "type": ["string", "null"] },
+        "preflight": { "$ref": "#/definitions/preflight" },
+        "lanes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/definitions/lane" }
+        },
+        "objects": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/object_probe" }
+        },
+        "totals": { "$ref": "#/definitions/totals" },
+        "commit_uncertain_reason": { "type": ["string", "null"] },
+        "receipt_truncated": { "type": "boolean" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["outcome", "refusal_reason"],
+      "properties": {
+        "outcome": { "const": "refused" },
+        "refusal_reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  ],
+  "definitions": {
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timer", "journal_locks", "archive_root"],
+      "properties": {
+        "timer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdict", "detail", "unit"],
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": ["active", "inactive", "undeterminable"],
+              "description": "An undeterminable probe counts as active and refuses the run."
+            },
+            "detail": { "type": ["string", "null"] },
+            "unit": { "type": "string", "minLength": 1 }
+          }
+        },
+        "journal_locks": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "string", "enum": ["present", "absent", "undeterminable"] },
+            "lock_dir": { "type": "string" },
+            "fresh_locks": { "type": "array", "items": { "type": "object" } },
+            "freshness_seconds": { "type": "integer", "minimum": 1 },
+            "detail": { "type": "string" }
+          }
+        },
+        "archive_root": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "free_bytes", "required_bytes", "writable"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "free_bytes": { "type": "integer", "minimum": 0 },
+            "required_bytes": { "type": "integer", "minimum": 0 },
+            "writable": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lane",
+        "index_path",
+        "index_sha256_before",
+        "snapshot_path",
+        "entry_count_before",
+        "entry_count_after",
+        "removed_count",
+        "removed_entries",
+        "readback_verified",
+        "readback_reason"
+      ],
+      "properties": {
+        "lane": { "type": "string", "enum": ["scratch", "nfs"] },
+        "index_path": { "type": "string", "minLength": 1 },
+        "index_sha256_before": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "snapshot_path": { "type": ["string", "null"] },
+        "entry_count_before": { "type": "integer", "minimum": 0 },
+        "entry_count_after": { "type": "integer", "minimum": 0 },
+        "removed_count": { "type": "integer", "minimum": 0 },
+        "removed_entries": { "type": "array", "items": { "type": "object" } },
+        "readback_verified": {
+          "type": ["boolean", "null"],
+          "description": "Null when nothing was written on this lane (dry run, or no in-scope entries); false is commit-uncertain, never a refusal."
+        },
+        "readback_reason": { "type": ["string", "null"] }
+      }
+    },
+    "object_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_id",
+        "model_id",
+        "source_id",
+        "valid_time",
+        "state_uri",
+        "object_key",
+        "stat_status",
+        "size_bytes",
+        "mtime",
+        "sha256",
+        "archived_path",
+        "detail",
+        "lanes"
+      ],
+      "properties": {
+        "state_id": { "type": "string" },
+        "model_id": { "type": "string" },
+        "source_id": { "type": "string" },
+        "valid_time": { "type": "string" },
+        "state_uri": { "type": "string" },
+        "object_key": { "type": ["string", "null"] },
+        "stat_status": {
+          "type": "string",
+          "enum": ["present", "absent", "undeterminable"],
+          "description": "Three-way; 'undeterminable' is never folded into 'absent'. Neither blocks the reset."
+        },
+        "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "mtime": { "type": ["string", "null"] },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "archived_path": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "lanes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["scratch", "nfs"] }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "removed_entries",
+        "objects_present",
+        "objects_absent",
+        "objects_undeterminable",
+        "archive_payload_bytes"
+      ],
+      "properties": {
+        "removed_entries": { "type": "integer", "minimum": 0 },
+        "objects_present": { "type": "integer", "minimum": 0 },
+        "objects_absent": { "type": "integer", "minimum": 0 },
+        "objects_undeterminable": { "type": "integer", "minimum": 0 },
+        "archive_payload_bytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
