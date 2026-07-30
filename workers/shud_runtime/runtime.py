@@ -841,9 +841,9 @@ class SHUDRuntime:
     def _stage_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
         # #1164: a manifest that DECLARES a packaged-IC bootstrap is handled by a
         # single consume-or-raise gate, in BOTH declaration forms (scheduler-
-        # produced without a ``state_id``, and the legacy manual manifest from
-        # ``scripts/create_qhh_shud_manifest.py`` which carries a ``state_id``
-        # and no recorded digest).  The branch never falls through to the
+        # produced without a ``state_id``, and hand-written diagnostic manifests
+        # that carry a ``state_id`` and no recorded digest).  Neither form falls
+        # through to the
         # cold-start assignments below, so a declared packaged run can no longer
         # silently zero the model state.
         if _declares_packaged_initial_condition(manifest):
