@@ -15,6 +15,7 @@ from scripts import scheduler_state_index_copyback_replay as replay
 
 PREFIX = "s3://nhms"
 AUTHORITATIVE_RUN = "fcst_gfs_2026072000_model_a"
+IFS_RUN = "fcst_ifs_2026072000_model_a"
 HISTORICAL_RUN = "fcst_gfs_2026070500_model_a"
 
 
@@ -68,8 +69,11 @@ def test_replay_enforce_publishes_missing_entries_and_is_idempotent(
 
     assert second_receipt["destination_entry_count_before"] == 2
     assert second_receipt["destination_entry_count_after"] == 2
+    # The entry is already published byte-identically, so the repeat enforce
+    # copies nothing at all (#1189 A2) instead of re-copying it as "reused".
     assert second_receipt["checkpoint_copied_count"] == 0
-    assert second_receipt["checkpoint_reused_count"] == 1
+    assert second_receipt["checkpoint_reused_count"] == 0
+    assert second_receipt["checkpoint_replaced_count"] == 0
     assert second_receipt["preview_new_state_ids"] == []
     assert json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"] == entries_after_first
 
@@ -84,13 +88,150 @@ def test_replay_resolves_flat_cycle_id_and_skips_entries_without_one(
 
     receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
     assert exit_code == 0
-    # The source index also holds a historical entry with a different cycle and
-    # a cycle-less entry; neither may be resolved into the authoritative set.
-    assert receipt["source_entry_count"] == 3
+    # The source index also holds a historical entry, an entry of another cycle
+    # and a cycle-less entry; none may be resolved into the authoritative set.
+    assert receipt["source_entry_count"] == 4
     assert receipt["resolved_run_ids"] == [AUTHORITATIVE_RUN]
     assert receipt["matched_source_entry_count"] == 1
     published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
     assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+
+
+def test_replay_enforce_honors_every_repeated_cycle_flag(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The production recovery is `--cycle gfs_... --cycle ifs_...`; honouring
+    # only the last flag would silently leave half the backlog behind.
+    _apply_env(monkeypatch, fixture)
+
+    exit_code = replay.main(
+        ["--cycle", "gfs_2026072000", "--cycle", "IFS_2026072000", "--enforce"]
+    )
+
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert receipt["requested_cycles"] == ["gfs_2026072000", "ifs_2026072000"]
+    assert receipt["resolved_run_ids"] == sorted([AUTHORITATIVE_RUN, IFS_RUN])
+    assert receipt["matched_source_entry_count"] == 2
+    assert receipt["destination_entry_count_before"] == 1
+    assert receipt["destination_entry_count_after"] == 3
+    assert receipt["checkpoint_copied_count"] == 2
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert sorted(entry["state_id"] for entry in published) == [
+        "archived-state",
+        "fresh-state",
+        "ifs-fresh-state",
+    ]
+    assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
+    assert fixture.ifs_shared_object.read_bytes() == fixture.ifs_content
+
+
+def test_replay_enforce_refuses_missing_destination_index(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A wrong destination root (typo, unmounted NFS stub) must not be
+    # bootstrapped into a fake canonical index holding only this replay.
+    _apply_env(monkeypatch, fixture)
+    empty_destination = fixture.root / "empty-shared-object-store"
+    empty_destination.mkdir()
+    monkeypatch.setenv(replay.DESTINATION_ROOT_ENV, str(empty_destination))
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert payload["status"] == "refused"
+    assert payload["reason"] == "destination_index_missing"
+    assert not (empty_destination / "scheduler").exists()
+    assert not (empty_destination / "states").exists()
+    assert list(empty_destination.iterdir()) == []
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_enforce_bootstraps_destination_index_when_allowed(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _apply_env(monkeypatch, fixture)
+    empty_destination = fixture.root / "empty-shared-object-store"
+    empty_destination.mkdir()
+    monkeypatch.setenv(replay.DESTINATION_ROOT_ENV, str(empty_destination))
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce", "--allow-bootstrap"])
+
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert receipt["destination_index_existed"] is False
+    assert receipt["allow_bootstrap"] is True
+    assert receipt["destination_entry_count_before"] == 0
+    assert receipt["destination_entry_count_after"] == 1
+    assert receipt["checkpoint_copied_count"] == 1
+    published = json.loads(
+        (empty_destination / "scheduler/state-index/index-last.json").read_text(encoding="utf-8")
+    )
+    assert [entry["state_id"] for entry in published["entries"]] == ["fresh-state"]
+    assert (empty_destination / "states/gfs/model_a/fresh/state.cfg.ic").read_bytes() == (
+        fixture.fresh_content
+    )
+
+
+def test_replay_dry_run_previews_against_missing_destination_index(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _apply_env(monkeypatch, fixture)
+    empty_destination = fixture.root / "empty-shared-object-store"
+    empty_destination.mkdir()
+    monkeypatch.setenv(replay.DESTINATION_ROOT_ENV, str(empty_destination))
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000"])
+
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert receipt["destination_index_existed"] is False
+    assert receipt["destination_entry_count_before"] == 0
+    assert receipt["preview_new_state_ids"] == ["fresh-state"]
+    assert list(empty_destination.iterdir()) == []
+
+
+def test_replay_receipt_write_failure_after_merge_reports_committed_mutation(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The merge is already committed at this point, so the tool must not report
+    # a refusal and must hand the operator the merge evidence on stdout.
+    _apply_env(monkeypatch, fixture)
+    real_write = replay.atomic_write_bytes_no_follow
+
+    def failing_receipt_write(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path).parent == fixture.receipt_root:
+            raise OSError("receipt volume is read-only")
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(replay, "atomic_write_bytes_no_follow", failing_receipt_write)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "receipt_write_failed_after_merge"
+    assert error["status"] != "refused"
+    assert error["receipt_failure_reason"] == "receipt_write_failed"
+    assert summary["mode"] == "enforce"
+    assert summary["destination_entry_count_before"] == 1
+    assert summary["destination_entry_count_after"] == 2
+    assert summary["merge"]["published_entry_count"] == 2
+    # The index mutation stands: the merge is not rolled back by the receipt.
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
+    assert not (fixture.receipt_root / "latest.json").exists()
 
 
 def test_replay_run_ids_selection_requires_source_index_entries(
@@ -233,12 +374,16 @@ class Fixture:
         private_store = LocalObjectStore(self.reference_root, PREFIX)
         self.archived_content = _valid_state_bytes(b"archived")
         self.fresh_content = _valid_state_bytes(b"fresh")
+        self.ifs_content = _valid_state_bytes(b"ifs-fresh")
         self.cycleless_content = _valid_state_bytes(b"cycleless")
         archived_uri = private_store.write_bytes_atomic(
             "states/gfs/model_a/archived/state.cfg.ic", self.archived_content
         )
         fresh_uri = private_store.write_bytes_atomic(
             "states/gfs/model_a/fresh/state.cfg.ic", self.fresh_content
+        )
+        ifs_uri = private_store.write_bytes_atomic(
+            "states/ifs/model_a/fresh/state.cfg.ic", self.ifs_content
         )
         cycleless_uri = private_store.write_bytes_atomic(
             "states/gfs/model_b/cycleless/state.cfg.ic", self.cycleless_content
@@ -261,6 +406,19 @@ class Fixture:
             created_at="2026-07-27T01:00:00Z",
             cycle_id="gfs_2026072000",
         )
+        # Production replays both deterministic sources of one cycle time, so
+        # the fixture carries a second cycle whose entry is also missing from
+        # the shared index.
+        self.ifs_entry = _entry(
+            state_id="ifs-fresh-state",
+            run_id=IFS_RUN,
+            state_uri=ifs_uri,
+            content=self.ifs_content,
+            valid_time="2026-07-20T12:00:00Z",
+            created_at="2026-07-27T01:00:00Z",
+            cycle_id="ifs_2026072000",
+            source_id="ifs",
+        )
         self.cycleless_entry = {
             **_entry(
                 state_id="cycleless-state",
@@ -278,7 +436,7 @@ class Fixture:
         self.source_index = self.reference_root / "scheduler/state-index/index-last.json"
         self.destination_index = self.destination_root / "scheduler/state-index/index-last.json"
         publish_state_snapshot_index(
-            [self.archived_entry, self.fresh_entry, self.cycleless_entry],
+            [self.archived_entry, self.fresh_entry, self.ifs_entry, self.cycleless_entry],
             self.source_index,
             object_store_root=self.reference_root,
             object_store_prefix=PREFIX,
@@ -294,6 +452,7 @@ class Fixture:
         )
         self.archived_shared_object = self.destination_root / "states/gfs/model_a/archived/state.cfg.ic"
         self.new_shared_object = self.destination_root / "states/gfs/model_a/fresh/state.cfg.ic"
+        self.ifs_shared_object = self.destination_root / "states/ifs/model_a/fresh/state.cfg.ic"
 
 
 @pytest.fixture(name="fixture")
@@ -318,12 +477,13 @@ def _entry(
     created_at: str,
     cycle_id: str,
     lead_hours: int = 12,
+    source_id: str = "gfs",
 ) -> dict[str, Any]:
     return {
         "state_id": state_id,
         "model_id": "model_a",
         "run_id": run_id,
-        "source_id": "gfs",
+        "source_id": source_id,
         "valid_time": valid_time,
         "state_uri": state_uri,
         "checksum": f"sha256:{sha256_bytes(content)}",

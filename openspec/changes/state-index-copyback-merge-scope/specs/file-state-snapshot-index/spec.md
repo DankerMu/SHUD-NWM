@@ -38,12 +38,12 @@ The state-snapshot-index copyback merge SHALL keep today's source-side validatio
 
 ### Requirement: A receipted idempotent copyback replay SHALL exist for failed state-index copybacks
 
-An operator-invoked replay tool SHALL re-run the state-index copyback for an explicit run-id set or for the runs of one or more explicit cycles, resolved from the source index by matching each entry's flat optional `cycle_id` field after normalizing the requested cycle identifier to the production lowercase-source form. It SHALL expose exactly two object-store roots (private reference and shared destination, defaulting to the production environment variables) with the index paths derived from them, and SHALL refuse equal or overlapping roots. It SHALL default to dry-run — a read-only preview that does not invoke the merge, changes no index content, and copies no objects — and require an explicit enforce flag to invoke the real merge code path used by production copyback. An empty run-id resolution SHALL exit non-zero with a structured reason and SHALL NOT invoke the merge. Enforce runs SHALL be idempotent (a repeated enforce run publishes no new entries and reuses all checkpoints) and SHALL write a JSON receipt (schema-versioned, recording mode, resolved run ids, entry counts before and after, and per-checkpoint outcomes) under the receipt root named by its environment variable. The tool SHALL NOT touch the orchestration journal, the registry, or canonical-readiness providers.
+An operator-invoked replay tool SHALL re-run the state-index copyback for an explicit run-id set or for the runs of one or more explicit cycles, resolved from the source index by matching each entry's flat optional `cycle_id` field after normalizing the requested cycle identifier to the production lowercase-source form. It SHALL expose exactly two object-store roots (private reference and shared destination, defaulting to the production environment variables) with the index paths derived from them, and SHALL refuse equal or overlapping roots. It SHALL default to dry-run — a read-only preview that does not invoke the merge, changes no index content, and copies no objects — and require an explicit enforce flag to invoke the real merge code path used by production copyback. An empty run-id resolution SHALL exit non-zero with a structured reason and SHALL NOT invoke the merge. An enforce run SHALL refuse to proceed — exiting non-zero before any merge invocation, index write, or object copy — when the derived destination index file does not exist, unless bootstrap is explicitly allowed by a dedicated flag. Enforce runs SHALL be idempotent (a repeated enforce run publishes no new entries and copies no objects) and SHALL write a JSON receipt (schema-versioned, recording mode, resolved run ids, entry counts before and after, and per-checkpoint outcomes) under the receipt root named by its environment variable; if the receipt cannot be written after a successful merge, the tool SHALL exit non-zero with a distinct post-merge failure reason that does not claim refusal and SHALL emit the merge summary on stdout. The tool SHALL NOT touch the orchestration journal, the registry, or canonical-readiness providers.
 
 #### Scenario: Backlogged entries are recovered idempotently
 
 - **WHEN** the replay tool is enforced for a cycle whose earlier copyback failed closed
-- **THEN** the missing entries enter the destination index with their objects copied, a receipt records the before/after counts, and a second enforce run reports zero new entries with all checkpoints reused
+- **THEN** the missing entries enter the destination index with their objects copied, a receipt records the before/after counts, and a second enforce run reports zero new entries and copies no objects
 
 #### Scenario: Dry-run changes nothing
 
@@ -54,3 +54,13 @@ An operator-invoked replay tool SHALL re-run the state-index copyback for an exp
 
 - **WHEN** the requested cycles or run ids resolve to no source-index entries
 - **THEN** the tool exits non-zero with a structured reason and the destination index is not written
+
+#### Scenario: Missing destination index refuses enforce
+
+- **WHEN** the replay tool is enforced against a destination root whose derived index file does not exist and bootstrap has not been explicitly allowed
+- **THEN** the tool exits non-zero with a structured reason before any merge invocation, and no index or object is written under the destination root
+
+#### Scenario: Receipt failure after a successful merge is reported distinctly
+
+- **WHEN** the merge succeeds but the receipt cannot be written
+- **THEN** the tool exits non-zero with a post-merge failure reason that does not claim refusal and the merge summary is emitted on stdout

@@ -1882,8 +1882,9 @@ def merge_state_snapshot_index_copyback(
     (object existence and checksum) before its winning entries' checkpoints are
     checksum-copied into the shared destination.  The destination index is
     validated structurally only: its historical objects may have been archived
-    off the shared root, and neither those objects nor the objects of losing
-    source entries are copied (#1189).
+    off the shared root, and neither those objects, nor the objects of losing
+    source entries, nor the objects of source entries the destination already
+    publishes byte-identically are copied (#1189).
     """
 
     with provider_destination_lock(
@@ -2012,13 +2013,20 @@ def _merge_state_snapshot_index_copyback_locked(
                 raise _state_index_error("state_snapshot_index_copyback_conflict", field="entries[]")
 
         # Copy only the objects this merge is responsible for: the source
-        # entries that won their identity key.  Pre-existing destination
-        # entries are carried through untouched (their objects may legitimately
-        # be archived off the shared root), and a source entry that lost its
-        # collision must not overwrite the shared object that the published
-        # destination entry's checksum describes.
+        # entries that won their identity key and are not already published
+        # verbatim.  Pre-existing destination entries are carried through
+        # untouched (their objects may legitimately be archived off the shared
+        # root), a source entry that lost its collision must not overwrite the
+        # shared object that the published destination entry's checksum
+        # describes, and a source entry byte-identical to the destination entry
+        # is already in the index -- its object lifecycle belongs to the
+        # archive mover, so replaying an old cycle must not resurrect it
+        # (#1189).  `destination_entries` is empty on the bootstrap path, so a
+        # first copyback still copies everything it publishes.
         winning_source_entries = [
-            entry for key, entry in source_entries.items() if merged.get(key) == entry
+            entry
+            for key, entry in source_entries.items()
+            if merged.get(key) == entry and destination_entries.get(key) != entry
         ]
         checkpoint_results = [
             _copyback_state_checkpoint(

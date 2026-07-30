@@ -33,6 +33,8 @@
 - **选择**:`--run-ids`(逗号分隔)或 `--cycle`(**可重复**)二选一。`--cycle` 解析:遍历 **source index** entries,匹配 `entry["cycle_id"]`(**平铺顶层可选字段**,可能为 None,须跳过;**没有** `lineage` 子对象)收集 `entry["run_id"]`。输入归一:cycle 串按生产 `cycle_id_for` 规则归一(source 段小写,如 `ifs_2026072000`;`workers/data_adapters/base.py:46-48`),工具对用户输入做同样小写归一以免大小写空匹配。
 - **空解析 fail-closed**(F9):解析结果为空集合、或解析到的 run_id 在 source index 中无对应 entry → **非零退出 + 结构化原因,不得调用 merge、不得写 index**(merge 对空 authoritative 集是"静默成功只刷 generated_at",必须在工具层挡住)。
 - **dry-run 机制**(F6):默认 dry-run;dry-run **不调用** merge(merge 无 dry-run 形参且在锁内无条件 publish)——只读加载两份 index(`read_provider_snapshot` 只读),做集合预览:解析出的 run_ids、source 中命中的 entry、其中 destination 缺失的 entry 数;receipt 标注 `mode=dry_run` 且为**advisory preview**(不模拟 merge 冲突语义)。语义口径:"index 内容不变 + 无对象拷贝"(锁文件/目录确保类副作用不在禁止面)。`--enforce` 才调用真实 merge(同一代码路径)。
+- **enforce 前置守卫:destination index 必须已存在**(cross-review B1):派生的 destination index 文件缺失时,enforce **必须在调用 merge 之前非零退出**(结构化原因),不写任何 index/对象——否则错根(手误父目录、NFS 未挂的桩 mountpoint)会让 merge 的 bootstrap 分支(`ProviderPreimage(exists=False)`)静默新建一份只含本次 entry 的假 canonical index 并出绿 receipt,恰好骗过 tasks 4.1 的 +36 验收口径。显式 `--allow-bootstrap` 旗标才放行 0-entry 开局(merge 层的 bootstrap 能力**不动**——生产首次 copyback 依赖它;守卫只在工具层)。dry-run 对缺失 destination 照常预览(报 before=0)。
+- **merge 后 receipt 写失败的报告语义**(cross-review B2):receipt root 校验在 merge 前(已实现);若 merge 成功后 receipt 写失败,**不得**以 `refused` 语义报告(mutation 已提交)——须用独立原因(如 `receipt_write_failed_after_merge`)非零退出,并把 merge 摘要打到 stdout(operator 仍拿到 4.1 证据;幂等重跑可补 receipt)。docstring 的 "never leaves a partial index write" 表述同步修正。
 - **receipt**(F7):落盘根由 env `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT` 指定(enforce 模式必需;目录 0700,沿用 refresh receipt 纪律),文件含 `schema_version` 常量、mode、解析 run_ids、entry 前后计数、copied/reused/replaced、时间戳。
 - **执行身份**(F11):必须以 provider 属主(node-22 上为 `frd_muziyao`)执行——provider 锁要求锁父目录 `st_uid == geteuid()`、CAS 替换要求 preimage uid 匹配(`provider_atomic.py:209-210/:297-298`),其他身份会以不透明 fail-closed 失败。写入 runbook。
 - 边界:仅 state-index;不触 journal、不触 registry/canonical-readiness、不改任何 pipeline 行。
@@ -44,7 +46,7 @@
 3. `_copyback_state_checkpoint` 的 checksum 校验、containment、no-follow 原子写、写后读回不变。
 4. destination 结构校验 fail-closed 不变(`unreadable`/`not_object`)。
 5. 锁 + preimage CAS 语义不变(`provider_destination_lock`、`expected_preimage`;replay 与 refresh 经同一 `.index-last.json.lock` 互斥,fixture review checklist 7d 已核实)。
-6. **不复活 + 不为败北者拷对象**:不在本次**胜出** source 集中的 entry,其对象一律不读不写(新回归锁,含 F2 的败北 source entry 场景)。
+6. **不复活 + 不为败北者拷对象 + 不为字节相同者重拷**(cross-review A2 修订,与 spec 原文"no resurrection"无限定口径对齐):不在本次**胜出** source 集中的 entry,其对象一律不读不写(F2 败北场景);**与 destination 既有 entry 字节相同的胜出 source entry 同样不拷对象**——其 entry 已在册,对象生命周期归 mover 契约,重放旧 cycle 不得把已归档对象复活回共享根。幂等重放语义随之为"零拷贝、entry 集不变"(而非"全 reused")。
 7. refresh 续期(`scripts/scheduler_file_provider_refresh.py:720-725`)与调度器读取路径零改动。
 8. `publish_state_snapshot_index` 其余调用点行为不变:`:1617` 续期与 refresh `:984` 均依赖默认 `verify_objects=True` ——**不改函数默认值**,只改 merge 内这一个调用点实参。
 9. **发布集必须仍是全量 merged**(F10):"收窄"只作用于对象校验与 checkpoint 拷贝,`publish` 的 entry 列表仍为 `merged` 全集(destination 历史 ∪ 胜出 source)。误把发布集收窄到 source 集 = canonical index 从 1645 条被削到 36 条、全部 warm-start 历史灭失(不可逆)。回归锁:`published_entry_count == destination_count + net_new_count`。
@@ -64,11 +66,12 @@
 | 任意 | 缺/checksum 不符 | fail-closed(source 侧全量校验 `:1923-1932` 不变) |
 | destination index 损坏(非 JSON/非 object) | 任意 | fail-closed(不变) |
 | 任意 | source entry 在冲突中**败北**(destination created_at 更晚) | 发布 destination entry;**败北 source entry 的对象不拷**(F2 新锁) |
+| **已归档(缺)** | source entry 与 destination 既有 entry **字节相同** | 发布不变;**对象不重拷(不复活,A2 新锁)**;计数零拷贝 |
 
 ## Evidence mapping
 
 - 单测:
-  - `tests/test_state_manager.py`(或就近新文件):红前——destination 含对象缺失的历史 entry + source 新 entry,merge 今日抛 `state_snapshot_index_object_missing`;修复后 merge 成功、仅胜出新 entry 对象被拷、历史 entry 原样进发布集(entry_count 守恒断言,must-preserve #9)、**已归档对象未被复活**(目标路径仍不存在,负测锁)、**败北 source entry 对象未被拷**(F2 负测锁);幂等重放(二次 merge counts 全 reused/entries 不变);must-preserve #8 锁(其他 publish 调用点行为不变)。注意:**全仓现无任何测试直接调用 merge**,既有回归锁全在 `tests/test_run_tree_copyback.py`。
+  - `tests/test_state_manager.py`(或就近新文件):红前——destination 含对象缺失的历史 entry + source 新 entry,merge 今日抛 `state_snapshot_index_object_missing`;修复后 merge 成功、仅胜出新 entry 对象被拷、历史 entry 原样进发布集(entry_count 守恒断言,must-preserve #9)、**已归档对象未被复活**(目标路径仍不存在,负测锁)、**败北 source entry 对象未被拷**(F2 负测锁);幂等重放(二次 merge 零拷贝——copied/reused/replaced 全 0——entries 不变,A2 修订);must-preserve #8 锁(其他 publish 调用点行为不变)。注意:**全仓现无任何测试直接调用 merge**,既有回归锁全在 `tests/test_run_tree_copyback.py`。
   - `tests/test_run_tree_copyback.py`(F5,**必须**列入验证门):两处既有 counts 断言随胜出集语义同步更新(`test_state_index_copyback_merges_split_root_checkpoint_only_in_private` 的 `checkpoint_reused_count` 1→0;`test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity` 同类),并补"destination-only entry 不被读写"正断言。
   - replay script 单测:cycle 小写归一 + 平铺 `cycle_id` 解析(None 跳过)、空解析非零退出且零写、dry-run 零 index/对象变更、enforce 幂等、receipt 字段与 0700 纪律、root 相等/重叠守卫。
 - 实机(tasks 4.x,node-22,以 `frd_muziyao` 执行):replay dry-run → enforce `--cycle gfs_2026072000 --cycle ifs_2026072000`(小写)→ NFS index entry_count 以 receipt 前后计数为准(**预期 +36**;若偏离先读数再分支)+ receipt 在案;随后自然 pass:072000 verdict complete、072012 候选提交;**验收(用户裁定口径)**:连续两个完整 warm-start pass;同时下一次自然 `state_save_qc` copyback 成功(journal 无新 `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`)。

@@ -1591,7 +1591,11 @@ install -d -m 0700 "$NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
 uv run python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000
 
-# 2) 确认 resolved_run_ids / preview_new_entry_count 符合预期后再执行
+# 2) 逐项核对 dry-run 输出后再执行：
+#    - resolved_run_ids / preview_new_entry_count 符合预期
+#    - destination_entry_count_before 与共享 index 现有条数一致（当前 ~1645），而不是 0
+#      （0 = 根写错 / NFS 没挂，别 enforce）
+#    - destination_index_existed 为 true
 uv run python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000 --enforce
 ```
@@ -1603,10 +1607,19 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 - 解析为空（cycle/run-id 在 private index 中无对应 entry）→ **非零退出 + 结构化 reason，
   不调用 merge、不写 index**。不要为了"跑通"改口径。
 - `--enforce` 走的是生产同一个 merge 代码路径（同样的锁、CAS、checksum 与冲突语义），
-  幂等：重复 enforce 只会全部 `reused`、entry 数不变。
+  幂等：重复 enforce 零拷贝（copied/reused/replaced 全 0）、entry 数不变——与共享 index
+  既有 entry 字节相同的胜出 entry 不重拷对象，避免把已归档对象复活回共享根。
+- `--enforce` 的前置守卫：派生出的 destination index 文件不存在时 **非零退出**（reason
+  `destination_index_missing`），在调用 merge 之前就拒绝，不写任何 index/对象。这挡的是
+  "根写错 / NFS 未挂的桩 mountpoint" —— 否则 merge 会走 bootstrap 分支新建一份只含本次
+  entry 的假 canonical index 并出绿 receipt。只有确认是真正的首次 copyback 才加
+  `--allow-bootstrap` 放行 0-entry 开局。dry-run 不受该守卫限制（照常预览，before=0）。
 - receipt 落在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`（0700 目录、0600 文件，
-  含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced；
-  enforce 模式未设该 env 直接拒绝执行。
+  含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced、
+  `destination_index_existed`/`allow_bootstrap`；enforce 模式未设该 env 直接拒绝执行。
+- merge 成功但 receipt 写不下去：exit 3、reason `receipt_write_failed_after_merge`
+  （status **不是** refused），merge 摘要打在 stdout —— index 变更已提交，先留存那份 stdout
+  摘要作 4.1 证据，修好 receipt 目录后重跑 enforce（幂等）即可补上 receipt。
 - 工具只碰 state-index：不写 journal、不动 registry / canonical-readiness、不改 pipeline 行。
 
 本案处置记录（#1189，2026-07-20 00Z 链停摆）：node-27 product-archive mover 以
@@ -1615,7 +1628,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 做对象存在性校验，于 2026-07-25T18:40:48Z 之后每次 `state_save_qc` 均 fail-closed，导致
 2026072000 产出的 36 条 f012 后继 checkpoint（gfs 18 + IFS 18，`valid_time=2026-07-20T12:00Z`）
 只存在于 private index，调度器读的 shared index 判 072000 为 gap、072012 永不规划。修复把
-destination 侧收窄为"只校验并搬运本次胜出的 source entry"，积压用上面的 replay
+destination 侧收窄为"只校验并搬运本次胜出、且 shared index 尚未逐字节在册的 source entry"，积压用上面的 replay
 （`--cycle gfs_2026072000 --cycle ifs_2026072000 --enforce`）补进 shared index。
 
 ## 9. 值守 SQL 片段

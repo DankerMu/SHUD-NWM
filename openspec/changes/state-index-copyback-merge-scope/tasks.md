@@ -11,7 +11,8 @@
 - [x] 2.1 `uv run pytest -q tests/test_state_manager.py tests/test_run_tree_copyback.py tests/test_production_scheduler.py`（实测同时纳入新增 `tests/test_scheduler_state_index_copyback_replay.py`；1164 passed）(净化 `__pycache__` + `PYTHONDONTWRITEBYTECODE=1`;**必须含 `test_run_tree_copyback.py`**——merge 的既有回归锁全在该文件,两处 `checkpoint_*_count` 断言需随胜出集语义同步更新,F5)。
 - [x] 2.2 `uv run ruff check .`;`openspec validate state-index-copyback-merge-scope --strict --no-interactive`。
 - [x] 2.3 红前证据:destination 含对象缺失历史 entry 的 merge 场景,在未改源上抛 `state_snapshot_index_object_missing`(`tests/test_state_manager.py::test_state_index_copyback_merge_publishes_new_entry_beside_archived_destination_object` 未改源红在 `state_manager.py:2517` `_verify_state_index_object`;同批 `..._does_not_copy_losing_source_entry_object` 红在 `state_manager.py:2060` `state_snapshot_index_object_checksum_mismatch`)。
-- [x] 2.4 负测锁:已归档对象不复活(merge 后 destination 目标路径仍不存在);**败北 source entry 对象不拷**(F2);entry_count 守恒 `published == destination ∪ 胜出source`(must-preserve #9);幂等重放全 reused;must-preserve #8(其他 publish 调用点行为不变);replay 空解析非零退出零写、dry-run 零 index/对象变更。
+- [x] 2.4 负测锁:已归档对象不复活(merge 后 destination 目标路径仍不存在);**败北 source entry 对象不拷**(F2);entry_count 守恒 `published == destination ∪ 胜出source`(must-preserve #9);幂等重放**零拷贝**(A2 修订);must-preserve #8(其他 publish 调用点行为不变);replay 空解析非零退出零写、dry-run 零 index/对象变更。
+- [x] 2.5 **修复轮补锁**(cross-review r1):B1 destination-index 缺失时 enforce 非零退出零写 + `--allow-bootstrap` 放行(两测);B2 merge 后 receipt 写失败 → 独立原因 + stdout 携带 merge 摘要(注入测);A1 确定性 TOCTOU 测试(`provider_destination_lock` seam 内改写 source 对象)杀死 `_copyback_state_checkpoint` 双护栏变异体;A2 字节相同胜出 entry 不重拷已归档对象(负测)+ 幂等测试计数改零拷贝;B5 双 `--cycle` enforce 用例(两 cycle 的 run_id 均 resolved 且发布)。(实测:四文件门 1171 passed = 1164 + 7 新测;变异体红证:剥掉 `_copyback_state_checkpoint` 双护栏 → A1 测试 `DID NOT RAISE` 红;`args.cycle` 截成 `[-1:]` → B5 测试红。)
 
 ## 3. 评审
 

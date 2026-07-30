@@ -15,7 +15,10 @@ lock requires the lock parent directory to be owned by the effective uid and
 the compare-and-swap requires a matching preimage owner.
 
 Default mode is a read-only dry run.  ``--enforce`` performs the merge and
-writes a receipt under ``NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT``.
+writes a receipt under ``NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT``; it
+refuses to run when the derived destination index does not exist (a wrong
+destination root would otherwise bootstrap a fake canonical index) unless
+``--allow-bootstrap`` is passed.
 """
 
 from __future__ import annotations
@@ -53,7 +56,13 @@ MAX_RECEIPT_BYTES = 1024 * 1024
 
 
 class ReplayError(RuntimeError):
-    """Structured fail-closed refusal; never leaves a partial index write."""
+    """Structured refusal raised before the merge writes the shared index.
+
+    Every refusal on this class is decided before ``merge_state_snapshot_index_copyback``
+    is invoked, so nothing has been published yet.  A failure *after* the merge
+    committed uses :class:`ReplayPostMergeError` instead, which must not claim
+    refusal.
+    """
 
     def __init__(self, reason: str, details: Mapping[str, Any] | None = None) -> None:
         super().__init__(reason)
@@ -62,6 +71,28 @@ class ReplayError(RuntimeError):
 
     def to_dict(self) -> dict[str, Any]:
         return {"status": "refused", "reason": self.reason, **self.details}
+
+
+class ReplayPostMergeError(ReplayError):
+    """The merge already committed but the run could not be completed cleanly.
+
+    The index mutation stands (a repeated enforce run is idempotent and can
+    re-record the receipt), so the status is not a refusal and the merge
+    summary is still handed to the operator on stdout.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        details: Mapping[str, Any] | None = None,
+        *,
+        summary: Mapping[str, Any],
+    ) -> None:
+        super().__init__(reason, details)
+        self.summary: dict[str, Any] = dict(summary)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"status": "merge_committed_incomplete", "reason": self.reason, **self.details}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -74,7 +105,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_ids=args.run_ids,
             cycles=args.cycle,
             enforce=args.enforce,
+            allow_bootstrap=args.allow_bootstrap,
         )
+    except ReplayPostMergeError as error:
+        # The merge is committed: emit the summary on stdout so the operator
+        # still holds the before/after evidence the receipt would have carried.
+        print(json.dumps(error.summary, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(error.to_dict(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        return 3
     except ReplayError as error:
         print(json.dumps(error.to_dict(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 2
@@ -90,6 +128,7 @@ def replay_state_index_copyback(
     run_ids: str | None,
     cycles: Sequence[str] | None,
     enforce: bool,
+    allow_bootstrap: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(tz=UTC)
     reference = _resolved_root(reference_root, env=REFERENCE_ROOT_ENV, field="reference_root")
@@ -103,12 +142,27 @@ def replay_state_index_copyback(
     source_entries = _read_index_entries(source_index, containment_root=reference, field="source_index")
     if not source_entries:
         raise ReplayError("source_index_empty", {"source_index": str(source_index)})
-    destination_entries = _read_index_entries(
+    destination_snapshot = _read_index_entries(
         destination_index,
         containment_root=destination,
         field="destination_index",
         allow_missing=True,
     )
+    destination_entries = destination_snapshot if destination_snapshot is not None else []
+    if enforce and destination_snapshot is None and not allow_bootstrap:
+        # A mistyped destination root (or an unmounted NFS stub) would send the
+        # merge down its bootstrap branch and silently publish a fake canonical
+        # index holding only this replay's entries, with a green receipt.  The
+        # merge keeps that capability for the genuine first copyback; here it
+        # takes an explicit --allow-bootstrap.
+        raise ReplayError(
+            "destination_index_missing",
+            {
+                "destination_index": str(destination_index),
+                "destination_root": str(destination),
+                "hint": "verify --destination-root/NHMS_OBJECT_STORE_COPYBACK_ROOT, or pass --allow-bootstrap",
+            },
+        )
 
     requested_cycles = [_normalize_cycle_id(value) for value in cycles or []]
     resolved_run_ids = (
@@ -137,6 +191,8 @@ def replay_state_index_copyback(
         "destination_index": str(destination_index),
         "requested_cycles": requested_cycles,
         "resolved_run_ids": sorted(resolved_run_ids),
+        "destination_index_existed": destination_snapshot is not None,
+        "allow_bootstrap": bool(allow_bootstrap),
         "source_entry_count": len(source_entries),
         "matched_source_entry_count": len(matched_entries),
         "destination_entry_count_before": len(destination_entries),
@@ -149,6 +205,7 @@ def replay_state_index_copyback(
         "checkpoint_replaced_count": None,
         "merge": None,
     }
+    merge_committed = False
     if enforce:
         try:
             merge = merge_state_snapshot_index_copyback(
@@ -169,10 +226,14 @@ def replay_state_index_copyback(
                     "resolved_run_ids": sorted(resolved_run_ids),
                 },
             ) from error
-        after_entries = _read_index_entries(
-            destination_index,
-            containment_root=destination,
-            field="destination_index",
+        merge_committed = True
+        after_entries = (
+            _read_index_entries(
+                destination_index,
+                containment_root=destination,
+                field="destination_index",
+            )
+            or []
         )
         receipt.update(
             {
@@ -192,7 +253,16 @@ def replay_state_index_copyback(
         )
     receipt["completed_at"] = _format_time(datetime.now(tz=UTC))
     if receipt_root is not None:
-        _write_receipt(receipt_root, receipt)
+        try:
+            _write_receipt(receipt_root, receipt)
+        except ReplayError as error:
+            if not merge_committed:
+                raise
+            raise ReplayPostMergeError(
+                "receipt_write_failed_after_merge",
+                {**error.details, "receipt_failure_reason": error.reason},
+                summary=receipt,
+            ) from error
         receipt["receipt_root"] = str(receipt_root)
     return receipt
 
@@ -244,7 +314,13 @@ def _read_index_entries(
     containment_root: Path,
     field: str,
     allow_missing: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
+    """Read an index's entries; ``None`` (only with ``allow_missing``) if absent.
+
+    An absent index and a published-but-empty index are different facts: the
+    enforce guard refuses the former without ``--allow-bootstrap``.
+    """
+
     try:
         content, _preimage = read_provider_snapshot(
             path,
@@ -253,7 +329,7 @@ def _read_index_entries(
         )
     except ProviderAtomicError as error:
         if allow_missing and error.reason == "provider_destination_missing":
-            return []
+            return None
         raise ReplayError("index_unreadable", {"field": field, "path": str(path), "error": str(error)}) from error
     try:
         payload = json.loads(content)
@@ -388,6 +464,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--enforce",
         action="store_true",
         help="Perform the real merge; without it the run is a read-only preview.",
+    )
+    parser.add_argument(
+        "--allow-bootstrap",
+        action="store_true",
+        help=(
+            "Allow an enforce run to create the destination index from scratch. "
+            "Without it a missing destination index is refused, because it is "
+            "almost always a wrong destination root rather than a first copyback."
+        ),
     )
     return parser
 
