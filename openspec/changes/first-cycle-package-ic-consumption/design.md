@@ -16,6 +16,7 @@
 
 - **IO 落位**:`evaluate_transition_decision` 是纯函数(`scheduler_generation.py:546-555`,只收 `history`/`declaration`);所有 IO 在 gate(`scheduler_generation_gate.py:322` 已有 `load_cutover_declaration` 先例)。包 manifest 读取放 gate:经 registry `resource_profile.manifest_uri`(`publish_scheduler_file_registry.py:566-567` 已发布)读包 manifest,产出资格信号注入 evaluator 新参数。
 - **信号取值**:`QUALIFIED(含 ic sha256)` / `UNQUALIFIED` / `UNREADABLE` / **`None`(registry 无 manifest 引用——legacy 场景)**。evaluator 新参数**可选、默认 `None`**——零重基线(must-preserve #10)依赖此默认值。判定:`included_files[]` 存在 `relative_path` 匹配 `*.cfg.ic` 的条目,且其 **`sha256`** ≠ 空文件摘要(`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`)且 **`size_bytes > 0`**(字段名以 `basins_package.py:289-299` 实际 schema 为准——是 `sha256`/`size_bytes`,不是 `checksum`)。manifest uri 存在但不可达/JSON 损坏 = `UNREADABLE`。
+- **资格主体只认 canonical 条目(review round 1 修)**:`included_files` 按 `(role, relative_path)` 排序,`CALIB/*.cfg.ic` 排在 canonical `runtime_input` 条目**之前**——"取首个 `*.cfg.ic`" 会拿错 sha256 / 被 0 字节 CALIB 占位误判。判据改为:manifest 带 `shud_input_name` 时取 `<shud_input_name>.cfg.ic`,否则取顶层(无 `/`)条目;`role` 不参与(planned 写 `shud_input`、written 写 `runtime_input`,不是稳定身份)。inventory 内出现 **>1 个** `*.cfg.ic`(任意层级)= `packaged_initial_condition_ambiguous` → block:runtime 是递归搜索 + exactly-one,提交这种包必然 `PACKAGED_IC_CONSUMPTION_FAILED`,gate 提前拦下才对称。
 - 内容级校验(header 可解析、非全零)下沉到 runtime staging fail-closed——选择层零对象 IO,只读 manifest。
 
 ### D2. 首时次判定表落在 generation-aware 路径;信号缺席 = legacy 保持
@@ -49,6 +50,8 @@ runtime 实际有**两个** packaged 分支:`runtime.py:841-862`(无 state_id �
 - 校验:manifest 带 `packaged_ic_checksum` 时,文件 sha256 必须相等(端到端完整性);**不带**(legacy 手工 manifest,qhh 形态)时跳过 checksum 比对,仅验非空 + header 可解析,记 warning 进 run evidence——must-preserve #7(qhh 手工路径可用)以此成立。header 校验复用 `tests/test_runtime_ic_header.py` 所测工具。
 - 任何失败(缺文件/0 字节/checksum 不符/header 不可解析)→ 新错误码 `PACKAGED_IC_CONSUMPTION_FAILED` fail-closed;**删除 packaged 分支内及其 fall-through 可达的静默 `_set_cold_start_initial_state` 降级**。负锁是**行为锁**:声明 packaged-IC 的 manifest(带/不带 state_id 两形态)staged IC 缺失时必须 raise,测试断言无 `INIT_MODE 1` 执行——不以 grep 为锁(`:899`/`:933` 的回退对 state-snapshot 来源运行仍保留)。
 - 残差归一化**做**:从 `_materialize_ic_to_project_name` 抽出 `normalize_state_negative_residuals` 调用为可复用 helper(`runtime.py:1015`),packaged 路径直接调 helper;`_materialize_ic_to_project_name` 本体(含 `:1029` `_shift_cfg_ic_time`)对 warm 路径逐字节不变。packaged 文件本就是 canonical 名(`basins_registry_import.py:2005-2007`),无需改名 materialize。
+- **失败标签不得逃逸(review round 1 修)**:消费尾段(materialize + header 读 + 归一化)整体包裹——`UnicodeDecodeError`(二进制包内 IC)、`SafeFilesystemError`、`OSError`、以及复用 helper 抛出的 `WARM_START_STATE_RESIDUALS_EXCEED_POLICY` 一律重抛为 `PACKAGED_IC_CONSUMPTION_FAILED`(原因串进 message,已是该码的原样透传),不再有 `RUNTIME_ERROR` 逃逸口。
+- **重复 prepare 必须收敛(review round 1 修)**:warm 路径靠 `_clear_staged_initial_states` 保持幂等;packaged 路径不能无条件删(canonical 名的包 IC 就是 target 本身),故只在"恰好两个候选、其中一个是 target、另一个是它的同目录兄弟"时删掉上一次 materialize 的 `<project>.cfg.ic`。子目录候选(`CALIB/`)与更高重数一律保留 → exactly-one 仍 fail-closed。
 - 有意不做:时间一致性校验(`_verify_ic_time_consistency` 是 warm-start state 的 valid_time 语义,包 IC 是无时刻标定产物)与 `_shift_cfg_ic_time`。此取舍记入 spec 场景。
 - 未声明 packaged-IC 的路径行为逐字节不变(合法 cold-start 回退、warm 消费管道、exact_required 检查顺序)。
 
