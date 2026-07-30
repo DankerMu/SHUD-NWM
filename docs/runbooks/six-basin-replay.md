@@ -270,13 +270,24 @@ stdout 上的 receipt 里 `unlinked_file_cache_paths` 是权威清单,按它核�
 `blocked_cache_keys_truncated` / `entries_truncated`):为 `true` 说明列表被 20000 条
 上限截断,清单不完整,不能当全量对账用。
 
-`failure.reason` 三分,别混为一谈:
+`failure.reason` 分六种,别混为一谈(带 `_after_file_unlink` 的三种表示**确实删过
+文件**;不带的三种是"没删文件、但 DELETE scope 已经在这笔事务里",典型是
+`--no-file-cache` 部署):
 
 | failure.reason | 含义 | 处置 |
 |---|---|---|
 | `db_delete_failed_after_file_unlink` | DELETE 语句本身失败,事务未提交,`deleted_rows: 0` 是**已知事实** | 文件已删、DB 行尚在;修因后重跑(换新 receipt 路径) |
+| `db_delete_failed` | 同上,但本次没有删过任何文件缓存条目 | DB 未变;修因后重跑(换新 receipt 路径) |
 | `db_commit_uncertain_after_file_unlink` | DELETE 已发出、commit 没得到应答,`deleted_rows: null`(**判不了**,不是 0) | 先查 DB 里这些 cache_key 是否还在,再决定重跑;不要假定"没删成" |
+| `db_commit_uncertain` | 同上,但本次没有删过任何文件缓存条目 | 同上:先查 DB 实际状态再决定重跑 |
 | `interrupted_after_file_unlink` | 删文件途中被 Ctrl-C / 信号打断 | receipt 已落盘并回显 stdout;按 `unlinked_file_cache_paths` 核对后重跑 |
+| `interrupted_delete_scope_uncertain` | 信号打断时没删过文件,但 DELETE scope 已在事务里(`deleted_rows: null`) | 先查 DB 实际状态,再决定重跑 |
+
+> **信号中断不是 exit 4**:Ctrl-C / SIGINT 打断时,工具先写 receipt(`--receipt-path`)
+> 并回显 stdout,然后**原样再抛**信号异常——进程按信号默认退出(SIGINT = 130)并打印
+> traceback。所以判"删过什么"的权威依据是那份 receipt,不是退出码;看到 130 + traceback
+> 时不要以为"什么都没发生",先去读 receipt 的 `failure.reason` 与
+> `unlinked_file_cache_paths`。
 
 其余步骤见 `openspec/changes/six-basin-production-replay/tasks.md` §6 与
 design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4 风格。

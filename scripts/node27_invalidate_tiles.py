@@ -35,9 +35,17 @@ and their file-cache probe verdicts, and still publishes a receipt.
 
 Exit codes: ``0`` completed (or dry run), ``2`` refused before any mutation,
 ``3`` incomplete -- some keys were deliberately left intact, ``4`` failed AFTER
-a mutation (file-cache entries were unlinked and the DB delete or the receipt
+a mutation could have started (file-cache entries were unlinked, or a DELETE
+scope was staged for this transaction, and the delete/commit or the receipt
 write did not complete).  Exit 4 always echoes a receipt on stdout naming every
 unlinked entry, and writes it to ``--receipt-path`` when that is still possible.
+
+A SIGNAL interrupt (Ctrl-C / SIGINT) does NOT exit 4: the interrupt is re-raised
+after the receipt is written and echoed, so the process ends with the signal's
+own default (130 for SIGINT) and prints a traceback.  The receipt -- on stdout
+and at ``--receipt-path``, ``failure.reason`` ``interrupted_after_file_unlink``
+(or ``interrupted_delete_scope_uncertain`` when no file cache entry was
+unlinked) -- is the authoritative record of what was mutated, not the exit code.
 """
 
 from __future__ import annotations
@@ -294,6 +302,10 @@ def invalidate_tiles(
     candidates: list[dict[str, Any]] = []
     entries: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
+    # Bound OUTSIDE the transaction block: the failure arms below read it to
+    # decide whether a DB mutation may already be in flight, and a deployment
+    # with no file cache reaches those arms with nothing unlinked (round-3 C3-3).
+    deletable_keys: list[str] = []
     deleted_rows: int | None = 0
 
     def partial_mutation(
@@ -344,7 +356,6 @@ def invalidate_tiles(
                     window_end=window_end,
                 )
 
-                deletable_keys: list[str] = []
                 for row in candidates:
                     cache_key = str(row.get("cache_key") or "")
                     probe = probe_file_cache(file_cache_dir, cache_key)
@@ -388,13 +399,14 @@ def invalidate_tiles(
                     deleted_rows = int(getattr(cursor, "rowcount", 0) or 0)
         except Exception as error:
             _rollback(connection)
-            if not unlinked_paths:
+            if not unlinked_paths and not deletable_keys:
                 raise
-            # File-cache entries are already gone and the rows are not: emit a
-            # receipt naming them instead of dying with a bare traceback.  The
+            # Something may already be in flight: file-cache entries are gone,
+            # or a DELETE scope was staged/issued for this transaction.  Emit a
+            # receipt naming it instead of dying with a bare traceback.  The
             # DELETE never committed, so zero rows is a fact here.
             raise partial_mutation(
-                "db_delete_failed_after_file_unlink",
+                "db_delete_failed_after_file_unlink" if unlinked_paths else "db_delete_failed",
                 error=error,
                 rows_deleted=0,
             ) from error
@@ -407,10 +419,10 @@ def invalidate_tiles(
                 connection.commit()
             except Exception as error:
                 _rollback(connection)
-                if not unlinked_paths:
+                if not unlinked_paths and not deletable_keys:
                     raise
                 raise partial_mutation(
-                    "db_commit_uncertain_after_file_unlink",
+                    "db_commit_uncertain_after_file_unlink" if unlinked_paths else "db_commit_uncertain",
                     error=error,
                     rows_deleted=None,
                 ) from error
@@ -419,12 +431,15 @@ def invalidate_tiles(
     except BaseException as error:
         # KeyboardInterrupt / SystemExit in the middle of the unlink loop escape
         # every `except Exception` above; without this arm the files are gone and
-        # a bare traceback is the only record (round-2 C2-6).
+        # a bare traceback is the only record (round-2 C2-6).  A signal that
+        # arrives with a DELETE scope staged and nothing unlinked (a deployment
+        # with no file cache) is just as uncertain, so it gets a receipt too
+        # (round-3 C3-3) -- under a reason that does not claim an unlink.
         _rollback(connection)
-        if not unlinked_paths:
+        if not unlinked_paths and not deletable_keys:
             raise
         failure = partial_mutation(
-            "interrupted_after_file_unlink",
+            "interrupted_after_file_unlink" if unlinked_paths else "interrupted_delete_scope_uncertain",
             error=error,
             rows_deleted=None,
         )

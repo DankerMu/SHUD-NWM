@@ -571,6 +571,85 @@ def test_a_delete_failure_after_file_unlinks_reports_zero_deleted_rows(tmp_path:
     assert _key(1) in connection.cache_keys()
 
 
+def test_a_commit_failure_with_no_file_cache_still_leaves_a_receipt(tmp_path: Path) -> None:
+    """C3-3: a deployment with no file cache has nothing to unlink.
+
+    ``--no-file-cache`` reaches the commit arm with ``unlinked_paths`` empty, so
+    the old ``if not unlinked_paths: raise`` re-raised the driver's exception and
+    the DELETE-issued-but-uncommitted state left no receipt at all -- exactly the
+    case where the operator most needs to know the DB outcome is unknown.
+    """
+
+    connection, _cache_dir, receipt_path = _site(tmp_path)
+
+    def _fail_on_commit() -> None:
+        raise RuntimeError("connection reset by peer")
+
+    connection.commit = _fail_on_commit  # type: ignore[method-assign]
+
+    with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
+        _run(connection, None, receipt_path, execute=True)
+
+    # the reason names what actually happened: no file was unlinked
+    assert excinfo.value.reason == "db_commit_uncertain"
+    assert excinfo.value.receipt_written is True
+    receipt = excinfo.value.receipt
+    assert receipt["outcome"] == "failed_partial_mutation"
+    assert receipt["unlinked_file_cache_paths"] == []
+    assert receipt["failure"]["reason"] == "db_commit_uncertain"
+    # the commit was issued and never answered: nobody knows how many rows went
+    assert receipt["totals"]["deleted_rows"] is None
+    assert connection.rolled_back is True
+    on_disk = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert on_disk["failure"]["reason"] == "db_commit_uncertain"
+    assert on_disk["totals"]["deleted_rows"] is None
+
+
+def test_a_delete_failure_with_no_file_cache_still_leaves_a_receipt(tmp_path: Path) -> None:
+    """The delete arm's half of C3-3: the scope was issued, the rows survived."""
+
+    _connection, _cache_dir, receipt_path = _site(tmp_path)
+    connection = _DeleteFailingConnection(_connection.rows)
+
+    with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
+        _run(connection, None, receipt_path, execute=True)
+
+    assert excinfo.value.reason == "db_delete_failed"
+    receipt = excinfo.value.receipt
+    assert receipt["failure"]["reason"] == "db_delete_failed"
+    assert receipt["unlinked_file_cache_paths"] == []
+    # the DELETE never committed, so zero is a fact rather than a guess
+    assert receipt["totals"]["deleted_rows"] == 0
+    assert connection.committed is False
+    assert connection.rolled_back is True
+    assert _key(1) in connection.cache_keys()
+
+
+def test_a_failure_before_any_delete_scope_is_never_dressed_up_as_a_mutation(tmp_path: Path) -> None:
+    """The widened guard must not turn a read-side failure into a mutation claim."""
+
+    class _CandidateQueryFailingConnection(_FakeConnection):
+        def cursor(self) -> _FakeCursor:
+            connection = self
+
+            class _Cursor(_FakeCursor):
+                def execute(self, statement: str, params: Mapping[str, Any] | None = None) -> None:
+                    if statement == tool.CANDIDATE_SQL:
+                        raise RuntimeError("server closed the connection unexpectedly")
+                    super().execute(statement, params)
+
+            return _Cursor(connection)
+
+    _connection, _cache_dir, receipt_path = _site(tmp_path)
+    connection = _CandidateQueryFailingConnection(_connection.rows)
+
+    with pytest.raises(RuntimeError, match="server closed the connection"):
+        _run(connection, None, receipt_path, execute=True)
+
+    assert not receipt_path.exists()
+    assert connection.rolled_back is True
+
+
 def _two_in_scope_site(tmp_path: Path) -> tuple[_FakeConnection, Path, Path]:
     rows = [
         _row(cache_key=_key(1), source_id=IN_SCOPE_SOURCE, valid_time=WINDOW_START + timedelta(hours=6)),
