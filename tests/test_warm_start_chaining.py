@@ -1730,6 +1730,11 @@ def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whiteli
         "retry_strict_warm_start_terminal_run_manifest_missing",
         "retry_strict_warm_start_retry_run_manifest_mismatch",
         "retry_terminal_run_manifest_missing",
+        # The pin did its job: this append was reviewed rather than silent
+        # (#1164 change 2, design D1 "chain 白名单同步"). The env-gated replay
+        # override never consults the retry budget, so the budget-blocked
+        # property asserted below is untouched by it.
+        "replay_resubmit",
     }
 
     def basin(decision: str) -> dict[str, Any]:
