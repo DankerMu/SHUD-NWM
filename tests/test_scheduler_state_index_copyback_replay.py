@@ -496,6 +496,56 @@ def test_replay_provider_postread_failure_is_commit_uncertain(
     assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
 
 
+def test_replay_untyped_merge_exception_is_commit_uncertain(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The provider lock teardown runs after the destination compare-and-swap and
+    # raises unclassified OSErrors (provider_atomic.py:244-257).  With a typed-only
+    # handler those escaped the entire triage: rc 1 bare traceback, no receipt, no
+    # stdout summary and no superset guard -- with the index already committed.
+    _apply_env(monkeypatch, fixture)
+    real_merge = replay.merge_state_snapshot_index_copyback
+
+    def merge_then_raise_untyped(**kwargs: Any) -> Any:
+        real_merge(**kwargs)
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(replay, "merge_state_snapshot_index_copyback", merge_then_raise_untyped)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    # The forbidden shape is rc 1 with an empty stdout; both are asserted away.
+    assert exit_code == 3
+    assert exit_code != 1
+    assert captured.out.strip()
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["status"] == "merge_committed_incomplete"
+    assert error["status"] != "refused"
+    assert error["reason"] == "merge_commit_uncertain"
+    # The exception type stays legible to the operator, not a blank verdict.
+    assert error["error_reason"] == "merge_unexpected_exception:OSError"
+    assert "Input/output error" in error["error"]
+    assert error["resolved_run_ids"] == [AUTHORITATIVE_RUN]
+    # The committed tail ran: read-back, superset guard and receipt.
+    assert summary["merge_commit_state"] == "uncertain"
+    assert summary["merge_error_reason"] == "merge_unexpected_exception:OSError"
+    assert summary["merge"] is None
+    assert summary["destination_entry_count_after"] == 2
+    assert summary["destination_entries_lost_count"] == 0
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["merge_commit_state"] == "uncertain"
+    assert receipt["merge_error_reason"] == "merge_unexpected_exception:OSError"
+    assert receipt["destination_entry_count_after"] == 2
+    assert receipt["destination_entries_lost_count"] == 0
+    # The mutation really is on disk, which is why a refusal would lie here.
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+
+
 def test_replay_pre_commit_allowlisted_merge_failure_still_refuses(
     fixture: Fixture,
     monkeypatch: pytest.MonkeyPatch,

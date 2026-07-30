@@ -23,8 +23,9 @@ destination root would otherwise bootstrap a fake canonical index) unless
 Exit codes: ``0`` success, ``2`` a refusal that provably left the shared index
 uncommitted, ``3`` the merge committed -- or may have committed -- and the run
 could not finish cleanly.  Merge failures are classified by commit state: only a
-reason on :data:`MERGE_PRE_COMMIT_REFUSAL_REASONS` is a refusal, everything else
-(including reasons added in the future) is reported as commit-uncertain.  A ``3``
+typed merge error whose reason is on :data:`MERGE_PRE_COMMIT_REFUSAL_REASONS` is a
+refusal, everything else (reasons added in the future, and exceptions carrying no
+classified reason at all) is reported as commit-uncertain.  A ``3``
 always runs the post-merge evidence chain as far as it can, prints the merge
 summary as far as it is known on stdout, and never claims refusal.
 """
@@ -384,17 +385,18 @@ def replay_state_index_copyback(
                 destination_containment_root=destination,
                 authoritative_run_ids=sorted(resolved_run_ids),
             )
-        except (StateManagerError, ProviderAtomicError) as error:
-            error_reason = str(getattr(error, "reason", "") or "")
-            if error_reason not in MERGE_PRE_COMMIT_REFUSAL_REASONS:
-                # Off the audited pre-commit allowlist: the compare-and-swap may
-                # already have replaced the shared index (a durable-replace or
-                # post-read uncertainty), and an unknown reason proves nothing at
-                # all.  Fail safe as commit-uncertain and take the committed tail
-                # -- read-back, superset guard, receipt -- with the merge evidence
-                # fields left null (#1189 r3 D1).
-                merge_uncertain = (error_reason, str(error))
-            else:
+        except Exception as error:
+            # Deliberately broad: the merge also raises exceptions it does not
+            # classify -- e.g. a bare OSError from provider lock teardown, which
+            # runs *after* the destination compare-and-swap
+            # (`provider_atomic._provider_destination_file_lock:244-257`).  A narrow
+            # typed-only handler let those escape the whole triage (rc 1 traceback,
+            # no receipt, no stdout summary, superset guard never run) while the
+            # index was already committed (#1189 r4 E1).  `Exception`, not
+            # `BaseException`: KeyboardInterrupt/SystemExit still propagate.
+            typed = isinstance(error, StateManagerError | ProviderAtomicError)
+            error_reason = str(getattr(error, "reason", "") or "") if typed else ""
+            if typed and error_reason in MERGE_PRE_COMMIT_REFUSAL_REASONS:
                 # An audited pre-commit raise point: the shared index is unchanged.
                 # Winning entries' checkpoint objects may already be on the shared
                 # root, so the recovery is an idempotent rerun.
@@ -406,6 +408,18 @@ def replay_state_index_copyback(
                         "resolved_run_ids": sorted(resolved_run_ids),
                     },
                 ) from error
+            # Everything else is commit-uncertain: off the audited pre-commit
+            # allowlist the compare-and-swap may already have replaced the shared
+            # index (a durable-replace or post-read uncertainty), and an unknown
+            # reason -- or an exception carrying no reason at all -- proves nothing.
+            # Fail safe and take the committed tail -- read-back, superset guard,
+            # receipt -- with the merge evidence fields left null (#1189 r3 D1, r4
+            # E1).  An unclassified exception gets a synthetic reason naming its
+            # type, so the receipt/stderr never carry a blank verdict.
+            merge_uncertain = (
+                error_reason or f"merge_unexpected_exception:{type(error).__name__}",
+                str(error),
+            )
 
     index_may_be_committed = merge is not None or merge_uncertain is not None
     # Everything below runs after the mutation may already stand, so no failure

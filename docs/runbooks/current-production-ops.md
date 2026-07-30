@@ -1655,7 +1655,11 @@ exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命
   `provider_postread_failed`：CAS 写完后校验读失败；或任何未来新增的未知 reason）。
   **按"已提交"对待**：工具照样跑完提交后证据链（读回 + 超集守卫 + receipt），只是
   merge 返回值不存在，所以 receipt 的 `merge` 与 `checkpoint_*_count` 为 `null`，
-  `merge_commit_state` 为 `uncertain`、`merge_error_reason` 记原始 reason。处置：
+  `merge_commit_state` 为 `uncertain`、`merge_error_reason` 记原始 reason。
+  merge 抛出的是**未分类异常**（不带 reason 的裸异常，如 CAS 之后 provider 锁释放段的
+  `OSError`）时同样归到本 reason，此时 `merge_error_reason` 是合成标识
+  `merge_unexpected_exception:<异常类型>`（如 `merge_unexpected_exception:OSError`），
+  原文在 stderr/receipt 的 `error` 字段。处置：
   先看 stdout 摘要/receipt 的 `destination_entry_count_after` 与
   `destination_entries_lost_count` —— **非 0 就转下面的 lost 分支停手**；为 0 且计数符合
   预期则幂等重跑 enforce 拿一份干净 receipt。

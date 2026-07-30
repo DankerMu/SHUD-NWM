@@ -18,6 +18,8 @@
 
 - [x] 2.7 **r3 修复轮补锁**(cross-review r3,retro-round3 不变量闭环):D1 三态分类——merge 异常按 reason 分流,pre-commit allowlist 之外(`provider_replace_uncertain`/`provider_postread_failed`/未知)→ commit-uncertain rc 3 `merge_commit_uncertain` + 完整 committed 尾段(读回/超集守卫/receipt,merge 字段 null);注入测:post-`os.replace` 父目录 fsync 失败 → rc 3 非 refused + 尾段执行;复合灾难态(vanishing index + fsync 失败)→ rc 3 且携带 lost 判决;`provider_postread_failed` 一例。D2 lost 优先——lost + receipt 双失败 → stderr reason 为 `destination_entries_lost_after_merge`,details 含 receipt 失败原因;复合注入测。runbook exit-2 行"index 未改"限定 allowlist、reason 表补行、receipt 分支加 lost 前置检查。design.md:38 `merge_failed` 措辞同步诚实化。(实测:四文件门 1180 passed = 1174 + 6 新测(replay 文件 15→21);allowlist 39 reason 逐条附 raise 点 file:line,`provider_replace_failed` 核对后纳入、`state_snapshot_index_lock_unavailable` 有疑义排除;红证:分类改回无差别 `merge_failed` → 3 测红 `assert 2 == 3`,优先级改回 receipt 先 → 1 测红;变异体已恢复。)
 
+- [x] 2.8 **r4 修复轮补锁**(cross-review r4 E1,retro-round4):merge handler `except Exception` 拓宽——refusal 分支要求 isinstance 两已知类型**且** reason 在 allowlist,其余(含 untyped 如裸 OSError)落 commit-uncertain,`merge_error_reason` 对 untyped 置合成标识;`Exception` 不含 BaseException。注入测:真实 merge 后抛 OSError(5) → rc 3、status `merge_committed_incomplete`、reason `merge_commit_uncertain`、receipt 在案、超集守卫已跑(`destination_entries_lost_count == 0`)、stdout 非空、无 rc 1。runbook `merge_commit_uncertain` 行补合成 reason 说明。变异红证:except 收回窄元组 → 新测红。(实测:`test_replay_untyped_merge_exception_is_commit_uncertain` 绿,四文件门 1181 passed = 1180 + 1;红证:收回窄元组 → `OSError: [Errno 5]` 裸逃逸红,同批 2 个 rc 2 typed 测试仍绿;已恢复。)
+
 ## 3. 评审
 
 - [x] 3.1 fixture review(只读)→ 修复 → validate。(第 1 轮:15 findings(5 P1/6 P2/4 P3)已全部修入 fixture,validate 通过)

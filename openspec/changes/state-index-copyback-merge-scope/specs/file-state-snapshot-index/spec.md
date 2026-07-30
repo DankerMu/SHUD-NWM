@@ -75,6 +75,11 @@ An operator-invoked replay tool SHALL re-run the state-index copyback for an exp
 - **WHEN** the destination index observed before the merge vanishes or loses entries before the merge commits, so the published index no longer contains every previously observed entry identity
 - **THEN** the enforce run exits non-zero with a distinct post-merge failure reason instead of reporting success
 
+#### Scenario: Untyped merge exceptions are commit-uncertain
+
+- **WHEN** the merge call raises an exception that is not one of the known typed error classes carrying a reason, such as a bare OSError from lock teardown after the destination compare-and-swap
+- **THEN** the tool classifies the outcome as commit-uncertain, runs the post-merge evidence chain, writes the receipt, and exits with the distinct non-refusal reason carrying a synthetic error identifier instead of crashing with an unclassified traceback
+
 #### Scenario: Commit-uncertain merge failures do not claim refusal
 
 - **WHEN** the merge raises an error whose reason is not on the pre-commit allowlist, such as a durable-replace or post-read uncertainty where the destination index may already hold the new content
