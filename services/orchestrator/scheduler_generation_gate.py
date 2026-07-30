@@ -111,6 +111,10 @@ def forecast_warm_start_env_enabled(scheduler: ProductionScheduler) -> bool:
     try:
         return bool(_scheduler.OrchestratorConfig.from_env().require_forecast_warm_start)
     except Exception:
+        # Carries no completeness / qualification / verdict contract: this is the
+        # D8.9 compat toggle only.  ``False`` means "do not take the terminal-skip
+        # shortcut", i.e. §8 gating (and with it the #1164 packaged-IC decision)
+        # still runs — the two-way collapse is fail-CLOSED w.r.t. admission.
         return False
 
 
@@ -175,6 +179,12 @@ def _package_manifest_reader(scheduler: ProductionScheduler) -> Any | None:
         try:
             store = LocalObjectStore(root, _scheduler.os.getenv("OBJECT_STORE_PREFIX") or "")
         except (ObjectStoreError, OSError, TypeError, ValueError):
+            # Two-way, fail-CLOSED: ``None`` (here and for a missing root above)
+            # is mapped by ``packaged_initial_condition_signal`` to
+            # ``PACKAGED_IC_UNREADABLE`` / ``package_manifest_reader_unavailable``,
+            # which blocks the candidate.  It never degrades to "the package
+            # ships no IC", so no qualification contract rides on separating a
+            # bad root from a bad prefix.
             return None
     try:
         scheduler._package_manifest_store_cache = store
@@ -195,8 +205,14 @@ def _canonical_packaged_ic_probe(reader: Any, object_uri: str) -> _generation.Pa
     """
     try:
         if not reader.exists(object_uri):
+            # Confirmed absence — the reader completed and found nothing.
             return _generation.PackagedIcObjectProbe(exists=False)
     except Exception:
+        # THREE-way, not two: this branch is "the existence check could not be
+        # completed", and ``unreadable_detail`` (evaluated before ``exists`` by
+        # ``_classify_packaged_ic_by_object_probe``) keeps it distinct from the
+        # confirmed absence above.  Carries the qualification contract and
+        # honours it.
         return _generation.PackagedIcObjectProbe(
             exists=False,
             unreadable_detail="packaged_initial_condition_object_probe_failed",
@@ -204,8 +220,10 @@ def _canonical_packaged_ic_probe(reader: Any, object_uri: str) -> _generation.Pa
     try:
         content = reader.read_bytes_limited(object_uri, max_bytes=MAX_PACKAGED_IC_PROBE_BYTES)
     except Exception:
-        # Includes the oversize refusal: an IC larger than the cap is unreadable
-        # for qualification purposes, never "the package ships no IC".
+        # THREE-way: ``exists=True`` + ``unreadable_detail`` is neither the
+        # confirmed absence above nor a completed digest.  Includes the oversize
+        # refusal: an IC larger than the cap is unreadable for qualification
+        # purposes, never "the package ships no IC".
         return _generation.PackagedIcObjectProbe(
             exists=True,
             unreadable_detail="packaged_initial_condition_object_probe_failed",
@@ -251,7 +269,9 @@ def packaged_initial_condition_signal(
     except Exception:
         # Bounded reader surface (object store errors, unsafe path, oversize,
         # unsupported reference shape): the manifest is referenced but we cannot
-        # read it, which fails closed rather than degrading to "no IC".
+        # read it, which fails closed rather than degrading to "no IC".  The
+        # "no manifest reference at all" case never reaches here — it returned
+        # ``None`` above — so absence and undecidability stay distinct.
         return _generation.PackagedIcSignal(
             status=_generation.PACKAGED_IC_UNREADABLE,
             detail="package_manifest_read_failed",

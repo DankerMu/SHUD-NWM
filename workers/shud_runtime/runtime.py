@@ -1026,6 +1026,9 @@ class SHUDRuntime:
                 f"{error.message}",
             ) from error
         except (SafeFilesystemError, OSError, ValueError) as error:
+            # Fail-LOUD, no two-way branch: every caught failure is re-raised as
+            # ``PACKAGED_IC_CONSUMPTION_FAILED``, so nothing here can fall
+            # through to the cold-start assignments in ``_stage_initial_state``.
             # ``UnicodeDecodeError`` is a ``ValueError``: a binary packaged IC is a
             # consumption failure, not an internal error.
             raise SHUDRuntimeError(
@@ -1066,6 +1069,14 @@ class SHUDRuntime:
         packaged-IC error code, because for a declared packaged run this clear is
         part of consumption: it is what makes the candidate set identical to the
         current staging.
+
+        Carries the "candidate set == this staging" contract and honours it
+        fail-LOUD: there is no two-way branch here.  ``_clear_staged_initial_states``
+        enumerates via ``_find_regular_files`` (which raises
+        ``WORKSPACE_PATH_UNSAFE`` / ``ARTIFACT_UNSAFE`` rather than returning a
+        short list) and deletes via ``unlink_no_follow``; every failure escapes
+        as a typed error, re-coded here.  A clear that cannot be completed
+        therefore fails the run instead of leaving a stale ``*.cfg.ic`` in scope.
         """
 
         try:
@@ -1101,6 +1112,14 @@ class SHUDRuntime:
         try:
             unlink_no_follow(staged_path, containment_root=input_dir, missing_ok=True)
         except SafeFilesystemError:
+            # Best-effort tidy-up of the source copy, and the ONLY swallowed
+            # failure on this path.  It carries no completeness contract: the
+            # candidate set was already fixed by the pre-staging clear and read
+            # above, ``target`` already holds the verified bytes whose digest is
+            # recorded, SHUD reads only ``<project_name>.cfg.ic``, and the next
+            # preparation re-clears every ``*.cfg.ic`` before staging — so a
+            # surviving source copy can neither be preferred nor silently
+            # consumed later.
             pass
         return target
 

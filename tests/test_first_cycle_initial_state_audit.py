@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -470,6 +471,89 @@ def test_audit_unparseable_earlier_run_manifest_does_not_promote_a_later_cycle(
     assert row["first_run_evidence_complete"] is False
 
 
+@pytest.mark.parametrize(
+    "obstruction",
+    ["symlink", "directory", "unreadable_parent"],
+    ids=["symlinked_manifest", "directory_at_manifest", "eacces_input_dir"],
+)
+def test_audit_undecidable_earlier_run_manifest_stat_does_not_promote_a_later_cycle(
+    tmp_path: Path, obstruction: str
+) -> None:
+    """The stat half of the run-manifest sweep must be three-way, like the parse half.
+
+    The earlier cycle's ``input/manifest.json`` is PRESENT but cannot be
+    stat-ed decidably: a symlink (``stat_no_follow`` refuses by policy), a
+    directory at the manifest path (stat succeeds, not a regular file), or an
+    ``input/`` directory the process cannot open (EACCES — the local stand-in for
+    NFS ``EIO`` / permission drift on ``/ghdc/data/nwm``).  A two-way
+    ``_is_regular_file`` guard folds all three into the same ``False`` as a
+    genuinely manifest-less run directory, silently skips to the LATER cycle and
+    still reports ``first_run_evidence_complete=true`` — i.e. a confident
+    ``consumed_package_ic`` for a basin whose real first cycle was never read.
+    That is exactly the fail-open shape #1164 exists to prevent.
+    """
+    if obstruction == "unreadable_parent" and os.geteuid() == 0:
+        pytest.skip("root bypasses directory permissions, so EACCES cannot be provoked")
+
+    fixture = _Fixture(tmp_path)
+    ic_sha256 = _sha256(b"calibrated-ic")
+    fixture.add_model("undecidable_first_run", _package_manifest("undecidable_first_run", ic_sha256=ic_sha256))
+    earlier_input = (
+        fixture.object_store_root
+        / "runs"
+        / "fcst_gfs_2026070500_undecidable_first_run"
+        / "input"
+    )
+    earlier_input.mkdir(parents=True, exist_ok=True)
+    manifest_path = earlier_input / "manifest.json"
+    if obstruction == "symlink":
+        real = fixture.object_store_root / "elsewhere_manifest.json"
+        _write_json(
+            real,
+            _run_manifest(
+                run_id="fcst_gfs_2026070500_undecidable_first_run",
+                model_id="undecidable_first_run",
+                source_id="GFS",
+                cycle_time="2026-07-05T00:00:00Z",
+                quality="cold_start_no_state",
+                init_mode=1,
+            ),
+        )
+        manifest_path.symlink_to(real)
+    elif obstruction == "directory":
+        manifest_path.mkdir()
+    else:
+        manifest_path.write_text("{}", encoding="utf-8")
+        earlier_input.chmod(0o000)
+
+    # The later cycle carries a clean consumption record; without a three-way
+    # stat it would be promoted to "first" and the row would read
+    # ``consumed_package_ic``.
+    fixture.add_object_store_run(
+        _run_manifest(
+            run_id="fcst_gfs_2026070512_undecidable_first_run",
+            model_id="undecidable_first_run",
+            source_id="GFS",
+            cycle_time="2026-07-05T12:00:00Z",
+            quality="packaged_calibrated_state",
+            init_mode=3,
+            packaged_ic_checksum=ic_sha256,
+        )
+    )
+    fixture.publish_registry()
+
+    try:
+        assert audit.main(fixture.argv("--sources", "gfs")) == 0
+        row = _row(fixture.receipt(), "undecidable_first_run", "gfs")
+    finally:
+        if obstruction == "unreadable_parent":
+            # Restore before pytest's tmp_path cleanup walks the tree.
+            earlier_input.chmod(0o700)
+
+    assert row["first_run_evidence_complete"] is False
+    assert row["verdict"] == "undetermined"
+
+
 def test_audit_run_directory_without_a_manifest_keeps_the_sweep_complete(tmp_path: Path) -> None:
     """The absence side of the same three-way: a manifest-less run dir is decidable.
 
@@ -694,6 +778,7 @@ def test_audit_verdict_table(
             ic_qualified=ic_qualified,
             first_run_quality=quality,
             first_run_init_mode=init_mode,
+            first_run_evidence_complete=True,
         )
         == expected
     )
@@ -716,3 +801,18 @@ def test_audit_verdict_table_refuses_an_incomplete_evidence_sweep(
         )
         == "undetermined"
     )
+
+
+def test_audit_verdict_table_requires_an_explicit_completeness_claim() -> None:
+    """No default: a caller must STATE whether its sweep was complete.
+
+    A ``first_run_evidence_complete: bool = True`` default lets a future caller
+    silently claim a complete sweep it never performed, which is the same
+    collapse the flag exists to prevent.
+    """
+    with pytest.raises(TypeError):
+        audit.classify_verdict(  # type: ignore[call-arg]
+            ic_qualified=True,
+            first_run_quality="cold_start_no_state",
+            first_run_init_mode=1,
+        )

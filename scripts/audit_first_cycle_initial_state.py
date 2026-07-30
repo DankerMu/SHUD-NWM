@@ -155,9 +155,13 @@ def classify_verdict(
     ic_qualified: bool | None,
     first_run_quality: str | None,
     first_run_init_mode: int | None,
-    first_run_evidence_complete: bool = True,
+    first_run_evidence_complete: bool,
 ) -> str:
     """Return the verdict for one model x source row.
+
+    ``first_run_evidence_complete`` is deliberately REQUIRED (no ``True``
+    default): it is a completeness contract, and a default would let a future
+    caller omit it and silently claim a complete sweep it never performed.
 
     Total and order-sensitive:
 
@@ -202,6 +206,22 @@ def _read_json_no_follow(path: Path, *, max_bytes: int, containment_root: Path) 
 
 
 def _is_regular_file(path: Path, *, containment_root: Path) -> bool:
+    """TWO-WAY predicate: absent, unsafe, and unreadable all collapse to ``False``.
+
+    Deliberately kept two-way and deliberately NOT used on any call site that
+    carries a completeness / qualification / verdict contract.  It is safe only
+    where a ``False`` return fails CLOSED — i.e. where the caller refuses
+    (``AuditBlocked``) or degrades to "cannot tell" (``ic_qualified=None`` →
+    ``undetermined``).  Its two surviving call sites are exactly those:
+
+    - :func:`load_registered_models` — ``False`` raises ``AuditBlocked``;
+    - :func:`packaged_ic_qualification` — ``False`` yields the ``unknown`` view
+      (``ic_status=unreadable``, ``ic_qualified=None``) → ``undetermined``.
+
+    Every site where the collapse would be fail-OPEN (the canonical-IC object
+    probe, the run-manifest sweep) inlines a THREE-way stat instead; see
+    :func:`_canonical_ic_object_probe` and :func:`earliest_run_evidence`.
+    """
     try:
         return stat.S_ISREG(stat_no_follow(path, containment_root=containment_root).st_mode)
     except (FileNotFoundError, SafeFilesystemError, OSError):
@@ -238,6 +258,10 @@ def _safe_relative_key(key: str) -> Path | None:
 
 def load_registered_models(registry_manifest: Path) -> list[dict[str, Any]]:
     """Return the registry manifest's model rows (read-only, bounded)."""
+    # Two-way guard, fail-CLOSED: absent / symlinked / unreadable registry
+    # manifests all refuse the whole audit with ``AuditBlocked``.  No receipt row
+    # is produced from a collapsed outcome, so no completeness or verdict
+    # contract rides on telling the three cases apart here.
     if not _is_regular_file(registry_manifest, containment_root=registry_manifest.parent):
         raise AuditBlocked(f"registry manifest is not a readable regular file: {registry_manifest}")
     try:
@@ -249,6 +273,8 @@ def load_registered_models(registry_manifest: Path) -> list[dict[str, Any]]:
     except AuditBlocked:
         raise
     except (OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        # Fail-CLOSED: every read/parse failure refuses the audit rather than
+        # producing rows.  No contract rides on separating them.
         raise AuditBlocked(f"registry manifest is unreadable: {error}") from error
     if not isinstance(payload, Mapping):
         raise AuditBlocked("registry manifest is not a JSON object")
@@ -398,6 +424,12 @@ def packaged_ic_qualification(
     if key is None:
         return {**unknown, "detail": "package manifest reference escapes the object-store root"}
     path = object_store_root / key
+    # Two-way guard, fail-CLOSED: absent / symlinked / unreadable manifests all
+    # land on the ``unknown`` view (``ic_status=unreadable``,
+    # ``ic_qualified=None``), which the verdict table refuses to collapse into
+    # either the defect or a clean cold start — the row is ``undetermined``
+    # either way.  Nothing downstream distinguishes the three, so the collapse
+    # cannot promote an undecidable check to a negative result.
     if not _is_regular_file(path, containment_root=object_store_root):
         return {**unknown, "detail": "package manifest object is missing or not a regular file"}
     try:
@@ -412,6 +444,7 @@ def packaged_ic_qualification(
         json.JSONDecodeError,
         RecursionError,
     ):
+        # Same fail-CLOSED target as the guard above: unreadable, never "no IC".
         return {**unknown, "detail": "package manifest could not be read or parsed"}
     signal = classify_packaged_initial_condition(
         payload,
@@ -546,7 +579,36 @@ def earliest_run_evidence(
     for cycle, lane, run_id, containment_root in sorted(candidates):
         runs_root = containment_root / "runs"
         manifest_path = runs_root / run_id / "input" / "manifest.json"
-        if not _is_regular_file(manifest_path, containment_root=containment_root):
+        # Three-way, mirroring :func:`_canonical_ic_object_probe`.  The two-way
+        # :func:`_is_regular_file` predicate folds an UNDECIDABLE stat (a
+        # symlinked manifest or an EACCES ``input/`` — ``SafeFilesystemError`` —
+        # or an NFS ``EIO`` — ``OSError``) into the same ``False`` as a genuinely
+        # absent manifest.  On THIS call site that collapse is fail-OPEN for the
+        # completeness contract: an earlier cycle whose manifest could not be
+        # inspected would be skipped silently, the NEXT cycle promoted to
+        # "first", and ``first_run_evidence_complete`` would stay ``True`` — a
+        # confident ``consumed_package_ic`` / ``cold_start_no_ic`` about a cycle
+        # that is not provably the earliest.
+        #
+        # The stat guard itself must STAY (rather than be dropped in favour of
+        # letting the read fail): ``open_file_no_follow`` raises
+        # ``FileNotFoundError`` for a genuinely missing manifest, which the parse
+        # half's ``except`` below would swallow into ``evidence_complete=False``
+        # and degrade every ordinary manifest-less run directory.
+        try:
+            manifest_stat = stat_no_follow(manifest_path, containment_root=containment_root)
+        except FileNotFoundError:
+            # Confirmed absence: this run directory (or its ``input/``) never got
+            # a manifest.  Decidable, so the sweep stays complete.
+            continue
+        except (SafeFilesystemError, OSError):
+            # The manifest may or may not be there; this cycle is undecidable.
+            evidence_complete = False
+            continue
+        if not stat.S_ISREG(manifest_stat.st_mode):
+            # Something IS at the manifest path (a directory, a device) and it is
+            # not readable run evidence — undecidable, not absent.
+            evidence_complete = False
             continue
         try:
             payload = _read_json_no_follow(
@@ -790,6 +852,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         write_receipt(receipt, receipt_path)
     except (OSError, SafeFilesystemError) as error:
+        # Fail-LOUD: no receipt was produced, so no row carries a collapsed
+        # outcome; the CLI reports blocked and exits non-zero.
         print(
             json.dumps({"status": "blocked", "reason": "RECEIPT_WRITE_FAILED", "message": str(error)[:512]}),
             file=sys.stderr,
@@ -807,7 +871,9 @@ def _emit_blocked(reason: str, message: str, generated_at: datetime, receipt_pat
         write_receipt(build_blocked_receipt(reason, message, generated_at), receipt_path)
     except (AuditBlocked, OSError, SafeFilesystemError, ValueError):
         # A blocked run must not mask its own refusal behind a receipt-write
-        # failure; the stderr line above is the authoritative signal.
+        # failure; the stderr line above is the authoritative signal.  Carries no
+        # completeness contract: the run has ALREADY refused, and the caller
+        # returns non-zero regardless of whether the blocked receipt landed.
         return
 
 
