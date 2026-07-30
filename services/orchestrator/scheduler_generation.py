@@ -84,6 +84,14 @@ from packages.common.state_lineage import PACKAGED_IC_QUALITY
 # (``packages.common.state_cli`` → ``state_manager.save_state_snapshot``).
 from packages.common.state_manager import cycle_id_for, state_snapshot_id
 
+#: Sentinel that separates "declaration not yet loaded" from "loaded and
+#: returned ``None``" (env unset — no declaration configured).  Lives on this
+#: leaf module (no orchestrator imports) so that ``scheduler_generation_gate``
+#: and ``scheduler_core`` can share one identity without a circular-import
+#: window: the gate imports ``scheduler`` before its own constants are bound,
+#: so any constant the cycle reads back must be defined below the cycle.
+CUTOVER_DECLARATION_UNLOADED: object = object()
+
 __all__ = (
     "CUTOVER_DECLARATION_ENV",
     "CUTOVER_DECLARATION_SCHEMA_VERSION",

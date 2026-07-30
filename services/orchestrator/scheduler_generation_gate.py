@@ -43,10 +43,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from services.orchestrator.scheduler_core import ProductionScheduler
 
 #: Sentinel that separates "declaration not yet loaded" from "loaded and
-#: returned ``None``" (env unset — no declaration configured).  Kept as a
-#: module-level object so both this module and ``scheduler_core.py`` reference
-#: the same identity when checking cache freshness.
-CUTOVER_DECLARATION_UNLOADED: object = object()
+#: returned ``None``" (env unset — no declaration configured).  Defined on the
+#: leaf module ``scheduler_generation`` and re-exported here so this module,
+#: ``scheduler_core`` and the tests keep one identity; ``scheduler_core`` must
+#: read it from the leaf, because importing this module first leaves it only
+#: partially initialized while the ``scheduler`` import cycle runs.
+CUTOVER_DECLARATION_UNLOADED: object = _generation.CUTOVER_DECLARATION_UNLOADED
 
 #: Bounded read guard for a model package manifest (#1164 D1).  Bound to
 #: ``scheduler_file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES`` (the cap the
