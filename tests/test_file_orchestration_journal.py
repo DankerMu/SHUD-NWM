@@ -7122,3 +7122,44 @@ def test_cohort_init_state_identity_is_frozen_and_out_of_the_cycle_scope_project
     assert terminal_row["init_state_identities"] == [
         {**_cohort_init_state_identity(0), "init_state_uri": "[object-uri]"}
     ]
+
+
+def test_hydro_run_row_records_initial_state_quality(tmp_path: Path) -> None:
+    """#1164: the journal row carries the initial-state quality face.
+
+    Absence of ``init_state_id`` no longer implies a cold start — a packaged-IC
+    bootstrap has no state id either — so the decision has to be readable from
+    the row itself.
+    """
+    cycle_time = _dt("2026-07-05T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+
+    run = repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026070500_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026070500_model_a"},
+            "initial_state": {
+                "state_id": None,
+                "ic_file_uri": None,
+                "quality": "packaged_calibrated_state",
+                "packaged_ic_checksum": "b" * 64,
+            },
+            "outputs": {
+                "run_manifest_uri": "s3://nhms/manifests/run.json",
+                "output_uri": "s3://nhms/runs/output",
+                "log_uri": "s3://nhms/logs/run.log",
+            },
+        },
+    )
+
+    assert run["init_state_id"] is None
+    assert run["quality"] == "packaged_calibrated_state"

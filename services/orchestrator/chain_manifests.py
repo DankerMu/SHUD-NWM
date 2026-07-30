@@ -55,6 +55,7 @@ from services.orchestrator.production_contract import (
     PRODUCTION_CONTRACT_SCHEMA_VERSION,
     production_stage_for,
 )
+from services.orchestrator.scheduler_generation import PACKAGED_IC_QUALITY
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 __all__ = (
@@ -457,7 +458,24 @@ def build_forecast_runtime_manifest(
         "quality_states": dict(assembly.quality_states),
         "residual_blockers": [dict(item) for item in assembly.residual_blockers],
     }
-    manifest["runtime"]["init_mode"] = 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1
+    # #1164: a packaged-IC bootstrap basin is decided HERE, last, so the verdict
+    # cannot be clobbered by whatever ``_apply_initial_state_selection_to_basin``
+    # wrote earlier on either warm-start mode's path.  ``state_id`` stays None so
+    # the cohort identity map keeps skipping it (empty ids are not booked).
+    packaged_ic_selected = bool(basin.get("packaged_ic_selected"))
+    if packaged_ic_selected:
+        manifest["initial_state"] = {
+            "state_id": None,
+            "ic_file_uri": None,
+            "valid_time": None,
+            "checksum": None,
+            "quality": PACKAGED_IC_QUALITY,
+            "lineage": {},
+            "packaged_ic_checksum": basin.get("packaged_ic_checksum") or None,
+        }
+    manifest["runtime"]["init_mode"] = (
+        3 if basin.get("init_state_id") or basin.get("init_state_uri") or packaged_ic_selected else 1
+    )
     if orchestrator.config.strict_forecast_warm_start_required_for(context.cycle_time) and (
         basin.get("init_state_id") or basin.get("init_state_uri")
     ):

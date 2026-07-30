@@ -1209,6 +1209,11 @@ class FileOrchestrationJournalRepository:
             "basin_version_id": str(context.basin_version_id),
             "forcing_version_id": str(context.forcing_version_id),
             "init_state_id": getattr(context, "init_state_id", None) or init_state.get("state_id"),
+            # #1164: the initial-state decision must be auditable from the journal
+            # row itself, not only from the run manifest object.  A packaged-IC
+            # bootstrap has no ``init_state_id`` at all, so absence of an id is no
+            # longer sufficient to conclude "cold start".
+            "quality": init_state.get("quality"),
             "source_id": _normalize_file_source_id(context.source_id, field="source_id"),
             "cycle_time": _format_utc(context.cycle_time),
             "start_time": _format_utc(context.start_time),
@@ -1240,6 +1245,9 @@ class FileOrchestrationJournalRepository:
             "basin_version_id": str(model["basin_version_id"]),
             "forcing_version_id": forcing.get("forcing_version_id"),
             "init_state_id": initial_state.get("state_id") or basin.get("init_state_id"),
+            # #1164: see ``create_hydro_run`` — the quality face travels with the
+            # row so a packaged-IC bootstrap is distinguishable from a cold start.
+            "quality": initial_state.get("quality") or basin.get("init_state_quality"),
             "source_id": _normalize_file_source_id(
                 manifest.get("source_id") or basin.get("source_id"),
                 field="source_id",
