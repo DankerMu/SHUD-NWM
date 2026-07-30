@@ -112,9 +112,16 @@ def forecast_warm_start_env_enabled(scheduler: ProductionScheduler) -> bool:
         return bool(_scheduler.OrchestratorConfig.from_env().require_forecast_warm_start)
     except Exception:
         # Carries no completeness / qualification / verdict contract: this is the
-        # D8.9 compat toggle only.  ``False`` means "do not take the terminal-skip
-        # shortcut", i.e. §8 gating (and with it the #1164 packaged-IC decision)
-        # still runs — the two-way collapse is fail-CLOSED w.r.t. admission.
+        # D8.9 compat toggle only.  ``False`` here does ENABLE the terminal-skip
+        # shortcut at the call site (``not env_enabled and already_complete``), so
+        # the two-way collapse is not fail-closed by itself; it is acceptable
+        # because the shortcut also requires ``candidate_pipeline_already_complete``
+        # to be affirmatively True — that probe IS fail-CLOSED (missing provider or
+        # probe error returns False), so the skip demands a positive journal read of
+        # a durably-complete pipeline.  For such a cycle admitting or blocking a
+        # cutover is equally a no-op, so no admission hole opens; the real cost is
+        # the loss of §8 (and with it #1164 packaged-IC) auditability evidence on
+        # that pass.
         return False
 
 
