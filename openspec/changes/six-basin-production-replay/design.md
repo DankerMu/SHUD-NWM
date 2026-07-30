@@ -108,7 +108,7 @@ D1 覆写发生在终态分支(:413-502),但候选随后仍经 canonical-readine
   6. 每 cycle 结束后原子重写替换 receipt(未完成时 `outcome=in_progress`),中途崩溃保留已完成行(round-1 B-P1-4)。
 - 串行序:先 IFS 全序列后 GFS(或反之,单序执行,不并行两源——控变量、控 Slurm 负载、失败面清晰)。
 - 全局 receipt `nhms.production_replay_replacement.v1`:rows[] 66×6 行 + per-source reset receipt 引用 + 中断/恢复记录(驱动器可从 receipt 断点续跑:已完成 cycle 经完成校验后跳过——校验=新 state 在场且 checksum 与 receipt 一致,非盲跳)。
-- **v5 续跑与 receipt 硬化(round-2 B2-1/B2-2/B2-4)**:(a) 续跑时任何 (cycle, model) 在 resume receipt 中已有 `prior` 的行(**不论 status**,含 halted)一律沿用该 prior(标 `prior_source=resumed_receipt`),仅重采 new 半——旧 run 树无任何归档,从已回放的树重采即永久销毁唯一 pre-image,键一致断言随之退化为回放对回放;(b) `--receipt-path` 与 `--resume-from` 解析为同一路径时拒跑(镜像解压工具的 fresh-path 规则);(c) 首次提交前先落 `in_progress` receipt 作写权限前置——不可写 → `receipt_path_unwritable` refused(exit 2,零提交);中途写失败 → typed halt 非零退出,绝不静默继续;(d) reset receipt 装载时校验其 `scopes[]` 覆盖本次 (source, 全部 model),不覆盖 → `reset_receipt_scope_mismatch` refuse——否则 `prior.state` 全空且收敛 oracle 退化为"有条目即算替换"。
+- **v5 续跑与 receipt 硬化(round-2 B2-1/B2-2/B2-4)**:(a) 续跑时任何 (cycle, model) 在 resume receipt 中已有 `prior` 的行(**不论 status**,含 halted)一律沿用该 prior(标 `prior_source=resumed_receipt`),仅重采 new 半——旧 run 树无任何归档,从已回放的树重采即永久销毁唯一 pre-image,键一致断言随之退化为回放对回放;(b) `--receipt-path` 与 `--resume-from` 解析为同一路径时拒跑(typed `receipt_path_is_resume_source`,镜像解压工具的 fresh-path 规则);(c) 首次提交前先落 `in_progress` receipt 作写权限前置——不可写 → `receipt_path_unwritable` refused(exit 2,零提交);中途写失败 → typed halt 非零退出,绝不静默继续;(d) reset receipt 装载时校验其 `scopes[]` 覆盖本次 (source, 全部 model),不覆盖 → `reset_receipt_scope_mismatch` refuse——否则 `prior.state` 全空且收敛 oracle 退化为"有条目即算替换"。
 
 ## D6 node-27 刷新、验证与 timer 重启
 
