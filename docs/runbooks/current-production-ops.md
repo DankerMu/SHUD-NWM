@@ -1614,13 +1614,47 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
   "根写错 / NFS 未挂的桩 mountpoint" —— 否则 merge 会走 bootstrap 分支新建一份只含本次
   entry 的假 canonical index 并出绿 receipt。只有确认是真正的首次 copyback 才加
   `--allow-bootstrap` 放行 0-entry 开局。dry-run 不受该守卫限制（照常预览，before=0）。
+- `--enforce` 的后置守卫：merge 提交后重读 destination index，断言其 entry 身份集
+  **涵盖**前置守卫读到的全部 destination entry 身份。merge 只增不减，所以该断言零误报；
+  比"after ≥ before"计数比较更严（等计数收缩也会被抓）。违反 → exit 3、reason
+  `destination_entries_lost_after_merge`（见下面的退出码表）。
 - receipt 落在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`（0700 目录、0600 文件，
   含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced、
   `destination_index_existed`/`allow_bootstrap`；enforce 模式未设该 env 直接拒绝执行。
-- merge 成功但 receipt 写不下去：exit 3、reason `receipt_write_failed_after_merge`
-  （status **不是** refused），merge 摘要打在 stdout —— index 变更已提交，先留存那份 stdout
-  摘要作 4.1 证据，修好 receipt 目录后重跑 enforce（幂等）即可补上 receipt。
 - 工具只碰 state-index：不写 journal、不动 registry / canonical-readiness、不改 pipeline 行。
+
+退出码判读（exit 2 与 exit 3 的区别是"index 有没有被改"，别混着看）：
+
+| exit | stderr `status` | 含义 | 处置 |
+|---|---|---|---|
+| 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
+| 2 | `refused` | merge 提交**之前**判定的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`、`merge_failed` 等）。shared index **未改**；`merge_failed` 时 index 仍未提交，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 3 | `merge_committed_incomplete` | merge **已提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
+
+exit 3 的四个 reason（逐字与代码一致）：
+
+- `post_merge_readback_failed`：merge 已提交，但提交后重读 destination index 失败
+  （NFS EIO/ESTALE、并发 preimage 变化、字节损坏）。receipt **照样写**，只是
+  `destination_entry_count_after` 为 `null` 且 `post_merge_readback_reason` 记下原因。
+  处置：手工数一遍 shared index 的 entry 数核对 stdout 摘要的
+  `merge.published_entry_count`，再重跑 enforce（幂等）拿一份完整 receipt。
+- `destination_entries_lost_after_merge`：提交后读回的 entry 身份集**没有涵盖**
+  enforce 前置守卫读到的全部 destination entry —— 前置守卫在锁外读、merge 在锁内重读，
+  这个窗口里 index 被带外删除 / NFS 掉挂，会让 merge 走 bootstrap 分支把 canonical index
+  削成只含本次 entry（#1189 的 1645→36 灾难态）。**这是数据丢失告警，不是重跑就好**：
+  立刻停手，别再 enforce，先确认 `/ghdc/data/nwm` 挂载状态，再从 private index
+  （`OBJECT_STORE_ROOT` 下那份，永不剪枝）重建 shared index。receipt 里
+  `destination_entries_lost_count` 是丢失的身份数，stderr 的 `lost_entry_identities`
+  给前 20 个身份元组。
+- `receipt_write_failed_after_merge`：index 变更已提交但 receipt 写不下去，
+  `receipt_failure_reason` 是底层原因。处置：留存 stdout 摘要作证据，修好 receipt
+  目录后重跑 enforce（幂等）补上 receipt。
+- `post_merge_unexpected_error`：兜底——merge 已提交、尾段抛了上面三类之外的异常
+  （`error_type`/`error` 记下原文）。当 index 已变更处理：先核对 shared index entry 数，
+  再重跑 enforce。
+
+**exit 3 一律不是 refused**：看到 `status` 是 `merge_committed_incomplete` 就说明 shared
+index 可能已被改，不能按"什么都没发生"处理。
 
 本案处置记录（#1189，2026-07-20 00Z 链停摆）：node-27 product-archive mover 以
 `cutoff=2026-07-06T00:00:00Z`、`minimum_age_days=14` 归档了 shared root 上 574 个旧 state

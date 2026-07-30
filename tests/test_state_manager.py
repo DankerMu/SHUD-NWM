@@ -2776,6 +2776,78 @@ def test_state_index_copyback_merge_fails_closed_when_source_object_changes_afte
     assert not (shared_root / state_key).exists()
 
 
+def test_state_index_copyback_merge_fails_closed_when_destination_write_diverges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The post-write read-back inside _copyback_state_checkpoint is the only guard
+    # left against the shared root ending up with bytes other than the ones just
+    # verified against the source checksum (a lying or torn write on NFS).  Drive
+    # the destination write to land different bytes so that read-back -- not the
+    # source-side checksum guard, which passes here -- is what has to fail closed.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/readback/state.cfg.ic"
+    source_content = _valid_ic_bytes(b"source-truth")
+    landed_content = _valid_ic_bytes(b"landed-other")
+    assert landed_content != source_content
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(
+        state_key, source_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="readback-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=source_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    destination_before = destination_index.read_bytes()
+    shared_object = shared_root / state_key
+    real_write = state_manager_module.atomic_write_bytes_no_follow
+
+    def diverging_write(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path) == shared_object:
+            return real_write(path, landed_content, **kwargs)
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "atomic_write_bytes_no_follow", diverging_write)
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_checksum_mismatch"
+    # The write did land -- the read-back is what caught it -- and the index was
+    # never published against the diverged object.
+    assert shared_object.read_bytes() == landed_content
+    assert destination_index.read_bytes() == destination_before
+
+
 def test_state_index_copyback_merge_still_fails_closed_on_missing_source_object(
     tmp_path: Path,
 ) -> None:

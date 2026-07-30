@@ -35,6 +35,8 @@
 - **dry-run 机制**(F6):默认 dry-run;dry-run **不调用** merge(merge 无 dry-run 形参且在锁内无条件 publish)——只读加载两份 index(`read_provider_snapshot` 只读),做集合预览:解析出的 run_ids、source 中命中的 entry、其中 destination 缺失的 entry 数;receipt 标注 `mode=dry_run` 且为**advisory preview**(不模拟 merge 冲突语义)。语义口径:"index 内容不变 + 无对象拷贝"(锁文件/目录确保类副作用不在禁止面)。`--enforce` 才调用真实 merge(同一代码路径)。
 - **enforce 前置守卫:destination index 必须已存在**(cross-review B1):派生的 destination index 文件缺失时,enforce **必须在调用 merge 之前非零退出**(结构化原因),不写任何 index/对象——否则错根(手误父目录、NFS 未挂的桩 mountpoint)会让 merge 的 bootstrap 分支(`ProviderPreimage(exists=False)`)静默新建一份只含本次 entry 的假 canonical index 并出绿 receipt,恰好骗过 tasks 4.1 的 +36 验收口径。显式 `--allow-bootstrap` 旗标才放行 0-entry 开局(merge 层的 bootstrap 能力**不动**——生产首次 copyback 依赖它;守卫只在工具层)。dry-run 对缺失 destination 照常预览(报 before=0)。
 - **merge 后 receipt 写失败的报告语义**(cross-review B2):receipt root 校验在 merge 前(已实现);若 merge 成功后 receipt 写失败,**不得**以 `refused` 语义报告(mutation 已提交)——须用独立原因(如 `receipt_write_failed_after_merge`)非零退出,并把 merge 摘要打到 stdout(operator 仍拿到 4.1 证据;幂等重跑可补 receipt)。docstring 的 "never leaves a partial index write" 表述同步修正。
+- **post-merge 尾段统一 committed 语义**(cross-review r2 C1,B2 泛化):`refused`(rc 2)语义严格限定在 **merge 被调用之前**判定的拒绝。merge 调用之后的**任何**失败——destination 读回失败(NFS EIO/ESTALE/并发 preimage 变化/malformed)、receipt 组装/写入失败——一律走 post-merge 失败通道(rc 3,独立原因,如 `post_merge_readback_failed`),merge 摘要(已知部分)打 stdout;读回失败时容忍降级(`destination_entry_count_after: null` + 错误原因)优先于丢 receipt。`merge_failed`(merge 本身抛错)发生在调用之后、可能已拷对象但 index 未提交,docstring 不得再宣称 "nothing has been published yet"——限定为 "index 未提交,对象可能已拷,幂等重跑安全"。
+- **enforce 后置守卫:发布集必须 ⊇ 守卫读到的 destination entry 集**(cross-review r2 C4):前置守卫在锁外读 destination,merge 在锁内重读——窗口内 index 消失(NFS mount 掉/带外删除)会让 merge 走 bootstrap 分支(`ProviderPreimage(exists=False)` CAS 对空路径成功),rc 0 绿 receipt 掩盖 canonical index 灭失(生产量级 1645→36,must-preserve #9 的灾难态)。修复:enforce 在 merge 后断言 post-merge 读回的 entry 集(identity key)**包含**前置守卫读到的全部 destination entry key;违反 → post-merge 失败通道(rc 3,原因如 `destination_entries_lost_after_merge`)。union 语义(merge 只增不减、无剪枝路径)+ identity/state-id 唯一性校验保证该断言零误报;纯 `after >= before` 计数比较不够(等计数收缩仍漏)。merge 层不加 `require_existing_destination` 参数(超范围,生产首次 copyback 依赖 bootstrap)。
 - **receipt**(F7):落盘根由 env `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT` 指定(enforce 模式必需;目录 0700,沿用 refresh receipt 纪律),文件含 `schema_version` 常量、mode、解析 run_ids、entry 前后计数、copied/reused/replaced、时间戳。
 - **执行身份**(F11):必须以 provider 属主(node-22 上为 `frd_muziyao`)执行——provider 锁要求锁父目录 `st_uid == geteuid()`、CAS 替换要求 preimage uid 匹配(`provider_atomic.py:209-210/:297-298`),其他身份会以不透明 fail-closed 失败。写入 runbook。
 - 边界:仅 state-index;不触 journal、不触 registry/canonical-readiness、不改任何 pipeline 行。
@@ -67,6 +69,7 @@
 | destination index 损坏(非 JSON/非 object) | 任意 | fail-closed(不变) |
 | 任意 | source entry 在冲突中**败北**(destination created_at 更晚) | 发布 destination entry;**败北 source entry 的对象不拷**(F2 新锁) |
 | **已归档(缺)** | source entry 与 destination 既有 entry **字节相同** | 发布不变;**对象不重拷(不复活,A2 新锁)**;计数零拷贝 |
+| **在,但字节与 entry checksum 分叉**(带外改写/位腐) | source entry 与 destination 既有 entry **字节相同** | **merge 不自愈**(0/0/0 no-op,r2 C3 裁定:master 上该场景本就 fail-closed 不自愈,对象生命周期归 mover 契约);消费侧 warm start 经 `_entry_with_verified_object` fail-closed(`object_unavailable`),恢复=operator 手工从 private reference root 复制 |
 
 ## Evidence mapping
 

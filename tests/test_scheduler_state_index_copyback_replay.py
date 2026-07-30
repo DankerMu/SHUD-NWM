@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_state_index_copyback_replay as replay
 
@@ -232,6 +233,96 @@ def test_replay_receipt_write_failure_after_merge_reports_committed_mutation(
     assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
     assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
     assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_readback_failure_after_merge_keeps_receipt_and_reports_committed(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The post-merge read-back can fail on its own (NFS EIO/ESTALE, a concurrent
+    # preimage change): the index mutation is already committed, so this must not
+    # be reported as a refusal and the receipt must survive with a null after
+    # count rather than being dropped.
+    _apply_env(monkeypatch, fixture)
+    real_read = replay.read_provider_snapshot
+    destination_reads = 0
+
+    def flaky_read(path: Path, **kwargs: Any) -> Any:
+        nonlocal destination_reads
+        if Path(path) == fixture.destination_index:
+            destination_reads += 1
+            # 1 = the pre-merge guard read, 2 = the post-merge read-back.
+            if destination_reads == 2:
+                raise ProviderAtomicError("provider_preimage_changed", phase="precommit")
+        return real_read(path, **kwargs)
+
+    monkeypatch.setattr(replay, "read_provider_snapshot", flaky_read)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "post_merge_readback_failed"
+    assert error["status"] != "refused"
+    assert error["readback_failure_reason"] == "index_unreadable"
+    assert summary["mode"] == "enforce"
+    assert summary["destination_entry_count_before"] == 1
+    assert summary["destination_entry_count_after"] is None
+    assert summary["merge"]["published_entry_count"] == 2
+    assert summary["checkpoint_copied_count"] == 1
+    # Keeping the receipt beats keeping the after count: it is written with the
+    # degraded fields, and the index mutation stands.
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["destination_entry_count_after"] is None
+    assert receipt["post_merge_readback_reason"] == "index_unreadable"
+    assert receipt["destination_entries_lost_count"] is None
+    assert receipt["merge"]["published_entry_count"] == 2
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
+
+
+def test_replay_reports_destination_entries_lost_across_the_merge(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The pre-merge guard reads the destination outside the provider lock.  If the
+    # index disappears in that window (NFS mount drop, out-of-band delete) the
+    # merge's bootstrap branch republishes only this replay's entries: 1645 -> 36
+    # in production.  That must never surface as a green receipt.
+    _apply_env(monkeypatch, fixture)
+    real_merge = replay.merge_state_snapshot_index_copyback
+
+    def vanishing_merge(**kwargs: Any) -> Any:
+        fixture.destination_index.unlink()
+        return real_merge(**kwargs)
+
+    monkeypatch.setattr(replay, "merge_state_snapshot_index_copyback", vanishing_merge)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["reason"] == "destination_entries_lost_after_merge"
+    assert error["status"] != "refused"
+    assert error["lost_entry_count"] == 1
+    assert error["destination_entry_count_before"] == 1
+    assert error["destination_entry_count_after"] == 1
+    # An equal-count contraction is exactly the case a `after >= before` count
+    # comparison would wave through, so the identity set is what is compared.
+    assert summary["destination_entry_count_before"] == 1
+    assert summary["destination_entry_count_after"] == 1
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["destination_entries_lost_count"] == 1
+    assert receipt["mode"] == "enforce"
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["fresh-state"]
 
 
 def test_replay_run_ids_selection_requires_source_index_entries(

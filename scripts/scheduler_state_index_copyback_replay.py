@@ -19,6 +19,12 @@ writes a receipt under ``NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT``; it
 refuses to run when the derived destination index does not exist (a wrong
 destination root would otherwise bootstrap a fake canonical index) unless
 ``--allow-bootstrap`` is passed.
+
+Exit codes: ``0`` success, ``2`` refusal decided before the merge commits
+(nothing published), ``3`` the merge committed but the run could not finish
+cleanly -- a failed destination read-back, destination entries lost across the
+merge, or an unwritable receipt.  A ``3`` always prints the merge summary as far
+as it is known on stdout and never claims refusal.
 """
 
 from __future__ import annotations
@@ -45,6 +51,11 @@ from packages.common.state_manager import (
     StateManagerError,
     merge_state_snapshot_index_copyback,
 )
+from packages.common.state_manager import (
+    # Reused deliberately: the post-merge superset guard must key entries exactly
+    # the way the merge keys them, or it would compare apples to pears.
+    _state_index_identity_key as state_index_identity_key,
+)
 
 SCHEMA_VERSION = "nhms.scheduler.state_index_copyback_replay_receipt.v1"
 STATE_INDEX_RELATIVE_PATH = Path("scheduler/state-index/index-last.json")
@@ -53,15 +64,23 @@ DESTINATION_ROOT_ENV = "NHMS_OBJECT_STORE_COPYBACK_ROOT"
 OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
 RECEIPT_ROOT_ENV = "NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
 MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_LOST_IDENTITY_SAMPLE = 20
+
+# The merge's entry identity: (model_id, source_id, valid_time, cycle_id, lead_hours).
+IdentityKey = tuple[str, str, str, str, str]
 
 
 class ReplayError(RuntimeError):
-    """Structured refusal raised before the merge writes the shared index.
+    """Structured refusal raised before the merge commits the shared index.
 
-    Every refusal on this class is decided before ``merge_state_snapshot_index_copyback``
-    is invoked, so nothing has been published yet.  A failure *after* the merge
-    committed uses :class:`ReplayPostMergeError` instead, which must not claim
-    refusal.
+    Every refusal on this class is decided before
+    ``merge_state_snapshot_index_copyback`` is invoked, with one narrow
+    exception: ``merge_failed`` means the merge itself raised, so its
+    compare-and-swap never committed and the shared index is unchanged --
+    checkpoint objects of winning entries may already have been copied to the
+    shared root, and an idempotent rerun is the recovery.  Any failure once the
+    merge has committed uses :class:`ReplayPostMergeError` instead, which must
+    not claim refusal.
     """
 
     def __init__(self, reason: str, details: Mapping[str, Any] | None = None) -> None:
@@ -78,7 +97,10 @@ class ReplayPostMergeError(ReplayError):
 
     The index mutation stands (a repeated enforce run is idempotent and can
     re-record the receipt), so the status is not a refusal and the merge
-    summary is still handed to the operator on stdout.
+    summary -- as far as it is known -- is still handed to the operator on
+    stdout.  Every failure past the merge's commit funnels through here: a
+    destination read-back failure, a lost-entry verdict, a receipt write
+    failure, or anything unexpected in the same tail.
     """
 
     def __init__(
@@ -203,10 +225,18 @@ def replay_state_index_copyback(
         "checkpoint_copied_count": None,
         "checkpoint_reused_count": None,
         "checkpoint_replaced_count": None,
+        "post_merge_readback_reason": None,
+        "destination_entries_lost_count": None,
         "merge": None,
     }
     merge_committed = False
+    merge: Mapping[str, Any] | None = None
+    keys_before: frozenset[IdentityKey] = frozenset()
     if enforce:
+        # Keyed before the merge, so a destination index that vanishes inside
+        # the guard-to-lock window can be caught by the post-merge superset
+        # check below instead of being bootstrapped away silently.
+        keys_before = _entry_identity_keys(destination_entries, field="destination_index")
         try:
             merge = merge_state_snapshot_index_copyback(
                 source_path=source_index,
@@ -218,6 +248,8 @@ def replay_state_index_copyback(
                 authoritative_run_ids=sorted(resolved_run_ids),
             )
         except (StateManagerError, ProviderAtomicError) as error:
+            # The merge raised, so its compare-and-swap never committed and the
+            # shared index is unchanged: this is still a pre-commit refusal.
             raise ReplayError(
                 "merge_failed",
                 {
@@ -227,44 +259,170 @@ def replay_state_index_copyback(
                 },
             ) from error
         merge_committed = True
+
+    # Everything below runs after the mutation may already stand, so no failure
+    # here may be reported as a refusal (#1189 r2 C1).
+    try:
+        post_merge_failure = (
+            _record_committed_merge(
+                receipt,
+                merge=merge,
+                destination_index=destination_index,
+                destination_root=destination,
+                keys_before=keys_before,
+            )
+            if merge is not None
+            else None
+        )
+        receipt["completed_at"] = _format_time(datetime.now(tz=UTC))
+        receipt_failure: ReplayError | None = None
+        if receipt_root is not None:
+            try:
+                _write_receipt(receipt_root, receipt)
+            except ReplayError as error:
+                if not merge_committed:
+                    raise
+                receipt_failure = error
+            else:
+                receipt["receipt_root"] = str(receipt_root)
+        if receipt_failure is not None:
+            raise ReplayPostMergeError(
+                "receipt_write_failed_after_merge",
+                {**receipt_failure.details, "receipt_failure_reason": receipt_failure.reason},
+                summary=receipt,
+            ) from receipt_failure
+        if post_merge_failure is not None:
+            # The receipt is on disk first: keeping the evidence beats reporting
+            # cleanly, because the index mutation is already committed.
+            reason, details = post_merge_failure
+            raise ReplayPostMergeError(reason, details, summary=receipt)
+    except ReplayPostMergeError:
+        raise
+    except Exception as error:
+        if not merge_committed:
+            raise
+        raise ReplayPostMergeError(
+            "post_merge_unexpected_error",
+            {"error": str(error), "error_type": type(error).__name__},
+            summary=receipt,
+        ) from error
+    return receipt
+
+
+def _record_committed_merge(
+    receipt: dict[str, Any],
+    *,
+    merge: Mapping[str, Any],
+    destination_index: Path,
+    destination_root: Path,
+    keys_before: frozenset[IdentityKey],
+) -> tuple[str, dict[str, Any]] | None:
+    """Record a committed merge's evidence; return its post-merge failure, if any.
+
+    The index mutation already stands, so a destination read-back that fails
+    (NFS EIO/ESTALE, a concurrent preimage change, malformed bytes) degrades the
+    receipt -- ``destination_entry_count_after`` becomes null and the reason is
+    recorded -- rather than losing the receipt entirely.  Callers still write the
+    receipt and then exit non-zero on the returned reason.
+    """
+
+    receipt.update(
+        {
+            "checkpoint_copied_count": int(merge["checkpoint_copied_count"]),
+            "checkpoint_reused_count": int(merge["checkpoint_reused_count"]),
+            "checkpoint_replaced_count": int(merge["checkpoint_replaced_count"]),
+            "merge": {
+                "source_entry_count": merge["source_entry_count"],
+                "authoritative_run_count": merge["authoritative_run_count"],
+                "merged_entry_count": merge["merged_entry_count"],
+                "published_entry_count": merge["entry_count"],
+                "content_sha256": merge.get("content_sha256"),
+                "generated_at": merge.get("generated_at"),
+            },
+        }
+    )
+    try:
         after_entries = (
             _read_index_entries(
                 destination_index,
-                containment_root=destination,
+                containment_root=destination_root,
                 field="destination_index",
             )
             or []
         )
-        receipt.update(
+        keys_after = _entry_identity_keys(after_entries, field="destination_index_after")
+    except ReplayError as error:
+        receipt["destination_entry_count_after"] = None
+        receipt["post_merge_readback_reason"] = error.reason
+        return (
+            "post_merge_readback_failed",
             {
-                "destination_entry_count_after": len(after_entries),
-                "checkpoint_copied_count": int(merge["checkpoint_copied_count"]),
-                "checkpoint_reused_count": int(merge["checkpoint_reused_count"]),
-                "checkpoint_replaced_count": int(merge["checkpoint_replaced_count"]),
-                "merge": {
-                    "source_entry_count": merge["source_entry_count"],
-                    "authoritative_run_count": merge["authoritative_run_count"],
-                    "merged_entry_count": merge["merged_entry_count"],
-                    "published_entry_count": merge["entry_count"],
-                    "content_sha256": merge.get("content_sha256"),
-                    "generated_at": merge.get("generated_at"),
-                },
-            }
+                **error.details,
+                "readback_failure_reason": error.reason,
+                "destination_entry_count_after": None,
+            },
         )
-    receipt["completed_at"] = _format_time(datetime.now(tz=UTC))
-    if receipt_root is not None:
+    receipt["destination_entry_count_after"] = len(after_entries)
+    lost = sorted(keys_before - keys_after)
+    receipt["destination_entries_lost_count"] = len(lost)
+    if lost:
+        # The pre-merge guard read the destination outside the lock; if the
+        # index vanished in that window the merge bootstrapped a fresh one and
+        # every previously published entry is gone (#1189 r2 C4).  The merge only
+        # ever adds entries, so this can never be a false alarm.
+        return (
+            "destination_entries_lost_after_merge",
+            {
+                "destination_index": str(destination_index),
+                "destination_entry_count_before": len(keys_before),
+                "destination_entry_count_after": len(after_entries),
+                "lost_entry_count": len(lost),
+                "lost_entry_identities": [list(key) for key in lost[:MAX_LOST_IDENTITY_SAMPLE]],
+            },
+        )
+    return None
+
+
+def _entry_identity_keys(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    field: str,
+) -> frozenset[IdentityKey]:
+    """Key entries the way the merge keys them (model/source/valid_time/cycle/lead).
+
+    Anything this rejects the merge's own validation rejects too, so no
+    destination index the merge would accept is refused here.
+    """
+
+    keys: set[IdentityKey] = set()
+    for index, entry in enumerate(entries):
+        for required in ("model_id", "source_id", "valid_time"):
+            if entry.get(required) in (None, ""):
+                raise ReplayError(
+                    "index_entry_identity_invalid",
+                    {"field": f"{field}.entries[{index}].{required}", "error": "required field missing"},
+                )
         try:
-            _write_receipt(receipt_root, receipt)
-        except ReplayError as error:
-            if not merge_committed:
-                raise
-            raise ReplayPostMergeError(
-                "receipt_write_failed_after_merge",
-                {**error.details, "receipt_failure_reason": error.reason},
-                summary=receipt,
+            keys.add(
+                state_index_identity_key(
+                    model_id=str(entry["model_id"]),
+                    source_id=str(entry["source_id"]),
+                    valid_time=str(entry["valid_time"]),
+                    cycle_id=entry.get("cycle_id"),
+                    lead_hours=entry.get("lead_hours"),
+                    field_prefix=f"{field}.entries[{index}]",
+                )
+            )
+        except StateManagerError as error:
+            raise ReplayError(
+                "index_entry_identity_invalid",
+                {
+                    "field": f"{field}.entries[{index}]",
+                    "error_reason": str(getattr(error, "reason", "") or ""),
+                    "error": str(error),
+                },
             ) from error
-        receipt["receipt_root"] = str(receipt_root)
-    return receipt
+    return frozenset(keys)
 
 
 def _run_ids_from_request(entries: Sequence[Mapping[str, Any]], run_ids: str | None) -> set[str]:
