@@ -222,7 +222,10 @@ def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> N
     ).read_text(encoding="utf-8")
 
 
-def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_path: Path) -> None:
+def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
     _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
@@ -254,6 +257,20 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
     )
+    # #1189 regression lock: a destination-only entry must be neither read nor
+    # copied by the merge.  All checkpoint object IO happens inside
+    # _copyback_state_checkpoint, so spying on it proves scope, and the shared
+    # object's bytes plus mtime prove no write.
+    checkpoint_state_ids: list[str] = []
+    real_copy_checkpoint = state_manager_module._copyback_state_checkpoint
+
+    def record_checkpoint(entry: dict[str, object], **kwargs: object) -> str:
+        checkpoint_state_ids.append(str(entry.get("state_id")))
+        return real_copy_checkpoint(entry, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", record_checkpoint)
+    shared_checkpoint = copyback_root / "states/gfs/model_a/shared/state.cfg.ic"
+    shared_before = (shared_checkpoint.read_bytes(), shared_checkpoint.stat().st_mtime_ns)
 
     summary = copyback_run_trees(
         object_store_root=object_root,
@@ -267,7 +284,9 @@ def test_state_index_copyback_merges_split_root_checkpoint_only_in_private(tmp_p
     assert {entry["state_id"] for entry in payload["entries"]} == {"private-state", "shared-state"}
     assert summary["extra_objects"][0]["merge"]["merged_entry_count"] == 2
     assert summary["extra_objects"][0]["merge"]["checkpoint_copied_count"] == 1
-    assert summary["extra_objects"][0]["merge"]["checkpoint_reused_count"] == 1
+    assert summary["extra_objects"][0]["merge"]["checkpoint_reused_count"] == 0
+    assert checkpoint_state_ids == ["private-state"]
+    assert (shared_checkpoint.read_bytes(), shared_checkpoint.stat().st_mtime_ns) == shared_before
     copied_checkpoint = copyback_root / "states/gfs/model_a/private/state.cfg.ic"
     assert copied_checkpoint.read_bytes() == private_content
     assert (copyback_root / "states/gfs/model_a/shared/state.cfg.ic").read_bytes() == shared_content
@@ -330,7 +349,10 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     assert summary is not None
     merge = summary["extra_objects"][0]["merge"]
     assert merge["merged_entry_count"] == 1
-    assert merge["checkpoint_reused_count"] == 1
+    # The private entry belongs to an unrelated run, so the scoped copyback
+    # copies nothing (#1189 winning-source-entry scope); the shared entry is
+    # still republished with its derived evidence stripped.
+    assert merge["checkpoint_reused_count"] == 0
     payload = json.loads(destination_index.read_text(encoding="utf-8"))
     assert payload["entries"] == [base_entry]
 
@@ -536,7 +558,14 @@ def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
-        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        [
+            {
+                **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+                # The copied run owns this entry, so it is the one checkpoint
+                # this scoped copyback must carry (#1189).
+                "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+            }
+        ],
         source_index,
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
@@ -591,11 +620,22 @@ def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
     publish_state_snapshot_index(
-        [_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z")],
+        [
+            {
+                # The copied run's own entry records a checksum that diverges
+                # from its private-root object: source-side verification still
+                # covers every source entry and fails closed (#1189
+                # must-preserve; only destination-side object existence was
+                # narrowed).
+                **_state_entry("private-state", private_uri, expected_shared_content, "2026-06-27T01:00:00Z"),
+                "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+            }
+        ],
         source_index,
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+        verify_objects=False,
     )
     publish_state_snapshot_index(
         [

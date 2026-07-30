@@ -372,7 +372,13 @@ env、mode-0700 workspace/receipt/emergency/lock 目录、`UMask=0077` 和 DB se
 `/ghdc/data/nwm/object-store`，且只承载 registry、canonical-readiness、state-index 三个
 shared-NFS canonical provider。registry JSON 位于 shared root，但其中
 `s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
-合并两根或关闭 object verification。
+合并两根，也不得关闭 private root 上的 object verification——registry package 解析、refresh
+续期的 checkpoint 校验、state-index copyback 的 source 侧全量校验一律照旧。唯一例外是
+**shared root 上历史 state entry 的对象存在性**：node-27 product-archive mover 按 14 天策略
+归档 shared root 的 state 对象，而没有任何组件剪枝 shared state index，因此 copyback merge
+只校验并搬运本次胜出的 source entry，不再要求 shared index 里历史 entry 的对象仍在
+shared root（#1189，见 8.8）。不要照旧文档把 destination 侧全量 object verification
+"恢复"回去——那会原地重装同一个链停摆雷。
 
 Registry package version 必须由 publisher 同一套源计划生成：required、optional SHUD
 runtime、`CALIB/` 与 forcing CSV 的相对路径、大小和内容 checksum 都参与；机器绝对路径、
@@ -1537,6 +1543,80 @@ Heihe DB river network has GIS display segments and SHUD output segments.
 `hydro.river_timeseries.q_down` attaches directly to SHUD output segments.
 GIS segments map through `properties_json->>'iRiv'`. If an API/frontend query
 uses GIS segment ids directly, some segments can appear to have no flow.
+
+### 8.8 state-index copyback fail-closed 与 replay 补账
+
+判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
+调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带
+`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`，`details.error` 是具体的 state-manager reason：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
+grep -rl OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED "$JOURNAL" | tail -20
+# 两份 index 的 entry 数（shared 是调度器实际读的那份）
+uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+  /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
+uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+  /ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
+```
+
+判读口径：
+
+- `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
+  **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
+  `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
+- shared root（`/ghdc/data/nwm/object-store`）下历史 state 对象缺失 —— **不再**是 copyback
+  失败原因（#1189 已收窄；node-27 mover 按 14 天归档 shared 对象，调度器与 refresh 都以
+  private root 解析对象）。若仍看到该失败，说明运行的是修复前的代码，先确认部署 SHA。
+- provider-refresh 天天"成功"不能证明 copyback 正常：refresh 只续期、只用 private root
+  解析对象。判"链是否在写入" 必须看 shared index 的 entry_count 是否随 cycle 增长。
+
+失败后的补账（stage 终态已落账，copyback 不会自然重试；无 replay 则那批 entry 永不进 index）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22   # 必须是 provider 属主 frd_muziyao：
+                                        # provider lock 要求锁父目录 st_uid == geteuid()，
+                                        # CAS 替换要求 preimage uid 匹配；换身份会不透明 fail-closed
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 提供 OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX
+NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
+NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/copyback-replay/receipts
+set +a
+install -d -m 0700 "$NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
+
+# 1) 只读预览（默认 dry-run：不调用 merge、不改 index、不拷对象）
+uv run python -m scripts.scheduler_state_index_copyback_replay \
+  --cycle gfs_2026072000 --cycle ifs_2026072000
+
+# 2) 确认 resolved_run_ids / preview_new_entry_count 符合预期后再执行
+uv run python -m scripts.scheduler_state_index_copyback_replay \
+  --cycle gfs_2026072000 --cycle ifs_2026072000 --enforce
+```
+
+约束与判读：
+
+- cycle 用生产小写形式 `<source>_<YYYYMMDDHH>`（工具会对输入小写归一）；也可用
+  `--run-ids a,b`（逗号分隔）。二者互斥且必选。
+- 解析为空（cycle/run-id 在 private index 中无对应 entry）→ **非零退出 + 结构化 reason，
+  不调用 merge、不写 index**。不要为了"跑通"改口径。
+- `--enforce` 走的是生产同一个 merge 代码路径（同样的锁、CAS、checksum 与冲突语义），
+  幂等：重复 enforce 只会全部 `reused`、entry 数不变。
+- receipt 落在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`（0700 目录、0600 文件，
+  含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced；
+  enforce 模式未设该 env 直接拒绝执行。
+- 工具只碰 state-index：不写 journal、不动 registry / canonical-readiness、不改 pipeline 行。
+
+本案处置记录（#1189，2026-07-20 00Z 链停摆）：node-27 product-archive mover 以
+`cutoff=2026-07-06T00:00:00Z`、`minimum_age_days=14` 归档了 shared root 上 574 个旧 state
+对象，而 shared index 无人剪枝；copyback merge 在写入前对 destination 全量 1645 条历史 entry
+做对象存在性校验，于 2026-07-25T18:40:48Z 之后每次 `state_save_qc` 均 fail-closed，导致
+2026072000 产出的 36 条 f012 后继 checkpoint（gfs 18 + IFS 18，`valid_time=2026-07-20T12:00Z`）
+只存在于 private index，调度器读的 shared index 判 072000 为 gap、072012 永不规划。修复把
+destination 侧收窄为"只校验并搬运本次胜出的 source entry"，积压用上面的 replay
+（`--cycle gfs_2026072000 --cycle ifs_2026072000 --enforce`）补进 shared index。
 
 ## 9. 值守 SQL 片段
 

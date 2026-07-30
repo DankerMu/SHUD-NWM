@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -24,6 +25,7 @@ from packages.common.state_manager import (
     StateManagerError,
     StateSnapshot,
     assess_freshness,
+    merge_state_snapshot_index_copyback,
     publish_state_snapshot_index,
     state_snapshot_id,
 )
@@ -2411,6 +2413,399 @@ async def test_state_snapshot_api_list_and_get(
     assert [item["state_id"] for item in list_data["items"]] == [latest.state_id, older.state_id]
     assert get_response.status_code == 200
     assert get_response.json()["state_id"] == latest.state_id
+
+
+def test_state_index_copyback_merge_publishes_new_entry_beside_archived_destination_object(
+    tmp_path: Path,
+) -> None:
+    # #1189: node-27's product-archive mover removes shared-root state objects
+    # after 14 days while nothing prunes the shared index, so the destination
+    # index legitimately references objects that no longer exist there.  The
+    # merge must still publish the new authoritative entry, keep the historical
+    # entry, and never resurrect the archived object.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    archived_content = _valid_ic_bytes(b"archived")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    archived_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/archived/state.cfg.ic", archived_content
+    )
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    archived_entry = _copyback_index_entry(
+        state_id="archived-state",
+        run_id="fcst_gfs_2026070500_model_a",
+        state_uri=archived_uri,
+        content=archived_content,
+        valid_time="2026-07-05T12:00:00Z",
+        created_at="2026-07-05T13:00:00Z",
+        cycle_id="gfs_2026070500",
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [archived_entry, fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [archived_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+    archived_shared_object = shared_root / "states/gfs/model_a/archived/state.cfg.ic"
+    assert not archived_shared_object.exists()
+
+    summary = merge_state_snapshot_index_copyback(
+        source_path=source_index,
+        destination_path=destination_index,
+        reference_object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        source_containment_root=private_root,
+        destination_containment_root=shared_root,
+        authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+    )
+
+    assert summary["source_entry_count"] == 1
+    assert summary["merged_entry_count"] == 2
+    # Published set stays the full merged set: destination history + net new.
+    assert summary["entry_count"] == 2
+    assert summary["checkpoint_copied_count"] == 1
+    assert summary["checkpoint_reused_count"] == 0
+    assert summary["checkpoint_replaced_count"] == 0
+    assert not archived_shared_object.exists()
+    assert (shared_root / "states/gfs/model_a/fresh/state.cfg.ic").read_bytes() == fresh_content
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert [entry["state_id"] for entry in payload["entries"]] == ["archived-state", "fresh-state"]
+    assert payload["entries"][0] == archived_entry
+
+
+def test_state_index_copyback_merge_is_idempotent_over_archived_destination_history(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    archived_content = _valid_ic_bytes(b"archived")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    archived_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/archived/state.cfg.ic", archived_content
+    )
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    archived_entry = _copyback_index_entry(
+        state_id="archived-state",
+        run_id="fcst_gfs_2026070500_model_a",
+        state_uri=archived_uri,
+        content=archived_content,
+        valid_time="2026-07-05T12:00:00Z",
+        created_at="2026-07-05T13:00:00Z",
+        cycle_id="gfs_2026070500",
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [archived_entry, fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [archived_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+
+    def merge() -> dict[str, Any]:
+        return merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    first = merge()
+    first_entries = json.loads(destination_index.read_text(encoding="utf-8"))["entries"]
+    second = merge()
+
+    assert first["checkpoint_copied_count"] == 1
+    assert second["merged_entry_count"] == 2
+    assert second["entry_count"] == 2
+    assert second["checkpoint_copied_count"] == 0
+    assert second["checkpoint_replaced_count"] == 0
+    assert second["checkpoint_reused_count"] == 1
+    assert json.loads(destination_index.read_text(encoding="utf-8"))["entries"] == first_entries
+    assert not (shared_root / "states/gfs/model_a/archived/state.cfg.ic").exists()
+
+
+def test_state_index_copyback_merge_does_not_copy_losing_source_entry_object(
+    tmp_path: Path,
+) -> None:
+    # The object key is a pure function of the identity tuple, so copying a
+    # source entry that lost its collision would overwrite the shared object
+    # while the index keeps the destination entry's checksum.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/contested/state.cfg.ic"
+    losing_content = _valid_ic_bytes(b"losing")
+    winning_content = _valid_ic_bytes(b"winning")
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(state_key, losing_content)
+    LocalObjectStore(shared_root, "s3://nhms").write_bytes_atomic(state_key, winning_content)
+    losing_entry = _copyback_index_entry(
+        state_id="losing-state",
+        run_id="fcst_gfs_2026072000_losing",
+        state_uri=state_uri,
+        content=losing_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    winning_entry = _copyback_index_entry(
+        state_id="winning-state",
+        run_id="fcst_gfs_2026072000_winning",
+        state_uri=state_uri,
+        content=winning_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T02:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [losing_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [winning_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 2, tzinfo=UTC),
+    )
+
+    summary = merge_state_snapshot_index_copyback(
+        source_path=source_index,
+        destination_path=destination_index,
+        reference_object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        source_containment_root=private_root,
+        destination_containment_root=shared_root,
+        authoritative_run_ids=["fcst_gfs_2026072000_losing"],
+    )
+
+    assert summary["source_entry_count"] == 1
+    assert summary["merged_entry_count"] == 1
+    assert summary["checkpoint_copied_count"] == 0
+    assert summary["checkpoint_replaced_count"] == 0
+    assert summary["checkpoint_reused_count"] == 0
+    assert (shared_root / state_key).read_bytes() == winning_content
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert payload["entries"] == [winning_entry]
+
+
+def test_state_index_copyback_merge_still_fails_closed_on_missing_source_object(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    (private_root / "states/gfs/model_a/fresh/state.cfg.ic").unlink()
+    before = destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_missing"
+    assert destination_index.read_bytes() == before
+
+
+def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_index(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    destination_index.parent.mkdir(parents=True, exist_ok=True)
+    destination_index.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_unreadable"
+    assert destination_index.read_text(encoding="utf-8") == "[]\n"
+    assert not (shared_root / "states/gfs/model_a/fresh/state.cfg.ic").exists()
+
+
+def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path: Path) -> None:
+    # must-preserve: the copyback merge narrows its own publish call site only.
+    # The renewal publisher and the provider-refresh state lane both rely on
+    # the default staying object-verifying.
+    assert (
+        inspect.signature(publish_state_snapshot_index).parameters["verify_objects"].default is True
+    )
+    assert (
+        inspect.signature(FileStateSnapshotIndexRepository._publish_entries)
+        .parameters["verify_objects"]
+        .default
+        is True
+    )
+    object_root = tmp_path / "object-store"
+    content = _valid_ic_bytes(b"missing-object")
+    state_uri = LocalObjectStore(object_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/gone/state.cfg.ic", content
+    )
+    entry = _copyback_index_entry(
+        state_id="gone-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    (object_root / "states/gfs/model_a/gone/state.cfg.ic").unlink()
+    index_path = object_root / "scheduler/state-index/index-last.json"
+
+    with pytest.raises(StateManagerError) as error_info:
+        publish_state_snapshot_index(
+            [entry],
+            index_path,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_missing"
+    assert not index_path.exists()
+
+
+def _copyback_index_entry(
+    *,
+    state_id: str,
+    run_id: str,
+    state_uri: str,
+    content: bytes,
+    valid_time: str,
+    created_at: str,
+    cycle_id: str,
+    lead_hours: int = 12,
+) -> dict[str, Any]:
+    return {
+        "state_id": state_id,
+        "model_id": "model_a",
+        "run_id": run_id,
+        "source_id": "gfs",
+        "valid_time": valid_time,
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "created_at": created_at,
+        "cycle_id": cycle_id,
+        "lead_hours": lead_hours,
+    }
 
 
 def _valid_ic_bytes(content: bytes) -> bytes:
