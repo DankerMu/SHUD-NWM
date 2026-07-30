@@ -206,7 +206,24 @@ uv run python -m scripts.node27_timeseries_decompression_replay \
 **只跑一次,scope 是四份替换 receipt 的并集**——`--from-replacement-receipt` 可重复
 传,run_id 取并集。少传一份就等于把那一段回放 run 的旧瓦片留在缓存里继续服务。
 四份 receipt 就在 NFS 上,node-27 直接按 `/home/ghdc/nwm/recovery/...` 读(与 node-22
-的 `/ghdc/data/nwm/recovery/...` 是同一份 NFS),**不需要**任何拷贝步骤。
+的 `/ghdc/data/nwm/recovery/...` 是同一份 NFS),**不需要**任何拷贝步骤——但这句话以
+下面的可读性前置为条件(uid 巧合不可依赖)。
+
+**前置(node-27,跑工具之前)**:逐一 `test -r` 四份 receipt,任一不可读就先回 node-22
+处置,不要靠 uid 恰好相同:
+
+```bash
+# node-27:四份都必须可读,任一 rc!=0 就停下
+for f in /home/ghdc/nwm/recovery/{ifs,gfs}-replay-phase{1,2}.json; do
+  test -r "$f" || echo "UNREADABLE: $f"
+done
+# 失败处置(在 node-22 上执行):
+#   chmod 0644 /ghdc/data/nwm/recovery/*-replay-phase*.json
+```
+
+驱动器自身已按 `0644` 写替换 receipt(`scripts/replay_driver.py` 的
+`REPLACEMENT_RECEIPT_MODE`);上面的 `chmod` 是对早于该改动产出的 receipt、或被
+umask/拷贝改了权限的情况兜底。
 
 ```bash
 # 瓦片失效:dry-run 默认;删除范围 = (source_id, valid_time ∈ 回放展示窗口)
@@ -293,8 +310,15 @@ scripts/ops/node22_six_basin_replay.sh ... --resume-from <上次 receipt 路径>
 ```
 
 续跑是**证据校验后跳过**,不是盲跳:只有当 receipt 里该 (model, cycle) 行已
-`completed`、且当前索引中对应 state 在场且 checksum 与 receipt 记录一致时才跳过;
-校验不过就重做该 cycle。
+`completed`/`verified_skip`、**且该行没有断言失败**(`key_consistency` 未 drift、
+bootstrap 断言未 violated)、且当前索引中对应 state 在场且 checksum 与 receipt 记录
+一致时才跳过;任一条不成立就重做该 cycle——重做时沿用结转的旧半,断言该停的必再停。
+
+`--resume-from` 必须指向**持有目标 cycle 旧半(pre-image)的那份 receipt**,正常就是
+**上一份**。resume receipt 的每一行都会被原样结转进新 receipt(新 receipt 顶层的
+`resume_from {path, sha256}` 记录来源),所以即使中间某次续跑只跑了窗口的一段,链条
+也不会断;但若跳过中间那份、直接拿更早/更晚的 receipt 续跑,就可能拿不到某些 cycle
+的旧半,那些 cycle 会从**已被回放覆盖**的 run 树重采,旧半从此失真。
 
 `--receipt-path` 必须是**另一个**路径(见 §2.2):被中断那一轮的 receipt 是旧 run
 的唯一 pre-image 记录。重做的 cycle 不再重新采集旧半——run 树此时装的已经是上一轮

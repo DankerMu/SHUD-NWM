@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -311,21 +312,27 @@ class _JournalTerminals:
 
     def __init__(self, *, original_terminal: bool = True) -> None:
         self.original_terminal = original_terminal
-        self.replayed: dict[str, str] = {}
+        self.replayed: dict[str, list[str]] = {}
 
     def __call__(self, config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
         token = cycle_time.strftime("%Y%m%d%H")
         ids: list[str] = []
         if self.original_terminal:
             ids.append(f"job-original-{token}")
-        replayed = self.replayed.get(token)
-        if replayed is not None:
-            ids.append(replayed)
+        ids.extend(self.replayed.get(token) or [])
         return {model_id: list(ids) for model_id in config.model_ids}
 
     def record_replay_terminal(self, cycle_time: datetime) -> None:
+        """Append a NEW terminal job id, keeping the earlier attempts' ids.
+
+        The journal is never reset between attempts, so a resumed attempt's
+        completion evidence must be a job id nobody has seen before -- not the
+        one the interrupted attempt already left behind.
+        """
+
         token = cycle_time.strftime("%Y%m%d%H")
-        self.replayed[token] = f"job-replay-{token}"
+        recorded = self.replayed.setdefault(token, [])
+        recorded.append(f"job-replay-{token}" if not recorded else f"job-replay-{token}-{len(recorded) + 1}")
 
 
 class _SubmitRecorder:
@@ -1264,6 +1271,201 @@ def test_resume_keeps_the_interrupted_cycle_prior_from_the_resume_receipt(site: 
     }
     assert resume_from.read_bytes() == resume_bytes_before
     jsonschema.validate(receipt, _SCHEMA)
+
+
+class _DriftLastModelSubmit(_SubmitRecorder):
+    """Replay pass whose LAST model comes back on a different river network.
+
+    A model package pinned to the wrong river-network version reproduces the
+    drift on every attempt -- which is the point: a resumed attempt must judge
+    the ORIGINAL pre-image and halt again, not skip past the drift.
+    """
+
+    def __init__(self, site: _Site, *, drift_cycle: datetime, **kwargs: Any) -> None:
+        super().__init__(site, **kwargs)
+        self.drift_cycle = drift_cycle
+
+    def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        self.calls.append((list(argv), dict(env)))
+        cycle = _cycle_from_argv(argv)
+        for model_id in MODELS:
+            drifts = model_id == MODELS[-1] and cycle == self.drift_cycle
+            self.site.write_run(
+                cycle,
+                model_id,
+                _manifest(
+                    marker="replayed",
+                    river_network_version_id="rn-2026b" if drifts else "rn-2026a",
+                ),
+            )
+        self.site.add_state_entries(cycle, checksum_prefix="new")
+        self.journal.record_replay_terminal(cycle)
+        return {"returncode": 0}
+
+
+def test_resume_reruns_a_drifted_cycle_and_halts_again_on_the_original_prior(site: _Site) -> None:
+    """B3-1: the skip gate needs the status/assertion filter, not just a checksum.
+
+    The last model of cycle 2 comes back on a different river network, so the
+    driver halts on ``key_consistency_drift``.  That row is ``planned`` and
+    carries the failed assertion, yet its recorded ``new.state_checksum`` DOES
+    match the live index -- the checksum-only gate skipped the whole cycle on
+    resume and shipped the drift as "verified".
+    """
+
+    drifting = _DriftLastModelSubmit(site, drift_cycle=CYCLE_2)
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=drifting,
+            journal_probe=drifting.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+    first = excinfo.value.receipt
+    assert first["interruption"]["reason"] == "key_consistency_drift"
+    assert first["interruption"]["cycle"] == CYCLE_2.strftime("%Y%m%d%H")
+    drifted_row = next(
+        row
+        for row in first["rows"]
+        if row["cycle"] == CYCLE_2.strftime("%Y%m%d%H") and row["model_id"] == MODELS[-1]
+    )
+    original_prior_sha256 = drifted_row["prior"]["run_manifest_sha256"]
+    # the premise of the defect: the live index really does carry what that row
+    # recorded, so a checksum-only gate would have skipped the cycle
+    assert drifted_row["new"]["state_checksum"] in {
+        entry["checksum"] for entry in site.index_entries()
+    }
+
+    resume_from = site.root / "attempt-1-receipt.json"
+    _write_json(resume_from, first)
+    resumed = _DriftLastModelSubmit(site, drift_cycle=CYCLE_2, journal=drifting.journal)
+
+    with pytest.raises(ReplayHalted) as second_excinfo:
+        run_replay(
+            site.config(
+                execute=True,
+                resume_from=resume_from,
+                receipt_path=site.root / "attempt-2-receipt.json",
+            ),
+            submit_pass=resumed,
+            journal_probe=resumed.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = second_excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    # the drift is re-judged against the original pre-image and halts again
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    assert receipt["interruption"]["cycle"] == CYCLE_2.strftime("%Y%m%d%H")
+    assert [_cycle_from_argv(argv) for argv, _env in resumed.calls] == [CYCLE_2]
+    cycle_2_rows = [row for row in receipt["rows"] if row["cycle"] == CYCLE_2.strftime("%Y%m%d%H")]
+    assert "verified_skip" not in {row["status"] for row in cycle_2_rows}
+    for row in cycle_2_rows:
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+    rerun_row = next(row for row in cycle_2_rows if row["model_id"] == MODELS[-1])
+    assert rerun_row["prior"]["run_manifest_sha256"] == original_prior_sha256
+    assert rerun_row["key_consistency"]["status"] == "drift"
+    # cycle 1 finished cleanly and is still allowed the verified skip
+    assert {row["status"] for row in receipt["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")} == {
+        "verified_skip"
+    }
+    assert receipt["resume_from"] == {
+        "path": str(resume_from),
+        "sha256": hashlib.sha256(resume_from.read_bytes()).hexdigest(),
+    }
+
+
+def test_a_three_hop_resume_chain_never_loses_a_cycles_pre_image(site: _Site) -> None:
+    """B3-2: a middle attempt with a narrower range must not break the chain.
+
+    Attempt 2 resumes for cycle 2 only.  Pre-change its receipt named cycle 2
+    alone, so attempt 3 -- resuming from it -- found no row for cycle 1 and
+    re-captured that "prior" from the tree attempt 1 had already replayed, then
+    labelled the re-capture ``captured``.  Every row is now carried forward
+    verbatim, so the original pre-image survives an arbitrarily long chain.
+    """
+
+    first = _completed_run(site)
+    original_priors = {
+        (row["cycle"], row["model_id"]): row["prior"]["run_manifest_sha256"] for row in first["rows"]
+    }
+    hop_1 = site.root / "hop-1-receipt.json"
+    _write_json(hop_1, first)
+
+    # attempt 2: cycle 2 only, exactly as a narrowed --start-cycle resume
+    hop_2 = site.root / "hop-2-receipt.json"
+    second = run_replay(
+        site.config(execute=True, cycles=(CYCLE_2,), resume_from=hop_1, receipt_path=hop_2),
+        submit_pass=_refuse_to_submit,
+        journal_probe=_original_terminals_only,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+    jsonschema.validate(second, _SCHEMA)
+    carried = [row for row in second["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")]
+    assert len(carried) == len(MODELS)
+    assert carried == [row for row in first["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")]
+
+    # attempt 3: the whole range again, with cycle 1's state evidence drifted so
+    # it must genuinely re-run rather than verified-skip
+    entries = site.index_entries()
+    for entry in entries:
+        if entry["valid_time"] == _format_time(CYCLE_1 + timedelta(hours=12)):
+            entry["checksum"] = "sha256:index-drifted"
+    site._write_index(entries)
+    submit = _SubmitRecorder(site)
+    third = run_replay(
+        site.config(
+            execute=True,
+            resume_from=hop_2,
+            receipt_path=site.root / "hop-3-receipt.json",
+        ),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(third, _SCHEMA)
+    assert third["outcome"] == "completed"
+    assert [_cycle_from_argv(argv) for argv, _env in submit.calls] == [CYCLE_1]
+    rerun_rows = [row for row in third["rows"] if row["cycle"] == CYCLE_1.strftime("%Y%m%d%H")]
+    assert len(rerun_rows) == len(MODELS)
+    for row in rerun_rows:
+        assert row["status"] == "completed"
+        # the pre-image from attempt 1, three hops back -- never the replayed tree
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+        assert row["prior"]["run_manifest_sha256"] == original_priors[(row["cycle"], row["model_id"])]
+    assert third["resume_from"]["path"] == str(hop_2)
+    assert third["resume_from"]["sha256"] == hashlib.sha256(hop_2.read_bytes()).hexdigest()
+
+
+def test_a_run_without_resume_records_no_resume_source(site: _Site) -> None:
+    receipt = _completed_run(site)
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert "resume_from" not in receipt
+    assert "resume_from" not in json.loads(site.receipt_path.read_text(encoding="utf-8"))
+
+
+def test_the_replacement_receipt_is_readable_by_the_node_27_consumer(site: _Site) -> None:
+    """C3-1: all four receipts are loaded on node-27 under a different uid.
+
+    ``safe_fs``'s 0600 default is right for node-22-only receipts; this one is
+    shared evidence, and the runbook's ``test -r`` precondition depends on it.
+    """
+
+    run_replay(
+        site.config(),
+        submit_pass=_refuse_to_submit,
+        journal_probe=_original_terminals_only,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    assert stat.S_IMODE(site.receipt_path.stat().st_mode) == 0o644
 
 
 def test_writing_the_receipt_to_the_resume_source_refuses(site: _Site) -> None:

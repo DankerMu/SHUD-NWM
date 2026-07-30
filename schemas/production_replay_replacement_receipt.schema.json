@@ -38,6 +38,16 @@
         "removed_entry_count": { "type": "integer", "minimum": 1 }
       }
     },
+    "resume_from": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "description": "Present only on a resumed run (--resume-from): the receipt this pass carried its rows and priors from. Makes a multi-hop resume chain auditable (#1164 change 2, design D5 v6).",
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "inventory_census": {
       "type": "object",
       "additionalProperties": false,

@@ -46,13 +46,21 @@ start unless the effective environment disables retention
 (``NHMS_RETENTION_ENABLED=false``) -- an enabled retention pass would delete the
 very historical cycles being replayed.
 
-Resumption (``--resume-from <receipt>``) never blind-skips: a cycle is skipped
-only when the state index still holds the recorded new state entry AND its
-checksum matches the receipt row.  A resumed row's PRIOR half is reused verbatim
-whatever its status (``halted`` included): the run trees carry no archive, so
+Resumption (``--resume-from <receipt>``) is owned end to end by
+:func:`_resume_plan` (design D5 v6).  Every row of the resume receipt is carried
+into the new receipt verbatim first, so a chain of three or more attempts never
+loses the pre-image of a cycle a middle attempt did not cover (round-3 B3-2).
+Disposition is then per ``(cycle, model)``: a row is eligible for the
+verified-skip re-check only when it is ``completed``/``verified_skip`` AND
+carries no assertion failure (round-3 B3-1), and even then the cycle is skipped
+only when the state index still holds the recorded new state entry with the
+recorded checksum.  Everything else re-runs with the carried prior
+(``prior.prior_source = "resumed_receipt"``), so a drift or bootstrap assertion
+re-fires against the ORIGINAL pre-image: the run trees carry no archive, and
 re-capturing the prior from a tree the interrupted attempt already replayed
-would destroy the only pre-image that ever existed (round-2 B2-1).  For the same
-reason the driver refuses to write its receipt to the path it resumes from.  The
+would destroy the only pre-image that ever existed (round-2 B2-1).  The receipt
+records its source under ``resume_from`` so a multi-hop chain is auditable, and
+the driver refuses to write its receipt to the path it resumes from.  The
 replacement receipt is rewritten atomically after every cycle, so an interrupted
 sequence leaves the completed rows on disk; an ``in_progress`` receipt is written
 BEFORE the first submission, which doubles as the writability pre-flight.
@@ -115,6 +123,13 @@ RECEIPT_SCHEMA_PATH = _ROOT / "schemas/production_replay_replacement_receipt.sch
 RETENTION_ENV = "NHMS_RETENTION_ENABLED"
 REPAIR_ENV = "NHMS_SCHEDULER_REPAIR_MISSING_FORCING"
 REPAIR_CYCLE_ENV = "NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME"
+
+#: The replacement receipt is CROSS-NODE evidence: node-27 loads all four of them
+#: off the shared NFS under a different uid, so this one writer opts out of
+#: ``safe_fs``'s 0600 default (round-3 C3-1).  ``safe_fs`` itself and every other
+#: receipt writer (the state-scope reset receipt included) are unchanged; the
+#: runbook's §2.3.2 ``test -r`` precondition is the operator-side check.
+REPLACEMENT_RECEIPT_MODE = 0o644
 
 PACKAGED_IC_QUALITY = "packaged_calibrated_state"
 PACKAGED_IC_INIT_MODE = 3
@@ -282,7 +297,7 @@ def run_replay(
         source_id=config.source_id,
         model_ids=config.model_ids,
     )
-    resumed_rows = _load_resume_rows(config)
+    resume = _resume_plan(config)
 
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -303,9 +318,14 @@ def run_replay(
         },
         "inventory_census": _inventory_census(config),
         "cycles": [cycle.strftime("%Y%m%d%H") for cycle in config.cycles],
-        "rows": [],
+        # Every resume-receipt row this pass will not touch, carried verbatim so
+        # the chain of attempts stays whole (round-3 B3-2).
+        "rows": resume.carried_rows(),
         "interruption": None,
     }
+    resume_evidence = resume.to_evidence()
+    if resume_evidence is not None:
+        receipt["resume_from"] = resume_evidence
 
     # Writability pre-flight: the first receipt write happens BEFORE the first
     # submission, so an unwritable path is a refusal with zero submissions
@@ -319,7 +339,7 @@ def run_replay(
         ) from error
 
     for cycle_time in config.cycles:
-        verified = _verified_resume_skip(config, cycle_time, resumed_rows)
+        verified = _verified_resume_skip(config, cycle_time, resume)
         if verified is not None:
             receipt["rows"].extend(verified)
             _checkpoint_receipt(config, receipt, cycle_time)
@@ -336,7 +356,7 @@ def run_replay(
                 model_id,
                 removed_entries=removed_entries,
                 prior_terminal_job_ids=prior_terminal_jobs[model_id],
-                resumed_row=resumed_rows.get((cycle_time.strftime("%Y%m%d%H"), model_id)),
+                resumed_row=resume.prior_row(cycle_time.strftime("%Y%m%d%H"), model_id),
             )
             for model_id in config.model_ids
         ]
@@ -894,42 +914,110 @@ def _row_assertion_failure(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _load_resume_rows(config: ReplayDriverConfig) -> dict[tuple[str, str], dict[str, Any]]:
-    """Index EVERY row of the resume receipt by (cycle, model).
+#: Row statuses whose work is finished; only these may be verified-skipped.
+RESUME_COMPLETED_STATUSES = frozenset({"completed", "verified_skip"})
 
-    Completed rows drive the verified skip; non-completed rows (``halted``,
-    ``planned``) are indexed too, for their ``prior``/``inputs`` half only --
-    that half is the sole surviving pre-image of the cycle the interrupted
-    attempt had already begun to overwrite (round-2 B2-1).  A later row for the
-    same key wins, matching the receipt's append order.
+
+@dataclass(frozen=True)
+class _ResumePlan:
+    """Single owner of every resume-receipt row's disposition (design D5 v6).
+
+    ``rows`` holds EVERY row of the resume receipt, verbatim, keyed by
+    ``(cycle, model)`` in receipt order.  ``skip_eligible`` is the subset that
+    finished cleanly -- ``completed``/``verified_skip`` AND no assertion failure
+    (round-3 B3-1) -- and is therefore allowed to reach the state-index
+    checksum re-check.  Every other key re-runs with the carried prior, so a
+    drift/bootstrap assertion re-judges the ORIGINAL pre-image and, if it was
+    genuinely wrong, halts again instead of being skipped past.
     """
 
+    source: Path | None
+    sha256: str | None
+    order: tuple[tuple[str, str], ...]
+    rows: Mapping[tuple[str, str], Mapping[str, Any]]
+    in_scope: frozenset[tuple[str, str]]
+    skip_eligible: frozenset[tuple[str, str]]
+
+    def carried_rows(self) -> list[dict[str, Any]]:
+        """Rows this pass will not touch, carried into the new receipt verbatim.
+
+        Without this a middle attempt's narrower ``--start-cycle`` drops the
+        earlier cycles' rows, and the NEXT resume re-captures their "prior" from
+        an already-replayed tree while labelling it ``captured`` (round-3 B3-2).
+        """
+
+        return [dict(self.rows[key]) for key in self.order if key not in self.in_scope]
+
+    def prior_row(self, cycle_token: str, model_id: str) -> Mapping[str, Any] | None:
+        return self.rows.get((cycle_token, model_id))
+
+    def cycle_rows_are_skip_eligible(self, cycle_token: str, model_ids: Sequence[str]) -> bool:
+        return bool(model_ids) and all(
+            (cycle_token, model_id) in self.skip_eligible for model_id in model_ids
+        )
+
+    def to_evidence(self) -> dict[str, Any] | None:
+        if self.source is None:
+            return None
+        return {"path": str(self.source), "sha256": self.sha256}
+
+
+def _resume_plan(config: ReplayDriverConfig) -> _ResumePlan:
+    """Read the resume receipt once and decide every row's disposition."""
+
+    scope = frozenset(
+        (cycle.strftime("%Y%m%d%H"), model_id)
+        for cycle in config.cycles
+        for model_id in config.model_ids
+    )
     if config.resume_from is None:
-        return {}
+        return _ResumePlan(
+            source=None,
+            sha256=None,
+            order=(),
+            rows={},
+            in_scope=scope,
+            skip_eligible=frozenset(),
+        )
     payload = _read_json(config.resume_from, max_bytes=MAX_RECEIPT_BYTES)
     if payload is None or payload.get("schema_version") != SCHEMA_VERSION:
         raise ReplayDriverRefused("resume_receipt_unreadable", {"path": str(config.resume_from)})
     rows: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    skip_eligible: set[tuple[str, str]] = set()
     for row in payload.get("rows") or []:
         if not isinstance(row, Mapping):
             continue
-        rows[(str(row.get("cycle") or ""), str(row.get("model_id") or ""))] = dict(row)
-    return rows
+        # A later row for the same key wins, matching the receipt's append order.
+        key = (str(row.get("cycle") or ""), str(row.get("model_id") or ""))
+        if key not in rows:
+            order.append(key)
+        rows[key] = dict(row)
+        if str(row.get("status") or "") in RESUME_COMPLETED_STATUSES and _row_assertion_failure(row) is None:
+            skip_eligible.add(key)
+        else:
+            skip_eligible.discard(key)
+    return _ResumePlan(
+        source=config.resume_from,
+        sha256=_safe_file_sha256(config.resume_from),
+        order=tuple(order),
+        rows=rows,
+        in_scope=scope,
+        skip_eligible=frozenset(skip_eligible),
+    )
 
 
 def _verified_resume_skip(
     config: ReplayDriverConfig,
     cycle_time: datetime,
-    resumed_rows: Mapping[tuple[str, str], Mapping[str, Any]],
+    plan: _ResumePlan,
 ) -> list[dict[str, Any]] | None:
     """Skip a cycle ONLY on positive evidence; a failed check re-runs it."""
 
-    if not resumed_rows:
-        return None
     token = cycle_time.strftime("%Y%m%d%H")
-    rows = [resumed_rows.get((token, model_id)) for model_id in config.model_ids]
-    if any(row is None for row in rows):
+    if not plan.cycle_rows_are_skip_eligible(token, config.model_ids):
         return None
+    rows = [plan.prior_row(token, model_id) for model_id in config.model_ids]
     try:
         entries = read_state_index_entries(config.state_index)
     except ReplayDriverRefused:
@@ -942,7 +1030,7 @@ def _verified_resume_skip(
     )
     verified: list[dict[str, Any]] = []
     for row in rows:
-        assert row is not None  # narrowed above
+        assert row is not None  # every key was proved skip-eligible above
         entry = present.get(str(row.get("model_id") or ""))
         recorded = (row.get("new") or {}).get("state_checksum")
         if entry is None or not recorded or str(entry.get("checksum") or "") != str(recorded):
@@ -958,11 +1046,11 @@ def _safe_file_sha256(path: Path) -> str | None:
         return None
 
 
-def _write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
+def _write_receipt(path: Path, receipt: Mapping[str, Any], *, mode: int = REPLACEMENT_RECEIPT_MODE) -> None:
     content = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True, default=str).encode("utf-8") + b"\n"
     try:
         ensure_directory_no_follow(path.parent)
-        atomic_write_bytes_no_follow(path, content, mode=0o600)
+        atomic_write_bytes_no_follow(path, content, mode=mode)
     except (OSError, SafeFilesystemError) as error:
         raise ReceiptWriteError(str(error)) from error
 
