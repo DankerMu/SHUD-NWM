@@ -53,7 +53,7 @@ For every basin × source whose generation history is empty at candidate plannin
 
 ### Requirement: Packaged-IC consumption SHALL fail closed at the runtime boundary
 
-When a run manifest declares `quality=packaged_calibrated_state` — in either form: without a state id (scheduler-produced) or with a manual-manifest state id and no recorded packaged IC checksum (legacy form) — the SHUD runtime SHALL locate exactly one non-empty packaged `*.cfg.ic` in the staged model input and consume it or raise; the branch SHALL never fall through to an unlabeled cold start. When the manifest records a packaged IC `sha256`, the staged file's digest SHALL match it; when it does not (legacy manual manifest), the runtime SHALL verify non-emptiness and header parseability only and record a warning in run evidence. The runtime SHALL apply the standard negative-residual normalization before execution. Any failure — missing file, empty file, checksum mismatch, unparseable header, non-UTF-8/undecodable content, an unsafe-path or IO refusal, or a refused residual normalization — SHALL fail the run with the typed error `PACKAGED_IC_CONSUMPTION_FAILED`, carrying the originating reason in its message. Re-preparing the same workspace SHALL converge: a packaged IC whose basename differs from the project name is materialized to `<project_name>.cfg.ic`, and a repeated preparation SHALL drop that previous materialization before the exactly-one search instead of wedging the workspace. Packaged ICs are timeless calibration products: warm-start time-consistency verification and IC time shifting SHALL NOT be applied to them. Warm-start staging, its time-consistency verification, and runs that do not declare packaged-IC bootstrap SHALL remain byte-identical.
+When a run manifest declares `quality=packaged_calibrated_state` — in either form: without a state id (scheduler-produced) or with a manual-manifest state id and no recorded packaged IC checksum (legacy form) — the SHUD runtime SHALL locate exactly one non-empty packaged `*.cfg.ic` in the staged model input and consume it or raise; the branch SHALL never fall through to an unlabeled cold start. When the manifest records a packaged IC `sha256`, the staged file's digest SHALL match it; when it does not (legacy manual manifest), the runtime SHALL verify non-emptiness and header parseability only and record a warning in run evidence. The runtime SHALL apply the standard negative-residual normalization before execution. Any failure — missing file, empty file, checksum mismatch, unparseable header, non-UTF-8/undecodable content, an unsafe-path or IO refusal, or a refused residual normalization — SHALL fail the run with the typed error `PACKAGED_IC_CONSUMPTION_FAILED`, carrying the originating reason in its message. Re-preparing the same workspace SHALL converge for every package shape: when the manifest declares packaged-IC bootstrap, the runtime SHALL clear all staged `*.cfg.ic` under the model input before staging the package, so the exactly-one search always runs against exactly what this staging produced — a package that legitimately stages more than one `*.cfg.ic` SHALL fail the exactly-one check without any previously-staged file being preferred or silently consumed. Packaged ICs are timeless calibration products: warm-start time-consistency verification and IC time shifting SHALL NOT be applied to them. Warm-start staging, its time-consistency verification, and runs that do not declare packaged-IC bootstrap SHALL remain byte-identical.
 
 #### Scenario: Staged packaged IC is verified and consumed
 
@@ -64,6 +64,16 @@ When a run manifest declares `quality=packaged_calibrated_state` — in either f
 
 - **WHEN** a manifest declares `packaged_calibrated_state` with a state id but no recorded packaged IC checksum, and the staged `*.cfg.ic` is non-empty with a parseable header
 - **THEN** the run proceeds with `INIT_MODE 3` and a warning about the skipped checksum comparison is recorded in run evidence
+
+#### Scenario: Re-preparation converges for any package shape
+
+- **WHEN** a packaged-IC bootstrap run prepares the same workspace twice, with the packaged `*.cfg.ic` named differently from the project or located in a package subdirectory
+- **THEN** the second preparation clears the previously staged and materialized `*.cfg.ic` files before re-staging the package, the exactly-one search sees only this staging's output, and the run converges to the identical initial state
+
+#### Scenario: Genuinely ambiguous packages fail closed without preferring a file
+
+- **WHEN** a staged package legitimately produces more than one `*.cfg.ic` (for example two top-level files)
+- **THEN** the run fails with `PACKAGED_IC_CONSUMPTION_FAILED` on the exactly-one check, and no candidate — canonical-named or otherwise — is deleted in favor of another or silently consumed
 
 #### Scenario: Consumption failure never becomes a silent cold start
 
