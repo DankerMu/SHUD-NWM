@@ -47,9 +47,14 @@ start unless the effective environment disables retention
 very historical cycles being replayed.
 
 Resumption (``--resume-from <receipt>``) is owned end to end by
-:func:`_resume_plan` (design D5 v6).  Every row of the resume receipt is carried
-into the new receipt verbatim first, so a chain of three or more attempts never
-loses the pre-image of a cycle a middle attempt did not cover (round-3 B3-2).
+:func:`_resume_plan` (design D5 v7), which first refuses a receipt from another
+``(source, models)`` scope: row keys collide exactly across IFS and GFS, so a
+foreign receipt would donate foreign pre-images under this pass's name
+(round-4 B4-2).  Every row of the accepted receipt then seeds
+:class:`_ReceiptRows`, the single owner of ``receipt["rows"]``; a row is replaced
+only when THIS pass produces that key, so a chain of three or more attempts never
+loses the pre-image of a cycle a middle attempt did not reach -- whether because
+its window was narrower or because it halted (round-4 B4-1).
 Disposition is then per ``(cycle, model)``: a row is eligible for the
 verified-skip re-check only when it is ``completed``/``verified_skip`` AND
 carries no assertion failure (round-3 B3-1), and even then the cycle is skipped
@@ -278,6 +283,36 @@ def default_journal_probe(config: ReplayDriverConfig, cycle_time: datetime) -> d
 # ---------------------------------------------------------------------------
 
 
+class _ReceiptRows:
+    """The receipt's rows: an ordered ``(cycle, model)``-keyed map (design D5 v7).
+
+    Single owner of ``receipt["rows"]``.  Seeded with EVERY resume-receipt row in
+    receipt order, then updated in place: a key this pass produces replaces the
+    carried row AT ITS ORIGINAL POSITION, and a key nobody has seen before is
+    appended in production order.  ``_halt``, the per-cycle checkpoint and the
+    pre-flight write all serialize from here, so no code path can leave a
+    partially-carried row list behind (round-4 B4-1).
+    """
+
+    def __init__(self, seed: Sequence[Mapping[str, Any]] = ()) -> None:
+        self._rows: dict[tuple[str, str], dict[str, Any]] = {}
+        self.extend(seed)
+
+    @staticmethod
+    def _key(row: Mapping[str, Any]) -> tuple[str, str]:
+        return (str(row.get("cycle") or ""), str(row.get("model_id") or ""))
+
+    def put(self, row: Mapping[str, Any]) -> None:
+        self._rows[self._key(row)] = dict(row)
+
+    def extend(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            self.put(row)
+
+    def serialize(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows.values()]
+
+
 def run_replay(
     config: ReplayDriverConfig,
     *,
@@ -298,6 +333,9 @@ def run_replay(
         model_ids=config.model_ids,
     )
     resume = _resume_plan(config)
+    # Single owner of the receipt's rows, seeded with the whole resume receipt:
+    # a row is replaced only when THIS pass produces it (round-4 B4-1).
+    rows_ledger = _ReceiptRows(resume.all_rows())
 
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -318,9 +356,9 @@ def run_replay(
         },
         "inventory_census": _inventory_census(config),
         "cycles": [cycle.strftime("%Y%m%d%H") for cycle in config.cycles],
-        # Every resume-receipt row this pass will not touch, carried verbatim so
-        # the chain of attempts stays whole (round-3 B3-2).
-        "rows": resume.carried_rows(),
+        # Serialized from the ledger at every write, never appended to directly,
+        # so the chain of attempts stays whole (round-4 B4-1).
+        "rows": rows_ledger.serialize(),
         "interruption": None,
     }
     resume_evidence = resume.to_evidence()
@@ -341,8 +379,8 @@ def run_replay(
     for cycle_time in config.cycles:
         verified = _verified_resume_skip(config, cycle_time, resume)
         if verified is not None:
-            receipt["rows"].extend(verified)
-            _checkpoint_receipt(config, receipt, cycle_time)
+            rows_ledger.extend(verified)
+            _checkpoint_receipt(config, receipt, rows_ledger, cycle_time)
             continue
         prior_probe = dict(journal_probe(config, cycle_time))
         prior_terminal_jobs = {
@@ -365,13 +403,13 @@ def run_replay(
         if not config.execute:
             for row in rows:
                 row["status"] = "planned"
-            receipt["rows"].extend(rows)
-            _checkpoint_receipt(config, receipt, cycle_time)
+            rows_ledger.extend(rows)
+            _checkpoint_receipt(config, receipt, rows_ledger, cycle_time)
             continue
 
         staging_halt = _staging_halt(config, cycle_time, rows)
         if staging_halt is not None:
-            _halt(receipt, config, rows, cycle_time, reason=staging_halt[0], detail=staging_halt[1])
+            _halt(receipt, rows_ledger, config, rows, cycle_time, reason=staging_halt[0], detail=staging_halt[1])
 
         pass_started_at = clock()
         submission = submit_pass(submit_argv(config, cycle_time), submit_env(config, cycle_time))
@@ -382,7 +420,7 @@ def run_replay(
                 "submitted_at": _format_time(pass_started_at),
             }
         if int(submission.get("returncode", 1)) != 0:
-            _halt(receipt, config, rows, cycle_time, reason="submission_failed", detail=submission)
+            _halt(receipt, rows_ledger, config, rows, cycle_time, reason="submission_failed", detail=submission)
 
         convergence = _wait_for_convergence(
             config,
@@ -407,6 +445,7 @@ def run_replay(
         if not convergence["converged"]:
             _halt(
                 receipt,
+                rows_ledger,
                 config,
                 rows,
                 cycle_time,
@@ -418,27 +457,37 @@ def run_replay(
             _post_capture_row(config, cycle_time, row, state_entry=convergence["state_entries"].get(row["model_id"]))
             failure = _row_assertion_failure(row)
             if failure is not None:
-                receipt["rows"].extend(rows)
-                _halt(receipt, config, [], cycle_time, reason=failure, detail={"model_id": row["model_id"]})
+                rows_ledger.extend(rows)
+                _halt(
+                    receipt,
+                    rows_ledger,
+                    config,
+                    [],
+                    cycle_time,
+                    reason=failure,
+                    detail={"model_id": row["model_id"]},
+                )
             row["status"] = "completed"
-        receipt["rows"].extend(rows)
+        rows_ledger.extend(rows)
         # Atomic per-cycle checkpoint: a crash on the next cycle keeps every row
         # finished so far, instead of losing the whole sequence.
-        _checkpoint_receipt(config, receipt, cycle_time)
+        _checkpoint_receipt(config, receipt, rows_ledger, cycle_time)
 
     receipt["outcome"] = "completed"
     receipt["finished_at"] = _format_time(clock())
-    _checkpoint_receipt(config, receipt, None)
+    _checkpoint_receipt(config, receipt, rows_ledger, None)
     return receipt
 
 
 def _checkpoint_receipt(
     config: ReplayDriverConfig,
     receipt: dict[str, Any],
+    rows: _ReceiptRows,
     cycle_time: datetime | None,
 ) -> None:
     """Write the receipt; a failure halts the sequence instead of printing."""
 
+    receipt["rows"] = rows.serialize()
     try:
         _write_receipt(config.receipt_path, receipt)
     except ReceiptWriteError as error:
@@ -474,6 +523,7 @@ def _resolved_path(path: Path) -> Path:
 
 def _halt(
     receipt: dict[str, Any],
+    rows_ledger: _ReceiptRows,
     config: ReplayDriverConfig,
     rows: Sequence[dict[str, Any]],
     cycle_time: datetime,
@@ -483,7 +533,10 @@ def _halt(
 ) -> None:
     for row in rows:
         row["status"] = "halted"
-    receipt["rows"].extend(rows)
+    rows_ledger.extend(rows)
+    # Halting is exactly where the round-3 shape lost rows: the cycles this pass
+    # never reached keep the carried resume rows the ledger was seeded with.
+    receipt["rows"] = rows_ledger.serialize()
     receipt["outcome"] = "halted"
     receipt["interruption"] = {
         "cycle": cycle_time.strftime("%Y%m%d%H"),
@@ -935,18 +988,21 @@ class _ResumePlan:
     sha256: str | None
     order: tuple[tuple[str, str], ...]
     rows: Mapping[tuple[str, str], Mapping[str, Any]]
-    in_scope: frozenset[tuple[str, str]]
     skip_eligible: frozenset[tuple[str, str]]
 
-    def carried_rows(self) -> list[dict[str, Any]]:
-        """Rows this pass will not touch, carried into the new receipt verbatim.
+    def all_rows(self) -> list[dict[str, Any]]:
+        """EVERY resume row, in receipt order, to seed this pass's row map.
 
-        Without this a middle attempt's narrower ``--start-cycle`` drops the
-        earlier cycles' rows, and the NEXT resume re-captures their "prior" from
-        an already-replayed tree while labelling it ``captured`` (round-3 B3-2).
+        Carrying only the rows outside this pass's static window (the round-3
+        shape) covers the window-narrowing branch and nothing else: a pass that
+        HALTS never reaches its later in-window cycles, so their rows were
+        dropped, and the next resume re-captured their "prior" from an
+        already-replayed tree while labelling it ``captured`` (round-4 B4-1).
+        Seeding everything and replacing per key only when this pass actually
+        produces that key makes the carry a RUNTIME judgement.
         """
 
-        return [dict(self.rows[key]) for key in self.order if key not in self.in_scope]
+        return [dict(self.rows[key]) for key in self.order]
 
     def prior_row(self, cycle_token: str, model_id: str) -> Mapping[str, Any] | None:
         return self.rows.get((cycle_token, model_id))
@@ -965,23 +1021,18 @@ class _ResumePlan:
 def _resume_plan(config: ReplayDriverConfig) -> _ResumePlan:
     """Read the resume receipt once and decide every row's disposition."""
 
-    scope = frozenset(
-        (cycle.strftime("%Y%m%d%H"), model_id)
-        for cycle in config.cycles
-        for model_id in config.model_ids
-    )
     if config.resume_from is None:
         return _ResumePlan(
             source=None,
             sha256=None,
             order=(),
             rows={},
-            in_scope=scope,
             skip_eligible=frozenset(),
         )
     payload = _read_json(config.resume_from, max_bytes=MAX_RECEIPT_BYTES)
     if payload is None or payload.get("schema_version") != SCHEMA_VERSION:
         raise ReplayDriverRefused("resume_receipt_unreadable", {"path": str(config.resume_from)})
+    _assert_resume_receipt_scope_covers(config, payload)
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
     skip_eligible: set[tuple[str, str]] = set()
@@ -1002,8 +1053,45 @@ def _resume_plan(config: ReplayDriverConfig) -> _ResumePlan:
         sha256=_safe_file_sha256(config.resume_from),
         order=tuple(order),
         rows=rows,
-        in_scope=scope,
         skip_eligible=frozenset(skip_eligible),
+    )
+
+
+def _assert_resume_receipt_scope_covers(
+    config: ReplayDriverConfig,
+    payload: Mapping[str, Any],
+) -> None:
+    """Refuse a resume receipt that belongs to another (source, models) scope.
+
+    Row keys are ``(cycle, model_id)`` and IFS/GFS replay the same windows with
+    the same model ids from the same directory, so a receipt from the OTHER
+    source collides key for key: its rows would be adopted verbatim as this
+    pass's ``resumed_receipt`` priors, the real pre-image would be destroyed by
+    the replay, and the key-consistency assertion would still pass because both
+    sources share a river network (round-4 B4-2).  A model SUBSET is legitimate
+    -- that is exactly a narrowed resume -- so only a missing model refuses.
+    """
+
+    recorded_source = str(payload.get("source_id") or "")
+    try:
+        payload_source = normalize_source_id(recorded_source) if recorded_source else ""
+    except ValueError:
+        # An unrecognized source id is not a match by default: refuse.
+        payload_source = ""
+    config_source = normalize_source_id(config.source_id)
+    payload_models = {str(model_id) for model_id in (payload.get("model_ids") or [])}
+    missing_models = sorted({str(model_id) for model_id in config.model_ids} - payload_models)
+    if payload_source == config_source and not missing_models:
+        return
+    raise ReplayDriverRefused(
+        "resume_receipt_scope_mismatch",
+        {
+            "path": str(config.resume_from),
+            "receipt_source_id": recorded_source or None,
+            "config_source_id": config_source,
+            "receipt_model_ids": sorted(payload_models),
+            "missing_model_ids": missing_models,
+        },
     )
 
 

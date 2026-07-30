@@ -1442,6 +1442,183 @@ def test_a_three_hop_resume_chain_never_loses_a_cycles_pre_image(site: _Site) ->
     assert third["resume_from"]["sha256"] == hashlib.sha256(hop_2.read_bytes()).hexdigest()
 
 
+def test_a_three_hop_chain_through_a_HALT_never_loses_a_cycles_pre_image(site: _Site) -> None:
+    """B4-1: the middle attempt covers the whole window and stops early.
+
+    This is the branch the static in-scope exclusion could not see.  Attempt 2
+    asks for cycles 1 AND 2, halts on cycle 1's submission, and therefore never
+    produces a cycle-2 row -- yet cycle 2 was in its window, so the round-3
+    ``carried_rows()`` dropped attempt 1's rows for it.  Attempt 3, resuming
+    from that holed receipt, then re-captured cycle 2's "prior" from the tree
+    attempt 1 had already replayed and labelled the re-capture ``captured``:
+    the only pre-image that ever existed, gone, with the key-consistency
+    assertion degenerating to replay-vs-replay.
+    """
+
+    first = _completed_run(site)
+    original_priors = {
+        (row["cycle"], row["model_id"]): row["prior"]["run_manifest_sha256"] for row in first["rows"]
+    }
+    cycle_1_token = CYCLE_1.strftime("%Y%m%d%H")
+    cycle_2_token = CYCLE_2.strftime("%Y%m%d%H")
+    first_cycle_2_rows = [row for row in first["rows"] if row["cycle"] == cycle_2_token]
+    hop_1 = site.root / "hop-1-receipt.json"
+    _write_json(hop_1, first)
+
+    # every cycle's live state drifted away from what attempt 1 recorded, so
+    # nothing is verified-skippable and both attempts really re-run
+    entries = site.index_entries()
+    for entry in entries:
+        entry["checksum"] = "sha256:index-drifted"
+    site._write_index(entries)
+
+    # attempt 2: the FULL window, stopped at the first cycle by a rejected pass
+    calls: list[datetime] = []
+
+    def _submission_rejected(argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        calls.append(_cycle_from_argv(argv))
+        return {"returncode": 1, "stdout_tail": "", "stderr_tail": "slurm refused"}
+
+    hop_2 = site.root / "hop-2-receipt.json"
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, resume_from=hop_1, receipt_path=hop_2),
+            submit_pass=_submission_rejected,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    second = excinfo.value.receipt
+    assert calls == [CYCLE_1]
+    assert second["outcome"] == "halted"
+    assert second["interruption"]["reason"] == "submission_failed"
+    assert second["interruption"]["cycle"] == cycle_1_token
+    jsonschema.validate(second, _SCHEMA)
+    # the halted receipt on disk is what attempt 3 will read
+    persisted = json.loads(hop_2.read_text(encoding="utf-8"))
+    assert persisted["rows"] == second["rows"]
+    # THE POINT: the cycle attempt 2 never reached keeps attempt 1's rows verbatim
+    assert [row for row in persisted["rows"] if row["cycle"] == cycle_2_token] == first_cycle_2_rows
+    assert {row["status"] for row in persisted["rows"] if row["cycle"] == cycle_1_token} == {"halted"}
+
+    # attempt 3: resumes from the halted receipt and re-runs both cycles
+    submit = _SubmitRecorder(site)
+    third = run_replay(
+        site.config(
+            execute=True,
+            resume_from=hop_2,
+            receipt_path=site.root / "hop-3-receipt.json",
+        ),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(third, _SCHEMA)
+    assert third["outcome"] == "completed"
+    assert [_cycle_from_argv(argv) for argv, _env in submit.calls] == [CYCLE_1, CYCLE_2]
+    rerun_rows = [row for row in third["rows"] if row["cycle"] == cycle_2_token]
+    assert len(rerun_rows) == len(MODELS)
+    for row in rerun_rows:
+        assert row["status"] == "completed"
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+        assert row["prior"]["run_manifest_sha256"] == original_priors[(row["cycle"], row["model_id"])]
+    assert third["resume_from"]["path"] == str(hop_2)
+
+
+def test_a_resume_receipt_from_the_other_source_is_refused(site: _Site) -> None:
+    """B4-2: ``(cycle, model)`` keys collide exactly across IFS and GFS.
+
+    Same windows, same six model ids, receipts written side by side in one
+    directory.  Adopting the other source's rows hands this pass foreign
+    pre-images under ``prior_source="resumed_receipt"`` while every row's own
+    ``source_id`` still says GFS, and key consistency passes because both
+    sources share the river network -- the real pre-image is destroyed by the
+    replay with nothing left to notice.
+    """
+
+    ifs_receipt = _completed_run(site)
+    assert ifs_receipt["source_id"] == "IFS"
+    resume_from = site.root / "ifs-receipt.json"
+    _write_json(resume_from, ifs_receipt)
+    # this pass is the GFS one: its own reset receipt covers the GFS scope
+    site.write_reset_receipt(source="GFS")
+    gfs_receipt_path = site.root / "gfs-receipt.json"
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            site.config(
+                execute=True,
+                source_id="GFS",
+                resume_from=resume_from,
+                receipt_path=gfs_receipt_path,
+            ),
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "resume_receipt_scope_mismatch"
+    assert excinfo.value.details["receipt_source_id"] == "IFS"
+    assert excinfo.value.details["config_source_id"] == "gfs"
+    # refused before the pre-flight write: nothing submitted, nothing written
+    assert not gfs_receipt_path.exists()
+    assert resume_from.read_bytes() == json.dumps(ifs_receipt, indent=2, sort_keys=True).encode("utf-8")
+
+
+def test_a_resume_receipt_missing_one_of_this_passs_models_is_refused(site: _Site) -> None:
+    """A model this pass replays but the receipt never covered has no pre-image."""
+
+    first = _completed_run(site)
+    narrowed = {**first, "model_ids": [MODELS[0]]}
+    resume_from = site.root / "narrow-receipt.json"
+    _write_json(resume_from, narrowed)
+
+    with pytest.raises(ReplayDriverRefused) as excinfo:
+        run_replay(
+            site.config(execute=True, resume_from=resume_from, receipt_path=site.root / "next.json"),
+            submit_pass=_refuse_to_submit,
+            journal_probe=_original_terminals_only,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert excinfo.value.reason == "resume_receipt_scope_mismatch"
+    assert excinfo.value.details["missing_model_ids"] == [MODELS[1]]
+
+
+def test_a_narrowed_model_resume_from_a_superset_receipt_still_runs(site: _Site) -> None:
+    """The subset direction is legitimate: a narrowed resume must keep working."""
+
+    first = _completed_run(site)
+    resume_from = site.root / "full-receipt.json"
+    _write_json(resume_from, first)
+
+    receipt = run_replay(
+        site.config(
+            execute=True,
+            model_ids=(MODELS[0],),
+            resume_from=resume_from,
+            receipt_path=site.root / "narrowed-receipt.json",
+        ),
+        submit_pass=_refuse_to_submit,
+        journal_probe=_original_terminals_only,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    assert {row["status"] for row in receipt["rows"] if row["model_id"] == MODELS[0]} == {"verified_skip"}
+    # the model this pass dropped keeps attempt 1's rows verbatim
+    assert [row for row in receipt["rows"] if row["model_id"] == MODELS[1]] == [
+        row for row in first["rows"] if row["model_id"] == MODELS[1]
+    ]
+
+
 def test_a_run_without_resume_records_no_resume_source(site: _Site) -> None:
     receipt = _completed_run(site)
 
