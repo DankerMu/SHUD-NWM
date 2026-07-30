@@ -1,0 +1,31 @@
+# Tasks: state-index-copyback-merge-scope
+
+## 1. 实现
+
+- [x] 1.1 **merge destination 侧三处收窄**(`packages/common/state_manager.py`):destination 读侧 `verify_objects=False`(结构/schema/checksum/唯一性校验保留);checkpoint 循环遍历**胜出并进入 merged 的 source entry**(`merged.get(key) == entry`,F2——严禁裸 `source_entries.values()`,严禁把发布集收窄到 source 集);merge 内 publish 调用点 `verify_objects=False`(**不改**函数默认值与其他调用点,must-preserve #8)。source 侧全量校验 `:1923-1932`、冲突语义、checksum/containment/no-follow/读回、锁+CAS 逐字节不变;publish 的 entry 列表仍为 merged 全集(must-preserve #9)。
+- [x] 1.2 **replay 工具** `scripts/scheduler_state_index_copyback_replay.py`:双根旗标(默认 env `OBJECT_STORE_ROOT`/`NHMS_OBJECT_STORE_COPYBACK_ROOT`),index 路径固定派生 `<root>/scheduler/state-index/index-last.json`,复刻 root 相等/重叠守卫;`--run-ids` 或可重复 `--cycle`(输入按生产规则小写归一;解析用**平铺** `entry["cycle_id"]`(可选,None 跳过)收集 `entry["run_id"]`,**无** `lineage` 子对象);**空解析非零退出 + 零写**;默认 dry-run(**不调用 merge**,只读集合预览,advisory);`--enforce` 调用修复后的 merge(同一代码路径);receipt 落 env `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`(0700,含 schema_version/mode/run_ids/前后计数/copied-reused-replaced);幂等。
+- [x] 1.3 **runbook**:copyback fail-closed 判读(journal `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`)+ replay 处置步骤(**以 provider 属主 `frd_muziyao` 执行**,F11)+ 本案 072000 处置记录(引用 #1189);**同步修订** `docs/runbooks/current-production-ops.md:369-376` 的禁令句(F8):精确收窄为"private root 校验与 registry package 解析不变;shared root 的历史 state entry 对象存在性不再要求",避免下任 operator 依旧文"恢复 object verification"原地重装雷。
+
+## 2. 验证(本地)
+
+- [x] 2.1 `uv run pytest -q tests/test_state_manager.py tests/test_run_tree_copyback.py tests/test_production_scheduler.py`（实测同时纳入新增 `tests/test_scheduler_state_index_copyback_replay.py`；1164 passed）(净化 `__pycache__` + `PYTHONDONTWRITEBYTECODE=1`;**必须含 `test_run_tree_copyback.py`**——merge 的既有回归锁全在该文件,两处 `checkpoint_*_count` 断言需随胜出集语义同步更新,F5)。
+- [x] 2.2 `uv run ruff check .`;`openspec validate state-index-copyback-merge-scope --strict --no-interactive`。
+- [x] 2.3 红前证据:destination 含对象缺失历史 entry 的 merge 场景,在未改源上抛 `state_snapshot_index_object_missing`(`tests/test_state_manager.py::test_state_index_copyback_merge_publishes_new_entry_beside_archived_destination_object` 未改源红在 `state_manager.py:2517` `_verify_state_index_object`;同批 `..._does_not_copy_losing_source_entry_object` 红在 `state_manager.py:2060` `state_snapshot_index_object_checksum_mismatch`)。
+- [x] 2.4 负测锁:已归档对象不复活(merge 后 destination 目标路径仍不存在);**败北 source entry 对象不拷**(F2);entry_count 守恒 `published == destination ∪ 胜出source`(must-preserve #9);幂等重放**零拷贝**(A2 修订);must-preserve #8(其他 publish 调用点行为不变);replay 空解析非零退出零写、dry-run 零 index/对象变更。
+- [x] 2.5 **修复轮补锁**(cross-review r1):B1 destination-index 缺失时 enforce 非零退出零写 + `--allow-bootstrap` 放行(两测);B2 merge 后 receipt 写失败 → 独立原因 + stdout 携带 merge 摘要(注入测);A1 确定性 TOCTOU 测试(`provider_destination_lock` seam 内改写 source 对象)杀死 `_copyback_state_checkpoint` **checksum 护栏**变异体(r2 C2 裁定:该测试路径读回护栏不可达,红证实为双剥;读回护栏另行钉住,见 2.6);A2 字节相同胜出 entry 不重拷已归档对象(负测)+ 幂等测试计数改零拷贝;B5 双 `--cycle` enforce 用例(两 cycle 的 run_id 均 resolved 且发布)。(实测:四文件门 1171 passed = 1164 + 7 新测;变异体红证:剥掉 `_copyback_state_checkpoint` 双护栏 → A1 测试 `DID NOT RAISE` 红;`args.cycle` 截成 `[-1:]` → B5 测试红。)
+
+- [x] 2.6 **r2 修复轮补锁**(cross-review r2,verifier 裁定):C1 post-merge 尾段统一 committed 语义——merge 调用后的任何失败(读回失败、receipt 失败)均 rc 3 + 独立原因 + stdout 摘要,`refused`(rc 2)严格 pre-merge;读回失败注入测(rc 3、`status != refused`、stdout 含 merge 摘要);docstring "decided before merge" 限定修正。C2 读回护栏杀死测试——注入 destination 读回字节异于写入 → `state_snapshot_index_object_checksum_mismatch`;变异红证:只剥 `state_manager.py` 读回护栏 → 该测试红。C4 enforce 后置超集守卫——post-merge 读回 entry key 集 ⊇ 前置守卫读到的 destination entry key 集,违反 → rc 3 `destination_entries_lost_after_merge`;注入测(守卫后删 destination index → 非零退出而非绿 receipt)。(实测:四文件门 1174 passed = 1171 + 3 新测;红证:C1 `assert 2 == 3`、C4 `assert 0 == 3`、C2 仅剥读回护栏 → `DID NOT RAISE`,变异体已恢复、stash 清空、state_manager.py 与 HEAD 逐字节一致。)
+
+- [x] 2.7 **r3 修复轮补锁**(cross-review r3,retro-round3 不变量闭环):D1 三态分类——merge 异常按 reason 分流,pre-commit allowlist 之外(`provider_replace_uncertain`/`provider_postread_failed`/未知)→ commit-uncertain rc 3 `merge_commit_uncertain` + 完整 committed 尾段(读回/超集守卫/receipt,merge 字段 null);注入测:post-`os.replace` 父目录 fsync 失败 → rc 3 非 refused + 尾段执行;复合灾难态(vanishing index + fsync 失败)→ rc 3 且携带 lost 判决;`provider_postread_failed` 一例。D2 lost 优先——lost + receipt 双失败 → stderr reason 为 `destination_entries_lost_after_merge`,details 含 receipt 失败原因;复合注入测。runbook exit-2 行"index 未改"限定 allowlist、reason 表补行、receipt 分支加 lost 前置检查。design.md:38 `merge_failed` 措辞同步诚实化。(实测:四文件门 1180 passed = 1174 + 6 新测(replay 文件 15→21);allowlist 39 reason 逐条附 raise 点 file:line,`provider_replace_failed` 核对后纳入、`state_snapshot_index_lock_unavailable` 有疑义排除;红证:分类改回无差别 `merge_failed` → 3 测红 `assert 2 == 3`,优先级改回 receipt 先 → 1 测红;变异体已恢复。)
+
+- [x] 2.8 **r4 修复轮补锁**(cross-review r4 E1,retro-round4):merge handler `except Exception` 拓宽——refusal 分支要求 isinstance 两已知类型**且** reason 在 allowlist,其余(含 untyped 如裸 OSError)落 commit-uncertain,`merge_error_reason` 对 untyped 置合成标识;`Exception` 不含 BaseException。注入测:真实 merge 后抛 OSError(5) → rc 3、status `merge_committed_incomplete`、reason `merge_commit_uncertain`、receipt 在案、超集守卫已跑(`destination_entries_lost_count == 0`)、stdout 非空、无 rc 1。runbook `merge_commit_uncertain` 行补合成 reason 说明。变异红证:except 收回窄元组 → 新测红。(实测:`test_replay_untyped_merge_exception_is_commit_uncertain` 绿,四文件门 1181 passed = 1180 + 1;红证:收回窄元组 → `OSError: [Errno 5]` 裸逃逸红,同批 2 个 rc 2 typed 测试仍绿;已恢复。)
+
+## 3. 评审
+
+- [x] 3.1 fixture review(只读)→ 修复 → validate。(第 1 轮:15 findings(5 P1/6 P2/4 P3)已全部修入 fixture,validate 通过)
+- [ ] 3.2 实现后 risk-adaptive cross-review(≥2 lane)+ verifier 批次;round ledger 记账。
+
+## 4. Evidence Floor(实机 oracle,merge 后)
+
+- [ ] 4.1 node-22 部署后,以 `frd_muziyao` 执行:replay dry-run 核对 → `--enforce --cycle gfs_2026072000 --cycle ifs_2026072000`(**小写**,F4)→ NFS index entry_count 以 receipt 前后计数为准(**预期 +36**,receipt 在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT` 下在案);随后自然 pass:072000 verdict complete(不再 oldest gap)、072012 候选生成并**提交**。若观测偏离,先读数再分支,严禁放宽判定。
+- [ ] 4.2 **验收(用户裁定口径,继承自 #1183)**:连续两个完整 warm-start pass 跑通——072012 Slurm 成功 + 其 +12h 状态经**自然 copyback**(修复后首个 `state_save_qc`,journal 无新 `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`)进入 NFS index + 下一 cycle(072100)以之 warm start 提交并成功。receipt(pass 文件名 + index entry_count 轨迹 + squeue/sacct)回贴 issue #1189 与 #1183。若观测偏离,先读数再分支,严禁放宽判定。

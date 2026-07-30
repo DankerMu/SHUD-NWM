@@ -372,7 +372,13 @@ env、mode-0700 workspace/receipt/emergency/lock 目录、`UMask=0077` 和 DB se
 `/ghdc/data/nwm/object-store`，且只承载 registry、canonical-readiness、state-index 三个
 shared-NFS canonical provider。registry JSON 位于 shared root，但其中
 `s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
-合并两根或关闭 object verification。
+合并两根，也不得关闭 private root 上的 object verification——registry package 解析、refresh
+续期的 checkpoint 校验、state-index copyback 的 source 侧全量校验一律照旧。唯一例外是
+**shared root 上历史 state entry 的对象存在性**：node-27 product-archive mover 按 14 天策略
+归档 shared root 的 state 对象，而没有任何组件剪枝 shared state index，因此 copyback merge
+只校验并搬运本次胜出的 source entry，不再要求 shared index 里历史 entry 的对象仍在
+shared root（#1189，见 8.8）。不要照旧文档把 destination 侧全量 object verification
+"恢复"回去——那会原地重装同一个链停摆雷。
 
 Registry package version 必须由 publisher 同一套源计划生成：required、optional SHUD
 runtime、`CALIB/` 与 forcing CSV 的相对路径、大小和内容 checksum 都参与；机器绝对路径、
@@ -1537,6 +1543,147 @@ Heihe DB river network has GIS display segments and SHUD output segments.
 `hydro.river_timeseries.q_down` attaches directly to SHUD output segments.
 GIS segments map through `properties_json->>'iRiv'`. If an API/frontend query
 uses GIS segment ids directly, some segments can appear to have no flow.
+
+### 8.8 state-index copyback fail-closed 与 replay 补账
+
+判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
+调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带
+`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`，`details.error` 是具体的 state-manager reason：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
+grep -rl OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED "$JOURNAL" | tail -20
+# 两份 index 的 entry 数（shared 是调度器实际读的那份）
+uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+  /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
+uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+  /ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
+```
+
+判读口径：
+
+- `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
+  **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
+  `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
+- shared root（`/ghdc/data/nwm/object-store`）下历史 state 对象缺失 —— **不再**是 copyback
+  失败原因（#1189 已收窄；node-27 mover 按 14 天归档 shared 对象，调度器与 refresh 都以
+  private root 解析对象）。若仍看到该失败，说明运行的是修复前的代码，先确认部署 SHA。
+- provider-refresh 天天"成功"不能证明 copyback 正常：refresh 只续期、只用 private root
+  解析对象。判"链是否在写入" 必须看 shared index 的 entry_count 是否随 cycle 增长。
+
+失败后的补账（stage 终态已落账，copyback 不会自然重试；无 replay 则那批 entry 永不进 index）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22   # 必须是 provider 属主 frd_muziyao：
+                                        # provider lock 要求锁父目录 st_uid == geteuid()，
+                                        # CAS 替换要求 preimage uid 匹配；换身份会不透明 fail-closed
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 提供 OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX
+NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
+NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/copyback-replay/receipts
+set +a
+install -d -m 0700 "$NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
+
+# 1) 只读预览（默认 dry-run：不调用 merge、不改 index、不拷对象）
+uv run python -m scripts.scheduler_state_index_copyback_replay \
+  --cycle gfs_2026072000 --cycle ifs_2026072000
+
+# 2) 逐项核对 dry-run 输出后再执行：
+#    - resolved_run_ids / preview_new_entry_count 符合预期
+#    - destination_entry_count_before 与共享 index 现有条数一致（当前 ~1645），而不是 0
+#      （0 = 根写错 / NFS 没挂，别 enforce）
+#    - destination_index_existed 为 true
+uv run python -m scripts.scheduler_state_index_copyback_replay \
+  --cycle gfs_2026072000 --cycle ifs_2026072000 --enforce
+```
+
+约束与判读：
+
+- cycle 用生产小写形式 `<source>_<YYYYMMDDHH>`（工具会对输入小写归一）；也可用
+  `--run-ids a,b`（逗号分隔）。二者互斥且必选。
+- 解析为空（cycle/run-id 在 private index 中无对应 entry）→ **非零退出 + 结构化 reason，
+  不调用 merge、不写 index**。不要为了"跑通"改口径。
+- `--enforce` 走的是生产同一个 merge 代码路径（同样的锁、CAS、checksum 与冲突语义），
+  幂等：重复 enforce 零拷贝（copied/reused/replaced 全 0）、entry 数不变——与共享 index
+  既有 entry 字节相同的胜出 entry 不重拷对象，避免把已归档对象复活回共享根。
+- `--enforce` 的前置守卫：派生出的 destination index 文件不存在时 **非零退出**（reason
+  `destination_index_missing`），在调用 merge 之前就拒绝，不写任何 index/对象。这挡的是
+  "根写错 / NFS 未挂的桩 mountpoint" —— 否则 merge 会走 bootstrap 分支新建一份只含本次
+  entry 的假 canonical index 并出绿 receipt。只有确认是真正的首次 copyback 才加
+  `--allow-bootstrap` 放行 0-entry 开局。dry-run 不受该守卫限制（照常预览，before=0）。
+- `--enforce` 的后置守卫：merge 提交后重读 destination index，断言其 entry 身份集
+  **涵盖**前置守卫读到的全部 destination entry 身份。merge 只增不减，所以该断言零误报；
+  比"after ≥ before"计数比较更严（等计数收缩也会被抓）。违反 → exit 3、reason
+  `destination_entries_lost_after_merge`（见下面的退出码表）。
+- receipt 落在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT`（0700 目录、0600 文件，
+  含 `latest.json`），字段含 mode、resolved run ids、前后 entry 数、copied/reused/replaced、
+  `destination_index_existed`/`allow_bootstrap`、`merge_commit_state`（`committed` /
+  `uncertain` / `dry_run`）与 `merge_error_reason`；enforce 模式未设该 env 直接拒绝执行。
+- 工具只碰 state-index：不写 journal、不动 registry / canonical-readiness、不改 pipeline 行。
+
+退出码判读（exit 2 与 exit 3 的区别是"index 有没有被改/可能被改"，别混着看）：
+
+| exit | stderr `status` | 含义 | 处置 |
+|---|---|---|---|
+| 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
+| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁类/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 3 | `merge_committed_incomplete` | merge **已提交或不能证明未提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
+
+exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命中多个，stderr 的 `reason`
+按严重度取最重的那个（`destination_entries_lost_after_merge` > `post_merge_readback_failed`
+\> `merge_commit_uncertain` > `receipt_write_failed_after_merge`），其余折进 details 并在
+`failure_reasons` 列全：
+
+- `post_merge_readback_failed`：merge 已提交，但提交后重读 destination index 失败
+  （NFS EIO/ESTALE、并发 preimage 变化、字节损坏）。receipt **照样写**，只是
+  `destination_entry_count_after` 为 `null` 且 `post_merge_readback_reason` 记下原因。
+  处置：手工数一遍 shared index 的 entry 数核对 stdout 摘要的
+  `merge.published_entry_count`，再重跑 enforce（幂等）拿一份完整 receipt。
+- `destination_entries_lost_after_merge`：提交后读回的 entry 身份集**没有涵盖**
+  enforce 前置守卫读到的全部 destination entry —— 前置守卫在锁外读、merge 在锁内重读，
+  这个窗口里 index 被带外删除 / NFS 掉挂，会让 merge 走 bootstrap 分支把 canonical index
+  削成只含本次 entry（#1189 的 1645→36 灾难态）。**这是数据丢失告警，不是重跑就好**：
+  立刻停手，别再 enforce，先确认 `/ghdc/data/nwm` 挂载状态，再从 private index
+  （`OBJECT_STORE_ROOT` 下那份，永不剪枝）重建 shared index。receipt 里
+  `destination_entries_lost_count` 是丢失的身份数，stderr 的 `lost_entry_identities`
+  给前 20 个身份元组。
+- `merge_commit_uncertain`：merge 自己抛错，但 `error_reason` **不在** pre-commit
+  allowlist 上（如 `provider_replace_uncertain`：`os.replace` 已成功、父目录 fsync 失败；
+  `provider_postread_failed`：CAS 写完后校验读失败；或任何未来新增的未知 reason）。
+  **按"已提交"对待**：工具照样跑完提交后证据链（读回 + 超集守卫 + receipt），只是
+  merge 返回值不存在，所以 receipt 的 `merge` 与 `checkpoint_*_count` 为 `null`，
+  `merge_commit_state` 为 `uncertain`、`merge_error_reason` 记原始 reason。
+  merge 抛出的是**未分类异常**（不带 reason 的裸异常，如 CAS 之后 provider 锁释放段的
+  `OSError`）时同样归到本 reason，此时 `merge_error_reason` 是合成标识
+  `merge_unexpected_exception:<异常类型>`（如 `merge_unexpected_exception:OSError`），
+  异常原文在 stderr 的 `error` 字段（receipt 只记 `merge_error_reason`，无 `error` 键）。处置：
+  先看 stdout 摘要/receipt 的 `destination_entry_count_after` 与
+  `destination_entries_lost_count` —— **`destination_entries_lost_count` 非 0 就转下面的
+  lost 分支停手**；为 0 且 `destination_entry_count_after` 符合预期则幂等重跑 enforce
+  拿一份干净 receipt。
+- `receipt_write_failed_after_merge`：index 变更已提交但 receipt 写不下去，
+  `receipt_failure_reason` 是底层原因。处置：**重跑前先看 stdout 摘要的
+  `destination_entries_lost_count`——非 0 就按上面的 lost 分支停手，绝不重跑**（按严重度
+  排序，lost 会直接顶掉本 reason，但 receipt 没写下来时 stdout 摘要是唯一现场证据）；
+  为 0 才留存 stdout 摘要作证据、修好 receipt 目录后重跑 enforce（幂等）补上 receipt。
+- `post_merge_unexpected_error`：兜底——merge 已提交、尾段抛了上面三类之外的异常
+  （`error_type`/`error` 记下原文）。当 index 已变更处理：先核对 shared index entry 数，
+  再重跑 enforce。
+
+**exit 3 一律不是 refused**：看到 `status` 是 `merge_committed_incomplete` 就说明 shared
+index 可能已被改，不能按"什么都没发生"处理。
+
+本案处置记录（#1189，2026-07-20 00Z 链停摆）：node-27 product-archive mover 以
+`cutoff=2026-07-06T00:00:00Z`、`minimum_age_days=14` 归档了 shared root 上 574 个旧 state
+对象，而 shared index 无人剪枝；copyback merge 在写入前对 destination 全量 1645 条历史 entry
+做对象存在性校验，于 2026-07-25T18:40:48Z 之后每次 `state_save_qc` 均 fail-closed，导致
+2026072000 产出的 36 条 f012 后继 checkpoint（gfs 18 + IFS 18，`valid_time=2026-07-20T12:00Z`）
+只存在于 private index，调度器读的 shared index 判 072000 为 gap、072012 永不规划。修复把
+destination 侧收窄为"只校验并搬运本次胜出、且 shared index 尚未逐字节在册的 source entry"，积压用上面的 replay
+（`--cycle gfs_2026072000 --cycle ifs_2026072000 --enforce`）补进 shared index。
 
 ## 9. 值守 SQL 片段
 

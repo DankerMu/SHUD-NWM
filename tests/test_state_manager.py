@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +27,7 @@ from packages.common.state_manager import (
     StateManagerError,
     StateSnapshot,
     assess_freshness,
+    merge_state_snapshot_index_copyback,
     publish_state_snapshot_index,
     state_snapshot_id,
 )
@@ -2411,6 +2415,606 @@ async def test_state_snapshot_api_list_and_get(
     assert [item["state_id"] for item in list_data["items"]] == [latest.state_id, older.state_id]
     assert get_response.status_code == 200
     assert get_response.json()["state_id"] == latest.state_id
+
+
+def test_state_index_copyback_merge_publishes_new_entry_beside_archived_destination_object(
+    tmp_path: Path,
+) -> None:
+    # #1189: node-27's product-archive mover removes shared-root state objects
+    # after 14 days while nothing prunes the shared index, so the destination
+    # index legitimately references objects that no longer exist there.  The
+    # merge must still publish the new authoritative entry, keep the historical
+    # entry, and never resurrect the archived object.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    archived_content = _valid_ic_bytes(b"archived")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    archived_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/archived/state.cfg.ic", archived_content
+    )
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    archived_entry = _copyback_index_entry(
+        state_id="archived-state",
+        run_id="fcst_gfs_2026070500_model_a",
+        state_uri=archived_uri,
+        content=archived_content,
+        valid_time="2026-07-05T12:00:00Z",
+        created_at="2026-07-05T13:00:00Z",
+        cycle_id="gfs_2026070500",
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [archived_entry, fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [archived_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+    archived_shared_object = shared_root / "states/gfs/model_a/archived/state.cfg.ic"
+    assert not archived_shared_object.exists()
+
+    summary = merge_state_snapshot_index_copyback(
+        source_path=source_index,
+        destination_path=destination_index,
+        reference_object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        source_containment_root=private_root,
+        destination_containment_root=shared_root,
+        authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+    )
+
+    assert summary["source_entry_count"] == 1
+    assert summary["merged_entry_count"] == 2
+    # Published set stays the full merged set: destination history + net new.
+    assert summary["entry_count"] == 2
+    assert summary["checkpoint_copied_count"] == 1
+    assert summary["checkpoint_reused_count"] == 0
+    assert summary["checkpoint_replaced_count"] == 0
+    assert not archived_shared_object.exists()
+    assert (shared_root / "states/gfs/model_a/fresh/state.cfg.ic").read_bytes() == fresh_content
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert [entry["state_id"] for entry in payload["entries"]] == ["archived-state", "fresh-state"]
+    assert payload["entries"][0] == archived_entry
+
+
+def test_state_index_copyback_merge_is_idempotent_over_archived_destination_history(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    archived_content = _valid_ic_bytes(b"archived")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    archived_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/archived/state.cfg.ic", archived_content
+    )
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    archived_entry = _copyback_index_entry(
+        state_id="archived-state",
+        run_id="fcst_gfs_2026070500_model_a",
+        state_uri=archived_uri,
+        content=archived_content,
+        valid_time="2026-07-05T12:00:00Z",
+        created_at="2026-07-05T13:00:00Z",
+        cycle_id="gfs_2026070500",
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [archived_entry, fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [archived_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+
+    def merge() -> dict[str, Any]:
+        return merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    first = merge()
+    first_entries = json.loads(destination_index.read_text(encoding="utf-8"))["entries"]
+    second = merge()
+
+    assert first["checkpoint_copied_count"] == 1
+    assert second["merged_entry_count"] == 2
+    assert second["entry_count"] == 2
+    # The replayed entry is already published byte-identically, so the second
+    # merge touches no object at all (#1189 A2): its object lifecycle belongs to
+    # the archive mover from the moment the entry is in the index.
+    assert second["checkpoint_copied_count"] == 0
+    assert second["checkpoint_replaced_count"] == 0
+    assert second["checkpoint_reused_count"] == 0
+    assert json.loads(destination_index.read_text(encoding="utf-8"))["entries"] == first_entries
+    assert not (shared_root / "states/gfs/model_a/archived/state.cfg.ic").exists()
+
+
+def test_state_index_copyback_merge_does_not_copy_losing_source_entry_object(
+    tmp_path: Path,
+) -> None:
+    # The object key is a pure function of the identity tuple, so copying a
+    # source entry that lost its collision would overwrite the shared object
+    # while the index keeps the destination entry's checksum.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/contested/state.cfg.ic"
+    losing_content = _valid_ic_bytes(b"losing")
+    winning_content = _valid_ic_bytes(b"winning")
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(state_key, losing_content)
+    LocalObjectStore(shared_root, "s3://nhms").write_bytes_atomic(state_key, winning_content)
+    losing_entry = _copyback_index_entry(
+        state_id="losing-state",
+        run_id="fcst_gfs_2026072000_losing",
+        state_uri=state_uri,
+        content=losing_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    winning_entry = _copyback_index_entry(
+        state_id="winning-state",
+        run_id="fcst_gfs_2026072000_winning",
+        state_uri=state_uri,
+        content=winning_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T02:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [losing_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [winning_entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 2, tzinfo=UTC),
+    )
+
+    summary = merge_state_snapshot_index_copyback(
+        source_path=source_index,
+        destination_path=destination_index,
+        reference_object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        source_containment_root=private_root,
+        destination_containment_root=shared_root,
+        authoritative_run_ids=["fcst_gfs_2026072000_losing"],
+    )
+
+    assert summary["source_entry_count"] == 1
+    assert summary["merged_entry_count"] == 1
+    assert summary["checkpoint_copied_count"] == 0
+    assert summary["checkpoint_replaced_count"] == 0
+    assert summary["checkpoint_reused_count"] == 0
+    assert (shared_root / state_key).read_bytes() == winning_content
+    payload = json.loads(destination_index.read_text(encoding="utf-8"))
+    assert payload["entries"] == [winning_entry]
+
+
+def test_state_index_copyback_merge_does_not_resurrect_archived_object_of_identical_entry(
+    tmp_path: Path,
+) -> None:
+    # #1189 (A2): replaying an old cycle re-presents entries the shared index
+    # already holds byte-identically.  Those entries are published already and
+    # their shared objects belong to node-27's archive mover, so the merge must
+    # not copy them back -- a replay must never resurrect an archived object.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/republished/state.cfg.ic"
+    content = _valid_ic_bytes(b"already-published")
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(state_key, content)
+    entry = _copyback_index_entry(
+        state_id="republished-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [entry],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 2, tzinfo=UTC),
+        verify_objects=False,
+    )
+    # The shared object has been archived off the shared root.
+    assert not (shared_root / state_key).exists()
+
+    summary = merge_state_snapshot_index_copyback(
+        source_path=source_index,
+        destination_path=destination_index,
+        reference_object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        source_containment_root=private_root,
+        destination_containment_root=shared_root,
+        authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+    )
+
+    assert summary["source_entry_count"] == 1
+    assert summary["merged_entry_count"] == 1
+    assert summary["entry_count"] == 1
+    assert summary["checkpoint_copied_count"] == 0
+    assert summary["checkpoint_reused_count"] == 0
+    assert summary["checkpoint_replaced_count"] == 0
+    assert not (shared_root / state_key).exists()
+    assert json.loads(destination_index.read_text(encoding="utf-8"))["entries"] == [entry]
+
+
+def test_state_index_copyback_merge_fails_closed_when_source_object_changes_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The source index is validated (objects + checksums) before the destination
+    # lock is taken, so the per-entry checksum verification and post-write
+    # read-back inside _copyback_state_checkpoint are the only guards left
+    # against the source object changing in that window.  Rewrite the object
+    # exactly when the destination lock is acquired to pin them down.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/toctou/state.cfg.ic"
+    validated_content = _valid_ic_bytes(b"validated")
+    tampered_content = _valid_ic_bytes(b"tampered")
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(
+        state_key, validated_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="toctou-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=validated_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    destination_before = destination_index.read_bytes()
+    real_lock = state_manager_module.provider_destination_lock
+
+    @contextmanager
+    def tampering_lock(path: Path, **kwargs: Any) -> Iterator[None]:
+        with real_lock(path, **kwargs):
+            if Path(path) == destination_index:
+                # Source-side validation has already passed at this point.
+                (private_root / state_key).write_bytes(tampered_content)
+            yield
+
+    monkeypatch.setattr(state_manager_module, "provider_destination_lock", tampering_lock)
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_checksum_mismatch"
+    assert destination_index.read_bytes() == destination_before
+    assert not (shared_root / state_key).exists()
+
+
+def test_state_index_copyback_merge_fails_closed_when_destination_write_diverges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The post-write read-back inside _copyback_state_checkpoint is the only guard
+    # left against the shared root ending up with bytes other than the ones just
+    # verified against the source checksum (a lying or torn write on NFS).  Drive
+    # the destination write to land different bytes so that read-back -- not the
+    # source-side checksum guard, which passes here -- is what has to fail closed.
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    state_key = "states/gfs/model_a/readback/state.cfg.ic"
+    source_content = _valid_ic_bytes(b"source-truth")
+    landed_content = _valid_ic_bytes(b"landed-other")
+    assert landed_content != source_content
+    state_uri = LocalObjectStore(private_root, "s3://nhms").write_bytes_atomic(
+        state_key, source_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="readback-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=source_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    destination_before = destination_index.read_bytes()
+    shared_object = shared_root / state_key
+    real_write = state_manager_module.atomic_write_bytes_no_follow
+
+    def diverging_write(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path) == shared_object:
+            return real_write(path, landed_content, **kwargs)
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "atomic_write_bytes_no_follow", diverging_write)
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_checksum_mismatch"
+    # The write did land -- the read-back is what caught it -- and the index was
+    # never published against the diverged object.
+    assert shared_object.read_bytes() == landed_content
+    assert destination_index.read_bytes() == destination_before
+
+
+def test_state_index_copyback_merge_still_fails_closed_on_missing_source_object(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [],
+        destination_index,
+        object_store_root=shared_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    (private_root / "states/gfs/model_a/fresh/state.cfg.ic").unlink()
+    before = destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_missing"
+    assert destination_index.read_bytes() == before
+
+
+def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_index(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "object-store"
+    shared_root = tmp_path / "shared-object-store"
+    private_store = LocalObjectStore(private_root, "s3://nhms")
+    fresh_content = _valid_ic_bytes(b"fresh")
+    fresh_uri = private_store.write_bytes_atomic(
+        "states/gfs/model_a/fresh/state.cfg.ic", fresh_content
+    )
+    fresh_entry = _copyback_index_entry(
+        state_id="fresh-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=fresh_uri,
+        content=fresh_content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    source_index = private_root / "scheduler/state-index/index-last.json"
+    destination_index = shared_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [fresh_entry],
+        source_index,
+        object_store_root=private_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+    )
+    destination_index.parent.mkdir(parents=True, exist_ok=True)
+    destination_index.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(StateManagerError) as error_info:
+        merge_state_snapshot_index_copyback(
+            source_path=source_index,
+            destination_path=destination_index,
+            reference_object_store_root=private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=private_root,
+            destination_containment_root=shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_unreadable"
+    assert destination_index.read_text(encoding="utf-8") == "[]\n"
+    assert not (shared_root / "states/gfs/model_a/fresh/state.cfg.ic").exists()
+
+
+def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path: Path) -> None:
+    # must-preserve: the copyback merge narrows its own publish call site only.
+    # The renewal publisher and the provider-refresh state lane both rely on
+    # the default staying object-verifying.
+    assert (
+        inspect.signature(publish_state_snapshot_index).parameters["verify_objects"].default is True
+    )
+    assert (
+        inspect.signature(FileStateSnapshotIndexRepository._publish_entries)
+        .parameters["verify_objects"]
+        .default
+        is True
+    )
+    object_root = tmp_path / "object-store"
+    content = _valid_ic_bytes(b"missing-object")
+    state_uri = LocalObjectStore(object_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/gone/state.cfg.ic", content
+    )
+    entry = _copyback_index_entry(
+        state_id="gone-state",
+        run_id="fcst_gfs_2026072000_model_a",
+        state_uri=state_uri,
+        content=content,
+        valid_time="2026-07-20T12:00:00Z",
+        created_at="2026-07-27T01:00:00Z",
+        cycle_id="gfs_2026072000",
+    )
+    (object_root / "states/gfs/model_a/gone/state.cfg.ic").unlink()
+    index_path = object_root / "scheduler/state-index/index-last.json"
+
+    with pytest.raises(StateManagerError) as error_info:
+        publish_state_snapshot_index(
+            [entry],
+            index_path,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+        )
+
+    assert error_info.value.reason == "state_snapshot_index_object_missing"
+    assert not index_path.exists()
+
+
+def _copyback_index_entry(
+    *,
+    state_id: str,
+    run_id: str,
+    state_uri: str,
+    content: bytes,
+    valid_time: str,
+    created_at: str,
+    cycle_id: str,
+    lead_hours: int = 12,
+) -> dict[str, Any]:
+    return {
+        "state_id": state_id,
+        "model_id": "model_a",
+        "run_id": run_id,
+        "source_id": "gfs",
+        "valid_time": valid_time,
+        "state_uri": state_uri,
+        "checksum": f"sha256:{sha256_bytes(content)}",
+        "usable_flag": True,
+        "created_at": created_at,
+        "cycle_id": cycle_id,
+        "lead_hours": lead_hours,
+    }
 
 
 def _valid_ic_bytes(content: bytes) -> bytes:
