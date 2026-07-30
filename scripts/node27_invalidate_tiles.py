@@ -21,11 +21,20 @@ and a key whose file leg could not be completed keeps BOTH tiers: that leaves th
 row re-runnable instead of stranding an unreachable stale file.  Such keys make
 the run ``incomplete`` (exit 3) with the keys named in the receipt.
 
+The file-cache ROOT itself is prechecked three ways before anything is read from
+the database: it must exist and be a directory.  A confirmed-absent root, a root
+that is not a directory, and a root that cannot be probed are all refusals -- a
+mistyped ``--file-cache-dir`` would otherwise make every per-key probe report
+``absent`` and delete the DB rows while the stale files keep being served.
+
 Dry run is the default and writes nothing at all: it reports the candidate rows
 and their file-cache probe verdicts, and still publishes a receipt.
 
 Exit codes: ``0`` completed (or dry run), ``2`` refused before any mutation,
-``3`` incomplete -- some keys were deliberately left intact.
+``3`` incomplete -- some keys were deliberately left intact, ``4`` failed AFTER
+a mutation (file-cache entries were unlinked and the DB delete or the receipt
+write did not complete).  Exit 4 always echoes a receipt on stdout naming every
+unlinked entry, and writes it to ``--receipt-path`` when that is still possible.
 """
 
 from __future__ import annotations
@@ -100,6 +109,38 @@ class TileInvalidationIncomplete(RuntimeError):
         self.receipt: dict[str, Any] = dict(receipt)
 
 
+class TileInvalidationPartialMutation(RuntimeError):
+    """Something was already mutated and the run could not finish: exit 4.
+
+    The two reachable shapes are a DB delete/commit that failed after file-cache
+    entries were unlinked, and a receipt write that failed after the delete was
+    committed.  Both carry the receipt -- including the unlinked entries -- so a
+    bare traceback can never be the only record of a partial mutation.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        receipt: Mapping[str, Any],
+        receipt_written: bool,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.receipt: dict[str, Any] = dict(receipt)
+        self.receipt_written = bool(receipt_written)
+        self.detail = detail
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": "failed_partial_mutation",
+            "failure_reason": self.reason,
+            "receipt_written": self.receipt_written,
+            "detail": self.detail,
+        }
+
+
 # ---------------------------------------------------------------------------
 # file cache
 # ---------------------------------------------------------------------------
@@ -111,6 +152,28 @@ def file_cache_path(root: Path | None, cache_key: str) -> Path | None:
     if root is None or not _CACHE_KEY_PATTERN.fullmatch(cache_key):
         return None
     return root / cache_key[:2] / f"{cache_key}.pbf"
+
+
+def probe_file_cache_root(root: Path | None) -> dict[str, Any]:
+    """Three-way precheck of the configured file-cache root.
+
+    ``present`` only when the root exists AND is a directory.  Anything else is
+    a refusal upstream: with a wrong root every per-key probe answers ``absent``
+    and the run would delete the DB rows while the real files keep serving
+    stale tiles (round-1 C-F4).
+    """
+
+    if root is None:
+        return {"path": None, "status": PROBE_ABSENT, "detail": "file cache not configured"}
+    try:
+        metadata = stat_no_follow(root)
+    except FileNotFoundError:
+        return {"path": str(root), "status": PROBE_ABSENT, "detail": "file cache root does not exist"}
+    except (OSError, SafeFilesystemError) as error:
+        return {"path": str(root), "status": PROBE_UNDETERMINABLE, "detail": f"stat failed: {error}"}
+    if not stat.S_ISDIR(metadata.st_mode):
+        return {"path": str(root), "status": PROBE_ABSENT, "detail": "file cache root is not a directory"}
+    return {"path": str(root), "status": PROBE_PRESENT, "detail": None}
 
 
 def probe_file_cache(root: Path | None, cache_key: str) -> dict[str, Any]:
@@ -193,8 +256,11 @@ def invalidate_tiles(
     file_cache_dir: Path | None,
     execute: bool,
     database_url: str,
-    connect: Callable[[str], Any] = _connect_default,
+    connect: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
+    # Resolved at call time (not as a default argument) so the connection
+    # boundary can be substituted module-wide, CLI entry point included.
+    connect = connect or _connect_default
     started_at = datetime.now(tz=UTC)
     resolved_sources = sorted({str(source_id).strip() for source_id in source_ids if str(source_id).strip()})
     if not resolved_sources:
@@ -211,7 +277,17 @@ def invalidate_tiles(
         )
     if not database_url:
         raise TileInvalidationRefused("database_url_missing", {"env": DATABASE_URL_ENV})
+    if file_cache_dir is not None:
+        root_probe = probe_file_cache_root(file_cache_dir)
+        if root_probe["status"] != PROBE_PRESENT:
+            raise TileInvalidationRefused(
+                "file_cache_dir_absent"
+                if root_probe["status"] == PROBE_ABSENT
+                else "file_cache_dir_undeterminable",
+                {"file_cache_dir": str(file_cache_dir), "probe": root_probe},
+            )
 
+    unlinked_paths: list[str] = []
     connection = connect(database_url)
     try:
         with connection.cursor() as cursor:
@@ -262,6 +338,7 @@ def invalidate_tiles(
                             entries.append(entry)
                             continue
                         entry["file_cache_action"] = "deleted"
+                        unlinked_paths.append(str(probe["path"]))
                     else:
                         entry["file_cache_action"] = "absent"
                 deletable_keys.append(cache_key)
@@ -273,9 +350,34 @@ def invalidate_tiles(
                 deleted_rows = int(getattr(cursor, "rowcount", 0) or 0)
         if execute:
             connection.commit()
-    except Exception:
+    except Exception as error:
         _rollback(connection)
-        raise
+        if not unlinked_paths:
+            raise
+        # File-cache entries are already gone and the rows are not: emit a
+        # receipt naming them instead of dying with a bare traceback.
+        receipt = _receipt_payload(
+            outcome="failed_partial_mutation",
+            executed=execute,
+            started_at=started_at,
+            resolved_sources=resolved_sources,
+            window_start=window_start,
+            window_end=window_end,
+            file_cache_dir=file_cache_dir,
+            candidates=candidates,
+            entries=entries,
+            blocked=blocked,
+            deleted_rows=0,
+            unlinked_paths=unlinked_paths,
+            failure={"reason": "db_delete_failed_after_file_unlink", "detail": str(error)},
+        )
+        written, write_error = _try_write_receipt(receipt_path, receipt)
+        raise TileInvalidationPartialMutation(
+            "db_delete_failed_after_file_unlink",
+            receipt=receipt,
+            receipt_written=written,
+            detail=str(error) if written else f"{error}; receipt write failed: {write_error}",
+        ) from error
     finally:
         _close(connection)
 
@@ -283,14 +385,65 @@ def invalidate_tiles(
         if entry["row_action"] == "planned" and execute:
             entry["row_action"] = "deleted"
 
-    receipt: dict[str, Any] = {
+    receipt = _receipt_payload(
+        outcome="incomplete" if blocked else "completed",
+        executed=execute,
+        started_at=started_at,
+        resolved_sources=resolved_sources,
+        window_start=window_start,
+        window_end=window_end,
+        file_cache_dir=file_cache_dir,
+        candidates=candidates,
+        entries=entries,
+        blocked=blocked,
+        deleted_rows=deleted_rows,
+        unlinked_paths=unlinked_paths,
+        failure=None,
+    )
+    written, write_error = _try_write_receipt(receipt_path, receipt)
+    if not written:
+        if unlinked_paths or deleted_rows:
+            # The delete is committed; the only remaining duty is to surface the
+            # record, which main() echoes on stdout under exit 4.
+            raise TileInvalidationPartialMutation(
+                "receipt_write_failed_after_commit",
+                receipt=receipt,
+                receipt_written=False,
+                detail=write_error,
+            )
+        raise TileInvalidationRefused(
+            "receipt_write_failed",
+            {"path": str(receipt_path), "error": write_error},
+        )
+    if blocked:
+        raise TileInvalidationIncomplete(receipt)
+    return receipt
+
+
+def _receipt_payload(
+    *,
+    outcome: str,
+    executed: bool,
+    started_at: datetime,
+    resolved_sources: Sequence[str],
+    window_start: datetime,
+    window_end: datetime,
+    file_cache_dir: Path | None,
+    candidates: Sequence[Mapping[str, Any]],
+    entries: Sequence[Mapping[str, Any]],
+    blocked: Sequence[Mapping[str, Any]],
+    deleted_rows: int,
+    unlinked_paths: Sequence[str],
+    failure: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
         "schema_version": SCHEMA_VERSION,
-        "outcome": "incomplete" if blocked else "completed",
-        "executed": bool(execute),
+        "outcome": outcome,
+        "executed": bool(executed),
         "started_at": _format_time(started_at),
         "finished_at": _format_time(datetime.now(tz=UTC)),
         "scope": {
-            "source_ids": resolved_sources,
+            "source_ids": list(resolved_sources),
             "window_start": _format_time(window_start),
             "window_end": _format_time(window_end),
             "file_cache_dir": str(file_cache_dir) if file_cache_dir is not None else None,
@@ -307,13 +460,21 @@ def invalidate_tiles(
             "blocked_keys": len(blocked),
         },
         "blocked_cache_keys": [entry["cache_key"] for entry in blocked][:MAX_RECEIPT_ENTRIES],
-        "entries": entries[:MAX_RECEIPT_ENTRIES],
+        "unlinked_file_cache_paths": list(unlinked_paths)[:MAX_RECEIPT_ENTRIES],
+        "failure": dict(failure) if failure is not None else None,
+        "entries": list(entries)[:MAX_RECEIPT_ENTRIES],
         "entries_truncated": len(entries) > MAX_RECEIPT_ENTRIES,
     }
-    _write_receipt(receipt_path, receipt)
-    if blocked:
-        raise TileInvalidationIncomplete(receipt)
-    return receipt
+
+
+def _try_write_receipt(path: Path, receipt: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Never raise: the receipt is the record of a mutation that already happened."""
+
+    try:
+        _write_receipt(path, receipt)
+    except (OSError, SafeFilesystemError) as error:
+        return False, str(error)
+    return True, None
 
 
 def _rollback(connection: Any) -> None:
@@ -450,6 +611,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except TileInvalidationIncomplete as error:
         print(json.dumps(error.receipt, ensure_ascii=False, sort_keys=True, default=str))
         return 3
+    except TileInvalidationPartialMutation as error:
+        # Declared exit code, receipt on stdout: a partial mutation must never
+        # surface as a bare traceback under exit 1.
+        print(json.dumps(error.receipt, ensure_ascii=False, sort_keys=True, default=str))
+        print(json.dumps(error.to_dict(), ensure_ascii=False, sort_keys=True, default=str), file=sys.stderr)
+        return 4
     except TileInvalidationRefused as error:
         print(json.dumps(error.to_dict(), ensure_ascii=False, sort_keys=True, default=str), file=sys.stderr)
         return 2

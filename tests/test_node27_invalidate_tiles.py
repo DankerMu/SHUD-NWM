@@ -368,6 +368,160 @@ def test_a_foreign_receipt_is_refused_rather_than_read_loosely(tmp_path: Path) -
     assert excinfo.value.reason == "replacement_receipt_schema_unsupported"
 
 
+def test_a_file_cache_root_that_does_not_exist_refuses_before_reading_the_db(tmp_path: Path) -> None:
+    """C-F4: a wrong root makes every per-key probe answer "absent".
+
+    Without the root precheck the run would delete every candidate DB row while
+    the real files keep serving stale tiles.
+    """
+
+    connection, _cache_dir, receipt_path = _site(tmp_path)
+
+    with pytest.raises(TileInvalidationRefused) as excinfo:
+        _run(connection, tmp_path / "typo-cache", receipt_path, execute=True)
+
+    assert excinfo.value.reason == "file_cache_dir_absent"
+    assert excinfo.value.details["probe"]["status"] == "absent"
+    assert connection.statements == []
+    assert connection.cache_keys() == {_key(1), _key(2), _key(3), _key(4)}
+    assert not receipt_path.exists()
+
+
+def test_a_file_cache_root_that_is_not_a_directory_refuses(tmp_path: Path) -> None:
+    connection, _cache_dir, receipt_path = _site(tmp_path)
+    not_a_dir = tmp_path / "cache-file"
+    not_a_dir.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(TileInvalidationRefused) as excinfo:
+        _run(connection, not_a_dir, receipt_path, execute=True)
+
+    assert excinfo.value.reason == "file_cache_dir_absent"
+    assert excinfo.value.details["probe"]["detail"] == "file cache root is not a directory"
+    assert connection.statements == []
+
+
+def test_an_unprobeable_file_cache_root_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three-way: a root that cannot be probed is not evidence of a usable root."""
+
+    connection, cache_dir, receipt_path = _site(tmp_path)
+
+    def _unprobeable(path: Path) -> Any:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(tool, "stat_no_follow", _unprobeable)
+
+    with pytest.raises(TileInvalidationRefused) as excinfo:
+        _run(connection, cache_dir, receipt_path, execute=True)
+
+    assert excinfo.value.reason == "file_cache_dir_undeterminable"
+    assert connection.statements == []
+    assert not receipt_path.exists()
+
+
+def test_a_db_failure_after_file_unlinks_still_emits_a_receipt(tmp_path: Path) -> None:
+    """C-F3: a partial mutation may not surface as a bare traceback."""
+
+    connection, cache_dir, receipt_path = _site(tmp_path)
+    unlinked_path = cache_dir / _key(1)[:2] / f"{_key(1)}.pbf"
+
+    def _fail_on_delete() -> None:
+        raise RuntimeError("connection reset by peer")
+
+    connection.commit = _fail_on_delete  # type: ignore[method-assign]
+
+    with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
+        _run(connection, cache_dir, receipt_path, execute=True)
+
+    assert excinfo.value.reason == "db_delete_failed_after_file_unlink"
+    assert excinfo.value.receipt_written is True
+    receipt = excinfo.value.receipt
+    assert receipt["outcome"] == "failed_partial_mutation"
+    assert receipt["unlinked_file_cache_paths"] == [str(unlinked_path)]
+    assert receipt["failure"]["reason"] == "db_delete_failed_after_file_unlink"
+    assert receipt["totals"]["deleted_rows"] == 0
+    # the file really is gone and the row really did survive
+    assert not unlinked_path.exists()
+    assert _key(1) in connection.cache_keys()
+    assert connection.rolled_back is True
+    assert json.loads(receipt_path.read_text(encoding="utf-8"))["outcome"] == "failed_partial_mutation"
+
+
+def test_a_receipt_write_failure_after_commit_is_a_declared_exit_not_a_traceback(tmp_path: Path) -> None:
+    connection, cache_dir, receipt_path = _site(tmp_path)
+    # the receipt path is unwritable: its parent is a regular file
+    blocked_receipt = tmp_path / "blocked" / "receipt.json"
+    blocked_receipt.parent.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(tool.TileInvalidationPartialMutation) as excinfo:
+        _run(connection, cache_dir, blocked_receipt, execute=True)
+
+    assert excinfo.value.reason == "receipt_write_failed_after_commit"
+    assert excinfo.value.receipt_written is False
+    assert excinfo.value.receipt["unlinked_file_cache_paths"] == [
+        str(cache_dir / _key(1)[:2] / f"{_key(1)}.pbf")
+    ]
+    # the mutation did happen; the receipt travels on the exception instead
+    assert connection.committed is True
+    assert _key(1) not in connection.cache_keys()
+
+
+def test_a_receipt_write_failure_without_any_mutation_is_a_refusal(tmp_path: Path) -> None:
+    connection, cache_dir, _receipt_path = _site(tmp_path)
+    blocked_receipt = tmp_path / "blocked" / "receipt.json"
+    blocked_receipt.parent.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(TileInvalidationRefused) as excinfo:
+        _run(connection, cache_dir, blocked_receipt, execute=False)
+
+    assert excinfo.value.reason == "receipt_write_failed"
+    assert connection.cache_keys() == {_key(1), _key(2), _key(3), _key(4)}
+
+
+def test_the_cli_exit_codes_are_declared_for_every_outcome(tmp_path: Path, capsys: Any) -> None:
+    """0 / 2 / 3 / 4 are the whole contract; nothing exits on a traceback."""
+
+    connection, cache_dir, receipt_path = _site(tmp_path)
+
+    def _fail_on_commit() -> None:
+        raise RuntimeError("connection reset by peer")
+
+    connection.commit = _fail_on_commit  # type: ignore[method-assign]
+    monkeypatched_connect = lambda _url: connection  # noqa: E731 - one-line boundary double
+
+    original_connect = tool._connect_default
+    tool._connect_default = monkeypatched_connect  # type: ignore[assignment]
+    tool.os.environ["DATABASE_URL"] = "postgresql://fake/nhms"
+    try:
+        code = tool.main(
+            [
+                "--source-id",
+                IN_SCOPE_SOURCE,
+                "--window-start",
+                "2026-07-05T00:00Z",
+                "--window-end",
+                "2026-07-21T12:00Z",
+                "--receipt-path",
+                str(receipt_path),
+                "--file-cache-dir",
+                str(cache_dir),
+                "--execute",
+            ]
+        )
+    finally:
+        tool._connect_default = original_connect  # type: ignore[assignment]
+        tool.os.environ.pop("DATABASE_URL", None)
+
+    assert code == 4
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out.strip().splitlines()[0])
+    assert emitted["outcome"] == "failed_partial_mutation"
+    assert emitted["unlinked_file_cache_paths"]
+    assert json.loads(captured.err.strip().splitlines()[-1])["failure_reason"] == (
+        "db_delete_failed_after_file_unlink"
+    )
+    assert "4" in tool.__doc__ and "failed AFTER" in tool.__doc__
+
+
 def test_an_unset_file_cache_dir_is_refused_unless_declared_absent() -> None:
     args = tool._build_parser().parse_args(
         ["--source-id", IN_SCOPE_SOURCE, "--window-start", "2026-07-05T00:00Z", "--window-end", "2026-07-21T12:00Z",
