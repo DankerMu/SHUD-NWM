@@ -166,6 +166,50 @@ def parse_replay_admission(
     return ReplayAdmission(model_ids=frozenset(requested_model_ids), window_start=start, window_end=end)
 
 
+def forcing_cycle_root(object_store_root: str | Path, source_id: str, cycle_time: datetime) -> Path:
+    """``<root>/forcing/<source>/<cycle>`` — the per-cycle forcing package parent."""
+
+    return (
+        Path(str(object_store_root))
+        / "forcing"
+        / normalize_source_id(source_id).lower()
+        / _format_cycle_token(cycle_time)
+    )
+
+
+def find_forcing_package_dir(
+    object_store_root: str | Path,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+) -> Path | None:
+    """Locate one model's direct-grid forcing package, or ``None`` if absent.
+
+    Shares the layout knowledge with :func:`replay_forcing_readiness`
+    (``<cycle>/<basin_version_id>/<model_id>/``) so the readiness gate and the
+    replay driver's staging step can never disagree about where a package lives.
+    """
+
+    cycle_root = forcing_cycle_root(object_store_root, source_id, cycle_time)
+    try:
+        parents = list_directory_no_follow_limited(
+            cycle_root,
+            max_entries=MAX_FORCING_PACKAGE_DIRECTORY_ENTRIES,
+        )
+    except (FileNotFoundError, OSError, SafeFilesystemError):
+        return None
+    for parent in sorted(parents):
+        candidate = cycle_root / parent / model_id
+        try:
+            metadata = stat_no_follow(candidate)
+        except (FileNotFoundError, OSError, SafeFilesystemError):
+            continue
+        if _is_directory(metadata):
+            return candidate
+    return None
+
+
 def replay_forcing_readiness(
     *,
     object_store_root: str | Path | None,

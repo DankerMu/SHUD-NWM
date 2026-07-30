@@ -1,0 +1,301 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NHMS Production Replay Replacement Receipt",
+  "description": "One row per (model, source, cycle) of a controlled six-basin production replay: the pre-overwrite evidence of the replaced run, the unconditional input checksums it consumed, and the post-replay evidence of its replacement (#1164 change 2, design D5). Prior state fields are sourced from the state-scope reset receipt's removed entries, never read back from the already-cleared index.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "outcome",
+    "pass_id",
+    "executed",
+    "source_id",
+    "model_ids",
+    "started_at",
+    "finished_at",
+    "reset_receipt",
+    "inventory_census",
+    "cycles",
+    "rows",
+    "interruption"
+  ],
+  "properties": {
+    "schema_version": { "const": "nhms.production_replay_replacement.v1" },
+    "outcome": { "type": "string", "enum": ["completed", "halted"] },
+    "pass_id": { "type": "string", "minLength": 1 },
+    "executed": { "type": "boolean" },
+    "source_id": { "type": "string", "minLength": 1 },
+    "model_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": ["string", "null"], "format": "date-time" },
+    "reset_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "removed_entry_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "removed_entry_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "inventory_census": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_index", "scopes", "frontier_cycle"],
+      "description": "Start-time on-site census; never a frozen survey count.",
+      "properties": {
+        "state_index": { "type": "string", "minLength": 1 },
+        "frontier_cycle": { "type": ["string", "null"], "pattern": "^[0-9]{10}$" },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model_id", "source_id", "run_cycle_count", "run_cycles", "state_index_entry_count"],
+            "properties": {
+              "model_id": { "type": "string", "minLength": 1 },
+              "source_id": { "type": "string", "minLength": 1 },
+              "run_cycle_count": { "type": "integer", "minimum": 0 },
+              "run_cycles": { "type": "array", "items": { "type": "string", "pattern": "^[0-9]{10}$" } },
+              "state_index_entry_count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "cycles": { "type": "array", "items": { "type": "string", "pattern": "^[0-9]{10}$" } },
+    "rows": { "type": "array", "items": { "$ref": "#/definitions/row" } },
+    "interruption": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cycle", "reason", "detail", "recorded_at"],
+          "properties": {
+            "cycle": { "type": "string", "pattern": "^[0-9]{10}$" },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "submission_failed",
+                "convergence_timeout",
+                "first_cycle_bootstrap_assertion_failed",
+                "key_consistency_drift"
+              ]
+            },
+            "detail": {},
+            "recorded_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "path", "status", "file_count", "total_bytes", "sha256", "detail"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["present", "absent", "undeterminable"] },
+        "file_count": { "type": ["integer", "null"], "minimum": 0 },
+        "total_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cycle",
+        "cycle_time",
+        "source_id",
+        "model_id",
+        "run_id",
+        "status",
+        "prior",
+        "inputs",
+        "staging",
+        "submission",
+        "convergence",
+        "new",
+        "key_consistency",
+        "bootstrap_assertion"
+      ],
+      "properties": {
+        "cycle": { "type": "string", "pattern": "^[0-9]{10}$" },
+        "cycle_time": { "type": "string", "format": "date-time" },
+        "source_id": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["planned", "completed", "halted", "verified_skip"] },
+        "prior": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_manifest_sha256",
+            "output_inventory",
+            "no_prior_run",
+            "state",
+            "state_source",
+            "river_network_version_id",
+            "variable_keys"
+          ],
+          "properties": {
+            "run_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "output_inventory": { "$ref": "#/definitions/digest" },
+            "no_prior_run": { "type": "boolean" },
+            "state": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "required": ["state_id", "checksum", "created_at", "source"],
+                  "properties": {
+                    "state_id": { "type": ["string", "null"] },
+                    "checksum": { "type": ["string", "null"] },
+                    "created_at": { "type": ["string", "null"] },
+                    "source": { "const": "reset_receipt" }
+                  }
+                }
+              ]
+            },
+            "state_source": { "const": "reset_receipt" },
+            "river_network_version_id": { "type": ["string", "null"] },
+            "variable_keys": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["forcing_package", "model_package"],
+          "description": "Recorded unconditionally on every row, including rows with no prior run.",
+          "properties": {
+            "forcing_package": { "$ref": "#/definitions/digest" },
+            "model_package": { "$ref": "#/definitions/digest" }
+          }
+        },
+        "staging": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "copied_files", "verified", "detail"],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "source_absent",
+                    "same_root",
+                    "already_staged",
+                    "stage_planned",
+                    "staged",
+                    "stage_failed",
+                    "verify_failed"
+                  ]
+                },
+                "copied_files": { "type": "integer", "minimum": 0 },
+                "verified": { "type": "boolean" },
+                "detail": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        },
+        "submission": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["returncode", "repair_parameter_set", "submitted_at"],
+              "properties": {
+                "returncode": { "type": "integer" },
+                "repair_parameter_set": { "type": "boolean" },
+                "submitted_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "convergence": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["journal_terminal", "state_entry_present", "waited_seconds"],
+              "properties": {
+                "journal_terminal": { "type": "boolean" },
+                "state_entry_present": { "type": "boolean" },
+                "waited_seconds": { "type": "number", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "new": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run_manifest_sha256",
+                "output_inventory",
+                "state_id",
+                "state_checksum",
+                "init_mode",
+                "quality",
+                "packaged_ic_checksum",
+                "river_network_version_id",
+                "variable_keys"
+              ],
+              "properties": {
+                "run_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+                "output_inventory": { "$ref": "#/definitions/digest" },
+                "state_id": { "type": ["string", "null"] },
+                "state_checksum": { "type": ["string", "null"] },
+                "init_mode": { "type": ["integer", "null"] },
+                "quality": { "type": ["string", "null"] },
+                "packaged_ic_checksum": { "type": ["string", "null"] },
+                "river_network_version_id": { "type": ["string", "null"] },
+                "variable_keys": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          ]
+        },
+        "key_consistency": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["status", "detail"],
+              "properties": {
+                "status": { "type": "string", "enum": ["consistent", "drift", "undeterminable"] },
+                "detail": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        },
+        "bootstrap_assertion": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["required", "status", "detail"],
+              "properties": {
+                "required": { "type": "boolean" },
+                "status": { "type": "string", "enum": ["satisfied", "violated", "not_required"] },
+                "detail": { "type": ["string", "null"] }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
