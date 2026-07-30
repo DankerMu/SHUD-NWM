@@ -427,6 +427,17 @@ class SHUDRuntime:
         _ensure_directory(input_dir)
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         _ensure_directory(model_input_dir, containment_root=input_dir)
+        # #1164 invariant: packaged 候选集恒等于本次 staging 产物;禁止事后猜测.
+        # A manifest that declares a packaged IC clears every staged ``*.cfg.ic``
+        # BEFORE the package is re-staged, so the exactly-one search below sees
+        # exactly what THIS staging produced — never a previous attempt's
+        # materialization.  That makes re-preparation converge for every package
+        # shape (renamed IC, subdirectory IC) while leaving a genuinely ambiguous
+        # package (two ICs in one staging) to fail closed.  The warm path keeps
+        # its own clear at its existing call site; a cold path that declares
+        # nothing is untouched.
+        if _declares_packaged_initial_condition(manifest):
+            self._clear_packaged_initial_states(model_input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
         forcing_context = self._prepare_forcing_package_context(manifest)
         self._stage_artifact(
@@ -954,11 +965,10 @@ class SHUDRuntime:
         """
 
         expected_checksum = _packaged_ic_checksum(manifest)
-        target_path = (
-            _materialized_model_input_dir(manifest, input_dir, self.config.command_style)
-            / f"{_project_name(manifest)}.cfg.ic"
-        )
-        matches = self._packaged_ic_candidates(input_dir, target_path)
+        # The candidate set is exactly what ``prepare_workspace`` just staged:
+        # the pre-staging clear guarantees no earlier attempt's materialization
+        # is in scope, so this search needs no heuristics.
+        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
         if not matches:
             raise SHUDRuntimeError(
                 PACKAGED_IC_CONSUMPTION_FAILED,
@@ -1048,44 +1058,24 @@ class SHUDRuntime:
         _set_runtime_init_mode(manifest, 3)
         self._sync_init_state_id(manifest)
 
-    def _packaged_ic_candidates(self, input_dir: Path, target_path: Path) -> list[Path]:
-        """Return the staged packaged-IC candidates, dropping a stale re-materialization.
+    def _clear_packaged_initial_states(self, model_input_dir: Path) -> None:
+        """Clear staged ``*.cfg.ic`` files before a packaged model package is staged.
 
-        ``prepare_workspace`` is re-runnable on a cycle-stable workspace (the warm
-        path keeps that property by calling ``_clear_staged_initial_states`` before
-        it re-stages).  For a package whose IC basename differs from the project
-        name, attempt 1 materializes ``<pkg>.cfg.ic`` -> ``<project>.cfg.ic``
-        (copy + unlink) while attempt 2 re-stages ``<pkg>.cfg.ic`` from the
-        package: without this step both files are then present and the exactly-one
-        check below would wedge the workspace forever.
-
-        The drop is deliberately narrow — the re-materialized ``<project>.cfg.ic``
-        is removed only when it is one of EXACTLY two candidates and the other is
-        its sibling in the same model-input directory (which is where package
-        staging puts a top-level packaged IC).  A second candidate in a
-        subdirectory (e.g. ``CALIB/``) or any higher multiplicity is left intact so
-        genuinely ambiguous staged input still fails closed; the scheduler-side
-        qualification blocks such packages before submission.
+        Mirrors :meth:`_clear_staged_initial_states` (recursive, no-follow
+        deletion under the staged model input) but reports failures with the
+        packaged-IC error code, because for a declared packaged run this clear is
+        part of consumption: it is what makes the candidate set identical to the
+        current staging.
         """
 
-        matches = _find_regular_files(input_dir, pattern="*.cfg.ic", non_empty=True)
-        if len(matches) != 2:
-            return matches
-        target = target_path.resolve()
-        stale = [path for path in matches if path.resolve() == target]
-        others = [path for path in matches if path.resolve() != target]
-        if len(stale) != 1 or len(others) != 1:
-            return matches
-        if others[0].resolve().parent != target.parent:
-            return matches
         try:
-            unlink_no_follow(stale[0], containment_root=input_dir, missing_ok=True)
-        except SafeFilesystemError as error:
+            self._clear_staged_initial_states(model_input_dir)
+        except SHUDRuntimeError as error:
             raise SHUDRuntimeError(
                 PACKAGED_IC_CONSUMPTION_FAILED,
-                f"Unsafe previously materialized packaged initial condition {stale[0]}: {error}",
+                "Previously staged packaged initial conditions could not be cleared "
+                f"({error.error_code}): {error.message}",
             ) from error
-        return others
 
     def _materialize_packaged_ic_to_project_name(
         self,

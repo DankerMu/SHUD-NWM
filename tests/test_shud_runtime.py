@@ -3374,9 +3374,9 @@ def test_packaged_ic_reprepare_is_idempotent_when_package_ic_is_renamed(tmp_path
 
     The package ships its IC under a NON-canonical basename, so attempt 1
     materializes ``<project>.cfg.ic`` and unlinks the staged source.  Attempt 2
-    re-stages that source from the package: without the stale-materialization
-    drop the exactly-one check would then see two candidates and fail the run
-    forever.
+    clears every staged ``*.cfg.ic`` BEFORE re-staging, so the candidate set is
+    again exactly what this staging produced — one file — instead of the two
+    (previous materialization + restored source) that would wedge the run.
     """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
@@ -3408,7 +3408,12 @@ def test_packaged_ic_reprepare_is_idempotent_when_package_ic_is_renamed(tmp_path
 
 
 def test_packaged_ic_subdirectory_candidate_still_fails_the_exactly_one_check(tmp_path: Path) -> None:
-    """The stale-materialization drop must not swallow a genuinely ambiguous input."""
+    """A package that STAGES two ICs is ambiguous and must fail closed.
+
+    The clear-before-stage invariant only removes what a PREVIOUS preparation
+    left behind; a single staging that produces two candidates is genuinely
+    ambiguous input and still raises.
+    """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     ic_sha256 = _write_packaged_ic(object_root)
@@ -3426,6 +3431,112 @@ def test_packaged_ic_subdirectory_candidate_still_fails_the_exactly_one_check(tm
 
     assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
     assert "exactly one is required" in excinfo.value.message
+
+
+def test_packaged_ic_reprepare_converges_when_the_package_ic_lives_in_a_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """C2: re-preparing a subdirectory-IC package converges instead of wedging.
+
+    Attempt 1 materializes ``CALIB/calibrated.cfg.ic`` to the top-level
+    ``<project>.cfg.ic``; attempt 2 re-stages the source from the package.  The
+    convergence requirement is unconditional — it must not depend on the two
+    candidates happening to be siblings.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "CALIB").mkdir(parents=True, exist_ok=True)
+    (package / "CALIB" / "calibrated.cfg.ic").write_bytes(PACKAGED_IC_CONTENT)
+    ic_sha256 = sha256_bytes(PACKAGED_IC_CONTENT)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    first_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / first_manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(first_manifest, input_dir)
+    materialized = input_dir / "alias-a" / "alias-a.cfg.ic"
+    first_initial_state = deepcopy(first_manifest["initial_state"])
+    first_evidence = deepcopy(first_manifest["runtime"]["packaged_initial_state"])
+
+    second_manifest = _packaged_manifest(checksums, packaged_ic_checksum=ic_sha256)
+    runtime.prepare_workspace(second_manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(second_manifest, input_dir, output_dir)
+
+    assert second_manifest["initial_state"] == first_initial_state
+    assert second_manifest["runtime"]["packaged_initial_state"] == first_evidence
+    assert materialized.read_bytes() == PACKAGED_IC_CONTENT
+    assert sorted(str(path.relative_to(input_dir)) for path in input_dir.rglob("*.cfg.ic")) == [
+        "alias-a/alias-a.cfg.ic"
+    ]
+    assert _cfg_init_mode(cfg_path) == "3"
+
+
+def _write_two_top_level_packaged_ics(object_root: Path) -> tuple[str, bytes]:
+    """Publish a package holding TWO top-level ``*.cfg.ic`` files.
+
+    Returns the canonical file's digest and the stray file's content, so a test
+    can prove which one (if any) the runtime consumed.
+    """
+    canonical_sha256 = _write_packaged_ic(object_root)
+    stray_content = b"9\t9\t11111111.000000\n1\t9.9\t9.9\t9.9\t9.9\n"
+    _write_packaged_ic(object_root, stray_content, name="stray.cfg.ic")
+    return canonical_sha256, stray_content
+
+
+def test_packaged_ic_two_top_level_siblings_fail_closed_without_deleting_the_canonical(
+    tmp_path: Path,
+) -> None:
+    """C1: a package that legitimately ships two top-level ICs is ambiguous.
+
+    The round-1 sibling-drop heuristic deleted the canonical file and consumed
+    the stray one here.  Exactly-one must fire instead, and the staged canonical
+    IC must still be on disk afterwards.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    canonical_sha256, _stray = _write_two_top_level_packaged_ics(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, packaged_ic_checksum=canonical_sha256)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "exactly one is required" in excinfo.value.message
+    # The canonical staged IC must survive the refusal — nothing may be dropped
+    # on a guess about which candidate is stale.
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").is_file()
+    assert (input_dir / "alias-a" / "stray.cfg.ic").is_file()
+
+
+def test_packaged_ic_legacy_form_with_two_siblings_raises_instead_of_consuming_a_stray(
+    tmp_path: Path,
+) -> None:
+    """C1, legacy form: without a recorded digest nothing catches a wrong pick."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _canonical_sha256, stray_content = _write_two_top_level_packaged_ics(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _packaged_manifest(checksums, state_id="qhh_packaged_calibrated_state")
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert excinfo.value.error_code == "PACKAGED_IC_CONSUMPTION_FAILED"
+    assert "exactly one is required" in excinfo.value.message
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").read_bytes() == PACKAGED_IC_CONTENT
+    assert (input_dir / "alias-a" / "stray.cfg.ic").read_bytes() == stray_content
+    assert "packaged_initial_state" not in manifest.get("runtime", {})
 
 
 def test_undeclared_packaged_ic_path_keeps_cold_start_regression(tmp_path: Path) -> None:
