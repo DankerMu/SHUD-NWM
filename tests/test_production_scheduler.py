@@ -25876,6 +25876,9 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
         "ic_relative_path": "model_a.cfg.ic",
         "ic_sha256": expected_ic_sha256,
         "ic_size_bytes": 131072,
+        # #1164 round 2: the tier that decided is recorded so an auditor can tell
+        # a manifest-recorded digest from a probed one.
+        "qualification_source": "inventory",
     }
     assert submitted_basin["state_evidence"]["mode"] == "db_free_packaged_ic_bootstrap"
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True

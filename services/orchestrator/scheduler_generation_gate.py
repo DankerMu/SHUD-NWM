@@ -31,6 +31,7 @@ Contents
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,12 @@ CUTOVER_DECLARATION_UNLOADED: object = object()
 #: than restating a number that could drift out of sync — a corrupt / oversized
 #: manifest must not exhaust scheduler memory during planning.
 MAX_PACKAGE_MANIFEST_BYTES = _file_providers.MAX_MODEL_PACKAGE_MANIFEST_BYTES
+
+#: Bounded read guard for the tier-(b) canonical packaged-IC object probe
+#: (#1164 D1).  Defined next to the qualification policy it belongs to
+#: (``scheduler_generation``) and re-exported here so the gate's IO reads one
+#: constant.
+MAX_PACKAGED_IC_PROBE_BYTES = _generation.MAX_PACKAGED_IC_PROBE_BYTES
 
 #: Candidate ``state_evidence.mode`` emitted for an admitted packaged-IC
 #: bootstrap.  Re-exported from ``scheduler_generation`` so gate callers keep a
@@ -176,6 +183,40 @@ def _package_manifest_reader(scheduler: ProductionScheduler) -> Any | None:
     return store
 
 
+def _canonical_packaged_ic_probe(reader: Any, object_uri: str) -> _generation.PackagedIcObjectProbe:
+    """Bounded no-follow stat + digest probe of ONE canonical packaged-IC object.
+
+    Tier (b) of the D1 qualification: used only when the referenced package
+    manifest carries no ``included_files`` inventory (the direct-grid variant
+    shape), and only on the first-cycle branch.  A probe that cannot complete
+    (unsafe/oversized/unsupported reference, IO error) reports
+    ``unreadable_detail`` so the caller fails CLOSED; a probe that completes and
+    finds no object reports plain non-existence.
+    """
+    try:
+        if not reader.exists(object_uri):
+            return _generation.PackagedIcObjectProbe(exists=False)
+    except Exception:
+        return _generation.PackagedIcObjectProbe(
+            exists=False,
+            unreadable_detail="packaged_initial_condition_object_probe_failed",
+        )
+    try:
+        content = reader.read_bytes_limited(object_uri, max_bytes=MAX_PACKAGED_IC_PROBE_BYTES)
+    except Exception:
+        # Includes the oversize refusal: an IC larger than the cap is unreadable
+        # for qualification purposes, never "the package ships no IC".
+        return _generation.PackagedIcObjectProbe(
+            exists=True,
+            unreadable_detail="packaged_initial_condition_object_probe_failed",
+        )
+    return _generation.PackagedIcObjectProbe(
+        exists=True,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
 def packaged_initial_condition_signal(
     scheduler: ProductionScheduler,
     candidate: _scheduler.SchedulerCandidate,
@@ -187,8 +228,11 @@ def packaged_initial_condition_signal(
     signal: a manifest that is referenced but unreachable / malformed is
     ``UNREADABLE`` (fail closed), never "no IC".
 
-    Only the manifest is read; package objects are never opened here, so the
-    selection layer performs no object-content IO.
+    The manifest read is unconditional; ONE package object is additionally
+    probed only for the inventory-less direct-grid variant shape (D1 tier (b)),
+    which is the only shape whose qualification cannot be decided from published
+    metadata.  Callers reach this function on the first-cycle branch only, so
+    the warm path still performs zero object IO.
     """
     resource_profile = getattr(candidate, "resource_profile", None) or {}
     manifest_uri = resource_profile.get("manifest_uri")
@@ -219,7 +263,11 @@ def packaged_initial_condition_signal(
             status=_generation.PACKAGED_IC_UNREADABLE,
             detail="package_manifest_malformed_json",
         )
-    return _generation.classify_packaged_initial_condition(payload)
+    return _generation.classify_packaged_initial_condition(
+        payload,
+        resource_profile=resource_profile,
+        canonical_object_probe=lambda object_uri: _canonical_packaged_ic_probe(reader, object_uri),
+    )
 
 
 # ---------------------------------------------------------------------------

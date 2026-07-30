@@ -16,6 +16,7 @@ running the whole test file plus the existing DB-free tests together.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -2818,6 +2819,228 @@ def test_packaged_ic_classification_requires_the_canonical_entry() -> None:
     assert named_match.ic_relative_path == "alias-a.cfg.ic"
 
 
+# ---------------------------------------------------------------------------
+# T14b (#1164 round 2): tier-(b) qualification for the INVENTORY-LESS
+# direct-grid variant manifest — the shape 36/36 production registry rows carry.
+#
+# ``provision_direct_grid_scheduler_registry.py`` publishes
+# ``resource_profile.manifest_uri = f"{variant_uri}manifest.json"`` and
+# ``model_package_uri = variant_uri`` (WITH a trailing '/'), while the variant
+# manifest written by ``workers/mapping_builder`` has exactly ONE top-level key:
+# ``direct_grid_forcing``.  There is no ``included_files`` and no
+# ``shud_input_name`` in that manifest, so qualification must fall back to the
+# canonical object probe or every production first cycle blocks.
+# ---------------------------------------------------------------------------
+
+
+DG_PACKAGE_KEY = "models/direct_grid_variants/basins_dth_ls_shud/dg-gfs-9f1c2b3d4e5a/package"
+DG_PACKAGE_URI = f"s3://nhms/{DG_PACKAGE_KEY}/"
+DG_MANIFEST_KEY = f"{DG_PACKAGE_KEY}/manifest.json"
+DG_SHUD_INPUT_NAME = "dth_ls"
+DG_CANONICAL_IC_URI = f"{DG_PACKAGE_URI}{DG_SHUD_INPUT_NAME}.cfg.ic"
+DG_IC_CONTENT = b"2\t1\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
+
+
+def _direct_grid_variant_manifest() -> dict[str, Any]:
+    """Return a manifest shaped like ``DirectGridManifest.to_resource_profile_dict``."""
+    return {
+        "direct_grid_forcing": {
+            "forcing_mapping_mode": "direct_grid",
+            "binding_uri": f"{DG_PACKAGE_URI}direct_grid_binding.json",
+            "binding_checksum": _hex("b"),
+            "model_input_package_id": "dg-input-9f1c2b3d4e5a",
+            "sp_att_path": f"{DG_SHUD_INPUT_NAME}.sp.att",
+            "sp_att_checksum": _hex("a"),
+            "applicable_source_ids": ["gfs"],
+            "grid_id": "gfs_0p25",
+            "grid_signature": _hex("f"),
+            "coordinate_reference_system": "EPSG:4326",
+            "z_policy": {"mode": "surface"},
+            "station_bindings": [],
+        }
+    }
+
+
+def _dg_resource_profile(
+    *,
+    model_package_uri: str | None = DG_PACKAGE_URI,
+    shud_input_name: str | None = DG_SHUD_INPUT_NAME,
+) -> dict[str, Any]:
+    profile: dict[str, Any] = {
+        "package_checksum": NEW_CHECKSUM,
+        "manifest_uri": f"s3://nhms/{DG_MANIFEST_KEY}",
+        "lineage": "direct_grid_variant_registration",
+        "forcing_mapping_mode": "direct_grid",
+    }
+    if model_package_uri is not None:
+        profile["model_package_uri"] = model_package_uri
+    if shud_input_name is not None:
+        profile["shud_input_name"] = shud_input_name
+    return profile
+
+
+class _RecordingProbe:
+    """Deterministic tier-(b) probe stub that records the uri it was handed."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        self.uris: list[str] = []
+
+    def __call__(self, object_uri: str) -> Any:
+        self.uris.append(object_uri)
+        return self.result
+
+
+def test_variant_manifest_qualifies_from_the_canonical_object_probe() -> None:
+    """Tier (b): inventory-less manifest + a present non-empty canonical object."""
+    probe = _RecordingProbe(
+        generation.PackagedIcObjectProbe(
+            exists=True, size_bytes=len(DG_IC_CONTENT), sha256=PACKAGE_IC_SHA256
+        )
+    )
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=probe,
+    )
+
+    assert signal.status == generation.PACKAGED_IC_QUALIFIED
+    assert signal.ic_sha256 == PACKAGE_IC_SHA256
+    assert signal.ic_size_bytes == len(DG_IC_CONTENT)
+    assert signal.ic_relative_path == f"{DG_SHUD_INPUT_NAME}.cfg.ic"
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+    # Exactly ONE object is probed, at the canonical uri derived from the row.
+    assert probe.uris == [DG_CANONICAL_IC_URI]
+    assert signal.evidence()["qualification_source"] == "object_probe"
+
+
+def test_canonical_object_uri_joining_tolerates_a_missing_trailing_slash() -> None:
+    """Production rows end with '/', but the join must not depend on it."""
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name=DG_SHUD_INPUT_NAME
+        )
+        == DG_CANONICAL_IC_URI
+    )
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI.rstrip("/"), shud_input_name=DG_SHUD_INPUT_NAME
+        )
+        == DG_CANONICAL_IC_URI
+    )
+    # Unusable rows produce no uri at all (never a guessed sibling key).
+    assert generation.canonical_packaged_ic_object_uri(model_package_uri="", shud_input_name="x") is None
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name=None
+        )
+        is None
+    )
+    assert (
+        generation.canonical_packaged_ic_object_uri(
+            model_package_uri=DG_PACKAGE_URI, shud_input_name="../escape"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("probe_kwargs", "expected_status", "expected_detail"),
+    [
+        (
+            {"exists": False},
+            generation.PACKAGED_IC_UNQUALIFIED,
+            "packaged_initial_condition_object_missing",
+        ),
+        (
+            {"exists": True, "size_bytes": 0, "sha256": EMPTY_FILE_SHA256},
+            generation.PACKAGED_IC_UNQUALIFIED,
+            "packaged_initial_condition_object_empty",
+        ),
+        (
+            {"exists": True, "unreadable_detail": "probe_failed"},
+            generation.PACKAGED_IC_UNREADABLE,
+            "probe_failed",
+        ),
+    ],
+    ids=["object_missing", "object_empty", "probe_read_failure"],
+)
+def test_variant_manifest_probe_outcomes_are_distinguished(
+    probe_kwargs: dict[str, Any], expected_status: str, expected_detail: str
+) -> None:
+    """A failed probe is UNREADABLE; a completed probe that found nothing is not."""
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=_RecordingProbe(generation.PackagedIcObjectProbe(**probe_kwargs)),
+    )
+
+    assert signal.status == expected_status
+    assert signal.detail == expected_detail
+    assert signal.ic_sha256 == ""
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        _dg_resource_profile(shud_input_name=None),
+        _dg_resource_profile(model_package_uri=None),
+        _dg_resource_profile(shud_input_name=""),
+    ],
+    ids=["no_shud_input_name", "no_model_package_uri", "blank_shud_input_name"],
+)
+def test_variant_manifest_without_registry_fields_is_unqualified_without_probing(
+    profile: dict[str, Any],
+) -> None:
+    """A row that cannot locate its IC is unqualified with its own reason."""
+    probe = _RecordingProbe(
+        generation.PackagedIcObjectProbe(exists=True, size_bytes=4096, sha256=PACKAGE_IC_SHA256)
+    )
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(), resource_profile=profile, canonical_object_probe=probe
+    )
+
+    assert signal.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert signal.detail == "packaged_initial_condition_registry_fields_absent"
+    assert probe.uris == []
+
+
+def test_inventory_tier_never_probes_and_absent_probe_keeps_the_legacy_reason() -> None:
+    """Tier (a) wins when an inventory exists; without a probe tier (b) cannot run."""
+    probe = _RecordingProbe(generation.PackagedIcObjectProbe(exists=False))
+    inventory = generation.classify_packaged_initial_condition(
+        _package_manifest(), resource_profile=_dg_resource_profile(), canonical_object_probe=probe
+    )
+    assert inventory.status == generation.PACKAGED_IC_QUALIFIED
+    assert inventory.qualification_source == generation.PACKAGED_IC_SOURCE_INVENTORY
+    assert probe.uris == []
+
+    no_probe = generation.classify_packaged_initial_condition(_direct_grid_variant_manifest())
+    assert no_probe.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert no_probe.detail == "package_manifest_included_files_absent"
+
+
+def test_first_cycle_variant_probe_signal_admits_packaged_ic_bootstrap() -> None:
+    """判定表 row 1 via tier (b): the probed digest reaches the decision."""
+    evaluation = _first_cycle_evaluation(
+        generation.classify_packaged_initial_condition(
+            _direct_grid_variant_manifest(),
+            resource_profile=_dg_resource_profile(),
+            canonical_object_probe=_RecordingProbe(
+                generation.PackagedIcObjectProbe(
+                    exists=True, size_bytes=131072, sha256=PACKAGE_IC_SHA256
+                )
+            ),
+        )
+    )
+
+    assert evaluation.decision == generation.TransitionDecision.PACKAGED_IC_BOOTSTRAP
+    assert evaluation.packaged_ic_checksum == PACKAGE_IC_SHA256
+    evidence = generation.generation_evidence(evaluation)
+    assert evidence["packaged_initial_condition"]["qualification_source"] == "object_probe"
+
+
 def test_first_cycle_qualified_signal_admits_packaged_ic_bootstrap() -> None:
     """判定表 row 1: QUALIFIED -> PACKAGED_IC_BOOTSTRAP carrying the IC digest."""
     evaluation = _first_cycle_evaluation(
@@ -3108,6 +3331,99 @@ def test_gate_blocks_first_cycle_when_referenced_package_manifest_is_absent(tmp_
     assert evidence is not None
     assert evidence["status"] == "blocked"
     assert evidence["reason"] == "first_cycle_initial_state_undecided"
+
+
+def _write_dg_variant_package(object_root: Path, *, ic_content: bytes | None = DG_IC_CONTENT) -> None:
+    """Publish a production-shaped direct-grid variant package under ``object_root``."""
+    from packages.common.object_store import LocalObjectStore
+
+    store = LocalObjectStore(object_root, "s3://nhms")
+    store.write_bytes_atomic(
+        DG_MANIFEST_KEY, json.dumps(_direct_grid_variant_manifest(), sort_keys=True).encode("utf-8")
+    )
+    store.write_bytes_atomic(f"{DG_PACKAGE_KEY}/{DG_SHUD_INPUT_NAME}.sp.mesh", b"mesh\n")
+    if ic_content is not None:
+        store.write_bytes_atomic(f"{DG_PACKAGE_KEY}/{DG_SHUD_INPUT_NAME}.cfg.ic", ic_content)
+
+
+def test_gate_qualifies_inventory_less_variant_package_via_the_object_probe(tmp_path: Path) -> None:
+    """The production 36/36 shape: no ``included_files``, IC decided by the probe."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["mode"] == "db_free_packaged_ic_bootstrap"
+    assert evidence["ready"] is True
+    assert evidence["packaged_ic_checksum"] == hashlib.sha256(DG_IC_CONTENT).hexdigest()
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["qualification_source"] == "object_probe"
+    assert packaged["ic_relative_path"] == f"{DG_SHUD_INPUT_NAME}.cfg.ic"
+
+
+@pytest.mark.parametrize(
+    "ic_content", [None, b""], ids=["canonical_object_missing", "canonical_object_empty"]
+)
+def test_gate_blocks_variant_package_without_a_usable_canonical_ic_object(
+    tmp_path: Path, ic_content: bytes | None
+) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root, ic_content=ic_content)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["reason"] == "first_cycle_initial_state_undecided"
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["status"] == "unqualified"
+    assert packaged["qualification_source"] == "object_probe"
+
+
+def test_gate_blocks_variant_package_whose_row_names_no_shud_input(tmp_path: Path) -> None:
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile(shud_input_name=None))
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    assert evidence["registry_cutover_transition"]["packaged_initial_condition"]["detail"] == (
+        "packaged_initial_condition_registry_fields_absent"
+    )
+
+
+def test_gate_reports_an_unreadable_canonical_ic_object_as_unreadable(tmp_path: Path) -> None:
+    """A probe that cannot complete blocks as UNREADABLE, never as "no IC"."""
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    _write_dg_variant_package(object_root, ic_content=None)
+    # A DIRECTORY at the canonical IC key: it stats (exists) but cannot be read.
+    (object_root / DG_PACKAGE_KEY / f"{DG_SHUD_INPUT_NAME}.cfg.ic").mkdir(parents=True)
+    scheduler = _StubScheduler(index=_StubStateIndex(), object_store_root=object_root)
+    candidate = _stub_candidate(resource_profile=_dg_resource_profile())
+
+    evidence = gate.strict_warm_start_evidence(scheduler, candidate, cycle=None)
+
+    assert evidence is not None
+    assert evidence["status"] == "blocked"
+    packaged = evidence["registry_cutover_transition"]["packaged_initial_condition"]
+    assert packaged["status"] == "unreadable"
+    assert packaged["detail"] == "packaged_initial_condition_object_probe_failed"
 
 
 def test_gate_keeps_cold_new_model_when_registry_has_no_package_manifest_reference(

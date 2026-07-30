@@ -60,7 +60,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -90,15 +90,20 @@ __all__ = (
     "CUTOVER_TRANSITION_MODES",
     "EMPTY_FILE_SHA256",
     "MAX_CUTOVER_DECLARATION_BYTES",
+    "MAX_PACKAGED_IC_PROBE_BYTES",
     "PACKAGED_IC_BOOTSTRAP_MODE",
     "PACKAGED_IC_QUALIFIED",
+    "PACKAGED_IC_SOURCE_INVENTORY",
+    "PACKAGED_IC_SOURCE_OBJECT_PROBE",
     "PACKAGED_IC_UNQUALIFIED",
     "PACKAGED_IC_UNREADABLE",
     "PACKAGED_IC_QUALITY",
+    "PackagedIcObjectProbe",
     "PackagedIcSignal",
     "TransitionDecision",
     "TRANSITION_DECISION_REASONS",
     "TransitionEvaluation",
+    "canonical_packaged_ic_object_uri",
     "classify_packaged_initial_condition",
     "derive_generation",
     "evaluate_transition_decision",
@@ -271,6 +276,23 @@ PACKAGED_IC_QUALIFIED = "qualified"
 PACKAGED_IC_UNQUALIFIED = "unqualified"
 PACKAGED_IC_UNREADABLE = "unreadable"
 
+#: Qualification sources (D1 two-tier).  ``inventory`` means the verdict came
+#: from the package manifest's ``included_files`` entry (basins package shape,
+#: zero object IO); ``object_probe`` means the manifest carried no inventory
+#: (direct-grid variant shape, which publishes only ``direct_grid_forcing``) and
+#: the verdict came from a bounded no-follow stat+digest read of the single
+#: canonical IC object derived from the registry row.
+PACKAGED_IC_SOURCE_INVENTORY = "inventory"
+PACKAGED_IC_SOURCE_OBJECT_PROBE = "object_probe"
+
+#: Hard cap for the tier-(b) canonical-IC object probe.  The probe hashes the
+#: object, so the cap bounds how much a corrupt / oversized package object can
+#: pull into scheduler memory during planning.  Production ICs run 128 KiB –
+#: ~4.4 MB (largest observed 2026-07), so 16 MiB leaves ~3.6x headroom while
+#: staying at the same order as ``MAX_MODEL_PACKAGE_MANIFEST_BYTES``.  An object
+#: larger than this reads as UNREADABLE (fail closed), never as "no IC".
+MAX_PACKAGED_IC_PROBE_BYTES = 16 * 1024 * 1024
+
 #: Suffix of the SHUD initial-condition file inside a Basins model package.
 _PACKAGED_IC_SUFFIX = ".cfg.ic"
 
@@ -292,9 +314,16 @@ class PackagedIcSignal:
         / :data:`PACKAGED_IC_UNREADABLE`.  Anything that is not exactly
         ``qualified`` fails closed at the decision layer.
     ic_sha256:
-        The manifest-recorded digest of the packaged ``*.cfg.ic`` (only set
-        when ``status`` is qualified).  This is the value that threads through
-        candidate evidence → basin marker → run manifest → runtime verification.
+        The digest of the packaged ``*.cfg.ic`` (only set when ``status`` is
+        qualified) — manifest-recorded on the inventory tier, freshly probed on
+        the object-probe tier.  This is the value that threads through candidate
+        evidence → basin marker → run manifest → runtime verification.
+    qualification_source:
+        :data:`PACKAGED_IC_SOURCE_INVENTORY` or
+        :data:`PACKAGED_IC_SOURCE_OBJECT_PROBE` — which of the two D1 tiers
+        produced this verdict.  Empty when no tier ran (e.g. the manifest itself
+        was unreadable), which is why it is recorded in evidence: an auditor must
+        be able to tell a manifest-recorded digest from a probed one.
     """
 
     status: str
@@ -302,6 +331,7 @@ class PackagedIcSignal:
     ic_relative_path: str = ""
     ic_size_bytes: int = 0
     detail: str = ""
+    qualification_source: str = ""
 
     @property
     def qualified(self) -> bool:
@@ -318,19 +348,57 @@ class PackagedIcSignal:
             payload["ic_size_bytes"] = self.ic_size_bytes
         if self.detail:
             payload["detail"] = self.detail
+        if self.qualification_source:
+            payload["qualification_source"] = self.qualification_source
         return payload
 
 
-def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSignal:
-    """Classify a Basins package manifest's calibrated-IC qualification (D1).
+@dataclass(frozen=True)
+class PackagedIcObjectProbe:
+    """Outcome of the bounded tier-(b) canonical-IC object probe (D1).
 
-    TOTAL and side-effect free: the caller has already performed the IO, so
-    every malformed shape maps to a signal rather than an exception.  The
-    criteria read ONLY fields the publisher already writes
-    (``workers/model_registry/basins_package.py``): an ``included_files``
-    entry whose ``relative_path`` ends with ``.cfg.ic``, whose ``sha256``
-    differs from :data:`EMPTY_FILE_SHA256`, and whose ``size_bytes`` is
-    positive.
+    The probe itself is IO and therefore lives in the caller (the gate, or the
+    audit tool); this dataclass is the pure boundary between the two.  A probe
+    that could not complete sets ``unreadable_detail`` — a probe that completed
+    and found nothing sets ``exists=False`` with an empty ``unreadable_detail``.
+    Conflating the two is exactly the fail-open mistake #1164 exists to prevent.
+    """
+
+    exists: bool
+    size_bytes: int = 0
+    sha256: str = ""
+    unreadable_detail: str = ""
+
+
+def classify_packaged_initial_condition(
+    package_manifest: Any,
+    *,
+    resource_profile: Mapping[str, Any] | None = None,
+    canonical_object_probe: Callable[[str], PackagedIcObjectProbe] | None = None,
+) -> PackagedIcSignal:
+    """Classify a model package's calibrated-IC qualification (D1, two-tier).
+
+    TOTAL and side-effect free apart from ``canonical_object_probe``: the caller
+    has already performed (or injected) the IO, so every malformed shape maps to
+    a signal rather than an exception.
+
+    Tier (a) — inventory.  When the manifest carries an ``included_files``
+    inventory (the Basins package shape written by
+    ``workers/model_registry/basins_package.py``) the verdict reads ONLY fields
+    the publisher already writes: an entry whose ``relative_path`` ends with
+    ``.cfg.ic``, whose ``sha256`` differs from :data:`EMPTY_FILE_SHA256`, and
+    whose ``size_bytes`` is positive.  Zero object IO.
+
+    Tier (b) — canonical object probe.  Production registry rows currently point
+    at direct-grid VARIANT manifests whose only top-level key is
+    ``direct_grid_forcing`` — readable, but with no inventory to consult.  Such a
+    manifest is not "a package without an IC": the registry row's
+    ``shud_input_name`` + ``model_package_uri`` locate exactly one canonical IC
+    object, and ``canonical_object_probe`` (supplied by the gate / audit tool)
+    decides on a bounded no-follow stat+digest read of that single object.
+    Without a probe (or without the registry fields it needs) the tier cannot
+    run and the package is UNQUALIFIED with a distinct reason — never silently
+    qualified.
 
     A payload that is not a manifest object at all is
     :data:`PACKAGED_IC_UNREADABLE` — never "no IC" — so an unreadable manifest
@@ -343,10 +411,14 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
     ``included_files``), otherwise any top-level ``*.cfg.ic``.  Entries under a
     subdirectory (``CALIB/…``, which sorts BEFORE the canonical entry) are never
     the qualification subject: a stray calibration IC must not lend its digest to
-    the run manifest nor let a 0-byte placeholder block a sound model.  When the
-    inventory lists more than one ``*.cfg.ic`` anywhere the package is ambiguous
-    and is blocked here rather than submitted into the runtime's exactly-one
-    failure (the runtime searches the staged tree recursively).
+    the run manifest.  When the inventory lists more than one ``*.cfg.ic``
+    anywhere the package is AMBIGUOUS and is blocked here — deliberately
+    fail-closed, even though the runtime's non-empty filter would skip a 0-byte
+    ``CALIB`` placeholder: the gate cannot tell a placeholder from a second real
+    IC without opening objects, and blocking a package the runtime's recursive
+    exactly-one search would also refuse keeps the two layers symmetric.  Tier
+    (b) has no inventory to enumerate, so its ambiguity backstop is that same
+    runtime exactly-one check (recorded as a limit in the design).
     """
     if not isinstance(package_manifest, Mapping):
         return PackagedIcSignal(
@@ -355,9 +427,10 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
         )
     included_files = package_manifest.get("included_files")
     if not isinstance(included_files, Sequence) or isinstance(included_files, str | bytes):
-        return PackagedIcSignal(
-            status=PACKAGED_IC_UNQUALIFIED,
-            detail="package_manifest_included_files_absent",
+        # Inventory-less (direct-grid variant) shape → tier (b).
+        return _classify_packaged_ic_by_object_probe(
+            resource_profile=resource_profile,
+            canonical_object_probe=canonical_object_probe,
         )
     ic_entries = [
         entry
@@ -368,11 +441,13 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
         return PackagedIcSignal(
             status=PACKAGED_IC_UNQUALIFIED,
             detail="packaged_initial_condition_entry_absent",
+            qualification_source=PACKAGED_IC_SOURCE_INVENTORY,
         )
     if len(ic_entries) > 1:
         return PackagedIcSignal(
             status=PACKAGED_IC_UNQUALIFIED,
             detail="packaged_initial_condition_ambiguous",
+            qualification_source=PACKAGED_IC_SOURCE_INVENTORY,
         )
     entry = ic_entries[0]
     relative_path = str(entry.get("relative_path") or "")
@@ -381,6 +456,7 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
             status=PACKAGED_IC_UNQUALIFIED,
             ic_relative_path=relative_path,
             detail="packaged_initial_condition_not_canonical",
+            qualification_source=PACKAGED_IC_SOURCE_INVENTORY,
         )
     sha256 = str(entry.get("sha256") or "").strip().lower()
     try:
@@ -393,12 +469,102 @@ def classify_packaged_initial_condition(package_manifest: Any) -> PackagedIcSign
             ic_relative_path=relative_path,
             ic_size_bytes=max(size_bytes, 0),
             detail="packaged_initial_condition_empty",
+            qualification_source=PACKAGED_IC_SOURCE_INVENTORY,
         )
     return PackagedIcSignal(
         status=PACKAGED_IC_QUALIFIED,
         ic_sha256=sha256,
         ic_relative_path=relative_path,
         ic_size_bytes=size_bytes,
+        qualification_source=PACKAGED_IC_SOURCE_INVENTORY,
+    )
+
+
+def canonical_packaged_ic_object_uri(
+    *,
+    model_package_uri: Any,
+    shud_input_name: Any,
+) -> str | None:
+    """Return the canonical packaged-IC object uri for a registry row, or ``None``.
+
+    ``model_package_uri`` is a DIRECTORY reference: both
+    ``basins_package._directory_uri`` and
+    ``scripts/provision_direct_grid_scheduler_registry`` publish it with a
+    trailing ``/``.  The trailing separator is normalized here rather than
+    trusted, so a row that lost it still resolves to the same object instead of
+    to a sibling key.  ``None`` means the row cannot locate an IC at all (a
+    missing / blank field, or a ``shud_input_name`` that is not a single safe
+    path segment).
+    """
+    package_uri = str(model_package_uri or "").strip()
+    input_name = str(shud_input_name or "").strip()
+    if not package_uri or not input_name:
+        return None
+    if "/" in input_name or input_name in (".", ".."):
+        return None
+    return f"{package_uri.rstrip('/')}/{input_name}{_PACKAGED_IC_SUFFIX}"
+
+
+def _classify_packaged_ic_by_object_probe(
+    *,
+    resource_profile: Mapping[str, Any] | None,
+    canonical_object_probe: Callable[[str], PackagedIcObjectProbe] | None,
+) -> PackagedIcSignal:
+    """Tier (b): decide an inventory-less manifest on the canonical IC object.
+
+    Every outcome is explicit.  "The caller supplied no probe" and "the registry
+    row names no SHUD input directory" are UNQUALIFIED with their own reasons
+    (the package cannot be shown to ship a usable IC); only a probe that FAILED
+    is UNREADABLE.
+    """
+    if canonical_object_probe is None:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            detail="package_manifest_included_files_absent",
+        )
+    profile = resource_profile if isinstance(resource_profile, Mapping) else {}
+    object_uri = canonical_packaged_ic_object_uri(
+        model_package_uri=profile.get("model_package_uri"),
+        shud_input_name=profile.get("shud_input_name"),
+    )
+    if object_uri is None:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            detail="packaged_initial_condition_registry_fields_absent",
+            qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
+        )
+    relative_path = object_uri.rsplit("/", 1)[-1]
+    probe = canonical_object_probe(object_uri)
+    if probe.unreadable_detail:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNREADABLE,
+            ic_relative_path=relative_path,
+            detail=probe.unreadable_detail,
+            qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
+        )
+    if not probe.exists:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            ic_relative_path=relative_path,
+            detail="packaged_initial_condition_object_missing",
+            qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
+        )
+    sha256 = str(probe.sha256 or "").strip().lower()
+    size_bytes = max(int(probe.size_bytes or 0), 0)
+    if size_bytes <= 0 or not sha256 or sha256 == EMPTY_FILE_SHA256:
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            ic_relative_path=relative_path,
+            ic_size_bytes=size_bytes,
+            detail="packaged_initial_condition_object_empty",
+            qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
+        )
+    return PackagedIcSignal(
+        status=PACKAGED_IC_QUALIFIED,
+        ic_sha256=sha256,
+        ic_relative_path=relative_path,
+        ic_size_bytes=size_bytes,
+        qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
     )
 
 
