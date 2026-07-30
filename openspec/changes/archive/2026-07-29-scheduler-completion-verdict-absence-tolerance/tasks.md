@@ -20,4 +20,4 @@
 
 ## 4. Evidence Floor(实机 oracle,merge 后)
 
-- [ ] 4.1 node-22 部署后 ≥1 自然 pass:evidence 中 072000 不再是 oldest gap(verdict complete),072012 候选生成、通过 warm 准入并**提交**(或其真实 Slurm 终态);随后链逐格推进(≥2 个后继 cycle 依次进入候选)。receipt(pass 文件名 + 关键字段)回贴 issue #1183 与 PR。若观测偏离,先读数再分支,严禁放宽判定。
+- [x] 4.1 node-22 部署后 ≥1 自然 pass:evidence 中 072000 不再是 oldest gap(verdict complete),072012 候选生成、通过 warm 准入并**提交**(或其真实 Slurm 终态);随后链逐格推进(≥2 个后继 cycle 依次进入候选)。receipt(pass 文件名 + 关键字段)回贴 issue #1183 与 PR。若观测偏离,先读数再分支,严禁放宽判定。

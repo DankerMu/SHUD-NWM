@@ -27,5 +27,5 @@
 
 ## 4. Evidence Floor(实机 oracle,merge 后)
 
-- [ ] 4.1 node-22 部署后,以 `frd_muziyao` 执行:replay dry-run 核对 → `--enforce --cycle gfs_2026072000 --cycle ifs_2026072000`(**小写**,F4)→ NFS index entry_count 以 receipt 前后计数为准(**预期 +36**,receipt 在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT` 下在案);随后自然 pass:072000 verdict complete(不再 oldest gap)、072012 候选生成并**提交**。若观测偏离,先读数再分支,严禁放宽判定。
-- [ ] 4.2 **验收(用户裁定口径,继承自 #1183)**:连续两个完整 warm-start pass 跑通——072012 Slurm 成功 + 其 +12h 状态经**自然 copyback**(修复后首个 `state_save_qc`,journal 无新 `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`)进入 NFS index + 下一 cycle(072100)以之 warm start 提交并成功。receipt(pass 文件名 + index entry_count 轨迹 + squeue/sacct)回贴 issue #1189 与 #1183。若观测偏离,先读数再分支,严禁放宽判定。
+- [x] 4.1 node-22 部署后,以 `frd_muziyao` 执行:replay dry-run 核对 → `--enforce --cycle gfs_2026072000 --cycle ifs_2026072000`(**小写**,F4)→ NFS index entry_count 以 receipt 前后计数为准(**预期 +36**,receipt 在 `NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT` 下在案);随后自然 pass:072000 verdict complete(不再 oldest gap)、072012 候选生成并**提交**。若观测偏离,先读数再分支,严禁放宽判定。
+- [x] 4.2 **验收(用户裁定口径,继承自 #1183)**:连续两个完整 warm-start pass 跑通——072012 Slurm 成功 + 其 +12h 状态经**自然 copyback**(修复后首个 `state_save_qc`,journal 无新 `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`)进入 NFS index + 下一 cycle(072100)以之 warm start 提交并成功。receipt(pass 文件名 + index entry_count 轨迹 + squeue/sacct)回贴 issue #1189 与 #1183。若观测偏离,先读数再分支,严禁放宽判定。
