@@ -23,7 +23,7 @@
 ## 3. 评审
 
 - [x] 3.1 fixture review(只读)→ 修复 → validate。(第 1 轮:15 findings(5 P1/6 P2/4 P3)已全部修入 fixture,validate 通过)
-- [ ] 3.2 实现后 risk-adaptive cross-review(≥2 lane)+ verifier 批次;round ledger 记账。
+- [x] 3.2 实现后 risk-adaptive cross-review(≥2 lane)+ verifier 批次;round ledger 记账。(5 轮 + 2 depth retro,round 5 clean,Phase 7 GO)
 
 ## 4. Evidence Floor(实机 oracle,merge 后)
 
