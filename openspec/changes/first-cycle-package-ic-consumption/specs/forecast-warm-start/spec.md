@@ -4,7 +4,7 @@
 
 ### Requirement: A first-cycle basin SHALL receive exactly one auditable initial-state decision
 
-For every basin × source whose generation history is empty at candidate planning time and whose model carries a published package-manifest reference (registry `resource_profile.manifest_uri`), the scheduler SHALL make exactly one machine-decidable initial-state decision on the generation-aware path before submission: (1) when the package manifest lists a `*.cfg.ic` entry whose `sha256` differs from the empty-file digest and whose `size_bytes` is positive, the packaged initial condition SHALL be selected and consumed (`PACKAGED_IC_BOOTSTRAP`); (2) when the entry is missing or empty (`UNQUALIFIED`), or the referenced manifest cannot be fetched or parsed (`UNREADABLE`), the candidate SHALL be blocked with a typed reason — an unreadable manifest SHALL NOT be treated as absence of an IC. Candidates that reach planning without a qualification signal (no published manifest reference, including the two named gate-bypass paths: registry entry without package checksum and declaration, and state-index-unavailable legacy fallback) SHALL retain today's labeled cold-start behavior unchanged; this carve-out SHALL be recorded in evidence with the existing `no_prior_history` reason and never produce an unlabeled cold start. The decision SHALL be recorded in the candidate state evidence, the run manifest initial-state block, and the orchestration journal run row. The decision contract SHALL hold identically under strict and non-strict warm-start modes.
+For every basin × source whose generation history is empty at candidate planning time and whose model carries a published package-manifest reference (registry `resource_profile.manifest_uri`), the scheduler SHALL make exactly one machine-decidable initial-state decision on the generation-aware path before submission: (1) when the package manifest lists a `*.cfg.ic` entry whose `sha256` differs from the empty-file digest and whose `size_bytes` is positive, the packaged initial condition SHALL be selected and consumed (`PACKAGED_IC_BOOTSTRAP`); (2) when the entry is missing or empty (`UNQUALIFIED`), or the referenced manifest cannot be fetched or parsed (`UNREADABLE`), the candidate SHALL be blocked with a typed reason — an unreadable manifest SHALL NOT be treated as absence of an IC. Candidates that reach planning without a qualification signal SHALL retain today's behavior unchanged, in the shape that path produces today: a registry row that publishes no package-manifest reference yields the existing labeled `COLD_NEW_MODEL` decision (evidence mode `db_free_cold_new_model`, reason `no_prior_history`); the two named gate-bypass paths (registry entry without package checksum and declaration, and state-index-unavailable legacy fallback) yield the pre-existing legacy evidence shape, which carries no transition block and no packaged signal — strict mode blocks such first-cycle candidates, while non-strict mode may still reach the legacy `cold_start_no_state` selection fallback (a named residual, not new behavior). The decision SHALL be recorded in the candidate state evidence, the run manifest initial-state block, and the orchestration journal run row. The decision contract SHALL hold identically under strict and non-strict warm-start modes.
 
 #### Scenario: Qualified packaged IC is selected and consumed
 
@@ -23,8 +23,13 @@ For every basin × source whose generation history is empty at candidate plannin
 
 #### Scenario: Missing qualification signal keeps legacy labeled cold start
 
-- **WHEN** a first-cycle candidate reaches planning without any published package-manifest reference (including the two named gate-bypass paths)
-- **THEN** the existing `COLD_NEW_MODEL` decision with evidence mode `db_free_cold_new_model` and reason `no_prior_history` applies unchanged, and no unlabeled cold start is produced
+- **WHEN** a first-cycle candidate's registry row publishes no package-manifest reference (and the candidate is not on a gate-bypass path)
+- **THEN** the existing `COLD_NEW_MODEL` decision with evidence mode `db_free_cold_new_model` and reason `no_prior_history` applies unchanged
+
+#### Scenario: Gate-bypass paths keep the pre-existing legacy evidence shape
+
+- **WHEN** a first-cycle candidate reaches planning via a named gate-bypass path (no package checksum and no declaration, or state index unavailable)
+- **THEN** the gate returns the pre-existing legacy evidence shape with no transition block and no packaged decision, exactly as before this change
 
 #### Scenario: Decision is mode-independent
 

@@ -29,7 +29,7 @@
 | `None`(无注册包引用) | `COLD_NEW_MODEL` 原样(**显式 carve-out**,见下) |
 
 - **审批载体砍掉(原 D5,YAGNI)**:registry import 强制包含 `<shud_input_name>.cfg.ic`(`basins_registry_import.py:2005-2018` `BASINS_REGISTRY_SOURCE_MISMATCH`),不合格实际只剩 0 字节/损坏一种形态——fail-closed block 即可,显式 cold-start 审批机制列为 follow-up(非目标),本变更不引入 `cold_start_approval.json`。
-- **`None` carve-out 的边界(两个 gate bypass 具名)**:`scheduler_generation_gate.py:322-328`(无 `package_checksum` 且无 declaration → legacy)与 `:336-346`(state index 不可用 → legacy)。二者返回的候选不带资格信号 → 保持现行为(带 `no_prior_history` 原因的 labeled cold start,非静默无因)。生产 18 个模型全部注册且带 manifest 引用,首时次不会走 bypass;此 carve-out 换来:`tests/test_scheduler_generation.py:846-868` 直方图基线(13 WARM_CONTINUE / 6 COLD_NEW_MODEL)与全部无包 unit fixture **零重基线**。记入 spec 场景与残余风险。
+- **`None` carve-out 的边界(两个 gate bypass 具名)**:`scheduler_generation_gate.py:322-328`(无 `package_checksum` 且无 declaration → legacy)与 `:336-346`(state index 不可用 → legacy)。二者在 §8 transition 评估**之前**即 return legacy 证据形态(无 transition block、无 mode、无 cold_start_reason)——保持 pre-#1164 原样:strict 下 block,非 strict 下仍可达 legacy `cold_start_no_state` 选择回退(具名残余,见残余风险)。带 `no_prior_history` 的 labeled `COLD_NEW_MODEL` 只出现在第三种输入(registry 行无 `manifest_uri`)。生产 18 个模型全部注册且带 manifest 引用,首时次不会走 bypass;此 carve-out 换来:`tests/test_scheduler_generation.py:846-868` 直方图基线(13 WARM_CONTINUE / 6 COLD_NEW_MODEL)与全部无包 unit fixture **零重基线**。记入 spec 场景与残余风险。
 - 非 strict 旧路径(`chain_forecast_state.py:190-245`)选择逻辑不改;首时次运载不依赖它(见 D3)。
 
 ### D3. 决策到 runtime 的运载:cold-seed 通道扩展(修 F1/F2 主缺口)
@@ -81,7 +81,8 @@ candidate `state_evidence.mode` 新增 `db_free_packaged_ic_bootstrap`(`schedule
 | QUALIFIED 但 runtime 校验失败(checksum 不符/header 坏/0 字节/缺文件) | (已提交后)run fail `PACKAGED_IC_CONSUMPTION_FAILED` | 同上 | 3 | fail-closed,无静默清零 |
 | UNQUALIFIED(0 字节/缺条目) | BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED | blocked | — | 不提交 |
 | UNREADABLE(uri 不可达/JSON 损坏) | 同上(fail-closed) | blocked | — | 不提交 |
-| None(无注册包引用;含两个 gate bypass) | COLD_NEW_MODEL 原样(labeled,`no_prior_history`) | db_free_cold_new_model | 1 | 清零(显式 carve-out) |
+| None:registry 行无 manifest 引用 | COLD_NEW_MODEL 原样(labeled,`no_prior_history`) | db_free_cold_new_model | 1 | 清零(显式 carve-out) |
+| None:两个 gate bypass | legacy 证据形态原样(无 transition block) | (legacy,无 mode) | strict block / 非 strict 1 | strict 不提交;非 strict 可达 legacy `cold_start_no_state`(具名残余) |
 
 ## Evidence mapping
 
@@ -103,6 +104,7 @@ candidate `state_evidence.mode` 新增 `db_free_packaged_ic_bootstrap`(`schedule
 ## 残余风险(具名)
 
 - `None` carve-out:未注册(无 manifest 引用)模型的首时次仍是 labeled cold start——生产 18 模型全注册,不受影响;若未来出现未注册模型上线,将复现 #1164 形态。follow-up 与审批机制一并承接。
+- **gate bypass 的非 strict 残余**:两个 bypass 路径在非 strict 模式下仍可达 legacy `cold_start_no_state` 选择回退(pre-#1164 原样,未新增)。生产为 strict(bypass 首时次会 block),且 18 模型均带 `package_checksum` + manifest 引用,正常不走 bypass;改 bypass 行为会破 must-preserve #1/#6/#10,故显式保留。
 - 12 个老流域若未来因 cutover 重回首时次语义,将进入新契约——行为变化是本契约的目的,首个自然案例在变更 2 回放窗口外观察。
 - 包 manifest sha256 与包内实际文件不符(发布期损坏)由 D4 端到端 checksum 兜住;审计工具对历史包只读 manifest,不逐字节验对象(记入 receipt limits)。
 
