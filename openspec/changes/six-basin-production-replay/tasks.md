@@ -25,9 +25,9 @@
 
 ## 4. node-27 失效与验证工具
 
-- [ ] 4.1 `scripts/node27_invalidate_tiles.py`:dry-run 默认;删除范围 **(source_id, valid_time ∈ 回放窗口)** 的 `map.tile_cache` 行 + 对应文件缓存条目(r2 R2);receipt(删除行数/条目数)。
-- [ ] 4.2 测试:dry-run 零写;窗口外同 source 行不被删;其他 source 行不被删。
-- [ ] 4.3 通用验证:`uv run ruff check .`;`uv run pytest -q`(定向文件);`openspec validate six-basin-production-replay --strict --no-interactive`。
+- [x] 4.1 `scripts/node27_invalidate_tiles.py`:dry-run 默认;删除范围 **(source_id, valid_time ∈ 回放窗口)** 的 `map.tile_cache` 行 + 对应文件缓存条目(r2 R2);receipt(删除行数/条目数)。
+- [x] 4.2 测试:dry-run 零写;窗口外同 source 行不被删;其他 source 行不被删。
+- [x] 4.3 通用验证:`uv run ruff check .`;`uv run pytest -q`(定向文件);`openspec validate six-basin-production-replay --strict --no-interactive`。
 
 ## 5. node-22 实机执行(merge 后,timer 保持停机)
 

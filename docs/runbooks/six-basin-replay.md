@@ -114,11 +114,20 @@ Phase 1 跑完把 env 里的 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` 改回 `t
 
 ```bash
 # 瓦片失效:dry-run 默认;删除范围 = (source_id, valid_time ∈ 回放窗口)
+# 注意:hydro 图层的 map.tile_cache.source_id 存的是 **run_id**
+# (apps/api/routes/hydro_display.py:313-321 传 source_id=run_id),不是 "IFS"/"gfs"。
+# 所以 scope 直接从替换 receipt 的 rows[].run_id 采,精确、零猜测:
 uv run python -m scripts.node27_invalidate_tiles \
-  --source-id IFS --window-start 2026-07-05T00:00Z --window-end 2026-07-21T12:00Z \
+  --from-replacement-receipt ~/receipts/ifs-replay-phase2.json \
+  --window-start 2026-07-05T00:00Z --window-end 2026-07-21T12:00Z \
   --receipt-path ~/receipts/ifs-tile-invalidation.json
-# 复核 dry-run 行数后加 --execute
+# 复核 dry-run 的 candidate_rows / file_cache_* 计数后加 --execute
 ```
+
+文件缓存目录必须给(`NHMS_MVT_FILE_CACHE_DIR` 或 `--file-cache-dir`);确无文件缓存
+的部署显式加 `--no-file-cache`——不给就拒跑,因为只删 DB 行会让文件缓存继续吐旧瓦片。
+删除顺序是「先文件后 DB 行」,某个 key 的文件腿判不了(exit 3 `incomplete`)时两腿都
+不动,receipt 列出 `blocked_cache_keys`,修因后原样重跑即可。
 
 其余步骤见 `openspec/changes/six-basin-production-replay/tasks.md` §6 与
 design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4 风格。
