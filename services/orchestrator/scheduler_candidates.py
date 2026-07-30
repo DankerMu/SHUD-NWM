@@ -19,6 +19,11 @@ from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
     init_state_field,
 )
+from services.orchestrator.scheduler_replay import (
+    REPLAY_RESUBMIT_DECISION,
+    REPLAY_TERMINAL_OVERRIDE_REASON,
+    ReplayAdmission,
+)
 from services.orchestrator.scheduler_state import (
     DURABLE_HYDRO_SUCCESS_STATUSES,
     CandidateStateDecision,
@@ -126,6 +131,7 @@ class SchedulerConfigLike(Protocol):
     repair_missing_forcing_cycle_time: datetime | None
     nfs_raw_manifest_root: str | Path | None
     nfs_raw_manifest_prefix: str
+    replay_admission: ReplayAdmission | None
 
 
 class SchedulerSourceCycleLike(Protocol):
@@ -415,7 +421,20 @@ def build_candidates(
                 and state_decision.action == "skip"
                 and state_decision.reason != "active_slurm_job"
             ):
-                if (
+                replay_override = _replay_terminal_override_decision(
+                    context.config,
+                    candidate,
+                    state_decision,
+                    strict_warm_start=strict_warm_start,
+                    successor_state=successor_state,
+                )
+                if replay_override is not None:
+                    # Replay presses over this whole terminal branch (#1164):
+                    # mismatch retry, successor-retry (`state_save_qc`) and the
+                    # retry-budget downgrade alike.  It runs BEFORE any of them
+                    # so the persisted retry budget is never consulted.
+                    state_decision = replay_override
+                elif (
                     strict_warm_start is not None
                     and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
                 ):
@@ -1968,6 +1987,146 @@ def _upgrade_retry_for_strict_warm_start_manifest(
             strict_evidence,
         ),
     )
+
+
+def _replay_terminal_override_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    state_decision: CandidateStateDecision,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+    successor_state: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    """Override a completed-type terminal skip for an in-scope replay candidate.
+
+    Decision-shape table (#1164 change 2, D1 v3).  "covered" means replay
+    admission is active AND ``model_id`` is in the closed set AND the candidate
+    cycle is inside the replay window:
+
+    ===========================  ==========================================  ==========================================
+    ``state_decision.reason``    pre-change / not covered                     covered by replay admission
+    ===========================  ==========================================  ==========================================
+    ``terminal_hydro_success``   mismatch retry
+    (production shape)           ``retry_strict_warm_start_terminal_init_``   ``replay_resubmit`` /
+                                 ``state_mismatch`` (budget-consulted), or    ``replay_terminal_override``,
+                                 ``blocked`` ``strict_warm_start_retry_``     restart_stage=restart_from_stage=
+                                 ``budget_exhausted`` once spent, or          ``forecast``,
+                                 successor retry                              ``native_shud_resubmitted=True``,
+                                 ``retry_strict_warm_start_successor_``       ``durable_output_reused=False``,
+                                 ``checkpoint_missing`` with                  retry budget NOT consulted
+                                 ``restart_stage="state_save_qc"``, or
+                                 the plain terminal skip
+    ``terminal_pipeline_success`` same ladder as above                        same override
+    ``terminal_completed_cycle``  generic skip (:495-502)                     UNCHANGED generic skip - no override,
+                                                                              no resubmission; the driver surfaces it
+                                                                              as a convergence timeout halt
+    ===========================  ==========================================  ==========================================
+
+    Returning a ``retry`` decision (not a bare evidence patch) is what makes the
+    candidate reach the submission set; the evidence shape mirrors the existing
+    mismatch retry so ``_upgrade_retry_for_strict_warm_start_manifest`` passes it
+    through unaltered and the chain's force-terminal-resubmit whitelist matches
+    the ``replay_resubmit`` decision token.
+    """
+
+    admission = getattr(config, "replay_admission", None)
+    if not isinstance(admission, ReplayAdmission):
+        return None
+    if state_decision.reason not in _STRICT_WARM_START_TERMINAL_SKIP_REASONS:
+        return None
+    if not admission.covers(model_id=candidate.model_id, cycle_time=candidate.cycle_time_utc):
+        return None
+    return CandidateStateDecision(
+        "retry",
+        REPLAY_TERMINAL_OVERRIDE_REASON,
+        _replay_terminal_override_evidence(
+            state_decision.evidence,
+            admission=admission,
+            overridden_skip_reason=str(state_decision.reason or ""),
+            overridden_branch=_replay_overridden_branch(
+                state_decision.evidence,
+                strict_warm_start=strict_warm_start,
+                successor_state=successor_state,
+            ),
+            strict_evidence=strict_warm_start,
+        ),
+    )
+
+
+def _replay_overridden_branch(
+    terminal_evidence: Mapping[str, Any],
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+    successor_state: Mapping[str, Any] | None,
+) -> str:
+    """Name the branch the override displaced, without consulting the budget.
+
+    Every leg below is a pure evidence comparison.  The mismatch leg is reported
+    as ``strict_warm_start_terminal_init_state_mismatch`` even when the budget
+    would have demoted it to ``strict_warm_start_retry_budget_exhausted``:
+    ``_state_retry_attempt`` is deliberately never called on the replay path, so
+    the receipt records the branch shape, not a budget verdict this pass did not
+    compute.
+    """
+
+    if strict_warm_start is not None:
+        if _terminal_decision_matches_strict_warm_start(terminal_evidence, strict_warm_start):
+            if not _terminal_decision_run_manifest_matches_strict_warm_start(
+                terminal_evidence,
+                strict_warm_start,
+            ):
+                return "strict_warm_start_terminal_run_manifest_missing"
+            if successor_state is not None and not bool(successor_state.get("ready")):
+                return "strict_warm_start_successor_checkpoint_missing"
+            return "terminal_skip"
+        return "strict_warm_start_terminal_init_state_mismatch"
+    if successor_state is not None and not bool(successor_state.get("ready")):
+        return "strict_warm_start_successor_checkpoint_missing"
+    if not _terminal_decision_has_run_manifest(terminal_evidence):
+        return "terminal_run_manifest_missing"
+    return "terminal_skip"
+
+
+def _replay_terminal_override_evidence(
+    terminal_evidence: Mapping[str, Any],
+    *,
+    admission: ReplayAdmission,
+    overridden_skip_reason: str,
+    overridden_branch: str,
+    strict_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    payload = {
+        **dict(terminal_evidence),
+        "decision": REPLAY_RESUBMIT_DECISION,
+        "reason": REPLAY_TERMINAL_OVERRIDE_REASON,
+        "restart_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        "restart_from_stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE,
+        # The terminal skip evidence records the ORIGINAL run's durable output as
+        # reusable and its SHUD as not resubmitted; a replay is the opposite on
+        # both counts, and `scheduler_candidate_manifest` reads these keys.
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+        "durable_shud_output_reused": False,
+        "replay_terminal_override": {
+            "overridden_skip_reason": overridden_skip_reason,
+            "overridden_decision": terminal_evidence.get("decision"),
+            "overridden_branch": overridden_branch,
+            "overridden_terminal_source": terminal_evidence.get("terminal_source"),
+            "overridden_terminal_status": terminal_evidence.get("terminal_status"),
+            "overridden_durable_output_reused": terminal_evidence.get("durable_output_reused"),
+            "retry_budget_consulted": False,
+            "replay_admission": admission.to_evidence(),
+        },
+    }
+    if strict_evidence is not None:
+        payload["strict_warm_start"] = _evidence_safe(dict(strict_evidence))
+        selected = strict_evidence.get("candidate_state")
+        if isinstance(selected, Mapping):
+            payload["candidate_state"] = _evidence_safe(dict(selected))
+        index = strict_evidence.get("state_snapshot_index")
+        if isinstance(index, Mapping):
+            payload["state_snapshot_index"] = _evidence_safe(dict(index))
+    return _evidence_safe(payload)
 
 
 def _journal_predecessor_identity_quarantine(

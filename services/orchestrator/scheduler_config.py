@@ -11,6 +11,17 @@ from urllib.parse import unquote, urlparse
 from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import source_cycle_raw_manifest
+from services.orchestrator.scheduler_replay import (
+    REPLAY_MODE_ENV,
+    REPLAY_MODEL_IDS_ENV,
+    REPLAY_WINDOW_ENV,
+    ReplayAdmission,
+    SchedulerReplayConfigError,
+    parse_replay_admission,
+)
+from services.orchestrator.scheduler_replay import (
+    WINDOW_SEPARATOR as _REPLAY_WINDOW_SEPARATOR,
+)
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 
 __all__ = ("ProductionSchedulerConfig",)
@@ -201,6 +212,16 @@ class ProductionSchedulerConfig:
     repair_missing_forcing_cycle_time: datetime | str | None = field(
         default_factory=lambda: os.getenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME")
     )
+    # Replay admission triple (#1164 change 2).  All three absent -> the
+    # scheduler behaves byte-identically to the pre-change build; any partial
+    # combination is a typed configuration error, never a silent downgrade.
+    replay_mode: bool | str | None = field(default_factory=lambda: os.getenv(REPLAY_MODE_ENV))
+    replay_model_ids: str | tuple[str, ...] | None = field(
+        default_factory=lambda: os.getenv(REPLAY_MODEL_IDS_ENV)
+    )
+    replay_window: str | None = field(default_factory=lambda: os.getenv(REPLAY_WINDOW_ENV))
+    #: Resolved admission scope; ``None`` whenever replay is not active.
+    replay_admission: ReplayAdmission | None = field(init=False, default=None)
     progress_guard_max_no_progress_steps: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_PROGRESS_GUARD_MAX_NO_PROGRESS_STEPS", 256)
     )
@@ -488,6 +509,50 @@ class ProductionSchedulerConfig:
             raise ValueError(
                 "production scheduler repair_missing_forcing_cycle_time requires repair_missing_forcing"
             )
+        # Replay admission (#1164 change 2).  ``parse_replay_admission`` raises a
+        # typed error for every partial triple; an active admission additionally
+        # requires the same exact-cycle invocation shape ``--cycle-time`` produces
+        # (lookback 0, one cycle per source, backfill off, single pass), because
+        # the override may only ever touch one pinned cycle.  Refusing here is
+        # deliberate: an enabled replay mode that quietly became an ordinary
+        # production pass is the failure this whole surface exists to prevent.
+        replay_admission = parse_replay_admission(
+            mode=self.replay_mode,
+            model_ids=self.replay_model_ids,
+            window=self.replay_window,
+        )
+        if replay_admission is not None:
+            if self.continuous:
+                raise SchedulerReplayConfigError(
+                    "replay_continuous_pass",
+                    "production scheduler replay mode cannot run continuously",
+                    field=REPLAY_MODE_ENV,
+                )
+            if self.backfill_enabled or int(self.max_cycles_per_source) != 1 or int(self.lookback_hours) != 0:
+                raise SchedulerReplayConfigError(
+                    "replay_cycle_pin_missing",
+                    "production scheduler replay mode requires an exact-cycle, "
+                    "single-cycle, backfill-disabled invocation",
+                    field=REPLAY_WINDOW_ENV,
+                )
+        object.__setattr__(self, "replay_mode", bool(replay_admission is not None))
+        object.__setattr__(
+            self,
+            "replay_model_ids",
+            tuple(sorted(replay_admission.model_ids)) if replay_admission is not None else (),
+        )
+        object.__setattr__(
+            self,
+            "replay_window",
+            (
+                f"{replay_admission.to_evidence()['window_start']}"
+                f"{_REPLAY_WINDOW_SEPARATOR}"
+                f"{replay_admission.to_evidence()['window_end']}"
+            )
+            if replay_admission is not None
+            else None,
+        )
+        object.__setattr__(self, "replay_admission", replay_admission)
         object.__setattr__(
             self,
             "progress_guard_max_no_progress_steps",

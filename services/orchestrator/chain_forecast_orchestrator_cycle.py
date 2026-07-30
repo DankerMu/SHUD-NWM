@@ -23,6 +23,11 @@ _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_strict_warm_start_terminal_run_manifest_missing",
     "retry_strict_warm_start_retry_run_manifest_mismatch",
     "retry_terminal_run_manifest_missing",
+    # Append-only (#1164 change 2): the env-gated replay override decides
+    # in-scope completed-type terminal candidates `replay_resubmit`; without
+    # membership here the chain would resume the terminal-success pipeline as a
+    # no-op and the replay would submit nothing.
+    "replay_resubmit",
 }
 _STAGE_ORDER = {
     "convert": 0,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_generation as _generation
 from services.orchestrator import scheduler_generation_gate as _generation_gate
+from services.orchestrator import scheduler_replay as _scheduler_replay
 
 # Issue #1081 §8.1: sentinel that separates "declaration not yet loaded" from
 # "loaded and returned ``None``" (env unset — no declaration configured).
@@ -596,6 +597,19 @@ class ProductionScheduler:
                 ready = status == "ready"
                 raw_reason = readiness.get("reason")
                 reason = None if ready else f"nfs_raw_manifest_{raw_reason or 'not_ready'}"
+                replay_discovery = (
+                    None
+                    if ready
+                    else self._replay_forcing_admission_discovery(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        cycle_hour=cycle_hour,
+                        raw_readiness=readiness,
+                    )
+                )
+                if replay_discovery is not None:
+                    discoveries.append(replay_discovery)
+                    continue
                 discoveries.append(
                     _scheduler.CycleDiscovery(
                         cycle_id=_scheduler.cycle_id_for(source_id, cycle_time),
@@ -613,6 +627,66 @@ class ProductionScheduler:
                 )
             current_date += _scheduler.timedelta(days=1)
         return discoveries
+
+    def _replay_forcing_admission_discovery(
+        self,
+        *,
+        source_id: str,
+        cycle_time: _scheduler.datetime,
+        cycle_hour: int,
+        raw_readiness: _scheduler.Mapping[str, _scheduler.Any],
+    ) -> _scheduler.CycleDiscovery | None:
+        """Admit a raw-manifest-less pinned cycle on direct-grid forcing evidence (#1164).
+
+        Returns ``None`` — leaving the pre-existing raw-manifest gate untouched —
+        unless replay admission is active and this cycle lies inside the replay
+        window.  When it does apply, the cycle is admitted ONLY if every model in
+        the closed replay set has a present, non-empty forcing package under a
+        bounded no-follow probe.  A missing package, or a probe that could not be
+        completed, rejects the whole cycle with a typed reason: there is no
+        fallback to ordinary discovery and no conversion attempt, because the raw
+        objects that conversion would need are exactly what is gone.
+        """
+
+        admission = getattr(self.config, "replay_admission", None)
+        if not isinstance(admission, _scheduler_replay.ReplayAdmission):
+            return None
+        if not admission.includes_cycle(cycle_time):
+            return None
+        from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
+
+        forcing_evidence = _scheduler_replay.replay_forcing_readiness(
+            object_store_root=self.config.object_store_root,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_ids=sorted(admission.model_ids),
+        )
+        ready = str(forcing_evidence.get("status") or "") == "ready"
+        reason = (
+            None
+            if ready
+            else str(
+                forcing_evidence.get("reason")
+                or _scheduler_replay.REPLAY_FORCING_EVIDENCE_MISSING_REASON
+            )
+        )
+        return _scheduler.CycleDiscovery(
+            cycle_id=_scheduler.cycle_id_for(source_id, cycle_time),
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_hour=cycle_hour,
+            available=ready,
+            status="discovered" if ready else str(forcing_evidence.get("status") or "missing"),
+            reason=reason,
+            classifier=_scheduler_replay.REPLAY_FORCING_READY_SOURCE,
+            retryable=False,
+            probe_uri=None,
+            evidence={
+                "replay_forcing_evidence": forcing_evidence,
+                "nfs_raw_manifest": _public_raw_manifest_evidence(raw_readiness),
+                "replay_admission": admission.to_evidence(),
+            },
+        )
 
     def _canonical_readiness_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
