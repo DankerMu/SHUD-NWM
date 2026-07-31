@@ -14,7 +14,7 @@ import json
 import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -281,6 +281,56 @@ def _optional_int(*values: Any) -> int | None:
     return None
 
 
+#: Directory a run tree keeps its state checkpoints in (``workers.shud_runtime``
+#: writes ``<output>/state_checkpoints/``).
+CHECKPOINT_DIR_NAME = "state_checkpoints"
+#: Suffix of the canonicalized-IC cache
+#: :func:`packages.common.state_cli._normalized_checkpoint_ic_file` writes as
+#: ``.{ic_file_name}.normalized`` NEXT TO the checkpoint it normalized.
+CHECKPOINT_NORMALIZATION_SUFFIX = ".normalized"
+
+
+def _is_checkpoint_normalization_sidecar(name: str) -> bool:
+    """True for the ``.{ic}.normalized`` cache the run's own state-save writes.
+
+    ``save_state_for_run`` (``state_cli.py:128``, the ``state_save_qc`` stage of
+    THIS run's own cycle) canonicalizes each checkpoint IC before snapshotting
+    it, and writes the canonical copy beside the checkpoint -- but only when the
+    content needs it: a retimed header or at least one clamped negative residual
+    (``state_cli.py:229-247``).  So the file's presence tracks whether that
+    half's IC needed normalizing, not the key set of the run.  Attempt-4 is
+    exactly that: the replayed dth_ls IC needed normalization while its July
+    original did not (prior 14 files vs new 15), whereas the hhe / jialingjiang
+    July originals did need it and their priors already carried theirs.  The
+    physical signal in that difference is real and separately known; it is not a
+    key-set difference, which is what R3's predicate-key axis compares.
+    """
+
+    parts = PurePosixPath(name).parts
+    if len(parts) < 2 or CHECKPOINT_DIR_NAME not in parts[:-1]:
+        return False
+    basename = parts[-1]
+    if not basename.startswith(".") or not basename.endswith(CHECKPOINT_NORMALIZATION_SUFFIX):
+        return False
+    # ``.{ic_file_name}.normalized``: the stem between the dot-prefix and the
+    # suffix must be non-empty, so a bare ``.normalized`` is not a sidecar.
+    return len(basename) > 1 + len(CHECKPOINT_NORMALIZATION_SUFFIX)
+
+
+def _partition_normalization_sidecars(
+    names: Sequence[str] | None,
+) -> tuple[list[str] | None, list[str]]:
+    """Split an inventory name list into (comparable names, excluded sidecars)."""
+
+    if names is None:
+        return None, []
+    kept: list[str] = []
+    excluded: list[str] = []
+    for name in names:
+        (excluded if _is_checkpoint_normalization_sidecar(name) else kept).append(name)
+    return kept, excluded
+
+
 def _inventory_file_names(inventory: Any) -> list[str] | None:
     if not isinstance(inventory, Mapping):
         return None
@@ -306,18 +356,31 @@ def key_consistency(prior: Mapping[str, Any], new: Mapping[str, Any]) -> dict[st
     missing or different on the new half is ``drift``.  ``undeterminable`` is
     reserved for the one honest case -- no comparable prior evidence at all
     (the GFS 070712 rows with no prior run).
+
+    The ``output_file_names`` axis compares the inventories with the checkpoint
+    IC normalization sidecars (``state_checkpoints/.{ic}.normalized``) removed
+    from BOTH halves: the run's own ``state_save_qc`` writes that file only when
+    that half's IC content needed canonicalizing (see
+    :func:`_is_checkpoint_normalization_sidecar`), so it is a per-half content
+    fact, not a key-set fact -- and either half may be the one carrying it.
+    Nothing is hidden: the recorded ``prior_output_file_names`` /
+    ``new_output_file_names`` stay the FULL inventories and
+    ``excluded_normalization_sidecars`` names exactly what the comparison
+    disregarded whenever it disregarded anything.  Every other inventory
+    difference -- the real checkpoint files included -- still drifts.
     """
 
+    prior_names = _inventory_file_names(prior.get("output_inventory"))
+    new_names = _inventory_file_names(new.get("output_inventory"))
+    prior_compared, prior_excluded = _partition_normalization_sidecars(prior_names)
+    new_compared, new_excluded = _partition_normalization_sidecars(new_names)
     axes: dict[str, tuple[Any, Any]] = {
         "river_network_version_id": (
             prior.get("river_network_version_id"),
             new.get("river_network_version_id"),
         ),
         "output_segment_count": (prior.get("output_segment_count"), new.get("output_segment_count")),
-        "output_file_names": (
-            _inventory_file_names(prior.get("output_inventory")),
-            _inventory_file_names(new.get("output_inventory")),
-        ),
+        "output_file_names": (prior_compared, new_compared),
     }
     comparable = {name: pair for name, pair in axes.items() if pair[0] not in (None, "")}
     record: dict[str, Any] = {
@@ -325,10 +388,15 @@ def key_consistency(prior: Mapping[str, Any], new: Mapping[str, Any]) -> dict[st
         "new_river_network_version_id": new.get("river_network_version_id"),
         "prior_output_segment_count": prior.get("output_segment_count"),
         "new_output_segment_count": new.get("output_segment_count"),
-        "prior_output_file_names": axes["output_file_names"][0],
-        "new_output_file_names": axes["output_file_names"][1],
+        "prior_output_file_names": prior_names,
+        "new_output_file_names": new_names,
         "compared_axes": sorted(comparable),
     }
+    if prior_excluded or new_excluded:
+        record["excluded_normalization_sidecars"] = {
+            "prior": prior_excluded,
+            "new": new_excluded,
+        }
     if not comparable:
         return {
             **record,

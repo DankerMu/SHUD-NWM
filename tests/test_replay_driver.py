@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -167,13 +168,14 @@ class _Site:
         _write_json(root / "input" / "manifest.json", manifest)
         output_root = root / "output"
         if output_root.exists():
-            for existing in sorted(output_root.iterdir()):
-                existing.unlink()
+            shutil.rmtree(output_root)
         output_root.mkdir(parents=True, exist_ok=True)
         for name in output_files:
             # A replay legitimately rewrites every output byte; the file SET is
-            # what must not drift.
-            (output_root / name).write_text(
+            # what must not drift.  Names may be nested (``state_checkpoints/...``).
+            target = output_root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
                 f"{manifest.get('marker')},{cycle.isoformat()},{model_id}\n", encoding="utf-8"
             )
 
@@ -191,10 +193,15 @@ class _Site:
         (package / "manifest.json").write_text(json.dumps({"model_id": model_id}), encoding="utf-8")
         return package
 
-    def populate(self, *, manifest_marker: str = "prior") -> None:
+    def populate(
+        self,
+        *,
+        manifest_marker: str = "prior",
+        output_files: Sequence[str] = ("discharge.csv", "stage.csv"),
+    ) -> None:
         for cycle in self.cycles:
             for model_id in self.models:
-                self.write_run(cycle, model_id, _manifest(marker=manifest_marker))
+                self.write_run(cycle, model_id, _manifest(marker=manifest_marker), output_files=output_files)
                 self.write_forcing(cycle, model_id)
 
     # -- state index -------------------------------------------------------
@@ -945,6 +952,193 @@ def test_output_inventory_drift_halts_the_driver(site: _Site) -> None:
     assert drifted[0]["key_consistency"]["drifted_axes"] == ["output_file_names"]
     assert drifted[0]["key_consistency"]["prior_output_file_names"] == ["discharge.csv", "stage.csv"]
     assert drifted[0]["key_consistency"]["new_output_file_names"] == ["discharge.csv"]
+
+
+#: A run tree's output files, checkpoint directory included -- the shape the
+#: attempt-4 inventories really had.
+_RUN_OUTPUT_FILES = (
+    "discharge.csv",
+    "stage.csv",
+    "state_checkpoints/state_checkpoints.json",
+    "state_checkpoints/CJ-DTH-LS.f012.cfg.ic.update",
+)
+#: What the run's OWN ``state_save_qc`` writes next to a checkpoint whose IC
+#: content needed canonicalizing (``state_cli._normalized_checkpoint_ic_file``).
+_NORMALIZATION_SIDECAR = "state_checkpoints/.CJ-DTH-LS.f012.cfg.ic.update.normalized"
+
+
+def test_normalization_sidecar_present_on_one_half_only_is_not_key_drift(site: _Site) -> None:
+    """Attempt-4: prior 14 files, new 15 -- the extra one is the IC normalization cache.
+
+    ``save_state_for_run`` writes ``.{ic}.normalized`` beside the checkpoint only
+    when that half's IC needed it (retimed header or clamped residual), so the
+    file tracks IC content, not the key set: the replayed dth_ls IC needed
+    normalizing where its July original did not.  The comparison drops it from
+    both halves and RECORDS what it dropped.
+    """
+
+    site.populate(output_files=_RUN_OUTPUT_FILES)
+    submit = _SubmitRecorder(site, new_output_files=(*_RUN_OUTPUT_FILES, _NORMALIZATION_SIDECAR))
+
+    receipt = run_replay(
+        site.config(execute=True),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    consistency = receipt["rows"][0]["key_consistency"]
+    assert consistency["status"] == "consistent"
+    assert consistency["drifted_axes"] == []
+    assert "output_file_names" in consistency["compared_axes"]
+    # the full inventories stay on the receipt: the check narrows loudly
+    assert _NORMALIZATION_SIDECAR in consistency["new_output_file_names"]
+    assert _NORMALIZATION_SIDECAR not in consistency["prior_output_file_names"]
+    assert consistency["excluded_normalization_sidecars"] == {
+        "prior": [],
+        "new": [_NORMALIZATION_SIDECAR],
+    }
+
+
+def test_normalization_sidecar_only_on_the_prior_half_is_not_key_drift(site: _Site) -> None:
+    """The mirror case: the OLD run's IC needed normalizing and the replayed one did not."""
+
+    site.populate(output_files=(*_RUN_OUTPUT_FILES, _NORMALIZATION_SIDECAR))
+    submit = _SubmitRecorder(site, new_output_files=_RUN_OUTPUT_FILES)
+
+    receipt = run_replay(
+        site.config(execute=True),
+        submit_pass=submit,
+        journal_probe=submit.journal,
+        clock=_Clock(),
+        sleep=lambda _seconds: None,
+    )
+
+    assert receipt["outcome"] == "completed"
+    consistency = receipt["rows"][0]["key_consistency"]
+    assert consistency["status"] == "consistent"
+    assert consistency["excluded_normalization_sidecars"] == {
+        "prior": [_NORMALIZATION_SIDECAR],
+        "new": [],
+    }
+
+
+def test_real_output_drift_under_a_normalization_sidecar_still_halts(site: _Site) -> None:
+    """The exclusion is surgical: any NON-sidecar difference still drifts."""
+
+    site.populate(output_files=(*_RUN_OUTPUT_FILES, _NORMALIZATION_SIDECAR))
+    submit = _SubmitRecorder(
+        site,
+        new_output_files=(
+            *(name for name in _RUN_OUTPUT_FILES if name != "discharge.csv"),
+            _NORMALIZATION_SIDECAR,
+        ),
+    )
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    drifted = next(row for row in receipt["rows"] if (row["key_consistency"] or {}).get("status") == "drift")
+    consistency = drifted["key_consistency"]
+    assert consistency["drifted_axes"] == ["output_file_names"]
+    assert "discharge.csv" in consistency["prior_output_file_names"]
+    assert "discharge.csv" not in consistency["new_output_file_names"]
+    assert consistency["excluded_normalization_sidecars"] == {
+        "prior": [_NORMALIZATION_SIDECAR],
+        "new": [_NORMALIZATION_SIDECAR],
+    }
+
+
+def test_a_differing_checkpoint_set_under_differing_sidecars_still_halts(site: _Site) -> None:
+    """The real checkpoint files are the backstop: both halves may carry a sidecar.
+
+    Excluding the sidecars must not also hide that the halves checkpointed at
+    DIFFERENT lead hours -- the ``.cfg.ic.update`` files themselves are compared.
+    """
+
+    prior_checkpoint = "state_checkpoints/CJ-DTH-LS.f006.cfg.ic.update"
+    new_checkpoint = "state_checkpoints/CJ-DTH-LS.f012.cfg.ic.update"
+    site.populate(
+        output_files=(
+            "discharge.csv",
+            "stage.csv",
+            "state_checkpoints/state_checkpoints.json",
+            prior_checkpoint,
+            f"state_checkpoints/.{prior_checkpoint.rsplit('/', 1)[1]}.normalized",
+        )
+    )
+    submit = _SubmitRecorder(
+        site,
+        new_output_files=(
+            "discharge.csv",
+            "stage.csv",
+            "state_checkpoints/state_checkpoints.json",
+            new_checkpoint,
+            f"state_checkpoints/.{new_checkpoint.rsplit('/', 1)[1]}.normalized",
+        ),
+    )
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True),
+            submit_pass=submit,
+            journal_probe=submit.journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    drifted = next(row for row in receipt["rows"] if (row["key_consistency"] or {}).get("status") == "drift")
+    consistency = drifted["key_consistency"]
+    assert consistency["drifted_axes"] == ["output_file_names"]
+    assert prior_checkpoint in consistency["prior_output_file_names"]
+    assert new_checkpoint in consistency["new_output_file_names"]
+    assert consistency["excluded_normalization_sidecars"] == {
+        "prior": [f"state_checkpoints/.{prior_checkpoint.rsplit('/', 1)[1]}.normalized"],
+        "new": [f"state_checkpoints/.{new_checkpoint.rsplit('/', 1)[1]}.normalized"],
+    }
+
+
+def test_only_checkpoint_normalization_sidecars_are_excluded() -> None:
+    """The exclusion follows the sidecar naming rule, not a basin name list."""
+
+    def inventory(*names: str) -> dict[str, Any]:
+        return {"status": "present", "files": list(names)}
+
+    look_alikes = (
+        "state_checkpoints/state.normalized",  # no dot prefix -> a real output
+        "state_checkpoints/.normalized",  # no ``{ic}`` stem
+        ".CJ-DTH-LS.f012.cfg.ic.update.normalized",  # outside state_checkpoints/
+        "state_checkpoints/.CJ-DTH-LS.f012.cfg.ic.update",  # not the cache
+    )
+    for name in look_alikes:
+        consistency = replay_capture.key_consistency(
+            {"output_inventory": inventory("discharge.csv")},
+            {"output_inventory": inventory("discharge.csv", name)},
+        )
+        assert consistency["status"] == "drift", name
+        assert "excluded_normalization_sidecars" not in consistency, name
+
+    nested = replay_capture.key_consistency(
+        {"output_inventory": inventory("discharge.csv")},
+        {"output_inventory": inventory("discharge.csv", "output/state_checkpoints/.HHe.f012.cfg.ic.update.normalized")},
+    )
+    assert nested["status"] == "consistent"
+    assert nested["excluded_normalization_sidecars"]["new"] == [
+        "output/state_checkpoints/.HHe.f012.cfg.ic.update.normalized"
+    ]
 
 
 def test_output_segment_count_drift_halts_the_driver(site: _Site) -> None:
