@@ -20,12 +20,17 @@ from services.orchestrator.scheduler_init_state_match import (
     init_state_field,
 )
 from services.orchestrator.scheduler_replay import (
+    REPLAY_MANUAL_RETRY_ADMISSION_KEY,
+    REPLAY_MANUAL_RETRY_ADMITTED_STATUS,
+    REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS,
     REPLAY_RESUBMIT_DECISION,
     REPLAY_TERMINAL_OVERRIDE_REASON,
     ReplayAdmission,
 )
 from services.orchestrator.scheduler_state import (
+    DOWNSTREAM_RESTART_STAGES,
     DURABLE_HYDRO_SUCCESS_STATUSES,
+    NATIVE_SHUD_STAGE_ALIASES,
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
@@ -35,6 +40,7 @@ from services.orchestrator.scheduler_state import (
     _candidate_state_decision,
     _candidate_state_has_identity_mismatch,
     _candidate_state_is_candidate_scoped_retry,
+    _canonical_downstream_stage,
     _ensure_utc,
     _evidence_safe,
     _format_utc,
@@ -88,6 +94,46 @@ _REPLAY_SUBSTITUTE_UNAVAILABLE_REASON = "replay_raw_manifest_substitute_unavaila
 #: Reason recorded when a replay-window repair candidate is admitted with the
 #: raw-manifest restart merged in full (design D3.5 v5, A2-1).
 _REPLAY_REPAIR_CONVERT_RESTART_REASON = "replay_repair_rebuilds_canonical_from_raw"
+#: Manual-retry family produced by ``_manual_retry_state_evidence``: an operator
+#: journal event (``event_type=manual_retry``/``details.trigger=manual``) flips
+#: the candidate to this decision, and the strict-warm upgrade then relabels the
+#: token while leaving the rest of the evidence in place.
+_MANUAL_RETRY_DECISION = "manual_retry"
+_MANUAL_RETRY_REASON = "manual_retry_requested"
+#: Replay-window admission marker recorded on a manual-retry candidate so the
+#: raw-less canonical leg admits it exactly like its ``replay_resubmit`` siblings
+#: (#1164 execution-phase defect 2).  Written ``eligible`` ONCE, before the
+#: strict-warm upgrade, so the marker rides through the token relabel; flipped to
+#: ``admitted`` at the raw-less leg when the substitute admission actually fires.
+#:
+#: SAFETY STORY (corrected after the execution-phase P1 review — the earlier
+#: claim that the token "stays outside the chain whitelist" was FALSE for the
+#: upgraded token, which IS a whitelist member):
+#:
+#: * the token family is NEVER rewritten — the honest producer token
+#:   (``manual_retry``, or the strict-warm relabel the ordinary ladder would have
+#:   produced anyway) is what ships, so the manual retry keeps its own
+#:   retry-suffixed submission path;
+#: * the marker is WINDOWED — it is written only when ``ReplayAdmission.covers``
+#:   this model and cycle, so the chain-gate exemption it grants
+#:   (``chain_forecast_orchestrator_cycle._basin_carries_replay_manual_retry_admission``)
+#:   cannot reach an out-of-window manual retry.
+_REPLAY_MANUAL_RETRY_ADMISSION_KEY = REPLAY_MANUAL_RETRY_ADMISSION_KEY
+_REPLAY_MANUAL_RETRY_ADMISSION_REASON = "replay_window_manual_retry_admitted"
+#: Marker statuses: scoped-in at the completion site, granted at the raw-less leg.
+#: Shared with the chain-side gate, which keys on ``admitted`` alone (round-2 C2).
+_REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS = REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS
+_REPLAY_MANUAL_RETRY_ADMITTED_STATUS = REPLAY_MANUAL_RETRY_ADMITTED_STATUS
+#: Earliest restart stage the raw-less admission may grant (round-2 C1).  The leg
+#: has just recorded the raw manifest as ABSENT, so a candidate resuming at
+#: ``convert``/``forcing`` — or declaring no restart stage at all, which keys the
+#: chain cohort ``(0, "full")`` and starts the pipeline at ``convert_canonical``
+#: — would rebuild canonical from inputs that do not exist.
+_REPLAY_MANUAL_RETRY_MIN_RESTART_STAGE = "forecast"
+#: Typed marker enrichment recorded when that precondition declines a candidate
+#: the window had already found eligible.  The BLOCK reason token stays
+#: ``nfs_raw_manifest_required`` — one runbook row, one operator response.
+_REPLAY_MANUAL_RETRY_RESTART_UNSUPPORTED_REASON = "replay_manual_retry_restart_stage_unsupported"
 #: Keys of ``_source_raw_manifest_restart_evidence`` that would lower a replay
 #: candidate's forecast restart back to ``convert``; the guard merges the rest.
 _REPLAY_SUPPRESSED_RESTART_KEYS = (
@@ -104,10 +150,35 @@ _REPLAY_SUPPRESSED_RESTART_KEYS = (
 #: repair under this key.  A future unguarded merge is therefore self-healing and
 #: visible instead of silently shipping the wrong restart stage.
 _REPLAY_INVARIANT_CLAMP_KEY = "replay_invariant_clamp_applied"
-#: Clamp modes: the replay terminal override's forecast restart, and the
-#: replay-window authorized repair's convert restart.
+#: Clamp modes: the replay terminal override's forecast restart, the
+#: replay-window authorized repair's convert restart, and the replay-window
+#: manual retry the raw-less leg admitted.
 _REPLAY_CLAMP_MODE_RESUBMIT = "replay_resubmit"
 _REPLAY_CLAMP_MODE_REPAIR_CONVERT = "replay_repair_convert_restart"
+_REPLAY_CLAMP_MODE_MANUAL_RETRY = "replay_manual_retry"
+
+
+class _AbsentAtAdmission:
+    """Sentinel expectation value: the key must NOT be present at return time.
+
+    Present-keys-only expectations are not enough for the manual-retry family
+    (execution-phase P1-2): the bare producer shape carries ``decision`` and
+    nothing else the clamp owns, so a later merge introducing
+    ``durable_shud_output_reused=True`` or ``restart_stage="parse"`` would be
+    invisible to a clamp that only re-imposed the keys admission time happened to
+    write.  Pinning absence makes the clamp DELETE such a key and record it.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "<absent-at-admission>"
+
+
+_REPLAY_CLAMP_ABSENT = _AbsentAtAdmission()
+#: Receipt placeholder for a key the clamp had to delete; the receipt must stay
+#: JSON-safe, so the sentinel object itself never reaches the evidence.
+_REPLAY_CLAMP_ABSENT_RECEIPT = "<absent>"
 #: Evidence keys each clamp mode owns.  Values are captured from the decision /
 #: evidence that was actually applied, so the clamp restores what this pass
 #: decided rather than a second copy of the literals.
@@ -122,6 +193,23 @@ _REPLAY_CLAMP_MODE_REPAIR_CONVERT = "replay_repair_convert_restart"
 #: and ``durable_shud_output_reused`` are read by
 #: ``scheduler_candidate_manifest``, which flips ``native_shud_resubmitted`` to
 #: False whenever the latter survives as True (the ``retry_downstream`` shape).
+#:
+#: ``fresh_ingestion`` is the THIRD recurrence of the protection-set-completeness
+#: class (repair-2 round 3, retro
+#: ``.workplans/issue-1164-change2/review/review-failure-retro-repair2-r3.md``).
+#: It does not merely compete with the clamped restart keys, it OUTRANKS them:
+#: ``scheduler_execution.candidate_restart_stage`` short-circuits to ``None`` on
+#: its FIRST line when ``fresh_ingestion={"required": True, "mode": "full_chain"}``
+#: is present, which keys the chain cohort ``(0, "full")``, and
+#: ``scheduler_candidate_manifest`` then drops ``restart_stage`` from the basin
+#: manifest entirely.  The post-sync journal re-read reaches that shape by default
+#: in the replay window (``scheduler_state_failure._missing_raw_manifest_repair_evidence``
+#: fires whenever the raw object is absent).  No admitted replay leg writes the key
+#: — the raw-ready leg strips it via :data:`_REPLAY_SUPPRESSED_RESTART_KEYS` — so
+#: both whole-set modes pin it ABSENT and the clamp DELETES a merged-in copy.
+#: :func:`_test_replay_clamp_consumer_key_closure` in
+#: ``tests/test_scheduler_replay_admission.py`` re-derives this set from the
+#: consumers so the next consumer-read key cannot be missed by hand again.
 _REPLAY_RESUBMIT_CLAMPED_KEYS = (
     "decision",
     "restart_stage",
@@ -129,13 +217,46 @@ _REPLAY_RESUBMIT_CLAMPED_KEYS = (
     "native_shud_resubmitted",
     "durable_output_reused",
     "durable_shud_output_reused",
+    "fresh_ingestion",
 )
+#: Leg (b) — and the ONE mode that pins ``fresh_ingestion`` BY VALUE.  The three
+#: sets' intents differ on purpose and changing one is not a licence to change the
+#: others: the repair deliberately rebuilds canonical from the raw manifest
+#: (``mode="reuse_raw_then_convert"``), so pinning that key absent here would undo
+#: the very evidence the leg was written to apply.  This set is also the only one
+#: still applied PRESENT-KEYS-ONLY, because its expectation is built from evidence
+#: THIS module assembled (``_replay_repair_raw_restart_evidence``) rather than from
+#: a journal decision — "the admission never carried the key" is not a reachable
+#: shape for it.
 _REPLAY_REPAIR_CLAMPED_KEYS = (
     "decision",
     "restart_stage",
     "restart_from_stage",
     "fresh_ingestion",
 )
+#: Same consumer-derived set as the resubmit mode — the admitted manual retry is
+#: read by exactly the same two consumers (the chain's force-terminal-resubmit
+#: gate and ``scheduler_candidate_manifest``'s SHUD projection).  Like the resubmit
+#: mode (and unlike the repair mode) this set is applied WHOLE, absent keys
+#: included: see :class:`_AbsentAtAdmission`.
+_REPLAY_MANUAL_RETRY_CLAMPED_KEYS = (
+    "decision",
+    "restart_stage",
+    "restart_from_stage",
+    "native_shud_resubmitted",
+    "durable_output_reused",
+    "durable_shud_output_reused",
+    "fresh_ingestion",
+)
+#: The clamp modes whose expectation covers the WHOLE owned set, absent keys
+#: included.  Membership here is what makes adding a key to the set actually bite:
+#: a present-keys-only expectation silently ignores a key the admission decision
+#: never wrote, which is exactly how ``fresh_ingestion`` would have been a no-op
+#: addition to :data:`_REPLAY_RESUBMIT_CLAMPED_KEYS`.
+_REPLAY_WHOLE_SET_CLAMPED_KEY_SETS = {
+    _REPLAY_CLAMP_MODE_RESUBMIT: _REPLAY_RESUBMIT_CLAMPED_KEYS,
+    _REPLAY_CLAMP_MODE_MANUAL_RETRY: _REPLAY_MANUAL_RETRY_CLAMPED_KEYS,
+}
 
 #: Completed-type terminal skip reasons that the §8.7 journal predecessor
 #: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
@@ -589,6 +710,20 @@ def build_candidates(
                             }
                         )
                         continue
+            manual_retry_admission = _replay_manual_retry_admission_decision(
+                context.config,
+                candidate,
+                state_decision,
+            )
+            if manual_retry_admission is not None:
+                # Replay-window manual retry (#1164 execution-phase defect 2).
+                # The completion runs BEFORE the strict-warm upgrade so the
+                # marker rides along into
+                # `retry_strict_warm_start_retry_run_manifest_mismatch`: the
+                # upgrade relabels the decision token, and the raw-less
+                # canonical leg would otherwise have no way to tell that
+                # relabelled decision apart from a downstream retry's.
+                state_decision = manual_retry_admission
             state_decision = _upgrade_retry_for_strict_warm_start_manifest(
                 state_decision,
                 strict_warm_start,
@@ -686,6 +821,19 @@ def build_candidates(
                                 if warm_admission_blocker is not None:
                                     blocked.append(warm_admission_blocker)
                                     continue
+                                # F2: the rebuild above REPLACED the decision the
+                                # main-path stamp/upgrade were applied to, and this
+                                # block sits UPSTREAM of the raw-less canonical
+                                # leg — an unstamped manual retry would be blocked
+                                # there with no admission marker at all.
+                                manual_retry_resync_active_leg = _replay_manual_retry_resynced_decision(
+                                    context.config,
+                                    candidate,
+                                    state_decision,
+                                    strict_warm_start=strict_warm_start,
+                                )
+                                if manual_retry_resync_active_leg is not None:
+                                    state_decision = manual_retry_resync_active_leg
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -856,6 +1004,37 @@ def build_candidates(
                     # blocks unconditionally (ignoring `required`) and the
                     # raw-ready leg lowers the forecast restart to `convert`.
                     replay_covered = _decision_is_replay_resubmit(state_decision)
+                    # Second raw-less admission key (#1164 execution-phase defect
+                    # 2): a manual retry the replay window already scoped in
+                    # upstream.  It shares the raw-less leg with its
+                    # `replay_resubmit` siblings — the raw objects for the
+                    # pre-070712 cycles do not exist, so no operator action could
+                    # ever satisfy `nfs_raw_manifest_required` — but NOT the
+                    # raw-ready leg, whose `convert` restart a manual retry
+                    # legitimately wants when the raw manifest is really there.
+                    replay_manual_retry_covered = _decision_is_replay_manual_retry_scoped(state_decision)
+                    manual_retry_restart_unsupported: dict[str, Any] | None = None
+                    if replay_manual_retry_covered and not _replay_manual_retry_restart_is_supported(
+                        state_decision
+                    ):
+                        # RESTART PRECONDITION (round-2 C1).  Being in the replay
+                        # window is not a restart stage: `_manual_retry_state_evidence`
+                        # writes restart keys ONLY in its COLD_START_QUARANTINED
+                        # branch, and the bare shape survives the strict-warm
+                        # upgrade whenever there is no strict warm start or its
+                        # run manifest already matches.  Admitting that shape here
+                        # would hand the chain cohort key `(0, "full")` — a full
+                        # chain from `convert_canonical` against the very raw
+                        # manifest this leg is about to record as ABSENT, turning
+                        # fail-closed into fail-late.  It is evaluated HERE, on the
+                        # CURRENT (post-upgrade) decision, and not at the
+                        # eligibility stamp: the campaign shape is bare when it is
+                        # stamped and only gets its `forecast` restart from the
+                        # upgrade that runs afterwards.
+                        manual_retry_restart_unsupported = _replay_manual_retry_restart_declined_marker(
+                            state_decision
+                        )
+                        replay_manual_retry_covered = False
                     state_evidence = {}
                     if state_decision is not None and state_decision.action == "retry":
                         state_evidence.update(state_decision.evidence)
@@ -868,17 +1047,20 @@ def build_candidates(
                         else:
                             state_evidence.update(raw_manifest_restart)
                             raw_manifest_restart_applied = True
-                    elif replay_covered:
+                    elif replay_covered or replay_manual_retry_covered:
                         substitute_evidence, substitute_block = _replay_raw_manifest_substitute_evidence(
                             discovery,
                             raw_candidate_state,
+                            decision=str(state_evidence.get("decision") or ""),
+                            restart_stage=str(state_evidence.get("restart_stage") or ""),
                         )
                         state_evidence.update(substitute_evidence)
                         if substitute_block is not None:
                             # The substitute the guard would lean on is absent or
                             # not ready (#1164 change 2, A2-3): fail closed rather
                             # than admit a cycle whose forcing packages nobody
-                            # proved present.
+                            # proved present.  The marker stays `eligible` here —
+                            # nothing was admitted.
                             blocked.append(
                                 _blocked_candidate(
                                     candidate,
@@ -887,8 +1069,30 @@ def build_candidates(
                                 )
                             )
                             continue
+                        if replay_manual_retry_covered:
+                            # The admission actually fired: promote the marker and
+                            # register the invariant expectation for this family
+                            # (#1164 execution-phase defect P1-2).  Without a
+                            # registered expectation `_clamp_replay_invariants` is
+                            # a no-op here and the post-Slurm-sync rebuild can
+                            # launder the admitted decision into `retry_downstream`
+                            # while the marker still says admitted.
+                            state_decision = _replay_manual_retry_admitted_decision(state_decision)
+                            state_evidence[_REPLAY_MANUAL_RETRY_ADMISSION_KEY] = dict(
+                                state_decision.evidence[_REPLAY_MANUAL_RETRY_ADMISSION_KEY]
+                            )
+                            manual_retry_invariant = _replay_manual_retry_invariant(state_decision)
+                            if manual_retry_invariant is not None:
+                                replay_invariants[candidate.candidate_id] = manual_retry_invariant
                     else:
                         state_evidence.update(_production_raw_manifest_missing_evidence(raw_candidate_state))
+                        if manual_retry_restart_unsupported is not None:
+                            # Eligible-but-unsupported-restart: the operator sees
+                            # WHY the in-window candidate was still blocked
+                            # instead of reading the marker as a contradiction.
+                            state_evidence[_REPLAY_MANUAL_RETRY_ADMISSION_KEY] = (
+                                manual_retry_restart_unsupported
+                            )
                         blocked.append(
                             _blocked_candidate(
                                 candidate,
@@ -1024,6 +1228,24 @@ def build_candidates(
                             if warm_admission_blocker is not None:
                                 blocked.append(warm_admission_blocker)
                                 continue
+                            # F2, second site.  This block runs DOWNSTREAM of the
+                            # canonical gate, so it can no longer open an admission —
+                            # what it must not do is let the rebuilt decision merge
+                            # a marker-less (or demoted) shape over an admission
+                            # this pass already granted.  The helper is first-wins
+                            # on `admitted` for exactly that reason.  STAMP ONLY:
+                            # re-running the strict-warm upgrade here would write a
+                            # `forecast` restart over the `convert` one the raw-ready
+                            # leg deliberately set, and the merge below has no
+                            # `raw_manifest_restart_applied` guard to stop it
+                            # (round-4 delta P1).
+                            manual_retry_resync_rebuild_leg = _replay_manual_retry_restamped_decision(
+                                context.config,
+                                candidate,
+                                state_decision,
+                            )
+                            if manual_retry_resync_rebuild_leg is not None:
+                                state_decision = manual_retry_resync_rebuild_leg
                         if state_decision is not None:
                             state_decision = CandidateStateDecision(
                                 action=state_decision.action,
@@ -1913,6 +2135,336 @@ def _decision_is_replay_resubmit(state_decision: CandidateStateDecision | None) 
     return str(evidence.get("decision") or "") == REPLAY_RESUBMIT_DECISION
 
 
+def _decision_is_manual_retry(state_decision: CandidateStateDecision | None) -> bool:
+    """True only for the operator manual-retry decision as its producer writes it.
+
+    Both halves are required.  ``manual_retry`` also appears as a plain evidence
+    block on EVERY decision (``_state_evidence`` copies the journal marker), so a
+    marker alone proves nothing about what this pass decided; the reason plus the
+    decision token are written together by ``_manual_retry_state_evidence`` and
+    by nothing else.
+    """
+
+    if state_decision is None or state_decision.action != "retry":
+        return False
+    if str(state_decision.reason or "") != _MANUAL_RETRY_REASON:
+        return False
+    evidence = state_decision.evidence
+    if not isinstance(evidence, Mapping):
+        return False
+    return str(evidence.get("decision") or "") == _MANUAL_RETRY_DECISION
+
+
+def _replay_manual_retry_admission_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    state_decision: CandidateStateDecision | None,
+) -> CandidateStateDecision | None:
+    """Scope a replay-window manual retry in for the raw-less leg.
+
+    Same admission predicate as every other replay leg — ``ReplayAdmission``
+    covering this ``model_id`` and cycle — and the same closed set that admitted
+    the ``replay_resubmit`` siblings of the same cycle.  Returns ``None``
+    (pre-change behaviour, byte-identical) for every other decision family, for
+    a candidate outside the window or model set, and whenever the replay triple
+    is absent.
+
+    The marker is written ``eligible``, not ``admitted``: at this point all that
+    is known is that the candidate is IN SCOPE.  Whether the raw-less admission
+    actually fires depends on the canonical/raw shape found further down, and a
+    receipt that claimed "admitted" for a candidate which then took the raw-ready
+    leg (or was blocked) would misreport what happened.
+
+    The decision itself is returned UNCHANGED apart from the added marker: the
+    action and reason are preserved and the ``decision`` token is never rewritten
+    to ``replay_resubmit``, so the manual retry keeps its own submission path
+    (retry-suffixed idempotency key from ``manual_retry``).
+    """
+
+    if state_decision is None or not _decision_is_manual_retry(state_decision):
+        return None
+    admission = getattr(config, "replay_admission", None)
+    if not isinstance(admission, ReplayAdmission):
+        return None
+    if not admission.covers(model_id=candidate.model_id, cycle_time=candidate.cycle_time_utc):
+        return None
+    evidence = dict(state_decision.evidence)
+    evidence[_REPLAY_MANUAL_RETRY_ADMISSION_KEY] = {
+        "status": _REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS,
+        "reason": _REPLAY_MANUAL_RETRY_ADMISSION_REASON,
+        "decision": _MANUAL_RETRY_DECISION,
+        "origin_reason": _MANUAL_RETRY_REASON,
+        "replay_admission": admission.to_evidence(),
+    }
+    return CandidateStateDecision("retry", state_decision.reason, _evidence_safe(evidence))
+
+
+def _replay_manual_retry_admitted_decision(
+    state_decision: CandidateStateDecision,
+) -> CandidateStateDecision:
+    """Flip the in-scope marker to ``admitted`` where the raw-less leg grants it.
+
+    Applied to the DECISION, not only to the assembled evidence: the same
+    decision evidence is merged onto the candidate again further down
+    (``:958-964``) and by the post-Slurm-sync legs, so a flip written on one copy
+    only would be quietly reverted to ``eligible``.
+    """
+
+    evidence = dict(state_decision.evidence)
+    marker = evidence.get(_REPLAY_MANUAL_RETRY_ADMISSION_KEY)
+    evidence[_REPLAY_MANUAL_RETRY_ADMISSION_KEY] = {
+        **(dict(marker) if isinstance(marker, Mapping) else {}),
+        "status": _REPLAY_MANUAL_RETRY_ADMITTED_STATUS,
+    }
+    return CandidateStateDecision("retry", state_decision.reason, _evidence_safe(evidence))
+
+
+def _replay_manual_retry_admission_status(evidence: Mapping[str, Any] | None) -> str:
+    """The admission marker status already recorded on an evidence mapping."""
+
+    if not isinstance(evidence, Mapping):
+        return ""
+    marker = evidence.get(_REPLAY_MANUAL_RETRY_ADMISSION_KEY)
+    if not isinstance(marker, Mapping):
+        return ""
+    return str(marker.get("status") or "")
+
+
+def _replay_manual_retry_restamped_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    state_decision: CandidateStateDecision | None,
+) -> CandidateStateDecision | None:
+    """Re-stamp a manual retry a post-Slurm-sync journal re-read produced.
+
+    The eligibility stamp runs ONCE, on the main path, BEFORE either
+    Slurm-status-sync block.  Both blocks then REPLACE ``state_decision`` wholesale
+    from a fresh journal read, so a manual retry that only materializes after a
+    sync — active job on the first probe, terminal on the re-probe,
+    ``manual_retry`` on the re-decide, which ``scheduler_state_manual_retry`` grants
+    off a blocker-bound marker regardless of timestamps — used to reach the raw-less
+    canonical leg with NO marker at all: a bare ``nfs_raw_manifest_required`` block,
+    an operator state no runbook row describes, zero submissions, and a
+    convergence-timeout halt from the single-pass driver (execution-phase repair-2,
+    F2).
+
+    This is the STAMP HALF ONLY — the marker and nothing else.  It is what the
+    SECOND sync block (post-canonical-gate rebuild) needs and all it may do; the
+    first block wraps it in :func:`_replay_manual_retry_resynced_decision` to add
+    the strict-warm upgrade as well.
+
+    SCOPE: returns ``None``, leaving the rebuilt decision byte-identical, for every
+    non-manual-retry family, for a candidate outside the window or model set, and
+    whenever the replay triple is absent (must-preserve: replay-off / out-of-window
+    invariance).
+
+    An admission this pass already GRANTED is not revoked by a journal re-read
+    (FIRST-WINS on the ``admitted`` status, read off the candidate — the object
+    that ships).  The second sync block runs DOWNSTREAM of the raw-less leg, so a
+    fresh ``eligible`` stamp there would demote the marker the chain-side gate keys
+    on while the clamp still pins the admitted restart shape — a self-contradictory
+    receipt.  The stamp itself is LAST-WINS: the rebuilt decision always gets a
+    marker.  Nothing here registers a clamp expectation, so a candidate that
+    already has one keeps it unchanged.
+    """
+
+    stamped = _replay_manual_retry_admission_decision(config, candidate, state_decision)
+    if stamped is None:
+        return None
+    if (
+        _replay_manual_retry_admission_status(candidate.state_evidence)
+        == _REPLAY_MANUAL_RETRY_ADMITTED_STATUS
+    ):
+        return _replay_manual_retry_admitted_decision(stamped)
+    return stamped
+
+
+def _replay_manual_retry_resynced_decision(
+    config: SchedulerConfigLike,
+    candidate: SchedulerCandidateLike,
+    state_decision: CandidateStateDecision | None,
+    *,
+    strict_warm_start: Mapping[str, Any] | None,
+) -> CandidateStateDecision | None:
+    """Re-stamp AND re-upgrade — the FIRST sync block's rebuild only.
+
+    That block sits UPSTREAM of the fresh-zero-row canonical gate, so the decision
+    it produces is the one the raw-less admission judges.  Both halves are required
+    there.  The stamp alone yields the bare producer shape, which round-2 C1's
+    restart precondition then declines: that makes the block self-describing but
+    still submits nothing.  The upgrade is what writes the ``forecast`` restart on
+    the campaign shape.  Order mirrors the main path exactly — stamp, then upgrade —
+    so the marker rides through the token relabel.
+
+    The SECOND sync block must NOT call this (round-4 delta P1).  It runs DOWNSTREAM
+    of the canonical gate, where a raw-READY manual retry has already had its
+    restart lowered to ``convert`` by design (:func:`_source_raw_manifest_restart_evidence`
+    merged at the gate) and NOTHING restores it afterwards — that leg registers no
+    clamp expectation.  Re-running the upgrade there re-wrote ``forecast`` onto the
+    rebuilt decision and the post-sync merge last-wrote it over the ``convert``
+    restart, shipping a receipt that claims a forecast restart next to
+    ``restart_reason="raw_manifest_ready_without_canonical"`` and
+    ``fresh_ingestion.mode="reuse_raw_then_convert"``: pre-orchestration forcing
+    skipped AND the chain started at forecast on a zero-row canonical.  That block
+    calls :func:`_replay_manual_retry_restamped_decision` instead.
+
+    The upgrade is never run on a decision the main path would not have stamped
+    either: the stamp's ``None`` scope short-circuits it.
+    """
+
+    stamped = _replay_manual_retry_restamped_decision(config, candidate, state_decision)
+    if stamped is None:
+        return None
+    return _upgrade_retry_for_strict_warm_start_manifest(stamped, strict_warm_start)
+
+
+def _decision_is_replay_manual_retry_scoped(
+    state_decision: CandidateStateDecision | None,
+) -> bool:
+    """True for a manual retry the replay window already scoped in above.
+
+    Read as the raw-less leg's second admission key.  It is deliberately an
+    EVIDENCE read rather than a second copy of the window/model predicate: the
+    scope decision is taken once, at the completion site, and the strict-warm
+    upgrade carries the answer forward through the token relabel that would
+    otherwise make the origin unrecoverable here.
+
+    DELIBERATE ASYMMETRY (round-2 C2): this SCHEDULER-side scope predicate accepts
+    BOTH marker statuses — it is what opens the raw-less leg in the first place,
+    and at that point the status is still ``eligible`` by construction.  Its
+    chain-side counterpart
+    (``chain_forecast_orchestrator_cycle._basin_carries_replay_manual_retry_admission``)
+    accepts ``admitted`` ONLY: an eligible-only candidate took the raw-ready
+    ``convert`` leg and must not be exempted from the decision whitelist.
+    """
+
+    if state_decision is None or state_decision.action != "retry":
+        return False
+    evidence = state_decision.evidence
+    if not isinstance(evidence, Mapping):
+        return False
+    marker = evidence.get(_REPLAY_MANUAL_RETRY_ADMISSION_KEY)
+    if not isinstance(marker, Mapping):
+        return False
+    return str(marker.get("status") or "") in {
+        _REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS,
+        _REPLAY_MANUAL_RETRY_ADMITTED_STATUS,
+    }
+
+
+def _replay_manual_retry_restart_stage(state_decision: CandidateStateDecision | None) -> str | None:
+    """Canonical restart stage of a decision, read the way the EXECUTOR reads it.
+
+    Derivation: the top-level ``restart_stage``/``restart_from_stage`` pair,
+    native-SHUD aliases folded onto ``forecast``, everything unrecognised ->
+    ``None`` (= full chain).  Anything looser would let the admission believe in a
+    restart stage the cohort keying does not.
+
+    NOT verbatim identical to ``scheduler_execution.candidate_restart_stage``, and
+    the earlier docstring claiming it was is corrected here (repair-2 round 3): the
+    executor's FIRST line short-circuits to ``None`` when the candidate carries
+    ``fresh_ingestion={"required": True, "mode": "full_chain"}``, which OUTRANKS
+    the restart pair this helper reads.
+
+    Why the omission is safe (round-4 delta, correcting the previous overclaim that
+    "the clamp pins ``fresh_ingestion`` ABSENT for every admitted replay candidate"
+    — it does not; the raw-READY manual-retry leg registers no expectation at all
+    and legitimately ships ``fresh_ingestion={"required": False, "mode":
+    "reuse_raw_then_convert"}``):
+
+    * this helper judges a DECISION at the raw-less leg's C1 precondition, and the
+      DECISION-level ``fresh_ingestion`` writers all belong to the ``retry_failed``
+      family (``scheduler_state_failure.py:692`` ``full_chain``, ``:755``
+      ``reuse_repaired_raw_then_full_chain``), whose ``restart_stage=None`` /
+      ``restart_from_stage="download"`` shape is neither stamped as a manual retry
+      nor accepted by C1 — this helper returns ``None`` for it, so it is declined;
+    * the two legs that DO register an expectation
+      (:data:`_REPLAY_MANUAL_RETRY_CLAMPED_KEYS`,
+      :data:`_REPLAY_RESUBMIT_CLAMPED_KEYS`) pin the key absent, so no candidate
+      admitted through the raw-less leg can acquire the short-circuiting shape
+      later;
+    * the raw-ready leg's own ``fresh_ingestion`` is ``required=False`` +
+      ``reuse_raw_then_convert``, which is NOT the short-circuiting shape
+      (:func:`_candidate_is_fresh_full_chain` requires both ``required`` and
+      ``mode == "full_chain"``), and that leg is never judged here — the C1
+      precondition guards the raw-LESS admission only.
+
+    If either clamp pin is relaxed, this helper must grow the short-circuit too.
+    """
+
+    evidence = state_decision.evidence if state_decision is not None else None
+    if not isinstance(evidence, Mapping):
+        return None
+    stage = str(evidence.get("restart_stage") or evidence.get("restart_from_stage") or "")
+    if stage in NATIVE_SHUD_STAGE_ALIASES:
+        return _REPLAY_MANUAL_RETRY_MIN_RESTART_STAGE
+    return _canonical_downstream_stage(stage)
+
+
+def _replay_manual_retry_restart_is_supported(state_decision: CandidateStateDecision | None) -> bool:
+    """True when the decision resumes at or after ``forecast`` (round-2 C1).
+
+    ``None`` (no restart stage at all) is the dangerous case, not a neutral one:
+    it is exactly what keys the chain cohort ``(0, "full")``.
+    """
+
+    stage = _replay_manual_retry_restart_stage(state_decision)
+    if stage is None:
+        return False
+    order = DOWNSTREAM_RESTART_STAGES
+    return order.index(stage) >= order.index(_REPLAY_MANUAL_RETRY_MIN_RESTART_STAGE)
+
+
+def _replay_manual_retry_restart_declined_marker(
+    state_decision: CandidateStateDecision,
+) -> dict[str, Any]:
+    """The eligible marker, enriched with why the raw-less leg declined it.
+
+    The status deliberately stays ``eligible``: the window really did scope this
+    candidate in, and no restart stage was fabricated onto the decision to make
+    it admissible (the producer withholds ``native_shud_resubmitted`` for
+    non-cold-start retries on purpose, and the decision family is never
+    rewritten).  What changed is only what an operator can see.
+    """
+
+    evidence = state_decision.evidence if isinstance(state_decision.evidence, Mapping) else {}
+    marker = evidence.get(_REPLAY_MANUAL_RETRY_ADMISSION_KEY)
+    return _evidence_safe(
+        {
+            **(dict(marker) if isinstance(marker, Mapping) else {}),
+            "status": _REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS,
+            "raw_less_admission": "declined",
+            "declined_reason": _REPLAY_MANUAL_RETRY_RESTART_UNSUPPORTED_REASON,
+            "restart_stage": _replay_manual_retry_restart_stage(state_decision),
+            "required_restart_stage": _REPLAY_MANUAL_RETRY_MIN_RESTART_STAGE,
+        }
+    )
+
+
+def _replay_manual_retry_invariant(
+    state_decision: CandidateStateDecision,
+) -> _ReplayInvariantExpectation | None:
+    """Record the admitted manual retry's restart + SHUD-reuse shape (leg c).
+
+    Unlike the other two modes the required set is EXPLICIT and complete: every
+    owned key is pinned, and a key the admission-time evidence did not carry is
+    pinned ABSENT (:class:`_AbsentAtAdmission`).  The bare producer shape carries
+    only ``decision``, so a present-keys-only expectation would let the post-sync
+    rebuild's ``restart_stage="parse"`` / ``durable_shud_output_reused=True``
+    survive under an admission marker still claiming a forecast restart —
+    parse/publish rerunning over the OLD outputs of a purged cycle (P1-2).
+    """
+
+    evidence = state_decision.evidence
+    if not isinstance(evidence, Mapping):
+        return None
+    required = {
+        key: evidence[key] if key in evidence else _REPLAY_CLAMP_ABSENT
+        for key in _REPLAY_MANUAL_RETRY_CLAMPED_KEYS
+    }
+    return _ReplayInvariantExpectation(mode=_REPLAY_CLAMP_MODE_MANUAL_RETRY, required=required)
+
+
 def _replay_raw_manifest_restart_suppressed_evidence(
     raw_manifest_restart: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1948,6 +2500,9 @@ def _replay_raw_manifest_restart_suppressed_evidence(
 def _replay_raw_manifest_substitute_evidence(
     discovery: CycleDiscovery,
     raw_state: Mapping[str, Any] | None,
+    *,
+    decision: str,
+    restart_stage: str,
 ) -> tuple[dict[str, Any], str | None]:
     """Raw-less leg of the replay guard: forcing evidence stands in for raw.
 
@@ -1965,6 +2520,12 @@ def _replay_raw_manifest_substitute_evidence(
     at all and is blocked.  Returns ``(evidence, block_reason)`` where a non-None
     block reason means the caller must block instead of admitting; the evidence
     never claims a substitute that is absent.
+
+    ``decision``/``restart_stage`` are the ones this pass actually decided, not
+    literals: the leg now serves the replay-window manual retry as well, whose
+    honest token is ``manual_retry`` (or the strict-warm relabel of it) and whose
+    restart stage is its own.  A receipt that hardcoded ``replay_resubmit`` would
+    misreport what was submitted.
     """
 
     classifier = str(getattr(discovery, "classifier", "") or "")
@@ -1976,7 +2537,7 @@ def _replay_raw_manifest_substitute_evidence(
     )
     guard: dict[str, Any] = {
         "leg": "raw_manifest_absent",
-        "decision": REPLAY_RESUBMIT_DECISION,
+        "decision": decision,
         "discovery_classifier": classifier,
         **_production_raw_manifest_missing_evidence(raw_state),
     }
@@ -1995,7 +2556,11 @@ def _replay_raw_manifest_substitute_evidence(
         guard["status"] = "admitted"
         guard["reason"] = _REPLAY_RAW_MANIFEST_SUBSTITUTE_REASON
         guard["substitute_present"] = True
-        guard["restart_stage"] = _STRICT_WARM_START_TERMINAL_RESTART_STAGE
+        # Always present, explicitly null when the admitted decision declares no
+        # restart stage of its own (the bare manual-retry shape): an operator
+        # reading the receipt must be able to see what the candidate resumes
+        # from, and a missing key reads as "not recorded" rather than "none".
+        guard["restart_stage"] = restart_stage or None
     return {_REPLAY_READINESS_GUARD_KEY: guard}, block_reason
 
 
@@ -2134,6 +2699,9 @@ class _ReplayInvariantExpectation:
     ``required`` maps a top-level ``state_evidence`` key to the value the
     admission decision fixed for it.  A ``Mapping`` value is compared (and
     repaired) sub-key by sub-key so an unrelated sibling key inside it survives.
+    The :data:`_REPLAY_CLAMP_ABSENT` sentinel means the admission decision did
+    NOT carry the key, and the clamp must delete it if a later merge introduced
+    one.
     """
 
     mode: str
@@ -2141,14 +2709,25 @@ class _ReplayInvariantExpectation:
 
 
 def _replay_resubmit_invariant(decision: CandidateStateDecision) -> _ReplayInvariantExpectation | None:
-    """Record the override's forecast restart + native/durable keys (leg a)."""
+    """Record the override's forecast restart + native/durable keys (leg a).
+
+    WHOLE-SET and absence-pinned, exactly like the manual-retry mode (repair-2
+    round 3).  The former present-keys-only form could only ever re-impose keys
+    the override itself wrote, so adding ``fresh_ingestion`` to
+    :data:`_REPLAY_RESUBMIT_CLAMPED_KEYS` alone would have been a NO-OP: neither
+    ``_replay_terminal_override_evidence`` nor the terminal skip evidence it
+    extends ever writes that key, and a key the expectation never carries is a key
+    the clamp never looks at.  Every key the override DOES write is still pinned by
+    value; only the genuinely-absent ones get the sentinel.
+    """
 
     evidence = decision.evidence
     if not isinstance(evidence, Mapping):
         return None
-    required = {key: evidence[key] for key in _REPLAY_RESUBMIT_CLAMPED_KEYS if key in evidence}
-    if not required:
-        return None
+    required = {
+        key: evidence[key] if key in evidence else _REPLAY_CLAMP_ABSENT
+        for key in _REPLAY_RESUBMIT_CLAMPED_KEYS
+    }
     return _ReplayInvariantExpectation(mode=_REPLAY_CLAMP_MODE_RESUBMIT, required=required)
 
 
@@ -2200,9 +2779,14 @@ def _clamped_replay_candidate(
     evidence = candidate.state_evidence if isinstance(candidate.state_evidence, Mapping) else {}
     pre_clamp: dict[str, Any] = {}
     restored: dict[str, Any] = {}
+    removed: list[str] = []
     for key, required in expectation.required.items():
         observed = evidence.get(key)
-        if isinstance(required, Mapping):
+        if required is _REPLAY_CLAMP_ABSENT:
+            if key not in evidence:
+                continue
+            removed.append(key)
+        elif isinstance(required, Mapping):
             if isinstance(observed, Mapping) and all(observed.get(name) == value for name, value in required.items()):
                 continue
             restored[key] = {
@@ -2214,18 +2798,29 @@ def _clamped_replay_candidate(
                 continue
             restored[key] = required
         pre_clamp[key] = observed
-    if not restored:
+    if not restored and not removed:
         return None
+    clamped = candidate
+    if removed:
+        # A merge INTRODUCED a key the admission decision never carried; merging
+        # cannot undo that, so rebuild the evidence without it first.
+        clamped = replace(
+            candidate,
+            state_evidence={key: value for key, value in evidence.items() if key not in set(removed)},
+        )
     return _candidate_with_state_evidence(
-        candidate,
+        clamped,
         {
             **restored,
             _REPLAY_INVARIANT_CLAMP_KEY: {
                 "mode": expectation.mode,
                 "candidate_id": candidate.candidate_id,
-                "clobbered_keys": sorted(restored),
+                "clobbered_keys": sorted([*restored, *removed]),
+                "removed_keys": sorted(removed),
                 "pre_clamp": _evidence_safe(pre_clamp),
-                "restored": _evidence_safe(restored),
+                "restored": _evidence_safe(
+                    {**restored, **{key: _REPLAY_CLAMP_ABSENT_RECEIPT for key in removed}}
+                ),
             },
         },
     )

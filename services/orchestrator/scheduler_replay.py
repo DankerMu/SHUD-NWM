@@ -54,6 +54,21 @@ REPLAY_WINDOW_ENV = "NHMS_SCHEDULER_REPLAY_WINDOW"
 REPLAY_RESUBMIT_DECISION = "replay_resubmit"
 #: Typed ``CandidateStateDecision.reason`` of an overridden replay candidate.
 REPLAY_TERMINAL_OVERRIDE_REASON = "replay_terminal_override"
+#: State-evidence key marking a manual retry the replay window admitted
+#: (#1164 execution-phase defect 2).  Written only by ``scheduler_candidates``
+#: and read by ``chain_forecast_orchestrator_cycle``'s force-terminal-resubmit
+#: gate, so it lives here rather than in either consumer: the gate exempts a
+#: basin carrying this key from the decision whitelist, and a literal drifting
+#: between the two modules would silently re-arm the cohort collapse.
+REPLAY_MANUAL_RETRY_ADMISSION_KEY = "replay_manual_retry_admission"
+#: Marker statuses.  ``eligible`` is stamped for EVERY in-window manual retry —
+#: it says "in scope", nothing more; ``admitted`` is written only where the
+#: raw-less canonical leg actually granted the substitute admission.  Both live
+#: here because the chain-side gate keys on the ``admitted`` value specifically
+#: (round-2 C2): an eligible-only candidate takes the raw-ready `convert` leg and
+#: must NOT be exempted from the decision whitelist.
+REPLAY_MANUAL_RETRY_ELIGIBLE_STATUS = "eligible"
+REPLAY_MANUAL_RETRY_ADMITTED_STATUS = "admitted"
 #: Typed discovery rejection reasons for the raw-manifest-less replay branch.
 REPLAY_FORCING_EVIDENCE_MISSING_REASON = "replay_forcing_evidence_missing"
 REPLAY_FORCING_EVIDENCE_UNDETERMINABLE_REASON = "replay_forcing_evidence_undeterminable"

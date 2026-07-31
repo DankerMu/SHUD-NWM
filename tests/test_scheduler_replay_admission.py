@@ -28,10 +28,11 @@ active AND ``model_id`` in the closed set AND cycle inside the replay window.
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,9 +42,11 @@ import pytest
 
 from services.orchestrator import chain as _chain  # noqa: F401  (import order: chain owns the cycle mixin)
 from services.orchestrator import chain_forecast_orchestrator_cycle as chain_cycle_module
+from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidate_manifest as scheduler_candidate_manifest_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_replay as scheduler_replay_module
+from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator.scheduler import ProductionSchedulerConfig
 from services.orchestrator.scheduler_generation import PACKAGED_IC_BOOTSTRAP_MODE
 from services.orchestrator.scheduler_replay import (
@@ -55,7 +58,7 @@ from services.orchestrator.scheduler_replay import (
     parse_replay_admission,
     replay_forcing_readiness,
 )
-from services.orchestrator.scheduler_state import CandidateStateDecision
+from services.orchestrator.scheduler_state import CandidateStateDecision, _candidate_state_decision
 from services.orchestrator.scheduler_types import SchedulerCandidate
 from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
@@ -1338,6 +1341,474 @@ def test_raw_less_leg_blocks_a_replay_candidate_from_another_discovery_provenanc
 
 
 # --------------------------------------------------------------------------
+# 1.2c-2 replay-window manual-retry admission over the raw-less canonical leg
+# (#1164 execution-phase defect 2)
+#
+# Production shape (node-22 `scheduler_2026073105_62f33b0c34d0.json`): an
+# operator manual-retry journal event flipped one candidate of an already
+# replayed cycle to `manual_retry`; the strict-warm upgrade relabelled it
+# `retry_strict_warm_start_retry_run_manifest_mismatch`, and the fresh-zero-row
+# merge then blocked it `nfs_raw_manifest_required` because the raw-less leg
+# only ever recognised the `replay_resubmit` token.  The raw objects for
+# 070500..070700 do not exist, so no operator action could clear that block
+# while the SAME cycle's replay candidates had already submitted 6/6.
+# --------------------------------------------------------------------------
+
+#: `scheduler_state_failure._manual_retry_state_evidence` shape for an operator
+#: retry bound to a previous job id.
+def _manual_retry_decision() -> CandidateStateDecision:
+    return CandidateStateDecision(
+        "retry",
+        "manual_retry_requested",
+        {
+            "decision": "manual_retry",
+            "reason": "manual_retry_requested",
+            "manual_retry": {
+                "marker": True,
+                "allowed": True,
+                "requested": True,
+                "previous_attempt": 1,
+                "new_attempt": 2,
+                "previous_job_id": "4412207",
+            },
+            "failure": {
+                "reason_code": "SHUD_RUNTIME_FAILURE",
+                "prior_failure_reason": "SHUD_RUNTIME_FAILURE",
+                "previous_attempt": 1,
+                "new_attempt": 2,
+            },
+            "retry_policy": {
+                "automatic_retry_allowed": False,
+                "manual_retry_required": False,
+                "manual_retry_marker": True,
+                "attempt": 2,
+            },
+        },
+    )
+
+
+def _downstream_retry_decision() -> CandidateStateDecision:
+    """A plain, non-manual retry: the family the completion must NOT touch."""
+
+    return CandidateStateDecision(
+        "retry",
+        "resume_downstream_after_durable_shud",
+        {
+            "decision": "retry_downstream",
+            "reason": "resume_downstream_after_durable_shud",
+            "restart_stage": "state_save_qc",
+            "restart_from_stage": "state_save_qc",
+            "durable_shud_output_reused": True,
+        },
+    )
+
+
+READY_FORCING_EVIDENCE: dict[str, Any] = {
+    "source": "replay_forcing_evidence",
+    "status": "ready",
+    "model_ids": [REPLAY_MODEL_ID, OUT_OF_SET_MODEL_ID],
+}
+
+
+def _raw_less_manual_retry_pass(
+    *,
+    admission: ReplayAdmission | None,
+    decision: CandidateStateDecision,
+    cycle_time: datetime = IN_WINDOW_CYCLE,
+    model_ids: Sequence[str] = (REPLAY_MODEL_ID,),
+    strict_warm_start: Mapping[str, Any] | None = None,
+    discovery_classifier: str | None = "replay_forcing_evidence",
+    raw_state: Mapping[str, Any] | None = None,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """The blocked production pass: zero canonical rows and no raw manifest."""
+
+    return _build(
+        admission=admission,
+        decision=decision,
+        strict_warm_start=strict_warm_start,
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        raw_state={} if raw_state is None else raw_state,
+        cycle_time=cycle_time,
+        model_ids=model_ids,
+        discovery_classifier=discovery_classifier,
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+    )
+
+
+def test_replay_window_manual_retry_is_admitted_over_the_raw_less_leg() -> None:
+    """T1 consumer oracle: admitted, and the manual-retry token survives intact.
+
+    Round-2 C1 re-pin: the shape under test is the ``COLD_START_QUARANTINED``
+    manual retry, which declares ``restart_stage="forecast"`` at stamp time.  A
+    BARE manual retry (no restart stage at all) is no longer admitted here — see
+    ``test_a_bare_manual_retry_without_a_forecast_restart_stays_blocked``.
+    """
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+    )
+    assert blocked == []
+    assert skipped == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    # Honest token: NEVER relabelled to `replay_resubmit`, so the retry keeps its
+    # own retry-suffixed submission path.  The token stays OUT of the global
+    # `_FORCE_TERMINAL_RESUBMIT_DECISIONS` whitelist — what makes this candidate
+    # resubmittable is the windowed admission marker the chain gate reads, which
+    # the cohort oracle in section 1.2e drives end to end.
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["reason"] == "manual_retry_requested"
+    assert (
+        evidence["decision"]
+        == _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE").evidence["decision"]
+    )
+    assert scheduler_candidate_manifest_module._candidate_manual_retry_attempt(candidates[0]) == 2
+
+    admitted = evidence["replay_manual_retry_admission"]
+    assert admitted["status"] == "admitted"
+    assert admitted["reason"] == "replay_window_manual_retry_admitted"
+    assert admitted["decision"] == "manual_retry"
+    assert admitted["origin_reason"] == "manual_retry_requested"
+    assert admitted["replay_admission"]["model_ids"] == [REPLAY_MODEL_ID]
+
+    guard = evidence["replay_canonical_readiness_guard"]
+    assert guard["leg"] == "raw_manifest_absent"
+    assert guard["status"] == "admitted"
+    assert guard["reason"] == "replay_forcing_evidence_substitutes_raw_manifest"
+    assert guard["decision"] == "manual_retry"
+    # Fold-in B: the receipt always names what the admitted candidate resumes
+    # from.  Round-2 C1: for an ADMITTED candidate that is now always a real
+    # stage at or after `forecast`, never null.
+    assert "restart_stage" in guard
+    assert guard["restart_stage"] == "forecast"
+    assert evidence["restart_stage"] == "forecast"
+    assert guard["substitute_present"] is True
+    assert guard["replay_forcing_evidence"]["status"] == "ready"
+    # The absent manifest is recorded, not silently dropped.
+    assert guard["nfs_raw_manifest"]["status"] == "missing"
+    assert evidence["canonical_readiness"]["candidate_row_count"] == 0
+
+
+def test_a_bare_manual_retry_without_a_forecast_restart_stays_blocked() -> None:
+    """C1: an eligible marker is not a restart precondition.
+
+    The bare producer shape (``_manual_retry_state_evidence`` writes restart keys
+    ONLY in its ``COLD_START_QUARANTINED`` branch) declares no restart stage, so
+    ``_candidate_restart_stage`` returns None and the chain cohort key is
+    ``(0, "full")`` — the pipeline would start at ``convert_canonical``, against
+    the very raw manifest this leg has just recorded as ABSENT.  Fail-closed must
+    stay fail-closed: the pre-change typed block is kept and the marker says why.
+    """
+
+    for label, decision in (
+        ("hand_written", _manual_retry_decision()),
+        ("producer", _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE")),
+    ):
+        candidates, blocked, skipped = _raw_less_manual_retry_pass(
+            admission=_admission(),
+            decision=decision,
+        )
+        assert candidates == [], label
+        assert skipped == [], label
+        assert len(blocked) == 1, label
+        # The reason TOKEN is unchanged — operators keep the one runbook row.
+        assert blocked[0].reason == "nfs_raw_manifest_required", label
+        blocked_evidence = blocked[0].state_evidence
+        assert blocked_evidence["nfs_raw_manifest"]["status"] == "missing", label
+        # Nothing was admitted, so no substitute receipt is written.
+        assert "replay_canonical_readiness_guard" not in blocked_evidence, label
+        # The marker stays honest AND explains the declined admission.
+        marker = blocked_evidence["replay_manual_retry_admission"]
+        assert marker["status"] == "eligible", label
+        assert marker["raw_less_admission"] == "declined", label
+        assert marker["declined_reason"] == "replay_manual_retry_restart_stage_unsupported", label
+        assert marker["restart_stage"] is None, label
+        assert marker["required_restart_stage"] == "forecast", label
+
+
+def test_a_bare_manual_retry_surviving_the_strict_warm_upgrade_stays_blocked() -> None:
+    """C1, second bare-shaped survival path: the upgrade early-returns.
+
+    ``_upgrade_retry_for_strict_warm_start_manifest`` leaves the decision alone
+    when the retry evidence's ``run_manifest_initial_state`` already matches the
+    strict warm start, so the bare shape reaches the raw-less leg with no restart
+    stage even under a strict warm start.  The precondition is therefore
+    evaluated at the FIRING POINT on the CURRENT decision, not at the eligibility
+    stamp.
+    """
+
+    decision = _produced_manual_retry_decision(
+        prior_failure_reason="SHUD_RUNTIME_FAILURE",
+        extra_state={"run_manifest_initial_state": dict(SELECTED_STATE)},
+    )
+    strict = {"ready": True, "candidate_state": dict(SELECTED_STATE)}
+    # Precondition of this test: the upgrade really is a no-op for this shape.
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(decision, strict)
+    assert upgraded.evidence["decision"] == "manual_retry"
+    assert "restart_stage" not in upgraded.evidence
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=decision,
+        strict_warm_start=strict,
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "nfs_raw_manifest_required"
+    marker = blocked[0].state_evidence["replay_manual_retry_admission"]
+    assert marker["status"] == "eligible"
+    assert marker["declined_reason"] == "replay_manual_retry_restart_stage_unsupported"
+
+
+def test_no_admitted_manual_retry_can_land_in_the_full_chain_cohort() -> None:
+    """C1 consumer oracle: the real cohort keying, over every admitted shape.
+
+    ``(0, "full")`` is the cohort whose chain starts at ``convert_canonical``
+    (``chain_runtime_utils`` stage index 0).  For a replay cycle whose raw
+    objects do not exist that is the one shape the admission must never produce,
+    so the property is asserted against the REAL scheduler helpers rather than
+    against the evidence keys the leg happens to write.
+    """
+
+    strict = {"ready": True, "candidate_state": dict(SELECTED_STATE)}
+    shapes = {
+        "bare": (_produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"), None),
+        "bare_upgraded": (
+            _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"),
+            strict,
+        ),
+        "cold_start": (
+            _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+            None,
+        ),
+        "cold_start_upgraded": (
+            _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+            strict,
+        ),
+    }
+    admitted_labels = []
+    for label, (decision, strict_warm_start) in shapes.items():
+        candidates, blocked, _skipped = _raw_less_manual_retry_pass(
+            admission=_admission(),
+            decision=decision,
+            strict_warm_start=strict_warm_start,
+        )
+        for candidate in candidates:
+            assert candidate.state_evidence["replay_manual_retry_admission"]["status"] == "admitted", label
+            admitted_labels.append(label)
+            restart_stage = scheduler_module._candidate_restart_stage(candidate)
+            cohort_key = scheduler_module._candidate_restart_cohort_key(restart_stage)
+            assert restart_stage == "forecast", (label, restart_stage)
+            assert cohort_key != (0, "full"), (label, cohort_key)
+            assert cohort_key == (3, "forecast"), (label, cohort_key)
+        if not candidates:
+            assert blocked[0].reason == "nfs_raw_manifest_required", label
+    # The campaign shape (bare -> upgraded token, restart forecast) and the
+    # cold-start shape must BOTH still be admitted; only the bare one is blocked.
+    assert sorted(admitted_labels) == ["bare_upgraded", "cold_start", "cold_start_upgraded"]
+
+
+def test_the_manual_retry_clamp_expectation_pins_admission_time_truth() -> None:
+    """C1 item 5: the 6-key expectation, re-derived for each admitted shape.
+
+    Replays the real pipeline order — producer decision, eligibility stamp,
+    strict-warm upgrade, admitted flip — and reads the expectation the raw-less
+    leg would register.  Present keys are pinned BY VALUE; only keys the
+    admission decision genuinely lacks keep the absence sentinel.
+    """
+
+    absent = scheduler_candidates_module._REPLAY_CLAMP_ABSENT
+    config = _FakeConfig(replay_admission=_admission())
+    candidate = _scheduler_candidate_for(REPLAY_MODEL_ID)
+    strict = {"ready": True, "candidate_state": dict(SELECTED_STATE)}
+
+    def _expectation(*, prior_failure_reason: str, strict_warm_start: Mapping[str, Any] | None) -> Any:
+        decision = _produced_manual_retry_decision(prior_failure_reason=prior_failure_reason)
+        stamped = scheduler_candidates_module._replay_manual_retry_admission_decision(
+            config, candidate, decision
+        )
+        assert stamped is not None
+        upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+            stamped,
+            strict_warm_start,
+        )
+        admitted = scheduler_candidates_module._replay_manual_retry_admitted_decision(upgraded)
+        return scheduler_candidates_module._replay_manual_retry_invariant(admitted)
+
+    cold_start = _expectation(prior_failure_reason="COLD_START_QUARANTINED", strict_warm_start=None)
+    assert cold_start.mode == "replay_manual_retry"
+    assert cold_start.required == {
+        "decision": "manual_retry",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "native_shud_resubmitted": True,
+        # never written by the producer's cold-start branch -> pinned ABSENT
+        "durable_output_reused": absent,
+        "durable_shud_output_reused": absent,
+        # repair-2 round 3: no manual-retry shape ever declares a fresh ingestion,
+        # and a merged-in `full_chain` one OUTRANKS the restart keys above
+        "fresh_ingestion": absent,
+    }
+
+    upgraded = _expectation(prior_failure_reason="SHUD_RUNTIME_FAILURE", strict_warm_start=strict)
+    assert upgraded.required == {
+        "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+        "native_shud_resubmitted": True,
+        "durable_output_reused": False,
+        "durable_shud_output_reused": False,
+        "fresh_ingestion": absent,
+    }
+    # Every admitted shape pins a restart stage BY VALUE: the absence sentinel
+    # survives only for genuinely-absent durable keys (C1 item 5).
+    for expectation in (cold_start, upgraded):
+        assert expectation.required["restart_stage"] == "forecast"
+        assert expectation.required["restart_from_stage"] == "forecast"
+
+
+def test_manual_retry_outside_the_replay_scope_stays_blocked() -> None:
+    """T2: out of window, out of model set, and replay off all keep the block."""
+
+    for label, kwargs in (
+        ("out_of_window", {"cycle_time": OUT_OF_WINDOW_CYCLE}),
+        ("out_of_set_model", {"model_ids": (OUT_OF_SET_MODEL_ID,)}),
+    ):
+        candidates, blocked, skipped = _raw_less_manual_retry_pass(
+            admission=_admission(),
+            decision=_manual_retry_decision(),
+            **kwargs,
+        )
+        assert candidates == [], label
+        assert skipped == [], label
+        assert blocked[0].reason == "nfs_raw_manifest_required", label
+        blocked_evidence = blocked[0].state_evidence
+        assert blocked_evidence["nfs_raw_manifest"]["status"] == "missing", label
+        assert "replay_manual_retry_admission" not in blocked_evidence, label
+        assert "replay_canonical_readiness_guard" not in blocked_evidence, label
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=None,
+        decision=_manual_retry_decision(),
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "nfs_raw_manifest_required"
+    assert "replay_manual_retry_admission" not in blocked[0].state_evidence
+
+
+def test_replay_window_non_manual_retry_keeps_the_raw_manifest_block() -> None:
+    """T3: the completion is manual-retry scoped, not a window-wide raw-less lift."""
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_downstream_retry_decision(),
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "nfs_raw_manifest_required"
+    blocked_evidence = blocked[0].state_evidence
+    assert blocked_evidence["decision"] == "retry_downstream"
+    assert "replay_manual_retry_admission" not in blocked_evidence
+    assert "replay_canonical_readiness_guard" not in blocked_evidence
+
+
+def test_strict_warm_upgraded_manual_retry_is_admitted_by_origin_not_by_token() -> None:
+    """T4: the production shape — upgraded FROM a manual retry — is admitted.
+
+    The same upgraded token produced from a NON-manual origin keeps the block, so
+    the admission follows the manual-retry origin rather than the relabelled
+    decision the upgrade writes.
+    """
+
+    strict = {"ready": True, "candidate_state": dict(SELECTED_STATE)}
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_manual_retry_decision(),
+        strict_warm_start=strict,
+    )
+    assert blocked == []
+    assert skipped == []
+    evidence = candidates[0].state_evidence
+    assert evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert evidence["replay_manual_retry_admission"]["status"] == "admitted"
+    # C1: the campaign path — bare at stamp time, `forecast` restart written by
+    # the upgrade BEFORE the firing point — must still be admitted.
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    # The upgrade relabels the token; the recorded origin still names the retry
+    # family the admission was granted to.
+    assert evidence["replay_manual_retry_admission"]["decision"] == "manual_retry"
+    assert evidence["manual_retry"]["marker"] is True
+    guard = evidence["replay_canonical_readiness_guard"]
+    assert guard["status"] == "admitted"
+    assert guard["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+
+    non_manual_candidates, non_manual_blocked, non_manual_skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_downstream_retry_decision(),
+        strict_warm_start=strict,
+    )
+    assert non_manual_candidates == []
+    assert non_manual_skipped == []
+    assert non_manual_blocked[0].reason == "nfs_raw_manifest_required"
+    non_manual_evidence = non_manual_blocked[0].state_evidence
+    assert non_manual_evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert "replay_manual_retry_admission" not in non_manual_evidence
+
+
+def test_manual_retry_admission_still_needs_a_verified_forcing_substitute() -> None:
+    """A2-3 stays armed: no forcing-evidence provenance, no raw-less admission.
+
+    The candidate here clears the C1 restart precondition (cold-start shape,
+    ``forecast`` restart) — the substitute check is the thing that blocks it, so
+    the two preconditions are proven independent.  This is the third observable
+    state the runbook row now names: marker ``eligible`` + guard ``blocked``.
+    """
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+        discovery_classifier="nfs_raw_manifest",
+    )
+    assert candidates == []
+    assert skipped == []
+    assert blocked[0].reason == "replay_raw_manifest_substitute_unavailable"
+    blocked_evidence = blocked[0].state_evidence
+    assert blocked_evidence["replay_manual_retry_admission"]["status"] == "eligible"
+    guard = blocked_evidence["replay_canonical_readiness_guard"]
+    assert guard["status"] == "blocked"
+    assert guard["substitute_present"] is False
+    assert guard["decision"] == "manual_retry"
+
+
+def test_manual_retry_with_a_ready_raw_manifest_keeps_the_convert_restart() -> None:
+    """The raw-ready leg is untouched: a manual retry still rebuilds from raw."""
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_manual_retry_decision(),
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    assert blocked == []
+    assert skipped == []
+    evidence = candidates[0].state_evidence
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+    assert evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+    assert evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+    assert "replay_canonical_readiness_guard" not in evidence
+    # Fold-in A: the marker is honest about what happened.  This candidate was
+    # only ever ELIGIBLE — the raw-less admission never fired for it, so no
+    # invariant expectation is registered and the raw-ready `convert` restart the
+    # manual retry legitimately wants is not clamped back to the admission shape.
+    assert evidence["replay_manual_retry_admission"]["status"] == "eligible"
+    assert "replay_invariant_clamp_applied" not in evidence
+
+
+# --------------------------------------------------------------------------
 # 1.2d post-assembly invariant clamp + merge-site audit
 # (round-3 gate retro, design D3.5 v6: A3-1, A3-2)
 # --------------------------------------------------------------------------
@@ -1482,6 +1953,33 @@ SUCCEEDED_FORECAST_JOB = {
 }
 
 
+def _cohort_basin_row(candidate: Any) -> dict[str, Any]:
+    """The ``context.active_basins`` row the chain builds for one candidate."""
+
+    return {
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "candidate_id": candidate.candidate_id,
+        "orchestration_run_id": candidate.cycle_id,
+        "state_evidence": dict(candidate.state_evidence),
+    }
+
+
+def _chain_gate_forces_resubmit_cohort(candidates: Sequence[Any]) -> bool:
+    """Drive the REAL chain gate with a WHOLE cohort's basins.
+
+    ``_terminal_stage_needs_forced_resubmit`` is a conjunction over
+    ``context.active_basins``: one non-qualifying basin returns False for every
+    basin in the cohort.  The cohort form is therefore the honest consumer shape
+    whenever a replay cycle carries more than one admitted candidate.
+    """
+
+    return chain_cycle_module._terminal_stage_needs_forced_resubmit(
+        SimpleNamespace(active_basins=[_cohort_basin_row(c) for c in candidates], restart_stage=None),
+        dict(SUCCEEDED_FORECAST_JOB),
+    )
+
+
 def _chain_gate_forces_resubmit(candidate: Any) -> bool:
     """Drive the REAL chain gate with an admitted candidate's evidence (A4-1).
 
@@ -1493,17 +1991,7 @@ def _chain_gate_forces_resubmit(candidate: Any) -> bool:
     here, the candidate evidence is the only source.
     """
 
-    basin = {
-        "model_id": candidate.model_id,
-        "basin_id": candidate.basin_id,
-        "candidate_id": candidate.candidate_id,
-        "orchestration_run_id": candidate.cycle_id,
-        "state_evidence": dict(candidate.state_evidence),
-    }
-    return chain_cycle_module._terminal_stage_needs_forced_resubmit(
-        SimpleNamespace(active_basins=[basin], restart_stage=None),
-        dict(SUCCEEDED_FORECAST_JOB),
-    )
+    return _chain_gate_forces_resubmit_cohort([candidate])
 
 
 def _post_sync_downstream_retry_decision() -> CandidateStateDecision:
@@ -1691,6 +2179,10 @@ def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobb
     expectation = scheduler_candidates_module._replay_resubmit_invariant(override)
     assert expectation is not None
 
+    # repair-2 round 3: the expectation is WHOLE-SET, so a key the override never
+    # wrote is pinned ABSENT rather than ignored.
+    assert expectation.required["fresh_ingestion"] is scheduler_candidates_module._REPLAY_CLAMP_ABSENT
+
     clobbered = scheduler_candidates_module._candidate_with_state_evidence(
         admitted,
         {
@@ -1700,6 +2192,7 @@ def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobb
             "native_shud_resubmitted": False,
             "durable_output_reused": True,
             "durable_shud_output_reused": True,
+            "fresh_ingestion": {"required": True, "mode": "full_chain"},
         },
     )
     clamped = [clobbered]
@@ -1712,21 +2205,29 @@ def test_the_clamp_restores_every_replay_resubmit_key_a_future_merge_could_clobb
     assert evidence["native_shud_resubmitted"] is True
     assert evidence["durable_output_reused"] is False
     assert evidence["durable_shud_output_reused"] is False
+    assert "fresh_ingestion" not in evidence
     clamp = evidence["replay_invariant_clamp_applied"]
     assert clamp["clobbered_keys"] == [
         "decision",
         "durable_output_reused",
         "durable_shud_output_reused",
+        "fresh_ingestion",
         "native_shud_resubmitted",
         "restart_from_stage",
         "restart_stage",
     ]
+    assert clamp["removed_keys"] == ["fresh_ingestion"]
     assert clamp["pre_clamp"]["native_shud_resubmitted"] is False
     assert clamp["pre_clamp"]["durable_output_reused"] is True
     assert clamp["pre_clamp"]["decision"] == "retry_failed"
+    assert clamp["pre_clamp"]["fresh_ingestion"]["mode"] == "full_chain"
     # the whole owned set is what the consumers read, nothing narrower
     assert set(scheduler_candidates_module._REPLAY_RESUBMIT_CLAMPED_KEYS) == set(clamp["clobbered_keys"])
     assert _chain_gate_forces_resubmit(clamped[0]) is True
+    # ... and the EXECUTOR agrees: `fresh_ingestion` outranks `restart_stage`, so
+    # leaving it merged in would have keyed the full-chain cohort regardless.
+    assert scheduler_module._candidate_restart_stage(clamped[0]) == "forecast"
+    assert scheduler_module._candidate_restart_cohort_key("forecast") == (3, "forecast")
 
 
 def test_the_clamp_is_a_pure_no_op_without_replay_admission() -> None:
@@ -1851,6 +2352,1255 @@ def test_replay_window_repair_needs_a_genuine_zero_row_canonical_evaluation(tmp_
         assert evidence["restart_stage"] == "forecast"
         assert "replay_canonical_readiness_guard" not in evidence
         assert "replay_invariant_clamp_applied" not in evidence
+
+
+# --------------------------------------------------------------------------
+# 1.2e execution-phase P1 fixes for the manual-retry admission
+#
+# P1-1  the chain's force-terminal-resubmit gate is a CONJUNCTION over the
+#       cohort's basins, so an admitted bare-``manual_retry`` sibling used to
+#       return False for the whole cohort — zero submissions for the
+#       ``replay_resubmit`` basins that shared its cycle.
+# P1-2  the post-Slurm-sync rebuild re-derives the decision from the journal and
+#       could launder the admitted manual retry into ``retry_downstream``
+#       (restart_stage=parse, durable_shud_output_reused=True) while the
+#       admission marker still said "admitted": parse/publish rerun over the OLD
+#       forecast outputs of a purged cycle.
+# --------------------------------------------------------------------------
+
+#: Second in-set basin of the same replay cycle, so a cohort can be mixed.
+MANUAL_RETRY_MODEL_ID = "dg_second_basin_gfs"
+
+
+def _cohort_admission() -> ReplayAdmission:
+    admission = parse_replay_admission(
+        mode=True,
+        model_ids=f"{REPLAY_MODEL_ID},{MANUAL_RETRY_MODEL_ID}",
+        window=WINDOW,
+    )
+    assert admission is not None
+    return admission
+
+
+def _scheduler_candidate_for(model_id: str, *, cycle_time: datetime = IN_WINDOW_CYCLE) -> Any:
+    """The candidate ``build_candidates`` itself constructs for this model/cycle."""
+
+    return _candidate_factory(
+        discovery=CycleDiscovery(
+            cycle_id=cycle_id_for("gfs", cycle_time),
+            source_id="gfs",
+            cycle_time=cycle_time,
+            cycle_hour=cycle_time.hour,
+            available=True,
+            status="discovered",
+        ),
+        model=_FakeModel(model_id=model_id),
+        horizon={},
+    )
+
+
+def _produced_manual_retry_decision(
+    *,
+    prior_failure_reason: str,
+    model_id: str = REPLAY_MODEL_ID,
+    cycle_time: datetime = IN_WINDOW_CYCLE,
+    extra_state: Mapping[str, Any] | None = None,
+) -> CandidateStateDecision:
+    """A manual-retry decision from the REAL producer, not a hand-written copy.
+
+    ``scheduler_state._candidate_state_decision`` -> ``_manual_retry_state_evidence``
+    is the only writer of this family, so the independent source of truth for
+    both the token and the two evidence shapes (bare, and the
+    ``COLD_START_QUARANTINED`` shape that carries a ``forecast`` restart) is the
+    producer itself.
+    """
+
+    candidate = _scheduler_candidate_for(model_id, cycle_time=cycle_time)
+    state = {
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "forecast",
+        "error_code": prior_failure_reason,
+        "retry_count": 1,
+        "retry_limit": 3,
+        "manual_retry": {"marker": True, "requested_by": "operator"},
+        "prior_failure_reason": prior_failure_reason,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        **dict(extra_state or {}),
+    }
+    decision = _candidate_state_decision(candidate, state)
+    assert decision is not None
+    return decision
+
+
+def test_the_manual_retry_literals_match_their_producer() -> None:
+    """Fold-in C: a coordinated rename must fail here, not silently disable admission.
+
+    ``scheduler_candidates._decision_is_manual_retry`` re-states literals owned by
+    ``scheduler_state_failure._manual_retry_state_evidence`` /
+    ``scheduler_state_decision``.  Both shapes the producer emits are pinned: the
+    bare one (``decision`` and nothing else the clamp owns) and the
+    ``COLD_START_QUARANTINED`` one.
+    """
+
+    bare = _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE")
+    assert bare.action == "retry"
+    assert bare.reason == scheduler_candidates_module._MANUAL_RETRY_REASON
+    assert bare.evidence["decision"] == scheduler_candidates_module._MANUAL_RETRY_DECISION
+    assert bare.evidence["reason"] == scheduler_candidates_module._MANUAL_RETRY_REASON
+    assert scheduler_candidates_module._decision_is_manual_retry(bare) is True
+    # Bare really is bare: none of the clamp-owned restart/reuse keys exist, which
+    # is exactly why the expectation has to pin ABSENCE and not present-keys-only.
+    for key in scheduler_candidates_module._REPLAY_MANUAL_RETRY_CLAMPED_KEYS:
+        assert (key in bare.evidence) is (key == "decision"), key
+
+    cold_start = _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED")
+    assert scheduler_candidates_module._decision_is_manual_retry(cold_start) is True
+    assert cold_start.evidence["restart_stage"] == "forecast"
+    assert cold_start.evidence["restart_from_stage"] == "forecast"
+    assert cold_start.evidence["native_shud_resubmitted"] is True
+    assert "durable_shud_output_reused" not in cold_start.evidence
+
+
+def _mixed_cohort_pass() -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """One replay cycle, two in-set basins: a replay sibling and a manual retry."""
+
+    return _build(
+        admission=_cohort_admission(),
+        decision=None,
+        decisions_by_model={
+            REPLAY_MODEL_ID: _replay_terminal_decision(),
+            MANUAL_RETRY_MODEL_ID: _produced_manual_retry_decision(
+                prior_failure_reason="COLD_START_QUARANTINED",
+                model_id=MANUAL_RETRY_MODEL_ID,
+            ),
+        },
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        model_ids=(REPLAY_MODEL_ID, MANUAL_RETRY_MODEL_ID),
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+    )
+
+
+def test_an_admitted_manual_retry_sibling_does_not_collapse_the_replay_cohort() -> None:
+    """P1-1 consumer oracle: the mixed cohort still forces the forecast resubmit.
+
+    Pre-fix this returned False — one basin outside
+    ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` vetoes the whole conjunction — so the
+    replay siblings that shared the cycle submitted nothing and the driver
+    re-created the convergence-timeout deadlock.
+    """
+
+    candidates, blocked, skipped = _mixed_cohort_pass()
+
+    assert blocked == []
+    assert skipped == []
+    by_model = {candidate.model_id: candidate for candidate in candidates}
+    assert set(by_model) == {REPLAY_MODEL_ID, MANUAL_RETRY_MODEL_ID}
+
+    replay_evidence = by_model[REPLAY_MODEL_ID].state_evidence
+    assert replay_evidence["decision"] == "replay_resubmit"
+    assert replay_evidence["restart_stage"] == "forecast"
+    assert "replay_manual_retry_admission" not in replay_evidence
+
+    manual_evidence = by_model[MANUAL_RETRY_MODEL_ID].state_evidence
+    # The token is NEVER rewritten: it stays the honest producer token.
+    assert manual_evidence["decision"] == "manual_retry"
+    assert manual_evidence["restart_stage"] == "forecast"
+    assert manual_evidence["replay_manual_retry_admission"]["status"] == "admitted"
+
+    # Each basin on its own already forced the resubmit before this fix ...
+    assert _chain_gate_forces_resubmit(by_model[REPLAY_MODEL_ID]) is True
+    # ... and the cohort — what the chain actually feeds the gate — must too.
+    assert _chain_gate_forces_resubmit_cohort(candidates) is True
+    assert _chain_gate_forces_resubmit(by_model[MANUAL_RETRY_MODEL_ID]) is True
+
+
+def test_an_unadmitted_manual_retry_never_forces_a_succeeded_forecast_resubmit() -> None:
+    """The exemption is the admission MARKER, not the manual-retry family.
+
+    Nothing was added to the global whitelist: an out-of-window / replay-off
+    manual retry reaching a succeeded forecast job must still be a no-op, alone
+    or beside a replay sibling.
+    """
+
+    unadmitted = _scheduler_candidate_for(MANUAL_RETRY_MODEL_ID)
+    unadmitted = scheduler_candidates_module._candidate_with_state_evidence(
+        unadmitted,
+        _produced_manual_retry_decision(
+            prior_failure_reason="COLD_START_QUARANTINED",
+            model_id=MANUAL_RETRY_MODEL_ID,
+        ).evidence,
+    )
+    assert "replay_manual_retry_admission" not in unadmitted.state_evidence
+    assert scheduler_candidates_module._MANUAL_RETRY_DECISION not in (
+        chain_cycle_module._FORCE_TERMINAL_RESUBMIT_DECISIONS
+    )
+    assert _chain_gate_forces_resubmit(unadmitted) is False
+
+    replay_candidate = _mixed_cohort_pass()[0][0]
+    assert replay_candidate.state_evidence["decision"] == "replay_resubmit"
+    assert _chain_gate_forces_resubmit_cohort([replay_candidate, unadmitted]) is False
+
+
+def test_an_eligible_only_manual_retry_does_not_get_the_gate_exemption() -> None:
+    """C2: the exemption is the ADMITTED status, not the marker's presence.
+
+    ``eligible`` is stamped for EVERY in-window manual retry, including the
+    raw-READY leg candidate that never passes the raw-less admission: it keeps
+    the ``convert`` restart it legitimately wants and no clamp expectation.
+    Granting it the whitelist exemption would let a resume-shaped candidate force
+    a succeeded forecast to resubmit — outside anything this change admits.
+    """
+
+    candidates, blocked, skipped = _raw_less_manual_retry_pass(
+        admission=_admission(),
+        decision=_produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+        raw_state=RAW_MANIFEST_READY_STATE,
+    )
+    assert blocked == []
+    assert skipped == []
+    eligible_only = candidates[0]
+    evidence = eligible_only.state_evidence
+    assert evidence["replay_manual_retry_admission"]["status"] == "eligible"
+    assert evidence["restart_stage"] == "convert"
+    assert "replay_invariant_clamp_applied" not in evidence
+
+    assert _chain_gate_forces_resubmit(eligible_only) is False
+    # ... and it must not veto NOR carry the cohort it could share with a replay
+    # sibling: the conjunction is False because this basin does not qualify.
+    replay_candidate = _mixed_cohort_pass()[0][0]
+    assert replay_candidate.state_evidence["decision"] == "replay_resubmit"
+    assert _chain_gate_forces_resubmit_cohort([replay_candidate, eligible_only]) is False
+    # The producer-side scope predicate stays TWO-status on purpose (it is what
+    # opens the raw-less leg); only the chain-side consumer narrows to admitted.
+    stamped = scheduler_candidates_module._replay_manual_retry_admission_decision(
+        _FakeConfig(replay_admission=_admission()),
+        _scheduler_candidate_for(REPLAY_MODEL_ID),
+        _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+    )
+    assert stamped is not None
+    assert stamped.evidence["replay_manual_retry_admission"]["status"] == "eligible"
+    assert scheduler_candidates_module._decision_is_replay_manual_retry_scoped(stamped) is True
+    assert (
+        chain_cycle_module._basin_carries_replay_manual_retry_admission(stamped.evidence) is False
+    )
+    assert (
+        chain_cycle_module._basin_carries_replay_manual_retry_admission(
+            scheduler_candidates_module._replay_manual_retry_admitted_decision(stamped).evidence
+        )
+        is True
+    )
+
+
+def test_an_admitted_manual_retry_still_resubmits_through_the_failed_status_leg() -> None:
+    """must-preserve: the admitted basin's OWN resubmission path is untouched.
+
+    ``_terminal_stage_needs_manual_retry`` resubmits a failed forecast job on the
+    ``retry_attempt`` leg; the marker exemption must not be the only thing making
+    that work, and must not break it either.
+    """
+
+    failed_job = {**SUCCEEDED_FORECAST_JOB, "status": "failed"}
+    for candidate in (
+        _mixed_cohort_pass()[0][1],
+        scheduler_candidates_module._candidate_with_state_evidence(
+            _scheduler_candidate_for(MANUAL_RETRY_MODEL_ID),
+            _produced_manual_retry_decision(
+                prior_failure_reason="COLD_START_QUARANTINED",
+                model_id=MANUAL_RETRY_MODEL_ID,
+            ).evidence,
+        ),
+    ):
+        context = SimpleNamespace(
+            active_basins=[_cohort_basin_row(candidate)],
+            restart_stage=None,
+            retry_attempt=2,
+        )
+        assert (
+            chain_cycle_module.ForecastOrchestratorCycleMixin._terminal_stage_needs_manual_retry(
+                context, dict(failed_job)
+            )
+            is True
+        )
+
+
+def test_post_sync_rebuild_cannot_launder_the_admitted_manual_retry() -> None:
+    """P1-2 consumer oracle: the A3-1 sync shape, on the manual-retry family.
+
+    Active job on the first probe, terminal on the re-probe, and the re-read
+    journal now says ``retry_downstream``.  Unclamped that merge ships
+    ``restart_stage=parse`` + ``durable_shud_output_reused=True`` under an
+    admission marker still claiming a forecast restart — the emitted manifest
+    then reruns parse/publish over the OLD forecast outputs of a purged cycle.
+    """
+
+    decider = _DecisionSequence(
+        [
+            _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+            _post_sync_downstream_retry_decision(),
+        ]
+    )
+    repository = _FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]])
+    orchestrator = _SyncingOrchestrator([TERMINAL_SYNC_UPDATE])
+
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=decider,
+        repository=repository,
+        orchestrator=orchestrator,
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert decider.calls == 2
+    admitted = candidates[0]
+    evidence = admitted.state_evidence
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["restart_from_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    # absent at admission time -> absent afterwards, however a merge introduced it
+    assert "durable_shud_output_reused" not in evidence
+    assert "durable_output_reused" not in evidence
+    assert evidence["replay_manual_retry_admission"]["status"] == "admitted"
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["mode"] == "replay_manual_retry"
+    assert clamp["candidate_id"] == admitted.candidate_id
+    assert clamp["clobbered_keys"] == [
+        "decision",
+        "durable_shud_output_reused",
+        "native_shud_resubmitted",
+        "restart_from_stage",
+        "restart_stage",
+    ]
+    assert clamp["removed_keys"] == ["durable_shud_output_reused"]
+    assert clamp["pre_clamp"]["decision"] == "retry_downstream"
+    assert clamp["pre_clamp"]["restart_stage"] == "parse"
+    assert clamp["pre_clamp"]["durable_shud_output_reused"] is True
+    assert clamp["pre_clamp"]["native_shud_resubmitted"] is False
+
+    # CONSUMER ORACLES: the manifest the scheduler emits, and the chain gate.
+    manifest = scheduler_candidate_manifest_module._candidate_basin_manifest(
+        admitted,
+        output_uri="s3://nhms/runs/replayed/output",
+    )
+    assert manifest["restart_stage"] == "forecast"
+    assert "durable_shud_output_reused" not in manifest
+    assert manifest.get("native_shud_resubmitted") is not False
+    assert manifest["state_evidence"]["decision"] == "manual_retry"
+    assert _chain_gate_forces_resubmit(admitted) is True
+
+
+# --------------------------------------------------------------------------
+# 1.2f fresh_ingestion: the key that OUTRANKS every clamped restart key
+# (execution-phase repair-2 round 3, F1; retro
+# `.workplans/issue-1164-change2/review/review-failure-retro-repair2-r3.md`)
+# --------------------------------------------------------------------------
+
+
+def _produced_missing_raw_manifest_repair_decision(
+    object_store_root: Path,
+    *,
+    model_id: str = REPLAY_MODEL_ID,
+) -> CandidateStateDecision:
+    """The ``repair_missing_raw_manifest`` decision from its REAL producer.
+
+    ``scheduler_state_failure._missing_raw_manifest_repair_evidence`` is the only
+    writer of the ``fresh_ingestion={"required": True, "mode": "full_chain"}`` +
+    ``restart_stage=None`` shape, so it — not a hand-written copy — is the source
+    of truth for what the post-sync journal re-read can put on a replay candidate.
+    Its preconditions are DEFAULT-TRUE inside the replay window: the raw objects
+    for the pre-070712 cycles are gone, so ``_object_manifest_is_missing`` is True
+    for any candidate whose object store root is configured.  The wrapping
+    ``CandidateStateDecision("retry", "repair_missing_raw_manifest", ...)`` mirrors
+    ``scheduler_state_decision`` :288-290 exactly.
+    """
+
+    candidate = replace(
+        _scheduler_candidate_for(model_id),
+        resource_profile={"object_store_root": str(object_store_root), "object_store_prefix": ""},
+    )
+    state = {
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "SHUD_RUNTIME_FAILURE",
+        "retry_count": 0,
+        "retry_limit": 3,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026070600_download_source_cycle",
+                "stage": "download_source_cycle",
+                "status": "succeeded",
+                "finished_at": "2026-07-06T01:00:00Z",
+            },
+            {
+                "job_id": "job_fcst_gfs_2026070600_forecast",
+                "stage": "forecast",
+                "status": "failed",
+                "finished_at": "2026-07-06T02:00:00Z",
+            },
+        ],
+    }
+    evidence = scheduler_state_failure_module._missing_raw_manifest_repair_evidence(candidate, state, {})
+    assert evidence is not None, "the repair producer's preconditions no longer hold"
+    # Precondition of every assertion below: this really is the full-chain shape.
+    assert evidence["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+    assert evidence["restart_stage"] is None
+    assert evidence["restart_from_stage"] == "download"
+    return CandidateStateDecision("retry", "repair_missing_raw_manifest", evidence)
+
+
+def _assert_no_full_chain_downgrade(candidate: Any, *, mode: str) -> None:
+    """The three consumer oracles ``fresh_ingestion`` would have flipped."""
+
+    evidence = candidate.state_evidence
+    assert "fresh_ingestion" not in evidence
+    assert scheduler_candidates_module._candidate_is_fresh_full_chain(candidate) is False
+    restart_stage = scheduler_module._candidate_restart_stage(candidate)
+    assert restart_stage == "forecast"
+    cohort_key = scheduler_module._candidate_restart_cohort_key(restart_stage)
+    assert cohort_key == (3, "forecast")
+    assert cohort_key != (0, "full")
+    manifest = scheduler_candidate_manifest_module._candidate_basin_manifest(
+        candidate,
+        output_uri="s3://nhms/runs/replayed/output",
+    )
+    assert manifest["restart_stage"] == "forecast"
+    assert _chain_gate_forces_resubmit(candidate) is True
+    clamp = evidence["replay_invariant_clamp_applied"]
+    assert clamp["mode"] == mode
+    assert "fresh_ingestion" in clamp["removed_keys"]
+    assert clamp["pre_clamp"]["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+    assert clamp["restored"]["fresh_ingestion"] == "<absent>"
+
+
+def test_post_sync_raw_repair_cannot_full_chain_the_admitted_manual_retry(tmp_path: Path) -> None:
+    """F1, leg (c): ``fresh_ingestion`` outranks every restart key the clamp owned.
+
+    The A3-1 sync shape again, but the re-read journal now yields
+    ``repair_missing_raw_manifest`` — the DEFAULT post-sync answer inside the
+    replay window, since the raw object really is absent.  Its
+    ``fresh_ingestion={"required": True, "mode": "full_chain"}`` short-circuits
+    ``candidate_restart_stage`` to None on that function's FIRST line, so the
+    clamp restoring ``restart_stage="forecast"`` bought nothing: cohort
+    ``(0, "full")``, chain starting at ``convert_canonical`` against the raw
+    manifest this very leg recorded as ABSENT, and a basin manifest with no
+    restart stage at all — under a receipt still claiming a forecast replay.
+    """
+
+    decider = _DecisionSequence(
+        [
+            _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+            _produced_missing_raw_manifest_repair_decision(tmp_path),
+        ]
+    )
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=decider,
+        repository=_FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+        orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert decider.calls == 2
+    admitted = candidates[0]
+    evidence = admitted.state_evidence
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["replay_manual_retry_admission"]["status"] == "admitted"
+    # the merge itself is not skipped — its audit evidence is the point of it
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+    _assert_no_full_chain_downgrade(admitted, mode="replay_manual_retry")
+
+
+def test_post_sync_raw_repair_cannot_full_chain_the_replay_resubmit(tmp_path: Path) -> None:
+    """F1, leg (a): the same hole on the COMMITTED ``replay_resubmit`` mode.
+
+    Adding ``fresh_ingestion`` to ``_REPLAY_RESUBMIT_CLAMPED_KEYS`` alone would
+    have been a no-op here: the override never writes that key, and the old
+    present-keys-only expectation could not pin what the admission decision did not
+    carry.  The mode had to be converted to the whole-set/absence-pinned form the
+    manual-retry mode already used.
+    """
+
+    decider = _DecisionSequence(
+        [
+            _replay_terminal_decision(),
+            _produced_missing_raw_manifest_repair_decision(tmp_path),
+        ]
+    )
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=decider,
+        repository=_FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+        orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert decider.calls == 2
+    admitted = candidates[0]
+    evidence = admitted.state_evidence
+    assert evidence["decision"] == "replay_resubmit"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+    _assert_no_full_chain_downgrade(admitted, mode="replay_resubmit")
+
+
+# --------------------------------------------------------------------------
+# 1.2g the eligibility stamp is re-applied after every Slurm-status sync
+# (execution-phase repair-2 round 3, F2)
+# --------------------------------------------------------------------------
+
+#: The ``skip active_slurm_job`` decision the FIRST journal read yields while the
+#: previous attempt's forecast job is still running.
+_ACTIVE_JOB_SKIP_DECISION = CandidateStateDecision(
+    "skip",
+    "active_slurm_job",
+    {
+        "decision": "skip_active",
+        "active_slurm_jobs": [dict(ACTIVE_SLURM_JOB)],
+        "replacement_submitted": False,
+    },
+)
+
+
+def _first_sync_manual_retry_pass(
+    *,
+    decision: CandidateStateDecision,
+    strict_warm_start: Mapping[str, Any] | None,
+    admission: ReplayAdmission | None = None,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """Active job first, manual retry only after the sync (the F2 shape).
+
+    ``scheduler_state_manual_retry`` grants a manual retry off a marker bound to
+    the previous job id regardless of timestamps, so "the operator's retry only
+    becomes visible once the running job goes terminal" is an ordinary campaign
+    shape, not a contrived one.
+    """
+
+    return _build(
+        admission=_admission() if admission is None else admission,
+        decision=None,
+        strict_warm_start=strict_warm_start,
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=_DecisionSequence([_ACTIVE_JOB_SKIP_DECISION, decision]),
+        repository=_FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+        orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+        allow_slurm_status_sync=True,
+    )
+
+
+def test_a_manual_retry_first_seen_after_the_slurm_sync_is_still_admitted() -> None:
+    """F2: the stamp ran once, pre-sync, and the sync REPLACED the decision.
+
+    Pre-fix this candidate reached the raw-less leg unstamped: blocked
+    ``nfs_raw_manifest_required`` with NO ``replay_manual_retry_admission`` key at
+    all — a fifth operator state no runbook row describes, zero submissions, and a
+    convergence-timeout halt out of the single-pass driver.  All three campaign
+    shapes are re-driven here through the sync path, and each must land exactly
+    where the main path puts it.
+    """
+
+    strict = {"ready": True, "candidate_state": dict(SELECTED_STATE)}
+    admitted_labels = []
+    for label, (decision, strict_warm_start) in {
+        "bare": (_produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"), None),
+        "bare_upgraded": (
+            _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"),
+            strict,
+        ),
+        "cold_start": (_produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"), None),
+    }.items():
+        candidates, blocked, skipped = _first_sync_manual_retry_pass(
+            decision=decision,
+            strict_warm_start=strict_warm_start,
+        )
+        assert skipped == [], label
+        if candidates:
+            admitted_labels.append(label)
+            evidence = candidates[0].state_evidence
+            assert blocked == [], label
+            assert evidence["replay_manual_retry_admission"]["status"] == "admitted", label
+            restart_stage = scheduler_module._candidate_restart_stage(candidates[0])
+            assert restart_stage == "forecast", (label, restart_stage)
+            assert scheduler_module._candidate_restart_cohort_key(restart_stage) == (3, "forecast"), label
+            assert _chain_gate_forces_resubmit(candidates[0]) is True, label
+            # the sync's own audit evidence still reaches the candidate
+            assert evidence["slurm_state_sync"]["status"] == "synced", label
+        else:
+            # The bare shape is still DECLINED — but now with the C1 marker that
+            # says why, which is the state the runbook row describes.
+            assert blocked[0].reason == "nfs_raw_manifest_required", label
+            marker = blocked[0].state_evidence["replay_manual_retry_admission"]
+            assert marker["status"] == "eligible", label
+            assert marker["declined_reason"] == "replay_manual_retry_restart_stage_unsupported", label
+    assert sorted(admitted_labels) == ["bare_upgraded", "cold_start"]
+
+
+def test_a_post_sync_manual_retry_outside_the_replay_scope_is_untouched() -> None:
+    """must-preserve: the re-stamp is windowed exactly like the main-path one.
+
+    Replay off, out-of-window cycle and out-of-set model all keep the pre-change
+    typed block with no admission marker anywhere — the sync path may not be a
+    second, wider door into the raw-less leg.
+    """
+
+    cold_start = _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED")
+    cases = {
+        "replay_off": {"admission": None, "cycle_time": IN_WINDOW_CYCLE, "model_ids": (REPLAY_MODEL_ID,)},
+        "out_of_window": {
+            "admission": _admission(),
+            "cycle_time": OUT_OF_WINDOW_CYCLE,
+            "model_ids": (REPLAY_MODEL_ID,),
+        },
+        "out_of_set_model": {
+            "admission": _admission(),
+            "cycle_time": IN_WINDOW_CYCLE,
+            "model_ids": (OUT_OF_SET_MODEL_ID,),
+        },
+    }
+    for label, case in cases.items():
+        candidates, blocked, skipped = _build(
+            admission=case["admission"],
+            decision=None,
+            strict_warm_start=None,
+            canonical_readiness=FRESH_ZERO_ROW_READINESS,
+            cycle_time=case["cycle_time"],
+            model_ids=case["model_ids"],
+            discovery_classifier="replay_forcing_evidence",
+            discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+            decider=_DecisionSequence([_ACTIVE_JOB_SKIP_DECISION, cold_start]),
+            repository=_FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+            orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+            allow_slurm_status_sync=True,
+        )
+        assert candidates == [], label
+        assert skipped == [], label
+        assert blocked[0].reason == "nfs_raw_manifest_required", label
+        assert "replay_manual_retry_admission" not in blocked[0].state_evidence, label
+        assert "replay_canonical_readiness_guard" not in blocked[0].state_evidence, label
+
+
+def test_a_post_sync_rebuild_never_demotes_an_already_admitted_manual_retry() -> None:
+    """F2 second site: the re-stamp is first-wins on the ``admitted`` status.
+
+    The second sync block runs DOWNSTREAM of the raw-less leg, so it can no longer
+    open an admission — but a plain re-stamp there would write ``eligible`` over
+    the marker the leg already granted, and the chain-side gate keys on
+    ``admitted`` alone (round-2 C2).  That would strip the exemption off a
+    candidate whose restart shape the clamp is still pinning: a self-contradictory
+    receipt.  This guards the new re-stamp path, not the pre-change one.
+    """
+
+    decider = _DecisionSequence(
+        [
+            _produced_manual_retry_decision(prior_failure_reason="COLD_START_QUARANTINED"),
+            _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"),
+        ]
+    )
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        strict_warm_start=None,
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=decider,
+        repository=_FakeRepository({}, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+        orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    assert decider.calls == 2
+    admitted = candidates[0]
+    evidence = admitted.state_evidence
+    assert evidence["replay_manual_retry_admission"]["status"] == "admitted"
+    assert (
+        chain_cycle_module._basin_carries_replay_manual_retry_admission(evidence) is True
+    )
+    assert evidence["restart_stage"] == "forecast"
+    assert _chain_gate_forces_resubmit(admitted) is True
+
+
+def test_a_post_sync_rebuild_cannot_forecast_restart_the_raw_ready_manual_retry() -> None:
+    """F2 second site: it re-stamps, it does NOT re-run the strict-warm upgrade.
+
+    The RAW-READY manual retry (round-4 delta P1).  The canonical gate lowered
+    its restart to ``convert`` on purpose (``:1048`` — the raw manifest really is
+    on disk and the canonical is a fresh zero-row), and that leg registers NO
+    clamp expectation (deferred #1198), so nothing restores the shape after a
+    later merge.  Re-running ``_upgrade_retry_for_strict_warm_start_manifest``
+    inside the second sync block put ``restart_stage=forecast`` back on the
+    rebuilt decision, and the ``:1281`` merge — which, unlike the main-path merge
+    at ``:1122``, has no ``raw_manifest_restart_applied`` guard — last-wrote it
+    over the ``convert`` restart.  The shipped receipt then contradicts itself:
+    a ``forecast`` restart beside ``restart_reason=raw_manifest_ready_without_canonical``
+    and ``fresh_ingestion.mode=reuse_raw_then_convert``, i.e. the chain skips
+    pre-orchestration forcing AND starts at forecast on a canonical with zero
+    rows.  The upgrade half belongs to the FIRST site only (``:829``), where the
+    ``forecast`` restart it writes is what the C1 precondition then accepts.
+    """
+
+    from services.orchestrator import scheduler_execution as scheduler_execution_module
+
+    bare = _produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE")
+    decider = _DecisionSequence([bare, bare])
+    candidates, blocked, skipped = _build(
+        admission=_admission(),
+        decision=None,
+        # Load-bearing: the strict warm start is what ARMS the upgrade.  Without
+        # it the second site is a no-op and the defect is invisible.
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+        canonical_readiness=FRESH_ZERO_ROW_READINESS,
+        discovery_classifier="replay_forcing_evidence",
+        discovery_evidence={"replay_forcing_evidence": dict(READY_FORCING_EVIDENCE)},
+        decider=decider,
+        repository=_FakeRepository(RAW_MANIFEST_READY_STATE, slurm_jobs_script=[[ACTIVE_SLURM_JOB]]),
+        orchestrator=_SyncingOrchestrator([TERMINAL_SYNC_UPDATE]),
+        allow_slurm_status_sync=True,
+    )
+
+    assert blocked == []
+    assert skipped == []
+    # No active-slurm SKIP decision anywhere in the sequence: the first sync
+    # block (`:829`) is never entered, so this exercises the SECOND site alone.
+    assert decider.calls == 2
+    candidate = candidates[0]
+    evidence = candidate.state_evidence
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+    assert evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+    assert evidence["fresh_ingestion"] == {"required": False, "mode": "reuse_raw_then_convert"}
+    assert evidence["raw_manifest_reuse"]["status"] == "ready"
+
+    restart_stage = scheduler_module._candidate_restart_stage(candidate)
+    assert restart_stage == "convert"
+    assert scheduler_module._candidate_restart_cohort_key(restart_stage) == (1, "convert")
+
+    # CONSUMER ORACLES: the two readers that make the contradiction operational —
+    # the forcing skip (raw reuse) and the manifest the chain actually runs from.
+    execution_context = SimpleNamespace(
+        candidate_is_fresh_full_chain=scheduler_candidates_module._candidate_is_fresh_full_chain,
+    )
+    assert (
+        scheduler_execution_module._candidate_skips_pre_orchestration_forcing(
+            execution_context,
+            candidate,
+        )
+        is True
+    )
+    manifest = scheduler_candidate_manifest_module._candidate_basin_manifest(
+        candidate,
+        output_uri="s3://nhms/runs/replayed/output",
+    )
+    assert manifest["restart_stage"] == "convert"
+
+    # Eligible-only: the raw-less admission never fired, so no chain-gate
+    # exemption and no clamp — the marker still says exactly what happened.
+    assert evidence["replay_manual_retry_admission"]["status"] == "eligible"
+    assert chain_cycle_module._basin_carries_replay_manual_retry_admission(evidence) is False
+    assert "replay_invariant_clamp_applied" not in evidence
+    # The second sync block still runs, and its audit evidence still ships.
+    assert evidence["slurm_state_sync"]["status"] == "synced"
+
+    # MUST-PRESERVE, first site (`:829`): unchanged.  Same bare shape, same
+    # strict warm start, but reached through the active-job skip that makes the
+    # FIRST sync block rebuild the decision — there the upgrade must still run,
+    # because its `forecast` restart is what the raw-less C1 precondition accepts.
+    first_site, first_blocked, first_skipped = _first_sync_manual_retry_pass(
+        decision=_produced_manual_retry_decision(prior_failure_reason="SHUD_RUNTIME_FAILURE"),
+        strict_warm_start={"ready": True, "candidate_state": dict(SELECTED_STATE)},
+    )
+    assert first_blocked == []
+    assert first_skipped == []
+    first_evidence = first_site[0].state_evidence
+    assert first_evidence["replay_manual_retry_admission"]["status"] == "admitted"
+    first_stage = scheduler_module._candidate_restart_stage(first_site[0])
+    assert first_stage == "forecast"
+    assert scheduler_module._candidate_restart_cohort_key(first_stage) == (3, "forecast")
+    assert _chain_gate_forces_resubmit(first_site[0]) is True
+
+
+# --------------------------------------------------------------------------
+# 1.2h derivation-closure audit: the clamp key sets vs. what consumers read
+# (retro-mandated Phase 6.2 invariant audit for the repeated
+# protection-set-completeness class)
+# --------------------------------------------------------------------------
+
+#: The restart-semantics consumers the clamp key sets must close over.  Each is a
+#: (module, top-level function) seed; the extractor follows same-module calls to
+#: fixpoint, so a helper split out of one of these stays covered.
+CLAMP_CONSUMER_SEEDS: tuple[tuple[str, str], ...] = (
+    ("services.orchestrator.scheduler_execution", "candidate_restart_stage"),
+    ("services.orchestrator.scheduler_execution", "_candidate_skips_pre_orchestration_forcing"),
+    ("services.orchestrator.scheduler_candidates", "_candidate_is_fresh_full_chain"),
+    ("services.orchestrator.scheduler_candidate_manifest", "_candidate_basin_manifest"),
+)
+
+#: Top-level state-evidence keys those consumers read that are deliberately NOT
+#: clamp-owned.  Every entry must say why the key cannot clobber restart / cohort /
+#: manifest / forcing-skip semantics for a clamped candidate.
+CLAMP_CONSUMER_KEY_ALLOWLIST: dict[str, str] = {
+    "raw_manifest_reuse": (
+        "read ONLY in conjunction with `fresh_ingestion.mode` in "
+        "{reuse_raw_then_convert, repair_missing_forcing} "
+        "(`_candidate_skips_pre_orchestration_forcing`).  Both whole-set modes pin "
+        "`fresh_ingestion` ABSENT, so the conjunction is unreachable for a clamped "
+        "candidate whatever this key says."
+    ),
+    "manual_retry": (
+        "feeds `manual_retry_attempt` / `retry_attempt` on the basin manifest — a "
+        "retry COUNTER.  It selects no stage, keys no cohort, and the admitted "
+        "manual retry legitimately wants the count the journal reports."
+    ),
+    "candidate_state": (
+        "warm-start init-state passthrough (`_apply_candidate_warm_start_fields`): "
+        "it names WHICH initial state the run starts from, not WHERE the chain "
+        "restarts.  The replay legs deliberately let the post-sync rebuild refresh "
+        "it — the strict-warm gate, not the clamp, owns that surface."
+    ),
+}
+
+
+def _consumer_state_evidence_keys() -> dict[str, set[str]]:
+    """key -> the consumer functions that read it, straight from the sources.
+
+    Deliberately structural rather than a curated list: the retro's finding is
+    that every HAND derivation of the protected set has missed at least one key.
+    A name is treated as state evidence when it is bound from an expression
+    mentioning ``.state_evidence`` (``state_evidence = candidate.state_evidence``,
+    ``state_evidence = _evidence_safe(candidate.state_evidence)``), and only
+    TOP-LEVEL reads off such a name count — nested reads (``fresh_ingestion.get
+    ("mode")``) are sub-keys of a key already extracted.
+
+    BOUNDARY: the closure follows same-module calls only, and
+    ``scheduler_candidate_manifest``'s ``*args`` re-export shims
+    (``_candidate_is_fresh_full_chain = _scheduler_call(...)``) are opaque to it —
+    which is exactly why the predicate is named as its own seed above.
+    """
+
+    def _is_evidence_expression(node: ast.AST, evidence_names: set[str]) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in evidence_names
+        return isinstance(node, ast.Attribute) and node.attr == "state_evidence"
+
+    def _scan(function: ast.AST) -> tuple[set[str], set[str]]:
+        evidence_names: set[str] = set()
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(child, ast.Attribute) and child.attr == "state_evidence"
+                for child in ast.walk(node.value)
+            ):
+                continue
+            evidence_names.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        keys: set[str] = set()
+        calls: set[str] = set()
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "get"
+                    and _is_evidence_expression(func.value, evidence_names)
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    keys.add(node.args[0].value)
+                if isinstance(func, ast.Name):
+                    calls.add(func.id)
+            elif isinstance(node, ast.Subscript) and _is_evidence_expression(node.value, evidence_names):
+                if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                    keys.add(node.slice.value)
+            elif (
+                isinstance(node, ast.Compare)
+                and len(node.comparators) == 1
+                and _is_evidence_expression(node.comparators[0], evidence_names)
+                and isinstance(node.left, ast.Constant)
+                and isinstance(node.left.value, str)
+            ):
+                keys.add(node.left.value)
+        return keys, calls
+
+    found: dict[str, set[str]] = {}
+    for module_name, seed in CLAMP_CONSUMER_SEEDS:
+        module = importlib.import_module(module_name)
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        assert seed in functions, f"{module_name}.{seed} no longer exists"
+        pending = [seed]
+        visited: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in visited or name not in functions:
+                continue
+            visited.add(name)
+            keys, calls = _scan(functions[name])
+            for key in keys:
+                found.setdefault(key, set()).add(f"{module_name.rsplit('.', 1)[-1]}.{name}")
+            pending.extend(calls)
+    return found
+
+
+def test_the_whole_set_clamp_modes_really_pin_their_whole_key_set() -> None:
+    """A key added to a present-keys-only expectation is a NO-OP (F1 leg a).
+
+    Both whole-set modes are driven with an EMPTY admission evidence, which is the
+    strongest form of the question: every owned key must come back pinned, and a
+    key the decision did not carry must come back pinned ABSENT rather than
+    silently dropped.
+    """
+
+    absent = scheduler_candidates_module._REPLAY_CLAMP_ABSENT
+    builders = {
+        "replay_resubmit": scheduler_candidates_module._replay_resubmit_invariant,
+        "replay_manual_retry": scheduler_candidates_module._replay_manual_retry_invariant,
+    }
+    assert set(builders) == set(scheduler_candidates_module._REPLAY_WHOLE_SET_CLAMPED_KEY_SETS)
+    for mode, builder in builders.items():
+        owned = scheduler_candidates_module._REPLAY_WHOLE_SET_CLAMPED_KEY_SETS[mode]
+        expectation = builder(CandidateStateDecision("retry", mode, {}))
+        assert expectation is not None, mode
+        assert expectation.mode == mode
+        assert set(expectation.required) == set(owned), mode
+        assert all(value is absent for value in expectation.required.values()), mode
+
+
+def test_the_clamp_key_sets_close_over_every_restart_semantics_consumer_read() -> None:
+    """Phase 6.2 invariant audit: the pin list itself, checked against the readers.
+
+    Three review rounds broke the SAME invariant (protection-set completeness), the
+    last one because v7's "derive the set from the consumers" rule was executed by
+    hand.  This test re-derives it from the sources every run: a key any named
+    consumer reads must be owned by EVERY whole-set clamp mode, or carry an
+    allowlist entry saying why it cannot clobber restart semantics.  The NEXT key
+    added to one of those consumers turns this red by construction.
+    """
+
+    found = _consumer_state_evidence_keys()
+    # Anti-vacuity: the extractor still sees the keys we know are read.  A rename
+    # that silently emptied the extraction would otherwise make this pass.
+    assert {"restart_stage", "restart_from_stage", "fresh_ingestion", "durable_shud_output_reused"} <= set(
+        found
+    ), sorted(found)
+
+    whole_set_modes = scheduler_candidates_module._REPLAY_WHOLE_SET_CLAMPED_KEY_SETS
+    assert whole_set_modes, "at least one clamp mode must claim whole-set protection"
+    uncovered: dict[str, list[str]] = {}
+    for key, readers in found.items():
+        if key in CLAMP_CONSUMER_KEY_ALLOWLIST:
+            continue
+        missing = [mode for mode, owned in whole_set_modes.items() if key not in owned]
+        if missing:
+            uncovered[key] = sorted(readers)
+    assert uncovered == {}, (
+        "a restart-semantics consumer reads a state-evidence key no whole-set clamp "
+        "mode owns; add it to _REPLAY_RESUBMIT_CLAMPED_KEYS and "
+        "_REPLAY_MANUAL_RETRY_CLAMPED_KEYS, or allowlist it in "
+        f"CLAMP_CONSUMER_KEY_ALLOWLIST with the reason it cannot clobber: {uncovered}"
+    )
+    # The allowlist may not rot into a mute exception list either.
+    assert set(CLAMP_CONSUMER_KEY_ALLOWLIST) <= set(found), sorted(
+        set(CLAMP_CONSUMER_KEY_ALLOWLIST) - set(found)
+    )
+    for key, reason in CLAMP_CONSUMER_KEY_ALLOWLIST.items():
+        assert len(reason) > 40, key
+
+
+#: Every replay-scoped branch inside ``build_candidates``, keyed by its literal
+#: test expression and classified by what it does about the invariant clamp
+#: (round-2 test-quality repair of the former mode-counting audit, which was
+#: structurally blind: it compared a COUNT of ``replay_invariants[...]``
+#: assignments against a COUNT of ``_REPLAY_CLAMP_MODE_*`` constants, so a family
+#: with two admitting paths and one registration balanced out to "covered").
+#:
+#: The unit here is an ADMITTING PATH, not a mode constant.  A new branch that
+#: consults a replay admission name — or a new replay-scoped local — fails this
+#: test by construction, and its author has to declare, per branch, which
+#: expectation builders run under it and whether it registers one.
+#:
+#: value = (invariant builders called in the branch subtree, registers?, note)
+REPLAY_ADMITTING_PATHS: dict[str, tuple[tuple[str, ...], bool, str]] = {
+    "replay_override is not None": (
+        ("_replay_resubmit_invariant",),
+        True,
+        "leg (a): the replay terminal override — registers the replay_resubmit expectation",
+    ),
+    "resubmit_invariant is not None": ((), True, "leg (a) registration guard"),
+    "manual_retry_admission is not None": (
+        (),
+        False,
+        "eligibility STAMP, not an admission: it only marks the candidate in-scope so the "
+        "marker rides through the strict-warm token relabel; nothing is admitted yet, so "
+        "there is nothing to pin",
+    ),
+    "manual_retry_resync_active_leg is not None": (
+        (),
+        False,
+        "F2 re-stamp, first sync block.  Same eligibility STAMP as the main path (plus the "
+        "strict-warm upgrade the main path runs right after it), re-applied because the "
+        "post-sync rebuild REPLACED the decision the main-path stamp was written on.  It "
+        "sits UPSTREAM of the raw-less leg, so it re-opens the ordinary admission path "
+        "rather than admitting anything itself — leg (c) still does the pinning",
+    ),
+    "manual_retry_resync_rebuild_leg is not None": (
+        (),
+        False,
+        "F2 re-stamp, second sync block.  DOWNSTREAM of the canonical gate: it cannot open an "
+        "admission, and it is first-wins on the `admitted` status so it cannot demote one "
+        "either.  STAMP ONLY — it calls `_replay_manual_retry_restamped_decision`, NOT the "
+        "resynced variant, so it never re-runs the strict-warm upgrade over the `convert` "
+        "restart the raw-ready leg set (round-4 delta P1).  Registers nothing — a candidate "
+        "admitted upstream keeps the expectation leg (c) already registered for it",
+    ),
+    "replay_repair_evidence is not None": (
+        ("_replay_repair_convert_invariant",),
+        True,
+        "leg (b): the replay-window authorized repair — registers the convert-restart expectation",
+    ),
+    "repair_invariant is not None": ((), True, "leg (b) registration guard"),
+    "replay_covered": (
+        (),
+        False,
+        "raw-READY leg.  The `replay_resubmit` branch suppresses the restart downgrade and its "
+        "expectation was already registered by leg (a).  Its ELSE branch is the raw-ready "
+        "manual-retry path (marker stays `eligible`, restart lowered to `convert`), which is "
+        "admitted WITHOUT any registered expectation — the known clamp gap, DEFERRED as round-2 "
+        "C3 (#1164) and deliberately NOT fixed in this round.  Recorded here so the gap is "
+        "visible in the audit instead of hiding behind a balanced count.",
+    ),
+    "replay_manual_retry_covered and (not _replay_manual_retry_restart_is_supported(state_decision))": (
+        (),
+        False,
+        "round-2 C1 restart precondition: DECLINES the raw-less admission for a decision whose "
+        "restart stage is absent or earlier than `forecast`, so nothing is admitted and nothing "
+        "is pinned",
+    ),
+    "replay_covered or replay_manual_retry_covered": (
+        ("_replay_manual_retry_invariant",),
+        True,
+        "leg (c): the raw-less substitute admission, shared by both admission keys",
+    ),
+    "substitute_block is not None": ((), False, "fail-closed block: the substitute is absent or not ready"),
+    "replay_manual_retry_covered": (
+        ("_replay_manual_retry_invariant",),
+        True,
+        "leg (c) manual-retry half: flips the marker to `admitted` and registers its expectation",
+    ),
+    "manual_retry_invariant is not None": ((), True, "leg (c) registration guard"),
+    "manual_retry_restart_unsupported is not None": (
+        (),
+        False,
+        "round-2 C1: enriches the kept `nfs_raw_manifest_required` block with the declined marker",
+    ),
+}
+
+
+def _build_candidates_ast() -> ast.FunctionDef:
+    tree = ast.parse(Path(scheduler_candidates_module.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "build_candidates":
+            return node
+    raise AssertionError("build_candidates not found")
+
+
+def _is_replay_helper(name: str) -> bool:
+    return name.startswith("_replay_") or name.startswith("_decision_is_replay")
+
+
+def _replay_scoped_locals(function: ast.FunctionDef) -> set[str]:
+    """Locals bound from a replay admission helper and from no OTHER call.
+
+    A name that is also bound from a non-replay call (``state_decision`` from
+    ``context.candidate_state_decider``, ``candidate`` from
+    ``_candidate_with_state_evidence``) is not a replay-scoped name: branching on
+    it says nothing about a replay admission.  Re-binding to a literal does NOT
+    disqualify a name — the C1 precondition sets ``replay_manual_retry_covered``
+    to ``False`` to decline the admission, and that is precisely a replay-scoped
+    use.
+    """
+
+    replay_bound: set[str] = set()
+    disqualified: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign):
+            continue
+        names: list[str] = []
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, ast.Tuple):
+                names.extend(element.id for element in target.elts if isinstance(element, ast.Name))
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if isinstance(value.func, ast.Name) and _is_replay_helper(value.func.id):
+            replay_bound.update(names)
+        else:
+            disqualified.update(names)
+    return replay_bound - disqualified
+
+
+def _branch_facts(node: ast.If) -> tuple[tuple[str, ...], bool]:
+    """(invariant builders called under this branch, registers an expectation?)."""
+
+    builders: set[str] = set()
+    registers = False
+    for statement in [*node.body, *node.orelse]:
+        for child in ast.walk(statement):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                if child.func.id.endswith("_invariant"):
+                    builders.add(child.func.id)
+            if (
+                isinstance(child, ast.Assign)
+                and any(
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "replay_invariants"
+                    for target in child.targets
+                )
+            ):
+                registers = True
+    return tuple(sorted(builders)), registers
+
+
+def _expectation_builder_modes() -> dict[str, str]:
+    """``_replay_*_invariant`` -> the clamp mode constant it actually returns."""
+
+    tree = ast.parse(Path(scheduler_candidates_module.__file__).read_text(encoding="utf-8"))
+    modes: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.endswith("_invariant"):
+            continue
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "_ReplayInvariantExpectation"
+            ):
+                for keyword in child.keywords:
+                    if keyword.arg == "mode" and isinstance(keyword.value, ast.Name):
+                        modes[node.name] = getattr(scheduler_candidates_module, keyword.value.id)
+    return modes
+
+
+def test_every_replay_admitting_path_is_classified_against_the_clamp() -> None:
+    """P1-2 item 4, reworked: paths are the unit, not mode constants.
+
+    The merge-site audit below classifies POSITIONS; this one classifies
+    ADMITTING PATHS.  ``site #10`` (post-sync rebuild) passed vacuously for the
+    manual-retry family precisely because nothing was registered for it, so the
+    clamp had nothing to enforce — and the previous version of THIS test passed
+    vacuously too, because it only counted assignments against mode constants.
+    """
+
+    function = _build_candidates_ast()
+    scoped = _replay_scoped_locals(function)
+    # The name set itself is pinned: a NEW replay-scoped local (i.e. a new
+    # admission predicate/builder result) changes it and lands here first.
+    assert scoped == {
+        "manual_retry_admission",
+        "manual_retry_invariant",
+        "manual_retry_restart_unsupported",
+        "manual_retry_resync_active_leg",
+        "manual_retry_resync_rebuild_leg",
+        "repair_invariant",
+        "replay_covered",
+        "replay_manual_retry_covered",
+        "replay_override",
+        "replay_repair_evidence",
+        "resubmit_invariant",
+        "substitute_block",
+        "substitute_evidence",
+    }, sorted(scoped)
+
+    found: dict[str, tuple[tuple[str, ...], bool]] = {}
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If):
+            continue
+        test_source = ast.unparse(node.test)
+        mentions = {
+            child.id for child in ast.walk(node.test) if isinstance(child, ast.Name)
+        } & scoped
+        calls_helper = any(
+            isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and _is_replay_helper(child.func.id)
+            for child in ast.walk(node.test)
+        )
+        if not mentions and not calls_helper:
+            continue
+        assert test_source not in found, f"duplicate branch key: {test_source}"
+        found[test_source] = _branch_facts(node)
+
+    assert set(found) == set(REPLAY_ADMITTING_PATHS), (
+        "a replay admitting path appeared or moved without a classification; "
+        f"unclassified={sorted(set(found) - set(REPLAY_ADMITTING_PATHS))} "
+        f"stale={sorted(set(REPLAY_ADMITTING_PATHS) - set(found))}"
+    )
+    for test_source, (builders, registers) in found.items():
+        declared_builders, declared_registers, note = REPLAY_ADMITTING_PATHS[test_source]
+        assert builders == declared_builders, (test_source, builders, declared_builders)
+        assert registers is declared_registers, (test_source, registers, note)
+
+    # Every clamp mode is still produced by a builder some classified path runs:
+    # a fourth mode with no admitting path, or a builder no path ever calls,
+    # fails here.
+    builder_modes = _expectation_builder_modes()
+    reachable = {
+        builder for builders, _registers, _note in REPLAY_ADMITTING_PATHS.values() for builder in builders
+    }
+    assert set(builder_modes) == reachable, (sorted(builder_modes), sorted(reachable))
+    declared_modes = {
+        getattr(scheduler_candidates_module, name)
+        for name in dir(scheduler_candidates_module)
+        if name.startswith("_REPLAY_CLAMP_MODE_")
+    }
+    assert set(builder_modes.values()) == declared_modes == {
+        "replay_resubmit",
+        "replay_repair_convert_restart",
+        "replay_manual_retry",
+    }
 
 
 #: Every ``_merge_state_evidence`` / ``_candidate_with_state_evidence`` call site

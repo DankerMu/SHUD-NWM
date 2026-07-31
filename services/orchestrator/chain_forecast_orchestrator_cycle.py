@@ -15,6 +15,10 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_identity_is_valid,
 )
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
+from services.orchestrator.scheduler_replay import (
+    REPLAY_MANUAL_RETRY_ADMISSION_KEY,
+    REPLAY_MANUAL_RETRY_ADMITTED_STATUS,
+)
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_repair_missing_forcing",
@@ -799,7 +803,11 @@ def _terminal_stage_needs_forced_resubmit(
         state_evidence = basin.get("state_evidence")
         if not isinstance(state_evidence, _chain.Mapping):
             return False
-        if state_evidence.get("decision") not in _FORCE_TERMINAL_RESUBMIT_DECISIONS:
+        if state_evidence.get(
+            "decision"
+        ) not in _FORCE_TERMINAL_RESUBMIT_DECISIONS and not _basin_carries_replay_manual_retry_admission(
+            state_evidence
+        ):
             return False
         restart_stage = _canonical_stage(
             state_evidence.get("restart_stage")
@@ -809,6 +817,43 @@ def _terminal_stage_needs_forced_resubmit(
         if restart_stage is None or _STAGE_ORDER[job_stage] < _STAGE_ORDER[restart_stage]:
             return False
     return True
+
+
+def _basin_carries_replay_manual_retry_admission(state_evidence: _chain.Mapping[str, _chain.Any]) -> bool:
+    """Per-basin exemption from the decision whitelist (#1164 execution defect P1-1).
+
+    ``_terminal_stage_needs_forced_resubmit`` is a CONJUNCTION over the cohort:
+    one basin whose decision token is not whitelisted vetoes the resubmission for
+    every basin beside it.  A replay cycle can legitimately mix ``replay_resubmit``
+    candidates with a manual retry the same replay window admitted, and that
+    manual retry keeps its honest ``manual_retry`` token (never rewritten) — so
+    without this exemption the whole cohort submits nothing and the convergence
+    timeout comes back.
+
+    The exemption is the ``admitted`` STATUS, not the marker's presence and not a
+    token (round-2 C2).  ``scheduler_candidates`` writes this key only for a
+    manual retry inside the replay window and inside the closed model set
+    (``ReplayAdmission.covers``), so the exemption is windowed either way — but
+    ``eligible`` is stamped for EVERY such candidate, including the raw-READY leg
+    candidate that keeps its ``convert`` restart and never passes the raw-less
+    admission.  Exempting that one would force a succeeded forecast to resubmit
+    for a resume-shaped candidate this change never admits.
+
+    DELIBERATE ASYMMETRY: the scheduler-side scope predicate
+    (``scheduler_candidates._decision_is_replay_manual_retry_scoped``) accepts
+    both statuses — it is the producer of the admission and reads the marker
+    before the flip.  Only this consumer narrows to ``admitted``.
+
+    ``manual_retry`` itself deliberately stays OUT of
+    ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``: an out-of-window manual retry must
+    never force a succeeded forecast to resubmit.  The stage-order check below
+    still applies to the exempted basin like any other.
+    """
+
+    marker = state_evidence.get(REPLAY_MANUAL_RETRY_ADMISSION_KEY)
+    if not isinstance(marker, _chain.Mapping):
+        return False
+    return str(marker.get("status") or "") == REPLAY_MANUAL_RETRY_ADMITTED_STATUS
 
 
 def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any]) -> bool:
