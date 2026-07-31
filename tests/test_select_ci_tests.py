@@ -230,3 +230,21 @@ def test_main_writes_json_github_output(tmp_path: Path) -> None:
     output = output_file.read_text(encoding="utf-8")
     assert "count=1\n" in output
     assert 'tests_json=["tests/test_two_node_docker_runtime.py"]\n' in output
+
+
+def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
+    # c4f2a8d4 renamed two scheduler tests but left their node ids pinned in
+    # the selector; every scheduler.py PR then failed collection with
+    # "ERROR: not found". Pinned node ids must track renames.
+    import re
+    from pathlib import Path
+
+    source = Path("scripts/select_ci_tests.py").read_text(encoding="utf-8")
+    node_ids = sorted(set(re.findall(r'"(tests/[^"]+::[^"]+)"', source)))
+    assert node_ids, "expected pinned node ids in the selector"
+    stale = []
+    for node_id in node_ids:
+        test_file, test_name = node_id.split("::", 1)
+        if f"def {test_name}(" not in Path(test_file).read_text(encoding="utf-8"):
+            stale.append(node_id)
+    assert not stale, f"selector pins node ids that no longer exist: {stale}"

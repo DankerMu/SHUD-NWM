@@ -31,8 +31,8 @@ ORCHESTRATOR_MANIFEST_SURFACE_TESTS: tuple[str, ...] = (
     "tests/test_orchestration_chain.py::test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts",
     "tests/test_orchestration_chain.py::test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest",
     "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
-    "tests/test_production_scheduler.py::test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate",
-    "tests/test_production_scheduler.py::test_scheduler_propagates_produced_forcing_identity_to_orchestration",
+    "tests/test_production_scheduler.py::test_scheduler_routes_ready_canonical_candidate_to_slurm_forcing_without_local_producer",
+    "tests/test_production_scheduler.py::test_scheduler_does_not_replace_candidate_identity_from_local_forcing_result",
     "tests/test_production_scheduler.py::test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count",
 )
 
