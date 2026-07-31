@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.slurm_env import is_sensitive_slurm_env_key, reserved_slurm_env_reason
 from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import cli
@@ -72,6 +73,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_preflight import _production_slurm_env
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
@@ -12502,6 +12504,36 @@ def test_slurm_preflight_passes_compute_runtime_env_without_download_adapter_env
         assert submitted_basin["slurm_env"][key] == value
     for key in blocked_download_env:
         assert key not in submitted_basin["slurm_env"]
+
+
+def test_production_slurm_env_passes_shud_timeout_seconds_from_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The SHUD runtime wrapper reads SHUD_TIMEOUT_SECONDS from the job env
+    # (workers/shud_runtime/runtime.py), so operators must be able to raise the
+    # wall-clock limit per deployment (e.g. hhe 7-day forecast needs ~2h).
+    monkeypatch.setenv("SHUD_TIMEOUT_SECONDS", "14400")
+
+    env = _production_slurm_env({})
+
+    assert env["SHUD_TIMEOUT_SECONDS"] == "14400"
+
+
+def test_production_slurm_env_explicit_shud_timeout_seconds_wins_over_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHUD_TIMEOUT_SECONDS", "14400")
+
+    env = _production_slurm_env({"SHUD_TIMEOUT_SECONDS": "7200"})
+
+    assert env["SHUD_TIMEOUT_SECONDS"] == "7200"
+
+
+def test_shud_timeout_seconds_survives_gateway_slurm_env_validation() -> None:
+    # Passthrough is only useful if the gateway-side slurm_env contract lets the
+    # key reach the sbatch export lines.
+    assert reserved_slurm_env_reason("SHUD_TIMEOUT_SECONDS") is None
+    assert is_sensitive_slurm_env_key("SHUD_TIMEOUT_SECONDS") is False
 
 
 def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
