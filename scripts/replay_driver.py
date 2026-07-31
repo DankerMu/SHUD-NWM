@@ -24,14 +24,29 @@ Per cycle, in this order:
    --disable-backfill --submit`` (single-pass semantics; ``--max-passes`` is
    meaningless without ``--continuous`` and is never passed).  The GFS
    2026-07-07T12 cycle switches to the pre-existing repair parameter set.
-4. **Wait**: the cycle is complete only when the journal records a terminal
-   completion job id that was NOT in the pre-pass baseline for every replay
-   model AND the NFS state index holds a successor entry
-   (``valid_time == T + 12h``) whose checksum differs from the one the reset
-   receipt archived.  Neither leg uses a timestamp: production state entries
-   carry ``created_at: null`` and the original run's terminal record survives
-   the reset.  Timeout, an undecidable index, or failure halts the sequence with
-   the interruption recorded; nothing is skipped automatically.
+4. **Wait**: the cycle is complete only when, for every replay model, the NFS
+   state index holds a successor entry (``valid_time == T + 12h``) whose
+   checksum differs from the one the reset receipt archived AND the journal
+   supplies terminal evidence -- either a completion job id that was NOT in the
+   pre-pass baseline (``new_job``) or, for a model whose replaced successor AND
+   terminal attribution a PRIOR pass durably observed, that same replaced
+   successor (``prior_pass``).  The second form exists because the scheduler
+   refuses to resubmit a model whose successor state is already present:
+   demanding a new job id would deadlock every resume after a partially
+   successful cycle.  It is bound to the RESUME RECEIPT, not to the live index:
+   a model is prior-eligible only when the receipt this pass resumes from
+   carries its row AND that row records both halves
+   (``convergence.state_entry_present`` true -- the only per-model discriminator
+   -- together with that pass's ``terminal_evidence``, or the older
+   ``journal_terminal`` on rows that predate it -- or a finished row status), and
+   the successor in the index must still carry the checksum that row recorded.
+   Without ``--resume-from`` there is no prior evidence at all, so re-running an
+   already-replayed cycle dead-ends in ``convergence_timeout`` rather than
+   recording the replay's own output as the pre-image.  Neither leg uses a
+   timestamp: production state entries carry ``created_at: null`` and the
+   original run's terminal record survives the reset.  Timeout, an undecidable
+   index, or failure halts the sequence with the interruption recorded; nothing
+   is skipped automatically.
 5. **Post-capture**: new manifest sha256, new state checksum, ``init_mode`` /
    ``quality`` / ``packaged_ic_checksum``, plus the key-consistency assertion
    over ``river_network_version_id``, the output segment count and the output
@@ -387,6 +402,10 @@ def run_replay(
             model_id: sorted(str(job_id) for job_id in (prior_probe.get(model_id) or []))
             for model_id in config.model_ids
         }
+        resumed_rows = {
+            model_id: resume.prior_row(cycle_time.strftime("%Y%m%d%H"), model_id)
+            for model_id in config.model_ids
+        }
         rows = [
             _pre_capture_row(
                 config,
@@ -394,7 +413,7 @@ def run_replay(
                 model_id,
                 removed_entries=removed_entries,
                 prior_terminal_job_ids=prior_terminal_jobs[model_id],
-                resumed_row=resume.prior_row(cycle_time.strftime("%Y%m%d%H"), model_id),
+                resumed_row=resumed_rows[model_id],
             )
             for model_id in config.model_ids
         ]
@@ -427,6 +446,7 @@ def run_replay(
             cycle_time,
             since=pass_started_at,
             prior_terminal_jobs=prior_terminal_jobs,
+            resumed_rows=resumed_rows,
             removed_entries=removed_entries,
             journal_probe=journal_probe,
             clock=clock,
@@ -435,10 +455,21 @@ def run_replay(
         for row in rows:
             model_id = row["model_id"]
             row["convergence"] = {
+                # ``journal_terminal`` keeps its original meaning: a NEW job id.
+                # How the terminal leg was actually satisfied is
+                # ``terminal_evidence``.
                 "journal_terminal": bool(convergence["new_terminal_jobs"].get(model_id)),
+                "terminal_evidence": convergence["terminal_evidence"].get(model_id),
+                "prior_eligible": model_id in convergence["prior_eligible"],
                 "prior_terminal_job_ids": list(prior_terminal_jobs.get(model_id) or []),
                 "new_terminal_job_ids": list(convergence["new_terminal_jobs"].get(model_id) or []),
                 "state_entry_present": model_id in convergence["state_entries"],
+                # Binds the row's prior evidence to the exact successor it
+                # describes: a later resume accepts ``prior_pass`` only while the
+                # index still holds this checksum (post-capture's
+                # ``new.state_checksum`` records the same value, but a halted row
+                # never reaches post-capture).
+                "successor_checksum": (convergence["state_entries"].get(model_id) or {}).get("checksum"),
                 "state_index_status": convergence["state_index_status"],
                 "waited_seconds": convergence["waited_seconds"],
             }
@@ -813,18 +844,83 @@ def _staging_halt(
     return reason, {"cycle": token, "repair_cycle": repair_cycle, "rows": offenders}
 
 
+#: The two ways a pass can adjudicate the terminal leg; anything else (``None``)
+#: means that pass closed nothing for the model.
+TERMINAL_EVIDENCE_KINDS = frozenset({"new_job", "prior_pass"})
+
+
+def _resumed_row_evidences_replacement(row: Mapping[str, Any] | None) -> bool:
+    """Did a PRIOR pass durably observe BOTH halves for this (cycle, model)?
+
+    Both, conjunctively -- the replaced successor AND terminal attribution --
+    because either alone launders a failure through the resume:
+
+    * ``state_entry_present`` is the only PER-MODEL discriminator (the checksum
+      differed from the reset-archived one for THIS model), but a run can write
+      its state and then die before anything adjudicates it terminal;
+    * terminal attribution is not per-model discriminating on its own: the real
+      attempt-1 rows carry ``journal_terminal: true`` for all six models, the
+      failed one included, because the cohort's completion job carries
+      ``model_id: null`` and is attributed to every requested model.
+
+    Terminal attribution is read from whichever field the writing pass had:
+    ``terminal_evidence`` when the row has it (that pass's own adjudication,
+    which makes ``prior_pass`` transitive down a chain), otherwise the older
+    ``journal_terminal``.  Note ``journal_terminal`` is PASS-RELATIVE: a
+    zero-submission pass writes ``false`` for every row, so its receipt carries
+    no usable prior evidence and a later attempt must resume from the receipt
+    that does (their prior halves are identical -- rows carry verbatim, B4-1).
+    """
+
+    if not row:
+        return False
+    if str(row.get("status") or "") in RESUME_COMPLETED_STATUSES:
+        return True
+    convergence = row.get("convergence") or {}
+    if convergence.get("state_entry_present") is not True:
+        return False
+    if "terminal_evidence" in convergence:
+        return convergence.get("terminal_evidence") in TERMINAL_EVIDENCE_KINDS
+    return convergence.get("journal_terminal") is True
+
+
+def _resumed_successor_checksum(row: Mapping[str, Any] | None) -> str | None:
+    """The successor checksum the prior pass actually saw, when it recorded one."""
+
+    if not row:
+        return None
+    checksum = (row.get("convergence") or {}).get("successor_checksum")
+    return str(checksum) if checksum else None
+
+
+def _successor_identity_holds(recorded: str | None, entry: Mapping[str, Any]) -> bool:
+    """Is the successor still the exact one the prior pass's evidence describes?
+
+    A different checksum means something re-ran and re-published this successor
+    after that observation, so the prior evidence no longer describes what is on
+    disk and only a new terminal job id may close the model.  ``None`` is a row
+    that predates the field: there is nothing to bind against, so its own
+    evidence stands alone.
+    """
+
+    if recorded is None:
+        return True
+    return str(entry.get("checksum") or "") == recorded
+
+
 def _wait_for_convergence(
     config: ReplayDriverConfig,
     cycle_time: datetime,
     *,
     since: datetime,
     prior_terminal_jobs: Mapping[str, Sequence[str]],
+    resumed_rows: Mapping[str, Mapping[str, Any] | None],
     removed_entries: Mapping[tuple[str, str, str], Mapping[str, Any]],
     journal_probe: Callable[[ReplayDriverConfig, datetime], Mapping[str, Sequence[str]]],
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
-    """Wait for a NEW terminal job id plus a REPLACED successor state entry.
+    """Wait for a REPLACED successor state entry plus terminal-job evidence.
 
     Neither leg uses a wall-clock gate: production state-index entries carry
     ``created_at: null`` and the journal's completion record for the original
@@ -833,12 +929,48 @@ def _wait_for_convergence(
     a successor checksum different from the one the reset receipt archived
     (round-1 B-P1-1 / B-P2-7).  An unreadable index is undecidable: it never
     counts as converged and halts with its own typed reason.
+
+    The terminal leg is satisfied two ways, because a cycle that partially
+    succeeded and was then resumed can never satisfy the first one again: the
+    scheduler refuses to resubmit a model whose successor state already exists,
+    so no NEW job id can appear for it and the wait would deadlock forever.
+
+    * ``new_job`` -- a terminal job id absent from this pass's pre-pass baseline;
+    * ``prior_pass`` -- the model is ``prior_eligible``, its successor entry is
+      currently REPLACED (checksum different from the reset-archived one), and
+      that entry is still the exact one the prior pass's evidence describes
+      (:func:`_successor_identity_holds`).
+
+    ``prior_eligible`` is derived ONCE, before the first poll, from the RESUME
+    RECEIPT -- never from the live index, so no observation this pass makes can
+    widen it.  A model qualifies when its resumed row exists, that row evidences
+    a replacement a prior pass durably observed together with terminal
+    attribution (:func:`_resumed_row_evidences_replacement`), and the journal
+    carries a terminal job id for the cycle (attribution; the pre-reset record
+    survives, so this conjunct is weak on its own and is never the deciding one).
+
+    Without ``--resume-from`` -- or for a model the resume receipt does not
+    evidence -- ``prior_eligible`` is empty and the ONLY way to converge is a new
+    terminal job id.  That is deliberate: re-running an already-replayed cycle
+    with no resume chain has no pre-image to record (the run trees were already
+    overwritten), so it must dead-end in ``convergence_timeout`` instead of
+    writing a receipt whose "prior" half is the replay's own output.
     """
 
     successor_valid_time = cycle_time + timedelta(hours=SUCCESSOR_LEAD_HOURS)
     canonical_source = normalize_source_id(config.source_id)
     prior_state_entries = {
         model_id: removed_entries.get((model_id, canonical_source, _format_time(successor_valid_time)))
+        for model_id in config.model_ids
+    }
+    prior_eligible = frozenset(
+        model_id
+        for model_id in config.model_ids
+        if _resumed_row_evidences_replacement(resumed_rows.get(model_id))
+        and (prior_terminal_jobs.get(model_id) or [])
+    )
+    prior_successor_checksums = {
+        model_id: _resumed_successor_checksum(resumed_rows.get(model_id))
         for model_id in config.model_ids
     }
     deadline = since + timedelta(seconds=config.cycle_timeout_seconds)
@@ -870,9 +1002,23 @@ def _wait_for_convergence(
             if state_index_status == PROBE_PRESENT
             else {}
         )
+        terminal_evidence: dict[str, str | None] = {}
+        for model_id in config.model_ids:
+            if new_terminal_jobs[model_id]:
+                terminal_evidence[model_id] = "new_job"
+            elif (
+                model_id in prior_eligible
+                and model_id in state_entries
+                and _successor_identity_holds(
+                    prior_successor_checksums.get(model_id), state_entries[model_id]
+                )
+            ):
+                terminal_evidence[model_id] = "prior_pass"
+            else:
+                terminal_evidence[model_id] = None
         converged = (
             state_index_status == PROBE_PRESENT
-            and all(new_terminal_jobs[model_id] for model_id in config.model_ids)
+            and all(terminal_evidence[model_id] for model_id in config.model_ids)
             and set(state_entries) == set(config.model_ids)
         )
         now = clock()
@@ -881,6 +1027,8 @@ def _wait_for_convergence(
                 "converged": True,
                 "halt_reason": None,
                 "new_terminal_jobs": new_terminal_jobs,
+                "terminal_evidence": terminal_evidence,
+                "prior_eligible": sorted(prior_eligible),
                 "state_entries": state_entries,
                 "state_index_status": state_index_status,
                 "waited_seconds": (now - since).total_seconds(),
@@ -895,6 +1043,8 @@ def _wait_for_convergence(
                     else "convergence_timeout"
                 ),
                 "new_terminal_jobs": new_terminal_jobs,
+                "terminal_evidence": terminal_evidence,
+                "prior_eligible": sorted(prior_eligible),
                 "state_entries": state_entries,
                 "state_index_status": state_index_status,
                 "waited_seconds": (now - since).total_seconds(),
@@ -902,6 +1052,15 @@ def _wait_for_convergence(
                     "journal_terminal": sorted(
                         model_id for model_id, ids in new_terminal_jobs.items() if ids
                     ),
+                    # Disjoint from ``journal_terminal``: these models satisfied
+                    # the terminal leg on an earlier pass's evidence, so a
+                    # timeout receipt shows which half is actually still pending.
+                    "prior_satisfied": sorted(
+                        model_id
+                        for model_id, evidence in terminal_evidence.items()
+                        if evidence == "prior_pass"
+                    ),
+                    "prior_eligible": sorted(prior_eligible),
                     "prior_terminal_job_ids": {
                         model_id: list(ids) for model_id, ids in prior_terminal_jobs.items()
                     },

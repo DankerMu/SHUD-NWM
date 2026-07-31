@@ -307,17 +307,18 @@ design.md D6;live receipt 按 `docs/runbooks/node-27-bringup-checklist.md` C1-C4
 | `forcing_source_absent` | 该 cycle 某模型在 NFS 上没有 forcing 包(非 repair cycle) | 先确认 NFS 挂载与保留期;补齐或把该模型移出本次 scope,再续跑 |
 | `forcing_staging_unverified` | 预 stage 失败或校验不过(`stage_failed` / `verify_failed`) | 看 `interruption.detail.rows[].detail`;修 scratch 空间/权限后续跑。**不要**手工拷文件绕过校验 |
 | `submission_failed` | 该 cycle 的 `plan-production --submit` 非零退出 | 看 pass stdout/journal;修因(Slurm 拒收等)后按下面"续跑" |
-| `convergence_timeout` | 超时内没等到「每模型新终态 job id」+「后继 state checksum 已变」 | 先查 Slurm 队列是否仍在跑;`detail.unreplaced_successors` 指出哪些模型的 state 还是旧值。**不要**盲目加大超时反复重投 |
+| `convergence_timeout` | 超时内没等到每模型收敛。收敛 = 「后继 state checksum 已变」**且**终态腿成立;终态腿 = 「本 pass 新终态 job id」(`terminal_evidence: new_job`)**或**「该模型 prior-eligible 且后继当前已被替换、checksum 与该行记录的一致」(`terminal_evidence: prior_pass`)——即**上一 pass 已持久观测到该模型的后继替换与终态归属**的模型不再要求新 job id(调度器拒绝重投它们,新 job 永远不会出现)。先前证据**与 resume receipt 行绑定**且**两半齐备**:该行须 `convergence.state_entry_present=true`(唯一逐模型可分辨的信号)**且**该行的 `terminal_evidence`(旧格式行则看 `journal_terminal=true`),或该行已是 `completed`/`verified_skip`;只看 receipt、不看活索引,且活索引里该后继的 checksum 必须仍等于行内 `successor_checksum`(变了说明被重发布过,退回要求新 job)。**无 `--resume-from` 即无先前证据腿**——对已回放世界裸重跑必然超时停机(这是防伪造 pre-image 的 fail-safe,不是 bug) | 先查 Slurm 队列是否仍在跑;`detail.unreplaced_successors` 指出哪些模型的 state 还是旧值,`detail.prior_eligible` 指出哪些模型带着先前 pass 证据入场(入场≠过关:checksum 对不上仍会被拒),`detail.prior_satisfied` 指出哪些模型据此过关(与 `detail.journal_terminal` 互斥)。若本该续跑却漏了 `--resume-from`、或续错了那份 receipt(见下),补正再跑,**不要**盲目加大超时反复重投 |
 | `state_index_undeterminable` | NFS 状态索引读不了(不是"没有新条目",是判不了) | 查 NFS 挂载与索引文件完整性;判不了绝不当作未收敛以外的任何结论,修好再续跑 |
 | `first_cycle_bootstrap_assertion_failed` | `--origin-cycle`(070500)行新半不是 bootstrap 形态 | 严重:说明 packaged-IC 契约没生效。停止全序列,回滚该源,查变更 1 契约 |
 | `key_consistency_drift` | 新 run 的 `river_network_version_id` / 输出段数 / 输出文件清单与旧半不一致 | 严重(R3):旧键行不会被 parser 删除条件覆盖,会残留。停止,人工介入;**不要**自动删旧键行 |
-| `receipt_write_failed` | 替换 receipt 写不下去(目录权限 / 空间 / 路径被占) | 停机原因就是"这一轮已经没有可信记录了"。修好写入面后**带 `--resume-from` 上一份可读 receipt** 续跑;stdout 上那份 receipt 先手工存档 |
+| `receipt_write_failed` | 替换 receipt 写不下去(目录权限 / 空间 / 路径被占) | 停机原因就是"这一轮已经没有可信记录了"。**先把 stdout 上那份 receipt 手工存档(必做,不是建议)**:先前证据只存在于 receipt 行里,存档丢了,这些 cycle 的 `prior_pass` 腿就再也无法成立(调度器又拒绝重投它们),该 cycle 从此只能靠人工介入。存档后修好写入面,**带 `--resume-from` 上一份可读 receipt** 续跑 |
 
 续跑时还可能撞上**调度侧**的拒绝(不是驱动器停机原因,出现在 pass stdout 里):
 
 | 现象 | 含义 | 处置 |
 |---|---|---|
 | 候选被 `PIPELINE_ALREADY_ACTIVE` / `active_duplicate_pipeline` 挡下 | 上一次该 cycle 的 pipeline 还被 journal 记为活跃(上次中断时 Slurm 作业没走到终态) | 先查该 cycle 的 `hydro_run.status` 与 journal `pipeline-jobs/`(以及 `squeue`)确认没有真在跑的作业;确属残留活跃态才处理,**不要**直接重投。作业仍在跑就等它到终态再续跑 |
+| 候选被 `missing_forcing_package_uri` 挡下(retry blocker,failed run 的 state 里没有 forcing URI) | 失败 run 的 planned retry 读不到 forcing 包 URI,fail-closed | 用调度器的 exact-cycle repair 逃生门单独解锁该 `(cycle, model)`:设 `NHMS_SCHEDULER_REPAIR_MISSING_FORCING=true` + `NHMS_SCHEDULER_REPAIR_MISSING_FORCING_CYCLE_TIME=<该 cycle ISO-8601 UTC>` 跑一次窄 scope `plan-production --submit`;修复后驱动器续跑靠上面新终态腿的先前证据(`prior_pass`)收敛 |
 
 续跑:
 
@@ -330,8 +331,11 @@ scripts/ops/node22_six_basin_replay.sh ... --resume-from <上次 receipt 路径>
 bootstrap 断言未 violated)、且当前索引中对应 state 在场且 checksum 与 receipt 记录
 一致时才跳过;任一条不成立就重做该 cycle——重做时沿用结转的旧半,断言该停的必再停。
 
-`--resume-from` 必须指向**持有目标 cycle 旧半(pre-image)的那份 receipt**,正常就是
-**上一份**。resume receipt 的每一行都会被原样结转进新 receipt(新 receipt 顶层的
+`--resume-from` 必须指向**持有目标 cycle 旧半(pre-image)且行级收敛证据最强的那份
+receipt**,正常就是**上一份**。零提交的死锁/诊断 pass(其行 `journal_terminal=false`
+且没有 `terminal_evidence` 字段)的 receipt **不携带可用的先前证据**,应改续它的上一份
+——两者旧半逐字相同(B4-1 结转保证),但只有上一份的行记着"我亲眼看到该模型的后继被
+替换且终态归属成立"。resume receipt 的每一行都会被原样结转进新 receipt(新 receipt 顶层的
 `resume_from {path, sha256}` 记录来源),只有**本次 pass 真正跑出**该 (cycle, model)
 行时才替换结转值,所以无论中间那次是"窗口收窄只跑了一段"还是"跑到一半停机",链条
 都不会断;但若跳过中间那份、直接拿更早/更晚的 receipt 续跑,就可能拿不到某些 cycle

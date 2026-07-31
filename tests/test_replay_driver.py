@@ -18,7 +18,12 @@ Covered, one test per required property:
   shape, otherwise the driver halts -- and a resumed mid-window run does not
   mistake its first cycle for the origin;
 * key drift halts the driver;
-* convergence needs a new terminal job id AND a replaced successor checksum;
+* convergence needs a replaced successor checksum AND terminal-job evidence --
+  either a new job id, or a prior pass's own record of the replacement carried in
+  the receipt this pass resumes from (the scheduler refuses to resubmit a model
+  whose state exists, so demanding a new id deadlocks every resume after a
+  partially successful cycle); with no ``--resume-from`` there is no prior
+  evidence at all and an already-replayed world dead-ends in the timeout;
 * the receipt is on disk after every cycle, not only at the end;
 * an unverified staging result halts before submission (repair cycles excepted);
 * resumption never blind-skips: a recorded row is skipped only when the live
@@ -123,8 +128,15 @@ def _manifest(
 class _Site:
     """A throwaway node-22-shaped object store plus the driver's inputs."""
 
-    def __init__(self, tmp_path: Path, *, cycles: Sequence[datetime]) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        cycles: Sequence[datetime],
+        models: Sequence[str] = MODELS,
+    ) -> None:
         self.root = tmp_path
+        self.models = tuple(models)
         self.nfs_root = tmp_path / "nfs"
         self.scratch_root = tmp_path / "scratch"
         self.state_index = tmp_path / "index" / "index-last.json"
@@ -181,7 +193,7 @@ class _Site:
 
     def populate(self, *, manifest_marker: str = "prior") -> None:
         for cycle in self.cycles:
-            for model_id in MODELS:
+            for model_id in self.models:
                 self.write_run(cycle, model_id, _manifest(marker=manifest_marker))
                 self.write_forcing(cycle, model_id)
 
@@ -197,11 +209,22 @@ class _Site:
             },
         )
 
+    def clear_index(self) -> None:
+        """Rewrite a valid, empty index -- an operator repairing an unreadable one."""
+
+        self._write_index([])
+
     def index_entries(self) -> list[dict[str, Any]]:
         payload = json.loads(self.state_index.read_text(encoding="utf-8"))
         return list(payload["entries"])
 
-    def add_state_entries(self, cycle: datetime, *, checksum_prefix: str) -> None:
+    def add_state_entries(
+        self,
+        cycle: datetime,
+        *,
+        checksum_prefix: str,
+        model_ids: Sequence[str] | None = None,
+    ) -> None:
         """Upsert one successor entry per model, production shape.
 
         ``created_at`` is ``None``: the state-index writer never sets it (1753 of
@@ -209,16 +232,17 @@ class _Site:
         may not use a since-gate (round-1 B-P1-1).
         """
 
+        targets = tuple(model_ids) if model_ids is not None else self.models
         valid_time = cycle + timedelta(hours=12)
         entries = [
             entry
             for entry in self.index_entries()
             if not (
-                str(entry.get("model_id")) in MODELS
+                str(entry.get("model_id")) in targets
                 and str(entry.get("valid_time")) == _format_time(valid_time)
             )
         ]
-        for model_id in MODELS:
+        for model_id in targets:
             entries.append(
                 {
                     "model_id": model_id,
@@ -242,7 +266,7 @@ class _Site:
         source: str = SOURCE,
     ) -> None:
         if scopes is None:
-            scopes = [{"model_id": model_id, "source_id": source} for model_id in MODELS]
+            scopes = [{"model_id": model_id, "source_id": source} for model_id in self.models]
         if removed is None:
             removed = [
                 {
@@ -254,7 +278,7 @@ class _Site:
                     "checksum": f"sha256:old-{model_id}-{cycle.strftime('%Y%m%d%H')}",
                 }
                 for cycle in self.cycles
-                for model_id in MODELS
+                for model_id in self.models
             ]
         _write_json(
             self.reset_receipt,
@@ -275,7 +299,7 @@ class _Site:
     def config(self, **overrides: Any) -> ReplayDriverConfig:
         kwargs: dict[str, Any] = {
             "source_id": SOURCE,
-            "model_ids": MODELS,
+            "model_ids": self.models,
             "cycles": self.cycles,
             "nfs_root": self.nfs_root,
             "scratch_root": self.scratch_root,
@@ -363,7 +387,7 @@ class _SubmitRecorder:
         cycle = _cycle_from_argv(argv)
         if self.returncode == 0:
             manifest = dict(self.new_manifest or _manifest(marker="replayed"))
-            for model_id in MODELS:
+            for model_id in self.site.models:
                 self.site.write_run(cycle, model_id, manifest, output_files=self.new_output_files)
             if self.publish_entries:
                 self.site.add_state_entries(cycle, checksum_prefix="new")
@@ -1019,6 +1043,8 @@ def test_convergence_rejects_a_successor_the_reset_receipt_already_recorded(site
     assert receipt["interruption"]["detail"]["journal_terminal"] == sorted(MODELS)
     assert receipt["interruption"]["detail"]["state_entries"] == []
     assert receipt["interruption"]["detail"]["unreplaced_successors"] == sorted(MODELS)
+    # ... and the unchanged checksum keeps them out of the prior-pass leg too
+    assert receipt["interruption"]["detail"]["prior_satisfied"] == []
     assert [entry["created_at"] for entry in site.index_entries()] == [None] * len(MODELS)
     assert all(row["convergence"]["state_entry_present"] is False for row in receipt["rows"])
 
@@ -1045,12 +1071,15 @@ def test_convergence_accepts_a_successor_whose_checksum_differs_from_the_reset_r
 def test_a_pre_existing_terminal_record_alone_does_not_count_as_completion(site: _Site) -> None:
     """B-P2-7: the ORIGINAL run's terminal record survives the state-scope reset.
 
-    The pass publishes the new state entries but never records a new terminal
-    job; the probe still reports the original completion, and the driver must
-    keep waiting rather than declare the cycle done.
+    "The journal holds a completion for this cycle" is therefore true before the
+    replay starts and can never be completion evidence on its own -- not even
+    now that the terminal leg accepts prior-pass evidence, because that leg also
+    demands a REPLACED successor.  Here the index still carries exactly the
+    checksum the reset receipt archived, so the driver must keep waiting.
     """
 
-    submit = _SubmitRecorder(site, publish_terminal=False)
+    site.add_state_entries(CYCLE_1, checksum_prefix="old")
+    submit = _SubmitRecorder(site, publish_entries=False, publish_terminal=False)
 
     with pytest.raises(ReplayHalted) as excinfo:
         run_replay(
@@ -1065,6 +1094,8 @@ def test_a_pre_existing_terminal_record_alone_does_not_count_as_completion(site:
     jsonschema.validate(receipt, _SCHEMA)
     assert receipt["interruption"]["reason"] == "convergence_timeout"
     assert receipt["interruption"]["detail"]["journal_terminal"] == []
+    assert receipt["interruption"]["detail"]["prior_satisfied"] == []
+    assert receipt["interruption"]["detail"]["unreplaced_successors"] == sorted(MODELS)
     assert receipt["interruption"]["detail"]["prior_terminal_job_ids"] == {
         model_id: [f"job-original-{CYCLE_1.strftime('%Y%m%d%H')}"] for model_id in MODELS
     }
@@ -1072,6 +1103,8 @@ def test_a_pre_existing_terminal_record_alone_does_not_count_as_completion(site:
         assert row["prior"]["terminal_job_ids"] == [f"job-original-{CYCLE_1.strftime('%Y%m%d%H')}"]
         assert row["convergence"]["journal_terminal"] is False
         assert row["convergence"]["new_terminal_job_ids"] == []
+        assert row["convergence"]["terminal_evidence"] is None
+        assert row["convergence"]["state_entry_present"] is False
 
 
 def test_an_unreadable_state_index_halts_with_its_own_typed_reason(site: _Site) -> None:
@@ -1097,15 +1130,21 @@ def test_an_unreadable_state_index_halts_with_its_own_typed_reason(site: _Site) 
 
 
 def test_a_non_terminal_journal_halts_even_when_the_index_is_fresh(site: _Site) -> None:
+    """A fresh successor without ANY journal attribution is not completion.
+
+    The second model's cycle has no terminal record at all -- neither this
+    pass's nor an earlier one's -- so neither leg of the terminal predicate can
+    fire and the fresh index alone must not close the cycle.
+    """
+
     submit = _SubmitRecorder(site)
 
     def _one_model_pending(config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
         token = cycle_time.strftime("%Y%m%d%H")
-        original = [f"job-original-{token}"]
-        # only the first model records a new terminal job after the submission
+        # only the first model records a terminal job, and only after submission
         return {
-            MODELS[0]: original + ([f"job-replay-{token}"] if submit.calls else []),
-            MODELS[1]: list(original),
+            MODELS[0]: [f"job-original-{token}"] + ([f"job-replay-{token}"] if submit.calls else []),
+            MODELS[1]: [],
         }
 
     with pytest.raises(ReplayHalted) as excinfo:
@@ -1117,7 +1156,600 @@ def test_a_non_terminal_journal_halts_even_when_the_index_is_fresh(site: _Site) 
             sleep=lambda _seconds: None,
         )
 
-    assert excinfo.value.receipt["interruption"]["reason"] == "convergence_timeout"
+    receipt = excinfo.value.receipt
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert receipt["interruption"]["detail"]["prior_satisfied"] == []
+    evidence = {row["model_id"]: row["convergence"]["terminal_evidence"] for row in receipt["rows"]}
+    assert evidence == {MODELS[0]: "new_job", MODELS[1]: None}
+
+
+# ---------------------------------------------------------------------------
+# convergence on a resume chain's prior evidence
+# ---------------------------------------------------------------------------
+
+
+SIX_MODELS = ("dg_alpha", "dg_beta", "dg_gamma", "dg_delta", "dg_epsilon", "dg_zeta")
+
+
+def _six_model_site(tmp_path: Path) -> _Site:
+    fixture = _Site(tmp_path, cycles=(CYCLE_1,), models=SIX_MODELS)
+    fixture.populate()
+    return fixture
+
+
+class _CampaignJournal:
+    """One journal for the whole campaign: never reset, never rewound.
+
+    Every model starts with the ORIGINAL run's terminal record -- it survived the
+    state-scope reset -- and each attempt appends what its cohort earns, so
+    attempt 2's pre-pass baseline contains attempt 1's completions.
+    """
+
+    def __init__(self, site: _Site) -> None:
+        self.token = CYCLE_1.strftime("%Y%m%d%H")
+        self.terminal: dict[str, list[str]] = {
+            model_id: [f"job-original-{self.token}"] for model_id in site.models
+        }
+
+    def record_cohort(self, model_ids: Sequence[str], attempt: str) -> None:
+        """Attribute ONE cohort completion job to every requested model.
+
+        The real record carries ``model_id: null`` and is attributed to the whole
+        cohort, which is why a terminal job id says nothing about which model
+        actually produced state (the failed model gets it too).
+        """
+
+        for model_id in model_ids:
+            self.terminal[model_id].append(f"job-{attempt}-cohort-{self.token}")
+
+    def record(self, model_id: str, attempt: str) -> None:
+        self.terminal[model_id].append(f"job-{attempt}-{self.token}-{model_id}")
+
+    def __call__(self, config: ReplayDriverConfig, cycle_time: datetime) -> dict[str, list[str]]:
+        return {model_id: list(self.terminal.get(model_id) or []) for model_id in config.model_ids}
+
+
+class _AttemptOne:
+    """Attempt 1: ``replayed`` models publish a successor, the rest produce nothing.
+
+    The cohort's completion job is attributed to EVERY model of the pass, the
+    failed one included -- that is the production shape and the reason
+    ``journal_terminal`` alone can never be the per-model discriminator.
+    """
+
+    def __init__(
+        self,
+        site: _Site,
+        journal: _CampaignJournal,
+        *,
+        replayed: Sequence[str],
+        record_terminal: bool = True,
+        manifest: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.site = site
+        self.journal = journal
+        self.replayed = tuple(replayed)
+        self.record_terminal = record_terminal
+        self.manifest = dict(manifest or _manifest(marker="replayed"))
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        self.calls.append((list(argv), dict(env)))
+        cycle = _cycle_from_argv(argv)
+        for model_id in self.replayed:
+            self.site.write_run(cycle, model_id, self.manifest)
+        if self.replayed:
+            self.site.add_state_entries(cycle, checksum_prefix="new", model_ids=self.replayed)
+        if self.record_terminal:
+            self.journal.record_cohort(self.site.models, "attempt1")
+        return {"returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+
+def _run_attempt_one(
+    site: _Site,
+    journal: _CampaignJournal,
+    *,
+    replayed: Sequence[str],
+    record_terminal: bool = True,
+    manifest: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Run attempt 1 and return its receipt plus the halt reason, if any."""
+
+    submit = _AttemptOne(
+        site, journal, replayed=replayed, record_terminal=record_terminal, manifest=manifest
+    )
+    try:
+        receipt = run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0),
+            submit_pass=submit,
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+    except ReplayHalted as error:
+        return error.receipt, str(error.receipt["interruption"]["reason"])
+    return receipt, None
+
+
+def _attempt_one_receipt(
+    site: _Site,
+    journal: _CampaignJournal,
+    *,
+    replayed: Sequence[str],
+    record_terminal: bool = True,
+    manifest: Mapping[str, Any] | None = None,
+    expect_halt: str | None = "convergence_timeout",
+) -> Path:
+    """Run attempt 1 and archive the receipt attempt 2 will resume from."""
+
+    receipt, reason = _run_attempt_one(
+        site, journal, replayed=replayed, record_terminal=record_terminal, manifest=manifest
+    )
+    assert reason == expect_halt
+    resume_from = site.root / "attempt-1-receipt.json"
+    _write_json(resume_from, receipt)
+    return resume_from
+
+
+class _AttemptTwo:
+    """Attempt 2: the scheduler refuses the finished models, ``pending`` runs.
+
+    The submission itself publishes nothing -- a real pass returns as soon as the
+    jobs are queued -- and the pending models reach terminal during the wait.
+    """
+
+    def __init__(self, site: _Site, journal: _CampaignJournal, *, pending: Sequence[str] = ()) -> None:
+        self.site = site
+        self.journal = journal
+        self.pending = tuple(pending)
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+        self.calls.append((list(argv), dict(env)))
+        return {"returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    def sleep(self, _seconds: float) -> None:
+        for model_id in self.pending:
+            self.site.write_run(CYCLE_1, model_id, _manifest(marker="replayed"))
+            self.journal.record(model_id, "attempt2")
+        if self.pending:
+            self.site.add_state_entries(CYCLE_1, checksum_prefix="new", model_ids=self.pending)
+
+
+def _no_sleep(_seconds: float) -> None:
+    raise AssertionError("an already-converged cycle must not wait")
+
+
+def _rows_by_model(path: Path) -> dict[str, dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {row["model_id"]: row for row in payload["rows"]}
+
+
+def _strip_post_fix_convergence_fields(path: Path) -> dict[str, dict[str, Any]]:
+    """Rewrite a receipt into the shape the pre-fix driver wrote.
+
+    The campaign's real receipts have no ``terminal_evidence`` / ``prior_eligible``
+    / ``successor_checksum``: those rows must still be judged, on the fields they
+    do carry.
+    """
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for row in payload["rows"]:
+        convergence = row.get("convergence") or {}
+        for field in ("terminal_evidence", "prior_eligible", "successor_checksum"):
+            convergence.pop(field, None)
+    _write_json(path, payload)
+    return {row["model_id"]: row for row in payload["rows"]}
+
+
+def test_resume_converges_on_prior_pass_evidence_for_the_models_already_done(tmp_path: Path) -> None:
+    """The mid-cycle partial failure the campaign actually hit.
+
+    Attempt 1 finished 5 of 6 models and halted on the 6th (OOM); attempt 2 may
+    not demand a NEW terminal job id for the 5 -- the scheduler refuses to
+    resubmit them, so no new id can ever appear and the wait would deadlock.
+    Attempt 1's rows record both halves for those 5, and that is the evidence
+    attempt 2 converges on.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=SIX_MODELS[:5])
+    world = _AttemptTwo(site, journal, pending=SIX_MODELS[5:])
+
+    receipt = run_replay(
+        site.config(execute=True, cycle_timeout_seconds=600, resume_from=resume_from),
+        submit_pass=world,
+        journal_probe=journal,
+        clock=_Clock(),
+        sleep=world.sleep,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    assert {row["status"] for row in receipt["rows"]} == {"completed"}
+    evidence = {row["model_id"]: row["convergence"]["terminal_evidence"] for row in receipt["rows"]}
+    assert evidence == {
+        **{model_id: "prior_pass" for model_id in SIX_MODELS[:5]},
+        SIX_MODELS[5]: "new_job",
+    }
+    for row in receipt["rows"]:
+        prior_done = row["model_id"] in SIX_MODELS[:5]
+        # the 6th model's attempt-1 row records no replacement, so it is not
+        # prior-eligible and converges on its NEW job id alone
+        assert row["convergence"]["prior_eligible"] is prior_done
+        assert row["convergence"]["journal_terminal"] is not prior_done
+        assert bool(row["convergence"]["new_terminal_job_ids"]) is not prior_done
+        assert row["convergence"]["state_entry_present"] is True
+        assert row["convergence"]["successor_checksum"] == row["new"]["state_checksum"]
+        assert row["prior"]["prior_source"] == "resumed_receipt"
+
+
+def test_a_fully_prior_evidenced_cycle_converges_without_any_new_job(tmp_path: Path) -> None:
+    """Attempt 1 converged the whole cycle, then halted on the drift assertion.
+
+    Attempt 2 is refused for every model -- their state exists -- so no new job
+    id can appear at all; attempt 1's rows are the whole terminal leg and the
+    wait closes on its first poll, before the drift assertion re-fires against
+    the original pre-image.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(
+        site,
+        journal,
+        replayed=SIX_MODELS,
+        manifest=_manifest(marker="replayed", river_network_version_id="rn-2026b"),
+        expect_halt="key_consistency_drift",
+    )
+    assert all(
+        row["convergence"]["terminal_evidence"] == "new_job"
+        for row in _rows_by_model(resume_from).values()
+    )
+    world = _AttemptTwo(site, journal)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=600, resume_from=resume_from),
+            submit_pass=world,
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=_no_sleep,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    # the WAIT converged on prior evidence alone; the halt is the re-fired drift
+    assert receipt["interruption"]["reason"] == "key_consistency_drift"
+    for row in receipt["rows"]:
+        assert row["convergence"]["terminal_evidence"] == "prior_pass"
+        assert row["convergence"]["prior_eligible"] is True
+        assert row["convergence"]["journal_terminal"] is False
+        assert row["convergence"]["new_terminal_job_ids"] == []
+        assert row["convergence"]["state_entry_present"] is True
+
+
+def test_a_rerun_without_resume_from_never_converges_on_prior_evidence(tmp_path: Path) -> None:
+    """Re-running an already-replayed cycle with no resume chain must dead-end.
+
+    There is no pre-image left on disk -- the run trees were overwritten -- so a
+    pass that "converged" here would record its own output as the prior half.
+    Prior evidence lives in the resume receipt, and without ``--resume-from``
+    there is none: the misoperation halts instead of fabricating a receipt.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    completed, reason = _run_attempt_one(site, journal, replayed=SIX_MODELS)
+    assert reason is None and completed["outcome"] == "completed"
+    world = _AttemptTwo(site, journal)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0),
+            submit_pass=world,
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=world.sleep,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    detail = receipt["interruption"]["detail"]
+    assert receipt["outcome"] == "halted"
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert receipt.get("resume_from") is None
+    # every successor IS replaced -- and none of it counts without a resume chain
+    assert detail["state_entries"] == sorted(SIX_MODELS)
+    assert detail["prior_eligible"] == []
+    assert detail["prior_satisfied"] == []
+    for row in receipt["rows"]:
+        assert row["convergence"]["terminal_evidence"] is None
+        assert row["convergence"]["prior_eligible"] is False
+
+
+def test_a_resumed_row_that_recorded_no_replacement_is_not_prior_evidence(tmp_path: Path) -> None:
+    """The failed model's own shape: cohort terminal job, no successor.
+
+    Its attempt-1 row carries ``journal_terminal: true`` exactly like the five
+    that succeeded -- the cohort job is attributed to every model -- and only
+    ``state_entry_present: false`` tells them apart.  It must stay outside the
+    prior-eligible set and keep the cycle waiting.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=SIX_MODELS[:5])
+    failed_row = _rows_by_model(resume_from)[SIX_MODELS[5]]
+    assert failed_row["convergence"]["journal_terminal"] is True
+    assert failed_row["convergence"]["state_entry_present"] is False
+    assert failed_row["convergence"]["successor_checksum"] is None
+    world = _AttemptTwo(site, journal)
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0, resume_from=resume_from),
+            submit_pass=world,
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=world.sleep,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    detail = receipt["interruption"]["detail"]
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert detail["prior_eligible"] == sorted(SIX_MODELS[:5])
+    assert detail["prior_satisfied"] == sorted(SIX_MODELS[:5])
+    assert SIX_MODELS[5] not in detail["prior_eligible"]
+    assert detail["journal_terminal"] == []
+    evidence = {row["model_id"]: row["convergence"]["terminal_evidence"] for row in receipt["rows"]}
+    assert evidence[SIX_MODELS[5]] is None
+    assert set(evidence[model_id] for model_id in SIX_MODELS[:5]) == {"prior_pass"}
+
+
+def test_a_successor_replaced_mid_wait_still_needs_a_new_terminal_job(tmp_path: Path) -> None:
+    """A replacement THIS pass produced is not prior evidence.
+
+    Attempt 1 published nothing, so its receipt evidences nothing.  The
+    successors that appear during attempt 2's wait are attempt 2's own runs
+    writing their state -- those runs may still fail afterwards -- so they close
+    the cycle only once their terminal job ids land.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=())
+
+    def _publish_state_during_the_wait(_seconds: float) -> None:
+        site.add_state_entries(CYCLE_1, checksum_prefix="new")
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=3, resume_from=resume_from),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=_publish_state_during_the_wait,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    detail = receipt["interruption"]["detail"]
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    # the successors ARE replaced by now -- and still not completion evidence
+    assert detail["state_entries"] == sorted(SIX_MODELS)
+    assert detail["prior_eligible"] == []
+    assert detail["prior_satisfied"] == []
+    assert detail["journal_terminal"] == []
+    for row in receipt["rows"]:
+        assert row["convergence"]["prior_eligible"] is False
+        assert row["convergence"]["terminal_evidence"] is None
+        assert row["convergence"]["state_entry_present"] is True
+
+
+def test_an_undeterminable_first_poll_does_not_admit_this_passs_own_successors(tmp_path: Path) -> None:
+    """An unreadable index at the first poll may not launder this pass's state.
+
+    The index is repaired mid-wait and then holds successors THIS pass wrote,
+    with no new terminal job id and nothing in the resume receipt to evidence
+    them; the cycle must still time out.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=())
+    site.state_index.write_text("{not json", encoding="utf-8")
+
+    def _repair_index_during_the_wait(_seconds: float) -> None:
+        if not site.state_index.read_text(encoding="utf-8").startswith("{not json"):
+            return
+        site.clear_index()
+        site.add_state_entries(CYCLE_1, checksum_prefix="new")
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=3, resume_from=resume_from),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=_repair_index_during_the_wait,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    detail = receipt["interruption"]["detail"]
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert detail["state_index_status"] == "present"
+    assert detail["state_entries"] == sorted(SIX_MODELS)
+    assert detail["prior_eligible"] == []
+    for row in receipt["rows"]:
+        assert row["convergence"]["terminal_evidence"] is None
+
+
+def test_a_pre_fix_attempt_one_row_still_evidences_the_replacement(tmp_path: Path) -> None:
+    """The campaign's real attempt-1 receipt predates ``terminal_evidence``.
+
+    Its rows carry ``state_entry_present`` and ``journal_terminal`` and nothing
+    else about the terminal leg, so both halves are read off those older fields:
+    a resume from the receipt the operator actually holds must converge.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=SIX_MODELS[:5])
+    stripped = _strip_post_fix_convergence_fields(resume_from)
+    assert all("terminal_evidence" not in row["convergence"] for row in stripped.values())
+    assert stripped[SIX_MODELS[0]]["convergence"]["journal_terminal"] is True
+    assert stripped[SIX_MODELS[0]]["convergence"]["state_entry_present"] is True
+    world = _AttemptTwo(site, journal, pending=SIX_MODELS[5:])
+
+    receipt = run_replay(
+        site.config(execute=True, cycle_timeout_seconds=600, resume_from=resume_from),
+        submit_pass=world,
+        journal_probe=journal,
+        clock=_Clock(),
+        sleep=world.sleep,
+    )
+
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["outcome"] == "completed"
+    evidence = {row["model_id"]: row["convergence"]["terminal_evidence"] for row in receipt["rows"]}
+    assert set(evidence[model_id] for model_id in SIX_MODELS[:5]) == {"prior_pass"}
+    assert evidence[SIX_MODELS[5]] == "new_job"
+
+
+def test_a_pre_fix_zero_submission_receipt_carries_no_prior_evidence(tmp_path: Path) -> None:
+    """A deadlocked diagnostic pass evidenced nothing, and its receipt says so.
+
+    ``journal_terminal`` is PASS-RELATIVE: the zero-submission attempt 2 wrote
+    ``false`` for every model even though five of them had state.  Resuming from
+    that receipt must NOT admit them -- the operator has to resume from attempt
+    1's receipt instead, whose prior halves are identical (rows carry verbatim).
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    attempt_one = _attempt_one_receipt(site, journal, replayed=SIX_MODELS[:5])
+    attempt_two = site.root / "attempt-2-receipt.json"
+    with pytest.raises(ReplayHalted) as halted:
+        run_replay(
+            site.config(
+                execute=True,
+                cycle_timeout_seconds=0,
+                resume_from=attempt_one,
+                receipt_path=site.root / "attempt-2-live.json",
+            ),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+    _write_json(attempt_two, halted.value.receipt)
+    stripped = _strip_post_fix_convergence_fields(attempt_two)
+    assert stripped[SIX_MODELS[0]]["convergence"]["journal_terminal"] is False
+    assert stripped[SIX_MODELS[0]]["convergence"]["state_entry_present"] is True
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0, resume_from=attempt_two),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert receipt["interruption"]["detail"]["prior_eligible"] == []
+    assert all(row["convergence"]["terminal_evidence"] is None for row in receipt["rows"])
+
+
+def test_a_row_whose_pass_adjudicated_no_terminal_evidence_is_not_prior_evidence(
+    tmp_path: Path,
+) -> None:
+    """A post-fix row that saw state but closed nothing is not evidence either.
+
+    ``terminal_evidence: null`` beside ``state_entry_present: true`` is exactly
+    the "state was written, nothing adjudicated it terminal" shape; the field is
+    present, so it -- not ``journal_terminal`` -- is what the next resume reads.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    first = _attempt_one_receipt(site, journal, replayed=())
+    site.add_state_entries(CYCLE_1, checksum_prefix="new")
+    second = site.root / "attempt-2-receipt.json"
+    with pytest.raises(ReplayHalted) as halted:
+        run_replay(
+            site.config(
+                execute=True,
+                cycle_timeout_seconds=0,
+                resume_from=first,
+                receipt_path=site.root / "attempt-2-live.json",
+            ),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+    _write_json(second, halted.value.receipt)
+    rows = _rows_by_model(second)
+    assert rows[SIX_MODELS[0]]["convergence"]["state_entry_present"] is True
+    assert rows[SIX_MODELS[0]]["convergence"]["terminal_evidence"] is None
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0, resume_from=second),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    assert receipt["interruption"]["detail"]["prior_eligible"] == []
+
+
+def test_a_successor_checksum_that_no_longer_matches_is_not_accepted(tmp_path: Path) -> None:
+    """Prior evidence describes ONE successor; a different one needs a new job.
+
+    The index still holds a replaced successor for all five models, but not the
+    one attempt 1 saw -- something re-published it -- so the rows stay eligible
+    and are still refused.
+    """
+
+    site = _six_model_site(tmp_path)
+    journal = _CampaignJournal(site)
+    resume_from = _attempt_one_receipt(site, journal, replayed=SIX_MODELS[:5])
+    recorded = _rows_by_model(resume_from)[SIX_MODELS[0]]["convergence"]["successor_checksum"]
+    site.add_state_entries(CYCLE_1, checksum_prefix="renewed", model_ids=SIX_MODELS[:5])
+    assert site.index_entries()[0]["checksum"] != recorded
+
+    with pytest.raises(ReplayHalted) as excinfo:
+        run_replay(
+            site.config(execute=True, cycle_timeout_seconds=0, resume_from=resume_from),
+            submit_pass=_AttemptTwo(site, journal),
+            journal_probe=journal,
+            clock=_Clock(),
+            sleep=lambda _seconds: None,
+        )
+
+    receipt = excinfo.value.receipt
+    jsonschema.validate(receipt, _SCHEMA)
+    detail = receipt["interruption"]["detail"]
+    assert receipt["interruption"]["reason"] == "convergence_timeout"
+    # eligible by receipt, refused by identity: the split is visible in the row
+    assert detail["prior_eligible"] == sorted(SIX_MODELS[:5])
+    assert detail["prior_satisfied"] == []
+    assert detail["state_entries"] == sorted(SIX_MODELS[:5])
+    for row in receipt["rows"]:
+        assert row["convergence"]["terminal_evidence"] is None
+        assert row["convergence"]["prior_eligible"] is (row["model_id"] in SIX_MODELS[:5])
 
 
 # ---------------------------------------------------------------------------

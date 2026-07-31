@@ -285,6 +285,19 @@
                   "type": "boolean",
                   "description": "True only when a terminal completion job id appeared that was absent from the pre-pass baseline."
                 },
+                "terminal_evidence": {
+                  "type": ["string", "null"],
+                  "enum": ["new_job", "prior_pass", null],
+                  "description": "How the terminal leg was satisfied: new_job = a completion job id absent from the pre-pass baseline; prior_pass = a currently replaced successor checksum on a prior-eligible model, i.e. one the resume receipt shows an earlier pass already replayed (the scheduler refuses to resubmit such a model, so no new id can appear); null = unsatisfied. Absent on rows carried over from a receipt written before this field existed."
+                },
+                "prior_eligible": {
+                  "type": "boolean",
+                  "description": "True when the receipt this pass resumed from carries a row for this (cycle, model) whose prior pass durably observed BOTH the replaced successor (convergence.state_entry_present true) AND terminal attribution (that row's terminal_evidence, or journal_terminal on rows predating it) — or a completed/verified_skip status — and the journal carries a terminal job id for the cycle. Derived from the resume receipt alone, never from the live index, so nothing this pass observes can widen it: with no --resume-from it is false for every row and only a new terminal job id can converge the cycle. Eligibility is necessary but not sufficient: acceptance also requires the live successor to still carry the checksum that row recorded. Absent on rows carried over from a receipt written before this field existed."
+                },
+                "successor_checksum": {
+                  "type": ["string", "null"],
+                  "description": "The successor state entry's checksum as observed at the deciding poll, or null when the model had no replaced successor then. Binds this row's prior evidence to the exact successor it describes: a later resume accepts prior_pass only while the index still holds this checksum, since a different one means something re-published that successor after this observation. Absent on rows carried over from a receipt written before this field existed, which skip the check."
+                },
                 "prior_terminal_job_ids": { "type": "array", "items": { "type": "string" } },
                 "new_terminal_job_ids": { "type": "array", "items": { "type": "string" } },
                 "state_entry_present": {
