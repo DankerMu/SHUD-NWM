@@ -30,6 +30,7 @@ from services.orchestrator import scheduler_evidence_payload as scheduler_eviden
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
+from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator import source_cycle_raw_manifest as source_cycle_raw_manifest_module
@@ -554,6 +555,33 @@ def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
         with monkeypatch.context() as patch_context:
             patch_context.setattr(scheduler_module, name, patched)
             assert scheduler_lease_module._scheduler_compat_function(name, fallback) is patched
+
+
+_PREFLIGHT_OWNED_CONSTANT_NAMES = (
+    "DATABASE_HOST_ALLOWED_RE",
+    "LOCALHOST_NAMES",
+    "MAX_SLURM_ENV_VALUE_LENGTH",
+    "PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS",
+    "SAFE_SLURM_ENV_KEY_RE",
+    "SAFE_SLURM_ENV_VALUE_RE",
+    "SHELL_META_RE",
+    "SLURM_ARRAY_STAGE_NAMES",
+)
+
+
+def test_slurm_preflight_constants_have_a_single_owner_module() -> None:
+    """`scheduler.py` carried verbatim copies of these preflight constants, so a
+    whitelist fix had to be applied twice. Keep the owner module the only definition."""
+    for name in _PREFLIGHT_OWNED_CONSTANT_NAMES:
+        assert hasattr(scheduler_preflight_module, name), (
+            f"{name} must stay defined in services.orchestrator.scheduler_preflight"
+        )
+        assert not hasattr(scheduler_module, name), (
+            f"{name} must not be redefined on the services.orchestrator.scheduler facade; "
+            "import it from services.orchestrator.scheduler_preflight instead"
+        )
+        with pytest.raises(AttributeError):
+            getattr(scheduler_module, name)
 
 
 def test_scheduler_discovery_compat_aliases_match_owner_module_and_inventory() -> None:

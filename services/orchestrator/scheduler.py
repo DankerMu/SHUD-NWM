@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -310,7 +309,6 @@ MAX_REGISTRY_PAGES = 20
 MAX_EVIDENCE_BYTES = _scheduler_evidence.MAX_EVIDENCE_BYTES
 MAX_CONTINUOUS_JSON_PASSES = 100
 MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
-MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
 # Cap a post-connect query hang in restart reconcile (mirrors
 # VALIDATION_STATEMENT_TIMEOUT_MS): a reachable-but-slow DB must not stall the
@@ -322,33 +320,13 @@ MODEL_RUN_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.MODEL_RUN_EVIDENCE_SCHEM
 SCHEDULER_EVIDENCE_CONTRACT_ID = _scheduler_evidence.SCHEDULER_EVIDENCE_CONTRACT_ID
 SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = _scheduler_evidence.SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE
 SCHEDULER_EVIDENCE_GITHUB_ISSUE = _scheduler_evidence.SCHEDULER_EVIDENCE_GITHUB_ISSUE
-SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc"}
-SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
-SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
-SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
-PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS = (
-    "GFS_FORECAST_START_HOUR",
-    "GFS_FORECAST_END_HOUR",
-    "GFS_FORECAST_STEP_HOURS",
-    "GFS_FORECAST_RESOLUTION_SEGMENTS",
-    "IFS_FORECAST_START_HOUR",
-    "IFS_FORECAST_END_HOUR",
-    "IFS_FORECAST_STEP_HOURS",
-    "IFS_FORECAST_RESOLUTION_SEGMENTS",
-    "NHMS_GRIB_ENV_ROOT",
-    "NHMS_GRIB_SYSTEM_ECCODES",
-)
-LOCALHOST_NAMES = {
-    "localhost",
-    "localhost.localdomain",
-    "ip6-localhost",
-    "ip6-loopback",
-    "127.0.0.1",
-    "::1",
-    "0.0.0.0",
-    "::",
-}
-DATABASE_HOST_ALLOWED_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+# Slurm env / preflight validation constants (SLURM_ARRAY_STAGE_NAMES,
+# SAFE_SLURM_ENV_KEY_RE, SAFE_SLURM_ENV_VALUE_RE, SHELL_META_RE,
+# MAX_SLURM_ENV_VALUE_LENGTH, PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS,
+# LOCALHOST_NAMES, DATABASE_HOST_ALLOWED_RE) are owned solely by
+# services.orchestrator.scheduler_preflight. This facade used to carry verbatim
+# copies that nothing imported, so a whitelist fix had to be applied twice;
+# import them from the owner module instead of re-adding literals here.
 SLURM_RESOURCE_PROFILE_DIRECTIVE_FIELDS = {
     "partition",
     "account",
