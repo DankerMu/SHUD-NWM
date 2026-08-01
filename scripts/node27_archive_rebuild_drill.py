@@ -70,6 +70,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,10 @@ CODE_STAGING_COUNT_MISMATCH = "STAGING_COUNT_MISMATCH"
 # Wire codes added post-review (Round 1 fix pass — B1/C2):
 CODE_DRILL_UNCAUGHT_ERROR = "DRILL_UNCAUGHT_ERROR"
 CODE_DRILL_CONCURRENT_INVOCATION = "DRILL_CONCURRENT_INVOCATION"
+# Wire code added for #1177 (receipt-derived salvage input): the derived
+# manifest set disagrees with what is on disk (absent/unreadable manifest,
+# stale selector window, or the derived-set byte bound tripping mid-run).
+CODE_SALVAGE_DERIVATION_FAILED = "SALVAGE_DERIVATION_FAILED"
 
 WIRE_CODES: frozenset[str] = frozenset(
     {
@@ -108,6 +113,7 @@ WIRE_CODES: frozenset[str] = frozenset(
         CODE_STAGING_COUNT_MISMATCH,
         CODE_DRILL_UNCAUGHT_ERROR,
         CODE_DRILL_CONCURRENT_INVOCATION,
+        CODE_SALVAGE_DERIVATION_FAILED,
     }
 )
 
@@ -115,6 +121,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 _DRILL_RECEIPT_SCHEMA_PATH = _ROOT / "schemas/archive_rebuild_drill_receipt.schema.json"
 _PRODUCT_MANIFEST_SCHEMA_PATH = _ROOT / "schemas/product_archive_manifest.schema.json"
 _SALVAGE_MANIFEST_SCHEMA_PATH = _ROOT / "schemas/salvage_manifest.schema.json"
+_COMPLETENESS_RECEIPT_SCHEMA_PATH = (
+    _ROOT / "schemas/archive_completeness_receipt.schema.json"
+)
 
 # Load the mover module by path so we reuse ``_decompressed_tar_stream`` +
 # ``_safe_relative`` without duplicating the tar-header guard. Importing by
@@ -134,6 +143,32 @@ MAX_SOURCE_BYTES = _MOVER.MAX_SOURCE_BYTES
 MAX_ARCHIVE_BYTES = _MOVER.MAX_ARCHIVE_BYTES
 MAX_MANIFEST_BYTES = _MOVER.MAX_MANIFEST_BYTES
 MAX_SALVAGE_OBJECT_BYTES = 16 * 1024**3  # 16 GiB per salvage object.
+
+# #1177 derived-set bounds. The per-object cap above bounds ONE object; it
+# says nothing about how many objects a receipt-derived set may pull in (the
+# live node-27 archive holds 228 db-export manifests). Both bounds are
+# fail-closed: cardinality refuses at config time (before any I/O), the
+# aggregate decompressed-byte budget refuses mid-traversal with a FAIL
+# receipt. They apply ONLY to the derived set — explicitly listed
+# ``--salvage-manifest`` inputs keep their pre-#1177 behavior.
+MAX_DERIVED_SALVAGE_MANIFESTS = 128
+MAX_DERIVED_SALVAGE_DECOMPRESSED_BYTES = 32 * 1024**3  # 32 GiB per drill run.
+
+# Completeness-receipt lanes that have a db-export salvage lane, and the
+# identity key each carries. Mirrors ``node27_db_export_salvage._TABLE_TO_LANE``
+# (:65-68) + ``_TABLE_TO_IDENTITY_KEY`` (:73-76) read back-to-front (lane ->
+# identity key). ``states`` deliberately has NO entry: there is no db-export
+# lane for it, so such subjects are skipped with recorded evidence.
+_COMPLETENESS_LANE_TO_IDENTITY_KEY = {
+    "forcing": "forcing_version_id",
+    "runs": "run_id",
+}
+
+# Identity strings become path components under ``<archive_root>/db-export/``.
+# Byte-identical with ``node27_db_export_salvage._SAFE_IDENTITY_RE`` (:89);
+# the completeness receipt schema types identities as unconstrained strings,
+# so the guard is mandatory before any path join.
+_SAFE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.]*$")
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +232,368 @@ class DrillConfigError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Receipt-derived salvage input (#1177)
+#
+# The retention gate's DEMAND set is derived mechanically from the archive
+# completeness receipt (``node27_timeseries_retention.derive_salvage_backed_windows``
+# :790-825: every ``coverage=="db-export" and verdict=="complete"`` subject
+# whose window overlaps the drop window). Before #1177 the drill's EVIDENCE
+# set was an operator-typed ``--salvage-manifest`` whitelist that shared no
+# source with it, so a PASS receipt said nothing about the demand set.
+# Deriving the evidence set from the same receipt closes that gap.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DerivedSalvageInput:
+    """One completeness subject mapped to its db-export manifest on disk."""
+
+    lane: str
+    identity: str
+    manifest_path: Path
+    subject_window: dict[str, str]
+
+    @property
+    def label(self) -> str:
+        key = _COMPLETENESS_LANE_TO_IDENTITY_KEY[self.lane]
+        return f"{key}={self.identity}"
+
+
+@dataclass(frozen=True)
+class SalvageDerivation:
+    """Outcome of deriving the salvage set from a completeness receipt."""
+
+    receipt_path: Path
+    drop_window: dict[str, str] | None
+    inputs: tuple[DerivedSalvageInput, ...]
+    skipped: tuple[dict[str, str], ...]
+    candidate_count: int
+    max_decompressed_bytes: int = MAX_DERIVED_SALVAGE_DECOMPRESSED_BYTES
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp as UTC.
+
+    Byte-compatible with ``node27_timeseries_retention._parse_iso`` (:447-453)
+    so the drill's overlap decisions agree with the gate's.
+    """
+    text = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _windows_overlap(
+    a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime
+) -> bool:
+    """CLOSED-interval overlap — mirror of the gate's ``_overlaps``.
+
+    ``node27_timeseries_retention._overlaps`` (:540-552) is closed on both
+    ends, and ``check_drill_gate`` (:693-701) keeps zero-length clips in
+    scope. A half-open convention here would silently drop exactly the
+    boundary-touching subjects the gate still demands — the #1177 failure
+    mode, re-created one layer up.
+    """
+    return a_start <= b_end and b_start <= a_end
+
+
+def _refuse_unsafe_identity(identity: str) -> None:
+    """Mirror of ``node27_db_export_salvage._refuse_unsafe_identity`` (:602-606)."""
+    if not _SAFE_IDENTITY_RE.match(identity):
+        raise DrillConfigError(
+            f"completeness subject identity {identity!r} contains characters "
+            "unsafe for a filesystem path segment"
+        )
+
+
+def load_completeness_receipt(path: Path) -> dict[str, Any]:
+    """Read + schema-validate the archive-completeness receipt.
+
+    Fail-closed refusal (never a FAIL receipt) on anything that makes the
+    receipt unusable as a scope source — same contract as the salvage
+    sibling's ``_load_input_receipt`` (:562-590).
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise DrillConfigError(
+            f"cannot read archive-completeness receipt {path}: {error}"
+        ) from error
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise DrillConfigError(
+            f"archive-completeness receipt {path} is not valid JSON: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise DrillConfigError(
+            f"archive-completeness receipt {path} is not a JSON object"
+        )
+    schema = _load_schema(_COMPLETENESS_RECEIPT_SCHEMA_PATH)
+    try:
+        jsonschema.Draft7Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(data)
+    except jsonschema.ValidationError as error:
+        raise DrillConfigError(
+            f"archive-completeness receipt {path} failed schema validation: {error.message}"
+        ) from error
+    outcome = data.get("outcome")
+    if outcome not in {"complete", "incomplete"}:
+        raise DrillConfigError(
+            f"archive-completeness receipt outcome {outcome!r} cannot supply salvage scope"
+        )
+    return data
+
+
+def derive_salvage_inputs(
+    completeness_receipt: Mapping[str, Any],
+    *,
+    receipt_path: Path,
+    archive_root: Path,
+    drop_window: tuple[datetime, datetime] | None = None,
+    max_manifests: int = MAX_DERIVED_SALVAGE_MANIFESTS,
+    max_decompressed_bytes: int = MAX_DERIVED_SALVAGE_DECOMPRESSED_BYTES,
+) -> SalvageDerivation:
+    """Map ``db-export`` + ``complete`` subjects to their manifests on disk.
+
+    Path shape is exactly what ``node27_db_export_salvage._paths_for_selector``
+    (:617-627) writes: ``<archive_root>/db-export/<lane>/<identity>/manifest.json``.
+
+    Subject selection is the gate's predicate (``coverage=="db-export"`` and
+    ``verdict=="complete"``), optionally narrowed to subjects overlapping
+    ``drop_window`` under the gate's CLOSED-interval convention.
+
+    Raises ``DrillConfigError`` (a refusal, exit 2 — not a FAIL receipt) on
+    an unsafe identity, an unparseable subject window, a receipt that
+    contradicts itself (one identity with two windows), or a derived set
+    exceeding ``max_manifests``. Subjects on a lane with no db-export
+    mapping are recorded in ``skipped`` — never silently dropped.
+    """
+    inputs: list[DerivedSalvageInput] = []
+    skipped: list[dict[str, str]] = []
+    seen: dict[tuple[str, str], DerivedSalvageInput] = {}
+    candidate_count = 0
+    for subject in completeness_receipt.get("windows") or []:
+        if not isinstance(subject, Mapping):
+            raise DrillConfigError(
+                "archive-completeness receipt subject entry is not an object"
+            )
+        if subject.get("coverage") != "db-export" or subject.get("verdict") != "complete":
+            continue
+        candidate_count += 1
+        lane = subject.get("lane")
+        identity_key = _COMPLETENESS_LANE_TO_IDENTITY_KEY.get(str(lane))
+        subject_identity = subject.get("subject") or {}
+        if identity_key is None:
+            # e.g. the ``states`` lane: no db-export lane exists for it, so
+            # there is nothing to derive. Recorded as evidence in the drill
+            # receipt so a narrowed evidence set is always visible.
+            skipped.append(
+                {
+                    "lane": str(lane),
+                    "subject": json.dumps(dict(subject_identity), sort_keys=True)
+                    if isinstance(subject_identity, Mapping)
+                    else str(subject_identity),
+                    "reason": f"lane {lane!r} has no db-export salvage lane",
+                }
+            )
+            continue
+        identity = (
+            subject_identity.get(identity_key)
+            if isinstance(subject_identity, Mapping)
+            else None
+        )
+        if not isinstance(identity, str) or not identity:
+            raise DrillConfigError(
+                f"completeness subject on lane {lane!r} has no {identity_key}"
+            )
+        _refuse_unsafe_identity(identity)
+        window = subject.get("window") or {}
+        start = window.get("start") if isinstance(window, Mapping) else None
+        end = window.get("end") if isinstance(window, Mapping) else None
+        if not isinstance(start, str) or not isinstance(end, str):
+            raise DrillConfigError(
+                f"completeness subject {identity_key}={identity} has no window start/end"
+            )
+        try:
+            parsed_start = _parse_iso_utc(start)
+            parsed_end = _parse_iso_utc(end)
+        except ValueError as error:
+            raise DrillConfigError(
+                f"completeness subject {identity_key}={identity} window is unparseable: {error}"
+            ) from error
+        if drop_window is not None and not _windows_overlap(
+            parsed_start, parsed_end, drop_window[0], drop_window[1]
+        ):
+            continue
+        key = (str(lane), identity)
+        derived = DerivedSalvageInput(
+            lane=str(lane),
+            identity=identity,
+            manifest_path=archive_root / "db-export" / str(lane) / identity / "manifest.json",
+            subject_window={"start": start, "end": end},
+        )
+        previous = seen.get(key)
+        if previous is not None:
+            if previous.subject_window != derived.subject_window:
+                raise DrillConfigError(
+                    f"completeness receipt declares two windows for {identity_key}="
+                    f"{identity}: {previous.subject_window} vs {derived.subject_window}"
+                )
+            continue
+        seen[key] = derived
+        inputs.append(derived)
+    if len(inputs) > max_manifests:
+        raise DrillConfigError(
+            f"receipt-derived salvage set has {len(inputs)} manifests, "
+            f"exceeding the bound of {max_manifests}; narrow the drop window "
+            "or raise NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS"
+        )
+    inputs.sort(key=lambda item: (item.lane, item.identity))
+    skipped.sort(key=lambda item: (item["lane"], item["subject"]))
+    return SalvageDerivation(
+        receipt_path=receipt_path,
+        drop_window=(
+            {
+                "start": _now_iso(drop_window[0]),
+                "end": _now_iso(drop_window[1]),
+            }
+            if drop_window is not None
+            else None
+        ),
+        inputs=tuple(inputs),
+        skipped=tuple(skipped),
+        candidate_count=candidate_count,
+        max_decompressed_bytes=max_decompressed_bytes,
+    )
+
+
+@dataclass
+class _ByteBudget:
+    """Running aggregate-decompressed-bytes budget for the derived set."""
+
+    remaining: int
+
+    def debit(self, amount: int) -> bool:
+        if amount > self.remaining:
+            self.remaining = 0
+            return False
+        self.remaining -= amount
+        return True
+
+
+@dataclass(frozen=True)
+class SalvageInputPlan:
+    """One salvage manifest the drill will verify, with its provenance."""
+
+    path: Path
+    provenance: str  # "derived" | "explicit" | "derived+explicit"
+    derived: DerivedSalvageInput | None
+
+    def as_receipt_entry(self) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "path": str(self.path),
+            "provenance": self.provenance,
+        }
+        if self.derived is not None:
+            entry["lane"] = self.derived.lane
+            entry["subject"] = self.derived.label
+            entry["window"] = dict(self.derived.subject_window)
+        return entry
+
+
+def plan_salvage_inputs(config: DrillConfig) -> list[SalvageInputPlan]:
+    """Union derived + explicit salvage manifests, deduped by resolved path.
+
+    Derived inputs come first (deterministic lane/identity order), then any
+    explicitly listed manifest not already covered. A path reachable both
+    ways is emitted once with provenance ``derived+explicit``.
+    """
+    plans: list[SalvageInputPlan] = []
+    index: dict[Path, int] = {}
+    derivation = config.salvage_derivation
+    if derivation is not None:
+        for derived in derivation.inputs:
+            resolved = _resolved_key(derived.manifest_path)
+            if resolved in index:
+                continue
+            index[resolved] = len(plans)
+            plans.append(
+                SalvageInputPlan(
+                    path=derived.manifest_path, provenance="derived", derived=derived
+                )
+            )
+    for explicit in config.salvage_manifest_paths:
+        resolved = _resolved_key(explicit)
+        existing = index.get(resolved)
+        if existing is not None:
+            previous = plans[existing]
+            if previous.provenance == "derived":
+                plans[existing] = SalvageInputPlan(
+                    path=previous.path,
+                    provenance="derived+explicit",
+                    derived=previous.derived,
+                )
+            continue
+        index[resolved] = len(plans)
+        plans.append(SalvageInputPlan(path=explicit, provenance="explicit", derived=None))
+    return plans
+
+
+def _resolved_key(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except OSError:  # pragma: no cover — resolve(strict=False) rarely raises
+        return path.expanduser().absolute()
+
+
+def check_derived_manifest_alignment(
+    salvage_manifest: Mapping[str, Any], derived: DerivedSalvageInput
+) -> str | None:
+    """Return a divergence description, or ``None`` when receipt and disk agree.
+
+    The drill's db-export coverage tuple takes its window from the MANIFEST
+    (:579), so a manifest whose selector window drifted from the receipt
+    subject's window would make the drill attest a window the gate never
+    demanded — a silent PASS over the wrong evidence. Fail closed instead.
+    """
+    identity_key = _COMPLETENESS_LANE_TO_IDENTITY_KEY[derived.lane]
+    matches = []
+    for export in salvage_manifest.get("exports") or []:
+        if not isinstance(export, Mapping):
+            continue
+        selector = export.get("selector") or {}
+        identity = selector.get("identity") or {}
+        if isinstance(identity, Mapping) and identity.get(identity_key) == derived.identity:
+            matches.append(selector)
+    if not matches:
+        return (
+            f"manifest declares no export for {identity_key}={derived.identity}"
+        )
+    for selector in matches:
+        window = selector.get("window") or {}
+        if not _windows_equal(window, derived.subject_window):
+            return (
+                f"manifest selector window {json.dumps(dict(window), sort_keys=True)} "
+                f"differs from receipt subject window "
+                f"{json.dumps(derived.subject_window, sort_keys=True)}"
+            )
+    return None
+
+
+def _windows_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    try:
+        return (
+            _parse_iso_utc(str(left["start"])) == _parse_iso_utc(str(right["start"]))
+            and _parse_iso_utc(str(left["end"])) == _parse_iso_utc(str(right["end"]))
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Configuration + DSN helpers
 # ---------------------------------------------------------------------------
 
@@ -217,6 +614,10 @@ class DrillConfig:
     archive_manifest_paths: tuple[Path, ...]
     salvage_manifest_paths: tuple[Path, ...]
     lock_path: Path
+    # #1177: present only when ``--completeness-receipt`` (or the sibling's
+    # ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` env var) was supplied. When
+    # ``None`` the drill behaves exactly as it did before #1177.
+    salvage_derivation: SalvageDerivation | None = None
 
     def prod_dbname(self) -> str:
         return _dsn_dbname(self.prod_database_url_ro)
@@ -492,12 +893,17 @@ def _verify_salvage_manifest(
     archive_root: Path,
     *,
     zstd_path: Path,
+    budget: _ByteBudget | None = None,
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     """Verify every ``exports[]`` entry.
 
     Returns ``(selector_labels, coverage_tuples, differences)``. Coverage
     tuples are attributed only to verified selectors (H4-symmetric with
     product cycles).
+
+    ``budget`` (#1177) is the drill-run aggregate decompressed-byte budget
+    for the RECEIPT-DERIVED set; it is ``None`` for explicitly listed
+    manifests, which keep their pre-#1177 behavior byte-for-byte.
     """
     selectors: list[str] = []
     coverage: list[dict[str, Any]] = []
@@ -552,6 +958,22 @@ def _verify_salvage_manifest(
                 }
             )
             continue
+        if budget is not None and budget.remaining <= 0:
+            # Aggregate bound already spent — refuse the remaining derived
+            # objects WITHOUT decompressing them (fail-closed, bounded work).
+            differences.append(
+                {
+                    "item": label,
+                    "expected": {
+                        "code": CODE_SALVAGE_DERIVATION_FAILED,
+                        "reason": "derived_set_decompressed_bytes_exceeded",
+                    },
+                    "actual": {
+                        "error": "derived-set aggregate decompressed-byte budget is exhausted"
+                    },
+                }
+            )
+            continue
         try:
             payload = _decompress_zstd_to_bytes(
                 obj_path, zstd_path, max_bytes=MAX_SALVAGE_OBJECT_BYTES
@@ -562,6 +984,23 @@ def _verify_salvage_manifest(
                     "item": label,
                     "expected": {"code": CODE_SALVAGE_SHA256_MISMATCH},
                     "actual": {"error": str(error)},
+                }
+            )
+            continue
+        if budget is not None and not budget.debit(len(payload)):
+            differences.append(
+                {
+                    "item": label,
+                    "expected": {
+                        "code": CODE_SALVAGE_DERIVATION_FAILED,
+                        "reason": "derived_set_decompressed_bytes_exceeded",
+                    },
+                    "actual": {
+                        "error": (
+                            f"decompressed {len(payload)} bytes exceeds the "
+                            "remaining derived-set aggregate budget"
+                        )
+                    },
                 }
             )
             continue
@@ -1199,6 +1638,8 @@ def build_receipt(
     coverage: Sequence[Mapping[str, Any]],
     comparisons: Mapping[str, Any] | None = None,
     differences: Sequence[Mapping[str, Any]] | None = None,
+    salvage_inputs: Sequence[Mapping[str, Any]] | None = None,
+    salvage_derivation: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a receipt matching ``schemas/archive_rebuild_drill_receipt.schema.json``.
@@ -1225,6 +1666,12 @@ def build_receipt(
         },
         "coverage": [dict(entry) for entry in coverage],
     }
+    # #1177: both fields are emitted ONLY when the run derived its salvage
+    # set from a completeness receipt, so receipts from pre-#1177-shaped
+    # invocations (explicit manifests only) stay byte-identical.
+    if salvage_derivation is not None:
+        receipt["salvage_derivation"] = dict(salvage_derivation)
+        receipt["salvage_inputs"] = [dict(entry) for entry in (salvage_inputs or [])]
     if verdict == "PASS":
         if not comparisons:
             raise DrillConfigError("PASS receipt requires comparisons")
@@ -1474,23 +1921,61 @@ def _run_drill_body(
             continue
         archive_extracts.append((archive_manifest_path, dest_dir, manifest))
 
-    # Phase 2: verify salvage (no reingest per D3).
+    # Phase 2: verify salvage (no reingest per D3). #1177: the input set is
+    # the union of the receipt-derived manifests and any explicitly listed
+    # ones, deduped by resolved path.
     salvage_selectors: list[str] = []
     salvage_coverage: list[dict[str, Any]] = []
-    for salvage_manifest_path in config.salvage_manifest_paths:
+    derivation = config.salvage_derivation
+    budget = (
+        _ByteBudget(remaining=derivation.max_decompressed_bytes)
+        if derivation is not None
+        else None
+    )
+    salvage_plan = plan_salvage_inputs(config)
+    for plan in salvage_plan:
+        salvage_manifest_path = plan.path
         try:
             salvage_manifest = load_salvage_manifest(salvage_manifest_path)
         except Exception as error:
             differences.append(
                 {
                     "item": str(salvage_manifest_path),
-                    "expected": {"code": CODE_SALVAGE_SHA256_MISMATCH},
+                    "expected": (
+                        {
+                            "code": CODE_SALVAGE_DERIVATION_FAILED,
+                            "reason": "derived_manifest_missing_or_unreadable",
+                        }
+                        if plan.derived is not None
+                        else {"code": CODE_SALVAGE_SHA256_MISMATCH}
+                    ),
                     "actual": {"error": str(error)},
                 }
             )
             continue
+        if plan.derived is not None:
+            divergence = check_derived_manifest_alignment(salvage_manifest, plan.derived)
+            if divergence is not None:
+                # Stale-manifest divergence: the coverage tuple would take
+                # its window from the manifest, so verifying it anyway would
+                # attest a window the completeness receipt never claimed.
+                differences.append(
+                    {
+                        "item": str(salvage_manifest_path),
+                        "expected": {
+                            "code": CODE_SALVAGE_DERIVATION_FAILED,
+                            "reason": "derived_manifest_window_divergence",
+                            "window": dict(plan.derived.subject_window),
+                        },
+                        "actual": {"error": divergence},
+                    }
+                )
+                continue
         s_selectors, s_coverage, s_diffs = _verify_salvage_manifest(
-            salvage_manifest, config.archive_root, zstd_path=config.zstd_path
+            salvage_manifest,
+            config.archive_root,
+            zstd_path=config.zstd_path,
+            budget=budget if plan.derived is not None else None,
         )
         salvage_selectors.extend(s_selectors)
         salvage_coverage.extend(s_coverage)
@@ -1599,6 +2084,24 @@ def _run_drill_body(
     return receipt, outcome
 
 
+def _salvage_provenance_fields(
+    config: DrillConfig,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    """Receipt provenance for the #1177 receipt-derived salvage set."""
+    derivation = config.salvage_derivation
+    if derivation is None:
+        return None, None
+    inputs = [plan.as_receipt_entry() for plan in plan_salvage_inputs(config)]
+    summary: dict[str, Any] = {
+        "completeness_receipt_path": str(derivation.receipt_path),
+        "drop_window": dict(derivation.drop_window) if derivation.drop_window else None,
+        "candidate_count": derivation.candidate_count,
+        "derived_count": len(derivation.inputs),
+        "skipped": [dict(entry) for entry in derivation.skipped],
+    }
+    return inputs, summary
+
+
 def _build_receipt_from_outcome(
     outcome: DrillOutcome, config: DrillConfig, now: datetime
 ) -> dict[str, Any]:
@@ -1607,6 +2110,7 @@ def _build_receipt_from_outcome(
         "schema": config.staging_run_label,
         "instance_id": config.staging_instance_id,
     }
+    salvage_inputs, salvage_derivation = _salvage_provenance_fields(config)
     if outcome.verdict == "PASS":
         comparisons: dict[str, Any] = {
             "cycles": outcome.cycles,
@@ -1624,6 +2128,8 @@ def _build_receipt_from_outcome(
             staging_database=staging_database,
             coverage=outcome.coverage,
             comparisons=comparisons,
+            salvage_inputs=salvage_inputs,
+            salvage_derivation=salvage_derivation,
             now=now,
         )
     return build_receipt(
@@ -1631,6 +2137,8 @@ def _build_receipt_from_outcome(
         staging_database=staging_database,
         coverage=outcome.coverage,
         differences=outcome.differences,
+        salvage_inputs=salvage_inputs,
+        salvage_derivation=salvage_derivation,
         now=now,
     )
 
@@ -1919,6 +2427,12 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
     )
     parser.add_argument("--archive-manifest", action="append", default=[])
     parser.add_argument("--salvage-manifest", action="append", default=[])
+    # #1177: derive the db-export salvage set from the completeness receipt
+    # instead of typing it out. Env fallbacks keep the bare-`exec` wrapper
+    # (`scripts/node27_archive_rebuild_drill_once.sh`) unchanged.
+    parser.add_argument("--completeness-receipt", default=None)
+    parser.add_argument("--drop-window-start", default=None)
+    parser.add_argument("--drop-window-end", default=None)
     args = parser.parse_args(argv)
 
     archive_root = _require_path_env(env, "NHMS_ARCHIVE_ROOT")
@@ -1938,9 +2452,11 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
     zstd_path = _validate_zstd(Path(env.get("NHMS_ZSTD_BIN", "/usr/bin/zstd")))
     archive_manifests = tuple(Path(item).expanduser() for item in args.archive_manifest)
     salvage_manifests = tuple(Path(item).expanduser() for item in args.salvage_manifest)
-    if not archive_manifests and not salvage_manifests:
+    derivation = _derivation_from_config(env, args, archive_root)
+    if not archive_manifests and not salvage_manifests and derivation is None:
         raise DrillConfigError(
-            "no --archive-manifest / --salvage-manifest args passed; nothing to drill"
+            "no --archive-manifest / --salvage-manifest / --completeness-receipt "
+            "args passed; nothing to drill"
         )
     lock_path_env = env.get("NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH")
     if lock_path_env and lock_path_env.strip():
@@ -1964,7 +2480,107 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
         archive_manifest_paths=archive_manifests,
         salvage_manifest_paths=salvage_manifests,
         lock_path=lock_path,
+        salvage_derivation=derivation,
     )
+
+
+def _derivation_from_config(
+    env: Mapping[str, str], args: argparse.Namespace, archive_root: Path
+) -> SalvageDerivation | None:
+    """Build the receipt-derived salvage set, or ``None`` when opted out.
+
+    Receipt path precedence: ``--completeness-receipt`` then
+    ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` (the same env name the
+    salvage sibling reads, so one node-27 env entry configures both).
+    """
+    raw_receipt = args.completeness_receipt or env.get(
+        "NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH"
+    )
+    if raw_receipt is None or not str(raw_receipt).strip():
+        if _drop_window_from_config(env, args) is not None:
+            # A drop window only means something for derivation. Silently
+            # ignoring it would let an operator believe the drill was scoped.
+            raise DrillConfigError(
+                "drop window supplied without --completeness-receipt "
+                "(or NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH); nothing to filter"
+            )
+        return None
+    receipt_path = Path(str(raw_receipt)).expanduser()
+    if not receipt_path.is_absolute():
+        raise DrillConfigError(
+            f"completeness receipt path must be absolute: {raw_receipt!r}"
+        )
+    drop_window = _drop_window_from_config(env, args)
+    max_manifests = _bounded_int_env(
+        env,
+        "NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS",
+        default=MAX_DERIVED_SALVAGE_MANIFESTS,
+    )
+    max_bytes = _bounded_int_env(
+        env,
+        "NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_BYTES",
+        default=MAX_DERIVED_SALVAGE_DECOMPRESSED_BYTES,
+    )
+    receipt = load_completeness_receipt(receipt_path)
+    derivation = derive_salvage_inputs(
+        receipt,
+        receipt_path=receipt_path,
+        archive_root=archive_root,
+        drop_window=drop_window,
+        max_manifests=max_manifests,
+        max_decompressed_bytes=max_bytes,
+    )
+    if not derivation.inputs:
+        # Fail-closed, symmetric with the gate's D2 pin (#1162): an empty
+        # derivation is NEVER "nothing to prove"; it means the receipt and
+        # the requested drop window disagree with the operator's intent.
+        raise DrillConfigError(
+            f"completeness receipt {receipt_path} derived no db-export salvage "
+            "manifests for the requested drop window"
+        )
+    return derivation
+
+
+def _drop_window_from_config(
+    env: Mapping[str, str], args: argparse.Namespace
+) -> tuple[datetime, datetime] | None:
+    raw_start = args.drop_window_start or env.get(
+        "NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_START"
+    )
+    raw_end = args.drop_window_end or env.get(
+        "NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_END"
+    )
+    raw_start = raw_start.strip() if isinstance(raw_start, str) else None
+    raw_end = raw_end.strip() if isinstance(raw_end, str) else None
+    if not raw_start and not raw_end:
+        return None
+    if not raw_start or not raw_end:
+        raise DrillConfigError(
+            "drop window needs BOTH --drop-window-start and --drop-window-end"
+        )
+    try:
+        start = _parse_iso_utc(raw_start)
+        end = _parse_iso_utc(raw_end)
+    except ValueError as error:
+        raise DrillConfigError(f"drop window is not ISO-8601: {error}") from error
+    if end < start:
+        raise DrillConfigError(
+            f"drop window end {raw_end!r} precedes start {raw_start!r}"
+        )
+    return start, end
+
+
+def _bounded_int_env(env: Mapping[str, str], key: str, *, default: int) -> int:
+    raw = env.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError as error:
+        raise DrillConfigError(f"env var {key} must be an integer, got {raw!r}") from error
+    if value < 1:
+        raise DrillConfigError(f"env var {key} must be >= 1, got {value}")
+    return value
 
 
 def _require_env(env: Mapping[str, str], key: str) -> str:
