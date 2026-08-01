@@ -577,9 +577,14 @@ def test_config_defaults_lock_path_to_canonical(tmp_path: Path) -> None:
 
 def test_window_default_is_drift_locked_to_the_shared_constant() -> None:
     """#1227 row (h): the archive-side guard resolves a missing/empty window
-    assignment to the SAME default this runner uses. The constant has one home
-    (`packages.common.storage`); this test fails the moment someone re-hardcodes
-    a second copy here.
+    assignment to the SAME default this runner uses — pinned here as VALUE
+    equality with the shared constant in `packages.common.storage`.
+
+    Honest limit (#1229 round-1 review B4): `is` cannot prove import identity
+    for 14, which CPython interns as a small int, so the identity assertion
+    below degenerates to value equality and a re-hardcoded local copy would
+    still pass. The real protection is directional: changing the shared
+    constant while this runner keeps a hardcoded literal turns this test red.
     """
     assert retention._DEFAULT_WINDOW_DAYS is DEFAULT_RETENTION_WINDOW_DAYS
     assert DEFAULT_RETENTION_WINDOW_DAYS == 14

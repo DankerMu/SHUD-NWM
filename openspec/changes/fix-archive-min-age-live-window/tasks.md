@@ -137,6 +137,35 @@ Must add (per design D1-D4):
   retention-timer-not-installed question (D5-b). PR body links it; #1227
   closes with an explicit hand-off reference to it.
 
+## Round-1 fix pass (PR #1229 cross-review, verified findings)
+
+- [x] 9. Parser fail-direction hardening (A1/A2 CONFIRMED; design D1
+  round-1 amendments are the contract):
+  (a) `VAR= 21` (unquoted leading-whitespace value) refuses;
+  (b) `VAR=#21` refuses as a present non-integer value (drop the
+  value-index-0 comment arm from `_strip_env_trailing_comment`);
+  (c) CRLF / non-`\n` line-break content refuses (split on `\n` only);
+  (d) no accepted window assignment + a non-comment line containing
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` → refuse (kills
+  `readonly`/`declare`/truncated-edit silent default);
+  (e) recognizability rule: readable file with zero accepted
+  `NODE27_TIMESERIES_RETENTION_*` assignments refuses; the existing
+  `missing-assignment-uses-runner-default` and
+  `only-commented-assignment-is-unassigned` rows are re-based onto
+  bodies carrying a sibling retention assignment;
+  (f) new refusal tests for every shape above (incl. `readonly` /
+  `declare -i` forms, `/dev/null`, and an archive-env wrong-file row)
+  plus sibling-line default rows; `storage.py` docstring corrected to
+  match.
+- [x] 10. Docs/test-honesty rides (B3 PLAUSIBLE, B4 CONFIRMED):
+  drift-lock test docstring states value-equality (small-int interning
+  defeats `is` identity — no source-inspection assertion needed, row (h)
+  floor allows value equality); runbook min-age-guard section + both
+  archive template comments gain the dual-pointer sentence
+  (`NODE27_TIMESERIES_RETENTION_ENV` must name the same file the runner
+  wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE` selects — repointing
+  one without the other leaves the guard reading a stale window).
+
 ## Required evidence
 
 - `uv run pytest -q tests/test_storage.py

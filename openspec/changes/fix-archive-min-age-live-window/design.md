@@ -49,6 +49,34 @@ source is the same file the retention runner reads:
   full-line comments ignored; last assignment of the EXACT variable name
   wins (shell source semantics); near-name decoys
   (e.g. `..._WINDOW_DAYS_OLD`) ignored.
+- **Round-1 review amendments (PR #1229, verified findings A1/A2)** — the
+  set above is tightened so every divergence from the runner's actual
+  oracle (`set -a; . file`) refuses instead of mis-parsing:
+  - an UNQUOTED value with leading whitespace (`VAR= 21`) REFUSES: bash
+    parses that line as assignment-prefix-plus-command, so the runner
+    sees the variable unset; accepting 21 would refuse a pair against a
+    window the runner never uses. Refusing with an honest
+    malformed-assignment message is a recorded fail-closed narrowing of
+    runner equivalence for a malformed hand-edit;
+  - a value whose FIRST character is `#` (`VAR=#21`) is a PRESENT
+    non-integer value → refuses (bash exports `#21` and the runner
+    refuses to start on it; `#` opens a comment only after whitespace);
+  - CRLF (any non-`\n` line-break character reaching a candidate line)
+    refuses — bash keeps the `\r` in the value and the runner refuses
+    it; extraction splits on `\n` only;
+  - if NO assignment of the exact window variable is accepted but some
+    non-comment line CONTAINS `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=`
+    (`readonly VAR=21`, `declare -i VAR=21`, a truncated edit), the file
+    carries an assignment shape the extractor does not support → refuse
+    rather than silently defaulting while the runner exports the value;
+  - the runner-equivalent default applies ONLY when the file is
+    recognizably the deployed retention env: at least one OTHER
+    `NODE27_TIMESERIES_RETENTION_*` assignment is accepted while the
+    window assignment is absent or empty. A readable file with no
+    recognized retention-family assignment at all (wrong file,
+    `/dev/null`, a stale copy) refuses — the guard is pointed at
+    something that is not the runner's config, and defaulting there
+    re-admits the exact #1227 silent pass.
 
 ## D2 — Path plumbing: explicit REQUIRED env var, no derived default
 
@@ -166,5 +194,13 @@ is the invariant working as specified. Honest surface inventory
   as every other env-read; per-tick revalidation at startup is the
   existing model and unchanged.
 - (d) Lexical parser fidelity is bounded: forms beyond D1's enumerated
-  set (line continuations, `$VAR` interpolation) refuse fail-closed
-  rather than mis-parse; recorded as accepted narrowness.
+  set (line continuations, `$VAR` interpolation, unsupported assignment
+  shapes such as `readonly`/`declare`, malformed hand-edits) refuse
+  fail-closed rather than mis-parse — made true by the round-1
+  amendments in D1. The remaining honest residual is FILE IDENTITY: a
+  wrong path whose target is lexically indistinguishable from the
+  deployed retention env (e.g. the shipped `.example`, which carries a
+  valid `WINDOW_DAYS=14` assignment) cannot be detected lexically; the
+  runbook's dual-pointer note (`NODE27_TIMESERIES_RETENTION_ENV` and
+  the runner wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE` must
+  reference the same file) is the operational mitigation.

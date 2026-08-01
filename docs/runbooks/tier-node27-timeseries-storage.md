@@ -148,13 +148,39 @@ guard with it. Resolution rules, all fail-closed except the last:
 - unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
   unreadable file, or a present value that is not a positive integer → refuse,
   never a constant fallback;
-- a readable file whose assignment is absent or empty → the retention runner's
-  own default (14 d), because that is the window the runner would actually
-  run; the guard never refuses a pair the runner itself considers healthy.
+- an assignment shape the extractor does not support — `readonly VAR=21`,
+  `declare -i VAR=21`, a truncated edit, an unquoted value starting with
+  whitespace (`VAR= 21`, which bash leaves UNSET), a `#`-first value
+  (`VAR=#21`, which bash exports verbatim), or CRLF content → refuse rather
+  than mis-parse a window the runner does not use;
+- a readable file that is recognizably the deployed retention env (at least
+  one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
+  assignment is absent or empty → the retention runner's own default (14 d),
+  because that is the window the runner would actually run; the guard never
+  refuses a pair the runner itself considers healthy. A readable file with no
+  retention-family assignment at all (wrong path, `/dev/null`, a stale copy)
+  → refuse.
 
 Moving or renaming the deployed retention env file therefore breaks both
 guards fail-closed. It is one-way extraction, not value syncing — do not copy
 the window value into the archive env files.
+
+**Dual-pointer discipline.** The guards' `NODE27_TIMESERIES_RETENTION_ENV` and
+the retention runner wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE`
+(`scripts/node27_timeseries_retention_once.sh:20`, default
+`$NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env`)
+MUST reference the SAME file. Repointing the runner — a systemd drop-in, an
+edited unit, or an exported `NODE27_TIMESERIES_RETENTION_ENV_FILE` — without
+updating the guard variable in both archive env files leaves the guards
+validating a stale window with NO signal: they keep passing against whatever
+the old file says while retention drops on a different window. Change the two
+pointers in the same operator step and re-read both files afterwards.
+
+Residual (design D5-d): file IDENTITY cannot be checked lexically. A wrong
+path whose target still looks like a retention env — most obviously the
+shipped `infra/env/node27-timeseries-retention.example`, which carries a valid
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — parses cleanly and the guard
+accepts its window. Only the dual-pointer check above catches that.
 
 **Deployment consequence — read before deploying.** As of 2026-08-01 the live
 pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against

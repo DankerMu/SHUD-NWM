@@ -35,6 +35,10 @@ NHMS_ARCHIVE_MIN_AGE_DAYS=14
 # Absolute path of the deployed retention env file (REQUIRED). Only
 # NODE27_TIMESERIES_RETENTION_WINDOW_DAYS is read from it; nothing is sourced.
 # Moving or renaming that file breaks this guard fail-closed.
+# MUST name the same file the retention unit actually sources — the wrapper's
+# NODE27_TIMESERIES_RETENTION_ENV_FILE (default
+# $NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env);
+# repointing one without the other leaves this guard on a stale window.
 NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
 
 # Per-tick candidate processing bound (bounded work per tick).

@@ -79,9 +79,18 @@ def _retention_env(
     window_days: int | None = 14,
     name: str = "node27-timeseries-retention.env",
 ) -> Path:
-    """Write a per-test retention env file — the guard's live window source (#1227)."""
+    """Write a per-test retention env file — the guard's live window source (#1227).
+
+    The body always carries a NODE27_TIMESERIES_RETENTION_* sibling so that a
+    `window_days=None` row exercises the runner-equivalent MISSING-ASSIGNMENT
+    default rather than the wrong-file refusal (#1227 design D1 round-1
+    recognizability rule).
+    """
     path = tmp_path / name
-    body = "DATABASE_URL=postgresql://user:pw@127.0.0.1:55432/nhms\n"
+    body = (
+        "DATABASE_URL=postgresql://user:pw@127.0.0.1:55432/nhms\n"
+        "NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND=5\n"
+    )
     if window_days is not None:
         body += f"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS={window_days}\n"
     path.write_text(body, encoding="utf-8")
