@@ -3419,12 +3419,22 @@ def test_1220_derivation_records_unfiltered_db_export_universe(
     The fixture deliberately mixes: a subject inside the drop window (derived
     and verified), a db-export/complete subject WHOLLY OUTSIDE it (filtered
     out of `inputs`, still recorded), a duplicate window on a second subject
-    (deduped to one pair), and a `product-archive` subject (never recorded —
-    the gate's predicate is `coverage == "db-export"`). Ordering is ascending
-    by `(start, end)`, matching the gate's own normalization.
+    (deduped to one pair), and a `product-archive` subject on a window of its
+    OWN — that window must be absent, because the gate's predicate is
+    `coverage == "db-export"` and a shared window would make its absence
+    unobservable. Ordering is ascending by `(start, end)`, matching the
+    gate's own normalization.
+
+    The `verdict != "complete"` half of the same predicate is pinned at the
+    `completeness_db_export_windows` seam below: `coverage: db-export` forces
+    `verdict: complete` in the receipt schema
+    (`schemas/archive_completeness_receipt.schema.json` coverage/verdict
+    contract), so the loader inside `_derive` would reject that shape.
     """
     inside = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
     outside = ("2026-05-01T00:00:00Z", "2026-05-10T00:00:00Z")
+    product = ("2026-07-01T00:00:00Z", "2026-07-03T00:00:00Z")
+    pending = ("2026-08-01T00:00:00Z", "2026-08-05T00:00:00Z")
     # Both in-window subjects are derived, so both need a manifest on disk;
     # `forc_outside` is filtered out by the drop window and needs none.
     for identity in ("forc_inside", "forc_inside_twin"):
@@ -3436,7 +3446,7 @@ def test_1220_derivation_records_unfiltered_db_export_universe(
         _completeness_subject("forcing", "forc_inside_twin", inside),
         _completeness_subject("forcing", "forc_outside", outside),
         _completeness_subject(
-            "forcing", "forc_product", inside, coverage="product-archive"
+            "forcing", "forc_product", product, coverage="product-archive"
         ),
     ]
     derivation, completeness = _derive(tmp_path, subjects, drop_window=_drop_window())
@@ -3450,7 +3460,23 @@ def test_1220_derivation_records_unfiltered_db_export_universe(
         {"start": outside[0], "end": outside[1]},
         {"start": inside[0], "end": inside[1]},
     )
+    # The product-archive subject's own window is nowhere in the record.
+    assert {"start": product[0], "end": product[1]} not in derivation.db_export_windows
     assert derivation.completeness_generated_at == completeness["generated_at"]
+
+    # Verdict leg, at the pure-function seam (schema-unreachable via `_derive`).
+    with_pending = drill.completeness_db_export_windows(
+        _completeness_receipt(
+            [
+                *subjects,
+                _completeness_subject(
+                    "forcing", "forc_pending", pending, verdict="pending-archive"
+                ),
+            ]
+        )
+    )
+    assert with_pending == derivation.db_export_windows
+    assert {"start": pending[0], "end": pending[1]} not in with_pending
 
     receipt, outcome = _run_with_runs_cycle(tmp_path, zstd_bin, derivation=derivation)
     assert outcome.verdict == "PASS", receipt.get("differences")

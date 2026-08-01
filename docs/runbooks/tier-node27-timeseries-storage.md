@@ -2152,9 +2152,12 @@ the operator's full recovery scope, not the slice that was dropped this
 tick. The retention gate is scoped differently on purpose: it evaluates
 each subject window's INTERSECTION with the drop window (#1162), so the
 drill is never asked for db-export coverage outside the interval actually
-being retired. These same intersected windows are what the drill's
-recorded completeness snapshot must have contained — see the binding rule
-in [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)
+being retired. That intersection applies only to the db-export
+coverage-tuple check. The binding rule runs BEFORE the clipping, on the
+UNCLIPPED subject `{start, end}` windows — the same shape the drill
+records in `salvage_derivation.db_export_windows` — so membership is
+judged pair-for-pair against the recorded snapshot; see
+[§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)
 (`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`).
 
 ## Rollback (unit-level, not data-level)

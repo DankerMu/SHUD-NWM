@@ -2072,6 +2072,12 @@ def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> No
     nothing to bind, and the surfaced code must stay
     `DRILL_COVERAGE_DB_EXPORT_MISSING`.
 
+    The recorded universe is deliberately UNUSABLE (`"not-a-list"`), which
+    `_drill_snapshot_binds` refuses regardless of the target set: the binding
+    guard would surface `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` if it ran
+    first, so the code below is a real ordering pin rather than a shape both
+    legs happen to accept.
+
     Same function-level convention as
     `test_drill_db_export_empty_salvage_derivation_refuses_fail_closed`:
     `db-export` + `pending-archive` is rejected by the completeness receipt
@@ -2084,7 +2090,7 @@ def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> No
             )
         ]
     )
-    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=[]))
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows="not-a-list"))
 
     reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
 
