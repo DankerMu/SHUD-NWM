@@ -269,6 +269,12 @@ class SalvageDerivation:
     skipped: tuple[dict[str, str], ...]
     candidate_count: int
     max_decompressed_bytes: int = MAX_DERIVED_SALVAGE_DECOMPRESSED_BYTES
+    # #1220 snapshot binding: the FULL db-export universe of the consumed
+    # completeness receipt (unfiltered by the drop window) plus that
+    # receipt's ``generated_at``. The retention gate binds its gate-time
+    # requirement set against the former; the latter is diagnostics only.
+    db_export_windows: tuple[dict[str, str], ...] = ()
+    completeness_generated_at: str | None = None
 
 
 def _parse_iso_utc(value: str) -> datetime:
@@ -345,6 +351,50 @@ def load_completeness_receipt(path: Path) -> dict[str, Any]:
             f"archive-completeness receipt outcome {outcome!r} cannot supply salvage scope"
         )
     return data
+
+
+def completeness_db_export_windows(
+    completeness_receipt: Mapping[str, Any],
+) -> tuple[dict[str, str], ...]:
+    """#1220: the FULL db-export universe of a completeness receipt.
+
+    Unique ``{start, end}`` string pairs of every subject with
+    ``coverage == "db-export"`` AND ``verdict == "complete"``, deduped by
+    exact pair and sorted ascending — byte-compatible with the gate's
+    ``node27_timeseries_retention.derive_salvage_backed_windows``
+    (:931-966) MINUS its drop-window overlap filter, and with no lane
+    condition (the gate has none either).
+
+    Unfiltered on purpose (design D2): it is the simpler record — no second
+    filter implementation on the emit side, matching the already-recorded
+    ``candidate_count`` universe semantics — and it stays correct if the
+    drill's own candidate selection changes. It is the #1207 containment
+    guard (retention-drop ⊆ drill-drop) that makes "recorded ⇒ was in the
+    drill's candidate set" hold; see design D5-(d).
+    """
+    seen: set[tuple[str, str]] = set()
+    windows: list[dict[str, str]] = []
+    for subject in completeness_receipt.get("windows") or []:
+        if not isinstance(subject, Mapping):
+            continue
+        if subject.get("coverage") != "db-export":
+            continue
+        if subject.get("verdict") != "complete":
+            continue
+        window = subject.get("window") or {}
+        if not isinstance(window, Mapping):
+            continue
+        start = window.get("start")
+        end = window.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            continue
+        key = (start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        windows.append({"start": start, "end": end})
+    windows.sort(key=lambda item: (item["start"], item["end"]))
+    return tuple(windows)
 
 
 def derive_salvage_inputs(
@@ -458,6 +508,7 @@ def derive_salvage_inputs(
         )
     inputs.sort(key=lambda item: (item.lane, item.identity))
     skipped.sort(key=lambda item: (item["lane"], item["subject"]))
+    generated_at = completeness_receipt.get("generated_at")
     return SalvageDerivation(
         receipt_path=receipt_path,
         drop_window=(
@@ -472,6 +523,8 @@ def derive_salvage_inputs(
         skipped=tuple(skipped),
         candidate_count=candidate_count,
         max_decompressed_bytes=max_decompressed_bytes,
+        db_export_windows=completeness_db_export_windows(completeness_receipt),
+        completeness_generated_at=generated_at if isinstance(generated_at, str) else None,
     )
 
 
@@ -2103,7 +2156,17 @@ def _salvage_provenance_fields(
         "candidate_count": derivation.candidate_count,
         "derived_count": len(derivation.inputs),
         "skipped": [dict(entry) for entry in derivation.skipped],
+        # #1220: the consumed snapshot's db-export universe, recorded even
+        # when empty — an empty record with a non-empty gate-time
+        # requirement set is exactly the drift the gate must refuse.
+        "db_export_windows": [dict(window) for window in derivation.db_export_windows],
     }
+    if derivation.completeness_generated_at is not None:
+        # Diagnostics only (which snapshot did the drill consume) — the gate
+        # NEVER refuses on it (design D1: the completeness receipt is
+        # rewritten daily, so a newer-snapshot refusal would collapse the
+        # 30 d drill budget to under a day).
+        summary["completeness_generated_at"] = derivation.completeness_generated_at
     return inputs, summary
 
 

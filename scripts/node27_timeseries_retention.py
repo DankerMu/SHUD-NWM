@@ -123,6 +123,7 @@ CODE_DRILL_RECEIPT_FAIL = "DRILL_RECEIPT_FAIL"
 CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW = "DRILL_DERIVATION_WINDOW_TOO_NARROW"
 CODE_DRILL_COVERAGE_FORCING_MISSING = "DRILL_COVERAGE_FORCING_MISSING"
 CODE_DRILL_COVERAGE_RUNS_MISSING = "DRILL_COVERAGE_RUNS_MISSING"
+CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND = "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND"
 CODE_DRILL_COVERAGE_DB_EXPORT_MISSING = "DRILL_COVERAGE_DB_EXPORT_MISSING"
 CODE_RETENTION_CONFIG_INVALID = "RETENTION_CONFIG_INVALID"
 CODE_RETENTION_CONCURRENT_INVOCATION = "RETENTION_CONCURRENT_INVOCATION"
@@ -142,6 +143,7 @@ WIRE_CODES: frozenset[str] = frozenset(
         CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW,
         CODE_DRILL_COVERAGE_FORCING_MISSING,
         CODE_DRILL_COVERAGE_RUNS_MISSING,
+        CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND,
         CODE_DRILL_COVERAGE_DB_EXPORT_MISSING,
         CODE_RETENTION_CONFIG_INVALID,
         CODE_RETENTION_CONCURRENT_INVOCATION,
@@ -686,6 +688,75 @@ def _drill_derivation_window_contains(
     return start <= drop_window.start and end >= drop_window.end
 
 
+def _drill_snapshot_binds(
+    receipt: Mapping[str, Any], targets: Sequence[Mapping[str, str]]
+) -> bool:
+    """#1220: was every gate-time requirement window in the drill's snapshot?
+
+    The gate's requirement set comes from the completeness receipt it loads
+    NOW; the drill's evidence comes from a receipt up to
+    ``drill_max_age_days`` old. The completeness receipt is rewritten in
+    place daily, so a db-export subject added AFTER the drill (backfill /
+    rerun selector) enters the requirement set without ever having been
+    restore-verified — and because coverage tuples carry no subject
+    identity, an older subject's wide tuple vouches for it.
+
+    The drill records the db-export universe of the snapshot it consumed at
+    ``salvage_derivation.db_export_windows`` (unfiltered by any drop window,
+    same normalization as :func:`derive_salvage_backed_windows`). Rule
+    (design D3 of ``fix-retention-drill-snapshot-binding``):
+
+    * key ``salvage_derivation`` entirely ABSENT → ``True`` (pre-#1206
+      receipts AND explicit-manifest drills — same population and same
+      neutral treatment as :func:`_drill_derivation_window_contains`);
+    * section present but ``db_export_windows`` key ABSENT → ``True``
+      (post-#1206 pre-binding receipts; recorded residual in runbook §7.5 —
+      the guard is simply dormant for them);
+    * key present but unusable (not a list, an entry that is not a Mapping,
+      missing / non-string endpoints) → ``False``. A record that exists but
+      cannot be judged is never evidence — symmetric with #1207's D2;
+    * else ``True`` iff EVERY target's exact ``(start, end)`` pair is a
+      member of the recorded set. The subset direction is deliberate:
+      requirement SHRINK (a subject removed since the drill) passes, only
+      ADDITIONS the drill never saw refuse. Binding the whole gate-time
+      universe instead of the drop-filtered targets would refuse whenever
+      any db-export subject appears anywhere — the daily-outage direction
+      design D1 rejects.
+
+    Binding is judged at WINDOW granularity because that is the gate's own
+    requirement granularity (``derive_salvage_backed_windows`` dedups to
+    ``{start, end}`` pairs). A new subject whose window is byte-identical to
+    a verified one is indistinguishable here and remains layer-2's job
+    (residual, runbook §7.5).
+    """
+    if "salvage_derivation" not in receipt:
+        return True
+    section = receipt.get("salvage_derivation")
+    if not isinstance(section, Mapping):
+        # Unreachable through `check_drill_gate` (#1207's guard already
+        # refused a non-Mapping section before this runs); fail-closed here
+        # so the helper is safe to call on its own.
+        return False
+    if "db_export_windows" not in section:
+        return True
+    recorded_raw = section["db_export_windows"]
+    if not isinstance(recorded_raw, list):
+        return False
+    recorded: set[tuple[str, str]] = set()
+    for entry in recorded_raw:
+        if not isinstance(entry, Mapping):
+            return False
+        start = entry.get("start")
+        end = entry.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            return False
+        recorded.add((start, end))
+    for target in targets:
+        if (target["start"], target["end"]) not in recorded:
+            return False
+    return True
+
+
 def check_drill_gate(
     receipt: Mapping[str, Any],
     completeness_receipt: Mapping[str, Any],
@@ -696,12 +767,19 @@ def check_drill_gate(
     """Evaluate H2: PASS/FAIL + staleness + forcing/runs/db-export coverage.
 
     Order: STALE → FAIL → derivation-window → forcing → runs → db-export
+    [empty-derivation → snapshot-binding → per-target coverage]
     (MISSING is raised by the loader).
 
     The derivation-window guard (#1207) runs BEFORE every coverage leg: if
     the drill recorded a ``salvage_derivation.drop_window`` that does not
     CONTAIN this drop window, no coverage-union evidence from that run is
     consulted at all — see :func:`_drill_derivation_window_contains`.
+
+    Inside the db-export leg the snapshot-binding guard (#1220) runs after
+    the empty-derivation refusal and BEFORE any per-target coverage tuple is
+    consulted: a requirement window the drill's completeness snapshot never
+    contained refuses with ``DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`` — see
+    :func:`_drill_snapshot_binds`.
 
     The db-export leg is salvage-window-scoped (#1162): drill ``db-export``
     coverage is required only over each salvage-backed window intersected
@@ -746,6 +824,12 @@ def check_drill_gate(
             # nothing is derivable from it (verdict != complete). An empty
             # derivation is NEVER "requirement satisfied".
             reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
+            return reasons
+        if not _drill_snapshot_binds(receipt, targets):
+            # #1220: the requirement set drifted past the drill's snapshot.
+            # Judged BEFORE the tuple union below, otherwise the exact
+            # substitution this guard kills would decide first.
+            reasons.append(CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND)
             return reasons
         for target in targets:
             clipped = _clip_to_drop(target, drop_window)

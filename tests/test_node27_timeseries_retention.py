@@ -351,6 +351,7 @@ _EXPECTED_WIRE_CODES = frozenset(
         "DRILL_DERIVATION_WINDOW_TOO_NARROW",
         "DRILL_COVERAGE_FORCING_MISSING",
         "DRILL_COVERAGE_RUNS_MISSING",
+        "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND",
         "DRILL_COVERAGE_DB_EXPORT_MISSING",
         "RETENTION_CONFIG_INVALID",
         "RETENTION_CONCURRENT_INVOCATION",
@@ -363,7 +364,7 @@ _EXPECTED_WIRE_CODES = frozenset(
 def test_wire_codes_match_fixture_exactly() -> None:
     """H6: WIRE_CODES frozenset content is byte-identical with the fixture."""
     assert retention.WIRE_CODES == _EXPECTED_WIRE_CODES
-    assert len(retention.WIRE_CODES) == 16
+    assert len(retention.WIRE_CODES) == 17
 
 
 def test_wire_codes_byte_identical_across_code_runbook_design() -> None:
@@ -1714,6 +1715,468 @@ def test_drill_derivation_window_guard_surfaces_as_refusal_reason(tmp_path: Path
 
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+    assert receipt["refusal_reason"] in retention.WIRE_CODES
+    jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
+# #1220 snapshot binding — the gate's REQUIREMENT set comes from the
+# completeness receipt it loads NOW (rewritten in place daily), its EVIDENCE
+# from a drill receipt up to 30 d old. A db-export subject added after the
+# drill entered the requirement set never having been restore-verified, and
+# an older subject's identity-less tuple vouched for it. The drill now
+# records the db-export universe of the snapshot it consumed and the gate
+# binds every target window to it.
+# ---------------------------------------------------------------------------
+
+
+# Windows from the issue's in-memory v1/v2 replay.
+_SNAP_A_START = datetime(2026, 6, 1, tzinfo=UTC)
+_SNAP_A_END = datetime(2026, 6, 30, tzinfo=UTC)
+_SNAP_B_START = datetime(2026, 6, 10, tzinfo=UTC)
+_SNAP_B_END = datetime(2026, 6, 20, tzinfo=UTC)
+_SNAP_DROP_START = datetime(2026, 6, 5, tzinfo=UTC)
+_SNAP_DROP_END = datetime(2026, 6, 15, tzinfo=UTC)
+# A later db-export subject that does NOT overlap the drop window.
+_SNAP_D_START = datetime(2026, 8, 1, tzinfo=UTC)
+_SNAP_D_END = datetime(2026, 8, 10, tzinfo=UTC)
+
+_UNSET = object()
+
+
+def _win(start: datetime, end: datetime) -> dict[str, str]:
+    return {"start": _iso(start), "end": _iso(end)}
+
+
+def _bound_salvage_derivation(
+    *,
+    drop_window: Mapping[str, Any] | None = None,
+    db_export_windows: Any = _UNSET,
+    completeness_generated_at: str | None = None,
+) -> dict[str, Any]:
+    """`salvage_derivation` with the #1220 snapshot-binding fields.
+
+    Sibling of :func:`_salvage_derivation` (the #1206/#1207 shape). Passing
+    ``db_export_windows=_UNSET`` reproduces the post-#1206 pre-binding
+    population: the section exists, the recorded universe does not.
+    """
+    section = _salvage_derivation(drop_window)
+    if db_export_windows is not _UNSET:
+        section["db_export_windows"] = db_export_windows
+    if completeness_generated_at is not None:
+        section["completeness_generated_at"] = completeness_generated_at
+    return section
+
+
+def _snapshot_completeness(
+    subjects: Sequence[tuple[datetime, datetime, str]],
+    *,
+    generated_at: datetime = _NOW - timedelta(hours=1),
+) -> dict[str, Any]:
+    return _completeness_receipt(
+        generated_at=generated_at,
+        subjects=[
+            _db_export_subject(start, end, version=version)
+            for start, end, version in subjects
+        ],
+    )
+
+
+def _snapshot_drill(
+    derivation: Mapping[str, Any] | None,
+    *,
+    runs_tuples: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A PASS drill whose db-export union spans subject A's FULL window.
+
+    That union is exactly the substitution vehicle: it covers every clipped
+    target in these fixtures, so without the binding guard the db-export leg
+    returns empty reasons for a subject the drill never saw.
+    """
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(_SNAP_A_START, _SNAP_A_END),
+        runs_tuples=runs_tuples,
+    )
+    if derivation is not None:
+        drill["salvage_derivation"] = dict(derivation)
+    return drill
+
+
+def _snapshot_drop_window() -> retention.DropWindow:
+    return retention.DropWindow(start=_SNAP_DROP_START, end=_SNAP_DROP_END)
+
+
+def test_snapshot_drift_with_new_subject_refuses_issue_1220_replay() -> None:
+    """#1220 (a): the issue's v1/v2 replay flips PASS → REFUSE.
+
+    The drill consumed completeness v1 (subject A `[06-01, 06-30]` only) and
+    recorded that universe; at gate time v2 additionally carries subject B
+    `[06-10, 06-20]`, added by a backfill after the drill. B was never
+    restore-verified, yet A's wide db-export tuple spans B's clipped target.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons[0] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
+
+
+def test_snapshot_drift_without_recorded_universe_keeps_pre_fix_behavior() -> None:
+    """#1220 (a) pre-fix oracle + residual pin: the SAME drift PASSES when the
+    drill receipt has a `salvage_derivation` section but no
+    `db_export_windows` field.
+
+    That is the post-#1206 / pre-#1220 receipt population: the guard is
+    dormant for them (design D5-(a)), and this empty reason list is exactly
+    the false PASS the row above flips.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(_bound_salvage_derivation())
+    assert "db_export_windows" not in drill["salvage_derivation"]
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_drift_without_derivation_section_keeps_pre_fix_behavior() -> None:
+    """#1220 (a) compat front half: the same drift with NO `salvage_derivation`
+    section at all still PASSES (pre-#1206 receipts and explicit-manifest
+    drills — the population #1207's guard also skips)."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(None)
+    assert "salvage_derivation" not in drill
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_identical_universe_passes() -> None:
+    """#1220 (b): the drill recorded exactly the gate-time universe → pass."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[
+                _win(_SNAP_A_START, _SNAP_A_END),
+                _win(_SNAP_B_START, _SNAP_B_END),
+            ],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_requirement_shrink_passes() -> None:
+    """#1220 (b): recorded `[A, B]`, gate-time only A → pass.
+
+    Membership is a SUBSET test in the target → recorded direction: a subject
+    that disappeared since the drill removes a requirement and can never make
+    the drill's evidence insufficient. An implementation that compared the
+    two sets for equality (or required recorded ⊆ targets) would refuse here.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[
+                _win(_SNAP_A_START, _SNAP_A_END),
+                _win(_SNAP_B_START, _SNAP_B_END),
+            ],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_daily_regeneration_alone_never_refuses() -> None:
+    """#1220 (c) / design D1: a NEWER completeness snapshot with the SAME
+    db-export windows passes.
+
+    The audit rewrites the completeness receipt in place every day while the
+    drill budget is 30 d, so at nearly every tick the loaded receipt is newer
+    than the drill's. Refusing on `generated_at` inequality (or a digest)
+    would refuse ~every tick after day one — `completeness_generated_at` is
+    recorded for diagnostics only and is never a refusal input.
+    """
+    completeness = _snapshot_completeness(
+        [(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")],
+        generated_at=_NOW - timedelta(minutes=5),
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+            completeness_generated_at=_iso(_NOW - timedelta(days=20)),
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_new_subject_outside_drop_window_passes() -> None:
+    """#1220 (d): binding is judged over the drop-filtered TARGETS only.
+
+    The gate-time receipt gained subject D `[08-01, 08-10]`, disjoint from
+    the `[06-05, 06-15]` drop window, so D is not a requirement of this tick.
+    Binding the whole gate-time db-export universe instead would refuse
+    whenever any db-export subject appears anywhere — the daily-outage
+    direction design D1 rejects.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_D_START, _SNAP_D_END, "fv-salvage-d"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+    assert retention.derive_salvage_backed_windows(
+        completeness, _snapshot_drop_window()
+    ) == [_win(_SNAP_A_START, _SNAP_A_END)]
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+@pytest.mark.parametrize(
+    ("label", "target"),
+    [
+        # A backfill EXTENDED subject A: same start, later end.
+        ("shared-start-longer-end", (_SNAP_A_START, datetime(2026, 7, 15, tzinfo=UTC))),
+        # Same end, earlier start.
+        ("shared-end-earlier-start", (datetime(2026, 5, 20, tzinfo=UTC), _SNAP_A_END)),
+    ],
+)
+def test_snapshot_one_sided_window_change_refuses(
+    label: str, target: tuple[datetime, datetime]
+) -> None:
+    """#1220 (e): membership is exact on BOTH endpoints.
+
+    A window sharing exactly one endpoint with a recorded window covers rows
+    the drill never verified (the extension), so a start-only or end-only
+    comparison would admit it.
+    """
+    completeness = _snapshot_completeness([(target[0], target[1], "fv-salvage-a")])
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
+
+
+def test_snapshot_empty_recorded_universe_refuses() -> None:
+    """#1220 (f): `db_export_windows: []` with a non-empty requirement set
+    refuses.
+
+    An empty recorded universe has no members — the drill consumed a snapshot
+    with no db-export/complete subject at all, so every gate-time target is
+    drift. An `if not recorded: return True` short-circuit dies here.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=[]))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
+
+
+@pytest.mark.parametrize(
+    ("label", "recorded"),
+    [
+        ("not-a-list", "2026-06-01T00:00:00Z/2026-06-30T00:00:00Z"),
+        ("mapping-not-a-list", {"start": "2026-06-01T00:00:00Z", "end": "2026-06-30T00:00:00Z"}),
+        ("entry-not-a-mapping", ["2026-06-01T00:00:00Z"]),
+        ("entry-missing-end", [{"start": "2026-06-01T00:00:00Z"}]),
+        ("entry-start-not-a-string", [{"start": 20260601, "end": "2026-06-30T00:00:00Z"}]),
+    ],
+)
+def test_snapshot_unusable_recorded_universe_refuses(label: str, recorded: Any) -> None:
+    """#1220 (g): a recorded universe that exists but cannot be judged is
+    never evidence — refuse fail-closed.
+
+    Unreachable through `load_drill_receipt` now that the schema types the
+    field; this is defence-in-depth at the pure-function seam, symmetric with
+    #1207's unusable-section rows.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=recorded))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
+
+
+def test_snapshot_binds_helper_refuses_non_mapping_section() -> None:
+    """Defence-in-depth: `_drill_snapshot_binds` on its own refuses a
+    `salvage_derivation` that is not an object.
+
+    Unreachable via `check_drill_gate` — #1207's guard refuses a non-Mapping
+    section with `DRILL_DERIVATION_WINDOW_TOO_NARROW` before this helper runs
+    (pinned by `test_drill_derivation_section_unusable_shape_refuses`) — so
+    the branch is asserted at the helper seam instead of the gate seam.
+    """
+    assert (
+        retention._drill_snapshot_binds(
+            {"salvage_derivation": ["not", "a", "mapping"]},
+            [_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+        is False
+    )
+
+
+def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> None:
+    """#1220 (h) precedence: the empty-derivation refusal (#1162 D2) precedes
+    the binding check.
+
+    The completeness receipt has an overlapping db-export subject whose
+    verdict is not `complete`, so the requirement set is EMPTY — there is
+    nothing to bind, and the surfaced code must stay
+    `DRILL_COVERAGE_DB_EXPORT_MISSING`.
+
+    The recorded universe is deliberately UNUSABLE (`"not-a-list"`), which
+    `_drill_snapshot_binds` refuses regardless of the target set: the binding
+    guard would surface `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` if it ran
+    first, so the code below is a real ordering pin rather than a shape both
+    legs happen to accept.
+
+    Same function-level convention as
+    `test_drill_db_export_empty_salvage_derivation_refuses_fail_closed`:
+    `db-export` + `pending-archive` is rejected by the completeness receipt
+    schema at load, so this shape is driven at the pure-function seam.
+    """
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(
+                _SNAP_A_START, _SNAP_A_END, version="fv-salvage-a", verdict="pending-archive"
+            )
+        ]
+    )
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows="not-a-list"))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+
+
+def test_snapshot_narrowed_drill_refuses_with_window_code_first() -> None:
+    """#1220 (h) precedence + design D5-(d) tripwire: #1207's containment
+    guard outranks the binding guard.
+
+    This ordering is load-bearing, not cosmetic: the recorded universe is
+    UNFILTERED, so "recorded ⇒ the drill actually derived it" only holds
+    because containment already forced retention-drop ⊆ drill-drop. If this
+    row ever starts reporting the binding code, #1207's guard was weakened or
+    reordered and the binding guard silently degraded with it.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            drop_window=_win(_SNAP_DROP_START, datetime(2026, 6, 7, tzinfo=UTC)),
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+def test_snapshot_missing_runs_coverage_refuses_before_binding() -> None:
+    """#1220 (h) precedence: the runs leg outranks the binding guard — the
+    binding check lives INSIDE the db-export leg, not at whole-gate level."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        ),
+        runs_tuples=[],
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_RUNS_MISSING]
+
+
+def test_snapshot_unbound_surfaces_as_refusal_reason(tmp_path: Path) -> None:
+    """#1220 (i) integration: the guard's code reaches the receipt surface.
+
+    Drives the full runner (fake chunk/measure/drop seams): the eligible
+    chunk's range is the `[74 d, 60 d]` drop window, the drill recorded only
+    subject A's window, and the gate-time completeness receipt carries a
+    second db-export/complete subject inside that drop window.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
+            _db_export_subject(
+                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
+            ),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _bound_salvage_derivation(
+        db_export_windows=[_win(drop_start, drop_end)],
+        completeness_generated_at=_iso(_NOW - timedelta(days=2)),
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-unbound-drill", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
     assert receipt["refusal_reason"] in retention.WIRE_CODES
     jsonschema.validate(receipt, _load_schema())
 
@@ -3903,6 +4366,47 @@ def test_drill_derivation_window_refuses_before_drill_coverage_missing(tmp_path:
     _write_json(tmp_path / "drill.json", narrowed_drill)
     config = _build_config(tmp_path)
     chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
+    stub = _StubRunner(chunks)
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+
+
+def test_drill_derivation_window_refuses_before_snapshot_unbound(tmp_path: Path) -> None:
+    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+    per §8.2 chain (#1207 before #1220), at the receipt surface.
+
+    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
+    inside the `[74 d, 60 d]` drop window) AND unbound (the gate-time
+    completeness receipt gained a db-export/complete subject the drill's
+    recorded universe never contained). The containment guard wins — and it
+    has to: the recorded universe is unfiltered, so binding only implies
+    "restore-verified" once containment holds (design D5-(d)).
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
+            _db_export_subject(
+                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
+            ),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _bound_salvage_derivation(
+        drop_window=_win(_NOW - timedelta(days=70), _NOW - timedelta(days=68)),
+        db_export_windows=[_win(drop_start, drop_end)],
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", drill)
+    config = _build_config(tmp_path)
+    chunks = [
+        _chunk(
+            "met", "forcing_station_timeseries", "chk-narrow-unbound", delta_days=60, duration_days=14
+        )
+    ]
     stub = _StubRunner(chunks)
     receipt = retention.run_retention(
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
