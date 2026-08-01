@@ -85,18 +85,18 @@ Risk packs (expanded):
 
 ## Implementation tasks
 
-- [ ] 1. Gate side: constant + `WIRE_CODES` registration +
+- [x] 1. Gate side: constant + `WIRE_CODES` registration +
   `_drill_snapshot_binds` helper + guard insertion in the db-export leg
   (after empty-derivation refusal, before per-target loop) + docstring
   gate-order update.
-- [ ] 2. Emit side: compute the D2 universe from the loaded completeness
+- [x] 2. Emit side: compute the D2 universe from the loaded completeness
   receipt (unfiltered by drop window) + `completeness_generated_at`;
   thread both into the salvage_derivation mapping. No change to the
   explicit-manifest path.
-- [ ] 3. Schema: `db_export_windows` (array of `#/definitions/window`) and
+- [x] 3. Schema: `db_export_windows` (array of `#/definitions/window`) and
   `completeness_generated_at` (string, format date-time) as OPTIONAL
   properties of `salvage_derivation`.
-- [ ] 4. Tests — rows (a)-(l) minimum:
+- [x] 4. Tests — rows (a)-(l) minimum:
   (a) issue v1/v2 replay: recorded universe [A], gate-time completeness
   A+B, un-narrowed drill, drop [06-05,06-15] → reasons ==
   [DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]; SAME receipts without
@@ -152,11 +152,11 @@ Risk packs (expanded):
   the db-export leg (its only coverage tuple is a runs window disjoint
   from the drop window → DRILL_COVERAGE_FORCING_MISSING) — do not use it
   for this row.
-- [ ] 5. Runbook §7.5/§8.2/§8.4 + tier design fixture #855/H2 sync per
+- [x] 5. Runbook §7.5/§8.2/§8.4 + tier design fixture #855/H2 sync per
   change surface, incl. the D5 residual rewrite (close
   fix-retention-drill-window-guard D5-(b) at window granularity; record
   the window-granularity blind spot and the dormant-population residual).
-- [ ] 6. Mutation proof on a scratch copy (never the working tree):
+- [x] 6. Mutation proof on a scratch copy (never the working tree):
   (i) binding guard deleted → replay row (a) fails;
   (ii) membership weakened to "recorded set non-empty" → replay row fails;
   (iii) field-absent branch removed (absent → refuse) → compat rows fail;

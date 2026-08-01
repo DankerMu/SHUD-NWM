@@ -1520,8 +1520,11 @@ Every receipt carries:
 - When (and only when) `--completeness-receipt` was supplied:
   `salvage_derivation` (`completeness_receipt_path`, the `drop_window`
   used or `null`, `candidate_count` = db-export+complete subjects seen,
-  `derived_count` = manifests derived, and `skipped[]` naming every
-  subject on a lane with no db-export salvage lane) plus
+  `derived_count` = manifests derived, `skipped[]` naming every
+  subject on a lane with no db-export salvage lane, `db_export_windows[]`
+  = the consumed snapshot's full db-export universe UNFILTERED by the drop
+  window, and `completeness_generated_at` = that snapshot's
+  `generated_at`) plus
   `salvage_inputs[]` (with `provenance` = `derived` / `explicit` /
   `derived+explicit`). Receipts from invocations without the flag are
   byte-identical to pre-#1177 receipts — neither field appears.
@@ -1643,29 +1646,71 @@ enough. Rerun the drill with a window ⊇ the NEW retention drop window
 (§7.3 step 3 recomputed); a receipt still inside its age budget is not
 evidence for a span it never judged.
 
-**Residual after #1207 (what this enforcement does NOT cover).** The
-guard blocks exactly one false-PASS mechanism — the operator narrowing
-knob — and cross-subject tuple substitution survives on three paths:
+**The drill's completeness snapshot binds the gate's requirement set
+(#1220).** A derivation-mode drill also records the db-export UNIVERSE of
+the completeness receipt it consumed — every `coverage=db-export` AND
+`verdict=complete` subject window, deduped and sorted, unfiltered by any
+drop window — at `salvage_derivation.db_export_windows` (§7.4). Before any
+db-export coverage tuple is consulted, the gate requires every
+salvage-backed window it derives from the CURRENT completeness receipt to
+be an exact `{start, end}` member of that recorded set; otherwise it
+refuses with `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` (§8.2). Membership is
+judged over the drop-window-filtered TARGETS only, never over the current
+receipt's whole db-export universe — a new subject far outside the drop
+window is not a requirement of this tick and must not block it. Reason for
+the guard: the completeness receipt is rewritten in place daily (timer
+cadence above) while a drill receipt stays valid for up to
+`NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`, so a db-export subject
+added after the drill would otherwise enter the gate's requirement set
+having never been restore-verified, with an older subject's identity-less
+tuple vouching for it.
+
+Ops consequence: **a drill receipt stops binding the moment a NEW OR
+CHANGED db-export window appears in the completeness receipt.** A brand
+new backfill/rerun selector unbinds it — and so does an EXISTING subject
+whose window was merely EXTENDED by a backfill, because membership is
+exact on BOTH endpoints (`[06-01, 06-30]` → `[06-01, 07-15]` is a
+different window). Remedy: rerun the drill against the current
+completeness receipt (§7.3), exactly as for the containment rule. What
+does NOT invalidate a receipt: daily completeness regeneration with an
+unchanged db-export universe (however much newer the receipt is), and
+requirement SHRINK (a subject that disappeared since the drill — the
+recorded set may be a strict superset of the targets). Note that
+`salvage_derivation.completeness_generated_at` is **diagnostics only** —
+it records which snapshot the drill consumed and is NEVER a refusal
+input; the gate does not compare it against the loaded receipt's
+`generated_at`, because at almost every tick the loaded receipt is newer
+and such a comparison would collapse the 30 d drill budget to under a day
+(daily mandatory restore drills or a permanent retention outage).
+
+**Residual after #1207 + #1220 (what this enforcement does NOT cover).**
+The two guards block the operator-narrowing knob and snapshot drift at
+window granularity; cross-subject tuple substitution survives on:
 
 - (a) **Receipts with no `salvage_derivation` section.** Both receipts
   predating #1206 and today's explicit-manifest drills
   (`--salvage-manifest` without `--completeness-receipt`) never write the
-  section, and the guard is skipped entirely for them; for those receipts
-  the hand-narrowed-manifest prohibition above remains prose-only.
-- (b) **Receipt-snapshot unbinding** (issue #1220, pre-existing): the
-  gate never checks that the drill's recorded
-  `completeness_receipt_path`/snapshot is the completeness receipt the
-  gate itself loaded. An un-narrowed drill (`null` window → guard passes)
-  derived from an OLDER completeness snapshot cannot have seen a subject
-  added by a later regeneration, and subject A's wide tuple still
-  substitutes for it.
-- (c) **Inside a contained window**, substitution is harmless only
+  section, and BOTH guards are skipped entirely for them; for those
+  receipts the hand-narrowed-manifest prohibition above remains
+  prose-only.
+- (b) **Receipts with the section but no `db_export_windows` field**
+  (derivation-mode receipts written between #1206 and #1220). The
+  containment guard applies to them; the binding guard is dormant, so
+  snapshot drift still substitutes there. Rerunning the drill migrates a
+  receipt out of this population.
+- (c) **Window-granularity blind spot.** Binding is judged on
+  `{start, end}` pairs, which is the gate's own requirement granularity.
+  A NEW subject whose window is byte-identical to one the drill verified
+  is indistinguishable at that granularity and passes the binding check.
+  (Receipt-snapshot unbinding — the #1220 defect formerly recorded here —
+  is otherwise CLOSED: a new or changed requirement window now refuses.)
+- (d) **Inside a contained, bound window**, substitution is harmless only
   RELATIVE TO the completeness snapshot the drill consumed — every
   subject overlapping the drill window was derived and restore-verified
-  from THAT snapshot. It is not an absolute guarantee; see (b).
+  from THAT snapshot. It is not an absolute guarantee; see (c).
 
-The root fix for all three is per-subject attribution of drill coverage
-tuples (layer 2 of #1207, separately scheduled).
+The root fix for all of these is per-subject attribution of drill coverage
+tuples (layer 2 of #1207/#1220, separately scheduled).
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -1804,6 +1849,20 @@ surfaces in the same commit.
   by ~14 daily tuples).
 - `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
   whose UNION covers the drop window.
+- `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` — the drill receipt records
+  `salvage_derivation.db_export_windows` (the db-export universe of the
+  completeness snapshot it consumed) and at least one salvage-backed
+  window derived from the CURRENT completeness receipt is not an exact
+  `{start, end}` member of it, so the requirement set drifted past the
+  drill's snapshot (#1220). Checked BEFORE any db-export coverage tuple is
+  consulted, and only over the drop-window-filtered targets. Also emitted
+  when the recorded set is present but unusable (not an array, an entry
+  that is not a window object, or missing/non-string endpoints;
+  fail-closed). A receipt with no `salvage_derivation` section, or with
+  the section but no `db_export_windows` field, is not affected (see
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)). Remedy:
+  rerun the drill against the current completeness receipt. NOT emitted on
+  `completeness_generated_at` drift alone — that field is diagnostics only.
 - `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`
   subject overlap but the UNION of the drill's `source=db-export` tuples
   fails to cover at least one salvage-backed window intersected with the
@@ -1842,8 +1901,17 @@ COMPLETENESS_RECEIPT_MISSING
                 -> DRILL_DERIVATION_WINDOW_TOO_NARROW
                   -> DRILL_COVERAGE_FORCING_MISSING
                     -> DRILL_COVERAGE_RUNS_MISSING
-                      -> DRILL_COVERAGE_DB_EXPORT_MISSING
+                      -> DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+                        -> DRILL_COVERAGE_DB_EXPORT_MISSING
 ```
+
+One ordering subtlety inside the db-export leg: an overlapping db-export
+subject that derives NO salvage-backed window (empty requirement set)
+still surfaces `DRILL_COVERAGE_DB_EXPORT_MISSING` — that refusal precedes
+the binding check, which has nothing to bind when there are no targets.
+`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` outranks
+`DRILL_COVERAGE_DB_EXPORT_MISSING` only for the per-target coverage
+comparison that follows it.
 
 #### 8.2.1 Non-code stderr diagnostics
 
@@ -1920,6 +1988,13 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 #    retention drop window (⊇), checked BEFORE any coverage leg — else
 #    refusal DRILL_DERIVATION_WINDOW_TOO_NARROW (§7.5). Receipts with no
 #    salvage_derivation section are unaffected.
+#  - Every salvage-backed window derived from the CURRENT completeness
+#    receipt MUST be an exact member of the drill's recorded
+#    salvage_derivation.db_export_windows — else refusal
+#    DRILL_COMPLETENESS_SNAPSHOT_UNBOUND (§7.5). A new or changed
+#    db-export window means the drill must be rerun; daily completeness
+#    regeneration with an unchanged db-export universe does not.
+#    Receipts without that field are unaffected.
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
 # pass --enforce on the CLI.
 uv run python scripts/node27_timeseries_retention.py --enforce
@@ -2077,7 +2152,10 @@ the operator's full recovery scope, not the slice that was dropped this
 tick. The retention gate is scoped differently on purpose: it evaluates
 each subject window's INTERSECTION with the drop window (#1162), so the
 drill is never asked for db-export coverage outside the interval actually
-being retired.
+being retired. These same intersected windows are what the drill's
+recorded completeness snapshot must have contained — see the binding rule
+in [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)
+(`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`).
 
 ## Rollback (unit-level, not data-level)
 

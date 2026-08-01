@@ -74,7 +74,12 @@
               "reason": {"type": "string", "minLength": 1}
             }
           }
-        }
+        },
+        "db_export_windows": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/window"}
+        },
+        "completeness_generated_at": {"type": "string", "format": "date-time"}
       }
     },
     "comparisons": {
