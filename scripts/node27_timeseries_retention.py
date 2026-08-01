@@ -31,8 +31,10 @@ Design references (design.md #855 fixture pins H1-H17):
   ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
   per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
-- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk relation is
-  gone; ``pg_total_relation_size`` would fail).
+- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk is gone;
+  ``chunks_detailed_size`` would no longer report it). Sized via
+  ``chunks_detailed_size(<hypertable>).total_bytes`` filtered to the chunk so
+  a compressed chunk's compressed sibling relation counts too (#1125).
 - H5 fail-closed on per-chunk drop failure — whole tick refuses.
 - H6 wire codes byte-identical across code / runbook §8.2 / design #855.
 - H7 predicate ``range_end <= cutoff`` (non-strict; divergence from #851's
@@ -898,7 +900,21 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
 def _default_measure_chunk_bytes(
     config: RetentionConfig, chunks: Sequence[ChunkRow]
 ) -> dict[str, int]:
-    """H4: measure ``pg_total_relation_size(...)`` BEFORE drop.
+    """H4: measure ``chunks_detailed_size(...).total_bytes`` BEFORE drop.
+
+    #1125: ``pg_total_relation_size(chunk)`` sizes only the main chunk
+    relation. For a compressed chunk the data lives in the compressed
+    sibling (``_timescaledb_internal.compress_hyper_*``), which
+    ``drop_chunks`` also removes — the main relation reads ~57 kB while the
+    real reclaim is hundreds of MB. TimescaleDB's public
+    ``chunks_detailed_size(<hypertable>::regclass)`` returns
+    ``total_bytes`` inclusive of the compressed sibling and indexes;
+    filtering it to ``(chunk_schema, chunk_name)`` yields this chunk's total
+    reclaim. Deliberate divergence from the compression sibling's private-
+    catalog join (``node27_timeseries_compression.py`` ``_COMPRESSED_SIBLING_QUERY``):
+    retention needs one total-reclaim number the public function returns
+    directly (validated byte-exactly against a live ``pg_database_size``
+    delta), not a two-step computation over private catalog tables.
 
     Per-chunk connection (mirrors compression sibling ``:292-338`` exactly):
     a shared transaction would enter ``InFailedSqlTransaction`` state on the
@@ -907,9 +923,11 @@ def _default_measure_chunk_bytes(
     the receipt faithful when a single chunk fails to size.
 
     Per-chunk try/except records ``0`` on failure so the drop phase can
-    still proceed and report best-effort ``freed_bytes``. Each connection
-    has a 60 s ``statement_timeout``; the DROP phase opens its own
-    connection (300 s) per chunk.
+    still proceed and report best-effort ``freed_bytes``; a chunk that
+    returns no row (dropped/renamed between enumeration and measurement) or
+    a NULL ``total_bytes`` records ``0`` through the same coercion. Each
+    connection has a 60 s ``statement_timeout``; the DROP phase opens its
+    own connection (300 s) per chunk.
     """
     import psycopg2  # type: ignore[import-untyped]
 
@@ -924,8 +942,13 @@ def _default_measure_chunk_bytes(
                     with connection.cursor() as cursor:
                         cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
                         cursor.execute(
-                            "SELECT pg_total_relation_size(%s::regclass)",
-                            (chunk.qualified_name,),
+                            "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+                            "WHERE chunk_schema = %s AND chunk_name = %s",
+                            (
+                                f"{chunk.hypertable_schema}.{chunk.hypertable_name}",
+                                chunk.chunk_schema,
+                                chunk.chunk_name,
+                            ),
                         )
                         row = cursor.fetchone()
                         result[chunk.qualified_name] = int((row[0] if row else 0) or 0)

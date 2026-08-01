@@ -114,6 +114,16 @@ candidate (`_hyper_1_3`, 17,403,224,064) is accurate. Tracked as a
 follow-up issue (receipt-accuracy only; the drop itself and the H4
 "measured before drop" ordering are correct).
 
+**Resolved by #1125.** The runner now measures each chunk with
+`SELECT total_bytes FROM chunks_detailed_size(<hypertable>::regclass)
+WHERE chunk_schema = ... AND chunk_name = ...`, which includes the
+compressed sibling relation, so future receipts report
+compression-inclusive `freed_bytes`. H4 ordering, the per-chunk
+isolated connection, and the best-effort "failure → 0 → continue"
+semantics are unchanged. The 2026-07-25 numbers above are **not**
+rewritten — they remain the immutable record of what that run
+measured.
+
 #### Reversibility footnote
 
 `drop_chunks` is not per-chunk reversible. The tested recovery oracle

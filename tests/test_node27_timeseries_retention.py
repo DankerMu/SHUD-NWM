@@ -2255,7 +2255,7 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
                 raise RuntimeError("current transaction is aborted (InFailedSqlTransaction)")
             if "statement_timeout" in sql:
                 return
-            if "pg_total_relation_size" in sql:
+            if "chunks_detailed_size" in sql:
                 global_chunk_idx[0] += 1
                 idx = global_chunk_idx[0]
                 if idx == fail_index:
@@ -2312,6 +2312,163 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
     assert measured[chunks[2].qualified_name] == 0  # failed chunk
     assert measured[chunks[3].qualified_name] == 4_444  # NOT zeroed
     assert measured[chunks[4].qualified_name] == 5_555  # NOT zeroed
+
+
+# ---------------------------------------------------------------------------
+# #1125 — default measurement path is compression-aware
+# ---------------------------------------------------------------------------
+
+# Live node-27 probe (TimescaleDB 2.10.2, 2026-08-01, recorded in
+# openspec/changes/fix-retention-freed-bytes-compressed/design.md D1):
+# compressed chunk ``_hyper_3_14_chunk`` reads 57,344 B through
+# ``pg_total_relation_size`` (the 2026-07-25 under-report signature) but
+# 5,904,531,456 B through ``chunks_detailed_size.total_bytes``.
+_PROBE_MAIN_RELATION_BYTES = 57_344
+_PROBE_TOTAL_BYTES = 5_904_531_456
+
+
+def _install_fake_measure_psycopg2(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Any,
+    executed: list[tuple[str, tuple | None]],
+    connect_calls: list[str],
+) -> None:
+    """Inject a fake ``psycopg2`` driving ``_default_measure_chunk_bytes``.
+
+    ``responder(params)`` returns the row ``fetchone()`` yields for the
+    measurement statement (or raises to simulate a per-chunk failure).
+    """
+
+    class _FakeCursor:
+        def __init__(self) -> None:
+            self._row: tuple | None = None
+
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, sql: str, params: tuple | None = None) -> None:
+            executed.append((sql, params))
+            if "statement_timeout" in sql:
+                return
+            self._row = responder(params)
+
+        def fetchone(self) -> tuple | None:
+            return self._row
+
+    class _FakeConn:
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_connect(url: str) -> _FakeConn:
+        connect_calls.append(url)
+        return _FakeConn()
+
+    import types
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "psycopg2", types.SimpleNamespace(connect=_fake_connect)
+    )
+
+
+def test_default_measure_chunk_bytes_uses_compression_aware_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1125: a compressed chunk's freed_bytes carries the compressed sibling.
+
+    The old ``pg_total_relation_size(chunk)`` query sized only the main chunk
+    relation (57,344 B on the live probe). The runner MUST query
+    ``chunks_detailed_size(<hypertable>::regclass)`` filtered by
+    ``(chunk_schema, chunk_name)`` and record its ``total_bytes``.
+    """
+    executed: list[tuple[str, tuple | None]] = []
+    connect_calls: list[str] = []
+    _install_fake_measure_psycopg2(
+        monkeypatch, lambda _params: (_PROBE_TOTAL_BYTES,), executed, connect_calls
+    )
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(
+        "hydro", "river_timeseries", "_hyper_3_14_chunk", delta_days=60, is_compressed=True
+    )
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: _PROBE_TOTAL_BYTES}
+    assert measured[chunk.qualified_name] != _PROBE_MAIN_RELATION_BYTES
+    measure_sql, params = next(
+        (sql, prm) for sql, prm in executed if "statement_timeout" not in sql
+    )
+    assert "chunks_detailed_size" in measure_sql
+    assert "pg_total_relation_size" not in measure_sql
+    assert "chunk_schema = %s" in measure_sql
+    assert "chunk_name = %s" in measure_sql
+    assert params == ("hydro.river_timeseries", "_timescaledb_internal", "_hyper_3_14_chunk")
+    assert len(connect_calls) == 1
+
+
+@pytest.mark.parametrize("row", [None, (None,)], ids=["no-row", "null-total-bytes"])
+def test_default_measure_chunk_bytes_missing_row_records_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, row: tuple | None
+) -> None:
+    """#1125 D2: the filtered function may return no row (chunk dropped or
+    renamed between enumeration and measurement) or a NULL ``total_bytes``;
+    both coerce to 0 rather than raising."""
+    executed: list[tuple[str, tuple | None]] = []
+    connect_calls: list[str] = []
+    _install_fake_measure_psycopg2(monkeypatch, lambda _params: row, executed, connect_calls)
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk("hydro", "river_timeseries", "chk-vanished", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+
+
+def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1125 D2: a per-chunk query failure records 0 for that chunk only; the
+    remaining chunks are still measured on their own fresh connections."""
+    sizes = {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        name = f"{params[1]}.{params[2]}"
+        if name == "_timescaledb_internal.chk-b":
+            raise RuntimeError('function chunks_detailed_size(regclass) failed for "chk-b"')
+        return (sizes[name],)
+
+    executed: list[tuple[str, tuple | None]] = []
+    connect_calls: list[str] = []
+    _install_fake_measure_psycopg2(monkeypatch, _responder, executed, connect_calls)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-a", "chk-b", "chk-c"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-b": 0,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+    assert len(connect_calls) == len(chunks)
 
 
 # ---------------------------------------------------------------------------
