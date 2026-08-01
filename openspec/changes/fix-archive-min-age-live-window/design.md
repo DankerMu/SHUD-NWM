@@ -203,20 +203,29 @@ is the invariant working as specified. Honest surface inventory
 - (c) TOCTOU between config validation and the tick body — same exposure
   as every other env-read; per-tick revalidation at startup is the
   existing model and unchanged.
-- (d) Lexical parser fidelity is bounded: forms beyond D1's enumerated
-  set (line continuations, `$VAR` interpolation, unsupported assignment
-  shapes such as `readonly`/`declare`, malformed hand-edits) refuse
-  fail-closed rather than mis-parse — made true by the round-1
-  amendments in D1 and the round-2 per-line mention rule, and pinned by
-  a DIFFERENTIAL oracle test (the parser-fail-direction class repeated
-  across two review rounds, triggering the 6.2 invariant audit): for a
-  corpus of env-file bodies, the helper's result is compared against
-  the runner's actual oracle (`bash -c 'set -a; . file'` + the runner's
-  strict parse semantics) — the helper MUST either refuse or return
-  exactly the runner's effective window; a number differing from the
-  runner's, or a number where the runner refuses/blocks, fails the
-  suite. Known bounded exception recorded in the test: multi-line
-  quoted values (not a realistic retention-env shape). The remaining honest residual is FILE IDENTITY: a
+- (d) Lexical parser fidelity is bounded to the DETECTABLE set (round-3
+  honest narrowing): unsupported-shape refusal is keyed on the literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring on non-comment
+  lines (catches `readonly`/`declare` prefixes and truncated edits)
+  plus the round-1 value-shape refusals (leading whitespace, `#`-value,
+  CRLF). Shell forms that set the window variable WITHOUT that
+  substring — `VAR+=21`, `: ${VAR:=21}`, nested `source`/`.`,
+  `printf -v`, `read`, `eval` — bypass detection and resolve to the
+  runner-equivalent default while the runner may export a different
+  value: a verified round-3 residual (fail-open direction, low
+  likelihood — requires non-plain hand edits of the deployed env),
+  deferred to issue #1230, whose fix is a closed-world file grammar
+  (every line must be blank, a full-line comment, or a plain accepted
+  assignment; pre-audited zero false-refusals across all 15 shipped
+  `infra/env/*.example` templates). The DIFFERENTIAL oracle test
+  (added when the parser-fail-direction class repeated across two
+  review rounds, triggering the 6.2 invariant audit) compares the
+  helper against `bash -c 'set -a; . file'` + the runner's strict
+  parse over the enumerated corpus — the helper MUST either refuse or
+  return exactly the runner's effective window. It is a regression
+  pin, not a search: it cannot discover shapes outside its corpus.
+  Multi-line quoted values remain the other recorded exception
+  (strict xfail). The remaining honest residual is FILE IDENTITY: a
   wrong path whose target is lexically indistinguishable from the
   deployed retention env (e.g. the shipped `.example`, which carries a
   valid `WINDOW_DAYS=14` assignment) cannot be detected lexically; the

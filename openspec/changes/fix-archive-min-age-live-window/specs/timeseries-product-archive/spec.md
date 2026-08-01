@@ -43,11 +43,16 @@ the runner itself considers healthy.
 - **WHEN** `NODE27_TIMESERIES_RETENTION_ENV` is unset, empty, or a
   relative path, or names a missing file, or the file carries a present
   assignment whose value is non-integer or non-positive, or ANY
-  non-comment line carries the window variable in an assignment shape
-  the extractor does not support (`readonly`/`declare` prefixes, an
-  unquoted leading-whitespace value, a CRLF line — even alongside an
+  non-comment line carries the window variable in a DETECTABLE
+  unsupported assignment shape (a line containing the literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring that is not
+  accepted as its assignment — `readonly`/`declare` prefixes,
+  truncated edits — or an accepted-shape line with an unsupported
+  value: unquoted leading whitespace, a CRLF line; even alongside an
   accepted plain assignment), or the file carries no recognized
-  `NODE27_TIMESERIES_RETENTION_*` assignment at all
+  `NODE27_TIMESERIES_RETENTION_*` assignment at all (shell forms that
+  set the variable without that detectable substring are a recorded
+  residual tracked by issue #1230 — see design D5(d))
 - **THEN** validation SHALL refuse with `ArchiveConfigurationError` (or
   the consumer's config error) and SHALL NOT fall back to any constant
 

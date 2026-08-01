@@ -199,6 +199,17 @@ Must add (per design D1-D4):
   pointer misconfiguration now refuses) and keeps the retention
   `.example` as the remaining lexically-indistinguishable wrong file.
 
+## Round-3 routing (PR #1229 cross-review, verified finding D1-r3)
+
+- [x] 12. D1-r3 (CONFIRMED P2, fail-open via non-`NAME=`-substring shell
+  forms: `+=`, `${:=}`, nested `source`, `printf -v`, `read`, `eval`)
+  DEFERRED per the P2-only severity-rationing rule after three rounds —
+  code hardening (closed-world file grammar) tracked by issue #1230.
+  Merge-time obligation: narrow the over-broad D5(d)/scenario-3/runbook
+  claims to the detectable set with #1230 recorded as the residual
+  (spec/design by orchestrator; runbook paragraph via docs micro-task);
+  both openspec validates stay green.
+
 ## Required evidence
 
 - `uv run pytest -q tests/test_storage.py

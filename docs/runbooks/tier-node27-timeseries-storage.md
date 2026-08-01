@@ -148,14 +148,19 @@ guard with it. Resolution rules, all fail-closed except the last:
 - unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
   unreadable file, or a present value that is not a positive integer → refuse,
   never a constant fallback;
-- an assignment shape the extractor cannot accept — `readonly VAR=21`,
-  `declare -i VAR=21`, a truncated edit, an unquoted value starting with
-  whitespace (`VAR= 21`, which bash leaves UNSET), a `#`-first value
-  (`VAR=#21`, which bash exports verbatim), or CRLF content → refuse rather
-  than mis-parse a window the runner does not use. This is judged PER LINE: a
-  file that mixes a plain `VAR=14` with a later `readonly VAR=30` refuses too,
-  because sourcing it exports 30 and reporting the earlier 14 would be
-  fail-open (`#1229` round-2);
+- a non-comment line that CARRIES the literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring but is not accepted as
+  that variable's assignment — `readonly VAR=21`, `declare -i VAR=21`, a
+  truncated or otherwise malformed edit — or an accepted-shape line whose VALUE
+  is unsupported: an unquoted value starting with whitespace (`VAR= 21`, which
+  bash leaves UNSET), a `#`-first value (`VAR=#21`, which bash exports
+  verbatim), or a non-`\n` line break such as CRLF anywhere in the file →
+  refuse rather than mis-parse a window the runner does not use. That is the
+  whole detection boundary: it is substring-keyed, so shapes that omit the
+  `VAR=` substring are invisible (see the fail-open residual below). It is
+  judged PER LINE: a file that mixes a plain `VAR=14` with a later
+  `readonly VAR=30` refuses too, because sourcing it exports 30 and reporting
+  the earlier 14 would be fail-open (`#1229` round-2);
 - a readable file that is recognizably the deployed retention env (at least
   one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
   assignment is absent or empty → the retention runner's own default (14 d),
@@ -195,6 +200,19 @@ differ:
   carries a valid `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — still parses
   cleanly and the guard accepts its window. That remains lexically
   undetectable; only the dual-pointer check above catches it.
+
+Residual (fail-open, `#1229` round-3): because unsupported-shape detection is
+keyed on that literal `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring,
+shell forms that set the window WITHOUT it are NOT detected — `VAR+=21`
+append, `: ${VAR:=21}` default-expansion, a nested `source`/`.` of another file
+from within the env, `printf -v`, `read`, `eval`. The guard then sees no window
+assignment, resolves the runner-equivalent default (14 d), and passes a
+`NHMS_ARCHIVE_MIN_AGE_DAYS=14` pair while the runner may export a LARGER window
+— fail-open, though of low likelihood since it takes a hand edit that turns the
+env into shell logic. The deployed retention env MUST therefore stay plain
+`KEY=VALUE` assignments plus `#` comments — no `+=`, no parameter-expansion
+defaults, no sourcing, no command substitution; tracked hardening is `#1230`
+(closed-world line grammar that refuses any non-`KEY=VALUE` line).
 
 **Deployment consequence — read before deploying.** As of 2026-08-01 the live
 pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
