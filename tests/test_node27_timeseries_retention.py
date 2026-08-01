@@ -3235,7 +3235,7 @@ _MEASURE_WARNING_GREP_TOKEN = "freed_bytes measurement failed"  # §8.6 operator
 # specifically — §8.2.1 names the same token in backticks, which does not
 # match, and an unquoted substring check would have been satisfied by §8.2.1
 # alone (making the §8.6 anchor vacuous).
-_MEASURE_WARNING_GREP_FENCE = "grep 'freed_bytes measurement failed'"
+_MEASURE_WARNING_GREP_FENCE = f"grep '{_MEASURE_WARNING_GREP_TOKEN}'"
 
 
 def test_measure_warning_byte_identical_with_runbook() -> None:
