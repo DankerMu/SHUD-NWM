@@ -59,13 +59,14 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import jsonschema
 
@@ -236,20 +237,6 @@ class DropWindow:
 
     start: datetime
     end: datetime
-
-
-def _mask_dsn(dsn: str) -> str:
-    """Return a DSN safe for stderr diagnostics — credentials stripped."""
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        return "postgresql://***@***/***"
-    netloc = parts.hostname or "***"
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    if parts.username is not None or parts.password is not None:
-        netloc = f"***@{netloc}"
-    return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
@@ -897,8 +884,18 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         connection.close()
 
 
-def _redact_measure_error(error: BaseException, dsn: str) -> str:
-    """Scrub credentials out of a measurement error before it reaches stderr.
+def _redact_error_text(error: BaseException, dsn: str) -> str:
+    """Scrub credentials out of an error before it reaches an operator surface.
+
+    #1213: this is the module's SINGLE error-redaction chokepoint. Every
+    driver/uncaught exception text this runner persists crosses it exactly
+    once — the per-chunk measurement stderr diagnostic, the drop-phase
+    ``RETENTION_DROP_FAILED`` refusal reason, and the ``RETENTION_UNCAUGHT_ERROR``
+    fallback refusal reason. Both refusal reasons land in the receipt file AND
+    (via ``_emit_stderr_diagnostic``) in the wrapper's long-lived
+    ``retention.log``; psycopg2 echoes the full conninfo — plaintext password
+    included — on DSN parse failures, so an unredacted interpolation is a
+    password-grade leak onto two persisted surfaces.
 
     Mirrors the salvage runner's ``_mask_dsn_in_message``
     (``scripts/node27_db_export_salvage.py:1039-1041``): the shared policy in
@@ -906,29 +903,54 @@ def _redact_measure_error(error: BaseException, dsn: str) -> str:
     in both URL-encoded and driver-decoded forms, and the marker is rendered
     as ``***`` for operator-facing text.
 
-    libpq additionally echoes the ROLE name back on auth failures
-    (``FATAL:  password authentication failed for user "nwm_writer"``), which
-    the DSN policy does not cover — so that ONE libpq-shaped occurrence is
-    scrubbed too, and only when the name matches the DSN's own username. A
-    bare literal replace of the username is deliberately NOT done: a username
-    like ``nwm`` also occurs inside unrelated substrings (``/home/nwm/...``)
-    and replacing those would mangle the diagnostic.
+    libpq additionally echoes the ROLE name back on connection failures, in
+    two shapes the DSN policy does not cover:
+
+    * ``FATAL:  password authentication failed for user "nwm_writer"``
+    * ``FATAL:  role "nwm_writer" does not exist``
+
+    Both keywords are scrubbed (every occurrence), and ONLY when the quoted
+    name matches the DSN's own username. A bare literal replace of the
+    username is deliberately NOT done: a username like ``nwm`` also occurs
+    inside unrelated substrings (``/home/nwm/...``) and replacing those would
+    mangle the diagnostic.
+
+    libpq's host/port echo (``connection to server at "10.x.x.x", port 55432``)
+    is deliberately RETAINED — a diagnosability trade-off recorded in #1213:
+    the caller keeps the wire code and exception type name, and the operator
+    keeps enough of the driver text to tell an auth failure from a timeout.
 
     The ``redaction`` import is function-local because that module imports
     ``psycopg2.extensions`` at module scope, and this runner keeps psycopg2
     strictly deferred (config parsing / ``--help`` must work without the
     driver installed).
-    """
-    from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
 
-    text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+    That deferral is exactly why this chokepoint is TOTAL — it never raises.
+    On a driver-less host (e.g. a venv rebuild window) the very error being
+    reported is typically ``DisplayWatermarkError("psycopg2 is unavailable")``,
+    and re-importing ``packages.common.redaction`` to redact it would raise
+    ``ModuleNotFoundError`` straight out of ``main()``'s except handler —
+    destroying the refused receipt and dumping a raw traceback into
+    ``retention.log``. Any internal failure therefore degrades to a
+    credential-free placeholder naming the original exception type; the
+    caller's wire-code prefix and type name are unaffected, so the receipt is
+    still published and still greppable.
+    """
     try:
-        username = urlsplit(dsn).username
-    except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
-        username = None
-    if username:
-        text = text.replace(f'user "{username}"', 'user "***"')
-    return text
+        from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
+
+        text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+        try:
+            username = urlsplit(dsn).username
+        except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
+            username = None
+        if username:
+            text = re.sub(rf'\b(user|role) "{re.escape(username)}"', r'\1 "***"', text)
+        return text
+    except Exception:
+        # Fail closed on BOTH axes: withhold the unredactable text entirely
+        # (no credential can survive) while keeping the receipt publishable.
+        return f"<error text withheld: redaction unavailable ({type(error).__name__})>"
 
 
 def _default_measure_chunk_bytes(
@@ -1008,7 +1030,7 @@ def _default_measure_chunk_bytes(
                     {
                         "warning": "freed_bytes measurement failed; recording 0",
                         "chunk": chunk.qualified_name,
-                        "error": _redact_measure_error(error, config.database_url),
+                        "error": _redact_error_text(error, config.database_url),
                     },
                     sort_keys=True,
                 ),
@@ -1358,9 +1380,14 @@ def run_retention(
             drop_chunk(config, chunk)
         except Exception as error:
             # H5 whole-tick fail-closed: subsequent chunks NOT attempted.
+            # #1213: the driver text is credential-redacted before it reaches
+            # the receipt file and the wrapper log; the wire-code +
+            # `<hypertable_schema>.<chunk_name>` prefix is byte-unchanged so
+            # operator greps keep matching.
             reason = (
                 f"{CODE_RETENTION_DROP_FAILED}:"
-                f"{chunk.hypertable_schema}.{chunk.chunk_name}: {error}"
+                f"{chunk.hypertable_schema}.{chunk.chunk_name}: "
+                f"{_redact_error_text(error, config.database_url)}"
             )
             return _build("refused", refusal_reason=reason)
         dropped.append(
@@ -1461,8 +1488,13 @@ def main(
             # RETENTION_UNCAUGHT_ERROR — symmetric with #854
             # DRILL_UNCAUGHT_ERROR. Emit a schema-valid refused receipt
             # rather than a raw stack trace.
+            # #1213: this is the path a psycopg2 DSN-parse failure takes, and
+            # that exception echoes the whole conninfo (password included), so
+            # the text crosses the redaction chokepoint before it is persisted.
+            # Wire code + exception type name are byte-unchanged.
             reason = (
-                f"{CODE_RETENTION_UNCAUGHT_ERROR}:{type(error).__name__}: {error}"
+                f"{CODE_RETENTION_UNCAUGHT_ERROR}:{type(error).__name__}: "
+                f"{_redact_error_text(error, config.database_url)}"
             )
             receipt = build_receipt("refused", stamp, refusal_reason=reason)
             try:
