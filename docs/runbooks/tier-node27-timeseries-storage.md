@@ -1448,18 +1448,30 @@ set -a; source /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env; set +a
 #    retention env file — read it, never type a remembered number. The spec
 #    default shipped in `infra/env/node27-timeseries-retention.example` is
 #    14 d, but the deployed value differs (node-27 ran 21 d as of
-#    2026-08-01). A count SMALLER than the live one makes this window
+#    2026-08-01). The query below is monotone-DECREASING in the day count:
+#    a LARGER count ⇒ an OLDER cutoff ⇒ FEWER eligible chunks ⇒ a window
 #    NARROWER than the runner's, and every retention tick then refuses with
 #    `DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) before any coverage leg
-#    runs — and a drill is quarterly-expensive to rerun.
+#    runs — and a drill is quarterly-expensive to rerun. A SMALLER count
+#    errs the safe way: a WIDER superset window, at worst a more expensive
+#    drill. So the danger is an over-large count, and the realistic way to
+#    get one is a live value tuned DOWN (disk pressure drops it to, say,
+#    7 d) while the operator pastes a remembered larger number. Always read
+#    the live value.
 WINDOW_DAYS="$(grep -E '^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=' \
   /home/nwm/NWM/infra/env/node27-timeseries-retention.env | tail -n1 | cut -d= -f2)"
 : "${WINDOW_DAYS:?live retention window unreadable — do not guess}"
 
 #    Feeding the runner's OWN window value into the query is what makes it a
 #    CONSERVATIVE SUPERSET of the runner's drop window BY CONSTRUCTION (not
-#    by numeric luck): same `window_days` ⇒ same cutoff ⇒ the same eligible
-#    chunk set, and `run_retention` only ever SHRINKS its side from there —
+#    by numeric luck). The two sides share `window_days` but NOT the anchor:
+#    this query subtracts it from DB `now()`, while `run_retention`
+#    subtracts it from the display watermark `MAX(cycle_time)` (header
+#    above; `fetch_display_watermark`), never from the wall clock. The
+#    watermark is never in the future, so watermark ≤ now() ⇒ this query's
+#    cutoff is never OLDER than the runner's ⇒ its eligible chunk set is a
+#    SUPERSET of the runner's.
+#    `run_retention` only ever SHRINKS its side from there —
 #    it additionally intersects the eligible chunks with the completeness
 #    receipt's `coverage_bounds` via `_partition_by_completeness_bounds`
 #    (boundary-partial chunks are deferred) BEFORE calling
@@ -1645,10 +1657,14 @@ recorded window passes. Run as instructed, the §7.3 step 3 query the
 standard invocation above pastes from is a conservative superset of the
 runner's own drop window and so never produces a narrower one: step 3
 reads the SAME live `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` the runner
-reads, so both sides derive the same cutoff, and the runner then only
-narrows its own window further (completeness-bounds intersection). That
+reads, but anchors it at DB `now()` while the runner anchors it at the
+display watermark `MAX(cycle_time)` — and the watermark is never in the
+future, so step 3's cutoff is never older than the runner's and its
+eligible chunk set is a superset. The runner then only narrows its own
+window further (completeness-bounds intersection). That
 guarantee comes from using the live value, not from any particular number
-— substituting a remembered day count breaks it. A
+— substituting a remembered day count breaks it. It also holds only at
+the moment step 3 runs; see "Windows advance" below. A
 recorded `drop_window` of `null` (the drill ran without
 `--drop-window-*`) passes; a `salvage_derivation` section that is present
 but unusable (not an object, `drop_window` key missing, unparseable
@@ -2113,10 +2129,12 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    applies first in that case). Common causes: statement timeout
    (5 min per chunk — `_DROP_TIMEOUT_MS = 300_000` in
    `scripts/node27_timeseries_retention.py`, set as `statement_timeout`
-   around each `drop_chunks`; this is the ONLY wall on the retention lane,
-   as `node27_timeseries_retention_once.sh` wraps nothing in `timeout` and
+   around each `drop_chunks`; there is no PROCESS-level wall on this lane
+   — `node27_timeseries_retention_once.sh` wraps nothing in `timeout` and
    the systemd unit sets `TimeoutStartSec=0`, so a tick hung outside a
-   statement is never killed for you), active
+   statement is never killed for you. The only walls are statement-level:
+   this 300 s per `drop_chunks`, plus the 60 s `_QUERY_TIMEOUT_MS` on
+   catalog enumeration and per-chunk size measurement — see §8.2.1), active
    writer holding an incompatible lock, or a
    TimescaleDB catalog inconsistency. Re-run enforce after the operator
    has confirmed the DB is healthy. There is no automated retry loop —
