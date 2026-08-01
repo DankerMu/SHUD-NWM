@@ -82,6 +82,18 @@ Risk packs:
   hypertable-wide before the filter; live instance has 8 chunks per
   hypertable, milliseconds vs the 60 s statement timeout (design D1
   records the magnitude). Evidence: design analysis; no timeout change.
+  Accepted risk (recorded in design D1, not mitigated): the **lock
+  footprint** widens with the cost — per call from `AccessShareLock` on one
+  cold chunk relation to `AccessShareLock` across every chunk relation of the
+  hypertable, compressed siblings included. Plain ingest `INSERT`
+  (`RowExclusiveLock`) does not conflict; concurrent `AccessExclusiveLock`
+  DDL does — `compress_chunk`'s swap/truncate phase, `decompress_chunk`, and
+  manual replay (the 04:25/05:15 timer stagger separates only the *scheduled*
+  ticks, not manual triggers). Worst case is a blocked size walk hitting the
+  60 s `statement_timeout`, which degrades to the D2 per-chunk best-effort 0
+  — an under-reported `freed_bytes`, never a blocked or failed drop.
+  Evidence: design D1 accepted-risk paragraph; per-chunk-failure → 0 →
+  continue unit row (2.2); no timeout or drop-path change.
 - Other packs (auth/secrets, release/packaging, documentation/migration):
   not selected — none touched beyond the doc syncs listed in the change
   surface (documentation sync is itself a task with a lint gate, 2.4).

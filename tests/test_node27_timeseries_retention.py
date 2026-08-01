@@ -2326,18 +2326,55 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
 _PROBE_MAIN_RELATION_BYTES = 57_344
 _PROBE_TOTAL_BYTES = 5_904_531_456
 
+# Synthetic (no live ``met`` probe is recorded in design D1). The met row
+# exists to pin the hypertable regclass parameter and the value round-trip
+# for the second retained hypertable, not to assert a live number.
+_MET_TOTAL_BYTES = 1_073_741_824
+
+# The exact statement ``_default_measure_chunk_bytes`` must issue. Pinning the
+# whole string (not substrings) is what makes a projected-column swap
+# (``total_bytes`` -> ``table_bytes``, which would resurrect the under-report
+# defect with a still-"chunks_detailed_size"-shaped query) and a predicate
+# reorder (which would silently mis-bind the two %s params) go red.
+_EXPECTED_MEASURE_SQL = (
+    "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+    "WHERE chunk_schema = %s AND chunk_name = %s"
+)
+
+
+class _MeasureProbe:
+    """Recorder for the fake psycopg2 driving ``_default_measure_chunk_bytes``.
+
+    ``completions`` gets one entry per connection context-manager exit: True
+    when the ``with connection:`` block unwound cleanly (psycopg2 COMMITs),
+    False when it unwound with an exception (psycopg2 ROLLBACKs). Without it a
+    recorded ``0`` is ambiguous — the D2-mandated coercion path and the
+    best-effort except path both write 0, so a mutation that deletes the
+    coercion would still "pass" while degrading every NULL/edge measurement
+    into a swallowed exception.
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.connect_calls: list[str] = []
+        self.completions: list[bool] = []
+
+    @property
+    def measure_statements(self) -> list[tuple[str, tuple | None]]:
+        """Executed statements excluding the ``SET statement_timeout`` prelude."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" not in sql]
+
 
 def _install_fake_measure_psycopg2(
     monkeypatch: pytest.MonkeyPatch,
     responder: Any,
-    executed: list[tuple[str, tuple | None]],
-    connect_calls: list[str],
-) -> None:
+) -> _MeasureProbe:
     """Inject a fake ``psycopg2`` driving ``_default_measure_chunk_bytes``.
 
     ``responder(params)`` returns the row ``fetchone()`` yields for the
     measurement statement (or raises to simulate a per-chunk failure).
     """
+    probe = _MeasureProbe()
 
     class _FakeCursor:
         def __init__(self) -> None:
@@ -2350,7 +2387,7 @@ def _install_fake_measure_psycopg2(
             return None
 
         def execute(self, sql: str, params: tuple | None = None) -> None:
-            executed.append((sql, params))
+            probe.executed.append((sql, params))
             if "statement_timeout" in sql:
                 return
             self._row = responder(params)
@@ -2363,6 +2400,9 @@ def _install_fake_measure_psycopg2(
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            # psycopg2's connection context manager COMMITs on a clean exit and
+            # ROLLBACKs on an exception; record which happened.
+            probe.completions.append(exc_type is None)
             return None
 
         def cursor(self) -> _FakeCursor:
@@ -2372,7 +2412,7 @@ def _install_fake_measure_psycopg2(
             return None
 
     def _fake_connect(url: str) -> _FakeConn:
-        connect_calls.append(url)
+        probe.connect_calls.append(url)
         return _FakeConn()
 
     import types
@@ -2380,10 +2420,24 @@ def _install_fake_measure_psycopg2(
     monkeypatch.setitem(
         __import__("sys").modules, "psycopg2", types.SimpleNamespace(connect=_fake_connect)
     )
+    return probe
 
 
+@pytest.mark.parametrize(
+    ("schema", "hypertable", "chunk_label", "total_bytes"),
+    [
+        ("hydro", "river_timeseries", "_hyper_3_14_chunk", _PROBE_TOTAL_BYTES),
+        ("met", "forcing_station_timeseries", "_hyper_5_21_chunk", _MET_TOTAL_BYTES),
+    ],
+    ids=["hydro-river", "met-forcing-station"],
+)
 def test_default_measure_chunk_bytes_uses_compression_aware_query(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema: str,
+    hypertable: str,
+    chunk_label: str,
+    total_bytes: int,
 ) -> None:
     """#1125: a compressed chunk's freed_bytes carries the compressed sibling.
 
@@ -2391,30 +2445,25 @@ def test_default_measure_chunk_bytes_uses_compression_aware_query(
     relation (57,344 B on the live probe). The runner MUST query
     ``chunks_detailed_size(<hypertable>::regclass)`` filtered by
     ``(chunk_schema, chunk_name)`` and record its ``total_bytes``.
+
+    Both retained hypertables are exercised so the regclass parameter cannot be
+    hardcoded to ``hydro.river_timeseries``; the SQL is asserted whole so the
+    projected column and the predicate order are both pinned.
     """
-    executed: list[tuple[str, tuple | None]] = []
-    connect_calls: list[str] = []
-    _install_fake_measure_psycopg2(
-        monkeypatch, lambda _params: (_PROBE_TOTAL_BYTES,), executed, connect_calls
-    )
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: (total_bytes,))
     config = _build_config(tmp_path, enforce=True)
-    chunk = _chunk(
-        "hydro", "river_timeseries", "_hyper_3_14_chunk", delta_days=60, is_compressed=True
-    )
+    chunk = _chunk(schema, hypertable, chunk_label, delta_days=60, is_compressed=True)
 
     measured = retention._default_measure_chunk_bytes(config, [chunk])
 
-    assert measured == {chunk.qualified_name: _PROBE_TOTAL_BYTES}
+    assert measured == {chunk.qualified_name: total_bytes}
     assert measured[chunk.qualified_name] != _PROBE_MAIN_RELATION_BYTES
-    measure_sql, params = next(
-        (sql, prm) for sql, prm in executed if "statement_timeout" not in sql
-    )
-    assert "chunks_detailed_size" in measure_sql
-    assert "pg_total_relation_size" not in measure_sql
-    assert "chunk_schema = %s" in measure_sql
-    assert "chunk_name = %s" in measure_sql
-    assert params == ("hydro.river_timeseries", "_timescaledb_internal", "_hyper_3_14_chunk")
-    assert len(connect_calls) == 1
+    assert len(probe.measure_statements) == 1
+    measure_sql, params = probe.measure_statements[0]
+    assert measure_sql == _EXPECTED_MEASURE_SQL
+    assert params == (f"{schema}.{hypertable}", "_timescaledb_internal", chunk_label)
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
 
 
 @pytest.mark.parametrize("row", [None, (None,)], ids=["no-row", "null-total-bytes"])
@@ -2423,16 +2472,28 @@ def test_default_measure_chunk_bytes_missing_row_records_zero(
 ) -> None:
     """#1125 D2: the filtered function may return no row (chunk dropped or
     renamed between enumeration and measurement) or a NULL ``total_bytes``;
-    both coerce to 0 rather than raising."""
-    executed: list[tuple[str, tuple | None]] = []
-    connect_calls: list[str] = []
-    _install_fake_measure_psycopg2(monkeypatch, lambda _params: row, executed, connect_calls)
+    both coerce to 0 rather than raising.
+
+    The 0 must come from the coercion, NOT from the best-effort except branch:
+    the measurement statement is asserted executed and the connection block
+    asserted to have unwound cleanly, so a lost coercion (``int(None)`` ->
+    TypeError -> except -> 0) is red instead of indistinguishable.
+    """
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: row)
     config = _build_config(tmp_path, enforce=True)
     chunk = _chunk("hydro", "river_timeseries", "chk-vanished", delta_days=60)
 
     measured = retention._default_measure_chunk_bytes(config, [chunk])
 
     assert measured == {chunk.qualified_name: 0}
+    assert probe.measure_statements == [
+        (
+            _EXPECTED_MEASURE_SQL,
+            ("hydro.river_timeseries", "_timescaledb_internal", "chk-vanished"),
+        )
+    ]
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
 
 
 def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
@@ -2452,9 +2513,7 @@ def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
             raise RuntimeError('function chunks_detailed_size(regclass) failed for "chk-b"')
         return (sizes[name],)
 
-    executed: list[tuple[str, tuple | None]] = []
-    connect_calls: list[str] = []
-    _install_fake_measure_psycopg2(monkeypatch, _responder, executed, connect_calls)
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
     config = _build_config(tmp_path, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
@@ -2468,7 +2527,11 @@ def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
         "_timescaledb_internal.chk-b": 0,
         "_timescaledb_internal.chk-c": 7_654_321,
     }
-    assert len(connect_calls) == len(chunks)
+    assert len(probe.connect_calls) == len(chunks)
+    # Only the failing chunk's block unwound with an exception — this is the
+    # counterpart of the missing-row test: here the 0 legitimately comes from
+    # the except branch, and the neighbours still complete cleanly.
+    assert probe.completions == [True, False, True]
 
 
 # ---------------------------------------------------------------------------

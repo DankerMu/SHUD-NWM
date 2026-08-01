@@ -925,8 +925,11 @@ def _default_measure_chunk_bytes(
     Per-chunk try/except records ``0`` on failure so the drop phase can
     still proceed and report best-effort ``freed_bytes``; a chunk that
     returns no row (dropped/renamed between enumeration and measurement) or
-    a NULL ``total_bytes`` records ``0`` through the same coercion. Each
-    connection has a 60 s ``statement_timeout``; the DROP phase opens its
+    a NULL ``total_bytes`` records ``0`` through the same coercion. A failure
+    additionally emits one JSON diagnostic line on stderr naming the chunk and
+    the error — the receipt's ``0`` is otherwise indistinguishable from a
+    genuinely empty chunk; the recorded value and control flow are unchanged.
+    Each connection has a 60 s ``statement_timeout``; the DROP phase opens its
     own connection (300 s) per chunk.
     """
     import psycopg2  # type: ignore[import-untyped]
@@ -954,10 +957,23 @@ def _default_measure_chunk_bytes(
                         result[chunk.qualified_name] = int((row[0] if row else 0) or 0)
             finally:
                 connection.close()
-        except Exception:
+        except Exception as error:
             # A per-chunk measure failure is not a whole-tick fault. Record
             # 0 so the receipt is faithful; a fresh connection for the next
             # chunk guarantees this chunk's abort does not poison the rest.
+            # The receipt cannot distinguish this 0 from a genuine 0, so the
+            # cause goes to stderr (diagnostic only — no control-flow change).
+            print(
+                json.dumps(
+                    {
+                        "warning": "freed_bytes measurement failed; recording 0",
+                        "chunk": chunk.qualified_name,
+                        "error": str(error),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
             result[chunk.qualified_name] = 0
     return result
 

@@ -56,6 +56,34 @@ per-call cost rises from O(1 relation) to O(hypertable chunks) — currently
 8 chunks per hypertable on the live instance, milliseconds against the
 60 s statement timeout; see the resource-limits risk pack.)
 
+**Accepted risk — lock footprint widens (recorded, not mitigated).** The old
+`pg_total_relation_size(<chunk>)` touched exactly one cold relation (the
+chunk about to be dropped) and took `AccessShareLock` on it.
+`chunks_detailed_size(<hypertable>)` walks **every** chunk relation of the
+hypertable, compressed siblings included, so each measurement call now takes
+`AccessShareLock` across the whole hypertable's chunk set — including chunks
+that are live ingest/read targets, not just the drop candidate. Consequences
+we accept:
+
+- Plain ingest `INSERT` takes `RowExclusiveLock`, which does **not** conflict
+  with `AccessShareLock` — the normal 24/7 ingest path is unaffected.
+- What does conflict is `AccessExclusiveLock` DDL on any chunk of the same
+  hypertable: `compress_chunk`'s swap/truncate phase, `decompress_chunk`, and
+  manual replay/maintenance. A concurrent holder blocks the size walk until
+  it releases or until the 60 s `statement_timeout` fires — and the timeout
+  degrades to the D2 best-effort **per-chunk 0**, i.e. an under-reported
+  `freed_bytes` for that chunk, never a blocked or failed drop.
+- The 04:25 / 05:15 timer stagger keeps the *scheduled* compression and
+  retention ticks apart, but it does **not** protect against manually
+  triggered compression/decompression/replay — an operator running those
+  while a retention tick is measuring can produce best-effort 0s in the
+  receipt.
+
+Not mitigated because the failure mode is receipt-accuracy-only and already
+has a defined, pinned semantic (D2); adding lock-wait tuning or a
+hypertable-wide advisory lock would be new coordination machinery for a
+degradation the receipt already tolerates.
+
 ## Decision 2 — failure and empty-result semantics unchanged
 
 - Per-chunk exception → record 0, continue (best-effort receipt, drop
