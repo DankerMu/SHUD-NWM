@@ -2705,14 +2705,170 @@ def test_1177_receipt_with_two_windows_for_one_identity_is_refused(
     assert "two windows for forcing_version_id=forc_dup" in str(info.value)
 
 
-def test_1177_empty_derivation_is_refused(tmp_path: Path, zstd_bin: Path) -> None:
-    """An empty derived set is NEVER 'nothing to prove' (gate D2 symmetry)."""
+@pytest.mark.parametrize(
+    ("case", "subjects_spec"),
+    [
+        # Healthy, product-archive-only archive: no db-export subject at all.
+        ("product_archive_only", [("forcing", "forc_pa", (_DROP_START, _DROP_END), "product-archive")]),
+        # db-export subjects exist but none overlaps the drop window.
+        (
+            "non_overlapping_db_export",
+            [("forcing", "forc_old", ("2026-06-01T00:00:00Z", "2026-06-05T00:00:00Z"), "db-export")],
+        ),
+    ],
+)
+def test_1177_empty_derivation_is_evidence_not_a_refusal(
+    tmp_path: Path,
+    zstd_bin: Path,
+    case: str,
+    subjects_spec: Sequence[tuple[str, str, tuple[str, str], str]],
+) -> None:
+    """A derivation yielding zero manifests proceeds; the gate demands nothing.
+
+    Design decision 2b. The earlier refusal claimed symmetry with the gate's
+    D2 pin, but D2 (``node27_timeseries_retention.py:687-692``) only fires
+    BEHIND ``_completeness_has_db_export_overlap`` (:622-637) — so refusing on
+    every empty derivation was strictly broader than gate demand and killed
+    the standard runbook invocation on a healthy archive.
+    """
     subjects = [
-        _completeness_subject(
-            "forcing", "forc_old", ("2026-06-01T00:00:00Z", "2026-06-05T00:00:00Z")
-        )
+        _completeness_subject(lane, identity, window, coverage=coverage)
+        for lane, identity, window, coverage in subjects_spec
     ]
-    receipt_path, _ = _write_completeness_receipt(tmp_path, subjects)
+    receipt_path, completeness = _write_completeness_receipt(tmp_path, subjects)
+    env = _base_env(tmp_path, zstd_bin)
+
+    # 1. Config assembly does NOT refuse.
+    forcing_manifest_path, forcing_manifest = _write_fixture_runs_archive(
+        tmp_path, run_id="drill_empty_forcing"
+    )
+    runs_manifest_path, runs_manifest = _write_fixture_runs_archive(
+        tmp_path, run_id="drill_empty_runs"
+    )
+    config_from_cli = drill._config_from_env(
+        env,
+        [
+            "--archive-manifest",
+            str(runs_manifest_path),
+            "--completeness-receipt",
+            str(receipt_path),
+            "--drop-window-start",
+            _DROP_START,
+            "--drop-window-end",
+            _DROP_END,
+        ],
+    )
+    assert config_from_cli.salvage_derivation is not None
+    assert config_from_cli.salvage_derivation.inputs == ()
+
+    # 2. The drill completes with a PASS receipt recording derived_count 0.
+    #    Both product cycles are runs-lane fixtures; the verify stub attributes
+    #    one to each timeseries-bearing lane so the receipt satisfies the
+    #    gate's forcing + runs legs (a real forcing package needs the legacy
+    #    forcing archive shape, which is out of scope for this assertion).
+    coverage_by_run = {
+        "drill_empty_forcing": "forcing",
+        "drill_empty_runs": "runs",
+    }
+
+    def _fake_verify(
+        dest_dir: Path, manifest_arg: Mapping[str, Any], conn: Any
+    ) -> drill.ProductVerification:
+        run_id = manifest_arg["identity"]["run_id"]
+        return drill.ProductVerification(
+            cycle_label=run_id,
+            expected_row_count=3,
+            staging_row_count=3,
+            coverage={
+                "source": coverage_by_run[run_id],
+                "window": {"start": _DROP_START, "end": _DROP_END},
+            },
+        )
+
+    lifter = _FakeLifter(
+        select_return={
+            **_closure_map_for_runs("drill_empty_forcing"),
+            **_closure_map_for_runs("drill_empty_runs"),
+        }
+    )
+    config = _config(
+        tmp_path,
+        zstd_path=zstd_bin,
+        archive_manifests=[forcing_manifest_path, runs_manifest_path],
+        salvage_derivation=config_from_cli.salvage_derivation,
+    )
+    now = datetime(2026, 6, 26, tzinfo=UTC)
+    receipt, outcome = drill.run_drill(
+        config,
+        provision_staging=_stub_provisioner,
+        teardown_staging=_stub_teardown,
+        open_prod=_stub_open_prod,
+        open_staging_conn=_stub_open_staging,
+        lifter_factory=lambda prod, staging: lifter,
+        ingest_runs=lambda workspace, manifest_arg, staging_database_url: {
+            "run_id": manifest_arg["identity"]["run_id"],
+            "rows_written": 6,
+        },
+        verify_product=_fake_verify,
+        now=now,
+    )
+    assert outcome.verdict == "PASS", receipt.get("differences")
+    assert receipt["salvage_derivation"]["derived_count"] == 0
+    assert receipt["salvage_derivation"]["drop_window"] == {
+        "start": _DROP_START,
+        "end": _DROP_END,
+    }
+    assert receipt["salvage_inputs"] == []
+    assert not [entry for entry in receipt["coverage"] if entry["source"] == "db-export"]
+    jsonschema.validate(
+        receipt,
+        json.loads(drill._DRILL_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")),
+    )
+
+    # 3. The gate agrees: it demands NOTHING from this receipt + completeness
+    #    receipt + drop window pair. This is the property the old refusal
+    #    contradicted.
+    drop = _drop_window()
+    gate_drop = retention.DropWindow(start=drop[0], end=drop[1])
+    assert retention.derive_salvage_backed_windows(completeness, gate_drop) == []
+    assert (
+        retention.check_drill_gate(
+            receipt,
+            completeness_receipt=completeness,
+            drop_window=gate_drop,
+            max_age_days=7,
+            now=now,
+        )
+        == []
+    ), case
+    # And the product manifests really were exercised (non-vacuity).
+    assert sorted(receipt["comparisons"]["cycles"]) == [
+        forcing_manifest["identity"]["run_id"],
+        runs_manifest["identity"]["run_id"],
+    ]
+
+
+def test_1177_receipt_without_archive_manifest_is_refused_before_salvage_io(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """A receipt-only invocation can never PASS — refuse at config time.
+
+    ``_build_receipt_from_outcome`` refuses a PASS receipt with no restored
+    product cycle (drill :2120-2125). Accepting the shape would run the whole
+    expensive salvage phase and then die with no receipt at all.
+    """
+    window = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
+    manifest_path, _ = _write_db_export_salvage(
+        tmp_path, lane="forcing", identity="forc_untouched", window=window
+    )
+    # Booby-trap: the derived subject's manifest path is a DIRECTORY, so any
+    # attempt to read it raises IsADirectoryError. The refusal below must
+    # therefore be the config-time one, not a downstream salvage-load fault.
+    manifest_path.unlink()
+    manifest_path.mkdir()
+    receipt_path, _ = _write_completeness_receipt(
+        tmp_path, [_completeness_subject("forcing", "forc_untouched", window)]
+    )
     env = _base_env(tmp_path, zstd_bin)
     with pytest.raises(drill.DrillConfigError) as info:
         drill._config_from_env(
@@ -2726,7 +2882,30 @@ def test_1177_empty_derivation_is_refused(tmp_path: Path, zstd_bin: Path) -> Non
                 _DROP_END,
             ],
         )
-    assert "derived no db-export salvage manifests" in str(info.value)
+    message = str(info.value)
+    assert "--archive-manifest" in message
+    assert "restored product cycle" in message
+
+    # Receipt + explicit --salvage-manifest but still no --archive-manifest is
+    # the same trap, and is refused identically.
+    salvage_path, _ = _write_salvage_object(tmp_path, forcing_version_id="forc_extra")
+    with pytest.raises(drill.DrillConfigError) as info:
+        drill._config_from_env(
+            env,
+            [
+                "--completeness-receipt",
+                str(receipt_path),
+                "--salvage-manifest",
+                str(salvage_path),
+            ],
+        )
+    assert "--archive-manifest" in str(info.value)
+
+    # But a PURE --salvage-manifest invocation (no receipt) stays byte-identical
+    # to master: accepted at config time, whatever it does later.
+    config = drill._config_from_env(env, ["--salvage-manifest", str(salvage_path)])
+    assert config.salvage_derivation is None
+    assert config.archive_manifest_paths == ()
 
 
 # --- 3.3 drop-window filter, bounds, runs lane -----------------------------
@@ -3002,20 +3181,23 @@ def test_1177_no_receipt_invocation_is_unchanged(
 def test_1177_config_from_env_wires_receipt_and_drop_window(
     tmp_path: Path, zstd_bin: Path
 ) -> None:
-    """CLI flags + env fallbacks, and a receipt-only invocation is valid."""
+    """CLI flags + drill-scoped env fallbacks alongside --archive-manifest."""
     window = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
     _write_db_export_salvage(
         tmp_path, lane="forcing", identity="forc_cli", window=window
     )
     subjects = [_completeness_subject("forcing", "forc_cli", window)]
     receipt_path, _ = _write_completeness_receipt(tmp_path, subjects)
+    archive_manifest_path, _ = _write_fixture_runs_archive(tmp_path)
     env = _base_env(tmp_path, zstd_bin)
 
-    # Receipt-only invocation (no --archive-manifest / --salvage-manifest) is
-    # accepted — the pre-#1177 "nothing to drill" refusal is extended.
+    # --completeness-receipt + --archive-manifest without --salvage-manifest
+    # is the new supported shape.
     config = drill._config_from_env(
         env,
         [
+            "--archive-manifest",
+            str(archive_manifest_path),
             "--completeness-receipt",
             str(receipt_path),
             "--drop-window-start",
@@ -3024,6 +3206,7 @@ def test_1177_config_from_env_wires_receipt_and_drop_window(
             _DROP_END,
         ],
     )
+    assert config.salvage_manifest_paths == ()
     assert config.salvage_derivation is not None
     assert config.salvage_derivation.drop_window == {
         "start": _DROP_START,
@@ -3031,14 +3214,16 @@ def test_1177_config_from_env_wires_receipt_and_drop_window(
     }
     assert [item.identity for item in config.salvage_derivation.inputs] == ["forc_cli"]
 
-    # Env fallbacks (sibling's receipt-path var) need no wrapper change.
+    # Env fallbacks (drill-scoped receipt-path var) need no wrapper change.
     env_only = {
         **env,
-        "NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH": str(receipt_path),
+        "NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH": str(receipt_path),
         "NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_START": _DROP_START,
         "NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_END": _DROP_END,
     }
-    config_env = drill._config_from_env(env_only, [])
+    config_env = drill._config_from_env(
+        env_only, ["--archive-manifest", str(archive_manifest_path)]
+    )
     assert config_env.salvage_derivation is not None
     assert config_env.salvage_derivation.drop_window == {
         "start": _DROP_START,
@@ -3051,6 +3236,70 @@ def test_1177_config_from_env_wires_receipt_and_drop_window(
     assert "nothing to drill" in str(info.value)
 
 
+def test_1177_sibling_salvage_env_never_activates_derivation(
+    tmp_path: Path, zstd_bin: Path
+) -> None:
+    """The db-export salvage sibling's env var must not switch on derivation.
+
+    ``infra/env/node27-db-export-salvage.example:29`` ships
+    ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` UNCOMMENTED and mandatory. If
+    the drill read that name, a ``set -a``-sourced salvage env would silently
+    put flag-less drill invocations into derivation mode, breaking the
+    "no flag -> no behavior change" must-preserve (design decision 6).
+    """
+    window = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
+    _write_db_export_salvage(
+        tmp_path, lane="forcing", identity="forc_leak", window=window
+    )
+    receipt_path, _ = _write_completeness_receipt(
+        tmp_path, [_completeness_subject("forcing", "forc_leak", window)]
+    )
+    salvage_path, _ = _write_salvage_object(tmp_path, forcing_version_id="forc_typed")
+    archive_manifest_path, _ = _write_fixture_runs_archive(tmp_path)
+    leaked = {
+        **_base_env(tmp_path, zstd_bin),
+        "NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH": str(receipt_path),
+    }
+
+    # Leaked sibling var + no flag -> still the explicit whitelist contract.
+    config = drill._config_from_env(leaked, ["--salvage-manifest", str(salvage_path)])
+    assert config.salvage_derivation is None
+    assert config.salvage_manifest_paths == (salvage_path,)
+
+    # Same with an archive-manifest-only invocation.
+    archive_only = drill._config_from_env(
+        leaked, ["--archive-manifest", str(archive_manifest_path)]
+    )
+    assert archive_only.salvage_derivation is None
+
+    # And the drop-window flags still have no receipt to filter, proving the
+    # sibling var was not consulted as a receipt source.
+    with pytest.raises(drill.DrillConfigError) as info:
+        drill._config_from_env(
+            leaked,
+            [
+                "--archive-manifest",
+                str(archive_manifest_path),
+                "--drop-window-start",
+                _DROP_START,
+                "--drop-window-end",
+                _DROP_END,
+            ],
+        )
+    assert "without --completeness-receipt" in str(info.value)
+
+    # The drill-scoped name DOES activate derivation.
+    scoped = drill._config_from_env(
+        {
+            **leaked,
+            "NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH": str(receipt_path),
+        },
+        ["--archive-manifest", str(archive_manifest_path)],
+    )
+    assert scoped.salvage_derivation is not None
+    assert [item.identity for item in scoped.salvage_derivation.inputs] == ["forc_leak"]
+
+
 def test_1177_partial_or_inverted_drop_window_is_refused(
     tmp_path: Path, zstd_bin: Path
 ) -> None:
@@ -3061,8 +3310,14 @@ def test_1177_partial_or_inverted_drop_window_is_refused(
     receipt_path, _ = _write_completeness_receipt(
         tmp_path, [_completeness_subject("forcing", "forc_cli", window)]
     )
+    archive_manifest_path, _ = _write_fixture_runs_archive(tmp_path)
     env = _base_env(tmp_path, zstd_bin)
-    base = ["--completeness-receipt", str(receipt_path)]
+    base = [
+        "--archive-manifest",
+        str(archive_manifest_path),
+        "--completeness-receipt",
+        str(receipt_path),
+    ]
 
     with pytest.raises(drill.DrillConfigError) as info:
         drill._config_from_env(env, [*base, "--drop-window-start", _DROP_START])
@@ -3107,8 +3362,20 @@ def test_1177_runbook_documents_the_implemented_cli(tmp_path: Path) -> None:
         "--drop-window-start",
         "--drop-window-end",
         "SALVAGE_DERIVATION_FAILED",
-        "NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH",
+        "NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH",
     ):
         assert token in text, token
     # The pre-#1177 "guess the full set" instruction must be gone.
     assert "full set of salvage manifests" not in text
+    # F4: the "narrow the window to bound cost" advice was unsound — the gate
+    # unions db-export tuples and never reads `salvage_derivation.drop_window`,
+    # so a narrower drill window lets one subject's wide tuple mask another
+    # subject's never-verified evidence.
+    assert "Narrowing the drop window is" not in text
+    assert "MUST contain (⊇) the retention run's drop" in text
+    # F4: §7.3 step 3 emits ISO-8601 directly so §7.5 pastes verbatim, and
+    # names the superset relationship with the runner's own drop window.
+    assert "_partition_by_completeness_bounds" in text
+    assert 'YYYY-MM-DD\\"T\\"HH24:MI:SS\\"Z\\"' in text
+    # F1: the salvage sibling's env var must not be advertised as the drill's.
+    assert "| `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` |" not in text

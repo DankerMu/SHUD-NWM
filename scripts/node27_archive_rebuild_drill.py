@@ -448,8 +448,12 @@ def derive_salvage_inputs(
     if len(inputs) > max_manifests:
         raise DrillConfigError(
             f"receipt-derived salvage set has {len(inputs)} manifests, "
-            f"exceeding the bound of {max_manifests}; narrow the drop window "
-            "or raise NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS"
+            f"exceeding the bound of {max_manifests}; raise "
+            "NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS deliberately. Do "
+            "NOT narrow the drop window below the retention run's — runbook "
+            "§7.5: the gate unions db-export tuples and never reads "
+            "salvage_derivation.drop_window, so a narrower drill window lets "
+            "one subject's wide tuple mask another's unverified evidence"
         )
     inputs.sort(key=lambda item: (item.lane, item.identity))
     skipped.sort(key=lambda item: (item["lane"], item["subject"]))
@@ -614,9 +618,9 @@ class DrillConfig:
     archive_manifest_paths: tuple[Path, ...]
     salvage_manifest_paths: tuple[Path, ...]
     lock_path: Path
-    # #1177: present only when ``--completeness-receipt`` (or the sibling's
-    # ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` env var) was supplied. When
-    # ``None`` the drill behaves exactly as it did before #1177.
+    # #1177: present only when ``--completeness-receipt`` (or the drill-scoped
+    # ``NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH`` env var) was
+    # supplied. When ``None`` the drill behaves exactly as it did before #1177.
     salvage_derivation: SalvageDerivation | None = None
 
     def prod_dbname(self) -> str:
@@ -2458,6 +2462,20 @@ def _config_from_env(env: Mapping[str, str], argv: Sequence[str]) -> DrillConfig
             "no --archive-manifest / --salvage-manifest / --completeness-receipt "
             "args passed; nothing to drill"
         )
+    if derivation is not None and not archive_manifests:
+        # Receipt-derived invocations still need at least one product cycle:
+        # ``_build_receipt_from_outcome`` refuses a PASS receipt with no
+        # restored cycle (:2120-2125, pre-#1177 rule, out of scope to change).
+        # Accepting this shape would run the whole expensive salvage phase and
+        # then die with no receipt at all — refuse before any salvage I/O.
+        # NOTE: the pure ``--salvage-manifest``-only shape is deliberately NOT
+        # gated here; it fails the same late way on master and staying
+        # byte-identical to master matters more than fixing it in this change.
+        raise DrillConfigError(
+            "--completeness-receipt requires at least one --archive-manifest: "
+            "a PASS receipt requires at least one restored product cycle, so a "
+            "receipt-only invocation can never PASS"
+        )
     lock_path_env = env.get("NHMS_ARCHIVE_REBUILD_DRILL_LOCK_PATH")
     if lock_path_env and lock_path_env.strip():
         lock_path = Path(lock_path_env).expanduser()
@@ -2490,11 +2508,18 @@ def _derivation_from_config(
     """Build the receipt-derived salvage set, or ``None`` when opted out.
 
     Receipt path precedence: ``--completeness-receipt`` then
-    ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` (the same env name the
-    salvage sibling reads, so one node-27 env entry configures both).
+    ``NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH``.
+
+    The env var is deliberately DRILL-SCOPED and is NOT the db-export salvage
+    sibling's ``NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`` (design decision 6):
+    that variable ships uncommented-and-mandatory in
+    ``infra/env/node27-db-export-salvage.example``, so a leaked export from a
+    ``set -a``-sourced salvage env would silently switch flag-less drill
+    invocations into derivation mode — breaking the "no flag → no behavior
+    change" must-preserve. The sibling's name is never read here.
     """
     raw_receipt = args.completeness_receipt or env.get(
-        "NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH"
+        "NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH"
     )
     if raw_receipt is None or not str(raw_receipt).strip():
         if _drop_window_from_config(env, args) is not None:
@@ -2502,7 +2527,8 @@ def _derivation_from_config(
             # ignoring it would let an operator believe the drill was scoped.
             raise DrillConfigError(
                 "drop window supplied without --completeness-receipt "
-                "(or NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH); nothing to filter"
+                "(or NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH); "
+                "nothing to filter"
             )
         return None
     receipt_path = Path(str(raw_receipt)).expanduser()
@@ -2530,14 +2556,15 @@ def _derivation_from_config(
         max_manifests=max_manifests,
         max_decompressed_bytes=max_bytes,
     )
-    if not derivation.inputs:
-        # Fail-closed, symmetric with the gate's D2 pin (#1162): an empty
-        # derivation is NEVER "nothing to prove"; it means the receipt and
-        # the requested drop window disagree with the operator's intent.
-        raise DrillConfigError(
-            f"completeness receipt {receipt_path} derived no db-export salvage "
-            "manifests for the requested drop window"
-        )
+    # An EMPTY derivation is evidence, not an error (design decision 2b). The
+    # gate demands db-export coverage only when the completeness receipt has
+    # an overlapping db-export subject
+    # (``node27_timeseries_retention._completeness_has_db_export_overlap``
+    # :622-637 guards the D2 pin), so refusing here would be strictly broader
+    # than gate demand and would kill the standard runbook invocation on a
+    # healthy, product-archive-only archive. The drill proceeds with the
+    # archive-manifest leg and records ``derived_count: 0`` + the drop window
+    # in ``salvage_derivation`` so the empty set is visible in the receipt.
     return derivation
 
 

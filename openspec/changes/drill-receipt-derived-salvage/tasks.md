@@ -28,19 +28,24 @@ Issue: #1177
 ## 2. CLI, wrapper, receipt provenance
 
 - [x] 2.1 `--completeness-receipt` (+ drop-window flags) wired through
-      CLI/config assembly (~:1918-1945), including extending the
-      no-manifests invocation refusal (:1941-1944) so a receipt-only
-      invocation is valid; `--salvage-manifest` unioned with the derived set,
-      deduped by resolved path.
+      CLI/config assembly (~:1918-1945). `--completeness-receipt` +
+      `--archive-manifest` (no `--salvage-manifest`) is valid; a receipt-ONLY
+      invocation is refused at config time naming `--archive-manifest`,
+      because the pre-existing PASS rule (:2120-2125) requires ≥1 restored
+      product cycle. `--salvage-manifest` unioned with the derived set,
+      deduped by resolved path; the `--salvage-manifest`-only shape is left
+      byte-identical to master.
 - [x] 2.2 Receipt records per-input provenance (`derived` vs `explicit`);
       `coverage` tuple shape unchanged for `check_drill_gate`; update
       `schemas/archive_rebuild_drill_receipt.schema.json` in lockstep (strict
       `additionalProperties: false`, validated at drill :1241) — admit the
       new fields precisely, do not loosen the schema wholesale.
-- [x] 2.3 Wrapper: prefer env-var config through `_config_from_env` (sibling
-      precedent `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`) — the
-      `node27_archive_rebuild_drill_once.sh` bare `exec` passthrough then
-      needs no change; touch it only if flag plumbing is unavoidable.
+- [x] 2.3 Wrapper: env-var config through `_config_from_env` using the
+      DRILL-SCOPED `NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH`
+      (never the salvage sibling's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`,
+      which its env file ships uncommented-and-mandatory and would leak into
+      flag-less drill runs) — the `node27_archive_rebuild_drill_once.sh` bare
+      `exec` passthrough then needs no change.
 
 ## 3. Tests (requirement-driven)
 

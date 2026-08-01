@@ -22,6 +22,13 @@ input's provenance (derived vs explicit). The derived set SHALL be subject
 to fail-closed bounds on cardinality and aggregate decompressed bytes in
 addition to the existing per-object size cap.
 
+Derivation SHALL be activated only by an explicit `--completeness-receipt`
+flag or by a drill-scoped environment variable that no sibling tool sets.
+A derivation yielding zero manifests SHALL NOT be a refusal; the drill SHALL
+proceed and record the empty derived set as receipt evidence. An invocation
+supplying a completeness receipt without any product archive manifest SHALL
+be refused at configuration time, before any salvage input is read.
+
 #### Scenario: Derived tuples cover the gate demand
 
 - **WHEN** the drill runs with a completeness receipt and a drop window
@@ -49,3 +56,28 @@ addition to the existing per-object size cap.
 - **WHEN** the drill runs without a completeness receipt
 - **THEN** its behavior MUST be unchanged from the explicit
   `--salvage-manifest` whitelist contract
+
+#### Scenario: A sibling tool's environment does not activate derivation
+
+- **WHEN** the drill runs with no `--completeness-receipt` flag and no
+  drill-scoped receipt-path variable, but the db-export salvage tool's own
+  receipt-path variable is exported in the environment
+- **THEN** derivation MUST stay off and the drill MUST behave exactly as the
+  explicit `--salvage-manifest` whitelist contract
+
+#### Scenario: Empty derivation is evidence, not a refusal
+
+- **WHEN** a supplied completeness receipt yields no `db-export` +
+  `complete` subject overlapping the drop window
+- **THEN** the drill MUST NOT refuse; it MUST run its archive-manifest leg
+  and record the empty derived set (derived count zero plus the drop window
+  used) in the receipt, matching the retention gate, which demands no
+  db-export coverage for that receipt and drop window
+
+#### Scenario: Receipt without a product archive manifest is refused early
+
+- **WHEN** the drill is invoked with a completeness receipt but no product
+  archive manifest
+- **THEN** it MUST be refused at configuration time with a message naming
+  the archive-manifest flag, before any salvage input is read, because a
+  PASS receipt requires at least one restored product cycle

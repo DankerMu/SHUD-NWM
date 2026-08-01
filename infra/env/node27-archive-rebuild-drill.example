@@ -63,11 +63,22 @@ NHMS_ZSTD_BIN=/usr/bin/zstd
 # db-export salvage manifest set from this archive-completeness receipt —
 # every `coverage=db-export` + `verdict=complete` subject, mapped to
 # `<NHMS_ARCHIVE_ROOT>/db-export/<lane>/<identity>/manifest.json` — instead
-# of relying on an operator-typed `--salvage-manifest` whitelist. Same
-# variable the db-export salvage runner reads, so one entry configures both.
+# of relying on an operator-typed `--salvage-manifest` whitelist.
 # Equivalent CLI flag: `--completeness-receipt`. Leave unset to keep the
 # pre-#1177 explicit-whitelist behavior.
-# NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
+#
+# The name is DRILL-SCOPED on purpose. It is NOT the db-export salvage
+# runner's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`, which
+# `infra/env/node27-db-export-salvage.example` ships uncommented and
+# mandatory: sharing the name would let a `set -a`-sourced salvage env leak
+# into a flag-less drill invocation and silently switch it into derivation
+# mode. The two files may point at the same receipt; they must not share the
+# variable.
+#
+# Requires at least one `--archive-manifest` in the same invocation — a PASS
+# receipt requires at least one restored product cycle, so a receipt-only
+# invocation is refused at boot.
+# NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
 # Optional drop window for the derivation above (ISO-8601, BOTH or NEITHER).
 # Subjects are kept when their window overlaps this interval under the

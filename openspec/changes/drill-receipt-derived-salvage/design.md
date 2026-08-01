@@ -63,8 +63,23 @@
    path, provenance recorded per input in the receipt. Rationale: strictly
    additive, keeps old invocations valid, and lets operators pin extra
    manifests during incident response without disabling derivation. The
-   invocation gate at drill :1941-1944 (refuses "no manifests supplied") is
-   extended so a receipt-only invocation is valid.
+   invocation gate is extended so `--completeness-receipt` +
+   `--archive-manifest` without `--salvage-manifest` is valid; a
+   receipt-ONLY invocation (no archive manifest) is refused AT CONFIG TIME
+   with a message naming `--archive-manifest` — the pre-existing PASS rule
+   requires ≥1 restored product cycle (out of scope to change), so accepting
+   the shape and failing after the expensive salvage phase with no receipt
+   would be a trap (verified finding, round 1).
+2b. **Empty derivation is evidence, not an error.** A derivation that yields
+   zero manifests (receipt has no db-export+complete subjects, or none
+   overlap the drop window) mirrors the gate: `check_drill_gate` demands
+   db-export coverage only when an overlapping db-export subject exists
+   (`_completeness_has_db_export_overlap`), so the drill proceeds with the
+   archive-manifest leg and records `derived_count: 0` + the drop window in
+   `salvage_derivation` — never a config refusal (verified finding, round 1:
+   the earlier refusal was strictly broader than gate demand and killed the
+   standard runbook invocation on healthy archives). Self-contradictory
+   receipts (duplicate identity with conflicting windows) still refuse.
 3. **Drop-window filter uses the gate's closed-interval `_overlaps`**
    (`node27_timeseries_retention.py:540-552`): boundary-touching and
    zero-length intersections stay in scope, exactly as `check_drill_gate`
@@ -81,10 +96,23 @@
    (no db-export lane) are refused/skipped with evidence.
 5. **New derived-set bound** (cardinality + aggregate decompressed bytes,
    fail-closed) since only per-object `MAX_SALVAGE_OBJECT_BYTES` exists.
-6. **Receipt-path env var, zero wrapper change**: the wrapper is a bare
-   `exec` passthrough and config flows via `_config_from_env`; reuse the
-   sibling's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` env name (or drill
-   equivalent) rather than new wrapper plumbing.
+6. **Receipt-path env var, zero wrapper change, drill-scoped name**: the
+   wrapper is a bare `exec` passthrough and config flows via
+   `_config_from_env`; the env var is
+   `NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH` — NOT the
+   sibling's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`, which the salvage
+   tool's env file ships uncommented-and-mandatory: a leaked export from a
+   `set -a`-sourced salvage env would silently switch flag-less drill
+   invocations into derivation mode, violating the "no flag → no behavior
+   change" must-preserve (verified finding, round 1).
+7. **Drill drop window must contain the retention drop window.** The gate's
+   union-coverage check never reads `salvage_derivation.drop_window`, so a
+   narrower drill window can let one subject's wide tuple mask another
+   subject's never-verified evidence. In-PR remedy is the runbook constraint
+   (window ⊇ retention window, with the masking warning, replacing the
+   "narrowing is legitimate" wording); machine enforcement in
+   `check_drill_gate` is a #1162 gate-semantics extension routed to its own
+   issue (gate functions are out of scope here).
 
 ## Evidence mapping
 

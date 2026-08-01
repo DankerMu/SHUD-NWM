@@ -69,14 +69,17 @@ guess-a-manifest retry loops. Live evidence: the 2026-07-27 rerun added the
 - Affected specs: `archive-rebuild-drill` (delta: salvage input derivation).
 - Affected code: `scripts/node27_archive_rebuild_drill.py` (CLI/config
   assembly ~:1918-1945 — note :1941-1944 refuses invocations with no
-  manifest args, which a receipt-only invocation must satisfy; salvage
-  traversal ~:1480-1500),
+  manifest args, and a receipt-ONLY invocation is refused there too because
+  a PASS receipt requires ≥1 restored product cycle; salvage traversal
+  ~:1480-1500),
   `schemas/archive_rebuild_drill_receipt.schema.json` (top-level
   `additionalProperties: false`, validated before write at drill :1241 — any
   new receipt field requires a schema change),
-  `scripts/node27_archive_rebuild_drill_once.sh` (likely zero change: the
-  wrapper is a bare `exec "$@"` passthrough and config knobs are env vars;
-  the sibling already reads `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`),
+  `scripts/node27_archive_rebuild_drill_once.sh` (zero change: the wrapper
+  is a bare `exec "$@"` passthrough and config knobs are env vars; the
+  drill's own var is `NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH`,
+  drill-scoped so the salvage sibling's mandatory
+  `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` cannot leak into it),
   `tests/test_node27_archive_rebuild_drill.py`,
   `docs/runbooks/tier-node27-timeseries-storage.md` (~:1424, :1493-1498).
 - Ops: drill invocations gain a mechanical, receipt-anchored input procedure;
