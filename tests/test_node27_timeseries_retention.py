@@ -17,12 +17,15 @@ Covers:
 - Config parse fail-closed rows.
 - Concurrent-invocation flock path → RETENTION_CONCURRENT_INVOCATION.
 - Uncaught error path → RETENTION_UNCAUGHT_ERROR.
+- #1213 credential redaction of every persisted error surface (receipt file
+  bytes + stderr/wrapper log) on the drop-phase and uncaught-fallback paths.
 - CLI + wrapper contract.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import inspect
 import json
@@ -2099,24 +2102,201 @@ def test_uncaught_error_publishes_refused_receipt(
 
 
 # ---------------------------------------------------------------------------
-# DSN never appears in stderr
+# #1213 — DSN credentials never reach stderr OR the receipt file
+#
+# Both persisted operator surfaces are asserted: the stderr diagnostic (the
+# wrapper redirects it into a long-lived `retention.log`) and the receipt file
+# BYTES (`refusal_reason` is persisted verbatim). The injected exceptions are
+# the two real driver shapes that echo credentials back:
+#
+# * psycopg2 `ProgrammingError('invalid dsn: ... "<full conninfo>" ...')` —
+#   echoes the whole DSN including the plaintext password;
+# * libpq `password authentication failed for user "<role>"` — echoes the role.
+#
+# The pre-#1213 lock injected a DSN-free `RuntimeError("oops")`, so its
+# assertions were vacuously true against exactly the exception classes that
+# can leak.
 # ---------------------------------------------------------------------------
 
 
-def test_dsn_never_appears_in_stderr(
+def _assert_surfaces_credential_free(*surfaces: str) -> None:
+    """Every operator-facing surface is free of the probe DSN's credentials.
+
+    ``alice`` is asserted as a bare substring (not just ``user "alice"``): the
+    conninfo echo carries the username outside the libpq role-echo shape, so a
+    redaction that only handled the role echo would still leak it.
+    """
+    for surface in surfaces:
+        assert "supersekret" not in surface
+        assert "alice" not in surface
+        # Operator-facing text renders the marker as ``***``.
+        assert REDACTION_MARKER not in surface
+
+
+def test_dsn_never_appears_in_stderr_or_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    env = _base_env(tmp_path, DATABASE_URL="postgresql://alice:supersekret@127.0.0.1:55432/nhms")
+    """Uncaught path, DSN-parse shape: the full conninfo echo is scrubbed.
+
+    ``_MEASURE_PROBE_DSN`` is the shared probe secret (defined with the
+    measurement-diagnostic rows further down) so both redaction call sites
+    assert against the same password/role pair.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
     def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
-        raise RuntimeError("oops")
+        raise psycopg2.ProgrammingError(
+            f'invalid dsn: missing "=" after "{_MEASURE_PROBE_DSN}" in connection info string'
+        )
 
-    retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
     err = capsys.readouterr().err
-    assert "supersekret" not in err
-    assert "alice" not in err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    # Operator grep contract: wire code + exception type name survive redaction.
+    assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:ProgrammingError:")
+    assert "invalid dsn" in receipt["refusal_reason"]
+    assert "***" in receipt["refusal_reason"]
+    # The wrapper-log surface carries the same redacted reason, not a second
+    # (unredacted) rendering of the same error.
+    diagnostic = json.loads(err.strip().splitlines()[-1])
+    assert diagnostic["refusal_reason"] == receipt["refusal_reason"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_uncaught_libpq_auth_failure_redacts_role_on_both_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Uncaught path, libpq auth shape: the role echo becomes ``user "***"``.
+
+    Diagnosability trade-off pinned here: the ``password authentication
+    failed`` phrase and the host/port echo are deliberately RETAINED so the
+    operator can still tell an auth failure from a timeout.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        raise psycopg2.OperationalError(
+            'connection to server at "127.0.0.1", port 55432 failed: '
+            'FATAL:  password authentication failed for user "alice"'
+        )
+
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:OperationalError:")
+    assert 'user "***"' in receipt["refusal_reason"]
+    assert "password authentication failed" in receipt["refusal_reason"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_drop_failure_reason_redacts_credentials_on_both_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drop path: the RETENTION_DROP_FAILED reason is credential-redacted.
+
+    Seam is ``main()`` rather than ``run_retention()`` because only ``main()``
+    publishes the receipt FILE — the leak surface under test. Enforce mode is
+    reached through the real env toggle so the gate evidence is genuinely
+    consumed.
+
+    H5 whole-tick fail-closed is re-asserted on this path (drop attempted
+    exactly once, second chunk untouched) so a redaction refactor cannot
+    quietly turn the fail-closed return into a continue.
+    """
+    env = _base_env(
+        tmp_path,
+        DATABASE_URL=_MEASURE_PROBE_DSN,
+        NODE27_TIMESERIES_RETENTION_ENFORCE="1",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("hydro", "river_timeseries", "chk-b", delta_days=61),
+    ]
+    drop_calls: list[str] = []
+
+    def _fetch(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        return list(chunks)
+
+    def _measure(
+        config: retention.RetentionConfig, selected: Sequence[retention.ChunkRow]
+    ) -> dict[str, int]:
+        return {chunk.qualified_name: 0 for chunk in selected}
+
+    def _drop(config: retention.RetentionConfig, chunk: retention.ChunkRow) -> None:
+        drop_calls.append(chunk.qualified_name)
+        raise psycopg2.OperationalError(
+            'connection to server at "127.0.0.1", port 55432 failed: '
+            'FATAL:  password authentication failed for user "alice" '
+            f"(tried {_MEASURE_PROBE_DSN})"
+        )
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=_fetch,
+        measure_chunk_bytes=_measure,
+        drop_chunk=_drop,
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    # Prefix shape unchanged: <hypertable_schema>.<chunk_name> (NOT
+    # ChunkRow.qualified_name, which is chunk_schema-qualified).
+    assert receipt["refusal_reason"].startswith("RETENTION_DROP_FAILED:hydro.chk-a: ")
+    assert 'user "***"' in receipt["refusal_reason"]
+    assert "***" in receipt["refusal_reason"]
+    # H5: the failing chunk is the only drop attempted.
+    assert drop_calls == ["_timescaledb_internal.chk-a"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_redaction_and_psycopg2_imports_stay_deferred() -> None:
+    """The runner must import cleanly without psycopg2 installed.
+
+    ``packages.common.redaction`` imports ``psycopg2.extensions`` at module
+    scope, so routing two more call sites through the redaction helper is
+    exactly the kind of change that tempts a module-scope import and breaks
+    ``--help`` / config parsing on a driver-less host. Guarded statically on
+    the module's own top-level source, plus a positive check that the helper
+    still does the import inside its body.
+    """
+    tree = ast.parse(Path(retention.__file__).read_text(encoding="utf-8"))
+    top_level: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            top_level.add(node.module)
+
+    assert not [name for name in top_level if name == "psycopg2" or name.startswith("psycopg2.")]
+    assert "packages.common.redaction" not in top_level
+
+    helper_source = inspect.getsource(retention._redact_error_text)
+    assert "from packages.common.redaction import" in helper_source
 
 
 # ---------------------------------------------------------------------------
