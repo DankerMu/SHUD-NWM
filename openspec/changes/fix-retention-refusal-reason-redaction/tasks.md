@@ -26,8 +26,14 @@ Fixture level: expanded · Repair intensity: high · Issue #1213
   eager-imports `packages.common.redaction` at top level); this change spreads
   that import to two more call sites, so a new deferral guard is added as
   evidence (see Required evidence).
-- Documentation / migration notes: not selected — no doc surface changes;
-  #1213 records the wrapper-log-permission observation.
+- Documentation / migration notes: not selected for THIS PR's diff boundary,
+  with a correction from round-2 review: the original "no doc surface
+  changes" premise was wrong — docs/runbooks/tier-node27-timeseries-storage.md
+  §8.2/§8.6 document the exact refusal_reason tail this change redacts, and
+  the driver-less placeholder is undocumented. Routed as a tracked follow-up
+  docs issue (see PR evidence bundle) rather than expanding this PR's
+  declared diff boundary; #1213 also records the wrapper-log-permission
+  observation.
 
 Domain packs (NHMS profile, itemized):
 - PostGIS/TimescaleDB domain behavior: not selected — chunk selection SQL,
