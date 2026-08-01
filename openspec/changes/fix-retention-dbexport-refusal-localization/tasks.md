@@ -74,14 +74,19 @@ Must add (per design D1):
   `scripts/audit_first_cycle_initial_state.py:750`,
   `scripts/scheduler_file_provider_refresh.py:2696+` — are unrelated
   emitters of their own receipt fields). Prefix-only readers stay correct.
-- [ ] 5. Mutation proof on a scratch copy:
+- [x] 5. Mutation proof on a scratch copy:
   (i) suffix dropped (bare code emitted) → exact-string rows fail;
   (ii) suffix renders RAW subject bounds instead of clipped → clip-bounds
   row fails;
   (iii) loop emits LAST uncovered window instead of first → k-th-window
   row fails (k chosen != last);
   (iv) D2 branch emits bare code → D2 row fails.
-- [ ] 6. node-27 live receipt per design D4 (hardened): explicit
+  Result (rsync scratch copy, main venv pytest): (i) 12 failed;
+  (ii) 4 failed; (iii) 3 failed — extra probe emitting the LAST
+  uncovered window killed 2 more rows (the clipped-window-end/start
+  pair, each with ≥2 uncovered windows), so the oracle genuinely
+  distinguishes first-vs-last; (iv) 2 failed. Unmutated baseline green.
+- [x] 6. node-27 live receipt per design D4 (hardened): explicit
   minimal env — NEVER source the deployed retention env —
   `NODE27_TIMESERIES_RETENTION_ENFORCE=0`, scratch receipt AND lock
   paths, READ-ONLY display DSN; eligible-chunk precondition checked
@@ -89,6 +94,15 @@ Must add (per design D1):
   (so #1207/#1220 legs pass and the per-window db-export shortfall is
   the refusal actually reached); record verbatim suffixed
   `refusal_reason` + production receipt/lock mtimes unchanged.
+  Result (2026-08-01T21:11:39Z, head 99fedbc6, scratch worktree
+  `/home/nwm/pr1175-scratch`, `env -i` minimal env, ENFORCE=0, scratch
+  receipt+lock): verbatim `refusal_reason` =
+  `DRILL_COVERAGE_DB_EXPORT_MISSING:2026-05-28T00:00:00Z/2026-06-25T00:00:00Z`
+  — fabricated subject was 2019..2031, so the suffix demonstrably
+  renders the CLIPPED live drop window, not raw subject bounds.
+  Production receipt mtimes byte-identical before/after; lock went to
+  the scratch path (mtime match); scratch worktree removed. Full log:
+  `.workplans/pr-1175/review/node27-evidence.md`.
 
 ## Required evidence
 
