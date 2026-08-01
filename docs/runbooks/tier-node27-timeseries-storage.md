@@ -148,19 +148,18 @@ guard with it. Resolution rules, all fail-closed except the last:
 - unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
   unreadable file, or a present value that is not a positive integer → refuse,
   never a constant fallback;
-- a non-comment line that CARRIES the literal
-  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring but is not accepted as
-  that variable's assignment — `readonly VAR=21`, `declare -i VAR=21`, a
-  truncated or otherwise malformed edit — or an accepted-shape line whose VALUE
-  is unsupported: an unquoted value starting with whitespace (`VAR= 21`, which
-  bash leaves UNSET), a `#`-first value (`VAR=#21`, which bash exports
+- any non-comment line outside the `[export ]KEY=VALUE` grammar —
+  `readonly VAR=21`, `declare -i VAR=21`, a truncated or quoted edit, and every
+  shape in the enforced-format note below — or an accepted-shape line whose
+  VALUE is unsupported: an unquoted value starting with whitespace (`VAR= 21`,
+  which bash leaves UNSET), a `#`-first value (`VAR=#21`, which bash exports
   verbatim), or a non-`\n` line break such as CRLF anywhere in the file →
-  refuse rather than mis-parse a window the runner does not use. That is the
-  whole detection boundary: it is substring-keyed, so shapes that omit the
-  `VAR=` substring are invisible (see the fail-open residual below). It is
-  judged PER LINE: a file that mixes a plain `VAR=14` with a later
-  `readonly VAR=30` refuses too, because sourcing it exports 30 and reporting
-  the earlier 14 would be fail-open (`#1229` round-2);
+  refuse rather than mis-parse a window the runner does not use. A CONFORMING
+  line that merely embeds the window name in another assignment's key or value
+  (`OLD_VAR=99`, `X=VAR=21`) refuses as well. Refusal is judged PER LINE: a
+  file that mixes a plain `VAR=14` with a later `readonly VAR=30` refuses too,
+  because sourcing it exports 30 and reporting the earlier 14 would be
+  fail-open (`#1229` round-2);
 - a readable file that is recognizably the deployed retention env (at least
   one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
   assignment is absent or empty → the retention runner's own default (14 d),
@@ -201,18 +200,62 @@ differ:
   cleanly and the guard accepts its window. That remains lexically
   undetectable; only the dual-pointer check above catches it.
 
-Residual (fail-open, `#1229` round-3): because unsupported-shape detection is
-keyed on that literal `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring,
-shell forms that set the window WITHOUT it are NOT detected — `VAR+=21`
-append, `: ${VAR:=21}` default-expansion, a nested `source`/`.` of another file
-from within the env, `printf -v`, `read`, `eval`. The guard then sees no window
-assignment, resolves the runner-equivalent default (14 d), and passes a
-`NHMS_ARCHIVE_MIN_AGE_DAYS=14` pair while the runner may export a LARGER window
-— fail-open, though of low likelihood since it takes a hand edit that turns the
-env into shell logic. The deployed retention env MUST therefore stay plain
-`KEY=VALUE` assignments plus `#` comments — no `+=`, no parameter-expansion
-defaults, no sourcing, no command substitution; tracked hardening is `#1230`
-(closed-world line grammar that refuses any non-`KEY=VALUE` line).
+**File format is now ENFORCED, not advisory (`#1230`).** The extractor judges
+the retention env by a closed-world line grammar: every line must be blank, a
+full-line `#` comment, or a `[export ]KEY=VALUE` assignment (any variable
+name). The FIRST line outside that grammar refuses, naming the file and the
+offending line. That closes the `#1229` round-3 fail-open class — `VAR+=21`
+append, `VAR=14` followed by `VAR+=7`, `: ${VAR:=21}` default-expansion, a
+nested `source`/`.` of another file from within the env, `printf -v`, `read`,
+`eval`, plus the `readonly`/`declare` prefixes and truncated or quoted edits —
+which previously slipped past the substring-keyed detector, let the guard
+resolve the runner-equivalent default (14 d) and pass a
+`NHMS_ARCHIVE_MIN_AGE_DAYS=14` pair while the runner exported a LARGER window.
+Every one of those eight shapes now REFUSES. Operationally this means the
+deployed retention env MUST stay plain `KEY=VALUE` assignments plus `#`
+comments — no `+=`, no parameter-expansion defaults, no sourcing, no
+`printf -v`/`read`/`eval`.
+
+Scope of the enforcement, precisely: the grammar is LINE-level. It blocks every
+line that is not `KEY=VALUE` (or blank / `#` comment), which is what closes the
+eight shapes above; it does NOT inspect what a conforming line's VALUE would do
+when bash sources it. A hand edit that turns the file into shell LINES blocks
+the units loudly — a hand edit that hides shell logic inside a conforming
+value does not.
+
+Residual (`#1230` design D5): two families survive the line grammar, each with
+a still-FAIL-OPEN variant:
+
+- **multi-line quoted value** (design D5(a)) — the two variants land on
+  opposite sides:
+  - the closing line is a bare `"` (`OTHER="` … `"`): that line violates the
+    grammar and is refused — an over-strict FALSE REFUSAL, fail-closed and
+    safe;
+  - every line happens to conform (`OTHER="` … `X=y"`, with a
+    `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` line inside the string): the
+    grammar accepts, the extractor reads the INNER line as the window while
+    bash keeps it inside the outer string and exports an earlier, LARGER value
+    — still FAIL-OPEN. Closing it needs unbalanced-quote tracking, which this
+    change does not add;
+- **value-level expansion that assigns** (design D5(b)) — a fully CONFORMING
+  line whose VALUE assigns the window variable through a shell expansion, e.g.
+  `X=${NODE27_TIMESERIES_RETENTION_WINDOW_DAYS:=21}` or
+  `X=$((NODE27_TIMESERIES_RETENTION_WINDOW_DAYS+=7))`. There is no literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring, so the line passes the
+  grammar AND the mention layer: the extractor resolves the runner-equivalent
+  default (14 d) while `set -a; . file` exports 21 — still FAIL-OPEN. Closing
+  it needs expansion-aware value scanning, which this change does not add.
+
+Both residuals are pinned by strict-xfail differential rows, so the day either
+is closed shows up as an XPASS rather than silently.
+
+Therefore: quoted values MUST NOT span lines in the deployed retention env, and
+no value may use an expansion that ASSIGNS the window variable
+(`${VAR:=...}`, `$((VAR+=...))`). Note that a conforming line's value is taken
+literally BY THE EXTRACTOR — `$VAR` or `$(cmd)` is a present non-integer for
+the window variable (refused) — but bash DOES expand it at source time, and an
+expansion whose side effect assigns the window variable is invisible to this
+guard.
 
 **Deployment consequence — read before deploying.** As of 2026-08-01 the live
 pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
