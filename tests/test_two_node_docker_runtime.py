@@ -4420,24 +4420,30 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(
     not os.access("/scratch/frd_muziyao", os.W_OK),
     reason="requires writable /scratch/frd_muziyao (node-22 host contract)",
 )
-def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:
+def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
     evidence_root = Path("/scratch/frd_muziyao/nwm-test/run-smoke-explicit/docker-security")
 
-    result = docker_runtime.run_docker_smoke(
-        evidence_root=evidence_root,
-        repo_root=tmp_path,
-        evidence_run_id="run-smoke-explicit",
-        min_free_bytes=100,
-        command_runner=_docker_smoke_success_runner,
-        disk_usage_provider=_high_space,
-    )
+    try:
+        result = docker_runtime.run_docker_smoke(
+            evidence_root=evidence_root,
+            repo_root=tmp_path,
+            evidence_run_id="run-smoke-explicit",
+            min_free_bytes=100,
+            command_runner=_docker_smoke_success_runner,
+            disk_usage_provider=_high_space,
+        )
 
-    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
-    preflight = json.loads((evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8"))
-    assert result.status == "PASS"
-    assert payload["evidence_run_id"] == "run-smoke-explicit"
-    assert preflight["evidence_run_id"] == "run-smoke-explicit"
-    shutil.rmtree(evidence_root.parent)
+        payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+        preflight = json.loads((evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8"))
+        assert result.status == "PASS"
+        assert payload["evidence_run_id"] == "run-smoke-explicit"
+        assert preflight["evidence_run_id"] == "run-smoke-explicit"
+    finally:
+        shutil.rmtree(evidence_root.parent)
 
 
 @pytest.mark.parametrize(
