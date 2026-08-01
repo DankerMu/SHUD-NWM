@@ -451,9 +451,10 @@ def derive_salvage_inputs(
             f"exceeding the bound of {max_manifests}; raise "
             "NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS deliberately. Do "
             "NOT narrow the drop window below the retention run's — runbook "
-            "§7.5: the gate unions db-export tuples and never reads "
-            "salvage_derivation.drop_window, so a narrower drill window lets "
-            "one subject's wide tuple mask another's unverified evidence"
+            "§7.5: the gate reads salvage_derivation.drop_window and refuses "
+            "with DRILL_DERIVATION_WINDOW_TOO_NARROW unless it contains the "
+            "retention drop window, so a narrower drill window buys nothing "
+            "and blocks retention"
         )
     inputs.sort(key=lambda item: (item.lane, item.identity))
     skipped.sort(key=lambda item: (item["lane"], item["subject"]))

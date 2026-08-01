@@ -3382,9 +3382,13 @@ def test_1177_runbook_documents_the_implemented_cli(tmp_path: Path) -> None:
     # The pre-#1177 "guess the full set" instruction must be gone.
     assert "full set of salvage manifests" not in text
     # F4: the "narrow the window to bound cost" advice was unsound — the gate
-    # unions db-export tuples and never reads `salvage_derivation.drop_window`,
-    # so a narrower drill window lets one subject's wide tuple mask another
-    # subject's never-verified evidence.
+    # unions db-export tuples, and those tuples carry no subject identity, so
+    # a narrower drill window lets one subject's wide tuple mask another
+    # subject's never-verified evidence. Since #1207 the retention gate reads
+    # `salvage_derivation.drop_window` and refuses
+    # (`DRILL_DERIVATION_WINDOW_TOO_NARROW`) unless it contains the retention
+    # drop window; the containment sentence below is the operator-facing half
+    # of that same rule.
     assert "Narrowing the drop window is" not in text
     assert "MUST contain (⊇) the retention run's drop" in text
     # F4: §7.3 step 3 emits ISO-8601 directly so §7.5 pastes verbatim, and

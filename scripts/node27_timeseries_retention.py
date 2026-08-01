@@ -120,6 +120,7 @@ CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW = "COMPLETENESS_RECEIPT_PENDING
 CODE_DRILL_RECEIPT_MISSING = "DRILL_RECEIPT_MISSING"
 CODE_DRILL_RECEIPT_STALE = "DRILL_RECEIPT_STALE"
 CODE_DRILL_RECEIPT_FAIL = "DRILL_RECEIPT_FAIL"
+CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW = "DRILL_DERIVATION_WINDOW_TOO_NARROW"
 CODE_DRILL_COVERAGE_FORCING_MISSING = "DRILL_COVERAGE_FORCING_MISSING"
 CODE_DRILL_COVERAGE_RUNS_MISSING = "DRILL_COVERAGE_RUNS_MISSING"
 CODE_DRILL_COVERAGE_DB_EXPORT_MISSING = "DRILL_COVERAGE_DB_EXPORT_MISSING"
@@ -138,6 +139,7 @@ WIRE_CODES: frozenset[str] = frozenset(
         CODE_DRILL_RECEIPT_MISSING,
         CODE_DRILL_RECEIPT_STALE,
         CODE_DRILL_RECEIPT_FAIL,
+        CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW,
         CODE_DRILL_COVERAGE_FORCING_MISSING,
         CODE_DRILL_COVERAGE_RUNS_MISSING,
         CODE_DRILL_COVERAGE_DB_EXPORT_MISSING,
@@ -626,6 +628,58 @@ def _completeness_has_db_export_overlap(
     return False
 
 
+def _drill_derivation_window_contains(
+    receipt: Mapping[str, Any], drop_window: DropWindow
+) -> bool:
+    """#1207 layer 1: does the drill's DECLARED judgment span cover this drop?
+
+    The drill records the drop window it was invoked with at
+    ``salvage_derivation.drop_window`` (machine-readable since #1206). A
+    drill that declared a NARROWER span than what retention wants to drop
+    cannot vouch for this drop: its coverage tuples carry no subject
+    identity, so subject A's wide tuple would silently vouch for a subject
+    B that the narrowed drill never derived and never restore-verified.
+
+    Unified rule (design D2 of ``fix-retention-drill-window-guard``):
+
+    * key ``salvage_derivation`` entirely ABSENT → ``True`` (no-derivation-
+      section receipt: pre-#1206 receipts AND today's explicit-manifest
+      drills, which never write the section — behavior unchanged);
+    * key PRESENT but unusable (not a Mapping, ``drop_window`` key missing,
+      window neither Mapping nor ``null``, unparseable, or inverted) →
+      ``False``. A section that exists but cannot be judged is never
+      evidence — symmetric with the inverted-tuple defence in
+      :func:`_tuples_cover_window`;
+    * ``drop_window`` is ``null`` → ``True`` (the drill ran un-narrowed);
+    * well-formed window → closed-interval containment. Equality on either
+      endpoint PASSES: the runbook §7.5 standard invocation passes the §7.3
+      interval verbatim, so drill window == retention window is the live
+      common case.
+    """
+    if "salvage_derivation" not in receipt:
+        return True
+    section = receipt.get("salvage_derivation")
+    if not isinstance(section, Mapping) or "drop_window" not in section:
+        return False
+    window = section["drop_window"]
+    if window is None:
+        return True
+    if not isinstance(window, Mapping):
+        return False
+    start_raw = window.get("start")
+    end_raw = window.get("end")
+    if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+        return False
+    try:
+        start = _parse_iso(start_raw)
+        end = _parse_iso(end_raw)
+    except ValueError:
+        return False
+    if end < start:
+        return False
+    return start <= drop_window.start and end >= drop_window.end
+
+
 def check_drill_gate(
     receipt: Mapping[str, Any],
     completeness_receipt: Mapping[str, Any],
@@ -635,8 +689,13 @@ def check_drill_gate(
 ) -> list[str]:
     """Evaluate H2: PASS/FAIL + staleness + forcing/runs/db-export coverage.
 
-    Order: STALE → FAIL → forcing → runs → db-export (MISSING is raised by
-    the loader).
+    Order: STALE → FAIL → derivation-window → forcing → runs → db-export
+    (MISSING is raised by the loader).
+
+    The derivation-window guard (#1207) runs BEFORE every coverage leg: if
+    the drill recorded a ``salvage_derivation.drop_window`` that does not
+    CONTAIN this drop window, no coverage-union evidence from that run is
+    consulted at all — see :func:`_drill_derivation_window_contains`.
 
     The db-export leg is salvage-window-scoped (#1162): drill ``db-export``
     coverage is required only over each salvage-backed window intersected
@@ -663,6 +722,9 @@ def check_drill_gate(
         reasons.append(CODE_DRILL_RECEIPT_FAIL)
         return reasons
     if drop_window is None:
+        return reasons
+    if not _drill_derivation_window_contains(receipt, drop_window):
+        reasons.append(CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW)
         return reasons
     coverage = receipt.get("coverage") or []
     if not _drill_covers(coverage, "forcing", drop_window):

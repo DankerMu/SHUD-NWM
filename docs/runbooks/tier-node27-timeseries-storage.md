@@ -1609,15 +1609,61 @@ without re-reading the completeness receipt.
 window.** Use the §7.3 step 3 interval verbatim, or something wider —
 never narrower, and never hand-narrowed to make an expensive drill
 cheaper. Reason: the gate's db-export check UNIONs the drill's
-`source=db-export` coverage tuples and never reads
-`salvage_derivation.drop_window`. With a narrower drill window, subject A
-(wide window, still derived) contributes a tuple that can span subject
-B's demand window even though B was filtered out of the drill and its
-evidence was never verified — the gate passes on evidence that does not
-exist. Machine enforcement of the containment rule belongs to the gate
-(#1162 follow-up); until then this constraint is operator-enforced.
-Narrowing the manifest list by hand is likewise not allowed — that is the
-failure this whole section exists to remove.
+`source=db-export` coverage tuples, and those tuples carry no subject
+identity. With a narrower drill window, subject A (wide window, still
+derived) contributes a tuple that can span subject B's demand window even
+though B was filtered out of the drill and its evidence was never
+verified — the gate would pass on evidence that does not exist.
+
+This containment rule is **machine-enforced by the gate** (#1207): before
+any coverage leg runs, the retention gate reads the drill receipt's
+recorded `salvage_derivation.drop_window` (§7.4) and refuses with
+`DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) unless that recorded window
+contains the retention drop window, closed-interval — an exactly equal
+window passes, which is what the standard invocation above produces. A
+recorded `drop_window` of `null` (the drill ran without
+`--drop-window-*`) passes; a `salvage_derivation` section that is present
+but unusable (not an object, `drop_window` key missing, unparseable
+timestamps, or `end` before `start`) refuses with the same code. The
+operator no longer has to compare the two windows by hand — but the
+remedy when the gate refuses is still yours: rerun the drill with a
+window ⊇ the retention drop window. Narrowing the manifest list by hand
+is likewise not allowed — that is the failure this whole section exists
+to remove, and it is NOT machine-enforced.
+
+**Windows advance — a drill receipt does not stay sufficient.** Within
+`NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS` the same receipt is
+reused across many retention ticks, but the retention drop window moves
+forward with the clock. The moment it advances past the recorded drill
+window, that receipt stops satisfying enforcement and every tick refuses
+with `DRILL_DERIVATION_WINDOW_TOO_NARROW` — freshness alone is not
+enough. Rerun the drill with a window ⊇ the NEW retention drop window
+(§7.3 step 3 recomputed); a receipt still inside its age budget is not
+evidence for a span it never judged.
+
+**Residual after #1207 (what this enforcement does NOT cover).** The
+guard blocks exactly one false-PASS mechanism — the operator narrowing
+knob — and cross-subject tuple substitution survives on three paths:
+
+- (a) **Receipts with no `salvage_derivation` section.** Both receipts
+  predating #1206 and today's explicit-manifest drills
+  (`--salvage-manifest` without `--completeness-receipt`) never write the
+  section, and the guard is skipped entirely for them; for those receipts
+  the hand-narrowed-manifest prohibition above remains prose-only.
+- (b) **Receipt-snapshot unbinding** (issue #1220, pre-existing): the
+  gate never checks that the drill's recorded
+  `completeness_receipt_path`/snapshot is the completeness receipt the
+  gate itself loaded. An un-narrowed drill (`null` window → guard passes)
+  derived from an OLDER completeness snapshot cannot have seen a subject
+  added by a later regeneration, and subject A's wide tuple still
+  substitutes for it.
+- (c) **Inside a contained window**, substitution is harmless only
+  RELATIVE TO the completeness snapshot the drill consumed — every
+  subject overlapping the drill window was derived and restore-verified
+  from THAT snapshot. It is not an absolute guarantee; see (b).
+
+The root fix for all three is per-subject attribution of drill coverage
+tuples (layer 2 of #1207, separately scheduled).
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -1738,6 +1784,18 @@ surfaces in the same commit.
 - `DRILL_RECEIPT_STALE` — drill `generated_at` older than
   `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
 - `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
+- `DRILL_DERIVATION_WINDOW_TOO_NARROW` — the drill receipt records a
+  `salvage_derivation.drop_window` that does NOT contain (closed-interval;
+  equality passes) the retention drop window, so the drill declared a
+  narrower judgment span than this drop and its coverage tuples cannot
+  vouch for it (#1207). Also emitted when the `salvage_derivation` section
+  is present but unusable — not an object, `drop_window` key missing,
+  unparseable timestamps, or an inverted window whose `end` precedes its
+  `start` (fail-closed; nonsense evidence never counts). A receipt with NO
+  `salvage_derivation` section is not affected (see
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)); a recorded
+  `drop_window` of `null` (drill ran un-narrowed) passes. Remedy: rerun the
+  drill with a window ⊇ the retention drop window.
 - `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
   tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
   into a single covering interval; a 14 d drop window is normally covered
@@ -1779,9 +1837,10 @@ COMPLETENESS_RECEIPT_MISSING
           -> DRILL_RECEIPT_MISSING
             -> DRILL_RECEIPT_STALE
               -> DRILL_RECEIPT_FAIL
-                -> DRILL_COVERAGE_FORCING_MISSING
-                  -> DRILL_COVERAGE_RUNS_MISSING
-                    -> DRILL_COVERAGE_DB_EXPORT_MISSING
+                -> DRILL_DERIVATION_WINDOW_TOO_NARROW
+                  -> DRILL_COVERAGE_FORCING_MISSING
+                    -> DRILL_COVERAGE_RUNS_MISSING
+                      -> DRILL_COVERAGE_DB_EXPORT_MISSING
 ```
 
 #### 8.2.1 Non-code stderr diagnostics
