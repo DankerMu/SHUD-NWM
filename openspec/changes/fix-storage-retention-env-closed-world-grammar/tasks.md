@@ -95,7 +95,9 @@ Must add (design D1/D2/D3):
   failed; (iv) seeded `readonly SEEDED_BAD=1` in the retention
   template → unmutated test FAILED (caught), filter mutated to
   `assert True` → passed (slipped) — filter is load-bearing.
-  Unmutated baseline 210 passed + 1 xfailed.
+  Unmutated baseline 210 passed + 1 xfailed at 71fdcadc; after the
+  Phase-7 P2 fix (a36152f0, second strict-xfail tripwire added) the
+  baseline is 210 passed + 2 xfailed — mutation counts unaffected.
 - [x] 6. node-27 live receipt per design D4: new helper vs deployed
   retention env file → assert it returns the positive integer actually
   assigned in the deployed file (no hardcoded expectation) with no
