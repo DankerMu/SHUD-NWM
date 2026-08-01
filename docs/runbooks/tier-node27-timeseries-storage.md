@@ -1881,10 +1881,25 @@ surfaces in the same commit.
   `/tmp/nhms-node27-timeseries-retention.lock` is already held. Receipt
   published, exit code 1.
 - `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised. Suffix
-  `:<hypertable_schema>.<chunk_name>: <error>`. Whole tick refuses (H5
-  fail-closed); subsequent chunks NOT attempted.
+  `:<hypertable_schema>.<chunk_name>: <error>`. The prefix through the
+  chunk name is byte-unchanged, but `<error>` is credential-redacted
+  driver text: DSN / password material and libpq `user "<name>"` /
+  `role "<name>"` echoes are replaced by `***`, while the host/port echo is
+  deliberately PRESERVED (diagnosability trade-off, #1213). Redaction is
+  total and never raises — the redaction helper imports `psycopg2` at
+  module scope, so in a driver-less window (venv rebuild, broken
+  `psycopg2` wheel) that import itself fails and the tail degrades to the
+  literal `<error text withheld: redaction unavailable (<Type>)>`, where
+  `<Type>` is the ORIGINAL exception's class name (#1216). Whole tick
+  refuses (H5 fail-closed); subsequent chunks NOT attempted.
 - `RETENTION_UNCAUGHT_ERROR` — catch-all top-level exception. Receipt
   carries `refusal_reason = "RETENTION_UNCAUGHT_ERROR:<ClassName>: <str(exc)>"`.
+  Wire code and `<ClassName>` are byte-unchanged; `<str(exc)>` crosses the
+  same redaction chokepoint as above (this is the path a psycopg2
+  DSN-parse failure takes, and that exception echoes the whole conninfo,
+  password included), so the tail is either credential-redacted driver
+  text or, in the same driver-less window, the literal
+  `<error text withheld: redaction unavailable (<Type>)>`.
   Symmetric with #854 `DRILL_UNCAUGHT_ERROR`.
 
 Refusal-code priority (highest first — the first hit wins):
@@ -1928,7 +1943,12 @@ frozenset:
   drops** — the tick is not refused and the exit code is unaffected. Grep
   literal: `freed_bytes measurement failed`. The `error` text is
   credential-redacted (DSN password and libpq role name are scrubbed)
-  because the wrapper captures stderr into `retention.log`.
+  because the wrapper captures stderr into `retention.log`. Post-#1216 it
+  crosses the SAME total chokepoint as the two refusal reasons in §8.2, so
+  in a driver-less window the `error` value is not driver text at all but
+  the literal `<error text withheld: redaction unavailable (<Type>)>` —
+  the warning line, and the best-effort `0` it explains, are emitted
+  either way.
 - NOT every best-effort `0` produces a line here. A measurement that
   returns NO ROW, or a NULL `total_bytes`, is coerced to `0` **silently** —
   no warning is emitted at all (design D2 coercion path). §8.6 item 5
@@ -2058,7 +2078,12 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    (per-chunk drop timings printed to stderr) with the current
    `timescaledb_information.chunks` state before re-running enforce.
    Inspect the offending chunk (the refusal_reason suffix names it
-   `<hypertable_schema>.<chunk_name>`). Common causes: statement timeout
+   `<hypertable_schema>.<chunk_name>`). The cause text AFTER that chunk
+   name is redacted (§8.2), so read it as an intent-preserving summary,
+   not as verbatim driver output; and when it is the withheld literal
+   `<error text withheld: redaction unavailable (<Type>)>` the cause is
+   absent ENTIRELY — classify from `<Type>` plus the DB side (item 4
+   applies first in that case). Common causes: statement timeout
    (14 min per chunk inside the 900 s wrapper / 940 s systemd walls), active
    writer holding an incompatible lock, or a
    TimescaleDB catalog inconsistency. Re-run enforce after the operator
@@ -2068,8 +2093,22 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 3. **Config refusal (`RETENTION_CONFIG_INVALID`).** No receipt was
    written. Fix the env file per §8.4 and retry.
 4. **Uncaught error (`RETENTION_UNCAUGHT_ERROR`).** The receipt carries
-   the exception class + message. File a bug against #855 (or the
-   downstream owner if the class is from a shared helper).
+   the exception class + redacted message (§8.2). File a bug against #855
+   (or the downstream owner if the class is from a shared helper). If the
+   message is instead the literal
+   `<error text withheld: redaction unavailable (<Type>)>`, the receipt
+   carries the exception class ONLY and no message at all; that
+   fingerprint points at a node-27 LOCAL environment failure (the
+   redaction helper's `psycopg2` import failed), not at a runner defect.
+   Check driver health FIRST:
+
+   ```
+   /home/nwm/NWM/.venv/bin/python -c "import psycopg2"
+   ```
+
+   If that import fails, rebuild the venv (`uv sync --all-extras --dev`)
+   and re-run enforce; only file a bug against #855 once a healthy driver
+   still reproduces the withheld tail.
 5. **`freed_bytes: 0` in an `enforced` receipt.** A `0` is ambiguous in the
    receipt alone: the chunk may have been genuinely empty, or its
    measurement may have failed. Disambiguate from the wrapper log:
@@ -2114,7 +2153,9 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    conservative — it costs one extra reconciliation pass, never the reverse:
    a failed measurement is never read as a real `0`.
 
-   An in-bracket hit names the chunk and the redacted cause (§8.2.1) — the
+   An in-bracket hit names the chunk and the redacted cause (§8.2.1; on
+   the withheld path the cause is withheld entirely and only the
+   exception class survives) — the
    receipt's `freed_bytes` for that chunk is a best-effort 0, not a
    measurement. The chunk WAS dropped; only the reclaim accounting is
    degraded. Common cause of a hit: concurrent `compress_chunk` /
