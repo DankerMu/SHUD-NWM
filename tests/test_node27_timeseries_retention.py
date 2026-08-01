@@ -348,6 +348,7 @@ _EXPECTED_WIRE_CODES = frozenset(
         "DRILL_RECEIPT_MISSING",
         "DRILL_RECEIPT_STALE",
         "DRILL_RECEIPT_FAIL",
+        "DRILL_DERIVATION_WINDOW_TOO_NARROW",
         "DRILL_COVERAGE_FORCING_MISSING",
         "DRILL_COVERAGE_RUNS_MISSING",
         "DRILL_COVERAGE_DB_EXPORT_MISSING",
@@ -362,7 +363,7 @@ _EXPECTED_WIRE_CODES = frozenset(
 def test_wire_codes_match_fixture_exactly() -> None:
     """H6: WIRE_CODES frozenset content is byte-identical with the fixture."""
     assert retention.WIRE_CODES == _EXPECTED_WIRE_CODES
-    assert len(retention.WIRE_CODES) == 15
+    assert len(retention.WIRE_CODES) == 16
 
 
 def test_wire_codes_byte_identical_across_code_runbook_design() -> None:
@@ -1462,6 +1463,259 @@ def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -
     )
 
     assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# #1207 layer 1 — drill derivation-window guard. The drill records the drop
+# window it was invoked with (`salvage_derivation.drop_window`, #1206); a
+# drill that declared a NARROWER judgment span than the retention drop window
+# cannot vouch for that drop, because its coverage tuples carry no subject
+# identity (subject A's wide tuple would substitute for a never-derived,
+# never-restore-verified subject B).
+# ---------------------------------------------------------------------------
+
+
+# Exact windows from the issue #1207 read-only probe.
+_ISSUE_A_START = datetime(2026, 6, 14, tzinfo=UTC)
+_ISSUE_A_END = datetime(2026, 6, 28, tzinfo=UTC)
+_ISSUE_B_START = datetime(2026, 6, 20, tzinfo=UTC)
+_ISSUE_B_END = datetime(2026, 6, 27, tzinfo=UTC)
+_ISSUE_DRILL_START = datetime(2026, 6, 18, tzinfo=UTC)
+_ISSUE_DRILL_END = datetime(2026, 6, 19, tzinfo=UTC)
+_ISSUE_DROP_START = datetime(2026, 6, 18, tzinfo=UTC)
+_ISSUE_DROP_END = datetime(2026, 6, 25, tzinfo=UTC)
+
+
+def _salvage_derivation(window: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A schema-valid `salvage_derivation` section (#1206 drill emit shape).
+
+    ``window`` is the recorded `--drop-window-*` interval, or ``None`` for a
+    drill that ran un-narrowed (`oneOf: [window, null]` per
+    `schemas/archive_rebuild_drill_receipt.schema.json`).
+    """
+    return {
+        "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
+        "drop_window": dict(window) if window is not None else None,
+        "candidate_count": 2,
+        "derived_count": 1,
+        "skipped": [],
+    }
+
+
+def _issue_1207_receipts(
+    derivation: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rebuild the issue's A/B scenario.
+
+    Completeness carries TWO db-export/complete subjects — A `[06-14, 06-28]`
+    and B `[06-20, 06-27]` — and the drill carries ONLY A's full-window
+    db-export tuples. Both subjects clip into the `[06-18, 06-25]` drop
+    window, and A's tuples span both clipped targets, so the db-export leg is
+    satisfied by evidence that never covered B. ``derivation=None`` builds the
+    no-derivation-section receipt (the pre-guard shape).
+    """
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(_ISSUE_A_START, _ISSUE_A_END, version="fv-salvage-a"),
+            _db_export_subject(_ISSUE_B_START, _ISSUE_B_END, version="fv-salvage-b"),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(_ISSUE_A_START, _ISSUE_A_END))
+    if derivation is not None:
+        drill["salvage_derivation"] = dict(derivation)
+    return completeness, drill
+
+
+def _issue_1207_drop_window() -> retention.DropWindow:
+    return retention.DropWindow(start=_ISSUE_DROP_START, end=_ISSUE_DROP_END)
+
+
+def test_drill_derivation_window_narrower_than_drop_refuses_issue_1207_replay() -> None:
+    """#1207 (a): the issue's A/B replay flips PASS → REFUSE.
+
+    The drill declared it judged only `[06-18, 06-19]` while retention wants
+    to drop `[06-18, 06-25]`; subject B `[06-20, 06-27]` was therefore never
+    derived, never restore-verified, and only subject A's wide tuple vouches
+    for it. The guard must fire FIRST — before any coverage-union evidence
+    from that run is consulted.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_DRILL_START), "end": _iso(_ISSUE_DRILL_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons[0] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+def test_drill_no_derivation_section_keeps_pre_guard_behavior() -> None:
+    """#1207 (b) + pinned residual: the SAME A/B receipt without the
+    `salvage_derivation` section still PASSES.
+
+    Two receipt populations legitimately lack the section — receipts
+    predating #1206 and today's explicit-manifest drills (`--salvage-manifest`
+    without `--completeness-receipt`), which never write it. Their behavior is
+    unchanged by design (D2), which also pins the residual: cross-subject
+    tuple substitution survives on that path and is only closed by layer 2
+    per-subject attribution. This assertion is simultaneously the pre-fix
+    oracle — it is exactly the PASS the guard flips above.
+    """
+    completeness, drill = _issue_1207_receipts(None)
+    assert "salvage_derivation" not in drill
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_null_passes_guard() -> None:
+    """#1207 (c): `drop_window: null` = the drill ran un-narrowed → pass."""
+    completeness, drill = _issue_1207_receipts(_salvage_derivation(None))
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_strictly_containing_passes_guard() -> None:
+    """#1207 (d1): a drill window strictly wider on BOTH sides passes.
+
+    The drill judged `[06-14, 06-28]` — a superset of the `[06-18, 06-25]`
+    drop window — so both subjects were in its derivation set.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_A_START), "end": _iso(_ISSUE_A_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_exactly_equal_passes_guard() -> None:
+    """#1207 (d2) BOUNDARY: drill window EXACTLY EQUAL to the retention drop
+    window passes.
+
+    Runbook §7.5's standard invocation tells operators to paste the §7.3
+    step-3 interval verbatim into `--drop-window-start/--drop-window-end`.
+    That interval is a documented CONSERVATIVE SUPERSET of the runner's own
+    drop window (the runner additionally intersects the eligible chunks with
+    the completeness `coverage_bounds`), so the standard invocation records
+    a window that is EQUAL to or WIDER than the retention drop window, never
+    narrower — equality is the tight end of that range and must pass. A
+    strict-inequality containment test would refuse it.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_DROP_START), "end": _iso(_ISSUE_DROP_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_narrowed_only_at_start_refuses() -> None:
+    """#1207 (d3) BOUNDARY: narrowing on the START side alone still refuses.
+
+    The drill judged `[06-20, 06-28]` — its END covers the `[06-18, 06-25]`
+    drop window completely, only its START is late. Subject A `[06-14,
+    06-28]` overhangs the drop start and was still derived, so its tuples
+    vouch for `[06-18, 06-20)` that this drill never judged.
+
+    This row kills the start-side conjunct: a predicate that dropped
+    `start <= drop_window.start` (checking only the end), or that compared
+    the start against the wrong endpoint (`start <= drop_window.end`), would
+    admit this receipt. The (a) replay above narrows BOTH sides and so
+    survives either mutation.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_B_START), "end": _iso(_ISSUE_A_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+@pytest.mark.parametrize(
+    ("label", "section"),
+    [
+        ("not-a-mapping", ["not", "a", "mapping"]),
+        (
+            "drop-window-key-missing",
+            {
+                "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
+                "candidate_count": 2,
+                "derived_count": 1,
+                "skipped": [],
+            },
+        ),
+        ("window-not-a-mapping", {"drop_window": "2026-06-18T00:00:00Z/2026-06-25T00:00:00Z"}),
+        ("start-unparseable", {"drop_window": {"start": "not-a-timestamp", "end": "2026-06-25T00:00:00Z"}}),
+        ("start-not-a-string", {"drop_window": {"start": 20260618, "end": "2026-06-25T00:00:00Z"}}),
+        (
+            "inverted",
+            {"drop_window": {"start": "2026-06-25T00:00:00Z", "end": "2026-06-18T00:00:00Z"}},
+        ),
+    ],
+)
+def test_drill_derivation_section_unusable_shape_refuses(
+    label: str, section: Any
+) -> None:
+    """#1207 (e): a `salvage_derivation` section that EXISTS but cannot be
+    judged is never evidence — refuse fail-closed with the same code.
+
+    Symmetric with the inverted-tuple defence in `_tuples_cover_window`.
+    Most of these shapes are intercepted upstream by `load_drill_receipt`'s
+    jsonschema validation (→ `DRILL_RECEIPT_MISSING`), so this is
+    defence-in-depth at the pure-function seam; the INVERTED window is the
+    one shape the schema cannot express, so it is the only row here that can
+    reach the gate on the production path. It does not isolate the explicit
+    `end < start` branch — containment already refuses any inverted window
+    against a well-ordered drop window (see the branch comment in
+    `_drill_derivation_window_contains`); the row pins the OUTCOME, not the
+    branch that produces it.
+    """
+    completeness, drill = _issue_1207_receipts(None)
+    drill["salvage_derivation"] = section
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW], label
+
+
+def test_drill_derivation_window_guard_surfaces_as_refusal_reason(tmp_path: Path) -> None:
+    """#1207 (f) integration: the guard's code reaches the receipt surface.
+
+    Drives the full runner (fake chunk/measure/drop seams) with a
+    schema-valid narrowed drill receipt: the eligible chunk's range is the
+    `[74 d, 60 d]` drop window while the drill recorded a 2 d judgment span
+    inside it, so `run_retention` must publish `outcome=refused` with
+    `refusal_reason = DRILL_DERIVATION_WINDOW_TOO_NARROW`.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(drop_start, drop_end, version="fv-salvage-wide")]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _salvage_derivation(
+        {
+            "start": _iso(_NOW - timedelta(days=70)),
+            "end": _iso(_NOW - timedelta(days=68)),
+        }
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-narrow-drill", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+    assert receipt["refusal_reason"] in retention.WIRE_CODES
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_enforced_receipt_echoes_unclipped_salvage_subject_windows(tmp_path: Path) -> None:
@@ -3627,6 +3881,33 @@ def test_completeness_bounds_refuses_before_drill_coverage_missing(tmp_path: Pat
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
     )
     assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
+
+
+def test_drill_derivation_window_refuses_before_drill_coverage_missing(tmp_path: Path) -> None:
+    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COVERAGE_* per §8.2 chain (#1207).
+
+    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
+    inside the `[72 d, 65 d]` drop window) AND missing its forcing coverage
+    leg entirely. The derivation-window guard outranks every coverage leg, so
+    no coverage-union evidence from a run that never judged this span is
+    consulted — the surfaced code is the window code, not FORCING_MISSING.
+    """
+    narrowed_drill = _drill_receipt(forcing_tuples=[])
+    narrowed_drill["salvage_derivation"] = _salvage_derivation(
+        {
+            "start": _iso(_NOW - timedelta(days=70)),
+            "end": _iso(_NOW - timedelta(days=67)),
+        }
+    )
+    _write_json(tmp_path / "completeness.json", _completeness_receipt())
+    _write_json(tmp_path / "drill.json", narrowed_drill)
+    config = _build_config(tmp_path)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
+    stub = _StubRunner(chunks)
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
 
 
 # ---------------------------------------------------------------------------
