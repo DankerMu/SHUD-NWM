@@ -23,12 +23,17 @@ this level.
 
 - Parametrize/extend the existing real-function test skeleton
   (`test_default_drop_chunk_bounds_exact_physical_interval`'s _FakeCursor /
-  _FakeConn / psycopg2 monkeypatch) with the guard's two failure directions:
+  _FakeConn / psycopg2 monkeypatch) with the guard's failure directions:
   - `fetchall() == []` — chunk vanished mid-tick (zero rows), the branch
     runbook §8.6 item 5 relies on;
   - `fetchall() == [("_timescaledb_internal.chk-other",)]` — server dropped
-    a DIFFERENT chunk (the surprising-range decision H3 defends against).
-  Each asserts `pytest.raises(RuntimeError)` with `match` binding both
+    a DIFFERENT chunk (the surprising-range decision H3 defends against);
+  - selected chunk PLUS an extra name (round-1 verified finding cand-01) —
+    cardinality binds: membership/first-row weakenings must fail;
+  - the raise exits THROUGH the `with connection:` context (round-2 verified
+    finding cand-02) — pins rollback-on-guard-failure: moving the guard out
+    of the transaction block must fail the suite.
+  Each row asserts `pytest.raises(RuntimeError)` with `match` binding both
   `expected exact selected chunk` and the selected chunk's qualified name.
 - Optional tick-level supplement (recommended in issue, implementer's call
   on cost): real `_default_drop_chunk` wired into `run_retention` via fake

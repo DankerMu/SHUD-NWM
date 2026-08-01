@@ -2490,14 +2490,22 @@ class _DropProbe:
     """Recorder for the fake psycopg2 driving the real ``_default_drop_chunk``.
 
     ``closed`` counts ``connection.close()`` calls: ``_default_drop_chunk``
-    closes in a ``finally``, so the count must be 1 on the raising rows too —
-    a guard that escaped the ``try`` would leak the connection on the one path
-    that runs after an irreversible ``DROP CHUNK`` attempt.
+    closes in a ``finally``, so the count must be 1 on the raising rows too.
+    Its kill surface is deletion of ``finally: connection.close()`` — the
+    connection would leak on the one path that runs after an irreversible
+    ``DROP CHUNK`` attempt. (It says nothing about *where* the guard lives:
+    a guard hoisted out of the ``try`` still leaves ``closed == 1``.)
+
+    ``conn_exit_exc`` records what the ``with connection:`` transaction
+    context observed on exit, one entry per exit. ``RuntimeError`` means the
+    H3 guard fired INSIDE the transaction, so psycopg2 rolls the unexpected
+    drop back; ``None`` means the block completed and psycopg2 commits.
     """
 
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple | None]] = []
         self.closed = 0
+        self.conn_exit_exc: list[type[BaseException] | None] = []
 
     @property
     def drop_statement(self) -> tuple[str, tuple | None]:
@@ -2532,6 +2540,9 @@ def _install_fake_drop_psycopg2(
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            # Real psycopg2 commits on a clean exit and ROLLS BACK when the
+            # block raises; record which one the transaction context saw.
+            probe.conn_exit_exc.append(exc_type)
             return None
 
         def cursor(self) -> _FakeCursor:
@@ -2654,6 +2665,12 @@ def test_default_drop_chunk_rejects_unexpected_drop_identity(
     drop_sql, params = probe.drop_statement
     assert "drop_chunks" in drop_sql
     assert params == (chunk.range_end, chunk.range_start, "hydro.river_timeseries")
+    # The RuntimeError propagated THROUGH `with connection:`, i.e. the guard
+    # raises inside the transaction, so psycopg2 rolls the unexpected drop
+    # back. A guard hoisted out of the `with` (or out of the `try`) would
+    # leave the transaction to commit before failing — same exception, same
+    # statement, same close count, but an irreversible drop.
+    assert probe.conn_exit_exc == [RuntimeError]
     # `finally: connection.close()` still runs on the raising path.
     assert probe.closed == 1
 

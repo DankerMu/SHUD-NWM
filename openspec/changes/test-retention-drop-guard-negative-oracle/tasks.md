@@ -49,6 +49,12 @@ Risk packs (compact):
   first-row check) fail the suite; update the test docstring's direction
   list; refresh mutation evidence (guard deleted AND membership/first-row
   mutants all killed).
+- [x] 5. Round-2 fix (cand-02 CONFIRMED): record `exc_type` received by
+  `_FakeConn.__exit__` in the probe and assert the RuntimeError exits
+  THROUGH the connection context (raise-inside-transaction → psycopg2
+  rollback pinned); correct the `_DropProbe` docstring's rationale for
+  `closed` (it kills finally-deletion, not guard-escaped-the-try); mutation
+  evidence: guard moved after `finally: connection.close()` → suite fails.
 
 ## Required evidence
 
