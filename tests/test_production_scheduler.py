@@ -9904,6 +9904,91 @@ def test_bounded_evidence_pops_the_emptied_restart_reconcile_shell_below_the_dro
     assert bounded["limit"]["candidate_lists"] == "dropped"
 
 
+def test_terminal_limit_compaction_keeps_the_evidence_size_limit_reason_marker() -> None:
+    """`limit.reason` is the last truncation marker left once every other tier ran."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_terminal_limit")
+
+    # Measured for this payload (budget scan 1_050..1_899 step 1): 1_424-1_516 is the
+    # contiguous band where the terminal `_compact_limit` tier both runs and fits --
+    # below it nothing fits at all (see the fail-closed test at 1_100) and above it the
+    # payload settles before the terminal tier (see the droppable-shell test at 1_800).
+    # 1_470 is an interior point.
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_470,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 1_470
+    # Reason-only shape is the terminal tier's own signature: an earlier tier would still
+    # carry `max_evidence_bytes` / `pre_limit_status` / `candidate_lists`, so this pins
+    # that the assertion below is made on a payload that reached `_compact_limit`.
+    assert bounded["limit"] == {"reason": "evidence_size_limit_exceeded"}
+    assert bounded["limit"]["reason"] == "evidence_size_limit_exceeded"
+    assert bounded["status"] == "resource_limit_blocked"
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_evidence_size_bound_accepts_exactly_the_budget_and_refuses_one_byte_more(compact: bool) -> None:
+    """The hard byte bound is `>`: exactly `max_evidence_bytes` fits, one byte more does not."""
+
+    max_evidence_bytes = 1_024
+
+    def serialized_size(candidate: Mapping[str, Any]) -> int:
+        # Measured through the production serializer itself, so the encoder mode and
+        # separators cannot drift away from the function under test.
+        serialized = scheduler_evidence_payload_module._serialize_evidence_json_if_within_limit(
+            candidate,
+            max_evidence_bytes=10_000_000,
+            compact=compact,
+        )
+        assert serialized is not None
+        return len(serialized.encode("utf-8"))
+
+    at_limit: dict[str, Any] = {
+        "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        "pass_id": "scheduler_2026072612_byte_boundary",
+        "status": "resource_limit_blocked",
+        "limit": {"reason": "evidence_size_limit_exceeded"},
+        "padding": "",
+    }
+    # Every padding character is one ASCII byte inside a JSON string, so the payload can
+    # be grown onto the bound exactly.
+    at_limit["padding"] = "x" * (max_evidence_bytes - serialized_size(at_limit))
+    one_byte_over = {**at_limit, "padding": at_limit["padding"] + "x"}
+
+    assert serialized_size(at_limit) == max_evidence_bytes
+    assert serialized_size(one_byte_over) == max_evidence_bytes + 1
+
+    accepted = scheduler_evidence_payload_module._serialize_evidence_json_if_within_limit(
+        at_limit,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=compact,
+    )
+    refused = scheduler_evidence_payload_module._serialize_evidence_json_if_within_limit(
+        one_byte_over,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=compact,
+    )
+
+    assert accepted is not None
+    assert len(accepted.encode("utf-8")) == max_evidence_bytes
+    assert refused is None
+    assert scheduler_evidence_payload_module._payload_fits(
+        at_limit,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=compact,
+    )
+    assert not scheduler_evidence_payload_module._payload_fits(
+        one_byte_over,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=compact,
+    )
+
+
 def test_write_evidence_still_fails_closed_when_no_degradation_tier_fits(tmp_path: Path) -> None:
     from services.orchestrator import scheduler_evidence
 

@@ -32,13 +32,13 @@ Must add:
 
 ## Implementation tasks
 
-- [ ] 1. Two tests per proposal, placed in the bounded-evidence cluster,
+- [x] 1. Two tests per proposal, placed in the bounded-evidence cluster,
   names stating the invariants.
-- [ ] 2. Red proof (scratch copy, no git stash): (a) `_compact_limit` →
+- [x] 2. Red proof (scratch copy, no git stash): (a) `_compact_limit` →
   `_compact_mapping(value, ())` → terminal test fails; (b) bound `>` →
   `> max_evidence_bytes + 1` → boundary test fails; (c) bound `>` →
   `>=` → boundary test fails (lower side pinned). Record outputs.
-- [ ] 3. Oracle: three suites green + `uv run ruff check .` +
+- [x] 3. Oracle: three suites green + `uv run ruff check .` +
   `openspec validate test-bounded-evidence-invariant-oracles --strict
   --no-interactive`.
 
