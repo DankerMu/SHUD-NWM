@@ -897,6 +897,40 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         connection.close()
 
 
+def _redact_measure_error(error: BaseException, dsn: str) -> str:
+    """Scrub credentials out of a measurement error before it reaches stderr.
+
+    Mirrors the salvage runner's ``_mask_dsn_in_message``
+    (``scripts/node27_db_export_salvage.py:1039-1041``): the shared policy in
+    ``packages/common/redaction.py`` strips the verbatim DSN plus its password
+    in both URL-encoded and driver-decoded forms, and the marker is rendered
+    as ``***`` for operator-facing text.
+
+    libpq additionally echoes the ROLE name back on auth failures
+    (``FATAL:  password authentication failed for user "nwm_writer"``), which
+    the DSN policy does not cover — so that ONE libpq-shaped occurrence is
+    scrubbed too, and only when the name matches the DSN's own username. A
+    bare literal replace of the username is deliberately NOT done: a username
+    like ``nwm`` also occurs inside unrelated substrings (``/home/nwm/...``)
+    and replacing those would mangle the diagnostic.
+
+    The ``redaction`` import is function-local because that module imports
+    ``psycopg2.extensions`` at module scope, and this runner keeps psycopg2
+    strictly deferred (config parsing / ``--help`` must work without the
+    driver installed).
+    """
+    from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
+
+    text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+    try:
+        username = urlsplit(dsn).username
+    except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
+        username = None
+    if username:
+        text = text.replace(f'user "{username}"', 'user "***"')
+    return text
+
+
 def _default_measure_chunk_bytes(
     config: RetentionConfig, chunks: Sequence[ChunkRow]
 ) -> dict[str, int]:
@@ -916,7 +950,8 @@ def _default_measure_chunk_bytes(
     directly (validated byte-exactly against a live ``pg_database_size``
     delta), not a two-step computation over private catalog tables.
 
-    Per-chunk connection (mirrors compression sibling ``:292-338`` exactly):
+    Per-chunk connection (mirrors compression sibling
+    ``scripts/node27_timeseries_compression.py:387-428`` exactly):
     a shared transaction would enter ``InFailedSqlTransaction`` state on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
@@ -927,8 +962,9 @@ def _default_measure_chunk_bytes(
     returns no row (dropped/renamed between enumeration and measurement) or
     a NULL ``total_bytes`` records ``0`` through the same coercion. A failure
     additionally emits one JSON diagnostic line on stderr naming the chunk and
-    the error — the receipt's ``0`` is otherwise indistinguishable from a
-    genuinely empty chunk; the recorded value and control flow are unchanged.
+    the (credential-redacted) error — the receipt's ``0`` is otherwise
+    indistinguishable from a genuinely empty chunk; the recorded value and
+    control flow are unchanged.
     Each connection has a 60 s ``statement_timeout``; the DROP phase opens its
     own connection (300 s) per chunk.
     """
@@ -963,12 +999,14 @@ def _default_measure_chunk_bytes(
             # chunk guarantees this chunk's abort does not poison the rest.
             # The receipt cannot distinguish this 0 from a genuine 0, so the
             # cause goes to stderr (diagnostic only — no control-flow change).
+            # The error text is credential-redacted: psycopg2 connection
+            # failures echo the DSN and the libpq role name back verbatim.
             print(
                 json.dumps(
                     {
                         "warning": "freed_bytes measurement failed; recording 0",
                         "chunk": chunk.qualified_name,
-                        "error": str(error),
+                        "error": _redact_measure_error(error, config.database_url),
                     },
                     sort_keys=True,
                 ),

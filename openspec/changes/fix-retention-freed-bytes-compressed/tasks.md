@@ -8,8 +8,11 @@ hit: production script in the `delete`-executing retention path, `writer`
 
 Change surface:
 - `scripts/node27_timeseries_retention.py` — `_default_measure_chunk_bytes`
-  query swap (design D1) + header H4 note + docstring; nothing else in the
-  script.
+  query swap (design D1) + header H4 note + docstring, plus the D2
+  measure-failure stderr diagnostic and its credential-redaction helper
+  (`_redact_measure_error`, new module-level function next to the measurement
+  path). Nothing else in the script: gates, drop path, receipt build, CLI and
+  exit codes are untouched.
 - `tests/test_node27_timeseries_retention.py` — new default-path measurement
   tests (design D4).
 - `openspec/changes/tier-node27-timeseries-storage/design.md:1903-1904` —
@@ -44,7 +47,17 @@ Must add/change:
   chunk_schema = %s AND chunk_name = %s` with params
   `(schema.table, chunk_schema, chunk_name)`; result coercion keeps the
   `int((row[0] if row else 0) or 0)` shape (zero-rows/NULL → 0).
-- Docs synced per design D3 list.
+- Measure-failure diagnostic (design D2): the per-chunk except branch emits
+  exactly one JSON line on stderr —
+  `{"warning": "freed_bytes measurement failed; recording 0", "chunk":
+  <qualified chunk name>, "error": <credential-redacted error text>}` —
+  before recording 0 and continuing. Warning vocabulary, NOT a wire code: it
+  never enters the receipt and is not a `WIRE_CODES` member. Error text is
+  routed through `packages/common/redaction.py` (`redact_database_dsn` plus
+  the narrow libpq `user "<name>"` scrub) since psycopg2 connection failures
+  echo the DSN and role name verbatim into the wrapper's `retention.log`.
+- Docs synced per design D3 list, plus the runbook §8.2/§8.6 entry for the
+  new stderr shape (grep literal: `freed_bytes measurement failed`).
 
 Seams under test:
 - Existing injection seam `measure_chunk_bytes` (upstream-declared, consumed
@@ -66,8 +79,12 @@ Risk packs:
 - Public API / CLI / script entry: not selected — no flag/env/exit-code
   change; internal measurement query only.
 - Error handling / rollback / partial outputs: selected — per-chunk
-  failure/empty-result semantics must stay best-effort-0. Evidence: unit
-  rows for exception edge + zero-rows edge (2.2).
+  failure/empty-result semantics must stay best-effort-0, and the failure now
+  also emits the D2 stderr diagnostic. Evidence: unit rows for exception edge
+  + zero-rows/NULL edge + uncoercible-value edge (coercion failure is a
+  per-chunk failure, not a whole-tick abort), each asserting the recorded 0,
+  the connection block's commit/rollback outcome, and the exact diagnostic
+  object (or stderr silence on the clean paths) (2.2).
 - Backward compatibility / legacy: not selected — receipt consumers read
   `freed_bytes: int >= 0`; larger accurate values break no reader
   (schema-validated); historical receipts untouched.
@@ -86,17 +103,32 @@ Risk packs:
   footprint** widens with the cost — per call from `AccessShareLock` on one
   cold chunk relation to `AccessShareLock` across every chunk relation of the
   hypertable, compressed siblings included. Plain ingest `INSERT`
-  (`RowExclusiveLock`) does not conflict; concurrent `AccessExclusiveLock`
-  DDL does — `compress_chunk`'s swap/truncate phase, `decompress_chunk`, and
-  manual replay (the 04:25/05:15 timer stagger separates only the *scheduled*
-  ticks, not manual triggers). Worst case is a blocked size walk hitting the
-  60 s `statement_timeout`, which degrades to the D2 per-chunk best-effort 0
-  — an under-reported `freed_bytes`, never a blocked or failed drop.
+  (`RowExclusiveLock`) does not conflict *directly*, but queues transitively:
+  an `AccessExclusiveLock` request on a chunk the walk holds makes later
+  `INSERT`s on that chunk wait behind the waiter. Conflicting DDL —
+  `compress_chunk`'s swap/truncate phase, `decompress_chunk`, manual replay
+  (the 04:25/05:15 timer stagger separates only the *scheduled* ticks, not
+  manual triggers). Worst case is either (a) a blocked size walk hitting the
+  60 s `statement_timeout`, degrading to the D2 per-chunk best-effort 0 — an
+  under-reported `freed_bytes`; or (b) a bounded (≤60 s, same timeout) ingest
+  stall on a chunk the walk holds. Never a blocked or failed drop, never data
+  loss.
   Evidence: design D1 accepted-risk paragraph; per-chunk-failure → 0 →
   continue unit row (2.2); no timeout or drop-path change.
-- Other packs (auth/secrets, release/packaging, documentation/migration):
-  not selected — none touched beyond the doc syncs listed in the change
-  surface (documentation sync is itself a task with a lint gate, 2.4).
+- Auth / secrets: selected (round-2) — the new D2 diagnostic prints a psycopg2
+  error, and psycopg2 echoes the DSN and the libpq role name back verbatim on
+  connection/auth failures; the wrapper captures stderr into `retention.log`.
+  Mitigation: the text goes through `packages/common/redaction.py`
+  (`redact_database_dsn`, marker rendered `***`, mirroring
+  `scripts/node27_db_export_salvage.py:1039-1041`) plus a narrow libpq
+  `user "<name>"` scrub bound to the DSN's own username. No new secret is
+  read, stored, or logged. Evidence: unit row asserting neither the DSN
+  password nor the role name reaches stderr while the line stays valid
+  three-key JSON and the chunk still records 0 (2.2); unredacted-error mutant
+  red (2.9).
+- Other packs (release/packaging, documentation/migration): not selected —
+  none touched beyond the doc syncs listed in the change surface
+  (documentation sync is itself a task with a lint gate, 2.4).
 
 Non-goals:
 - No live node-27 enforce as merge evidence (design D5/Non-goals: drops are
@@ -106,8 +138,8 @@ Non-goals:
   issue scope.
 - No changes to the compression sibling script or its measurement — it is
   already compression-aware by construction (its `after=True` branch
-  deliberately sizes the compressed sibling relation,
-  `scripts/node27_timeseries_compression.py:328-337`); it never had this
+  deliberately re-targets the measurement at the compressed sibling relation,
+  `scripts/node27_timeseries_compression.py:397-426`); it never had this
   defect. Only retention's "total reclaimed" semantics were wrong.
 - #856/#845 cascade behavior untouched.
 
@@ -152,3 +184,10 @@ Non-goals:
   `total_bytes` 134 MB–5.9 GB — query shape, column names, and
   compression-inclusiveness all verified on the target instance before
   implementation (probe output recorded in design D1).
+- [x] 2.9 Mutation re-proof of the D2 diagnostic + measurement oracle (all
+  RED, scratchpad harness, restored after): delete-print, drop-`chunk`-key,
+  non-JSON print, stdout instead of stderr, coercion hoisted out of the
+  `with connection:` block, coercion hoisted out of the per-chunk `try`,
+  consistent `total_bytes` -> `table_bytes` drift in code AND test constant
+  (killed by the doc-anchored prefix row), deleted `SET statement_timeout`,
+  and unredacted error text (killed by the credential-redaction row).

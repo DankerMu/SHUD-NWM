@@ -36,6 +36,12 @@ from typing import Any, Mapping, Sequence
 import jsonschema
 import pytest
 
+# Imported eagerly (not inside a test): the runner defers this import to keep
+# psycopg2 out of module import, and these tests monkeypatch ``psycopg2`` with
+# a fake — importing ``packages.common.redaction`` (which imports
+# ``psycopg2.extensions`` at module scope) under that fake would fail. Loading
+# it here caches the real module before any fake is installed.
+from packages.common.redaction import REDACTION_MARKER
 from scripts import node27_timeseries_retention as retention
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -2341,6 +2347,22 @@ _EXPECTED_MEASURE_SQL = (
     "WHERE chunk_schema = %s AND chunk_name = %s"
 )
 
+# The operator-facing half of the same statement, byte-identical with the two
+# permanent doc surfaces (receipts README resolution note + design #855 H4).
+# Same byte-identity discipline as the wire-code and lock-path rows above.
+_DOC_MEASURE_SQL_PREFIX = "SELECT total_bytes FROM chunks_detailed_size("
+
+_RECEIPTS_README_PATH = (
+    _ROOT
+    / "docs/runbooks/receipts/tier-node27-timeseries-storage"
+    / "timeseries-retention/README.md"
+)
+
+# One JSON line on stderr per failed per-chunk measurement (design D2). It is
+# warning vocabulary, NOT a wire code: it never reaches the receipt and is not
+# a member of ``WIRE_CODES``.
+_MEASURE_WARNING = "freed_bytes measurement failed; recording 0"
+
 
 class _MeasureProbe:
     """Recorder for the fake psycopg2 driving ``_default_measure_chunk_bytes``.
@@ -2363,6 +2385,17 @@ class _MeasureProbe:
     def measure_statements(self) -> list[tuple[str, tuple | None]]:
         """Executed statements excluding the ``SET statement_timeout`` prelude."""
         return [(sql, prm) for sql, prm in self.executed if "statement_timeout" not in sql]
+
+    @property
+    def timeout_statements(self) -> list[tuple[str, tuple | None]]:
+        """The ``SET statement_timeout`` prelude of every connection."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" in sql]
+
+
+# H12: every measurement connection MUST cap itself at 60 s before issuing the
+# now hypertable-wide size walk — deleting the prelude turns a lock-blocked
+# walk into an unbounded wait inside the wrapper/systemd wall.
+_EXPECTED_TIMEOUT_STATEMENT = (f"SET statement_timeout = {retention._QUERY_TIMEOUT_MS}", None)
 
 
 def _install_fake_measure_psycopg2(
@@ -2434,6 +2467,7 @@ def _install_fake_measure_psycopg2(
 def test_default_measure_chunk_bytes_uses_compression_aware_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     schema: str,
     hypertable: str,
     chunk_label: str,
@@ -2464,11 +2498,20 @@ def test_default_measure_chunk_bytes_uses_compression_aware_query(
     assert params == (f"{schema}.{hypertable}", "_timescaledb_internal", chunk_label)
     assert len(probe.connect_calls) == 1
     assert probe.completions == [True]
+    assert probe.executed[0] == _EXPECTED_TIMEOUT_STATEMENT
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # The clean path is silent — the D2 diagnostic belongs to the failure path
+    # only, so a successful measurement must not add stderr noise to the
+    # wrapper's `retention.log`.
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("row", [None, (None,)], ids=["no-row", "null-total-bytes"])
 def test_default_measure_chunk_bytes_missing_row_records_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, row: tuple | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    row: tuple | None,
 ) -> None:
     """#1125 D2: the filtered function may return no row (chunk dropped or
     renamed between enumeration and measurement) or a NULL ``total_bytes``;
@@ -2494,13 +2537,25 @@ def test_default_measure_chunk_bytes_missing_row_records_zero(
     ]
     assert len(probe.connect_calls) == 1
     assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # Second, independent witness that this 0 is the coercion and not the
+    # best-effort except branch: the failure path ALWAYS emits the D2
+    # diagnostic line, so silence here proves no exception was swallowed.
+    assert capsys.readouterr().err == ""
 
 
 def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """#1125 D2: a per-chunk query failure records 0 for that chunk only; the
-    remaining chunks are still measured on their own fresh connections."""
+    remaining chunks are still measured on their own fresh connections.
+
+    The failure ALSO emits exactly one JSON diagnostic line on stderr naming
+    the chunk and the cause — without it the receipt's ``0`` is
+    indistinguishable from a genuinely empty chunk. The whole parsed object is
+    asserted (all three keys), so dropping the line, dropping the ``chunk``
+    key, printing non-JSON, or printing to stdout are each red.
+    """
     sizes = {
         "_timescaledb_internal.chk-a": 1_234_567,
         "_timescaledb_internal.chk-c": 7_654_321,
@@ -2532,6 +2587,124 @@ def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
     # counterpart of the missing-row test: here the 0 legitimately comes from
     # the except branch, and the neighbours still complete cleanly.
     assert probe.completions == [True, False, True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT] * len(chunks)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        "warning": _MEASURE_WARNING,
+        "chunk": "_timescaledb_internal.chk-b",
+        "error": 'function chunks_detailed_size(regclass) failed for "chk-b"',
+    }
+
+
+def test_default_measure_chunk_bytes_uncoercible_value_records_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: the coercion is PART of the per-chunk measurement, so a value
+    that cannot be coerced is a per-chunk failure — 0 + diagnostic + continue,
+    never a whole-tick abort.
+
+    This pins the coercion's *placement*, which no other row does: only a
+    row whose `total_bytes` actually raises in `int()` distinguishes
+    "coercion inside the connection block and inside the per-chunk try" from
+    a refactor that hoists it out. Hoisted out of the `with connection:`
+    block the failing chunk would COMMIT instead of ROLLBACK
+    (`completions == [True, ...]`); hoisted out of the `try` the exception
+    would escape and take the whole tick down with it.
+    """
+    sizes: dict[str, Any] = {
+        "_timescaledb_internal.chk-bad": "18 GB",  # driver/type surprise
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        return (sizes[f"{params[1]}.{params[2]}"],)
+
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-bad", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-bad": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.completions == [False, True]
+    lines = [line for line in capsys.readouterr().err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-bad"
+    assert "invalid literal for int()" in payload["error"]
+
+
+def test_measure_failure_diagnostic_redacts_dsn_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The D2 diagnostic must not leak the DSN password or the libpq role name.
+
+    A psycopg2 connection failure echoes both back verbatim
+    (``FATAL:  password authentication failed for user "alice"`` plus, for
+    URI DSNs, the connection string itself). The wrapper redirects stderr into
+    a world-readable-ish `retention.log`, so the diagnostic goes through the
+    shared redaction policy first. Recording semantics are unchanged: still 0,
+    still continue.
+    """
+    dsn = "postgresql://alice:supersekret@127.0.0.1:55432/nhms"
+    message = (
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice" '
+        f"(tried {dsn})"
+    )
+
+    def _responder(_params: tuple | None) -> tuple | None:
+        raise RuntimeError(message)
+
+    _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True, database_url=dsn)
+    chunk = _chunk("hydro", "river_timeseries", "chk-auth", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+
+    captured = capsys.readouterr()
+    assert "supersekret" not in captured.err
+    assert "alice" not in captured.err
+    assert REDACTION_MARKER not in captured.err  # rendered as *** for operators
+    payload = json.loads(captured.err.strip())
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == chunk.qualified_name
+    assert "password authentication failed" in payload["error"]
+
+
+def test_measure_sql_prefix_byte_identical_with_docs() -> None:
+    """Byte-identity: the measurement statement's operator-facing prefix is
+    pinned in the two permanent doc surfaces.
+
+    Same discipline as the wire-code and lock-path rows: a future edit that
+    changes the projected column or the function (e.g. back to
+    ``pg_total_relation_size``, or to ``table_bytes``) without touching the
+    receipts README resolution note and design #855 H4 goes red here instead
+    of silently re-opening the 2026-07-25 under-report with docs that claim
+    otherwise.
+    """
+    assert _EXPECTED_MEASURE_SQL.startswith(_DOC_MEASURE_SQL_PREFIX)
+    readme_text = _RECEIPTS_README_PATH.read_text(encoding="utf-8")
+    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    assert _DOC_MEASURE_SQL_PREFIX in readme_text, (
+        "receipts README resolution note must name the measurement statement"
+    )
+    assert _DOC_MEASURE_SQL_PREFIX in design_text, "design #855 H4 must name the statement"
 
 
 # ---------------------------------------------------------------------------

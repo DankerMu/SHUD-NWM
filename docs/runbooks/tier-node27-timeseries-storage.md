@@ -1784,6 +1784,23 @@ COMPLETENESS_RECEIPT_MISSING
                     -> DRILL_COVERAGE_DB_EXPORT_MISSING
 ```
 
+#### 8.2.1 Non-code stderr diagnostics
+
+Not every stderr line is a wire code. The runner also emits **warning**
+lines that never reach the receipt and are not members of the `WIRE_CODES`
+frozenset:
+
+- `{"chunk": "<chunk_schema>.<chunk_name>", "error": "<redacted text>",
+  "warning": "freed_bytes measurement failed; recording 0"}` — the
+  pre-drop size measurement for that ONE chunk failed (lock wait hitting the
+  60 s statement timeout, chunk vanished mid-tick, catalog error). The runner
+  records `freed_bytes: 0` for that chunk, keeps measuring the remaining
+  chunks on fresh connections, and **still drops** — the tick is not
+  refused and the exit code is unaffected. Grep literal:
+  `freed_bytes measurement failed`. The `error` text is credential-redacted
+  (DSN password and libpq role name are scrubbed) because the wrapper
+  captures stderr into `retention.log`.
+
 ### 8.3 Metadata-table exemption + row-count invariant
 
 The runner targets EXACTLY two hypertables (spec §Window and mechanism):
@@ -1908,6 +1925,22 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 4. **Uncaught error (`RETENTION_UNCAUGHT_ERROR`).** The receipt carries
    the exception class + message. File a bug against #855 (or the
    downstream owner if the class is from a shared helper).
+5. **`freed_bytes: 0` in an `enforced` receipt.** A `0` is ambiguous in the
+   receipt alone: the chunk may have been genuinely empty, or its
+   measurement may have failed. Disambiguate from the wrapper log:
+
+   ```
+   grep 'freed_bytes measurement failed' /path/to/retention.log
+   ```
+
+   A hit names the chunk and the redacted cause (§8.2.1) — the receipt's
+   `freed_bytes` for that chunk is a best-effort 0, not a measurement. The
+   chunk WAS dropped; only the reclaim accounting is degraded. No hit means
+   the 0 is a real measurement. Common cause of a hit: concurrent
+   `compress_chunk` / `decompress_chunk` / manual replay holding an
+   incompatible lock on the same hypertable until the 60 s statement
+   timeout fires. No action is required unless the receipt's reclaim total
+   is being reconciled against a `pg_database_size` delta.
 
 ### 8.7 Salvage-backed windows
 

@@ -66,7 +66,18 @@ that are live ingest/read targets, not just the drop candidate. Consequences
 we accept:
 
 - Plain ingest `INSERT` takes `RowExclusiveLock`, which does **not** conflict
-  with `AccessShareLock` — the normal 24/7 ingest path is unaffected.
+  with `AccessShareLock` *directly* — but the impact is transitive through
+  PostgreSQL's anti-starvation lock queue: if an `AccessExclusiveLock` request
+  arrives for a chunk the size walk currently holds, that request queues
+  behind the walk, and any later ingest `INSERT` into **that same chunk**
+  queues behind the waiter (`RowExclusiveLock` conflicts with the queued
+  `AccessExclusiveLock`, so it joins the queue rather than being granted).
+  Preconditions: the DDL must target a chunk that is simultaneously an ingest
+  target; the stall is bounded by the walk's own 60 s `statement_timeout`
+  (`_QUERY_TIMEOUT_MS`), after which the measurement statement aborts and
+  releases. The old one-relation measurement could not produce this — it
+  locked only the cold drop candidate, which ingest never writes. So the
+  worst case is a **rare, ≤60 s ingest stall**, not "ingest unaffected".
 - What does conflict is `AccessExclusiveLock` DDL on any chunk of the same
   hypertable: `compress_chunk`'s swap/truncate phase, `decompress_chunk`, and
   manual replay/maintenance. A concurrent holder blocks the size walk until
@@ -79,10 +90,13 @@ we accept:
   while a retention tick is measuring can produce best-effort 0s in the
   receipt.
 
-Not mitigated because the failure mode is receipt-accuracy-only and already
-has a defined, pinned semantic (D2); adding lock-wait tuning or a
-hypertable-wide advisory lock would be new coordination machinery for a
-degradation the receipt already tolerates.
+Not mitigated because the failure mode is receipt-accuracy-only in the common
+case, and in the transitive lock-queue case above a bounded (≤60 s) ingest
+stall with no data loss and no failed drop; D2 already pins the degraded
+receipt semantic. `lock_timeout` on the measurement connection is available
+as a cheap tightening if a live receipt ever shows this, but a hypertable-wide
+advisory lock would be new coordination machinery for a degradation the
+receipt already tolerates.
 
 ## Decision 2 — failure and empty-result semantics unchanged
 
@@ -95,6 +109,22 @@ degradation the receipt already tolerates.
 - `chunks_detailed_size` on a non-hypertable/garbage regclass raises → falls
   into the existing except-→ -0 path. No new wire code, no new receipt
   field: this is a measurement-accuracy fix, not a contract change.
+- **Failure semantics unchanged (0 / continue / never block the drop), PLUS a
+  diagnostic on the failure path.** The recorded `0` is indistinguishable in
+  the receipt from a genuinely empty chunk — and the widened lock footprint
+  (D1) makes best-effort 0s marginally more likely — so the failure branch
+  emits exactly one JSON line on stderr:
+  `{"warning": "freed_bytes measurement failed; recording 0", "chunk":
+  <qualified chunk name>, "error": <credential-redacted error text>}`.
+  This is **warning vocabulary, not a wire code**: it never enters the
+  receipt, is not a `WIRE_CODES` member, and does not participate in the H6
+  byte-identity walk. It is emitted from inside the measurement loop, i.e.
+  before the terminal `_emit_stderr_diagnostic` receipt line, so the
+  wrapper's `retention.log` reads chronologically. The error text goes
+  through `packages/common/redaction.py` (`redact_database_dsn` + the libpq
+  `user "<name>"` scrub) because psycopg2 connection failures echo the DSN
+  and the role name back verbatim. Control flow, the recorded value, and the
+  exit code are all unchanged.
 
 ## Decision 3 — H4 ordering and doc pins
 
@@ -141,13 +171,43 @@ precedent: the suite already stubs connections for default-path coverage; if
 none exists for this function, inject via `sys.modules` monkeypatching as
 the sibling compression tests do):
 
-- compressed-chunk fixture: fake cursor returns `total_bytes` (large value);
-  assert recorded value equals it — proving the query path reports
-  compression-inclusive bytes and binds `(hypertable, chunk_schema,
-  chunk_name)` correctly (assert on executed SQL + params).
-- zero-rows edge → 0.
-- exception edge → 0 and the remaining chunks still measured (existing
-  semantics pinned).
+- compressed-chunk fixture, **parametrized over both retained hypertables**
+  (`hydro.river_timeseries` + `met.forcing_station_timeseries`) so the
+  regclass parameter cannot be hardcoded: fake cursor returns `total_bytes`
+  (the live 5,904,531,456 B probe value for the hydro row); assert the
+  recorded value equals it and differs from the 57,344 B under-report
+  signature. The executed statement is asserted **whole** (not by substring)
+  and the params tuple is asserted exactly, so a projected-column swap
+  (`total_bytes` → `table_bytes`) and a predicate reorder both go red.
+- zero-rows edge and NULL-`total_bytes` edge → 0, parametrized. Both assert
+  the 0 came from the coercion and NOT from the best-effort except branch,
+  via `_MeasureProbe.completions` (records whether each `with connection:`
+  block unwound cleanly, i.e. psycopg2 COMMIT vs ROLLBACK) plus stderr
+  silence (`capsys.readouterr().err == ""` — the failure path always emits
+  the D2 diagnostic, so silence proves nothing was swallowed).
+- exception edge → 0 and the remaining chunks still measured on fresh
+  connections (`completions == [True, False, True]`); the emitted D2
+  diagnostic is asserted as a **parsed JSON object equal to the exact
+  three-key dict** on stderr, with stdout empty — killing delete-the-print,
+  drop-the-`chunk`-key, non-JSON, and print-to-stdout mutants.
+- uncoercible-value edge (`total_bytes` that `int()` rejects): the coercion
+  is part of the measurement, so its failure is a per-chunk failure — 0 +
+  diagnostic + the next chunk still measured, never a whole-tick abort. This
+  is the only row that pins the coercion's *placement*: hoisted out of the
+  `with connection:` block the failing chunk would COMMIT instead of ROLLBACK
+  (`completions == [False, True]` goes red), hoisted out of the per-chunk
+  `try` the exception escapes the loop.
+- credential redaction: a fake connect failure whose message embeds the DSN
+  username and password asserts neither appears on stderr, the line is still
+  valid three-key JSON, and the chunk still records 0.
+- statement-timeout pin: `probe.executed[0]` is
+  `("SET statement_timeout = {_QUERY_TIMEOUT_MS}", None)` and every
+  connection carries it (`timeout_statements`), so deleting the 60 s cap on
+  the now hypertable-wide walk is red.
+- doc-anchored SQL prefix: `SELECT total_bytes FROM chunks_detailed_size(`
+  must appear byte-identically in the receipts README resolution note and in
+  design #855 `:1904`, and `_EXPECTED_MEASURE_SQL` must start with it — the
+  same byte-identity discipline as the wire-code and lock-path rows.
 - H4 mock-ordering test unchanged and green.
 
 Red-first: the query-shape assertion fails against the current
