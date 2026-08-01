@@ -17,11 +17,21 @@ Change surface:
   tests (design D4).
 - `openspec/changes/tier-node27-timeseries-storage/design.md:1903-1904` —
   design #855 H4 back-fill (measurement path naming + recorded sibling
-  divergence, design D1/D3). Runbook `:1870` and design `:1964` are NOT
-  stale (they state only the ordering, which stays true) — no edit gated.
-- `tests/test_node27_timeseries_retention.py:2258` region — the B1
-  isolation test's fake-cursor SQL matcher (`"pg_total_relation_size" in
-  sql`) MUST be updated to match the new query; its isolation semantics,
+  divergence, design D1/D3). The H4-ordering LINES runbook `:1892`
+  (`origin/master:1870`, shifted by the §8.2.1 insertion below) and design
+  `:1964` are NOT stale (they state only the ordering, which stays true) —
+  no edit gated on those two lines.
+- `docs/runbooks/tier-node27-timeseries-storage.md` — new §8.2.1 ("Non-code
+  stderr diagnostics": the D2 warning line's byte-exact shape, its cause
+  set, and the silent no-row/NULL coercion that emits NO warning) and §8.6
+  item 5 (operator procedure for disambiguating a `freed_bytes: 0` in an
+  `enforced` receipt via `grep 'freed_bytes measurement failed'`, including
+  the no-hit trichotomy). Byte-anchored by
+  `test_measure_warning_byte_identical_with_runbook`.
+- `tests/test_node27_timeseries_retention.py:2264` region — the B1
+  isolation test's fake-cursor SQL matcher (pre-change:
+  `"pg_total_relation_size" in sql`) MUST be updated to match the new query;
+  post-change it reads `"chunks_detailed_size" in sql`. Its isolation semantics,
   5-chunk shape, and byte-value assertions stay unchanged (it is the #855
   Class C `InFailedSqlTransaction` regression guard — weakening it is an
   oracle violation).
@@ -56,8 +66,10 @@ Must add/change:
   routed through `packages/common/redaction.py` (`redact_database_dsn` plus
   the narrow libpq `user "<name>"` scrub) since psycopg2 connection failures
   echo the DSN and role name verbatim into the wrapper's `retention.log`.
-- Docs synced per design D3 list, plus the runbook §8.2/§8.6 entry for the
-  new stderr shape (grep literal: `freed_bytes measurement failed`).
+- Docs synced per design D3 list, plus the runbook §8.2.1/§8.6 entry for the
+  new stderr shape (grep literal: `freed_bytes measurement failed`). Both the
+  full warning literal and the grep token must live in the runbook — pinned
+  byte-identical by `test_measure_warning_byte_identical_with_runbook`.
 
 Seams under test:
 - Existing injection seam `measure_chunk_bytes` (upstream-declared, consumed
@@ -91,7 +103,8 @@ Risk packs:
 - Config / project setup: not selected — no config change.
 - Concurrency / ordering: selected — H4 "measure BEFORE drop" is the
   flagship ordering invariant of this function. Evidence: existing
-  mock-ordering test (`tests/test_node27_timeseries_retention.py:1712`,
+  mock-ordering test (`test_freed_bytes_measured_before_drop`,
+  `tests/test_node27_timeseries_retention.py:1718`,
   injection seam, unaffected by the query swap) stays untouched and green
   (2.2).
 - Resource limits: selected — per-call cost rises from O(1 relation) to
@@ -175,7 +188,9 @@ Non-goals:
 - [x] 2.7 Doc-pin consistency (stale surfaces only): script header +
   docstring, design #855 `:1903-1904`, and the receipts README resolution
   note all name `chunks_detailed_size` after the change (grep proof);
-  runbook `:1870` / design `:1964` intentionally not gated (not stale).
+  the H4-ordering lines runbook `:1892` / design `:1964` intentionally not
+  gated (not stale). The runbook's NEW §8.2.1/§8.6 D2 material IS gated —
+  by `test_measure_warning_byte_identical_with_runbook` (2.10), not by grep.
 - [x] 2.8 Live read-only API oracle (node-27 primary, TimescaleDB 2.10.2,
   SELECT-only, 2026-08-01): `chunks_detailed_size('hydro.river_timeseries'::regclass)`
   returns `chunk_schema, chunk_name, table_bytes, total_bytes`; join
@@ -191,3 +206,10 @@ Non-goals:
   consistent `total_bytes` -> `table_bytes` drift in code AND test constant
   (killed by the doc-anchored prefix row), deleted `SET statement_timeout`,
   and unredacted error text (killed by the credential-redaction row).
+- [x] 2.10 Runbook byte-anchor for the D2 warning
+  (`test_measure_warning_byte_identical_with_runbook`, round-3): the full
+  literal AND the §8.6 grep token must both appear in
+  `docs/runbooks/tier-node27-timeseries-storage.md`. Mutation proof: a
+  CONSISTENT rename of the code string plus the test constant (which the
+  stderr-payload rows cannot see) goes RED here; a code-only rename stays
+  RED on the existing stderr-payload rows.

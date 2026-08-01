@@ -2707,6 +2707,30 @@ def test_measure_sql_prefix_byte_identical_with_docs() -> None:
     assert _DOC_MEASURE_SQL_PREFIX in design_text, "design #855 H4 must name the statement"
 
 
+# The grep token §8.6's disambiguation procedure tells the operator to run
+# against the wrapper log. It is a PREFIX of the full warning literal, so a
+# rename of the tail alone still greps — the row below pins both halves.
+_MEASURE_WARNING_GREP_TOKEN = "freed_bytes measurement failed"  # §8.6 operator procedure
+
+
+def test_measure_warning_byte_identical_with_runbook() -> None:
+    """Byte-identity: the D2 stderr warning is anchored to the runbook.
+
+    §8.2.1 documents the literal line and §8.6 item 5 hands the operator a
+    `grep` for its prefix. A rename of the code string that does not touch the
+    runbook would silently break that procedure — the operator would grep a
+    literal the runner no longer emits and read "no hit" as "the 0 is real".
+    """
+    assert _MEASURE_WARNING.startswith(_MEASURE_WARNING_GREP_TOKEN)
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _MEASURE_WARNING in runbook_text, (
+        "runbook §8.2.1 must carry the full warning literal"
+    )
+    assert _MEASURE_WARNING_GREP_TOKEN in runbook_text, (
+        "runbook §8.6 must carry the grep token"
+    )
+
+
 # ---------------------------------------------------------------------------
 # RF-F1 R2 — loader-side FormatChecker symmetry with emit side
 # ---------------------------------------------------------------------------

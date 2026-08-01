@@ -136,8 +136,9 @@ precedent):
 
 Actually-stale surfaces (MUST change — they name the old query):
 
-1. `scripts/node27_timeseries_retention.py` header H4 note (`:34-35`) and
-   `_default_measure_chunk_bytes` docstring + query (`:901-931`).
+1. `scripts/node27_timeseries_retention.py` header H4 note (`:34-37`) and
+   `_default_measure_chunk_bytes` docstring + query (`:937-987`; the whole
+   function is `:934-1018` post-change).
 2. `openspec/changes/tier-node27-timeseries-storage/design.md:1903-1904`
    H4 measurement-path sentence — back-filled to name
    `chunks_detailed_size` AND to record the deliberate divergence from the
@@ -147,10 +148,15 @@ Actually-stale surfaces (MUST change — they name the old query):
    2026-07-25 receipt numbers themselves are immutable history — never
    rewritten.
 
-NOT stale (no edit required): `docs/runbooks/tier-node27-timeseries-storage.md:1870`
+NOT stale (no edit required): `docs/runbooks/tier-node27-timeseries-storage.md:1892`
 and design #855 `:1964` say only "measured BEFORE `drop_chunks`" without
 naming the function — the H4 ordering claim stays true. Optional naming
 there is allowed but not gated (tasks 2.7 greps only the stale surfaces).
+This is a claim about those two LINES, not about the runbook FILE: the
+runbook is separately edited by this change to add §8.2.1 and §8.6 item 5
+for the D2 stderr diagnostic (see the change surface in `tasks.md`). The
+runbook pin above is post-C1, i.e. after those insertions shifted it from
+`origin/master:1870`.
 
 ## Decision 3b — archive ordering note
 

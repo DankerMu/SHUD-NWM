@@ -951,8 +951,10 @@ def _default_measure_chunk_bytes(
     delta), not a two-step computation over private catalog tables.
 
     Per-chunk connection (mirrors compression sibling
-    ``scripts/node27_timeseries_compression.py:387-428`` exactly):
-    a shared transaction would enter ``InFailedSqlTransaction`` state on the
+    ``scripts/node27_timeseries_compression.py:387-428`` — same per-chunk
+    isolation and 60 s statement timeout; the sibling additionally passes
+    ``connect_timeout``, a pre-existing divergence this change does not
+    touch): a shared transaction would enter ``InFailedSqlTransaction`` on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
     the receipt faithful when a single chunk fails to size.
