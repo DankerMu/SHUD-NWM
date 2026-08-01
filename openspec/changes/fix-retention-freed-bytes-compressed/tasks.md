@@ -45,7 +45,8 @@ Must preserve:
   (best-effort receipt; drop proceeds); 60 s statement timeout.
 - H5 whole-tick fail-closed on drop failure; H7 predicate; per-tick bound;
   gate/deferral/salvage-window logic — zero diff outside
-  `_default_measure_chunk_bytes` and comments/docs.
+  `_default_measure_chunk_bytes` + the new `_redact_measure_error` helper and
+  comments/docs.
 - Receipt schema byte-identical (`schemas/timeseries_retention_receipt.schema.json`).
 - Wire codes byte-identical (H6).
 - The historical 2026-07-25 receipt JSON — immutable, never edited.
@@ -183,14 +184,18 @@ Non-goals:
   `_overlaps`/receipt shapes) — no regression.
 - [x] 2.6 Zero-diff assertions: `git diff origin/master --
   schemas/timeseries_retention_receipt.schema.json` empty; script diff
-  confined to `_default_measure_chunk_bytes` + comments (reviewer-checkable
-  hunk list); historical receipt JSON untouched.
+  confined to `_default_measure_chunk_bytes` + the new `_redact_measure_error`
+  helper and comments/docs (reviewer-checkable hunk list); historical receipt
+  JSON untouched.
 - [x] 2.7 Doc-pin consistency (stale surfaces only): script header +
   docstring, design #855 `:1903-1904`, and the receipts README resolution
   note all name `chunks_detailed_size` after the change (grep proof);
   the H4-ordering lines runbook `:1892` / design `:1964` intentionally not
   gated (not stale). The runbook's NEW §8.2.1/§8.6 D2 material IS gated —
-  by `test_measure_warning_byte_identical_with_runbook` (2.10), not by grep.
+  by `test_measure_warning_byte_identical_with_runbook` (2.10), not by grep:
+  §8.2.1 by the full warning literal searched file-wide, §8.6 item 5 by its
+  `grep '<literal>'` command reproduced verbatim (single-quoted, which occurs
+  only in §8.6's fenced block).
 - [x] 2.8 Live read-only API oracle (node-27 primary, TimescaleDB 2.10.2,
   SELECT-only, 2026-08-01): `chunks_detailed_size('hydro.river_timeseries'::regclass)`
   returns `chunk_schema, chunk_name, table_bytes, total_bytes`; join
@@ -207,9 +212,59 @@ Non-goals:
   (killed by the doc-anchored prefix row), deleted `SET statement_timeout`,
   and unredacted error text (killed by the credential-redaction row).
 - [x] 2.10 Runbook byte-anchor for the D2 warning
-  (`test_measure_warning_byte_identical_with_runbook`, round-3): the full
-  literal AND the §8.6 grep token must both appear in
-  `docs/runbooks/tier-node27-timeseries-storage.md`. Mutation proof: a
-  CONSISTENT rename of the code string plus the test constant (which the
-  stderr-payload rows cannot see) goes RED here; a code-only rename stays
-  RED on the existing stderr-payload rows.
+  (`test_measure_warning_byte_identical_with_runbook`) + assertion-level
+  falsifiability table (round-4).
+
+  What the runbook anchor asserts NOW (round-4 correction; the round-3
+  third assertion — "the grep TOKEN appears somewhere in the runbook" — was
+  vacuous, subsumed by the full-literal assertion): (1) the code literal
+  starts with the token §8.6 greps for; (2) the FULL warning literal
+  `freed_bytes measurement failed; recording 0` appears in
+  `docs/runbooks/tier-node27-timeseries-storage.md` (§8.2.1's documented
+  line); (3) §8.6 item 5's operator command
+  `grep 'freed_bytes measurement failed'` appears VERBATIM — the
+  single-quoted form occurs only inside §8.6's fenced block, so it pins §8.6
+  specifically (§8.2.1 names the token in backticks and does not match).
+
+  Falsifiability method: every anchor assertion this PR adds/edits was
+  mutated INDEPENDENTLY in a scratchpad harness (a `MUT_SPEC`-driven pytest
+  plugin: production-code mutants are loaded from a mutated COPY of
+  `scripts/node27_timeseries_retention.py` under a fake root with `schemas/`
+  symlinked; doc and test-constant mutants are rebound on the imported test
+  module). The worktree script and the worktree docs are never edited.
+  Identity-mutant control run over the whole file: 131 passed, 1 skipped.
+  Every row below is RED, and each mutant leaves the other assertions of the
+  same test satisfied.
+
+  | # | assertion (test) | mutant | result | killing assertion |
+  |---|---|---|---|---|
+  | a1 | `_EXPECTED_MEASURE_SQL.startswith(_DOC_MEASURE_SQL_PREFIX)` (`test_measure_sql_prefix_byte_identical_with_docs`) | expected SQL drifts `total_bytes` -> `table_bytes` in code + test constant, docs untouched | RED | assertion 1 (`startswith`) |
+  | a2 | `_DOC_MEASURE_SQL_PREFIX in readme_text` | receipts README copy: `chunks_detailed_size(` -> `chunks_detailed_size (` | RED | assertion 2 (README) |
+  | a3 | `_DOC_MEASURE_SQL_PREFIX in design_text` | design #855 copy: same drift | RED | assertion 3 (design) |
+  | b1 | `_MEASURE_WARNING.startswith(_MEASURE_WARNING_GREP_TOKEN)` (`test_measure_warning_byte_identical_with_runbook`) | token constant -> `freed_bytes measure failed` | RED | assertion 1 (`startswith`) |
+  | b2 | `_MEASURE_WARNING in runbook_text` | runbook copy: §8.2.1 `recording 0` -> `recording zero`; §8.6 fence intact | RED | assertion 2 (full literal) |
+  | b3 | `_MEASURE_WARNING_GREP_FENCE in runbook_text` | runbook copy: §8.6 `:1938` fence ONLY, `measurement` -> `measure`; §8.2.1 intact | RED | assertion 3 (§8.6 fence) |
+  | c | `probe.executed[0] == _EXPECTED_TIMEOUT_STATEMENT` (`..._uses_compression_aware_query`) | script copy issues `SET statement_timeout` AFTER the measurement statement | RED | `executed[0]`; `timeout_statements` stays green (same statements, order only) |
+  | d | `json.loads(lines[0]) == {3 keys}` (`..._failure_records_zero_and_continues`) | diagnostic gains a 4th key `hypertable` | RED | the dict equality; `len(lines)==1`, `measured`, `completions` stay green |
+  | e1 | `measured == {chk-noconn: 0, chk-ok: 4242}` (`test_measure_connect_failure_records_zero_redacts_and_continues`) | `psycopg2.connect` hoisted above the per-chunk loop, no outer catch (whole-tick abort) | RED | none reached — `_default_measure_chunk_bytes` itself raises `OperationalError` |
+  | e2 | same continue-semantics assertion | `connect` hoisted above the loop WITH a best-effort catch recording 0 for EVERY chunk | RED | `measured ==` (chk-ok reads 0, not 4242) |
+  | e3 | `probe.connect_calls == [dsn, dsn]` | connect uses `config.database_url + "?application_name=retention"` | RED | `connect_calls` |
+  | e4 | `probe.completions == [True]` | `with connection:` transaction context manager dropped (`if True:`) | RED | `completions` (`[]` vs `[True]`) |
+  | e5 | `probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]` | `SET statement_timeout` prelude deleted | RED | `timeout_statements` |
+  | e6 | `captured.out == ""` | diagnostic printed to stdout instead of stderr | RED | `captured.out` |
+  | e7 | `len(lines) == 1` | diagnostic printed twice | RED | `len(lines)` |
+  | e8 | `set(payload) == {warning, chunk, error}` | diagnostic gains a 4th key `hypertable` | RED | `set(payload)` |
+  | e9 | `payload["warning"] == _MEASURE_WARNING` | code-only rename `recording 0` -> `recorded 0` | RED | `payload["warning"]` |
+  | e10 | `payload["chunk"] == "_timescaledb_internal.chk-noconn"` | diagnostic names `chunk.chunk_name` instead of `chunk.qualified_name` | RED | `payload["chunk"]` |
+  | e11 | `"password authentication failed" in payload["error"]` | error text collapsed to `type(error).__name__` (over-redaction) | RED | `payload["error"]` substring |
+  | e12 | `"alice" not in captured.err` | `_redact_measure_error(...)` -> `str(error)` | RED | the role-name redaction assertion |
+
+  Honest notes: no row had to be waived for structural subsumption. e1 is the
+  only row whose mutant aborts before any assertion executes — recorded as
+  "none reached" rather than claimed as an assertion kill; e2 is the paired
+  row that keeps control flow alive so the continue-semantics assertion is
+  the demonstrated killer. Round-3's earlier mutation set (delete-print,
+  drop-`chunk`-key, non-JSON print, stdout, coercion hoisted out of the
+  `with` block, coercion hoisted out of the `try`, consistent
+  `total_bytes` -> `table_bytes` drift, deleted timeout, unredacted error)
+  remains valid and is recorded in 2.9.

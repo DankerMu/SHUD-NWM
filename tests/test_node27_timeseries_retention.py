@@ -34,13 +34,16 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import jsonschema
+import psycopg2
 import pytest
 
 # Imported eagerly (not inside a test): the runner defers this import to keep
 # psycopg2 out of module import, and these tests monkeypatch ``psycopg2`` with
 # a fake — importing ``packages.common.redaction`` (which imports
 # ``psycopg2.extensions`` at module scope) under that fake would fail. Loading
-# it here caches the real module before any fake is installed.
+# it here caches the real module before any fake is installed. The same reason
+# applies to the ``psycopg2`` import above: the connect-failure row needs the
+# REAL ``psycopg2.OperationalError`` class, which the fake does not carry.
 from packages.common.redaction import REDACTION_MARKER
 from scripts import node27_timeseries_retention as retention
 
@@ -2363,6 +2366,12 @@ _RECEIPTS_README_PATH = (
 # a member of ``WIRE_CODES``.
 _MEASURE_WARNING = "freed_bytes measurement failed; recording 0"
 
+# A URI DSN whose password AND libpq role name both appear verbatim in the
+# error text psycopg2 raises on an auth failure. Shared by the two redaction
+# rows (query-time failure and connect-time failure) so both assert the
+# scrubbing against the same secret.
+_MEASURE_PROBE_DSN = "postgresql://alice:supersekret@127.0.0.1:55432/nhms"
+
 
 class _MeasureProbe:
     """Recorder for the fake psycopg2 driving ``_default_measure_chunk_bytes``.
@@ -2401,11 +2410,19 @@ _EXPECTED_TIMEOUT_STATEMENT = (f"SET statement_timeout = {retention._QUERY_TIMEO
 def _install_fake_measure_psycopg2(
     monkeypatch: pytest.MonkeyPatch,
     responder: Any,
+    *,
+    connect_error: BaseException | None = None,
 ) -> _MeasureProbe:
     """Inject a fake ``psycopg2`` driving ``_default_measure_chunk_bytes``.
 
     ``responder(params)`` returns the row ``fetchone()`` yields for the
     measurement statement (or raises to simulate a per-chunk failure).
+
+    ``connect_error``, when given, is raised by the FIRST ``psycopg2.connect``
+    call only; every later call connects normally. This is the one failure the
+    responder cannot reach — it never runs, because there is no cursor — so it
+    is the only way to exercise the connect call's placement inside the
+    per-chunk ``try``.
     """
     probe = _MeasureProbe()
 
@@ -2446,6 +2463,8 @@ def _install_fake_measure_psycopg2(
 
     def _fake_connect(url: str) -> _FakeConn:
         probe.connect_calls.append(url)
+        if connect_error is not None and len(probe.connect_calls) == 1:
+            raise connect_error
         return _FakeConn()
 
     import types
@@ -2658,7 +2677,7 @@ def test_measure_failure_diagnostic_redacts_dsn_credentials(
     shared redaction policy first. Recording semantics are unchanged: still 0,
     still continue.
     """
-    dsn = "postgresql://alice:supersekret@127.0.0.1:55432/nhms"
+    dsn = _MEASURE_PROBE_DSN
     message = (
         'connection to server at "127.0.0.1", port 55432 failed: '
         'FATAL:  password authentication failed for user "alice" '
@@ -2687,6 +2706,58 @@ def test_measure_failure_diagnostic_redacts_dsn_credentials(
     assert "password authentication failed" in payload["error"]
 
 
+def test_measure_connect_failure_records_zero_redacts_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: a chunk whose CONNECTION cannot even be opened records 0 and
+    the next chunk is still measured on its own fresh connection.
+
+    ``psycopg2.connect`` sits inside the per-chunk ``try``; every other failure
+    row in this file needs a live cursor and therefore cannot see that
+    placement. Hoisting the connect above the loop (one shared connection) or
+    outside the ``try`` turns this per-chunk fault into a whole-tick abort —
+    chunk two would never be measured. The libpq text embeds the DSN role, so
+    the redaction is asserted on the same line.
+    """
+    error = psycopg2.OperationalError(
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice"'
+    )
+    probe = _install_fake_measure_psycopg2(
+        monkeypatch, lambda _params: (4_242,), connect_error=error
+    )
+    config = _build_config(tmp_path, enforce=True, database_url=_MEASURE_PROBE_DSN)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-noconn", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    # Continue semantics: the failed chunk records 0, the neighbour is measured.
+    assert measured == {
+        "_timescaledb_internal.chk-noconn": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.connect_calls == [_MEASURE_PROBE_DSN, _MEASURE_PROBE_DSN]
+    # Only the second chunk ever entered a connection block — the first never
+    # obtained a connection to commit or roll back.
+    assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-noconn"
+    assert "password authentication failed" in payload["error"]
+    # The libpq role name is scrubbed before the wrapper captures stderr.
+    assert "alice" not in captured.err
+
+
 def test_measure_sql_prefix_byte_identical_with_docs() -> None:
     """Byte-identity: the measurement statement's operator-facing prefix is
     pinned in the two permanent doc surfaces.
@@ -2707,27 +2778,35 @@ def test_measure_sql_prefix_byte_identical_with_docs() -> None:
     assert _DOC_MEASURE_SQL_PREFIX in design_text, "design #855 H4 must name the statement"
 
 
-# The grep token §8.6's disambiguation procedure tells the operator to run
-# against the wrapper log. It is a PREFIX of the full warning literal, so a
-# rename of the tail alone still greps — the row below pins both halves.
+# The token §8.6's disambiguation procedure greps for. It is a PREFIX of the
+# full warning literal, so a rename of the tail alone still greps.
 _MEASURE_WARNING_GREP_TOKEN = "freed_bytes measurement failed"  # §8.6 operator procedure
+
+# The §8.6 item 5 command as the operator copy-pastes it. Quoting matters: this
+# exact string occurs ONLY in §8.6's fenced block, so it pins that section
+# specifically — §8.2.1 names the same token in backticks, which does not
+# match, and an unquoted substring check would have been satisfied by §8.2.1
+# alone (making the §8.6 anchor vacuous).
+_MEASURE_WARNING_GREP_FENCE = "grep 'freed_bytes measurement failed'"
 
 
 def test_measure_warning_byte_identical_with_runbook() -> None:
     """Byte-identity: the D2 stderr warning is anchored to the runbook.
 
     §8.2.1 documents the literal line and §8.6 item 5 hands the operator a
-    `grep` for its prefix. A rename of the code string that does not touch the
-    runbook would silently break that procedure — the operator would grep a
-    literal the runner no longer emits and read "no hit" as "the 0 is real".
+    `grep` command for its prefix. A rename of the code string that does not
+    touch the runbook would silently break that procedure — the operator would
+    grep a literal the runner no longer emits and read "no hit" as "the 0 is
+    real". The three rows are independently falsifiable: the prefix relation
+    (code side), §8.2.1's full literal, and §8.6's executable command.
     """
     assert _MEASURE_WARNING.startswith(_MEASURE_WARNING_GREP_TOKEN)
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
     assert _MEASURE_WARNING in runbook_text, (
         "runbook §8.2.1 must carry the full warning literal"
     )
-    assert _MEASURE_WARNING_GREP_TOKEN in runbook_text, (
-        "runbook §8.6 must carry the grep token"
+    assert _MEASURE_WARNING_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 5 must carry the operator's grep command verbatim"
     )
 
 

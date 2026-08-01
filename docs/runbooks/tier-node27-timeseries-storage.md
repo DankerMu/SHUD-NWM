@@ -1938,14 +1938,28 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    grep 'freed_bytes measurement failed' /path/to/retention.log
    ```
 
-   A hit names the chunk and the redacted cause (§8.2.1) — the receipt's
-   `freed_bytes` for that chunk is a best-effort 0, not a measurement. The
-   chunk WAS dropped; only the reclaim accounting is degraded. Common cause
-   of a hit: concurrent `compress_chunk` / `decompress_chunk` / manual
-   replay holding an incompatible lock on the same hypertable until the
-   60 s statement timeout fires.
+   Scope the match to THIS tick before reading anything into it.
+   `retention.log` is cumulative — the wrapper appends every tick to the same
+   file (`>>`) — so a bare `grep` also returns warnings from earlier runs.
+   Each tick is bracketed in the log by the wrapper's own
+   `node27-timeseries-retention: start summary=<receipt path>` and
+   `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
+   lines (`scripts/node27_timeseries_retention_once.sh:143,151`): read only
+   the lines between the `start` line naming the receipt under investigation
+   and the matching `done rc=` line. Then require the hit's `chunk` field to
+   name a chunk that appears in THIS receipt's `dropped_chunks[]`. A hit
+   outside that bracket belongs to an earlier tick and says nothing about
+   this receipt's `0`.
 
-   No hit does NOT prove the 0 was measured — it leaves two possibilities:
+   An in-bracket hit names the chunk and the redacted cause (§8.2.1) — the
+   receipt's `freed_bytes` for that chunk is a best-effort 0, not a
+   measurement. The chunk WAS dropped; only the reclaim accounting is
+   degraded. Common cause of a hit: concurrent `compress_chunk` /
+   `decompress_chunk` / manual replay holding an incompatible lock on the
+   same hypertable until the 60 s statement timeout fires.
+
+   No in-bracket hit does NOT prove the 0 was measured — it leaves two
+   possibilities:
    (a) a real measurement of a small or empty chunk, or (b) the
    silent-coercion path, where `chunks_detailed_size` returned no row or a
    NULL `total_bytes` and the runner recorded 0 without emitting any
