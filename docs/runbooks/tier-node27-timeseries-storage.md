@@ -1405,6 +1405,22 @@ this runbook, and design.md #854 fixture block:
   `~/node27-archive-rebuild-drill-logs/drill.lock` (single-instance
   guard via `fcntl.flock`, non-blocking). Wait for the first drill to
   finish or investigate the stuck process.
+- `SALVAGE_DERIVATION_FAILED` — the receipt-derived salvage set disagrees
+  with what is on disk. `differences[].expected.reason` is one of:
+  `derived_manifest_missing_or_unreadable` (the completeness receipt
+  claims a db-export subject whose `manifest.json` is absent or
+  unparseable), `derived_manifest_window_divergence` (the manifest's
+  selector window differs from the receipt subject's window — the drill's
+  coverage tuple takes its window from the manifest, so verifying it
+  anyway would attest a window the gate never demanded), or
+  `derived_set_decompressed_bytes_exceeded` (the derived set blew the
+  aggregate decompressed-byte budget, default 32 GiB per run — see §7.3).
+  `differences[].item` is NOT uniform across the three reasons: for
+  `derived_manifest_missing_or_unreadable` and
+  `derived_manifest_window_divergence` it is the derived manifest path,
+  while for `derived_set_decompressed_bytes_exceeded` it is the selector
+  label (`forcing_version_id=<id>` / `run_id=<id>`) of the object that
+  tripped the budget. Never a PASS over the narrower set.
 
 ### 7.3 How to run
 
@@ -1416,17 +1432,71 @@ chmod 0600 /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env
 # fill in real PROD_DATABASE_URL_RO, STAGING_DATABASE_URL,
 # POSTGRES_ADMIN_URL, and NHMS_ARCHIVE_ROOT.
 
-# 2. Source + invoke against real archive + salvage manifests
+# 2. Source the env
 set -a; source /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env; set +a
+
+# 3. Compute the drop window the retention runner will ask about — the
+#    covering interval of the chunks eligible at the current cutoff
+#    (same rule as `_drop_window_from_eligible`). 14 d is
+#    NODE27_TIMESERIES_RETENTION_WINDOW_DAYS.
+#
+#    This query is a deliberate CONSERVATIVE SUPERSET of the runner's own
+#    drop window: `run_retention` additionally intersects the eligible
+#    chunks with the completeness receipt's `coverage_bounds` via
+#    `_partition_by_completeness_bounds` (boundary-partial chunks are
+#    deferred) BEFORE calling `_drop_window_from_eligible`. A superset is
+#    the right error direction here — see §7.5, the drill window MUST
+#    contain the runner's.
+#
+#    Output is ISO-8601 with a `Z` suffix so it pastes verbatim into the
+#    §7.5 invocation below.
+psql "$PROD_DATABASE_URL_RO" -At -F' ' -c "
+  SELECT to_char(min(range_start) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+         to_char(max(range_end)   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+  FROM timescaledb_information.chunks
+  WHERE (hypertable_schema, hypertable_name) IN
+        (('hydro','river_timeseries'), ('met','forcing_station_timeseries'))
+    AND range_end <= now() - interval '14 days'"
+
+# 4. Invoke. The db-export salvage set is DERIVED from the completeness
+#    receipt (every `coverage=db-export` + `verdict=complete` subject whose
+#    window overlaps the drop window) — never typed out by hand.
+#    At least one --archive-manifest is MANDATORY (see the flag table).
 uv run python scripts/node27_archive_rebuild_drill.py \
   --archive-manifest "${NHMS_ARCHIVE_ROOT}/runs/<run_id>/manifest.json" \
   --archive-manifest "${NHMS_ARCHIVE_ROOT}/forcing/gfs/<cycle>/<basin>/<model>/manifest.json" \
-  --salvage-manifest "${NHMS_ARCHIVE_ROOT}/db-export/forcing/<forcing_version_id>/manifest.json"
+  --completeness-receipt ~/node27-storage-inventory-audit-logs/completeness-receipt.json \
+  --drop-window-start 2026-06-18T00:00:00Z \
+  --drop-window-end   2026-06-25T00:00:00Z
 ```
 
+Flags and their env equivalents (the wrapper
+`scripts/node27_archive_rebuild_drill_once.sh` is a bare `exec`
+passthrough, so env vars in the env file work identically):
+
+| Flag | Env var | Meaning |
+|---|---|---|
+| `--completeness-receipt` | `NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH` | Absolute path to the archive-completeness receipt; enables derivation. DRILL-SCOPED name — deliberately NOT the db-export salvage runner's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` (that one ships uncommented-and-mandatory in its env file, and sharing the name would let a `set -a`-sourced salvage env switch a flag-less drill into derivation mode). Both may point at the same receipt file. |
+| `--archive-manifest` | — | MANDATORY for a PASS, and mandatory whenever `--completeness-receipt` is used: a PASS receipt requires ≥1 restored product cycle, so a receipt-only invocation is refused at boot (exit 2) rather than after the expensive salvage phase. |
+| `--drop-window-start` / `--drop-window-end` | `NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_START` / `_END` | Optional ISO-8601 bounds; derivation keeps subjects overlapping this interval under the gate's CLOSED-interval convention (a subject ending exactly at the drop start stays in scope). Both or neither. |
+| — | `NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS` | Cardinality bound on the derived set (default 128). Refuses at boot. Raise it deliberately — do NOT narrow the drop window below the retention run's, which §7.5 forbids. |
+| — | `NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_BYTES` | Aggregate decompressed-byte budget for the derived set (default 32 GiB), on top of the 16 GiB per-object cap. |
+| `--salvage-manifest` | — | Still supported. Explicit paths are UNIONed with the derived set (deduped by resolved path); use it to pin an extra manifest during incident response without disabling derivation. |
+
 Exit code semantics: `0` = PASS, `1` = FAIL (per-item differences), `2` =
-configuration refusal (missing env var, DSN parity, unsafe path). The
+configuration refusal (missing env var, DSN parity, unsafe path, unreadable
+or schema-invalid completeness receipt, unsafe subject identity, a receipt
+that declares two windows for one identity, derived set over the cardinality
+bound, or `--completeness-receipt` without any `--archive-manifest`). The
 receipt path is announced to stdout on success.
+
+A derivation that yields ZERO manifests is NOT a refusal. It means the
+receipt has no `coverage=db-export` + `verdict=complete` subject overlapping
+the drop window — exactly the case where the retention gate demands no
+db-export coverage either (`_completeness_has_db_export_overlap` guards the
+gate's db-export leg). The drill runs its archive-manifest leg normally and
+records `salvage_derivation.derived_count: 0` plus the drop window used, so
+the empty set is auditable in the receipt.
 
 ### 7.4 Reading the receipt
 
@@ -1447,6 +1517,22 @@ Every receipt carries:
   `comparisons.counts[]`.
 - On FAIL: `differences[]` where each entry names the failing item, the
   wire-format code, and the expected/actual values.
+- When (and only when) `--completeness-receipt` was supplied:
+  `salvage_derivation` (`completeness_receipt_path`, the `drop_window`
+  used or `null`, `candidate_count` = db-export+complete subjects seen,
+  `derived_count` = manifests derived, and `skipped[]` naming every
+  subject on a lane with no db-export salvage lane) plus
+  `salvage_inputs[]` (with `provenance` = `derived` / `explicit` /
+  `derived+explicit`). Receipts from invocations without the flag are
+  byte-identical to pre-#1177 receipts — neither field appears.
+  - `salvage_inputs[]` is the PLANNED input set: one entry per manifest
+    the drill intended to verify, regardless of outcome. A missing,
+    unreadable, or window-diverged manifest still gets its entry. Do NOT
+    read it as "these verified". Verification results live in `coverage[]`
+    (tuples only for verified selectors) and `differences[]`.
+  - `derived_count: 0` is a legitimate outcome, not a bug: the receipt had
+    no `coverage=db-export` + `verdict=complete` subject overlapping the
+    drop window, so there was nothing for the gate to demand either.
 
 ### 7.5 How the coverage rule maps to the retention gate
 
@@ -1490,12 +1576,48 @@ windows only) for the code emitted when the union does not cover; see
 `openspec/changes/tier-node27-timeseries-storage/design.md` #855
 fixture block H2 pin for the canonical statement.
 
-Ops consequence: the `--salvage-manifest` arguments passed to the drill
-(§7.3) MUST cover every db-export subject window appearing in the drop
-window, not just one of them — each such window is judged on its own, so
-a missing salvage manifest for any one of them makes the gate refuse
-(correctly). Re-run the drill with the full set of salvage manifests
-rather than narrowing the drop window.
+Ops consequence: the drill's db-export evidence MUST cover every
+db-export subject window appearing in the drop window, not just one of
+them — each such window is judged on its own, so a single missing
+salvage manifest makes the gate refuse (correctly). Do NOT try to guess
+that set: pass `--completeness-receipt` (plus the drop window from §7.3
+step 3) and the drill derives it from the same receipt the gate derives
+its demand from — `coverage=db-export` AND `verdict=complete` subjects
+overlapping the drop window, mapped to
+`<NHMS_ARCHIVE_ROOT>/db-export/<lane>/<identity>/manifest.json` for the
+`forcing` and `runs` lanes. Concretely:
+
+```
+uv run python scripts/node27_archive_rebuild_drill.py \
+  --archive-manifest "${NHMS_ARCHIVE_ROOT}/runs/<run_id>/manifest.json" \
+  --completeness-receipt ~/node27-storage-inventory-audit-logs/completeness-receipt.json \
+  --drop-window-start <min(range_start) from §7.3 step 3> \
+  --drop-window-end   <max(range_end) from §7.3 step 3>
+```
+
+The derived set is fail-closed end to end: a derived subject whose
+`manifest.json` is missing/unreadable, or whose selector window drifted
+from the receipt subject's window, produces a FAIL receipt naming the
+path (`SALVAGE_DERIVATION_FAILED`, §7.2) instead of a PASS over the
+narrower set — so a drill PASS is now a statement ABOUT the gate's
+demand set, not merely about whatever the operator typed. Because
+`derived_count` and the `drop_window` used are recorded in the receipt
+(§7.4), a derivation narrower than the retention window is visible
+without re-reading the completeness receipt.
+
+**The drill's drop window MUST contain (⊇) the retention run's drop
+window.** Use the §7.3 step 3 interval verbatim, or something wider —
+never narrower, and never hand-narrowed to make an expensive drill
+cheaper. Reason: the gate's db-export check UNIONs the drill's
+`source=db-export` coverage tuples and never reads
+`salvage_derivation.drop_window`. With a narrower drill window, subject A
+(wide window, still derived) contributes a tuple that can span subject
+B's demand window even though B was filtered out of the drill and its
+evidence was never verified — the gate passes on evidence that does not
+exist. Machine enforcement of the containment rule belongs to the gate
+(#1162 follow-up); until then this constraint is operator-enforced.
+Narrowing the manifest list by hand is likewise not allowed — that is the
+failure this whole section exists to remove.
 
 ### 7.6 Recovery (post-fault operator playbook)
 
