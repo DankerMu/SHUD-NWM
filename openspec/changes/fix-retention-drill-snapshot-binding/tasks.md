@@ -137,14 +137,21 @@ Risk packs (expanded):
   `completeness_generated_at` + receipt jsonschema-valid; explicit-manifest
   drill still omits the section;
   (l) emit→gate ROUND TRIP (fixture-review P1-1): a receipt built by the
-  REAL emit path (`_derive` + `_run_with_runs_cycle` fixtures,
-  tests/test_node27_archive_rebuild_drill.py:2276-2345; that file already
-  imports retention) judged by `check_drill_gate` against the very
-  completeness receipt it was derived from → reasons contain no
-  binding refusal; add a new overlapping db-export/complete subject to
-  that completeness receipt → DRILL_COMPLETENESS_SNAPSHOT_UNBOUND. Kills
-  any emit/gate field-name or normalization mismatch (silent permanent
-  dormancy).
+  REAL emit path, using the pattern that already passes the WHOLE gate —
+  runs-lane manifests + verify stub attributing coverage to forcing/runs
+  with window == drop (tests/test_node27_archive_rebuild_drill.py:2769-2848,
+  where :2835 asserts `check_drill_gate(...) == []`; that file already
+  imports retention) — judged by `check_drill_gate` against the very
+  completeness receipt it was derived from → assert reasons == [] (NOT
+  merely "no binding refusal": the row must prove it reached past every
+  earlier leg, non-vacuity requirement); then add a new overlapping
+  db-export/complete subject to that completeness receipt →
+  DRILL_COMPLETENESS_SNAPSHOT_UNBOUND. Kills any emit/gate field-name or
+  normalization mismatch (silent permanent dormancy). NOTE: the plain
+  `_derive` + `_run_with_runs_cycle` fixture (~:2276-2345) does NOT reach
+  the db-export leg (its only coverage tuple is a runs window disjoint
+  from the drop window → DRILL_COVERAGE_FORCING_MISSING) — do not use it
+  for this row.
 - [ ] 5. Runbook §7.5/§8.2/§8.4 + tier design fixture #855/H2 sync per
   change surface, incl. the D5 residual rewrite (close
   fix-retention-drill-window-guard D5-(b) at window granularity; record
@@ -169,7 +176,7 @@ Risk packs (expanded):
 - `uv run ruff check .` clean; markdownlint runbook 0 issues.
 - `openspec validate fix-retention-drill-snapshot-binding --strict
   --no-interactive` and `tier-node27-timeseries-storage` both valid.
-- Mutation outputs (i)-(v) in PR body.
+- Mutation outputs (i)-(vii) in PR body — all seven from task 6.
 - Grep: `git grep -n "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND" -- scripts
   tests docs openspec` shows all four sync surfaces.
 - `git diff --stat`: the seven change-surface files + this change dir

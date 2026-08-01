@@ -4,7 +4,9 @@
 
 ### Requirement: A derivation-mode drill MUST record its completeness snapshot's db-export universe
 
-A derivation-mode drill (`--completeness-receipt`) SHALL record in
+A derivation-mode drill SHALL record — whether derivation was activated
+by `--completeness-receipt` or by the drill-scoped environment variable,
+per the existing activation requirement — in
 `salvage_derivation` the field `db_export_windows` — the normalized
 `{start, end}` windows of ALL subjects with `coverage == "db-export"` AND
 `verdict == "complete"` in the consumed completeness receipt, unfiltered

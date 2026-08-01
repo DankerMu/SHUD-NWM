@@ -56,8 +56,10 @@ REJECTED by arithmetic, it would collapse the 30-day drill budget to <1 day):
   `DRILL_COVERAGE_DB_EXPORT_MISSING`), design fixture #855 block + H2.
 - `docs/runbooks/tier-node27-timeseries-storage.md` §7.5: record the
   binding rule and its operator consequence (a drill receipt stops binding
-  when a NEW db-export window appears — rerun the drill; daily completeness
-  regeneration WITHOUT new windows does not invalidate it); residual
+  when a NEW OR CHANGED db-export window appears — an existing window
+  extended by a backfill unbinds too; rerun the drill; daily completeness
+  regeneration WITHOUT new or changed windows does not invalidate it);
+  residual
   paragraph updated (D5 of `fix-retention-drill-window-guard` (b) is now
   closed at window granularity; what remains is layer-2 subject identity).
 
