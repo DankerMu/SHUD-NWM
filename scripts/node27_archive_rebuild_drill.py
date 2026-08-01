@@ -295,8 +295,8 @@ def _windows_overlap(
 ) -> bool:
     """CLOSED-interval overlap — mirror of the gate's ``_overlaps``.
 
-    ``node27_timeseries_retention._overlaps`` (:540-552) is closed on both
-    ends, and ``check_drill_gate`` (:693-701) keeps zero-length clips in
+    ``node27_timeseries_retention._overlaps`` (:533-535) is closed on both
+    ends, and ``check_drill_gate`` (:834-842) keeps zero-length clips in
     scope. A half-open convention here would silently drop exactly the
     boundary-touching subjects the gate still demands — the #1177 failure
     mode, re-created one layer up.

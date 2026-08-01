@@ -2732,8 +2732,8 @@ def test_1177_empty_derivation_is_evidence_not_a_refusal(
     """A derivation yielding zero manifests proceeds; the gate demands nothing.
 
     Design decision 2b. The earlier refusal claimed symmetry with the gate's
-    D2 pin, but D2 (``node27_timeseries_retention.py:687-692``) only fires
-    BEHIND ``_completeness_has_db_export_overlap`` (:622-637) — so refusing on
+    D2 pin, but D2 (``node27_timeseries_retention.py:822-827``) only fires
+    BEHIND ``_completeness_has_db_export_overlap`` (:615-630) — so refusing on
     every empty derivation was strictly broader than gate demand and killed
     the standard runbook invocation on a healthy archive.
 
@@ -2935,7 +2935,7 @@ def test_1177_drop_window_filter_is_closed_interval(tmp_path: Path) -> None:
     """Boundary-touching and zero-length intersections stay in scope.
 
     Half-open filtering here would drop exactly the subjects the gate still
-    demands (``check_drill_gate`` :693-701 keeps zero-length clips), which is
+    demands (``check_drill_gate`` :834-842 keeps zero-length clips), which is
     the #1177 failure mode one layer up.
     """
     cases = {
