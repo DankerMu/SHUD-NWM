@@ -54,8 +54,12 @@ One rule, two halves, both directions explicit:
 - **Window present and well-formed** → closed-interval containment
   required: `drill.start <= drop.start AND drill.end >= drop.end`.
   Equality on either side PASSES — the runbook §7.5 standard invocation
-  passes the §7.3 interval verbatim, so drill == retention is the live
-  common case; a strict inequality would refuse every production run.
+  passes the §7.3 step 3 interval verbatim, and that interval is a
+  documented conservative SUPERSET of the runner's own drop window (the
+  runner also intersects eligible chunks with the completeness
+  `coverage_bounds`), so a live drill records a window EQUAL to or WIDER
+  than the retention one, never narrower. Equality is the tight end of
+  that range; a strict inequality would refuse it.
 
 ## D3 — Reachability note and code choice
 

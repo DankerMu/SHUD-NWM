@@ -1619,8 +1619,10 @@ This containment rule is **machine-enforced by the gate** (#1207): before
 any coverage leg runs, the retention gate reads the drill receipt's
 recorded `salvage_derivation.drop_window` (§7.4) and refuses with
 `DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) unless that recorded window
-contains the retention drop window, closed-interval — an exactly equal
-window passes, which is what the standard invocation above produces. A
+contains the retention drop window, closed-interval — an equal or wider
+recorded window passes, and the §7.3 step 3 query the standard invocation
+above pastes from is a conservative superset of the runner's own drop
+window, so it never produces a narrower one. A
 recorded `drop_window` of `null` (the drill ran without
 `--drop-window-*`) passes; a `salvage_derivation` section that is present
 but unusable (not an object, `drop_window` key missing, unparseable
@@ -1914,6 +1916,10 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 #    tuples span the drop window. The forcing-recovery union accepts verified
 #    forcing product tuples plus verified db-export tuples; db-export remains
 #    an independent required check when completeness reports an overlap.
+#  - Drill's recorded salvage_derivation.drop_window MUST contain the
+#    retention drop window (⊇), checked BEFORE any coverage leg — else
+#    refusal DRILL_DERIVATION_WINDOW_TOO_NARROW (§7.5). Receipts with no
+#    salvage_derivation section are unaffected.
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
 # pass --enforce on the CLI.
 uv run python scripts/node27_timeseries_retention.py --enforce

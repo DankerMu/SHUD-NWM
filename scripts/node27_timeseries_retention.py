@@ -653,8 +653,11 @@ def _drill_derivation_window_contains(
     * ``drop_window`` is ``null`` → ``True`` (the drill ran un-narrowed);
     * well-formed window → closed-interval containment. Equality on either
       endpoint PASSES: the runbook §7.5 standard invocation passes the §7.3
-      interval verbatim, so drill window == retention window is the live
-      common case.
+      step 3 interval verbatim, and that interval is a documented
+      conservative SUPERSET of the runner's own drop window (the runner also
+      intersects the eligible chunks with the completeness
+      ``coverage_bounds``), so a live drill records a window EQUAL to or
+      WIDER than the retention one, never narrower.
     """
     if "salvage_derivation" not in receipt:
         return True
@@ -675,6 +678,9 @@ def _drill_derivation_window_contains(
         end = _parse_iso(end_raw)
     except ValueError:
         return False
+    # Redundant for any well-ordered drop window (containment below already
+    # refuses an inverted recorded window); kept as an explicit defence so an
+    # inverted window can never be read as evidence.
     if end < start:
         return False
     return start <= drop_window.start and end >= drop_window.end
