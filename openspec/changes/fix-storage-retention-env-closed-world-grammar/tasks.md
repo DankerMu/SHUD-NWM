@@ -80,7 +80,7 @@ Must add (design D1/D2/D3):
   sites); `uv run ruff check .` clean; markdownlint on the runbook 0
   issues; issue's inline template-scan Verification script run once
   as-is.
-- [ ] 5. Mutation proof on a scratch copy:
+- [x] 5. Mutation proof on a scratch copy:
   (i) revert grammar refusal to `continue` → the 8 new rows fail;
   (ii) grammar message drops `{candidate!r}` → the dedicated
   offending-line assertions fail;
@@ -89,12 +89,26 @@ Must add (design D1/D2/D3):
   (iv) template test's grammar-fragment filter inverted/removed →
   a seeded non-conforming template body is no longer caught (oracle is
   real).
-- [ ] 6. node-27 live receipt per design D4: new helper vs deployed
+  Result (rsync scratch, main venv pytest): (i) 34 failed (8 shape
+  rows in both the shape test and the bash differential oracle, plus
+  re-pointed rows and offending-line tests); (ii) 4 failed; (iii) 4
+  failed; (iv) seeded `readonly SEEDED_BAD=1` in the retention
+  template → unmutated test FAILED (caught), filter mutated to
+  `assert True` → passed (slipped) — filter is load-bearing.
+  Unmutated baseline 210 passed + 1 xfailed.
+- [x] 6. node-27 live receipt per design D4: new helper vs deployed
   retention env file → assert it returns the positive integer actually
   assigned in the deployed file (no hardcoded expectation) with no
   grammar refusal; record value + line count; mutation scope limited
   to the scratch worktree (no DB, no receipts, no locks, no env
   edits), worktree removed afterwards.
+  Result (head 4f170485, scratch worktree `/home/nwm/pr1230-scratch`,
+  cwd-based import of the PR code): deployed
+  `infra/env/node27-timeseries-retention.env` (16 lines, 1 window
+  assignment) → helper returned 21, equal to the deployed assignment;
+  no grammar refusal. First attempt imported the MAIN worktree's older
+  storage.py via cwd (`sys.path[0]`) and failed with ImportError —
+  rerun from the scratch worktree cwd; worktree removed after.
 
 ## Required evidence
 
