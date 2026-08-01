@@ -1859,6 +1859,7 @@ Drill emits structured `differences[]` on FAIL. Code strings (byte-identical acr
 - `STAGING_COUNT_MISMATCH` — staging `COUNT(*)` ≠ file-derived expected count.
 - `DRILL_UNCAUGHT_ERROR` — any downstream fault outside the enumerated codes lands here (psycopg2 / OSError / OutputParsingError / ...); receipt carries `differences[].actual.cause_type` = exception class name. Added by Round 1 fix pass (B1 / C-is-4).
 - `DRILL_CONCURRENT_INVOCATION` — non-blocking `fcntl.flock` on the drill lock file is already held. Added by Round 1 fix pass (C2 / C-is-3). Round 2 NEW-3: FAIL receipt actual carries `cause_type = "DrillConcurrentInvocationError"` (symmetric with `DRILL_UNCAUGHT_ERROR`) so operators reading the receipt file — the sole oracle — can distinguish this race from a generic uncaught error without stderr.
+- `SALVAGE_DERIVATION_FAILED` — a receipt-derived salvage input failed before verification: `differences[].expected.reason` distinguishes `derived_manifest_missing_or_unreadable` / `derived_manifest_window_divergence` (item = manifest path) from `derived_set_decompressed_bytes_exceeded` (item = selector label). Added for #1177 (receipt-derived salvage input, change `drill-receipt-derived-salvage`).
 
 ### Single-instance lock path (Round 2)
 

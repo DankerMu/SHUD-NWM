@@ -2999,7 +2999,7 @@ def test_1177_max_derived_manifests_env_override(
 
 
 def test_1177_derived_set_byte_budget_fails_closed(
-    tmp_path: Path, zstd_bin: Path
+    tmp_path: Path, zstd_bin: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The aggregate decompressed-byte budget refuses instead of grinding on."""
     window = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
@@ -3017,6 +3017,16 @@ def test_1177_derived_set_byte_budget_fails_closed(
         drop_window=_drop_window(),
         max_decompressed_bytes=8,  # smaller than a single CSV payload
     )
+
+    decompressed: list[Path] = []
+    _real_decompress = drill._decompress_zstd_to_bytes
+
+    def _counting_decompress(path: Path, zstd_path: Path, **kwargs: Any) -> bytes:
+        decompressed.append(path)
+        return _real_decompress(path, zstd_path, **kwargs)
+
+    monkeypatch.setattr(drill, "_decompress_zstd_to_bytes", _counting_decompress)
+
     receipt, outcome = _run_with_runs_cycle(tmp_path, zstd_bin, derivation=derivation)
 
     assert outcome.verdict == "FAIL"
@@ -3030,6 +3040,10 @@ def test_1177_derived_set_byte_budget_fails_closed(
         "derived_set_decompressed_bytes_exceeded",
     ]
     assert not [entry for entry in receipt["coverage"] if entry["source"] == "db-export"]
+    # Bounded work, not just a bounded verdict: the first object spends the
+    # aggregate budget, the second is refused *before* decompression. Both
+    # emit the same receipt reason, so only the call count can tell them apart.
+    assert len(decompressed) == 1
 
 
 def test_1177_byte_budget_does_not_bind_explicit_manifests(
