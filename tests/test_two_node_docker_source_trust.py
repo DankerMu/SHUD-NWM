@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "validate_two_node_docker_source_trust.py"
 
@@ -67,6 +69,10 @@ def test_source_trust_preflight_passes_for_trusted_owner_and_0600_role_envs(tmp_
     assert "readonly-secret" not in evidence_text
 
 
+@pytest.mark.skipif(
+    not os.access("/scratch/frd_muziyao", os.W_OK),
+    reason="requires writable /scratch/frd_muziyao (node-22 host contract)",
+)
 def test_source_trust_single_role_report_is_role_scoped_and_explicit_run_bound(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
     evidence_root = Path("/scratch/frd_muziyao/nwm-test/source-trust-explicit/docker-security")
