@@ -1005,6 +1005,12 @@ def test_read_retention_window_days_refuses_present_invalid_values(
         read_retention_window_days(_retention_env(tmp_path, body))
 
 
+# #1230 closed-world grammar: the single refusal fragment every non-conforming
+# LINE now produces, regardless of which shell form produced it.
+_GRAMMAR_REFUSAL = "not a supported assignment"
+# The second layer, reachable only from CONFORMING lines after #1230 (design D2).
+_MENTION_REFUSAL = "cannot accept as an"
+
 _UNSUPPORTED_SHAPE_ROWS = [
     # Round-1 narrowing (#1229 review A1): bash reads `VAR= 21` as an
     # assignment prefix plus the command `21`, so the runner sees the
@@ -1022,32 +1028,65 @@ _UNSUPPORTED_SHAPE_ROWS = [
     pytest.param(f"{_WINDOW_VAR}=#21\n", "must be an integer", id="hash-first-character-is-a-value"),
     pytest.param(f"{_SIBLING}\r\n{_WINDOW_VAR}=21\r\n", "non-newline line breaks", id="crlf-content"),
     pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}=21\v", "non-newline line breaks", id="vertical-tab-content"),
-    # Unsupported assignment shapes: mentioned but not accepted -> refuse
-    # instead of silently defaulting while the runner exports the value.
-    pytest.param(f"{_SIBLING}\nreadonly {_WINDOW_VAR}=21\n", "cannot accept as an", id="readonly-prefix"),
-    pytest.param(f"{_SIBLING}\ndeclare -i {_WINDOW_VAR}=21\n", "cannot accept as an", id="declare-prefix"),
-    pytest.param(f'{_SIBLING}\n"{_WINDOW_VAR}=21"\n', "cannot accept as an", id="truncated-quoted-edit"),
-    # Round-2 fail-open closure (#1229 review C2): the mention refusal is PER
-    # LINE. `VAR=14` + `readonly VAR=30` is exported as 30 by `set -a; . file`,
+    # Unsupported assignment shapes: refused because the LINE is outside the
+    # closed-world grammar (#1230) — before that these were caught one layer
+    # later, by the `NAME=` mention detector. The inputs and their fail-closed
+    # direction are unchanged; only the refusing layer moved.
+    pytest.param(f"{_SIBLING}\nreadonly {_WINDOW_VAR}=21\n", _GRAMMAR_REFUSAL, id="readonly-prefix"),
+    pytest.param(f"{_SIBLING}\ndeclare -i {_WINDOW_VAR}=21\n", _GRAMMAR_REFUSAL, id="declare-prefix"),
+    pytest.param(f'{_SIBLING}\n"{_WINDOW_VAR}=21"\n', _GRAMMAR_REFUSAL, id="truncated-quoted-edit"),
+    # Round-2 fail-open closure (#1229 review C2): the refusal is PER LINE.
+    # `VAR=14` + `readonly VAR=30` is exported as 30 by `set -a; . file`,
     # so the round-1 "refuse only when nothing was assigned" gate returned the
     # stale 14 — a fail-open against a LARGER live window.
     pytest.param(
         f"{_WINDOW_VAR}=14\nreadonly {_WINDOW_VAR}=30\n",
-        "cannot accept as an",
+        _GRAMMAR_REFUSAL,
         id="mixed-plain-then-readonly",
     ),
     # Reverse order: bash fails to re-assign the readonly variable and `. file`
     # exits non-zero, so the runner never starts — refusing is right either way.
     pytest.param(
         f"readonly {_WINDOW_VAR}=30\n{_WINDOW_VAR}=14\n",
-        "cannot accept as an",
+        _GRAMMAR_REFUSAL,
         id="mixed-readonly-then-plain",
     ),
     pytest.param(
         f"{_WINDOW_VAR}=14\ndeclare -i {_WINDOW_VAR}=30\n",
-        "cannot accept as an",
+        _GRAMMAR_REFUSAL,
         id="mixed-plain-then-declare",
     ),
+    # #1230: eight shell forms that export the window WITHOUT the literal
+    # `NAME=` substring, so the open-world mention detector let them through and
+    # the helper answered with the runner-equivalent default 14 while
+    # `set -a; . file` exported a LARGER window (issue table, 8/8 differentially
+    # reproduced). The closed-world grammar refuses each at the offending line —
+    # including the nested source lines, which no variable-name detector can see.
+    pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}+=21\n", _GRAMMAR_REFUSAL, id="append-assignment"),
+    pytest.param(f"{_WINDOW_VAR}=14\n{_WINDOW_VAR}+=7\n", _GRAMMAR_REFUSAL, id="plain-then-append"),
+    pytest.param(f"{_SIBLING}\n: ${{{_WINDOW_VAR}:=21}}\n", _GRAMMAR_REFUSAL, id="default-expansion"),
+    pytest.param(f"{_SIBLING}\n. other.env\n", _GRAMMAR_REFUSAL, id="nested-dot-source"),
+    pytest.param(f"{_SIBLING}\nsource other.env\n", _GRAMMAR_REFUSAL, id="nested-source-keyword"),
+    pytest.param(f"{_SIBLING}\nprintf -v {_WINDOW_VAR} 21\n", _GRAMMAR_REFUSAL, id="printf-v-assignment"),
+    pytest.param(f"{_SIBLING}\nread {_WINDOW_VAR} <<< 21\n", _GRAMMAR_REFUSAL, id="read-here-string"),
+    pytest.param(f"{_SIBLING}\neval '{_WINDOW_VAR}'=21\n", _GRAMMAR_REFUSAL, id="eval-quoted-name"),
+    # #1230 design D5(a1): a quoted value spanning lines closes on a bare `"`
+    # line, which the grammar refuses. bash keeps the window line INSIDE the
+    # other variable's string (runner runs its default 14) while the
+    # line-oriented extractor read it as an assignment — refusing is the
+    # over-strict, fail-closed side of that class (was a strict-xfail
+    # differential row before the grammar landed).
+    pytest.param(
+        f'{_SIBLING}\nOTHER="\n{_WINDOW_VAR}=21\n"\n',
+        _GRAMMAR_REFUSAL,
+        id="multi-line-quoted-closing-quote-refused",
+    ),
+    # #1230 design D2: after the grammar, the `NAME=` mention layer is reachable
+    # from two CONFORMING shapes — a value embedding the name, and a key that
+    # merely ends with it. Both refuse (over-strict for the decoy, fail-closed);
+    # without these rows the mention branch loses its last direct coverage.
+    pytest.param(f"{_SIBLING}\nX={_WINDOW_VAR}=21\n", _MENTION_REFUSAL, id="mention-embedded-in-value"),
+    pytest.param(f"{_SIBLING}\nOLD_{_WINDOW_VAR}=99\n", _MENTION_REFUSAL, id="mention-key-suffix-decoy"),
     # Wrong file entirely: no retention-family assignment at all.
     pytest.param(
         "DATABASE_URL=postgresql://x\nNHMS_ARCHIVE_MIN_AGE_DAYS=14\n",
@@ -1077,6 +1116,88 @@ def test_read_retention_window_days_refuses_unsupported_shapes(
         read_retention_window_days(path)
 
     assert str(path) in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "offending_line"),
+    [
+        pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}+=21\n", f"{_WINDOW_VAR}+=21", id="append-assignment"),
+        pytest.param(f"{_SIBLING}\n. other.env\n", ". other.env", id="nested-dot-source"),
+        pytest.param(
+            f"{_SIBLING}\nprintf -v {_WINDOW_VAR} 21\n",
+            f"printf -v {_WINDOW_VAR} 21",
+            id="printf-v-assignment",
+        ),
+        # Two offending lines: the FIRST in file order must be the one named,
+        # so the message is deterministic for an operator diffing the file.
+        pytest.param(
+            f"{_SIBLING}\n. first.env\nsource second.env\n",
+            ". first.env",
+            id="first-offending-line-in-file-order",
+        ),
+    ],
+)
+def test_grammar_refusal_names_the_offending_line(
+    tmp_path: Path, body: str, offending_line: str
+) -> None:
+    """#1230 acceptance item 1: the operator gets the path AND the exact line."""
+    path = _retention_env(tmp_path, body)
+
+    with pytest.raises(ArchiveConfigurationError, match=_GRAMMAR_REFUSAL) as error:
+        read_retention_window_days(path)
+
+    message = str(error.value)
+    assert str(path) in message
+    assert repr(offending_line) in message
+
+
+@pytest.mark.parametrize(
+    ("body", "offending_line"),
+    [
+        pytest.param(f"{_SIBLING}\nX={_WINDOW_VAR}=21\n", f"X={_WINDOW_VAR}=21", id="embedded-in-value"),
+        pytest.param(
+            f"{_SIBLING}\nOLD_{_WINDOW_VAR}=99\n",
+            f"OLD_{_WINDOW_VAR}=99",
+            id="key-suffix-decoy",
+        ),
+    ],
+)
+def test_mention_refusal_names_the_offending_line(
+    tmp_path: Path, body: str, offending_line: str
+) -> None:
+    """#1230 acceptance item 3: the mention layer localizes its refusal too."""
+    path = _retention_env(tmp_path, body)
+
+    with pytest.raises(ArchiveConfigurationError, match=_MENTION_REFUSAL) as error:
+        read_retention_window_days(path)
+
+    message = str(error.value)
+    assert str(path) in message
+    assert repr(offending_line) in message
+
+
+def test_shipped_env_templates_never_hit_the_grammar_refusal(tmp_path: Path) -> None:
+    """#1230 design D3: zero grammar-class false refusals on the shipped templates.
+
+    Bound to BEHAVIOR, not to a re-implementation of the grammar: every
+    `infra/env/*.example` goes through the public helper, and the only allowed
+    outcomes are a positive window (the retention template) or a refusal that
+    is NOT the closed-world grammar refusal (archive and unrelated templates
+    refuse as "does not look like the deployed retention env"). A future
+    template line that stops conforming turns this red.
+    """
+    templates = sorted((_REPO_ROOT / "infra/env").glob("*.example"))
+    assert len(templates) >= 15
+
+    for template in templates:
+        path = tmp_path / f"{template.name}.env"
+        path.write_bytes(template.read_bytes())
+        try:
+            window = read_retention_window_days(path)
+        except ArchiveConfigurationError as error:
+            assert _GRAMMAR_REFUSAL not in str(error), f"{template.name}: {error}"
+            continue
+        assert isinstance(window, int) and window > 0, f"{template.name} resolved to {window!r}"
 
 
 @pytest.mark.parametrize(
@@ -1125,12 +1246,15 @@ def test_read_retention_window_days_accepts_the_shipped_retention_env(tmp_path: 
 _BASH = shutil.which("bash")
 _UNSET_SENTINEL = "__UNSET__"
 
-# Known bounded exception recorded in D5(d): a quoted value spanning multiple
-# lines. bash keeps the window line INSIDE another variable's string (so the
-# runner runs its default 14) while the line-oriented extractor reads it as an
-# assignment. Not a realistic retention-env shape; pinned xfail so a future
-# parser change that closes it shows up as XPASS.
-_MULTILINE_QUOTED_BODY = f'{_SIBLING}\nOTHER="\n{_WINDOW_VAR}=21\n"\n'
+# Residual class tripwire (#1230 design D5(a2)): a quoted value spanning lines
+# whose EVERY line happens to fullmatch the grammar. `OTHER="` takes the bare
+# quote as its value, the inner window line is read as the last assignment
+# (helper 7) while bash keeps it inside OTHER's string and exports the earlier
+# 30 — still FAIL-OPEN, not closable by a line grammar (it needs unbalanced
+# quote tracking). Pinned strict-xfail so the day that lands shows up as XPASS.
+# The (a1) sibling — a closing bare `"` line — is now a plain grammar refusal
+# row in `_UNSUPPORTED_SHAPE_ROWS`.
+_MULTILINE_QUOTED_ALL_CONFORMING_BODY = f'{_WINDOW_VAR}=30\nOTHER="\n{_WINDOW_VAR}=7\nX=y"\n'
 
 
 def _differential_corpus() -> list[Any]:
@@ -1140,11 +1264,15 @@ def _differential_corpus() -> list[Any]:
     ]
     rows.append(
         pytest.param(
-            _MULTILINE_QUOTED_BODY,
-            id="multi-line-quoted-value-known-exception",
+            _MULTILINE_QUOTED_ALL_CONFORMING_BODY,
+            id="multi-line-quoted-all-conforming-still-diverges",
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="design D5(d) known bounded exception: multi-line quoted values",
+                reason=(
+                    "#1230 design D5(a2) recorded residual: every line of a multi-line quoted "
+                    "value conforms to the grammar, so the helper reads the inner assignment "
+                    "while bash keeps it inside the outer string"
+                ),
             ),
         )
     )

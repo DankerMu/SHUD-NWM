@@ -55,10 +55,10 @@ Must add (design D1/D2/D3):
 
 ## Implementation tasks
 
-- [ ] 1. `_scan_env_assignment`: grammar refusal + `mentioned_line`
+- [x] 1. `_scan_env_assignment`: grammar refusal + `mentioned_line`
   capture; caller mention message gains the line; docstrings rewritten
   (no "detectable substring" framing left in code).
-- [ ] 2. Tests per D3: 8 new rows; 6 existing rows' match updated to the
+- [x] 2. Tests per D3: 8 new rows; 6 existing rows' match updated to the
   grammar message (ids/bodies unchanged); TWO mention-layer rows
   (value-embedding + KEY-suffix decoy) asserting message + offending
   line; dedicated grammar-refusal test asserting `repr(offending_line)`
@@ -66,14 +66,14 @@ Must add (design D1/D2/D3):
   `_UNSUPPORTED_SHAPE_ROWS`, the old xfail append deleted, and the
   D5(a2) all-conforming body added as a NEW strict-xfail differential
   row; new template-conformance test via the public helper.
-- [ ] 3. Docs: runbook residual paragraph rewritten (8 enumerated
+- [x] 3. Docs: runbook residual paragraph rewritten (8 enumerated
   shapes now refused; file-format constraint enforced by the guard;
   residual = multi-line-quote class in BOTH directions, incl. the
   still-fail-open all-conforming variant — quoted values MUST NOT span
   lines); spec delta applied. Archived #1229 artifacts
   (`openspec/changes/archive/2026-08-01-fix-archive-min-age-live-window/**`)
   are historical records and are NOT rewritten (fixture-review P3-2).
-- [ ] 4. Full-file oracle: `uv run pytest -q tests/test_storage.py
+- [x] 4. Full-file oracle: `uv run pytest -q tests/test_storage.py
   tests/test_node27_product_archive.py
   tests/test_node27_storage_inventory_audit.py` green (differential
   oracle runs with real bash; the two consumer suites pin the call

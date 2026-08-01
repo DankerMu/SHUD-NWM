@@ -217,23 +217,40 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
     integer; a readable file carrying no recognized retention-family
     assignment at all (wrong file, `/dev/null`, a stale copy).
 
-    Lexical forms honored (shell-source semantics, bounded on purpose):
-    optional `export ` prefix, single/double quoted values taken verbatim,
-    a trailing ` # comment` stripped, whitespace stripped OUTSIDE quotes only,
-    full-line `#` comments ignored, exact variable-name match (near-name
-    decoys ignored), last assignment wins.
+    The file is judged by a CLOSED-WORLD line grammar (#1230 design D1):
+    every line must be blank, a full-line `#` comment, or a
+    `[export ]KEY=VALUE` assignment of ANY variable name. The FIRST line that
+    is not raises, naming the file and the offending line. `VAR+=21`,
+    `: ${VAR:=21}`, a nested `. other.env` / `source other.env`,
+    `printf -v VAR 21`, `read VAR <<< 21`, `eval 'VAR'=21`,
+    `readonly`/`declare` prefixes and truncated or quoted edits all fail that
+    grammar — the shapes the shell WOULD export while an open-world substring
+    detector saw nothing now refuse instead of silently resolving the
+    runner-equivalent default (#1230).
 
-    Every shape OUTSIDE that set refuses rather than mis-parses (design D5(d),
-    round-1 amendments in D1): line continuations and `$VAR` interpolation; an
-    UNQUOTED value with leading whitespace (`VAR= 21`, which bash parses as an
-    assignment prefix plus a command, leaving the variable unset); a value
-    whose first character is `#` (`VAR=#21` is a present non-integer, not a
-    comment); content carrying non-`\\n` line breaks such as CRLF; and a window
-    variable mentioned on a non-comment LINE that is not accepted as its
-    assignment (`readonly`/`declare` prefixes, a truncated edit). That last
+    Inside an accepted assignment the honored lexical forms are (shell-source
+    semantics, bounded on purpose): optional `export ` prefix, single/double
+    quoted values taken verbatim, a trailing ` # comment` stripped, whitespace
+    stripped OUTSIDE quotes only, exact variable-name match (near-name decoys
+    ignored), last assignment wins.
+
+    Beyond the grammar these still refuse rather than mis-parse (round-1
+    amendments in #1227 design D1): content carrying non-`\\n` line breaks such
+    as CRLF; an UNQUOTED value with leading whitespace (`VAR= 21`, which bash
+    parses as an assignment prefix plus a command, leaving the variable unset);
+    a value whose first character is `#` (`VAR=#21` is a present non-integer,
+    not a comment); a line continuation or `$VAR` interpolation in the window
+    value (a present non-integer); and the window variable appearing on a
+    CONFORMING line that is not accepted as its assignment — its name embedded
+    in another assignment's key (`OLD_VAR=99`) or value (`X=VAR=21`). That last
     refusal is PER LINE and fires even when a plain assignment was accepted
-    elsewhere in the file, because the shell would export the unsupported
-    line's value instead (#1227 round-2 C2).
+    elsewhere in the file (#1227 round-2 C2).
+
+    Known residual (#1230 design D5(a)): a quoted value spanning lines is only
+    partly covered. A closing bare `"` line breaks the grammar (over-strict,
+    fail-closed), but a multi-line quoted value whose every line happens to
+    conform is still read line-wise while bash keeps it inside the outer
+    string — quoted values MUST NOT span lines in the deployed retention env.
     """
     if env_path is None:
         raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be set to an absolute path")
@@ -259,8 +276,9 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
         # by `set -a; . file`, so returning the earlier 14 would be fail-open.
         raise ArchiveConfigurationError(
             f"{RETENTION_WINDOW_VARIABLE} appears on a line this extractor cannot accept as an "
-            f"assignment in {path} (readonly/declare prefix, or a truncated or malformed edit); "
-            "refusing instead of parsing a window the shell would not export"
+            f"assignment in {path}: {scan.mentioned_line!r} (the name is embedded in another "
+            "assignment's key or value); refusing instead of parsing a window the shell would "
+            "not export"
         )
     if not scan.assigned:
         if not scan.retention_family_seen:
@@ -299,20 +317,32 @@ class _EnvAssignmentScan:
     assigned: bool
     mentioned_unaccepted: bool
     retention_family_seen: bool
+    mentioned_line: str | None
 
 
 def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignmentScan:
     """Scan `content` for the last accepted assignment of `name` (#1227 D1).
 
-    Also records whether ANY non-comment LINE mentions `name=` without that
-    line being accepted as `name`'s assignment (unsupported assignment shape),
+    The file grammar is CLOSED-WORLD (#1230 design D1): a line is legal only
+    if, after `strip()`, it is empty, a full-line `#` comment, or a fullmatch
+    of `_ENV_ASSIGNMENT_PATTERN` (`[export ]KEY=VALUE`, any variable name).
+    The first line outside that grammar refuses here, naming the file and the
+    offending line, because the shell would still act on it: `VAR+=`,
+    `: ${VAR:=}`, a nested `.`/`source`, `printf -v`, `read`, `eval`,
+    `readonly`/`declare` prefixes all export a window this line-oriented
+    extractor cannot see. Enumerating the LEGAL shapes is what closes them;
+    enumerating illegal ones (the pre-#1230 `name=` substring test) could not
+    see a nested `source` at all.
+
+    Within that grammar the scan also records whether any conforming LINE
+    mentions `name=` without being accepted as `name`'s assignment (the name
+    embedded in another assignment's key or value) plus the first such line,
     and whether any retention-family assignment was accepted at all, so the
     caller can tell an absent assignment in the real retention env apart from
     the wrong file. The mention flag is per line and independent of accepted
     assignments (#1227 round-2 C2). `RETENTION_ENV_PATH_VARIABLE` is the
     ARCHIVE-side pointer at this file and is never consumed by the runner, so
     it does not count as retention-family recognition (#1227 round-2 C1).
-    Lexically unsupported shapes of `name` itself refuse here.
     """
     offending = sorted({character for character in _NON_NEWLINE_LINE_BREAKS if character in content})
     if offending:
@@ -325,16 +355,23 @@ def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignme
     assigned = False
     mentioned_unaccepted = False
     retention_family_seen = False
+    mentioned_line: str | None = None
     for line in content.split("\n"):
         candidate = line.strip()
         if not candidate or candidate.startswith("#"):
             continue
         matched = _ENV_ASSIGNMENT_PATTERN.fullmatch(candidate)
-        accepted_here = matched is not None and matched.group(1) == name
+        if matched is None:
+            raise ArchiveConfigurationError(
+                f"retention env line is not a supported assignment in {path}: {candidate!r} — "
+                "every line must be blank, a full-line # comment, or a [export ]KEY=VALUE "
+                "assignment; refusing instead of guessing what the shell would export"
+            )
+        accepted_here = matched.group(1) == name
         if f"{name}=" in candidate and not accepted_here:
             mentioned_unaccepted = True
-        if matched is None:
-            continue
+            if mentioned_line is None:
+                mentioned_line = candidate
         assigned_name = matched.group(1)
         if assigned_name.startswith(RETENTION_VARIABLE_PREFIX) and assigned_name != RETENTION_ENV_PATH_VARIABLE:
             retention_family_seen = True
@@ -353,6 +390,7 @@ def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignme
         assigned=assigned,
         mentioned_unaccepted=mentioned_unaccepted,
         retention_family_seen=retention_family_seen,
+        mentioned_line=mentioned_line,
     )
 
 
