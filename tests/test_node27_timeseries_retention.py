@@ -2589,8 +2589,19 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
     [
         ((), "[]"),
         ((("_timescaledb_internal.chk-other",),), "['_timescaledb_internal.chk-other']"),
+        (
+            (
+                ("_timescaledb_internal.chk-covered",),
+                ("_timescaledb_internal.chk-other",),
+            ),
+            "['_timescaledb_internal.chk-covered', '_timescaledb_internal.chk-other']",
+        ),
     ],
-    ids=["chunk-vanished-mid-tick", "server-dropped-a-different-chunk"],
+    ids=[
+        "chunk-vanished-mid-tick",
+        "server-dropped-a-different-chunk",
+        "server-dropped-an-extra-chunk",
+    ],
 )
 def test_default_drop_chunk_rejects_unexpected_drop_identity(
     tmp_path: Path,
@@ -2600,18 +2611,26 @@ def test_default_drop_chunk_rejects_unexpected_drop_identity(
 ) -> None:
     """H3: any ``drop_chunks`` result other than the selected chunk fails closed.
 
-    Two directions, both reachable in production:
+    Three directions, all reachable in production:
 
     * zero rows — the chunk vanished between enumeration and drop (a
       concurrent manual drop / retention policy), so this tick's evidence no
       longer describes what the server did;
     * a DIFFERENT chunk name — a surprising server-side range decision
-      succeeded on something the gate never evidenced.
+      succeeded on something the gate never evidenced;
+    * the selected chunk PLUS an extra — a widened server-side range took
+      collateral chunks with it. A superset containing the selected chunk is
+      NOT success: the extra drop is unevidenced and irreversible, so
+      cardinality binds as tightly as identity. Membership-only
+      (``qualified_name not in dropped_names``) or first-row-only
+      (``dropped_names[0] != qualified_name``) weakenings of the guard pass
+      the other two rows and must fail here.
 
-    Cardinality alone cannot separate the second case from success, which is
-    why the guard binds identity too. The expected message is written out by
-    hand rather than recomputed from ``dropped_rows``, so the assertion is an
-    independent oracle rather than a mirror of the implementation.
+    Cardinality alone cannot separate the second case from success, and
+    identity alone cannot separate the third, which is why the guard binds
+    both. The expected message is written out by hand rather than recomputed
+    from ``dropped_rows``, so the assertion is an independent oracle rather
+    than a mirror of the implementation.
     """
     probe = _install_fake_drop_psycopg2(monkeypatch, dropped_rows)
     config = _build_config(tmp_path, enforce=True)

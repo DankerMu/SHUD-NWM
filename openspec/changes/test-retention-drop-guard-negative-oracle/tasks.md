@@ -13,7 +13,8 @@ Must preserve:
   (parametrizing it is allowed if the happy row keeps its assertions)
 
 Must add:
-- Guard failure-direction coverage: empty fetchall + mismatched identity
+- Guard failure-direction coverage: empty fetchall + mismatched identity +
+  selected-chunk-plus-extra (cardinality direction; round-1 verified finding)
 
 Seams under test:
 - `_default_drop_chunk(config, chunk)` real function with fake psycopg2
@@ -42,6 +43,12 @@ Risk packs (compact):
 - [x] 3. Coverage proof: `coverage report -m` Missing no longer contains the
   guard's raise line (master baseline 976; anchor by the `raise RuntimeError`
   line if drifted).
+- [x] 4. Round-1 fix (cand-01 CONFIRMED): add a third parametrize row
+  `server-dropped-an-extra-chunk` — `dropped_rows` = selected chunk plus one
+  extra name — so cardinality-relaxing weakenings (membership check,
+  first-row check) fail the suite; update the test docstring's direction
+  list; refresh mutation evidence (guard deleted AND membership/first-row
+  mutants all killed).
 
 ## Required evidence
 
@@ -49,6 +56,8 @@ Risk packs (compact):
   chunk` + qualified name in message.
 - Test: `fetchall() == [("_timescaledb_internal.chk-other",)]` → same
   RuntimeError shape.
+- Test: `fetchall()` returning the selected chunk PLUS an extra chunk name →
+  same RuntimeError shape (cardinality binds; superset is not success).
 - Command: `uv run pytest -q tests/test_node27_timeseries_retention.py` all
   green (baseline on current master: 136 passed / 1 skipped; count grows).
 - Command: `uv run ruff check .` clean.
