@@ -64,17 +64,27 @@ source is the same file the retention runner reads:
   - CRLF (any non-`\n` line-break character reaching a candidate line)
     refuses — bash keeps the `\r` in the value and the runner refuses
     it; extraction splits on `\n` only;
-  - if NO assignment of the exact window variable is accepted but some
-    non-comment line CONTAINS `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=`
-    (`readonly VAR=21`, `declare -i VAR=21`, a truncated edit), the file
-    carries an assignment shape the extractor does not support → refuse
-    rather than silently defaulting while the runner exports the value;
+  - ANY non-comment line that CONTAINS
+    `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` without being accepted as
+    that variable's assignment (`readonly VAR=21`, `declare -i VAR=21`,
+    a truncated edit) refuses — PER LINE, regardless of whether a plain
+    assignment was accepted elsewhere in the file. Round-2 verified C2:
+    the round-1 form gated this on "no assignment accepted", so a mixed
+    `VAR=14` + `readonly VAR=30` file mis-parsed to the stale 14 while
+    `set -a; . file` yields 30 — a fail-open the per-line rule closes;
   - the runner-equivalent default applies ONLY when the file is
     recognizably the deployed retention env: at least one OTHER
     `NODE27_TIMESERIES_RETENTION_*` assignment is accepted while the
-    window assignment is absent or empty. A readable file with no
-    recognized retention-family assignment at all (wrong file,
-    `/dev/null`, a stale copy) refuses — the guard is pointed at
+    window assignment is absent or empty — EXCLUDING the archive-side
+    pointer variable `NODE27_TIMESERIES_RETENTION_ENV` itself, which
+    shares the prefix but is never consumed by the runner and lives in
+    the ARCHIVE env files (round-2 verified C1: counting it accepted the
+    guard's own env file — a self-referencing pointer silently
+    defaulted to 14). The real bytes of both shipped archive templates
+    are pinned REFUSED by test, so any future retention-prefixed
+    addition to them that would re-open the hole turns red. A readable
+    file with no recognized retention-family assignment at all (wrong
+    file, `/dev/null`, a stale copy) refuses — the guard is pointed at
     something that is not the runner's config, and defaulting there
     re-admits the exact #1227 silent pass.
 
@@ -197,7 +207,16 @@ is the invariant working as specified. Honest surface inventory
   set (line continuations, `$VAR` interpolation, unsupported assignment
   shapes such as `readonly`/`declare`, malformed hand-edits) refuse
   fail-closed rather than mis-parse — made true by the round-1
-  amendments in D1. The remaining honest residual is FILE IDENTITY: a
+  amendments in D1 and the round-2 per-line mention rule, and pinned by
+  a DIFFERENTIAL oracle test (the parser-fail-direction class repeated
+  across two review rounds, triggering the 6.2 invariant audit): for a
+  corpus of env-file bodies, the helper's result is compared against
+  the runner's actual oracle (`bash -c 'set -a; . file'` + the runner's
+  strict parse semantics) — the helper MUST either refuse or return
+  exactly the runner's effective window; a number differing from the
+  runner's, or a number where the runner refuses/blocks, fails the
+  suite. Known bounded exception recorded in the test: multi-line
+  quoted values (not a realistic retention-env shape). The remaining honest residual is FILE IDENTITY: a
   wrong path whose target is lexically indistinguishable from the
   deployed retention env (e.g. the shipped `.example`, which carries a
   valid `WINDOW_DAYS=14` assignment) cannot be detected lexically; the

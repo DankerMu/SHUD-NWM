@@ -204,9 +204,12 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
     Resolution mirrors the retention runner (#1227 design D1): an ABSENT or
     EMPTY window assignment resolves to `DEFAULT_RETENTION_WINDOW_DAYS`, but
     ONLY when the file is recognizably the deployed retention env — at least
-    one `NODE27_TIMESERIES_RETENTION_*` assignment was accepted. That default is
-    the runner's live-effective window, never a fallback for an unreadable
-    source.
+    one `NODE27_TIMESERIES_RETENTION_*` assignment was accepted, EXCLUDING
+    `NODE27_TIMESERIES_RETENTION_ENV` itself, which is the archive-side pointer
+    at this file (it lives in the ARCHIVE env files and is never consumed by
+    the runner, so counting it would let the guard default off its own env
+    file — #1227 round-2 C1). That default is the runner's live-effective
+    window, never a fallback for an unreadable source.
 
     Everything else fails closed with `ArchiveConfigurationError` and no
     constant fallback: an unset, empty or relative path variable; a
@@ -226,10 +229,11 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
     assignment prefix plus a command, leaving the variable unset); a value
     whose first character is `#` (`VAR=#21` is a present non-integer, not a
     comment); content carrying non-`\\n` line breaks such as CRLF; and a window
-    variable that appears only in an unsupported assignment shape
-    (`readonly`/`declare` prefixes, a truncated edit) — mentioned but not
-    accepted refuses instead of silently defaulting while the runner exports
-    the value.
+    variable mentioned on a non-comment LINE that is not accepted as its
+    assignment (`readonly`/`declare` prefixes, a truncated edit). That last
+    refusal is PER LINE and fires even when a plain assignment was accepted
+    elsewhere in the file, because the shell would export the unsupported
+    line's value instead (#1227 round-2 C2).
     """
     if env_path is None:
         raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be set to an absolute path")
@@ -249,13 +253,16 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
     except ValueError as error:
         raise ArchiveConfigurationError(f"retention env file is not valid UTF-8: {path}") from error
     scan = _scan_env_assignment(content, RETENTION_WINDOW_VARIABLE, path=path)
+    if scan.mentioned_unaccepted:
+        # PER LINE, regardless of any accepted plain assignment elsewhere in the
+        # file (#1227 round-2 C2): `VAR=14` + `readonly VAR=30` is exported as 30
+        # by `set -a; . file`, so returning the earlier 14 would be fail-open.
+        raise ArchiveConfigurationError(
+            f"{RETENTION_WINDOW_VARIABLE} appears on a line this extractor cannot accept as an "
+            f"assignment in {path} (readonly/declare prefix, or a truncated or malformed edit); "
+            "refusing instead of parsing a window the shell would not export"
+        )
     if not scan.assigned:
-        if scan.mentioned:
-            raise ArchiveConfigurationError(
-                f"{RETENTION_WINDOW_VARIABLE} appears only in an assignment shape this extractor "
-                f"does not support in {path} (readonly/declare prefix, or a truncated edit); "
-                "refusing instead of defaulting"
-            )
         if not scan.retention_family_seen:
             raise ArchiveConfigurationError(
                 f"retention env file does not look like the deployed retention env: {path} carries "
@@ -290,17 +297,21 @@ class _EnvAssignmentScan:
 
     value: str | None
     assigned: bool
-    mentioned: bool
+    mentioned_unaccepted: bool
     retention_family_seen: bool
 
 
 def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignmentScan:
     """Scan `content` for the last accepted assignment of `name` (#1227 D1).
 
-    Also records whether `name` was MENTIONED in a non-comment line without
-    being accepted (unsupported assignment shape) and whether any
-    retention-family assignment was accepted at all, so the caller can tell an
-    absent assignment in the real retention env apart from the wrong file.
+    Also records whether ANY non-comment LINE mentions `name=` without that
+    line being accepted as `name`'s assignment (unsupported assignment shape),
+    and whether any retention-family assignment was accepted at all, so the
+    caller can tell an absent assignment in the real retention env apart from
+    the wrong file. The mention flag is per line and independent of accepted
+    assignments (#1227 round-2 C2). `RETENTION_ENV_PATH_VARIABLE` is the
+    ARCHIVE-side pointer at this file and is never consumed by the runner, so
+    it does not count as retention-family recognition (#1227 round-2 C1).
     Lexically unsupported shapes of `name` itself refuse here.
     """
     offending = sorted({character for character in _NON_NEWLINE_LINE_BREAKS if character in content})
@@ -312,20 +323,22 @@ def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignme
         )
     value: str | None = None
     assigned = False
-    mentioned = False
+    mentioned_unaccepted = False
     retention_family_seen = False
     for line in content.split("\n"):
         candidate = line.strip()
         if not candidate or candidate.startswith("#"):
             continue
-        if f"{name}=" in candidate:
-            mentioned = True
         matched = _ENV_ASSIGNMENT_PATTERN.fullmatch(candidate)
+        accepted_here = matched is not None and matched.group(1) == name
+        if f"{name}=" in candidate and not accepted_here:
+            mentioned_unaccepted = True
         if matched is None:
             continue
-        if matched.group(1).startswith(RETENTION_VARIABLE_PREFIX):
+        assigned_name = matched.group(1)
+        if assigned_name.startswith(RETENTION_VARIABLE_PREFIX) and assigned_name != RETENTION_ENV_PATH_VARIABLE:
             retention_family_seen = True
-        if matched.group(1) != name:
+        if not accepted_here:
             continue
         raw = matched.group(2)
         if raw[:1] in (" ", "\t"):
@@ -338,7 +351,7 @@ def _scan_env_assignment(content: str, name: str, *, path: Path) -> _EnvAssignme
     return _EnvAssignmentScan(
         value=value,
         assigned=assigned,
-        mentioned=mentioned,
+        mentioned_unaccepted=mentioned_unaccepted,
         retention_family_seen=retention_family_seen,
     )
 

@@ -17,7 +17,9 @@ not support, or a readable file with no recognized retention-family
 assignment at all) SHALL be rejected fail-closed with no constant
 fallback, while a readable file that is recognizably the deployed
 retention env (at least one other `NODE27_TIMESERIES_RETENTION_*`
-assignment accepted) whose window assignment is missing or empty SHALL
+assignment accepted, excluding the archive-side pointer variable
+`NODE27_TIMESERIES_RETENTION_ENV`) whose window assignment is missing
+or empty SHALL
 resolve to the shared runner-equivalent default (the same constant the
 retention runner itself defaults to), so the guard never refuses a pair
 the runner itself considers healthy.
@@ -40,11 +42,12 @@ the runner itself considers healthy.
 
 - **WHEN** `NODE27_TIMESERIES_RETENTION_ENV` is unset, empty, or a
   relative path, or names a missing file, or the file carries a present
-  assignment whose value is non-integer or non-positive, or the file
-  carries the window variable only in an assignment shape the extractor
-  does not support (`readonly`/`declare` prefixes, an unquoted
-  leading-whitespace value, a CRLF line), or the file carries no
-  recognized `NODE27_TIMESERIES_RETENTION_*` assignment at all
+  assignment whose value is non-integer or non-positive, or ANY
+  non-comment line carries the window variable in an assignment shape
+  the extractor does not support (`readonly`/`declare` prefixes, an
+  unquoted leading-whitespace value, a CRLF line — even alongside an
+  accepted plain assignment), or the file carries no recognized
+  `NODE27_TIMESERIES_RETENTION_*` assignment at all
 - **THEN** validation SHALL refuse with `ArchiveConfigurationError` (or
   the consumer's config error) and SHALL NOT fall back to any constant
 
@@ -52,7 +55,9 @@ the runner itself considers healthy.
 
 - **WHEN** the retention env file exists, is readable, and is
   recognizably the deployed retention env (at least one other
-  `NODE27_TIMESERIES_RETENTION_*` assignment is accepted) but the
+  `NODE27_TIMESERIES_RETENTION_*` assignment is accepted, where the
+  archive-side pointer variable `NODE27_TIMESERIES_RETENTION_ENV`
+  itself never counts as such evidence) but the
   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` assignment is absent or has
   an empty value
 - **THEN** the effective window SHALL be the shared runner-equivalent

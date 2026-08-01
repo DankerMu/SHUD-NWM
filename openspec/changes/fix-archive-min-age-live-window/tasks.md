@@ -154,9 +154,11 @@ Must add (per design D1-D4):
   `only-commented-assignment-is-unassigned` rows are re-based onto
   bodies carrying a sibling retention assignment;
   (f) new refusal tests for every shape above (incl. `readonly` /
-  `declare -i` forms, `/dev/null`, and an archive-env wrong-file row)
-  plus sibling-line default rows; `storage.py` docstring corrected to
-  match.
+  `declare -i` forms, `/dev/null`, and an archive-env wrong-file row —
+  round-2 verified C1 found the round-1 synthetic row NOT isomorphic to
+  the shipped archive env, which carries the retention-prefixed pointer
+  line; real-bytes rows land in task 11) plus sibling-line default
+  rows; `storage.py` docstring corrected to match.
 - [x] 10. Docs/test-honesty rides (B3 PLAUSIBLE, B4 CONFIRMED):
   drift-lock test docstring states value-equality (small-int interning
   defeats `is` identity — no source-inspection assertion needed, row (h)
@@ -165,6 +167,37 @@ Must add (per design D1-D4):
   (`NODE27_TIMESERIES_RETENTION_ENV` must name the same file the runner
   wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE` selects — repointing
   one without the other leaves the guard reading a stale window).
+
+## Round-2 fix pass (PR #1229 cross-review, verified findings C1 P1 / C2 P2)
+
+- [x] 11. Parser fail-open closure + 6.2 invariant audit (class repeated
+  round-1→round-2; design D1/D5(d) round-2 amendments are the contract):
+  (a) C1 narrow-scope fix: `NODE27_TIMESERIES_RETENTION_ENV` itself
+  never grants retention-family recognition (it is the archive-side
+  pointer, never consumed by the runner); decoy semantics unchanged
+  (`decoy-alone-is-unassigned` stays 14);
+  (b) C1 real-bytes locking rows: feed the ACTUAL bytes of
+  `infra/env/node27-product-archive.example` AND
+  `infra/env/node27-storage-inventory-audit.example` to the helper and
+  assert the does-not-look-like-retention-env refusal — pins the
+  shipped archive templates REFUSED so any future retention-prefixed
+  addition re-opening the hole turns red;
+  (c) C2 per-line mention rule: any non-comment line containing
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` that is not accepted as
+  that variable's assignment refuses, regardless of an accepted plain
+  assignment elsewhere; rows for `VAR=14`+`readonly VAR=30` (both
+  orders) and the `declare` variant; refusal message wording no longer
+  says "appears only in an assignment shape";
+  (d) 6.2 differential oracle test: corpus of env bodies (all existing
+  parametrized shapes + the mixed shapes) run through
+  `bash -c 'set -a; . file'` in a subprocess and the runner's strict
+  parse semantics; assert the helper either refuses or returns exactly
+  the runner's effective window — never a different number, never a
+  number where the runner refuses/blocks; multi-line quoted values
+  recorded as the known bounded exception;
+  (e) runbook residual paragraph names the archive envs (self/sibling
+  pointer misconfiguration now refuses) and keeps the retention
+  `.example` as the remaining lexically-indistinguishable wrong file.
 
 ## Required evidence
 

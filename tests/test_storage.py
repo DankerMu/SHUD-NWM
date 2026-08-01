@@ -1,10 +1,14 @@
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from packages.common.storage import (
     DEFAULT_RETENTION_WINDOW_DAYS,
+    RETENTION_ENV_PATH_VARIABLE,
     VALID_PREFIX_PATTERNS,
     ArchiveConfigurationError,
     ArchiveIdentity,
@@ -17,7 +21,7 @@ from packages.common.storage import (
     validate_object_path,
     validate_product_archive_manifest_binding,
 )
-from scripts import node27_raw_retention, node27_resource_governance
+from scripts import node27_raw_retention, node27_resource_governance, node27_timeseries_retention
 
 
 @pytest.mark.parametrize(
@@ -926,6 +930,8 @@ def test_validate_archive_configuration_requires_explicit_retention_days(tmp_pat
 # ---------------------------------------------------------------------------
 
 _WINDOW_VAR = "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"
+_RETENTION_ENV_VAR = RETENTION_ENV_PATH_VARIABLE
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The runner-equivalent default applies ONLY to a file that is recognizably the
 # deployed retention env (#1227 design D1 round-1 amendment): at least one
@@ -940,35 +946,35 @@ def _retention_env(tmp_path: Path, body: str, *, name: str = "retention.env") ->
     return path
 
 
-@pytest.mark.parametrize(
-    ("body", "expected"),
-    [
-        pytest.param(f"{_WINDOW_VAR}=21\n", 21, id="plain"),
-        pytest.param(
-            f"DATABASE_URL=postgresql://x\n{_SIBLING}\n",
-            14,
-            id="missing-assignment-uses-runner-default",
-        ),
-        pytest.param(f"{_WINDOW_VAR}=\n", 14, id="empty-value-uses-runner-default"),
-        pytest.param(f'{_WINDOW_VAR}=""\n', 14, id="quoted-empty-uses-runner-default"),
-        pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}=\n", 14, id="sibling-plus-empty-value-defaults"),
-        pytest.param(f"export {_WINDOW_VAR}=21\n", 21, id="export-prefix"),
-        pytest.param(f'{_WINDOW_VAR}="21"\n', 21, id="double-quoted"),
-        pytest.param(f"{_WINDOW_VAR}='21'\n", 21, id="single-quoted"),
-        pytest.param(f"{_WINDOW_VAR}=21   # trailing comment\n", 21, id="trailing-comment"),
-        pytest.param(f"   {_WINDOW_VAR}=21   \n", 21, id="surrounding-whitespace"),
-        pytest.param(f"# {_WINDOW_VAR}=99\n{_WINDOW_VAR}=21\n", 21, id="full-line-comment-ignored"),
-        pytest.param(
-            f"# {_WINDOW_VAR}=99\n{_SIBLING}\n",
-            14,
-            id="only-commented-assignment-is-unassigned",
-        ),
-        pytest.param(f"{_WINDOW_VAR}_OLD=99\n{_WINDOW_VAR}=21\n", 21, id="near-name-decoy-ignored"),
-        pytest.param(f"{_WINDOW_VAR}_OLD=99\n", 14, id="decoy-alone-is-unassigned"),
-        pytest.param(f"{_WINDOW_VAR}=14\n{_WINDOW_VAR}=21\n", 21, id="last-assignment-wins"),
-        pytest.param(f"{_WINDOW_VAR}=21\n{_WINDOW_VAR}=30\n", 30, id="last-assignment-wins-again"),
-    ],
-)
+_LEXICAL_ROWS = [
+    pytest.param(f"{_WINDOW_VAR}=21\n", 21, id="plain"),
+    pytest.param(
+        f"DATABASE_URL=postgresql://x\n{_SIBLING}\n",
+        14,
+        id="missing-assignment-uses-runner-default",
+    ),
+    pytest.param(f"{_WINDOW_VAR}=\n", 14, id="empty-value-uses-runner-default"),
+    pytest.param(f'{_WINDOW_VAR}=""\n', 14, id="quoted-empty-uses-runner-default"),
+    pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}=\n", 14, id="sibling-plus-empty-value-defaults"),
+    pytest.param(f"export {_WINDOW_VAR}=21\n", 21, id="export-prefix"),
+    pytest.param(f'{_WINDOW_VAR}="21"\n', 21, id="double-quoted"),
+    pytest.param(f"{_WINDOW_VAR}='21'\n", 21, id="single-quoted"),
+    pytest.param(f"{_WINDOW_VAR}=21   # trailing comment\n", 21, id="trailing-comment"),
+    pytest.param(f"   {_WINDOW_VAR}=21   \n", 21, id="surrounding-whitespace"),
+    pytest.param(f"# {_WINDOW_VAR}=99\n{_WINDOW_VAR}=21\n", 21, id="full-line-comment-ignored"),
+    pytest.param(
+        f"# {_WINDOW_VAR}=99\n{_SIBLING}\n",
+        14,
+        id="only-commented-assignment-is-unassigned",
+    ),
+    pytest.param(f"{_WINDOW_VAR}_OLD=99\n{_WINDOW_VAR}=21\n", 21, id="near-name-decoy-ignored"),
+    pytest.param(f"{_WINDOW_VAR}_OLD=99\n", 14, id="decoy-alone-is-unassigned"),
+    pytest.param(f"{_WINDOW_VAR}=14\n{_WINDOW_VAR}=21\n", 21, id="last-assignment-wins"),
+    pytest.param(f"{_WINDOW_VAR}=21\n{_WINDOW_VAR}=30\n", 30, id="last-assignment-wins-again"),
+]
+
+
+@pytest.mark.parametrize(("body", "expected"), _LEXICAL_ROWS)
 def test_read_retention_window_days_lexical_forms_and_runner_defaults(
     tmp_path: Path, body: str, expected: int
 ) -> None:
@@ -981,17 +987,17 @@ def test_missing_or_empty_assignment_resolves_to_the_shared_runner_default() -> 
     assert DEFAULT_RETENTION_WINDOW_DAYS == 14
 
 
-@pytest.mark.parametrize(
-    ("body", "match"),
-    [
-        pytest.param(f"{_WINDOW_VAR}=not-an-int\n", "must be an integer", id="non-integer"),
-        pytest.param(f"{_WINDOW_VAR}=0\n", "must be positive", id="zero"),
-        pytest.param(f"{_WINDOW_VAR}=-1\n", "must be positive", id="negative"),
-        pytest.param(f"{_WINDOW_VAR}=21.5\n", "must be an integer", id="float"),
-        pytest.param(f'{_WINDOW_VAR}=" 21 "\n', "whitespace", id="quoted-whitespace-padding"),
-        pytest.param(f"{_WINDOW_VAR}=$OTHER\n", "must be an integer", id="interpolation-refused"),
-    ],
-)
+_PRESENT_INVALID_ROWS = [
+    pytest.param(f"{_WINDOW_VAR}=not-an-int\n", "must be an integer", id="non-integer"),
+    pytest.param(f"{_WINDOW_VAR}=0\n", "must be positive", id="zero"),
+    pytest.param(f"{_WINDOW_VAR}=-1\n", "must be positive", id="negative"),
+    pytest.param(f"{_WINDOW_VAR}=21.5\n", "must be an integer", id="float"),
+    pytest.param(f'{_WINDOW_VAR}=" 21 "\n', "whitespace", id="quoted-whitespace-padding"),
+    pytest.param(f"{_WINDOW_VAR}=$OTHER\n", "must be an integer", id="interpolation-refused"),
+]
+
+
+@pytest.mark.parametrize(("body", "match"), _PRESENT_INVALID_ROWS)
 def test_read_retention_window_days_refuses_present_invalid_values(
     tmp_path: Path, body: str, match: str
 ) -> None:
@@ -999,49 +1005,203 @@ def test_read_retention_window_days_refuses_present_invalid_values(
         read_retention_window_days(_retention_env(tmp_path, body))
 
 
-@pytest.mark.parametrize(
-    ("body", "match"),
-    [
-        # Round-1 narrowing (#1229 review A1): bash reads `VAR= 21` as an
-        # assignment prefix plus the command `21`, so the runner sees the
-        # variable UNSET. Accepting 21 would validate against a window the
-        # runner never uses.
-        pytest.param(f"{_WINDOW_VAR}= 21\n", "assignment is malformed", id="unquoted-leading-whitespace"),
-        # Same narrowing: previously read as an empty value defaulting to 14;
-        # bash also leaves the variable unset here, so refusing is fail-closed.
-        pytest.param(
-            f"{_WINDOW_VAR}= # comment\n",
-            "assignment is malformed",
-            id="empty-value-then-comment-is-malformed",
-        ),
-        # `#` opens a comment only AFTER whitespace: bash exports `#21`.
-        pytest.param(f"{_WINDOW_VAR}=#21\n", "must be an integer", id="hash-first-character-is-a-value"),
-        pytest.param(f"{_SIBLING}\r\n{_WINDOW_VAR}=21\r\n", "non-newline line breaks", id="crlf-content"),
-        pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}=21\v", "non-newline line breaks", id="vertical-tab-content"),
-        # Unsupported assignment shapes: mentioned but not accepted -> refuse
-        # instead of silently defaulting while the runner exports the value.
-        pytest.param(f"{_SIBLING}\nreadonly {_WINDOW_VAR}=21\n", "does not support", id="readonly-prefix"),
-        pytest.param(f"{_SIBLING}\ndeclare -i {_WINDOW_VAR}=21\n", "does not support", id="declare-prefix"),
-        pytest.param(f'{_SIBLING}\n"{_WINDOW_VAR}=21"\n', "does not support", id="truncated-quoted-edit"),
-        # Wrong file entirely: no retention-family assignment at all.
-        pytest.param(
-            "DATABASE_URL=postgresql://x\nNHMS_ARCHIVE_MIN_AGE_DAYS=14\n",
-            "does not look like the deployed retention env",
-            id="wrong-file-has-no-retention-family",
-        ),
-        pytest.param("", "does not look like the deployed retention env", id="empty-file-mirrors-dev-null"),
-    ],
-)
+_UNSUPPORTED_SHAPE_ROWS = [
+    # Round-1 narrowing (#1229 review A1): bash reads `VAR= 21` as an
+    # assignment prefix plus the command `21`, so the runner sees the
+    # variable UNSET. Accepting 21 would validate against a window the
+    # runner never uses.
+    pytest.param(f"{_WINDOW_VAR}= 21\n", "assignment is malformed", id="unquoted-leading-whitespace"),
+    # Same narrowing: previously read as an empty value defaulting to 14;
+    # bash also leaves the variable unset here, so refusing is fail-closed.
+    pytest.param(
+        f"{_WINDOW_VAR}= # comment\n",
+        "assignment is malformed",
+        id="empty-value-then-comment-is-malformed",
+    ),
+    # `#` opens a comment only AFTER whitespace: bash exports `#21`.
+    pytest.param(f"{_WINDOW_VAR}=#21\n", "must be an integer", id="hash-first-character-is-a-value"),
+    pytest.param(f"{_SIBLING}\r\n{_WINDOW_VAR}=21\r\n", "non-newline line breaks", id="crlf-content"),
+    pytest.param(f"{_SIBLING}\n{_WINDOW_VAR}=21\v", "non-newline line breaks", id="vertical-tab-content"),
+    # Unsupported assignment shapes: mentioned but not accepted -> refuse
+    # instead of silently defaulting while the runner exports the value.
+    pytest.param(f"{_SIBLING}\nreadonly {_WINDOW_VAR}=21\n", "cannot accept as an", id="readonly-prefix"),
+    pytest.param(f"{_SIBLING}\ndeclare -i {_WINDOW_VAR}=21\n", "cannot accept as an", id="declare-prefix"),
+    pytest.param(f'{_SIBLING}\n"{_WINDOW_VAR}=21"\n', "cannot accept as an", id="truncated-quoted-edit"),
+    # Round-2 fail-open closure (#1229 review C2): the mention refusal is PER
+    # LINE. `VAR=14` + `readonly VAR=30` is exported as 30 by `set -a; . file`,
+    # so the round-1 "refuse only when nothing was assigned" gate returned the
+    # stale 14 — a fail-open against a LARGER live window.
+    pytest.param(
+        f"{_WINDOW_VAR}=14\nreadonly {_WINDOW_VAR}=30\n",
+        "cannot accept as an",
+        id="mixed-plain-then-readonly",
+    ),
+    # Reverse order: bash fails to re-assign the readonly variable and `. file`
+    # exits non-zero, so the runner never starts — refusing is right either way.
+    pytest.param(
+        f"readonly {_WINDOW_VAR}=30\n{_WINDOW_VAR}=14\n",
+        "cannot accept as an",
+        id="mixed-readonly-then-plain",
+    ),
+    pytest.param(
+        f"{_WINDOW_VAR}=14\ndeclare -i {_WINDOW_VAR}=30\n",
+        "cannot accept as an",
+        id="mixed-plain-then-declare",
+    ),
+    # Wrong file entirely: no retention-family assignment at all.
+    pytest.param(
+        "DATABASE_URL=postgresql://x\nNHMS_ARCHIVE_MIN_AGE_DAYS=14\n",
+        "does not look like the deployed retention env",
+        id="wrong-file-has-no-retention-family",
+    ),
+    pytest.param("", "does not look like the deployed retention env", id="empty-file-mirrors-dev-null"),
+    # Round-2 C1: the archive-side POINTER variable shares the retention prefix
+    # but is never consumed by the runner, so it must not grant recognition —
+    # otherwise pointing the guard at an archive env defaults it to 14.
+    pytest.param(
+        f"NHMS_ARCHIVE_MIN_AGE_DAYS=14\n{_RETENTION_ENV_VAR}=/home/nwm/x.env\n",
+        "does not look like the deployed retention env",
+        id="pointer-variable-alone-is-not-the-retention-env",
+    ),
+]
+
+
+@pytest.mark.parametrize(("body", "match"), _UNSUPPORTED_SHAPE_ROWS)
 def test_read_retention_window_days_refuses_unsupported_shapes(
     tmp_path: Path, body: str, match: str
 ) -> None:
-    """Round-1 fail-direction hardening: every divergence from `set -a; . file` refuses."""
+    """Fail-direction hardening: every divergence from `set -a; . file` refuses."""
     path = _retention_env(tmp_path, body)
 
     with pytest.raises(ArchiveConfigurationError, match=match) as error:
         read_retention_window_days(path)
 
     assert str(path) in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "infra/env/node27-product-archive.example",
+        "infra/env/node27-storage-inventory-audit.example",
+    ],
+)
+def test_read_retention_window_days_refuses_the_shipped_archive_envs(tmp_path: Path, example: str) -> None:
+    """Round-2 C1 lock: the ACTUAL bytes of both archive templates must refuse.
+
+    They carry `NODE27_TIMESERIES_RETENTION_ENV` (the pointer at the retention
+    env), which shares the retention prefix. Counting it as retention-family
+    recognition made a self- or sibling-pointing misconfiguration default
+    silently to 14. Reading the repo files (not a hand-copied body) means any
+    future retention-prefixed line added to these templates turns this red.
+    """
+    body = (_REPO_ROOT / example).read_bytes()
+    path = tmp_path / "archive.env"
+    path.write_bytes(body)
+
+    assert f"{_RETENTION_ENV_VAR}=".encode() in body
+    with pytest.raises(ArchiveConfigurationError, match="does not look like the deployed retention env"):
+        read_retention_window_days(path)
+
+
+def test_read_retention_window_days_accepts_the_shipped_retention_env(tmp_path: Path) -> None:
+    """The counterpart lock: the real retention template still parses to 14."""
+    path = tmp_path / "retention.env"
+    path.write_bytes((_REPO_ROOT / "infra/env/node27-timeseries-retention.example").read_bytes())
+
+    assert read_retention_window_days(path) == 14
+
+
+# ---------------------------------------------------------------------------
+# 6.2 invariant audit (#1229 round-2, design D5(d)): the parser-fail-direction
+# class repeated across two review rounds, so the invariant is made executable
+# instead of re-audited by eye. For every corpus body the helper must EITHER
+# refuse OR return exactly the window the retention RUNNER would actually run
+# with — a different number, or any number where the runner refuses / never
+# starts, fails. Fail-closed narrowings (the helper refusing where the runner
+# runs) are legitimate by design and deliberately NOT asserted against.
+# ---------------------------------------------------------------------------
+
+_BASH = shutil.which("bash")
+_UNSET_SENTINEL = "__UNSET__"
+
+# Known bounded exception recorded in D5(d): a quoted value spanning multiple
+# lines. bash keeps the window line INSIDE another variable's string (so the
+# runner runs its default 14) while the line-oriented extractor reads it as an
+# assignment. Not a realistic retention-env shape; pinned xfail so a future
+# parser change that closes it shows up as XPASS.
+_MULTILINE_QUOTED_BODY = f'{_SIBLING}\nOTHER="\n{_WINDOW_VAR}=21\n"\n'
+
+
+def _differential_corpus() -> list[Any]:
+    rows: list[Any] = [
+        pytest.param(param.values[0], id=param.id)
+        for param in (*_LEXICAL_ROWS, *_PRESENT_INVALID_ROWS, *_UNSUPPORTED_SHAPE_ROWS)
+    ]
+    rows.append(
+        pytest.param(
+            _MULTILINE_QUOTED_BODY,
+            id="multi-line-quoted-value-known-exception",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="design D5(d) known bounded exception: multi-line quoted values",
+            ),
+        )
+    )
+    return rows
+
+
+def _runner_effective_window(env_file: Path) -> int | None:
+    """Return the window the retention runner would run with, or None if it cannot.
+
+    None means the runner never gets a window: either the wrapper's
+    `set -a; . <env>` fails (ENV_FILE_SOURCE_FAILED) or the runner's strict
+    parse refuses the exported value.
+    """
+    script = (
+        'set -a; . "$1" 2>/dev/null; rc=$?; '
+        f'printf %s "${{{_WINDOW_VAR}-{_UNSET_SENTINEL}}}"; exit "$rc"'
+    )
+    # Bytes, not text mode: universal-newline translation would hide the `\r`
+    # of a CRLF value, which is exactly what the runner's strict parse rejects.
+    completed = subprocess.run(
+        [str(_BASH), "-c", script, "bash", str(env_file)],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    exported = completed.stdout.decode("utf-8", errors="surrogateescape")
+    raw = None if exported == _UNSET_SENTINEL else exported
+    try:
+        return node27_timeseries_retention._optional_positive_int(
+            raw,
+            name=_WINDOW_VAR,
+            default=node27_timeseries_retention._DEFAULT_WINDOW_DAYS,
+        )
+    except node27_timeseries_retention.RetentionConfigError:
+        return None
+
+
+@pytest.mark.skipif(_BASH is None, reason="differential oracle needs a real bash to source env files")
+@pytest.mark.parametrize("body", _differential_corpus())
+def test_helper_never_returns_a_window_the_runner_would_not_use(tmp_path: Path, body: str) -> None:
+    """Differential oracle against `bash -c 'set -a; . file'` + the runner's parse."""
+    path = _retention_env(tmp_path, body)
+    runner_window = _runner_effective_window(path)
+
+    try:
+        helper_window = read_retention_window_days(path)
+    except ArchiveConfigurationError:
+        return  # Fail-closed narrowing: allowed, and not asserted against.
+
+    assert runner_window is not None, (
+        f"helper returned {helper_window} but the runner would refuse or never start on {body!r}"
+    )
+    assert helper_window == runner_window, (
+        f"helper returned {helper_window} but the runner would run with {runner_window} on {body!r}"
+    )
 
 
 def test_read_retention_window_days_refuses_unset_path() -> None:

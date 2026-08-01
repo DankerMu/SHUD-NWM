@@ -148,11 +148,14 @@ guard with it. Resolution rules, all fail-closed except the last:
 - unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
   unreadable file, or a present value that is not a positive integer → refuse,
   never a constant fallback;
-- an assignment shape the extractor does not support — `readonly VAR=21`,
+- an assignment shape the extractor cannot accept — `readonly VAR=21`,
   `declare -i VAR=21`, a truncated edit, an unquoted value starting with
   whitespace (`VAR= 21`, which bash leaves UNSET), a `#`-first value
   (`VAR=#21`, which bash exports verbatim), or CRLF content → refuse rather
-  than mis-parse a window the runner does not use;
+  than mis-parse a window the runner does not use. This is judged PER LINE: a
+  file that mixes a plain `VAR=14` with a later `readonly VAR=30` refuses too,
+  because sourcing it exports 30 and reporting the earlier 14 would be
+  fail-open (`#1229` round-2);
 - a readable file that is recognizably the deployed retention env (at least
   one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
   assignment is absent or empty → the retention runner's own default (14 d),
@@ -176,11 +179,22 @@ validating a stale window with NO signal: they keep passing against whatever
 the old file says while retention drops on a different window. Change the two
 pointers in the same operator step and re-read both files afterwards.
 
-Residual (design D5-d): file IDENTITY cannot be checked lexically. A wrong
-path whose target still looks like a retention env — most obviously the
-shipped `infra/env/node27-timeseries-retention.example`, which carries a valid
-`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — parses cleanly and the guard
-accepts its window. Only the dual-pointer check above catches that.
+Residual (design D5-d): file IDENTITY cannot be checked lexically. Two cases
+differ:
+
+- pointing `NODE27_TIMESERIES_RETENTION_ENV` at an ARCHIVE env file — its own
+  (`node27-product-archive.env`) or its sibling
+  (`node27-storage-inventory-audit.env`) — now REFUSES. Those files carry the
+  pointer variable itself, which shares the `NODE27_TIMESERIES_RETENTION_`
+  prefix; it no longer counts as retention-env recognition, and the shipped
+  templates' real bytes are pinned refused by test, so any future
+  retention-prefixed line added to them turns that test red instead of
+  re-opening a silent default to 14 (`#1229` round-2);
+- a wrong path whose target genuinely looks like a retention env — most
+  obviously the shipped `infra/env/node27-timeseries-retention.example`, which
+  carries a valid `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — still parses
+  cleanly and the guard accepts its window. That remains lexically
+  undetectable; only the dual-pointer check above catches it.
 
 **Deployment consequence — read before deploying.** As of 2026-08-01 the live
 pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
