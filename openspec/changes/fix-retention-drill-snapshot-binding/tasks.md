@@ -168,6 +168,13 @@ Risk packs (expanded):
   drop-filtered targets → targets-scoping row (d) fails;
   (vii) comparison collapsed to start-only, and separately to end-only →
   the one-sided rows (e) fail. Capture outputs for the PR body.
+- [x] 7. (round-2 F1) Empty-universe emit pin: derivation-mode drill over
+  a completeness receipt with zero db-export/complete subjects still
+  writes `db_export_windows` (key present, `== []`) — asserted in the
+  existing `product_archive_only` empty-derivation row — plus mutant
+  (viii): emit made conditional on a non-empty universe
+  (omit-when-empty) → that row fails. Spec delta gains the
+  empty-universe scenario.
 
 ## Required evidence
 

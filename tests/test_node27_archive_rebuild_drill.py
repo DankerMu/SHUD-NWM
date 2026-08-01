@@ -2706,14 +2706,19 @@ def test_1177_receipt_with_two_windows_for_one_identity_is_refused(
 
 
 @pytest.mark.parametrize(
-    ("case", "subjects_spec"),
+    ("case", "subjects_spec", "expected_db_export_windows"),
     [
         # Healthy, product-archive-only archive: no db-export subject at all.
-        ("product_archive_only", [("forcing", "forc_pa", (_DROP_START, _DROP_END), "product-archive")]),
+        (
+            "product_archive_only",
+            [("forcing", "forc_pa", (_DROP_START, _DROP_END), "product-archive")],
+            [],
+        ),
         # db-export subjects exist but none overlaps the drop window.
         (
             "non_overlapping_db_export",
             [("forcing", "forc_old", ("2026-06-01T00:00:00Z", "2026-06-05T00:00:00Z"), "db-export")],
+            [{"start": "2026-06-01T00:00:00Z", "end": "2026-06-05T00:00:00Z"}],
         ),
     ],
 )
@@ -2722,6 +2727,7 @@ def test_1177_empty_derivation_is_evidence_not_a_refusal(
     zstd_bin: Path,
     case: str,
     subjects_spec: Sequence[tuple[str, str, tuple[str, str], str]],
+    expected_db_export_windows: list[dict[str, str]],
 ) -> None:
     """A derivation yielding zero manifests proceeds; the gate demands nothing.
 
@@ -2730,6 +2736,15 @@ def test_1177_empty_derivation_is_evidence_not_a_refusal(
     BEHIND ``_completeness_has_db_export_overlap`` (:622-637) — so refusing on
     every empty derivation was strictly broader than gate demand and killed
     the standard runbook invocation on a healthy archive.
+
+    #1220 rider: the emitted ``db_export_windows`` KEY must be present on both
+    cases — including ``product_archive_only``, whose universe is genuinely
+    empty. An "omit when empty" emit would land in the gate's key-ABSENT
+    branch (``node27_timeseries_retention.py:740-741``), which is the
+    pre-binding compat skip returning ``True`` — i.e. an empty-universe drill
+    receipt would silently disarm the snapshot-binding guard instead of
+    refusing the exact drift #1220 exists to catch. Hence direct indexing and
+    an exact expected list, never ``.get()``.
     """
     subjects = [
         _completeness_subject(lane, identity, window, coverage=coverage)
@@ -2818,6 +2833,11 @@ def test_1177_empty_derivation_is_evidence_not_a_refusal(
         "start": _DROP_START,
         "end": _DROP_END,
     }
+    # #1220: key present unconditionally — an empty universe is recorded as
+    # `[]`, not omitted (omission reads as the gate's pre-binding compat skip).
+    assert receipt["salvage_derivation"]["db_export_windows"] == (
+        expected_db_export_windows
+    ), case
     assert receipt["salvage_inputs"] == []
     assert not [entry for entry in receipt["coverage"] if entry["source"] == "db-export"]
     jsonschema.validate(
@@ -3429,7 +3449,8 @@ def test_1220_derivation_records_unfiltered_db_export_universe(
     `completeness_db_export_windows` seam below: `coverage: db-export` forces
     `verdict: complete` in the receipt schema
     (`schemas/archive_completeness_receipt.schema.json` coverage/verdict
-    contract), so the loader inside `_derive` would reject that shape.
+    contract), and this suite keeps its completeness fixtures schema-valid,
+    so that shape is driven at the pure-function seam.
     """
     inside = ("2026-06-14T06:00:00Z", "2026-06-21T06:00:00Z")
     outside = ("2026-05-01T00:00:00Z", "2026-05-10T00:00:00Z")
@@ -3464,7 +3485,7 @@ def test_1220_derivation_records_unfiltered_db_export_universe(
     assert {"start": product[0], "end": product[1]} not in derivation.db_export_windows
     assert derivation.completeness_generated_at == completeness["generated_at"]
 
-    # Verdict leg, at the pure-function seam (schema-unreachable via `_derive`).
+    # Verdict leg, at the pure-function seam (schema-invalid as a fixture).
     with_pending = drill.completeness_db_export_windows(
         _completeness_receipt(
             [

@@ -362,7 +362,7 @@ def completeness_db_export_windows(
     ``coverage == "db-export"`` AND ``verdict == "complete"``, deduped by
     exact pair and sorted ascending — byte-compatible with the gate's
     ``node27_timeseries_retention.derive_salvage_backed_windows``
-    (:847-882) MINUS its drop-window overlap filter, and with no lane
+    (:931-966) MINUS its drop-window overlap filter, and with no lane
     condition (the gate has none either).
 
     Unfiltered on purpose (design D2): it is the simpler record — no second
