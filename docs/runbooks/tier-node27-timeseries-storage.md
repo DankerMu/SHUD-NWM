@@ -1944,12 +1944,35 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    Each tick is bracketed in the log by the wrapper's own
    `node27-timeseries-retention: start summary=<receipt path>` and
    `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
-   lines (`scripts/node27_timeseries_retention_once.sh:143,151`): read only
-   the lines between the `start` line naming the receipt under investigation
-   and the matching `done rc=` line. Then require the hit's `chunk` field to
-   name a chunk that appears in THIS receipt's `dropped_chunks[]`. A hit
-   outside that bracket belongs to an earlier tick and says nothing about
-   this receipt's `0`.
+   lines (`scripts/node27_timeseries_retention_once.sh:143,151`), each
+   prefixed with a UTC ISO-8601 timestamp from the wrapper's `ts()`
+   (`scripts/node27_timeseries_retention_once.sh:23`). The receipt path in
+   those lines is NOT a tick key: the shipped env pins
+   `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` to one fixed file
+   (`infra/env/node27-timeseries-retention.example`), so every tick prints
+   the same path and the path ALONE cannot discriminate ticks. Correlate on
+   time instead: pick the bracket whose `start summary=` timestamp and
+   matching `done rc=` timestamp CONTAIN the receipt's `generated_at`
+   (schema-required, `format: date-time`), and read only the lines between
+   those two. Two kinds of bracket must be skipped because that tick wrote
+   no receipt at all: a `start` with no matching `done rc=` (a tick still in
+   flight, or a wrapper that died mid-tick), and a `done rc=2` tick — the
+   config refusal of item 3, where `RETENTION_CONFIG_INVALID` publishes no
+   receipt and the file at the pinned path still belongs to some earlier
+   tick. Neither is the bracket to read; do NOT fall back to "the last
+   bracket in the file". Then require the hit's `chunk` field to name a
+   chunk that appears in THIS receipt's `dropped_chunks[]`. A hit outside
+   that bracket belongs to an earlier tick and says nothing about this
+   receipt's `0`.
+
+   That second criterion does not close the refuse-then-retry window: a
+   prior tick that warned about chunk X and then refused with
+   `RETENTION_DROP_FAILED` (item 2) leaves a stale warning naming a chunk
+   that THIS tick may genuinely measure as 0 and drop, so X can sit in this
+   receipt's `dropped_chunks[]` while the only warning about it belongs to
+   the earlier tick. Within THAT window the misread direction is
+   conservative — it costs one extra reconciliation pass, never the reverse:
+   a failed measurement is never read as a real `0`.
 
    An in-bracket hit names the chunk and the redacted cause (§8.2.1) — the
    receipt's `freed_bytes` for that chunk is a best-effort 0, not a
