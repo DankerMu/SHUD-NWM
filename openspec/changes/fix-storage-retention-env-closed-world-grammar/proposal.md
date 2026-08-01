@@ -17,10 +17,13 @@ result with zero signal. Differentially reproduced 8/8 in the issue
 (helper=14 vs runner larger). PR #1229 shipped with the spec claim
 narrowed to "the detectable set" and these shapes recorded as a residual
 tracked by #1230; this change closes all 8 enumerated shapes and every
-other non-`KEY=VALUE` line shape. It does NOT close the multi-line
-quoted-value class when every line happens to conform (design D5(a2),
-fixture-review P1-1) — that variant stays a recorded, xfail-pinned
-fail-open residual.
+other non-`KEY=VALUE` line shape. Because the grammar is LINE-level it
+does NOT close two residual families, both recorded and both pinned by
+strict-xfail differential rows: the multi-line quoted-value class when
+every line happens to conform (design D5(a2), fixture-review P1-1), and
+value-level shell expansions that ASSIGN the window variable from inside
+a CONFORMING line's value (`X=${VAR:=21}`, `X=$((VAR+=7))` — design
+D5(b)). Both stay fail-open.
 
 ## What Changes
 
@@ -58,10 +61,13 @@ pre-assessed):
   `tier-node27-timeseries-storage.md` residual paragraph (~:204-215)
   rewritten: the 8 enumerated non-`KEY=VALUE` shapes are now refused,
   the file-format constraint (blank / `#` comment / `KEY=VALUE` only)
-  becomes the enforced contract, and the residual list narrows to the
-  multi-line quoted-value class — BOTH variants recorded: bare closing
-  quote (over-strict, fail-closed) and all-conforming lines (still
-  fail-open; quoted values MUST NOT span lines).
+  becomes the enforced contract (LINE-level), and the residual list
+  records BOTH remaining families: the multi-line quoted-value class
+  (bare closing quote → over-strict fail-closed; all-conforming lines →
+  still fail-open; quoted values MUST NOT span lines) and value-level
+  assigning expansions inside conforming values (`X=${VAR:=21}`,
+  `X=$((VAR+=7))` — still fail-open; values MUST NOT use assigning
+  expansions).
 
 ## Non-goals
 

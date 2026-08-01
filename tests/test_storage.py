@@ -1256,6 +1256,16 @@ _UNSET_SENTINEL = "__UNSET__"
 # row in `_UNSUPPORTED_SHAPE_ROWS`.
 _MULTILINE_QUOTED_ALL_CONFORMING_BODY = f'{_WINDOW_VAR}=30\nOTHER="\n{_WINDOW_VAR}=7\nX=y"\n'
 
+# Second residual class tripwire (#1230 design D5(b)): the grammar is LINE-level,
+# so a fully CONFORMING `KEY=VALUE` line can still assign the WINDOW variable
+# from inside its VALUE via a shell expansion. `X=${WINDOW:=21}` carries no
+# literal `WINDOW=` substring, so it slips the grammar AND the mention layer:
+# the helper sees only the sibling and answers the runner-equivalent 14 while
+# `set -a; . file` exports 21 — FAIL-OPEN. `X=$((WINDOW+=7))` is the arithmetic
+# sibling of the same family. Closing this needs expansion-aware value scanning,
+# out of scope here; pinned strict-xfail so the day that lands shows up as XPASS.
+_VALUE_LEVEL_EXPANSION_BODY = f"{_SIBLING}\nX=${{{_WINDOW_VAR}:=21}}\n"
+
 
 def _differential_corpus() -> list[Any]:
     rows: list[Any] = [
@@ -1272,6 +1282,20 @@ def _differential_corpus() -> list[Any]:
                     "#1230 design D5(a2) recorded residual: every line of a multi-line quoted "
                     "value conforms to the grammar, so the helper reads the inner assignment "
                     "while bash keeps it inside the outer string"
+                ),
+            ),
+        )
+    )
+    rows.append(
+        pytest.param(
+            _VALUE_LEVEL_EXPANSION_BODY,
+            id="value-level-expansion-still-diverges",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "#1230 design D5(b) recorded residual: value-level shell expansion on a "
+                    "CONFORMING line assigns the window variable itself, invisible to a "
+                    "line-level grammar and to the `NAME=` mention layer"
                 ),
             ),
         )

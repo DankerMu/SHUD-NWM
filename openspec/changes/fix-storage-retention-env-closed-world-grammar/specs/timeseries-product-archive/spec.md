@@ -66,10 +66,13 @@ considers healthy.
   no runner-equivalent default SHALL be resolved from that file; a
   quoted value spanning multiple lines whose closing-quote line
   violates the grammar is likewise refused (fail-closed false
-  refusal), while a multi-line quoted value whose every line happens
-  to conform to the grammar remains a recorded divergence the line
-  grammar cannot detect — quoted values MUST NOT span lines in the
-  deployed retention env
+  refusal), while TWO families of divergence remain recorded as
+  undetectable by a LINE-level grammar — a multi-line quoted value
+  whose every line happens to conform, and a conforming line whose
+  VALUE assigns the window variable through a shell expansion
+  (`X=${VAR:=21}`, `X=$((VAR+=7))`) — so the deployed retention env
+  MUST NOT let quoted values span lines and MUST NOT use assigning
+  expansions in any value
 
 #### Scenario: Missing or empty assignment mirrors the runner's default
 

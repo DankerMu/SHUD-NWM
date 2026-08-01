@@ -246,11 +246,23 @@ def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
     refusal is PER LINE and fires even when a plain assignment was accepted
     elsewhere in the file (#1227 round-2 C2).
 
-    Known residual (#1230 design D5(a)): a quoted value spanning lines is only
-    partly covered. A closing bare `"` line breaks the grammar (over-strict,
+    Known residuals — the grammar is LINE-level, so two families of divergence
+    survive it and BOTH are fail-open in their worst variant:
+
+    (a) #1230 design D5(a): a quoted value spanning lines is only partly
+    covered. A closing bare `"` line breaks the grammar (over-strict,
     fail-closed), but a multi-line quoted value whose every line happens to
     conform is still read line-wise while bash keeps it inside the outer
     string — quoted values MUST NOT span lines in the deployed retention env.
+
+    (b) #1230 design D5(b): a fully CONFORMING line can assign the window
+    variable from INSIDE its value via shell expansion — `X=${VAR:=21}` or
+    `X=$((VAR+=7))`. Those carry no literal `VAR=` substring, so they slip the
+    line grammar AND the mention layer: this helper reports the
+    runner-equivalent default while `set -a; . file` exports the expanded
+    window. Closing it needs expansion-aware value scanning; until then the
+    deployed retention env MUST NOT use expansions that assign
+    (`${VAR:=...}`, `$((VAR+=...))`) in any value.
     """
     if env_path is None:
         raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be set to an absolute path")

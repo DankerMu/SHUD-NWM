@@ -148,9 +148,26 @@ on the REAL deployed file (the `.example` scan cannot vouch for it):
     xfail differential row for the (a2) body (replacing the removed
     xfail as the class tripwire; a future unbalanced-quote fix shows
     up as XPASS).
-- (b) The grammar accepts any `KEY=VALUE` fullmatch line — including
-  values with `$VAR` / `$(cmd)` the shell would expand. Those are
-  PRESENT values for the window variable itself (refused downstream as
-  non-integers) but silently divergent for OTHER variables; the helper
-  only ever answers for the window variable, so divergence elsewhere is
-  out of its contract. Unchanged from #1229; documented, not widened.
+- (b) Value-level expansion class: the grammar is LINE-level, so a
+  fully CONFORMING `KEY=VALUE` line can assign THE WINDOW VARIABLE
+  ITSELF from inside its VALUE via shell expansion. This corrects the
+  round-earlier framing ("the helper only answers for the window
+  variable, so divergence elsewhere is out of its contract") — the
+  divergence is not elsewhere, it is the window variable. Two repros,
+  both differentially confirmed with real bash:
+  - `PER_TICK_BOUND=5` + `X=${WINDOW:=21}` → helper 14, `set -a; . file`
+    exports 21;
+  - `WINDOW=14` + `X=$((WINDOW+=7))` → helper 14, bash exports 21.
+
+  Both slip BOTH layers: the line fullmatches the grammar, and neither
+  carries the literal `WINDOW=` substring the mention layer keys on
+  (`X=$((WINDOW=21))` is caught only ACCIDENTALLY, by that substring).
+  STILL FAIL-OPEN. Closing it needs expansion-aware value scanning
+  (parse `${...}` / `$((...))` bodies for assigning forms) — follow-up
+  territory, explicitly out of scope here. RECORDED in docstring +
+  runbook + spec (values MUST NOT use assigning expansions) and pinned
+  by a NEW strict xfail differential row
+  (`value-level-expansion-still-diverges`) so a future fix shows up as
+  XPASS. Plain non-assigning `$VAR` / `$(cmd)` values remain as in
+  #1229: a PRESENT non-integer for the window variable (refused), taken
+  literally for other variables.
