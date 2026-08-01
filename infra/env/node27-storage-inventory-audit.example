@@ -33,8 +33,22 @@ OBJECT_STORE_PREFIX=s3://nhms
 # stable across restarts.
 NODE27_STORAGE_INVENTORY_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
-# Archive minimum age must match the shared retention invariant (>= 14 d).
+# Archive minimum age must satisfy the shared retention invariant: >= the
+# LIVE DB retention window, which config validation reads from
+# NODE27_TIMESERIES_RETENTION_ENV below at every startup — not from a
+# compile-time constant. A drifted pair refuses the audit fail-closed and the
+# refusal publishes blocked/CONFIG_INVALID over the completeness receipt the
+# retention gate consumes (#1227).
 NHMS_ARCHIVE_MIN_AGE_DAYS=14
+
+# Absolute path of the deployed retention env file (REQUIRED). Only
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS is read from it; nothing is sourced.
+# Moving or renaming that file breaks this guard fail-closed.
+# MUST name the same file the retention unit actually sources — the wrapper's
+# NODE27_TIMESERIES_RETENTION_ENV_FILE (default
+# $NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env);
+# repointing one without the other leaves this guard on a stale window.
+NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
 
 # DB URL for the audit. MUST be a read-only role (nhms_display_ro or the
 # equivalent read-only account); the audit itself is REPEATABLE READ READ

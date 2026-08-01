@@ -77,6 +77,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     open_directory_no_follow,
 )
+from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 
 SCHEMA_VERSION = "1.0"
 TOOL_VERSION = "node27-timeseries-retention/1"
@@ -89,7 +90,10 @@ _DEFAULT_COMPLETENESS_MAX_AGE_HOURS = 26
 _DEFAULT_DRILL_MAX_AGE_DAYS = 30
 
 # H3 per-tick bound + window defaults (matches spec §Window and mechanism).
-_DEFAULT_WINDOW_DAYS = 14
+# Shared with the archive-side min-age guard (#1227): the guard reads this
+# file's window variable and must resolve a missing/empty assignment to the
+# SAME default this runner uses, so the constant has one home.
+_DEFAULT_WINDOW_DAYS = DEFAULT_RETENTION_WINDOW_DAYS
 _DEFAULT_PER_TICK_BOUND = 5
 
 # H12 statement timeouts.

@@ -77,8 +77,9 @@ products). Same-volume staging + atomic rename after verification keeps
 moves atomic; checksums are verified before any source deletion, and a
 final-path object that fails verification on a later run is quarantined and
 re-archived rather than trusted. Candidates are cycles older than
-`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14 d; config-validated ≥ the 14-day DB
-retention window), so the hot object-store — and therefore the ADR 0001
+`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14 d; config-validated ≥ the live DB
+retention window read from the deployed retention env file), so the hot
+object-store — and therefore the ADR 0001
 display disk window — is never shorter than the DB hot window.
 *Alternatives rejected:* bare directory move (no integrity story,
 inode-heavy), per-file zstd (object explosion), cross-volume copy (no second
@@ -293,7 +294,7 @@ Invariant Matrix:
 - Regression: every evidence read and receipt replace is root-dirfd anchored with no-follow component opens; missing leaves behind symlinks, inode swaps, unsafe siblings and parse/hash cross-inode races fail closed.
 - Regression: salvage traversal is bounded to 10,000 manifests/100,000 total entries/eight levels, and per-run output traversal is bounded to 10,000 entries/eight levels; both inspect every bounded sibling and publish a schema-valid `blocked` terminal receipt on overflow when the bootstrapped destination is safe, while run-output list/stat/child-open stays on one held directory-FD tree across pathname swaps.
 - Regression: salvage enumeration/stat/child-open/manifest-read/object-hash stays on one held `db-export` FD tree; real-directory swaps cannot mix evidence namespaces or bypass the global entry cap.
-- Regression: archive age shares the >=14-day foundation invariant without truthiness fallback, and all readable mismatch evidence survives coverage fallback precedence.
+- Regression: archive age shares the live-retention-window foundation invariant without truthiness fallback, and all readable mismatch evidence survives coverage fallback precedence.
 - Regression: missing archive namespaces are ordinary absence; existing unsafe/unreadable/malformed/conflicting evidence terminates with a schema-valid `blocked` receipt, while a fully readable size/checksum mismatch is recorded and treated as absent coverage so the safe `incomplete` coverage receipt can still publish.
 - Regression: readable hot forcing manifest/member and state checksum mismatches are retained as absent-coverage evidence even when product/salvage wins; unsafe, malformed, permission and I/O failures remain blockers.
 - Regression: `schema_version=1.1` terminal receipts are deterministic, exact-`oneOf`, and atomically replaced; success branches cover every subject exactly once and enforce the complete/incomplete aggregate plus forcing/run gap-selector bijection, while pre-publication audit blockers publish `blocked`. Once the single publication attempt starts, pre-replace failure preserves prior bytes and post-replace failure leaves content unknown; both are stderr-only, never retried, and never reported as `published`.

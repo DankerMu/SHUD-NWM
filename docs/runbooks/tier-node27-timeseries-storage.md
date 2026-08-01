@@ -129,6 +129,124 @@ selected object must pass archive verification, source-retirement preflight,
 and the free-space gate. Operators use the same wrapper without `--enforce`
 for an additional manual preview.
 
+### Min-age guard reads the LIVE retention window (`#1227`)
+
+Both archive-side env files carry one REQUIRED line:
+
+```
+NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
+```
+
+At every mover and audit startup, configuration validation extracts
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` from that file (read-only, single
+variable, nothing sourced) and refuses when `NHMS_ARCHIVE_MIN_AGE_DAYS` is
+below it — so the hot object-store window, which is also the ADR 0001 display
+disk window for station forcing CSVs, is never shorter than the DB hot window.
+The old compile-time 14 is gone: raising the retention window now moves the
+guard with it. Resolution rules, all fail-closed except the last:
+
+- unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
+  unreadable file, or a present value that is not a positive integer → refuse,
+  never a constant fallback;
+- a non-comment line that CARRIES the literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring but is not accepted as
+  that variable's assignment — `readonly VAR=21`, `declare -i VAR=21`, a
+  truncated or otherwise malformed edit — or an accepted-shape line whose VALUE
+  is unsupported: an unquoted value starting with whitespace (`VAR= 21`, which
+  bash leaves UNSET), a `#`-first value (`VAR=#21`, which bash exports
+  verbatim), or a non-`\n` line break such as CRLF anywhere in the file →
+  refuse rather than mis-parse a window the runner does not use. That is the
+  whole detection boundary: it is substring-keyed, so shapes that omit the
+  `VAR=` substring are invisible (see the fail-open residual below). It is
+  judged PER LINE: a file that mixes a plain `VAR=14` with a later
+  `readonly VAR=30` refuses too, because sourcing it exports 30 and reporting
+  the earlier 14 would be fail-open (`#1229` round-2);
+- a readable file that is recognizably the deployed retention env (at least
+  one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
+  assignment is absent or empty → the retention runner's own default (14 d),
+  because that is the window the runner would actually run; the guard never
+  refuses a pair the runner itself considers healthy. A readable file with no
+  retention-family assignment at all (wrong path, `/dev/null`, a stale copy)
+  → refuse.
+
+Moving or renaming the deployed retention env file therefore breaks both
+guards fail-closed. It is one-way extraction, not value syncing — do not copy
+the window value into the archive env files.
+
+**Dual-pointer discipline.** The guards' `NODE27_TIMESERIES_RETENTION_ENV` and
+the retention runner wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE`
+(`scripts/node27_timeseries_retention_once.sh:20`, default
+`$NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env`)
+MUST reference the SAME file. Repointing the runner — a systemd drop-in, an
+edited unit, or an exported `NODE27_TIMESERIES_RETENTION_ENV_FILE` — without
+updating the guard variable in both archive env files leaves the guards
+validating a stale window with NO signal: they keep passing against whatever
+the old file says while retention drops on a different window. Change the two
+pointers in the same operator step and re-read both files afterwards.
+
+Residual (design D5-d): file IDENTITY cannot be checked lexically. Two cases
+differ:
+
+- pointing `NODE27_TIMESERIES_RETENTION_ENV` at an ARCHIVE env file — its own
+  (`node27-product-archive.env`) or its sibling
+  (`node27-storage-inventory-audit.env`) — now REFUSES. Those files carry the
+  pointer variable itself, which shares the `NODE27_TIMESERIES_RETENTION_`
+  prefix; it no longer counts as retention-env recognition, and the shipped
+  templates' real bytes are pinned refused by test, so any future
+  retention-prefixed line added to them turns that test red instead of
+  re-opening a silent default to 14 (`#1229` round-2);
+- a wrong path whose target genuinely looks like a retention env — most
+  obviously the shipped `infra/env/node27-timeseries-retention.example`, which
+  carries a valid `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — still parses
+  cleanly and the guard accepts its window. That remains lexically
+  undetectable; only the dual-pointer check above catches it.
+
+Residual (fail-open, `#1229` round-3): because unsupported-shape detection is
+keyed on that literal `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring,
+shell forms that set the window WITHOUT it are NOT detected — `VAR+=21`
+append, `: ${VAR:=21}` default-expansion, a nested `source`/`.` of another file
+from within the env, `printf -v`, `read`, `eval`. The guard then sees no window
+assignment, resolves the runner-equivalent default (14 d), and passes a
+`NHMS_ARCHIVE_MIN_AGE_DAYS=14` pair while the runner may export a LARGER window
+— fail-open, though of low likelihood since it takes a hand edit that turns the
+env into shell logic. The deployed retention env MUST therefore stay plain
+`KEY=VALUE` assignments plus `#` comments — no `+=`, no parameter-expansion
+defaults, no sourcing, no command substitution; tracked hardening is `#1230`
+(closed-world line grammar that refuses any non-`KEY=VALUE` line).
+
+**Deployment consequence — read before deploying.** As of 2026-08-01 the live
+pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21`, so the first deployment of this
+code refuses BOTH units at startup. That is the invariant working, not a
+regression, and the two refusals surface differently:
+
+- **Mover**: refusal is a journal/stderr `{"status":"failed",...}` line plus a
+  non-zero exit ONLY. Validation runs before any receipt write, so no receipt
+  is published and `/home/nwm/node27-product-archive-logs/receipt.json` keeps
+  its previous success payload. Do not point monitoring at that file for this
+  condition — watch the unit result instead. Hot-source deletion stops, which
+  is protective: the display gap stops growing.
+- **Audit**: refusal DOES publish a terminal `blocked` receipt with
+  `refusal_reason=CONFIG_INVALID` over its production receipt path
+  `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
+  That file is the `#855` retention gate's completeness input, so every audit
+  tick on a drifted pair also starves the retention gate. Still fail-closed in
+  the safe direction: retention refuses and nothing is dropped.
+
+Clearing it is an operator decision with a real capacity trade-off, and there
+are exactly two exits — no warn-only mode exists, because a warning is the
+comment-level coupling this guard replaced:
+
+1. raise `NHMS_ARCHIVE_MIN_AGE_DAYS` to >= the live window in BOTH archive env
+   files, after assessing free space on the shared 1.7 TB volume (a longer hot
+   window means more hot bytes); or
+2. lower `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` back to the value the
+   archive envs already satisfy.
+
+Read the live values off the box before deciding (§7.3 step 3 shows the
+extraction). The code change ships no live env edits — the deployment step and
+the min-age-vs-capacity decision are operator actions.
+
 ### Reading receipts
 
 - Product archive mover receipt:

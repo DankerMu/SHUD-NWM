@@ -35,7 +35,8 @@ Order is load-bearing:
   the non-display tooling (inventory audit, rebuild drill, salvage);
   configuration validation rejects (a) any overlap between the archive root
   and any retention/cleanup target roots and (b)
-  `NHMS_ARCHIVE_MIN_AGE_DAYS` below the DB retention window (14 days);
+  `NHMS_ARCHIVE_MIN_AGE_DAYS` below the live DB retention window read from
+  the deployed retention env file;
   display API code paths do not import the archive resolver (ADR 0001
   carve-out).
   Test rows:
@@ -316,8 +317,9 @@ Order is load-bearing:
   validation uses `jsonschema` as a direct production dependency, not a dev
   transitive dependency.
   Archive minimum age is parsed without truthiness fallback and validated
-  against the shared 14-day DB retention invariant; explicit or environment
-  values below 14 (including zero) fail before DB/filesystem audit work.
+  against the shared live-retention-window invariant; explicit or environment
+  values below the live window (including zero) fail before DB/filesystem
+  audit work.
   Every readable size/checksum mismatch discovered for a subject is appended
   to its evidence before coverage precedence is selected, so a valid fallback
   copy never erases evidence of a corrupt sibling. This includes readable hot

@@ -49,6 +49,7 @@ import pytest
 # applies to the ``psycopg2`` import above: the connect-failure row needs the
 # REAL ``psycopg2.OperationalError`` class, which the fake does not carry.
 from packages.common.redaction import REDACTION_MARKER
+from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 from scripts import node27_timeseries_retention as retention
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -572,6 +573,37 @@ def test_config_defaults_lock_path_to_canonical(tmp_path: Path) -> None:
     env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_LOCK_PATH=None)
     config = retention.config_from_args(_args(), env)
     assert str(config.lock_path) == "/tmp/nhms-node27-timeseries-retention.lock"
+
+
+def test_window_default_is_drift_locked_to_the_shared_constant() -> None:
+    """#1227 row (h): the archive-side guard resolves a missing/empty window
+    assignment to the SAME default this runner uses — pinned here as VALUE
+    equality with the shared constant in `packages.common.storage`.
+
+    Honest limit (#1229 round-1 review B4): `is` cannot prove import identity
+    for 14, which CPython interns as a small int, so the identity assertion
+    below degenerates to value equality and a re-hardcoded local copy would
+    still pass. The real protection is directional: changing the shared
+    constant while this runner keeps a hardcoded literal turns this test red.
+    """
+    assert retention._DEFAULT_WINDOW_DAYS is DEFAULT_RETENTION_WINDOW_DAYS
+    assert DEFAULT_RETENTION_WINDOW_DAYS == 14
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": None}, id="missing-assignment"),
+        pytest.param({"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": ""}, id="empty-value"),
+    ],
+)
+def test_window_resolution_for_missing_or_empty_env_is_unchanged(
+    tmp_path: Path, override: dict[str, str | None]
+) -> None:
+    """#1227 row (j): moving the default constant's home changed no runner behavior."""
+    config = retention.config_from_args(_args(), _base_env(tmp_path, **override))
+
+    assert config.window_days == 14
 
 
 def test_config_enforce_env_toggles(tmp_path: Path) -> None:
