@@ -1756,6 +1756,20 @@ demand set, not merely about whatever the operator typed. Because
 (§7.4), a derivation narrower than the retention window is visible
 without re-reading the completeness receipt.
 
+**Reading the refusal (#1175).** The refused receipt's `refusal_reason`
+names the shortfall: `DRILL_COVERAGE_DB_EXPORT_MISSING:<start>/<end>` is
+the first uncovered salvage-backed window CLIPPED to the drop window, and
+`DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window` means an
+overlapping db-export subject derived no window at all (see §8.2 for both
+forms). Use it to diagnose, not to narrow the next drill: check that the
+named window is one the drill actually judged (`salvage_derivation`
+§7.4), or — if its `end` precedes its `start` — that the completeness
+subject behind it is corrupt rather than the drill deficient. The remedy
+is unchanged and stays the derived one above: rerun the drill with
+`--completeness-receipt` and a drop window ⊇ the retention drop window.
+Only the FIRST shortfall is named per tick, so a second refusal naming a
+different window after a fix is expected, not a regression.
+
 **The drill's drop window MUST contain (⊇) the retention run's drop
 window.** Use the §7.3 step 3 interval verbatim, or something wider —
 never narrower, and never hand-narrowed to make an expensive drill
@@ -2033,6 +2047,25 @@ surfaces in the same commit.
   window at all (fail-closed), and when a salvage-backed window's
   intersection with the drop window is inverted (a corrupt subject window
   whose `end` precedes its `start`; fail-closed guard, #1162).
+  Carries a detail suffix localizing the shortfall (#1175), in one of two
+  forms — the bare code above stays the registered wire code and a strict
+  prefix of both:
+  - `:<clipped_start>/<clipped_end>` — the FIRST uncovered salvage-backed
+    window in ascending window order, CLIPPED to the drop window, each
+    endpoint rendered as UTC `Z` ISO-8601 (e.g.
+    `…_MISSING:2026-06-01T00:00:00Z/2026-06-08T00:00:00Z`). Only the first
+    shortfall is reported per tick (the leg early-returns); later ticks
+    surface the next one. An inverted clip renders its interval verbatim,
+    so an `end` preceding the `start` IS the diagnosis (corrupt subject
+    window).
+  - `:no-derivable-window` — the empty-derivation branch: an overlapping
+    db-export subject exists but no salvage-backed window is derivable, so
+    there is no interval to name.
+  The suffix is diagnostic localization, not a remedy: it says WHICH window
+  fell short (check the drill actually judged it, or that the completeness
+  subject is not corrupt). The remedy stays the one in
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate) — rerun the
+  drill with `--completeness-receipt` over a window ⊇ the drop window.
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
   failure before any DB call. Emitted to stderr as a single JSON line
   `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;
@@ -2368,6 +2401,14 @@ records in `salvage_derivation.db_export_windows` — so membership is
 judged pair-for-pair against the recorded snapshot; see
 [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)
 (`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`).
+
+Cross-note for the refusal suffix (#1175): the window a refused receipt
+names in `DRILL_COVERAGE_DB_EXPORT_MISSING:<start>/<end>` is the CLIPPED
+intersection rendered by the runner's own UTC `Z` serializer, whereas
+these entries are the UNCLIPPED subject strings echoed verbatim from the
+completeness receipt — so the suffix is not expected to string-match any
+`salvage_backed_windows[]` entry (a refused receipt carries no such array
+anyway); compare the intervals by value, never by grep.
 
 ## Rollback (unit-level, not data-level)
 

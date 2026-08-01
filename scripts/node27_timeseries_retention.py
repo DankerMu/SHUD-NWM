@@ -827,7 +827,11 @@ def check_drill_gate(
             # D2 fail-closed (#1162): the driver saw a db-export subject but
             # nothing is derivable from it (verdict != complete). An empty
             # derivation is NEVER "requirement satisfied".
-            reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
+            # #1175: dedicated payload — no window exists to name, and the
+            # lowercase-hyphen token can never collide with an ISO interval.
+            reasons.append(
+                f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}:no-derivable-window"
+            )
             return reasons
         if not _drill_snapshot_binds(receipt, targets):
             # #1220: the requirement set drifted past the drill's snapshot.
@@ -844,7 +848,15 @@ def check_drill_gate(
             # to `_drill_covers`, which would vacuously "cover" it — see
             # `_clip_to_drop`.
             if clipped.end < clipped.start or not _drill_covers(coverage, "db-export", clipped):
-                reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
+                # #1175: localize the shortfall — the FIRST uncovered target in
+                # the ascending derivation order, rendered as the CLIPPED
+                # interval (an inverted clip renders inverted, which IS the
+                # diagnosis). Detail suffix only; the bare code stays the
+                # registered `WIRE_CODES` token and a strict prefix.
+                reasons.append(
+                    f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}"
+                    f":{_iso(clipped.start)}/{_iso(clipped.end)}"
+                )
                 return reasons
     return reasons
 

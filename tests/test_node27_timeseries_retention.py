@@ -95,6 +95,25 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+# #1175: the db-export coverage refusal carries a DETAIL SUFFIX localizing the
+# shortfall — the FIRST uncovered salvage-backed target in ascending derivation
+# order, CLIPPED to the drop window (`<start>/<end>`), or the dedicated
+# `no-derivable-window` token for the #1162 D2 empty-derivation branch. The bare
+# code stays the registered `WIRE_CODES` member and a strict prefix of both
+# forms. These helpers spell the wire token and the separator out literally so
+# the assertions are an oracle for the format, not an echo of the emitter.
+_DB_EXPORT_MISSING_NO_DERIVABLE = "DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window"
+
+
+def _db_export_missing(start: datetime, end: datetime) -> str:
+    """Expected `refusal_reason` for a per-window db-export shortfall (#1175).
+
+    ``start`` / ``end`` are the CLIPPED bounds the caller derives from its own
+    fixture windows ∩ drop window — an inverted clip is rendered verbatim.
+    """
+    return f"DRILL_COVERAGE_DB_EXPORT_MISSING:{_iso(start)}/{_iso(end)}"
+
+
 def _completeness_receipt(
     *,
     generated_at: datetime = _NOW - timedelta(hours=1),
@@ -935,7 +954,11 @@ def test_drill_coverage_db_export_missing_refuses(tmp_path: Path) -> None:
     receipt = retention.run_retention(
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
     )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: drop window is the eligible chunk's range [72 d, 65 d]; the sole
+    # salvage subject [70 d, 63 d] clips to [70 d, 65 d].
+    assert receipt["refusal_reason"] == _db_export_missing(
+        _NOW - timedelta(days=70), _NOW - timedelta(days=65)
+    )
 
 
 def test_drill_coverage_db_export_not_required_without_completeness_overlap(
@@ -1070,7 +1093,9 @@ def test_drill_db_export_gap_inside_salvage_window_still_refuses(tmp_path: Path)
 
     receipt = _run_dry(tmp_path, completeness, drill, chunk)
 
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: the single salvage target [74 d, 70 d] is already inside the drop
+    # window, so the suffix renders it unchanged.
+    assert receipt["refusal_reason"] == _db_export_missing(drop_start, salvage_end)
 
 
 def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
@@ -1100,7 +1125,9 @@ def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
 
     receipt = _run_dry(tmp_path, completeness, drill, chunk)
 
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: the FIRST window is covered, so the suffix names the SECOND
+    # (uncovered) target [68 d, 66 d] — not the first, not the drop window.
+    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
 
 
 def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
@@ -1136,6 +1163,51 @@ def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
 
     assert receipt.get("refusal_reason") is None
     assert receipt["outcome"] == "dry-run"
+
+
+def test_drill_db_export_refusal_names_the_kth_uncovered_salvage_window(
+    tmp_path: Path,
+) -> None:
+    """#1175 localization oracle: with THREE salvage-backed targets and the gap
+    in the MIDDLE one, the suffix names exactly that window.
+
+    The neighbouring two-window row has its gap in the LAST target, so it
+    cannot tell "first uncovered target" apart from "last target" or "last
+    uncovered target". Here the first and third targets are fully covered by
+    the drill's db-export union, so any emitter that reports targets[0],
+    targets[-1], the hull of the targets, or the drop window itself renders a
+    different interval than the asserted [70 d, 68 d].
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    first_start, first_end = drop_start, _NOW - timedelta(days=72)
+    second_start, second_end = _NOW - timedelta(days=70), _NOW - timedelta(days=68)
+    third_start, third_end = _NOW - timedelta(days=66), _NOW - timedelta(days=64)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(first_start, first_end, version="fv-salvage-a"),
+            _product_archive_subject(first_end, second_start, version="fv-product-1"),
+            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
+            _product_archive_subject(second_end, third_start, version="fv-product-2"),
+            _db_export_subject(third_start, third_end, version="fv-salvage-c"),
+            _product_archive_subject(third_end, drop_end, version="fv-product-3"),
+        ]
+    )
+    # Covers the first and third salvage windows; the second has NO db-export
+    # tuple at all.
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(first_start, first_end)
+            + _db_export_tuples(third_start, third_end)
+        )
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-kth", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
 
 
 def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
@@ -1180,7 +1252,9 @@ def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
         now=_NOW,
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: no window is derivable, so the refusal carries the dedicated
+    # payload rather than an interval.
+    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
 
 
 def test_drill_db_export_salvage_window_clipped_at_drop_window_start(
@@ -1256,6 +1330,37 @@ def _drill_gate_reasons(
     )
 
 
+def test_drill_db_export_refusal_renders_clipped_not_raw_subject_bounds() -> None:
+    """#1175: a subject overrunning the drop window on BOTH sides (the live
+    shape — 7 d forcing_version windows vs. chunk boundaries) is reported by its
+    CLIPPED bounds.
+
+    The raw subject spans [80 d, 50 d]; the requirement — and therefore the
+    refusal — is only [74 d, 60 d]. An emitter echoing `target["start"]` /
+    `target["end"]` would name a window the retention tick never judged and
+    would send the operator hunting outside the drop window.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    raw_start = _NOW - timedelta(days=80)
+    raw_end = _NOW - timedelta(days=50)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(raw_start, raw_end, version="fv-salvage-overrun")]
+    )
+    # Union stops 5 d short of the clipped end → the clipped target is uncovered.
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(drop_start, _NOW - timedelta(days=65))
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [_db_export_missing(drop_start, drop_end)]
+    assert _iso(raw_start) not in reasons[0]
+    assert _iso(raw_end) not in reasons[0]
+
+
 def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
     """#1162 right-edge oracle: a 6 h db-export shortfall at the END of each
     salvage window (∩ drop window) refuses.
@@ -1292,7 +1397,9 @@ def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: both targets fall short, and the early return surfaces the FIRST
+    # in ascending order — the inner window [72 d, 70 d].
+    assert reasons == [_db_export_missing(inner_start, inner_end)]
 
 
 def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
@@ -1329,7 +1436,9 @@ def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the first target is the overhanging subject, and the suffix carries
+    # its CLIPPED start (`drop.start`), not the raw 80 d subject start.
+    assert reasons == [_db_export_missing(drop_start, overhang_end)]
 
 
 def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None:
@@ -1356,7 +1465,8 @@ def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the zero-length clip renders as the same instant twice.
+    assert reasons == [_db_export_missing(drop_start, drop_start)]
 
 
 def test_drill_db_export_zero_length_clipped_window_covered_admits() -> None:
@@ -1419,7 +1529,10 @@ def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the inverted clip [64 d, 70 d] is rendered VERBATIM — a refusal
+    # naming an interval whose end precedes its start is the diagnosis that the
+    # completeness subject itself is corrupt.
+    assert reasons == [_db_export_missing(inverted_start, inverted_end)]
 
 
 def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> None:
@@ -1457,7 +1570,11 @@ def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> Non
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the first target is covered, so the suffix names the SECOND —
+    # rendered inverted, exactly as the corrupt subject clips.
+    assert reasons == [
+        _db_export_missing(_NOW - timedelta(days=64), _NOW - timedelta(days=70))
+    ]
 
 
 def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -> None:
@@ -2126,7 +2243,8 @@ def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> No
 
     reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the D2 payload, not an interval — nothing was derivable to name.
+    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
 
 
 def test_snapshot_narrowed_drill_refuses_with_window_code_first() -> None:
