@@ -2486,13 +2486,33 @@ def test_main_emits_config_invalid_wire_code_on_non_absolute_receipt_path(
 # ---------------------------------------------------------------------------
 
 
-def test_default_drop_chunk_bounds_exact_physical_interval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The SQL lower bound prevents a later selected chunk from cascading
-    through an older boundary-partial chunk that was deliberately deferred.
+class _DropProbe:
+    """Recorder for the fake psycopg2 driving the real ``_default_drop_chunk``.
+
+    ``closed`` counts ``connection.close()`` calls: ``_default_drop_chunk``
+    closes in a ``finally``, so the count must be 1 on the raising rows too —
+    a guard that escaped the ``try`` would leak the connection on the one path
+    that runs after an irreversible ``DROP CHUNK`` attempt.
     """
-    executed: list[tuple[str, tuple | None]] = []
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.closed = 0
+
+    @property
+    def drop_statement(self) -> tuple[str, tuple | None]:
+        return next((sql, params) for sql, params in self.executed if "drop_chunks" in sql)
+
+
+def _install_fake_drop_psycopg2(
+    monkeypatch: pytest.MonkeyPatch, dropped_rows: Sequence[tuple[str]]
+) -> _DropProbe:
+    """Inject a fake ``psycopg2`` driving ``_default_drop_chunk`` (no DB).
+
+    ``dropped_rows`` is what server-side ``drop_chunks`` reports back — the
+    exact input the H3 identity guard judges.
+    """
+    probe = _DropProbe()
 
     class _FakeCursor:
         def __enter__(self) -> "_FakeCursor":
@@ -2502,10 +2522,10 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
             return None
 
         def execute(self, sql: str, params: tuple | None = None) -> None:
-            executed.append((sql, params))
+            probe.executed.append((sql, params))
 
         def fetchall(self) -> list[tuple[str]]:
-            return [("_timescaledb_internal.chk-covered",)]
+            return list(dropped_rows)
 
     class _FakeConn:
         def __enter__(self) -> "_FakeConn":
@@ -2518,15 +2538,25 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
             return _FakeCursor()
 
         def close(self) -> None:
-            return None
+            probe.closed += 1
 
     import types
 
     monkeypatch.setitem(
-        __import__("sys").modules,
+        sys.modules,
         "psycopg2",
         types.SimpleNamespace(connect=lambda _url: _FakeConn()),
     )
+    return probe
+
+
+def test_default_drop_chunk_bounds_exact_physical_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SQL lower bound prevents a later selected chunk from cascading
+    through an older boundary-partial chunk that was deliberately deferred.
+    """
+    probe = _install_fake_drop_psycopg2(monkeypatch, [("_timescaledb_internal.chk-covered",)])
     config = _build_config(tmp_path, enforce=True)
     chunk = _chunk(
         "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
@@ -2534,13 +2564,79 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
 
     retention._default_drop_chunk(config, chunk)
 
-    drop_sql, params = next((sql, params) for sql, params in executed if "drop_chunks" in sql)
+    drop_sql, params = probe.drop_statement
     assert "newer_than" in drop_sql
     assert params == (
         chunk.range_end,
         chunk.range_start,
         "hydro.river_timeseries",
     )
+
+
+# ---------------------------------------------------------------------------
+# #1214 — H3 identity guard: negative oracle
+#
+# `_default_drop_chunk`'s `dropped_names != [chunk.qualified_name]` check is
+# the SOLE runtime enforcement of H3 BLOCKING ("bind returned identity AND
+# cardinality"), and runbook §8.6 item 5's trichotomy depends on it. Before
+# these rows the `raise` was never executed by any test — deleting the whole
+# guard left the suite green on an irreversible DROP CHUNK path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("dropped_rows", "expected_returned_repr"),
+    [
+        ((), "[]"),
+        ((("_timescaledb_internal.chk-other",),), "['_timescaledb_internal.chk-other']"),
+    ],
+    ids=["chunk-vanished-mid-tick", "server-dropped-a-different-chunk"],
+)
+def test_default_drop_chunk_rejects_unexpected_drop_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dropped_rows: Sequence[tuple[str]],
+    expected_returned_repr: str,
+) -> None:
+    """H3: any ``drop_chunks`` result other than the selected chunk fails closed.
+
+    Two directions, both reachable in production:
+
+    * zero rows — the chunk vanished between enumeration and drop (a
+      concurrent manual drop / retention policy), so this tick's evidence no
+      longer describes what the server did;
+    * a DIFFERENT chunk name — a surprising server-side range decision
+      succeeded on something the gate never evidenced.
+
+    Cardinality alone cannot separate the second case from success, which is
+    why the guard binds identity too. The expected message is written out by
+    hand rather than recomputed from ``dropped_rows``, so the assertion is an
+    independent oracle rather than a mirror of the implementation.
+    """
+    probe = _install_fake_drop_psycopg2(monkeypatch, dropped_rows)
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(
+        "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
+    )
+    expected_message = (
+        f"drop_chunks returned {expected_returned_repr} for "
+        f"{chunk.qualified_name}; expected exact selected chunk"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"{re.escape(chunk.qualified_name)}; expected exact selected chunk",
+    ) as excinfo:
+        retention._default_drop_chunk(config, chunk)
+
+    assert str(excinfo.value) == expected_message
+    # The guard fired AFTER the real drop_chunks statement was issued — not
+    # from some earlier failure that never reached the identity check.
+    drop_sql, params = probe.drop_statement
+    assert "drop_chunks" in drop_sql
+    assert params == (chunk.range_end, chunk.range_start, "hydro.river_timeseries")
+    # `finally: connection.close()` still runs on the raising path.
+    assert probe.closed == 1
 
 
 def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
