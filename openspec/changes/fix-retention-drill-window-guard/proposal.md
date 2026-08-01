@@ -42,8 +42,10 @@ scheduled):
   (PASS→REFUSE flip), no-derivation-section compat (including the pinned
   residual: cross-subject substitution still passes without the section),
   null window pass, containment pass incl. the EQUALITY boundary (drill ==
-  retention window → PASS; the §7.5 standard invocation makes equality the
-  live common case), unusable-shape refusals, refusal-surface integration
+  retention window → PASS; the §7.3 step 3 interval is a conservative
+  superset of the runner's own drop window, so a live drill records an
+  equal-or-wider window — equality is the tight end and must pass),
+  unusable-shape refusals, refusal-surface integration
   (reasons[0] → `refusal_reason`), and the wire-code registry updates.
 - `docs/runbooks/tier-node27-timeseries-storage.md` +
   `openspec/changes/tier-node27-timeseries-storage/design.md`: §7.5

@@ -38,8 +38,9 @@ unparseable, or inverted window) SHALL refuse with the same code.
 - **WHEN** the recorded `drop_window` is null, contains the retention drop
   window, or is exactly equal to it, with otherwise complete evidence
 - **THEN** the gate SHALL NOT emit `DRILL_DERIVATION_WINDOW_TOO_NARROW`
-  (equality is the live common case per the §7.5 standard invocation; no
-  false negatives introduced)
+  (a live drill records an equal-or-wider window than the runner's own
+  drop window — equality is the tight end of that range; no false
+  negatives introduced)
 
 #### Scenario: Unusable derivation shape refuses
 

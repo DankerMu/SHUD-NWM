@@ -88,9 +88,10 @@ Risk packs (expanded):
   (c) `drop_window: null` passes;
   (d) containing drill window + complete evidence passes, AND the
   equality boundary explicitly: drill window EXACTLY EQUAL to the
-  retention window → PASS (the §7.5 standard invocation makes equality
-  the live common case; a strict-inequality bug would refuse every
-  production run);
+  retention window → PASS (the §7.3 step 3 interval is a conservative
+  superset of the runner's own drop window, so a live drill records an
+  equal-or-wider window — equality is the tight end of that range and
+  must pass);
   (e) unusable-shape refusals: section not a Mapping / `drop_window` key
   missing / window unparseable / inverted — all refuse with the new code;
   (f) integration: `run_retention` surfaces the code as
@@ -114,6 +115,9 @@ Risk packs (expanded):
   no-section branch removed (treats absent section as refuse) →
   no-section-compat test fails; (iv) boundary mutation `<=`/`>=` → `<`/`>`
   → the equality-boundary row (d) fails. Capture outputs for the PR body.
+  Round-1 review additions: (v) start conjunct deleted / start compared to
+  the wrong endpoint → the start-only-narrowed row fails; (vi) guard block
+  moved after the coverage legs → the §8.2 precedence-pin row fails.
 
 ## Required evidence
 
