@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -2171,14 +2172,40 @@ def test_dsn_never_appears_in_stderr_or_receipt(
     jsonschema.validate(receipt, _load_schema())
 
 
+@pytest.mark.parametrize(
+    ("libpq_tail", "expected_echo", "retained_phrase"),
+    [
+        (
+            'FATAL:  password authentication failed for user "alice"',
+            'user "***"',
+            "password authentication failed",
+        ),
+        (
+            'FATAL:  role "alice" does not exist',
+            'role "***"',
+            "does not exist",
+        ),
+    ],
+    ids=["password-auth-failed", "missing-role"],
+)
 def test_uncaught_libpq_auth_failure_redacts_role_on_both_surfaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    libpq_tail: str,
+    expected_echo: str,
+    retained_phrase: str,
 ) -> None:
-    """Uncaught path, libpq auth shape: the role echo becomes ``user "***"``.
+    """Uncaught path, libpq role-echo shapes: both keywords are scrubbed.
 
-    Diagnosability trade-off pinned here: the ``password authentication
-    failed`` phrase and the host/port echo are deliberately RETAINED so the
-    operator can still tell an auth failure from a timeout.
+    libpq echoes the DSN role back in TWO shapes — ``... for user "alice"``
+    (auth failure) and ``role "alice" does not exist`` (role dropped/renamed
+    mid-run). Scrubbing only the first leaves the second bleeding the DSN
+    username into the receipt and the 0644 ``retention.log``.
+
+    Diagnosability trade-off pinned here: the failure phrase and the host/port
+    echo are deliberately RETAINED so the operator can still tell an auth
+    failure from a timeout.
     """
     env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
     for key, value in env.items():
@@ -2186,8 +2213,7 @@ def test_uncaught_libpq_auth_failure_redacts_role_on_both_surfaces(
 
     def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
         raise psycopg2.OperationalError(
-            'connection to server at "127.0.0.1", port 55432 failed: '
-            'FATAL:  password authentication failed for user "alice"'
+            f'connection to server at "127.0.0.1", port 55432 failed: {libpq_tail}'
         )
 
     code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
@@ -2200,8 +2226,10 @@ def test_uncaught_libpq_auth_failure_redacts_role_on_both_surfaces(
     receipt = json.loads(receipt_bytes.decode("utf-8"))
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:OperationalError:")
-    assert 'user "***"' in receipt["refusal_reason"]
-    assert "password authentication failed" in receipt["refusal_reason"]
+    assert expected_echo in receipt["refusal_reason"]
+    assert retained_phrase in receipt["refusal_reason"]
+    # Host/port echo retained by design (non-goal in the #1213 fixture).
+    assert 'connection to server at "127.0.0.1", port 55432' in receipt["refusal_reason"]
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -2274,15 +2302,112 @@ def test_drop_failure_reason_redacts_credentials_on_both_surfaces(
     jsonschema.validate(receipt, _load_schema())
 
 
+def test_redaction_failure_still_publishes_refused_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The chokepoint is TOTAL: an unimportable redaction dep cannot eat the receipt.
+
+    Driver-less window (venv rebuild, broken wheel): psycopg2 is unimportable,
+    so the chokepoint's function-local ``packages.common.redaction`` import —
+    which pulls ``psycopg2.extensions`` at module scope — raises INSIDE
+    ``main()``'s except handler. Without totality that ``ModuleNotFoundError``
+    escapes ``main()``: no refused receipt is published at all and a raw
+    traceback (carrying whatever the driver echoed) lands in ``retention.log``.
+
+    Fail-closed on both axes: the unredactable text is withheld ENTIRELY (no
+    credential can survive), while the wire code, the original exception type
+    name and the published receipt all survive.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    # Force a real re-import of the redaction module (the test module caches
+    # it at import time) and make every psycopg2 entry unimportable — the
+    # already-cached ``psycopg2.extensions`` submodule would otherwise satisfy
+    # the redaction module's import straight out of ``sys.modules``.
+    monkeypatch.delitem(sys.modules, "packages.common.redaction", raising=False)
+    for name in [n for n in sys.modules if n == "psycopg2" or n.startswith("psycopg2.")]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+
+    def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        raise RuntimeError(
+            f'connect failed (tried {_MEASURE_PROBE_DSN}): FATAL:  role "alice" does not exist'
+        )
+
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+    assert receipt_path.exists(), "refused receipt MUST survive a redaction failure"
+    receipt_bytes = receipt_path.read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == (
+        "RETENTION_UNCAUGHT_ERROR:RuntimeError: "
+        "<error text withheld: redaction unavailable (RuntimeError)>"
+    )
+    jsonschema.validate(receipt, _load_schema())
+
+
+# A driver-less interpreter: psycopg2 (and every submodule) is hard-blocked at
+# the meta-path level, then the runner is imported and its argument parser is
+# exercised. Run as a subprocess so the block is total — an in-process check
+# cannot un-import what pytest already loaded.
+_DRIVERLESS_IMPORT_PROBE = '''
+import sys
+
+
+class _BlockPsycopg2:
+    def find_spec(self, name, path=None, target=None):
+        if name == "psycopg2" or name.startswith("psycopg2."):
+            raise ImportError("psycopg2 blocked by the driver-less import probe")
+        return None
+
+
+sys.meta_path.insert(0, _BlockPsycopg2())
+
+# The blocker must actually bite, else the probe is vacuous.
+try:
+    import psycopg2  # noqa: F401
+except ImportError:
+    pass
+else:
+    raise SystemExit("probe vacuous: psycopg2 imported despite the blocker")
+
+from scripts import node27_timeseries_retention as runner
+
+try:
+    runner._parser().parse_args(["--help"])
+except SystemExit as exc:
+    if exc.code not in (0, None):
+        raise SystemExit(f"--help failed with exit code {exc.code!r}")
+print("DRIVERLESS_IMPORT_OK")
+'''
+
+
 def test_redaction_and_psycopg2_imports_stay_deferred() -> None:
     """The runner must import cleanly without psycopg2 installed.
 
     ``packages.common.redaction`` imports ``psycopg2.extensions`` at module
     scope, so routing two more call sites through the redaction helper is
     exactly the kind of change that tempts a module-scope import and breaks
-    ``--help`` / config parsing on a driver-less host. Guarded statically on
-    the module's own top-level source, plus a positive check that the helper
-    still does the import inside its body.
+    ``--help`` / config parsing on a driver-less host.
+
+    Two independent guards:
+
+    1. Static: the module's own top level carries no psycopg2 / redaction
+       import. Both the ``from packages.common.redaction import ...`` and the
+       ``from packages.common import redaction`` spellings are recorded —
+       matching only ``ImportFrom.module`` would register ``packages.common``
+       for the second spelling and wave the breaking mutant through.
+    2. Behavioral: a subprocess with psycopg2 hard-blocked imports the module
+       and runs ``--help``. The static check cannot see an import that creeps
+       in through some other module in the import graph; this one can.
     """
     tree = ast.parse(Path(retention.__file__).read_text(encoding="utf-8"))
     top_level: set[str] = set()
@@ -2291,12 +2416,23 @@ def test_redaction_and_psycopg2_imports_stay_deferred() -> None:
             top_level.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             top_level.add(node.module)
+            top_level.update(f"{node.module}.{alias.name}" for alias in node.names)
 
     assert not [name for name in top_level if name == "psycopg2" or name.startswith("psycopg2.")]
     assert "packages.common.redaction" not in top_level
 
     helper_source = inspect.getsource(retention._redact_error_text)
     assert "from packages.common.redaction import" in helper_source
+
+    probe = subprocess.run(
+        [sys.executable, "-c", _DRIVERLESS_IMPORT_PROBE],
+        cwd=str(_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert "DRIVERLESS_IMPORT_OK" in probe.stdout
 
 
 # ---------------------------------------------------------------------------

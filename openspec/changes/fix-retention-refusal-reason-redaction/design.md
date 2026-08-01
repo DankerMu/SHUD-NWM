@@ -35,10 +35,14 @@ but there must be exactly ONE redaction helper in the module afterwards, with
 call sites at: measurement diagnostic (existing), drop-phase reason, uncaught
 fallback reason.
 
-Redaction contract (unchanged from #1212 helper):
+Redaction contract (round-1 hardened from the #1212 helper):
 - verbatim DSN and password (URL-encoded + decoded forms) → `***`
-- one libpq-shaped `user "<dsn-username>"` occurrence → `user "***"`
+- libpq role echo shapes `user "<dsn-username>"` / `role "<dsn-username>"`
+  → `user "***"` / `role "***"` (bounded to the DSN's own username)
 - exception type name and wire-code prefixes remain intact (diagnosability)
+- the chokepoint is TOTAL: it never raises; internal failure (e.g. redaction
+  module unimportable on a driver-less host) degrades to a credential-free
+  placeholder so the refused receipt is always published
 - libpq host/port echo is deliberately RETAINED (diagnosability trade-off;
   residual host/port-grade exposure accepted, recorded in tasks.md non-goals)
 

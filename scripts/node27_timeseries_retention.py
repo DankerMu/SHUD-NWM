@@ -59,6 +59,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -902,13 +903,17 @@ def _redact_error_text(error: BaseException, dsn: str) -> str:
     in both URL-encoded and driver-decoded forms, and the marker is rendered
     as ``***`` for operator-facing text.
 
-    libpq additionally echoes the ROLE name back on auth failures
-    (``FATAL:  password authentication failed for user "nwm_writer"``), which
-    the DSN policy does not cover — so that ONE libpq-shaped occurrence is
-    scrubbed too, and only when the name matches the DSN's own username. A
-    bare literal replace of the username is deliberately NOT done: a username
-    like ``nwm`` also occurs inside unrelated substrings (``/home/nwm/...``)
-    and replacing those would mangle the diagnostic.
+    libpq additionally echoes the ROLE name back on connection failures, in
+    two shapes the DSN policy does not cover:
+
+    * ``FATAL:  password authentication failed for user "nwm_writer"``
+    * ``FATAL:  role "nwm_writer" does not exist``
+
+    Both keywords are scrubbed (every occurrence), and ONLY when the quoted
+    name matches the DSN's own username. A bare literal replace of the
+    username is deliberately NOT done: a username like ``nwm`` also occurs
+    inside unrelated substrings (``/home/nwm/...``) and replacing those would
+    mangle the diagnostic.
 
     libpq's host/port echo (``connection to server at "10.x.x.x", port 55432``)
     is deliberately RETAINED — a diagnosability trade-off recorded in #1213:
@@ -919,17 +924,33 @@ def _redact_error_text(error: BaseException, dsn: str) -> str:
     ``psycopg2.extensions`` at module scope, and this runner keeps psycopg2
     strictly deferred (config parsing / ``--help`` must work without the
     driver installed).
-    """
-    from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
 
-    text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+    That deferral is exactly why this chokepoint is TOTAL — it never raises.
+    On a driver-less host (e.g. a venv rebuild window) the very error being
+    reported is typically ``DisplayWatermarkError("psycopg2 is unavailable")``,
+    and re-importing ``packages.common.redaction`` to redact it would raise
+    ``ModuleNotFoundError`` straight out of ``main()``'s except handler —
+    destroying the refused receipt and dumping a raw traceback into
+    ``retention.log``. Any internal failure therefore degrades to a
+    credential-free placeholder naming the original exception type; the
+    caller's wire-code prefix and type name are unaffected, so the receipt is
+    still published and still greppable.
+    """
     try:
-        username = urlsplit(dsn).username
-    except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
-        username = None
-    if username:
-        text = text.replace(f'user "{username}"', 'user "***"')
-    return text
+        from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
+
+        text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+        try:
+            username = urlsplit(dsn).username
+        except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
+            username = None
+        if username:
+            text = re.sub(rf'\b(user|role) "{re.escape(username)}"', r'\1 "***"', text)
+        return text
+    except Exception:
+        # Fail closed on BOTH axes: withhold the unredactable text entirely
+        # (no credential can survive) while keeping the receipt publishable.
+        return f"<error text withheld: redaction unavailable ({type(error).__name__})>"
 
 
 def _default_measure_chunk_bytes(

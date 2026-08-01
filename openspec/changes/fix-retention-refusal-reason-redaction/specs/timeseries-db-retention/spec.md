@@ -10,7 +10,11 @@ stderr diagnostic stream (wrapper-captured into `retention.log`) — receives
 text only through the module's single redaction chokepoint. The
 chokepoint SHALL scrub the configured DSN (verbatim and password in both
 URL-encoded and driver-decoded forms, rendered as `***`) and the libpq
-role-name echo form `user "<dsn-username>"` (rendered as `user "***"`),
+role-name echo forms `user "<dsn-username>"` AND `role "<dsn-username>"`
+(rendered as `user "***"` / `role "***"`), SHALL never raise (any internal
+failure — including an unavailable redaction dependency — degrades to a
+credential-free placeholder that preserves the wire-code prefix and the
+exception type name),
 while preserving the wire-code prefix
 (`RETENTION_DROP_FAILED:<hypertable_schema>.<chunk_name>:`,
 `RETENTION_UNCAUGHT_ERROR:<TypeName>:`) and the exception type name for
@@ -31,12 +35,22 @@ helper whose docstring claims a safety property nothing enforces.
 #### Scenario: libpq auth failure keeps role redacted but diagnosable
 
 - **WHEN** a driver exception carrying
-  `password authentication failed for user "<dsn-username>"` reaches either
-  the drop-phase failure path or the uncaught fallback
-- **THEN** the persisted reason SHALL render the role echo as `user "***"`,
-  retain the wire-code prefix (including the
+  `password authentication failed for user "<dsn-username>"` or
+  `role "<dsn-username>" does not exist` reaches either the drop-phase
+  failure path or the uncaught fallback
+- **THEN** the persisted reason SHALL render the role echo as `user "***"`
+  or `role "***"` respectively, retain the wire-code prefix (including the
   `<hypertable_schema>.<chunk_name>` component on the drop path), and leak
   no credentials on either surface
+
+#### Scenario: Redaction failure cannot destroy the refused receipt
+
+- **WHEN** the redaction chokepoint itself fails (e.g. psycopg2 and thus
+  `packages.common.redaction` is unimportable on a driver-less host) while
+  the uncaught fallback is composing `refusal_reason`
+- **THEN** `main()` SHALL still publish a schema-valid refused receipt whose
+  `refusal_reason` starts with `RETENTION_UNCAUGHT_ERROR:<ExceptionTypeName>:`
+  followed by a credential-free placeholder, and SHALL still exit non-zero
 
 #### Scenario: Measurement diagnostic redaction is unchanged
 

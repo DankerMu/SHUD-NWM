@@ -49,10 +49,17 @@ Domain packs (NHMS profile, itemized):
 - [x] 3. Route the uncaught-fallback reason (:1464-1466) through the helper,
   preserving `RETENTION_UNCAUGHT_ERROR:<TypeName>:` prefix.
 - [x] 4. Delete dead `_mask_dsn` (:241-252) and the then-unused `urlunsplit`
-  import; `git grep _mask_dsn scripts/node27_timeseries_retention.py` must
-  return zero hits.
+  import; `git grep "def _mask_dsn" scripts/node27_timeseries_retention.py`
+  must return zero hits (a docstring cross-reference to salvage's
+  `_mask_dsn_in_message` may remain).
 - [x] 5. Upgrade `test_dsn_never_appears_in_stderr` to real driver-shaped
   injection and add drop-phase + receipt-file assertions (see evidence).
+- [x] 6. (round-1 verified findings) Make the chokepoint total: wrap the
+  helper so it never raises (driver-less host degrades to a credential-free
+  placeholder and the refused receipt is still published); extend the role
+  scrub to the `role "<dsn-username>"` echo shape; strengthen the deferral
+  guard (AST check joins module+alias, plus a blocked-driver subprocess
+  import probe).
 
 ## Required evidence
 
