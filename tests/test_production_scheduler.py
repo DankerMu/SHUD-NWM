@@ -9655,6 +9655,33 @@ def test_fit_summary_tier_summarizes_injected_unsummarized_bounded_payload() -> 
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_summarize_tier_never_downgrades_dropped_candidate_lists() -> None:
+    """`dropped` means rows were cut, so a later summary pass must not relabel it `summarized`."""
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_dropped_not_downgraded")
+
+    # 2_200 runs the drop loop past every candidate list (see the droppable-tier test at
+    # the same budget), leaving the marker at `dropped` with all three lists emptied.
+    dropped = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_200,
+    )
+    assert dropped["limit"]["candidate_lists"] == "dropped"
+    for field_name in ("candidates", "blocked_candidates", "skipped_candidates"):
+        assert dropped[field_name] == []
+
+    # The list keys are still present, so a second summary pass does summarize them; only
+    # the tier's `dropped` guard keeps that pass from rewriting the marker.
+    resummarized = json.loads(json.dumps(dropped))
+    scheduler_evidence_payload_module._summarize_bounded_candidate_lists(resummarized)
+
+    assert resummarized["limit"]["candidate_lists"] == "dropped"
+    for field_name in ("candidates", "blocked_candidates", "skipped_candidates"):
+        assert resummarized[field_name] == []
+    assert resummarized == dropped
+
+
 def test_bounded_evidence_retains_compact_restart_reconcile_incident_block() -> None:
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_restart_reconcile")
 

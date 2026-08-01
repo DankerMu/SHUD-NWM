@@ -30,12 +30,12 @@ Must add:
 
 ## Implementation tasks
 
-- [ ] 1. New test per proposal; name states the invariant (e.g.
+- [x] 1. New test per proposal; name states the invariant (e.g.
   `test_summarize_tier_never_downgrades_dropped_candidate_lists`).
-- [ ] 2. Red proof: mutate the guard to `if summarized:` on a scratch
+- [x] 2. Red proof: mutate the guard to `if summarized:` on a scratch
   copy → new test fails; seam-liveness sanity (unmutated baseline
   green). Record both outputs.
-- [ ] 3. Oracle: `uv run pytest -q tests/test_production_scheduler.py
+- [x] 3. Oracle: `uv run pytest -q tests/test_production_scheduler.py
   tests/test_production_readiness_validation.py
   tests/test_scheduler_timing.py` green; `uv run ruff check .` clean;
   `openspec validate test-bounded-candidate-lists-never-downgrade
