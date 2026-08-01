@@ -96,7 +96,10 @@ Must add (per design D1):
   `refusal_reason` + production receipt/lock mtimes unchanged.
   Result (2026-08-01T21:11:39Z, head 99fedbc6, scratch worktree
   `/home/nwm/pr1175-scratch`, `env -i` minimal env, ENFORCE=0, scratch
-  receipt+lock): verbatim `refusal_reason` =
+  receipt+lock; DEVIATION: no live RO `nhms_display_ro` DSN with
+  credentials exists on node-27 — ran with the deployed RW DSN, so the
+  RO second line was absent and ENFORCE=0 + refusal-before-drop was the
+  only guard, which held): verbatim `refusal_reason` =
   `DRILL_COVERAGE_DB_EXPORT_MISSING:2026-05-28T00:00:00Z/2026-06-25T00:00:00Z`
   — fabricated subject was 2019..2031, so the suffix demonstrably
   renders the CLIPPED live drop window, not raw subject bounds.
