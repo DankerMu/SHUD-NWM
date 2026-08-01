@@ -5,7 +5,13 @@ Operation, rollback, and cadence rationale for the node-27 archive lane
 `openspec/changes/tier-node27-timeseries-storage`.
 
 Current policy (effective 2026-07-21): product retirement and DB retention use
-a 14-day eligibility window. Compression remains earlier at 7 days. Both ages
+a spec-default 14-day eligibility window. That default is what the committed
+env templates ship (`NHMS_ARCHIVE_MIN_AGE_DAYS`,
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`); the value that actually runs is
+whatever the machine's env file holds — node-27's DB retention window was
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21` as of 2026-08-01. Read the live
+value on the box before quoting a day count anywhere (see §7.3 step 3).
+Compression remains earlier at 7 days. Both ages
 are measured from the latest forecast cycle accepted by the node-27 display
 catalog, not from the server wall clock. Historical 30/45-day receipts below
 are audit evidence only, not commands for new runs.
@@ -1437,16 +1443,28 @@ set -a; source /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env; set +a
 
 # 3. Compute the drop window the retention runner will ask about — the
 #    covering interval of the chunks eligible at the current cutoff
-#    (same rule as `_drop_window_from_eligible`). 14 d is
-#    NODE27_TIMESERIES_RETENTION_WINDOW_DAYS.
-#
-#    This query is a deliberate CONSERVATIVE SUPERSET of the runner's own
-#    drop window: `run_retention` additionally intersects the eligible
-#    chunks with the completeness receipt's `coverage_bounds` via
-#    `_partition_by_completeness_bounds` (boundary-partial chunks are
-#    deferred) BEFORE calling `_drop_window_from_eligible`. A superset is
-#    the right error direction here — see §7.5, the drill window MUST
-#    contain the runner's.
+#    (same rule as `_drop_window_from_eligible`). The day count MUST be the
+#    LIVE `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` off this machine's
+#    retention env file — read it, never type a remembered number. The spec
+#    default shipped in `infra/env/node27-timeseries-retention.example` is
+#    14 d, but the deployed value differs (node-27 ran 21 d as of
+#    2026-08-01). A count SMALLER than the live one makes this window
+#    NARROWER than the runner's, and every retention tick then refuses with
+#    `DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) before any coverage leg
+#    runs — and a drill is quarterly-expensive to rerun.
+WINDOW_DAYS="$(grep -E '^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=' \
+  /home/nwm/NWM/infra/env/node27-timeseries-retention.env | tail -n1 | cut -d= -f2)"
+: "${WINDOW_DAYS:?live retention window unreadable — do not guess}"
+
+#    Feeding the runner's OWN window value into the query is what makes it a
+#    CONSERVATIVE SUPERSET of the runner's drop window BY CONSTRUCTION (not
+#    by numeric luck): same `window_days` ⇒ same cutoff ⇒ the same eligible
+#    chunk set, and `run_retention` only ever SHRINKS its side from there —
+#    it additionally intersects the eligible chunks with the completeness
+#    receipt's `coverage_bounds` via `_partition_by_completeness_bounds`
+#    (boundary-partial chunks are deferred) BEFORE calling
+#    `_drop_window_from_eligible`. A superset is the right error direction
+#    here — see §7.5, the drill window MUST contain the runner's.
 #
 #    Output is ISO-8601 with a `Z` suffix so it pastes verbatim into the
 #    §7.5 invocation below.
@@ -1456,7 +1474,7 @@ psql "$PROD_DATABASE_URL_RO" -At -F' ' -c "
   FROM timescaledb_information.chunks
   WHERE (hypertable_schema, hypertable_name) IN
         (('hydro','river_timeseries'), ('met','forcing_station_timeseries'))
-    AND range_end <= now() - interval '14 days'"
+    AND range_end <= now() - interval '${WINDOW_DAYS} days'"
 
 # 4. Invoke. The db-export salvage set is DERIVED from the completeness
 #    receipt (every `coverage=db-export` + `verdict=complete` subject whose
@@ -1561,8 +1579,8 @@ tuples include, sampled within or older than that window:
 
 The drill EMIT contract is per-cycle: each verified product manifest
 contributes one 24 h coverage tuple sampled within or older than the
-drop window (see §7.4). The retention gate check is UNION-based: a 14 d
-drop window is normally covered by ~14 daily tuples whose union spans
+drop window (see §7.4). The retention gate check is UNION-based: an N-day
+drop window is normally covered by ~N daily tuples whose union spans
 it — no single tuple is expected to individually contain the drop
 window. These two shapes coexist deliberately (drill emits per-cycle
 tuples; retention union-checks them against the candidate drop window).
@@ -1623,9 +1641,14 @@ any coverage leg runs, the retention gate reads the drill receipt's
 recorded `salvage_derivation.drop_window` (§7.4) and refuses with
 `DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) unless that recorded window
 contains the retention drop window, closed-interval — an equal or wider
-recorded window passes, and the §7.3 step 3 query the standard invocation
-above pastes from is a conservative superset of the runner's own drop
-window, so it never produces a narrower one. A
+recorded window passes. Run as instructed, the §7.3 step 3 query the
+standard invocation above pastes from is a conservative superset of the
+runner's own drop window and so never produces a narrower one: step 3
+reads the SAME live `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` the runner
+reads, so both sides derive the same cutoff, and the runner then only
+narrows its own window further (completeness-bounds intersection). That
+guarantee comes from using the live value, not from any particular number
+— substituting a remembered day count breaks it. A
 recorded `drop_window` of `null` (the drill ran without
 `--drop-window-*`) passes; a `salvage_derivation` section that is present
 but unusable (not an object, `drop_window` key missing, unparseable
@@ -1739,7 +1762,8 @@ a clean environment (no-op if already recovered):
 
 ### 7.7 Live receipts (§5.2 boundary)
 
-Live PASS receipts on node-27 covering the planned 14-day drop window
+Live PASS receipts on node-27 covering the planned drop window (width =
+the live `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`, §7.3 step 3)
 are the domain of task §5.2 (follow-up commit under issue #854, not part
 of the §5.1 PR that introduced this section). Once §5.2 lands, the live
 receipts will be committed under
@@ -1750,13 +1774,16 @@ mover and audit receipt directories.
 
 The retention runner
 (`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
-strictly older than the drop window (default 14 days) from the two D3
+strictly older than the drop window from the two D3
 detail hypertables `hydro.river_timeseries` and
-`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. Enforce
+`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. The window
+width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
+21 d on node-27 as of 2026-08-01) — always read the live value off the box
+rather than assuming the default. Enforce
 mode is hard-gated on TWO archive receipts and refuses fail-closed if
 either is missing, stale, or fails to cover the drop window (spec
 `timeseries-db-retention` and design D6 / D7). Compression state is
-never a gate — compressed chunks older than 14 days are exactly the
+never a gate — compressed chunks older than the window are exactly the
 retention target (H3 divergence from #851).
 
 Related documents:
@@ -1845,8 +1872,8 @@ surfaces in the same commit.
   drill with a window ⊇ the retention drop window.
 - `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
   tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
-  into a single covering interval; a 14 d drop window is normally covered
-  by ~14 daily tuples).
+  into a single covering interval; an N-day drop window is normally covered
+  by ~N daily tuples).
 - `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
   whose UNION covers the drop window.
 - `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` — the drill receipt records
@@ -2084,7 +2111,12 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    `<error text withheld: redaction unavailable (<Type>)>` the cause is
    absent ENTIRELY — classify from `<Type>` plus the DB side (item 4
    applies first in that case). Common causes: statement timeout
-   (14 min per chunk inside the 900 s wrapper / 940 s systemd walls), active
+   (5 min per chunk — `_DROP_TIMEOUT_MS = 300_000` in
+   `scripts/node27_timeseries_retention.py`, set as `statement_timeout`
+   around each `drop_chunks`; this is the ONLY wall on the retention lane,
+   as `node27_timeseries_retention_once.sh` wraps nothing in `timeout` and
+   the systemd unit sets `TimeoutStartSec=0`, so a tick hung outside a
+   statement is never killed for you), active
    writer holding an incompatible lock, or a
    TimescaleDB catalog inconsistency. Re-run enforce after the operator
    has confirmed the DB is healthy. There is no automated retry loop —
