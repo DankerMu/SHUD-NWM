@@ -48,10 +48,11 @@ from packages.common.safe_fs import (
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import (
     DEFAULT_ARCHIVE_MIN_AGE_DAYS,
-    DEFAULT_DB_RETENTION_DAYS,
+    RETENTION_ENV_PATH_VARIABLE,
     ArchiveConfigurationError,
     ArchiveIdentity,
     archive_provenance_paths,
+    read_retention_window_days,
     validate_archive_configuration,
     validate_product_archive_manifest_binding,
 )
@@ -261,6 +262,10 @@ class MoverConfig:
     receipt_path: Path
     lock_path: Path
     zstd_path: Path
+    # Absolute path of the deployed retention env file (#1227). Declared
+    # BEFORE the first defaulted field on purpose: it has no default, because
+    # the live DB retention window is never guessed.
+    retention_env_path: Path
     minimum_age_days: int = DEFAULT_ARCHIVE_MIN_AGE_DAYS
     per_tick_bound: int = 10
     enforce: bool = False
@@ -4336,16 +4341,19 @@ def _validate_config(config: MoverConfig) -> None:
     if config.receipt_path == config.lock_path:
         raise ArchiveMoverError("receipt and lock paths must be distinct")
     _canonical_object_store_prefix(config.object_store_prefix)
-    if config.minimum_age_days < DEFAULT_DB_RETENTION_DAYS:
-        raise ArchiveMoverError(f"minimum age must be at least {DEFAULT_DB_RETENTION_DAYS} days")
     if config.per_tick_bound <= 0:
         raise ArchiveMoverError("per-tick bound must be positive")
     if config.per_tick_bound > MAX_DISCOVERY:
         raise ArchiveMoverError(f"per-tick bound must not exceed {MAX_DISCOVERY}")
+    # Single min-age comparison site (#1227): the LIVE DB retention window is
+    # read from the deployed retention env file, never a compile-time
+    # constant. Pure over the dataclass — the path was resolved from env in
+    # `_config_from_args`.
     validate_archive_configuration(
         archive_root=config.archive_root,
         cleanup_roots={"object_store_root": config.object_store_root},
         archive_min_age_days=config.minimum_age_days,
+        retention_days=read_retention_window_days(config.retention_env_path),
     )
     verify_directory_no_follow(config.object_store_root)
     verify_directory_no_follow(config.archive_root)
@@ -4439,6 +4447,7 @@ def _config_from_args(args: argparse.Namespace) -> MoverConfig:
     except ValueError as error:
         raise ArchiveMoverError("minimum age and per-tick bound must be integers") from error
     warn_bytes, refuse_bytes = _parse_free_space_watermarks(env)
+    retention_env_path = _retention_env_path(env)
     return MoverConfig(
         object_store_root=Path(args.object_store_root or env.get("NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT", "")),
         object_store_prefix=(args.object_store_prefix or env.get("OBJECT_STORE_PREFIX", "")),
@@ -4448,12 +4457,32 @@ def _config_from_args(args: argparse.Namespace) -> MoverConfig:
         receipt_path=Path(args.receipt or env.get("NODE27_PRODUCT_ARCHIVE_RECEIPT", "")),
         lock_path=Path(args.lock_file or env.get("NODE27_PRODUCT_ARCHIVE_LOCK_FILE", "")),
         zstd_path=Path(args.zstd or env.get("NODE27_PRODUCT_ARCHIVE_ZSTD", "/usr/bin/zstd")),
+        retention_env_path=retention_env_path,
         minimum_age_days=age,
         per_tick_bound=bound,
         enforce=args.enforce,
         free_space_warn_bytes=warn_bytes,
         free_space_refuse_bytes=refuse_bytes,
     )
+
+
+def _retention_env_path(env: Mapping[str, str]) -> Path:
+    """Resolve the REQUIRED absolute path of the deployed retention env file.
+
+    No derived default and no truthiness fallback (#1227 design D2): the guard
+    that keeps the hot object-store window >= the DB hot window must be
+    pointed at the live window source explicitly, and a relative path is
+    refused by name rather than surfacing later as a missing-file error.
+    """
+    raw = env.get(RETENTION_ENV_PATH_VARIABLE, "").strip()
+    if not raw:
+        raise ArchiveMoverError(
+            f"{RETENTION_ENV_PATH_VARIABLE} must be set to the absolute path of the retention env file"
+        )
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ArchiveMoverError(f"{RETENTION_ENV_PATH_VARIABLE} must be an absolute path: {raw}")
+    return path
 
 
 def _parse_free_space_watermarks(env: Mapping[str, str]) -> tuple[int | None, int | None]:

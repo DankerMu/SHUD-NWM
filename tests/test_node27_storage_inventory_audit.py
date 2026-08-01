@@ -18,6 +18,7 @@ import pytest
 
 from packages.common import redaction, safe_fs
 from packages.common.object_store import LocalObjectStore
+from packages.common.storage import ArchiveConfigurationError
 from scripts import node27_product_archive as mover
 from scripts import node27_storage_inventory_audit as audit
 
@@ -70,6 +71,21 @@ def _config(tmp_path: Path) -> audit.AuditConfig:
     return audit.AuditConfig(
         "postgresql://redacted", object_root, "s3://nhms", archive_root, 45, receipt, zstd
     )
+
+
+def _retention_env(
+    tmp_path: Path,
+    *,
+    window_days: int | None = 14,
+    name: str = "node27-timeseries-retention.env",
+) -> Path:
+    """Write a per-test retention env file — the guard's live window source (#1227)."""
+    path = tmp_path / name
+    body = "DATABASE_URL=postgresql://user:pw@127.0.0.1:55432/nhms\n"
+    if window_days is not None:
+        body += f"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS={window_days}\n"
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
 def _main_argv(config: audit.AuditConfig) -> list[str]:
@@ -292,6 +308,7 @@ def _write_forcing_and_run_product_archives(
         receipt_path=tmp_path / "mover-receipt.json",
         lock_path=tmp_path / "mover.lock",
         zstd_path=tool,
+        retention_env_path=_retention_env(tmp_path),
         enforce=True,
     )
     receipt, code = mover.run(
@@ -1554,6 +1571,7 @@ def test_real_db_shaped_prefix_mismatch_reaches_main_and_publishes_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     key = "forcing/gfs/2026050100/basin-a/model-a"
     package = config.object_store_root / key
     package.mkdir(parents=True)
@@ -2317,6 +2335,7 @@ def test_real_manifest_member_surrogate_blocks_without_publication_failure(
     surrogate: str,
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     stale = _receipt([_subject(identifier="stale-success")])
     audit.publish_receipt(config.receipt_path, stale)
     key = "forcing/gfs/2026050100/basin-a/model-a"
@@ -3129,11 +3148,25 @@ def test_audit_root_preflight_rejects_symlink_object_root(tmp_path: Path) -> Non
         audit._validate_audit_roots(config)
 
 
-def _args(tmp_path: Path, *, age: int | None) -> argparse.Namespace:
+def _args(
+    tmp_path: Path,
+    *,
+    age: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+    window_days: int | None = 14,
+) -> argparse.Namespace:
+    """Build audit CLI args and point the REQUIRED live-window var at a tmp env file.
+
+    The path var is wired explicitly here (never an autouse fixture) so every
+    row that depends on the guard input shows it.
+    """
     object_root = tmp_path / "objects-config"
     archive_root = tmp_path / "archive-config"
     object_root.mkdir(exist_ok=True)
     archive_root.mkdir(exist_ok=True)
+    monkeypatch.setenv(
+        "NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path, window_days=window_days))
+    )
     return argparse.Namespace(
         database_url="postgresql://redacted",
         object_store_root=str(object_root),
@@ -3146,17 +3179,20 @@ def _args(tmp_path: Path, *, age: int | None) -> argparse.Namespace:
 
 def test_archive_age_cli_zero_does_not_fall_through_to_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "45")
-    with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
-        audit.config_from_args(_args(tmp_path, age=0))
+    with pytest.raises(audit.AuditBlocked, match="below DB retention"):
+        audit.config_from_args(_args(tmp_path, age=0, monkeypatch=monkeypatch))
 
 
 def test_archive_age_cli_overrides_env_and_env_below_retention_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "0")
-    assert audit.config_from_args(_args(tmp_path, age=14)).archive_min_age_days == 14
-    with pytest.raises(audit.AuditBlocked, match="at least DB retention"):
-        audit.config_from_args(_args(tmp_path, age=None))
+    assert (
+        audit.config_from_args(_args(tmp_path, age=14, monkeypatch=monkeypatch)).archive_min_age_days
+        == 14
+    )
+    with pytest.raises(audit.AuditBlocked, match="below DB retention"):
+        audit.config_from_args(_args(tmp_path, age=None, monkeypatch=monkeypatch))
 
 
 def test_archive_age_invalid_env_uses_typed_config_reason(
@@ -3165,9 +3201,199 @@ def test_archive_age_invalid_env_uses_typed_config_reason(
     monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "not-an-int")
 
     with pytest.raises(audit.AuditConfigError, match="must be an integer") as captured:
-        audit.config_from_args(_args(tmp_path, age=None))
+        audit.config_from_args(_args(tmp_path, age=None, monkeypatch=monkeypatch))
 
     assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# #1227 — min-age guard compares against the LIVE DB retention window.
+# ---------------------------------------------------------------------------
+
+
+def test_live_drifted_pair_refuses_config_parse_with_both_numbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (a): live (min_age=14, window=21) refuses; the message names both."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch, window_days=21)
+
+    with pytest.raises(audit.AuditConfigError) as captured:
+        audit.config_from_args(args)
+
+    message = str(captured.value)
+    assert "14" in message and "21" in message
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_live_drifted_pair_refusal_originates_from_the_shared_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (f): the audit routes through `validate_archive_configuration`, not a local copy."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch, window_days=21)
+
+    with pytest.raises(audit.AuditConfigError) as captured:
+        audit.config_from_args(args)
+
+    assert isinstance(captured.value.__cause__, ArchiveConfigurationError)
+    assert "archive minimum age 14 days is below DB retention 21 days" in str(captured.value)
+
+
+def test_live_drifted_pair_publishes_blocked_config_invalid_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (a): at `main()` level the audit's refusal is a terminal blocked receipt."""
+    config = _config(tmp_path)
+    monkeypatch.setenv(
+        "NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path, window_days=21))
+    )
+    monkeypatch.setenv("NHMS_ARCHIVE_MIN_AGE_DAYS", "14")
+
+    assert audit.main(_main_argv(config)) == 1
+
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "blocked"
+    assert receipt["refusal_reason"] == "CONFIG_INVALID"
+    assert "14" in receipt["detail"] and "21" in receipt["detail"]
+
+
+@pytest.mark.parametrize(("min_age", "window", "accepted"), [(21, 21, True), (30, 21, True), (20, 21, False)])
+def test_audit_min_age_boundary_against_live_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, min_age: int, window: int, accepted: bool
+) -> None:
+    """Row (b): equality passes, one day under refuses."""
+    args = _args(tmp_path, age=min_age, monkeypatch=monkeypatch, window_days=window)
+
+    if accepted:
+        assert audit.config_from_args(args).archive_min_age_days == min_age
+        return
+    with pytest.raises(
+        audit.AuditConfigError,
+        match=f"archive minimum age {min_age} days is below DB retention {window} days",
+    ):
+        audit.config_from_args(args)
+
+
+def test_audit_missing_retention_env_file_refuses_without_constant_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (e): min age 14 satisfied the old constant-14 rule; an unreadable source still refuses."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(tmp_path / "absent-retention.env"))
+
+    with pytest.raises(audit.AuditConfigError, match="retention env file is unreadable") as captured:
+        audit.config_from_args(args)
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_audit_missing_window_assignment_uses_the_runner_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (d)/(e) pair: a readable file with no assignment is the runner's 14, not a refusal."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch, window_days=None)
+
+    assert audit.config_from_args(args).archive_min_age_days == 14
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        pytest.param(None, "NODE27_TIMESERIES_RETENTION_ENV is required", id="unset"),
+        pytest.param("", "NODE27_TIMESERIES_RETENTION_ENV is required", id="empty"),
+        pytest.param("   ", "NODE27_TIMESERIES_RETENTION_ENV is required", id="blank"),
+    ],
+)
+def test_audit_requires_the_retention_env_path_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None, match: str
+) -> None:
+    """Row (c) consumer-level: REQUIRED path var, no derived default."""
+    args = _args(tmp_path, age=45, monkeypatch=monkeypatch)
+    if value is None:
+        monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_ENV", raising=False)
+    else:
+        monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", value)
+
+    with pytest.raises(audit.AuditConfigError, match=match) as captured:
+        audit.config_from_args(args)
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_audit_relative_retention_env_path_refusal_names_absoluteness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (c): a RELATIVE path pointing at a valid existing file still refuses, by absoluteness."""
+    args = _args(tmp_path, age=45, monkeypatch=monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert Path("node27-timeseries-retention.env").is_file()
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", "node27-timeseries-retention.env")
+
+    with pytest.raises(
+        audit.AuditConfigError, match="NODE27_TIMESERIES_RETENTION_ENV must be absolute"
+    ):
+        audit.config_from_args(args)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=not-an-int\n", "must be an integer", id="non-integer"),
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=0\n", "must be positive", id="zero"),
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=-5\n", "must be positive", id="negative"),
+    ],
+)
+def test_audit_present_invalid_window_value_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, match: str
+) -> None:
+    args = _args(tmp_path, age=45, monkeypatch=monkeypatch)
+    broken = tmp_path / "broken-retention.env"
+    broken.write_text(body, encoding="utf-8")
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(broken))
+
+    with pytest.raises(audit.AuditConfigError, match=match) as captured:
+        audit.config_from_args(args)
+
+    assert audit._blocked_reason(captured.value) == "CONFIG_INVALID"
+
+
+def test_audit_healthy_node27_shaped_config_still_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (i): non-overlapping roots, window 14, min age 14 — the imported checks must not false-refuse."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch)
+
+    config = audit.config_from_args(args)
+
+    assert config.archive_min_age_days == 14
+    assert config.object_store_root == Path(args.object_store_root)
+    assert config.archive_root == Path(args.archive_root)
+
+
+def test_audit_overlapping_object_and_archive_roots_now_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (i): the newly imported overlap check is intended hardening, not an accident."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch)
+    nested = Path(args.archive_root) / "objects"
+    nested.mkdir()
+    args.object_store_root = str(nested)
+
+    with pytest.raises(audit.AuditConfigError, match="archive root overlaps cleanup root object_store_root"):
+        audit.config_from_args(args)
+
+
+def test_audit_keeps_its_own_absolute_values_for_the_config_it_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (i)/D3: shared normalization is VALIDATION ONLY — no #1153-style root drift."""
+    args = _args(tmp_path, age=14, monkeypatch=monkeypatch)
+    unresolved = f"{tmp_path}/archive-config/../archive-config"
+    args.archive_root = unresolved
+
+    config = audit.config_from_args(args)
+
+    assert str(config.archive_root) == unresolved
+    assert config.archive_root != config.archive_root.resolve()
 
 
 @pytest.mark.parametrize(
@@ -3327,9 +3553,9 @@ def test_main_publishes_config_invalid_for_non_integer_archive_age_env(
     ],
 )
 def test_object_store_prefix_config_rejects_noncanonical_authority_and_path(
-    tmp_path: Path, prefix: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str
 ) -> None:
-    args = _args(tmp_path, age=45)
+    args = _args(tmp_path, age=45, monkeypatch=monkeypatch)
     args.object_store_prefix = prefix
     with pytest.raises(audit.AuditBlocked, match="OBJECT_STORE_PREFIX") as captured:
         audit.config_from_args(args)
@@ -3338,9 +3564,9 @@ def test_object_store_prefix_config_rejects_noncanonical_authority_and_path(
 
 @pytest.mark.parametrize("prefix", ["s3://nhms", "s3://lowercase-bucket/safe/prefix"])
 def test_object_store_prefix_config_accepts_canonical_root_or_safe_path(
-    tmp_path: Path, prefix: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str
 ) -> None:
-    args = _args(tmp_path, age=45)
+    args = _args(tmp_path, age=45, monkeypatch=monkeypatch)
     args.object_store_prefix = prefix
     assert audit.config_from_args(args).object_store_prefix == prefix
 
@@ -3530,6 +3756,7 @@ def test_real_complete_forcing_evidence_with_unsafe_member_uri_blocks_once(
     mutation: str,
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     stale_subject = _subject(start=NOW - timedelta(days=1), end=NOW)
     audit.publish_receipt(
         config.receipt_path,
@@ -3658,6 +3885,7 @@ def test_real_main_rejects_noncanonical_inventory_evidence_once(
     scenario: str,
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     stale = _receipt([_subject(identifier="stale-file-kind")])
     audit.publish_receipt(config.receipt_path, stale)
     forcing_rows: list[dict[str, object]] = []
@@ -3794,6 +4022,7 @@ def test_real_main_classifies_db_shaped_archive_identity_failures_as_evidence_bl
     subject_id: str,
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     stale = _receipt([_subject(identifier="stale-identity")])
     audit.publish_receipt(config.receipt_path, stale)
     forcing_rows: list[dict[str, object]] = []
@@ -3905,6 +4134,7 @@ def test_non_identity_runtime_error_during_archive_derivation_remains_indetermin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(_retention_env(tmp_path)))
     forcing_row = {
         "forcing_version_id": "forcing-a",
         "model_id": "model-a",

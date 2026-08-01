@@ -77,8 +77,9 @@ products). Same-volume staging + atomic rename after verification keeps
 moves atomic; checksums are verified before any source deletion, and a
 final-path object that fails verification on a later run is quarantined and
 re-archived rather than trusted. Candidates are cycles older than
-`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14 d; config-validated ≥ the 14-day DB
-retention window), so the hot object-store — and therefore the ADR 0001
+`NHMS_ARCHIVE_MIN_AGE_DAYS` (default 14 d; config-validated ≥ the live DB
+retention window read from the deployed retention env file), so the hot
+object-store — and therefore the ADR 0001
 display disk window — is never shorter than the DB hot window.
 *Alternatives rejected:* bare directory move (no integrity story,
 inode-heavy), per-file zstd (object explosion), cross-volume copy (no second

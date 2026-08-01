@@ -129,6 +129,66 @@ selected object must pass archive verification, source-retirement preflight,
 and the free-space gate. Operators use the same wrapper without `--enforce`
 for an additional manual preview.
 
+### Min-age guard reads the LIVE retention window (`#1227`)
+
+Both archive-side env files carry one REQUIRED line:
+
+```
+NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
+```
+
+At every mover and audit startup, configuration validation extracts
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` from that file (read-only, single
+variable, nothing sourced) and refuses when `NHMS_ARCHIVE_MIN_AGE_DAYS` is
+below it — so the hot object-store window, which is also the ADR 0001 display
+disk window for station forcing CSVs, is never shorter than the DB hot window.
+The old compile-time 14 is gone: raising the retention window now moves the
+guard with it. Resolution rules, all fail-closed except the last:
+
+- unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
+  unreadable file, or a present value that is not a positive integer → refuse,
+  never a constant fallback;
+- a readable file whose assignment is absent or empty → the retention runner's
+  own default (14 d), because that is the window the runner would actually
+  run; the guard never refuses a pair the runner itself considers healthy.
+
+Moving or renaming the deployed retention env file therefore breaks both
+guards fail-closed. It is one-way extraction, not value syncing — do not copy
+the window value into the archive env files.
+
+**Deployment consequence — read before deploying.** As of 2026-08-01 the live
+pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21`, so the first deployment of this
+code refuses BOTH units at startup. That is the invariant working, not a
+regression, and the two refusals surface differently:
+
+- **Mover**: refusal is a journal/stderr `{"status":"failed",...}` line plus a
+  non-zero exit ONLY. Validation runs before any receipt write, so no receipt
+  is published and `/home/nwm/node27-product-archive-logs/receipt.json` keeps
+  its previous success payload. Do not point monitoring at that file for this
+  condition — watch the unit result instead. Hot-source deletion stops, which
+  is protective: the display gap stops growing.
+- **Audit**: refusal DOES publish a terminal `blocked` receipt with
+  `refusal_reason=CONFIG_INVALID` over its production receipt path
+  `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
+  That file is the `#855` retention gate's completeness input, so every audit
+  tick on a drifted pair also starves the retention gate. Still fail-closed in
+  the safe direction: retention refuses and nothing is dropped.
+
+Clearing it is an operator decision with a real capacity trade-off, and there
+are exactly two exits — no warn-only mode exists, because a warning is the
+comment-level coupling this guard replaced:
+
+1. raise `NHMS_ARCHIVE_MIN_AGE_DAYS` to >= the live window in BOTH archive env
+   files, after assessing free space on the shared 1.7 TB volume (a longer hot
+   window means more hot bytes); or
+2. lower `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` back to the value the
+   archive envs already satisfy.
+
+Read the live values off the box before deciding (§7.3 step 3 shows the
+extraction). The code change ships no live env edits — the deployment step and
+the min-age-vs-capacity decision are operator actions.
+
 ### Reading receipts
 
 - Product archive mover receipt:

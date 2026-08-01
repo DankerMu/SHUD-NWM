@@ -5,6 +5,11 @@
 # receipt + drill PASS receipt). Do not sync this env against
 # node27-product-archive.env / node27-storage-inventory-audit.env / node27-resource-governance.env.
 #
+# The archive-side min-age guards (mover + inventory audit) READ this file's
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS by absolute path — they are pointed at it
+# via NODE27_TIMESERIES_RETENTION_ENV — so moving or renaming the deployed copy
+# breaks those guards fail-closed (#1227). That is one-way extraction, not value syncing.
+#
 # Copy to node27-timeseries-retention.env and chmod 0600.
 
 NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM

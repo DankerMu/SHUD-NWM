@@ -71,6 +71,22 @@ def _tool(tmp_path: Path) -> Path:
     return path
 
 
+def _retention_env(
+    tmp_path: Path, *, window_days: int | None = 14, name: str = "node27-timeseries-retention.env"
+) -> Path:
+    """Write a per-test retention env file — the guard's live window source (#1227).
+
+    Explicit per-config wiring, never an autouse env fixture: the guard input
+    must be visible in every test that depends on it.
+    """
+    path = tmp_path / name
+    body = "DATABASE_URL=postgresql://user:pw@127.0.0.1:55432/nhms\n"
+    if window_days is not None:
+        body += f"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS={window_days}\n"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
 def _config(tmp_path: Path, *, enforce: bool, bound: int = 10) -> archive.MoverConfig:
     store = tmp_path / "object-store"
     store.mkdir(exist_ok=True)
@@ -82,6 +98,7 @@ def _config(tmp_path: Path, *, enforce: bool, bound: int = 10) -> archive.MoverC
         receipt_path=tmp_path / "logs" / "receipt.json",
         lock_path=tmp_path / "locks" / "archive.lock",
         zstd_path=_tool(tmp_path),
+        retention_env_path=_retention_env(tmp_path),
         minimum_age_days=45,
         per_tick_bound=bound,
         enforce=enforce,
@@ -105,6 +122,7 @@ def _live_shape_config(
         receipt_path=tmp_path / "logs" / "receipt.json",
         lock_path=tmp_path / "locks" / "archive.lock",
         zstd_path=_tool(tmp_path),
+        retention_env_path=_retention_env(tmp_path),
         minimum_age_days=45,
         per_tick_bound=10,
         enforce=enforce,
@@ -1182,6 +1200,7 @@ def test_main_publishes_exact_state_access_receipt_then_emits_one_compact_diagno
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = _live_shape_config(tmp_path, enforce=True)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(config.retention_env_path))
     before = _tree_snapshot(config.object_store_root)
     _inject_state_open_failures(
         monkeypatch,
@@ -1254,6 +1273,7 @@ def test_main_keeps_exit_one_for_other_receipt_failures(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = _config(tmp_path, enforce=False)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(config.retention_env_path))
     monkeypatch.setattr(
         archive,
         "run",
@@ -3795,9 +3815,10 @@ def test_lock_contention_does_not_touch_receipt(tmp_path: Path, capsys: pytest.C
 
 
 def test_main_lock_contender_emits_one_diagnostic_and_preserves_receipt(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _config(tmp_path, enforce=False)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(config.retention_env_path))
     config.receipt_path.parent.mkdir()
     config.receipt_path.write_text("old\n", encoding="utf-8")
     holder = archive.acquire_lock(config.lock_path)
@@ -3831,23 +3852,222 @@ def test_main_lock_contender_emits_one_diagnostic_and_preserves_receipt(
 
 @pytest.mark.parametrize("age", [0, 13])
 def test_invalid_minimum_age_never_falls_back(tmp_path: Path, age: int) -> None:
+    """Refusal now names the LIVE window (14 here) instead of a compile-time bound."""
     config = _config(tmp_path, enforce=False)
     config = archive.MoverConfig(**{**config.__dict__, "minimum_age_days": age})
-    with pytest.raises(archive.ArchiveMoverError, match="at least 14"):
+    with pytest.raises(
+        archive.ArchiveConfigurationError,
+        match=f"archive minimum age {age} days is below DB retention 14 days",
+    ):
         archive.run(config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace)
 
 
-def test_minimum_age_equal_to_fourteen_day_policy_is_accepted(tmp_path: Path) -> None:
+def test_minimum_age_equal_to_live_retention_window_is_accepted(tmp_path: Path) -> None:
     config = _config(tmp_path, enforce=False)
-    config = archive.MoverConfig(**{**config.__dict__, "minimum_age_days": 14})
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 21,
+            "retention_env_path": _retention_env(tmp_path, window_days=21),
+        }
+    )
 
     receipt, exit_code = archive.run(
         config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace
     )
 
     assert exit_code == 0
-    assert receipt["minimum_age_days"] == 14
+    assert receipt["minimum_age_days"] == 21
     assert receipt["outcome"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# #1227 — min-age guard compares against the LIVE DB retention window.
+# ---------------------------------------------------------------------------
+
+
+def test_live_drifted_pair_refuses_and_writes_no_receipt(tmp_path: Path) -> None:
+    """Row (a): live (min_age=14, window=21) refuses; NO receipt is created."""
+    config = _config(tmp_path, enforce=True)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 14,
+            "retention_env_path": _retention_env(tmp_path, window_days=21),
+        }
+    )
+    assert not config.receipt_path.exists()
+
+    with pytest.raises(archive.ArchiveConfigurationError) as error:
+        archive.run(config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace)
+
+    message = str(error.value)
+    assert "14" in message and "21" in message
+    assert not config.receipt_path.exists()
+
+
+def test_live_drifted_pair_refusal_does_not_touch_an_existing_receipt(tmp_path: Path) -> None:
+    """Row (a): the mover's config refusal is stderr/exit only — the receipt is untouched."""
+    config = _config(tmp_path, enforce=True)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 14,
+            "retention_env_path": _retention_env(tmp_path, window_days=21),
+        }
+    )
+    config.receipt_path.parent.mkdir(parents=True)
+    config.receipt_path.write_text("previous-success\n", encoding="utf-8")
+    before = config.receipt_path.stat().st_mtime_ns
+
+    with pytest.raises(archive.ArchiveConfigurationError):
+        archive.run(config, mount_id_provider=_mount_id, rename_impl=_rename_noreplace)
+
+    assert config.receipt_path.read_text(encoding="utf-8") == "previous-success\n"
+    assert config.receipt_path.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize(("min_age", "window", "accepted"), [(21, 21, True), (30, 21, True), (20, 21, False)])
+def test_minimum_age_boundary_against_live_window(
+    tmp_path: Path, min_age: int, window: int, accepted: bool
+) -> None:
+    """Row (b): equality passes, one day under refuses."""
+    config = _config(tmp_path, enforce=False)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": min_age,
+            "retention_env_path": _retention_env(tmp_path, window_days=window),
+        }
+    )
+
+    if accepted:
+        archive._validate_config(config)
+        return
+    with pytest.raises(
+        archive.ArchiveConfigurationError,
+        match=f"archive minimum age {min_age} days is below DB retention {window} days",
+    ):
+        archive._validate_config(config)
+
+
+def test_missing_retention_env_file_refuses_even_when_min_age_satisfies_the_old_constant(
+    tmp_path: Path,
+) -> None:
+    """Row (e): an unreadable window SOURCE never falls back to the old constant 14."""
+    config = _config(tmp_path, enforce=False)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 14,
+            "retention_env_path": tmp_path / "absent-retention.env",
+        }
+    )
+
+    with pytest.raises(archive.ArchiveConfigurationError, match="retention env file is unreadable"):
+        archive._validate_config(config)
+
+
+def test_missing_window_assignment_resolves_to_the_runner_default(tmp_path: Path) -> None:
+    """Row (d)/(e) pair: a missing ASSIGNMENT is not a missing FILE — runner default 14."""
+    config = _config(tmp_path, enforce=False)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 14,
+            "retention_env_path": _retention_env(tmp_path, window_days=None),
+        }
+    )
+
+    archive._validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=not-an-int\n", "must be an integer", id="non-integer"),
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=0\n", "must be positive", id="zero"),
+        pytest.param("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=-3\n", "must be positive", id="negative"),
+    ],
+)
+def test_present_invalid_window_value_refuses_the_mover(tmp_path: Path, body: str, match: str) -> None:
+    """Row (c) consumer-level: a present broken window value fails closed."""
+    config = _config(tmp_path, enforce=False)
+    retention_env = tmp_path / "broken-retention.env"
+    retention_env.write_text(body, encoding="utf-8")
+    config = archive.MoverConfig(**{**config.__dict__, "retention_env_path": retention_env})
+
+    with pytest.raises(archive.ArchiveConfigurationError, match=match):
+        archive._validate_config(config)
+
+
+def test_validate_config_never_reads_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (f): `_validate_config` is pure over the dataclass — env is resolved earlier."""
+    config = _config(tmp_path, enforce=False)
+    config = archive.MoverConfig(
+        **{
+            **config.__dict__,
+            "minimum_age_days": 14,
+            "retention_env_path": _retention_env(tmp_path, window_days=21),
+        }
+    )
+    monkeypatch.setenv(
+        "NODE27_TIMESERIES_RETENTION_ENV",
+        str(_retention_env(tmp_path, window_days=7, name="env-poison-retention.env")),
+    )
+
+    with pytest.raises(archive.ArchiveConfigurationError, match="below DB retention 21 days"):
+        archive._validate_config(config)
+
+
+def test_mover_config_requires_the_retention_env_path_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row (c) consumer-level: the path var is REQUIRED, with no derived default."""
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_ENV", raising=False)
+    args = archive._parser().parse_args([])
+
+    with pytest.raises(archive.ArchiveMoverError, match="NODE27_TIMESERIES_RETENTION_ENV must be set"):
+        archive._config_from_args(args)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_mover_config_refuses_empty_retention_env_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", value)
+    args = archive._parser().parse_args([])
+
+    with pytest.raises(archive.ArchiveMoverError, match="NODE27_TIMESERIES_RETENTION_ENV must be set"):
+        archive._config_from_args(args)
+
+
+def test_mover_config_refuses_relative_retention_env_path_by_absoluteness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal must name absoluteness even when the relative file exists."""
+    _retention_env(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", "node27-timeseries-retention.env")
+    args = archive._parser().parse_args([])
+
+    with pytest.raises(
+        archive.ArchiveMoverError,
+        match="NODE27_TIMESERIES_RETENTION_ENV must be an absolute path",
+    ):
+        archive._config_from_args(args)
+
+
+def test_mover_config_carries_the_resolved_retention_env_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retention_env = _retention_env(tmp_path, window_days=21)
+    monkeypatch.setenv("NODE27_TIMESERIES_RETENTION_ENV", str(retention_env))
+    args = archive._parser().parse_args([])
+
+    assert archive._config_from_args(args).retention_env_path == retention_env
 
 
 def test_receipt_schema_positive_and_negative() -> None:

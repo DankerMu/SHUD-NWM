@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from packages.common.storage import (
+    DEFAULT_RETENTION_WINDOW_DAYS,
     VALID_PREFIX_PATTERNS,
     ArchiveConfigurationError,
     ArchiveIdentity,
     archive_identity_for_state_reference,
     archive_provenance_paths,
+    read_retention_window_days,
     resolve_archive_root,
     resolve_archive_storage_config,
     validate_archive_configuration,
@@ -801,6 +803,7 @@ def test_validate_archive_configuration_rejects_all_overlap_directions(
         validate_archive_configuration(
             archive_root=archive,
             cleanup_roots={"raw-retention": cleanup, "other-cleanup": tmp_path / "other"},
+            retention_days=14,
         )
 
     message = str(error.value)
@@ -824,6 +827,7 @@ def test_validate_archive_configuration_normalizes_aliases_and_symlinks(
         validate_archive_configuration(
             archive_root="~/shared/../shared/archive",
             cleanup_roots={"rotation": alias},
+            retention_days=14,
         )
 
 
@@ -832,6 +836,7 @@ def test_validate_archive_configuration_rejects_relative_cleanup_root(tmp_path: 
         validate_archive_configuration(
             archive_root=tmp_path / "archive",
             cleanup_roots={"raw-retention": "relative/object-store"},
+            retention_days=14,
         )
 
 
@@ -840,6 +845,7 @@ def test_validate_archive_configuration_rejects_relative_archive_root(tmp_path: 
         validate_archive_configuration(
             archive_root="relative/archive",
             cleanup_roots={"raw-retention": tmp_path / "object-store"},
+            retention_days=14,
         )
 
 
@@ -847,6 +853,7 @@ def test_validate_archive_configuration_canonicalizes_absolute_dotdot_path(tmp_p
     config = validate_archive_configuration(
         archive_root=tmp_path / "archive-parent" / ".." / "archive",
         cleanup_roots={"raw-retention": tmp_path / "object-store"},
+        retention_days=14,
     )
 
     assert config.archive_root == (tmp_path / "archive").resolve()
@@ -867,16 +874,19 @@ def test_archive_provenance_rejects_relative_root_before_lookup() -> None:
 
 def test_archive_configuration_requires_explicit_cleanup_set(tmp_path: Path) -> None:
     with pytest.raises(ArchiveConfigurationError, match="explicitly contain every cleanup"):
-        validate_archive_configuration(archive_root=tmp_path / "archive", cleanup_roots={})
+        validate_archive_configuration(
+            archive_root=tmp_path / "archive", cleanup_roots={}, retention_days=14
+        )
 
 
 def test_resolve_archive_storage_config_rejects_minimum_age_below_retention(tmp_path: Path) -> None:
-    with pytest.raises(ArchiveConfigurationError, match="13 days is below DB retention 14 days"):
+    with pytest.raises(ArchiveConfigurationError, match="20 days is below DB retention 21 days"):
         resolve_archive_storage_config(
             cleanup_roots={"raw": tmp_path / "object-store"},
+            retention_days=21,
             env={
                 "NHMS_ARCHIVE_ROOT": str(tmp_path / "archive"),
-                "NHMS_ARCHIVE_MIN_AGE_DAYS": "13",
+                "NHMS_ARCHIVE_MIN_AGE_DAYS": "20",
             },
         )
 
@@ -884,11 +894,177 @@ def test_resolve_archive_storage_config_rejects_minimum_age_below_retention(tmp_
 def test_resolve_archive_storage_config_uses_default_age(tmp_path: Path) -> None:
     config = resolve_archive_storage_config(
         cleanup_roots={"raw": tmp_path / "object-store"},
+        retention_days=14,
         env={"NHMS_ARCHIVE_ROOT": str(tmp_path / "archive")},
     )
 
     assert config.archive_min_age_days == 14
     assert config.retention_days == 14
+
+
+def test_resolve_archive_storage_config_requires_explicit_retention_days(tmp_path: Path) -> None:
+    """No defaulted guard input: a caller that forgets the live window cannot run."""
+    with pytest.raises(TypeError, match="retention_days"):
+        resolve_archive_storage_config(  # type: ignore[call-arg]
+            cleanup_roots={"raw": tmp_path / "object-store"},
+            env={"NHMS_ARCHIVE_ROOT": str(tmp_path / "archive")},
+        )
+
+
+def test_validate_archive_configuration_requires_explicit_retention_days(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="retention_days"):
+        validate_archive_configuration(  # type: ignore[call-arg]
+            archive_root=tmp_path / "archive",
+            cleanup_roots={"raw": tmp_path / "object-store"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# #1227 — the min-age guard compares against the LIVE DB retention window.
+# Helper seam: `read_retention_window_days` extracts one variable from the
+# deployed retention env file with shell-source lexical semantics.
+# ---------------------------------------------------------------------------
+
+_WINDOW_VAR = "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"
+
+
+def _retention_env(tmp_path: Path, body: str, *, name: str = "retention.env") -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(f"{_WINDOW_VAR}=21\n", 21, id="plain"),
+        pytest.param("DATABASE_URL=postgresql://x\n", 14, id="missing-assignment-uses-runner-default"),
+        pytest.param(f"{_WINDOW_VAR}=\n", 14, id="empty-value-uses-runner-default"),
+        pytest.param(f'{_WINDOW_VAR}=""\n', 14, id="quoted-empty-uses-runner-default"),
+        pytest.param(f"export {_WINDOW_VAR}=21\n", 21, id="export-prefix"),
+        pytest.param(f'{_WINDOW_VAR}="21"\n', 21, id="double-quoted"),
+        pytest.param(f"{_WINDOW_VAR}='21'\n", 21, id="single-quoted"),
+        pytest.param(f"{_WINDOW_VAR}=21   # trailing comment\n", 21, id="trailing-comment"),
+        pytest.param(f"   {_WINDOW_VAR}=21   \n", 21, id="surrounding-whitespace"),
+        pytest.param(f"# {_WINDOW_VAR}=99\n{_WINDOW_VAR}=21\n", 21, id="full-line-comment-ignored"),
+        pytest.param(f"# {_WINDOW_VAR}=99\n", 14, id="only-commented-assignment-is-unassigned"),
+        pytest.param(f"{_WINDOW_VAR}_OLD=99\n{_WINDOW_VAR}=21\n", 21, id="near-name-decoy-ignored"),
+        pytest.param(f"{_WINDOW_VAR}_OLD=99\n", 14, id="decoy-alone-is-unassigned"),
+        pytest.param(f"{_WINDOW_VAR}=14\n{_WINDOW_VAR}=21\n", 21, id="last-assignment-wins"),
+        pytest.param(f"{_WINDOW_VAR}=21\n{_WINDOW_VAR}=30\n", 30, id="last-assignment-wins-again"),
+    ],
+)
+def test_read_retention_window_days_lexical_forms_and_runner_defaults(
+    tmp_path: Path, body: str, expected: int
+) -> None:
+    """Runner-equivalent resolution + the exact lexical forms pinned by design D1."""
+    assert read_retention_window_days(_retention_env(tmp_path, body)) == expected
+
+
+def test_missing_or_empty_assignment_resolves_to_the_shared_runner_default() -> None:
+    """The default is the runner's live-effective value, not a comparison fallback."""
+    assert DEFAULT_RETENTION_WINDOW_DAYS == 14
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        pytest.param(f"{_WINDOW_VAR}=not-an-int\n", "must be an integer", id="non-integer"),
+        pytest.param(f"{_WINDOW_VAR}=0\n", "must be positive", id="zero"),
+        pytest.param(f"{_WINDOW_VAR}=-1\n", "must be positive", id="negative"),
+        pytest.param(f"{_WINDOW_VAR}=21.5\n", "must be an integer", id="float"),
+        pytest.param(f'{_WINDOW_VAR}=" 21 "\n', "whitespace", id="quoted-whitespace-padding"),
+        pytest.param(f"{_WINDOW_VAR}=$OTHER\n", "must be an integer", id="interpolation-refused"),
+    ],
+)
+def test_read_retention_window_days_refuses_present_invalid_values(
+    tmp_path: Path, body: str, match: str
+) -> None:
+    with pytest.raises(ArchiveConfigurationError, match=match):
+        read_retention_window_days(_retention_env(tmp_path, body))
+
+
+def test_read_retention_window_days_refuses_unset_path() -> None:
+    with pytest.raises(ArchiveConfigurationError, match="NODE27_TIMESERIES_RETENTION_ENV must be set"):
+        read_retention_window_days(None)
+
+
+def test_read_retention_window_days_refuses_empty_path() -> None:
+    with pytest.raises(ArchiveConfigurationError, match="NODE27_TIMESERIES_RETENTION_ENV must be set"):
+        read_retention_window_days("   ")
+
+
+def test_read_retention_window_days_refuses_relative_path_by_absoluteness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative path that EXISTS and parses must still refuse, naming absoluteness."""
+    _retention_env(tmp_path, f"{_WINDOW_VAR}=21\n")
+    monkeypatch.chdir(tmp_path)
+    assert Path("retention.env").is_file()
+
+    with pytest.raises(ArchiveConfigurationError, match="must be an absolute path: retention.env"):
+        read_retention_window_days("retention.env")
+
+
+def test_read_retention_window_days_refuses_missing_file_without_fallback(tmp_path: Path) -> None:
+    """Missing FILE is NOT the missing-ASSIGNMENT case: no constant fallback."""
+    with pytest.raises(ArchiveConfigurationError, match="retention env file is unreadable"):
+        read_retention_window_days(tmp_path / "absent.env")
+
+
+def test_read_retention_window_days_refuses_directory_source(tmp_path: Path) -> None:
+    directory = tmp_path / "retention.env"
+    directory.mkdir()
+    with pytest.raises(ArchiveConfigurationError, match="retention env file is unreadable"):
+        read_retention_window_days(directory)
+
+
+def test_live_drifted_pair_refuses_at_the_single_comparison_site(tmp_path: Path) -> None:
+    window = read_retention_window_days(_retention_env(tmp_path, f"{_WINDOW_VAR}=21\n"))
+
+    with pytest.raises(ArchiveConfigurationError) as error:
+        validate_archive_configuration(
+            archive_root=tmp_path / "archive",
+            cleanup_roots={"object_store_root": tmp_path / "object-store"},
+            archive_min_age_days=14,
+            retention_days=window,
+        )
+
+    message = str(error.value)
+    assert "14" in message and "21" in message
+
+
+@pytest.mark.parametrize(("min_age", "window", "accepted"), [(21, 21, True), (30, 21, True), (20, 21, False)])
+def test_min_age_boundary_against_live_window(
+    tmp_path: Path, min_age: int, window: int, accepted: bool
+) -> None:
+    def _validate() -> None:
+        validate_archive_configuration(
+            archive_root=tmp_path / "archive",
+            cleanup_roots={"object_store_root": tmp_path / "object-store"},
+            archive_min_age_days=min_age,
+            retention_days=window,
+        )
+
+    if accepted:
+        _validate()
+        return
+    with pytest.raises(ArchiveConfigurationError, match=f"{min_age} days is below DB retention {window} days"):
+        _validate()
+
+
+@pytest.mark.parametrize(
+    "example",
+    ["infra/env/node27-product-archive.example", "infra/env/node27-storage-inventory-audit.example"],
+)
+def test_archive_env_examples_declare_the_live_window_source(example: str) -> None:
+    """Row (g): the invariant bound is no longer stated as a '14-day' literal."""
+    text = (Path(__file__).resolve().parents[1] / example).read_text(encoding="utf-8")
+
+    assert "NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env" in text
+    assert "NHMS_ARCHIVE_MIN_AGE_DAYS=14" in text
+    assert "14-day" not in text
+    assert ">= 14 d" not in text
 
 
 def test_raw_retention_object_store_override_precedence_is_unchanged(

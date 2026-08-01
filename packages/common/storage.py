@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,7 +109,19 @@ class ArchiveConfigurationError(ValueError):
 ARCHIVE_LANES = frozenset({"forcing", "runs", "states"})
 LEGACY_UNQUALIFIED_ARCHIVE_SOURCE = "legacy-unqualified"
 DEFAULT_ARCHIVE_MIN_AGE_DAYS = 14
-DEFAULT_DB_RETENTION_DAYS = 14
+
+# Runner-equivalent default for the DB retention window (#1227). This constant
+# exists ONLY to mirror `scripts/node27_timeseries_retention.py`, whose window
+# variable is optional: a missing or empty assignment means the runner runs
+# this many days. The retention runner imports this same constant so the two
+# sides cannot drift. It is NEVER a fallback for an unreadable window source —
+# those fail closed in `read_retention_window_days`.
+DEFAULT_RETENTION_WINDOW_DAYS = 14
+
+RETENTION_ENV_PATH_VARIABLE = "NODE27_TIMESERIES_RETENTION_ENV"
+RETENTION_WINDOW_VARIABLE = "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"
+
+_ENV_ASSIGNMENT_PATTERN = re.compile(r"(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)")
 
 
 VALID_PREFIX_PATTERNS: tuple[ObjectPrefixPattern, ...] = (
@@ -172,12 +185,105 @@ def resolve_archive_root(
     return _normalized_filesystem_path(value, label="archive root")
 
 
+def read_retention_window_days(env_path: str | os.PathLike[str] | None) -> int:
+    """Read the LIVE DB retention window from the deployed retention env file.
+
+    `env_path` is the absolute path named by `NODE27_TIMESERIES_RETENTION_ENV`
+    — the same file `scripts/node27_timeseries_retention.py` is started with.
+    Only `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` is extracted; nothing is
+    sourced or executed.
+
+    Resolution mirrors the retention runner (#1227 design D1): a MISSING or
+    EMPTY assignment resolves to `DEFAULT_RETENTION_WINDOW_DAYS`, because that
+    is the window the runner itself would use. Everything else fails closed
+    with `ArchiveConfigurationError` and no constant fallback: an unset, empty
+    or relative path, a missing/unreadable file, or a PRESENT value that is
+    not a positive integer.
+
+    Lexical forms honored (shell-source semantics, bounded on purpose):
+    optional `export ` prefix, single/double quoted values taken verbatim,
+    a trailing ` # comment` stripped, whitespace stripped OUTSIDE quotes only,
+    full-line `#` comments ignored, exact variable-name match (near-name
+    decoys ignored), last assignment wins. Any other shape (line
+    continuations, `$VAR` interpolation) refuses rather than mis-parses.
+    """
+    if env_path is None:
+        raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be set to an absolute path")
+    raw_path = os.fspath(env_path).strip()
+    if not raw_path:
+        raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be set to an absolute path")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise ArchiveConfigurationError(f"{RETENTION_ENV_PATH_VARIABLE} must be an absolute path: {raw_path}")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ArchiveConfigurationError(f"retention env file is unreadable: {path}: {error}") from error
+    except ValueError as error:
+        raise ArchiveConfigurationError(f"retention env file is not valid UTF-8: {path}") from error
+    raw_value = _extract_env_assignment(content, RETENTION_WINDOW_VARIABLE)
+    if raw_value is None or raw_value == "":
+        return DEFAULT_RETENTION_WINDOW_DAYS
+    if raw_value.strip() != raw_value:
+        raise ArchiveConfigurationError(
+            f"{RETENTION_WINDOW_VARIABLE} must not contain leading/trailing whitespace "
+            f"in {path}: {raw_value!r}"
+        )
+    try:
+        window_days = int(raw_value)
+    except ValueError as error:
+        raise ArchiveConfigurationError(
+            f"{RETENTION_WINDOW_VARIABLE} must be an integer in {path}: {raw_value!r}"
+        ) from error
+    if window_days <= 0:
+        raise ArchiveConfigurationError(
+            f"{RETENTION_WINDOW_VARIABLE} must be positive in {path}: {window_days}"
+        )
+    return window_days
+
+
+def _extract_env_assignment(content: str, name: str) -> str | None:
+    """Return the last assigned value of `name`, or None when unassigned."""
+    value: str | None = None
+    for line in content.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#"):
+            continue
+        matched = _ENV_ASSIGNMENT_PATTERN.fullmatch(candidate)
+        if matched is None or matched.group(1) != name:
+            continue
+        value = _unquote_env_value(_strip_env_trailing_comment(matched.group(2)))
+    return value
+
+
+def _strip_env_trailing_comment(value: str) -> str:
+    quote = ""
+    for index, character in enumerate(value):
+        if quote:
+            if character == quote:
+                quote = ""
+            continue
+        if character in "\"'":
+            quote = character
+            continue
+        if character == "#" and (index == 0 or value[index - 1] in " \t"):
+            return value[:index]
+    return value
+
+
+def _unquote_env_value(value: str) -> str:
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate[0] in "\"'" and candidate[-1] == candidate[0]:
+        return candidate[1:-1]
+    return candidate
+
+
 def resolve_archive_storage_config(
     *,
     cleanup_roots: Mapping[str, str | os.PathLike[str]],
+    retention_days: int,
     script_name: str | None = None,
     env: Mapping[str, str] | None = None,
-    retention_days: int = DEFAULT_DB_RETENTION_DAYS,
 ) -> ArchiveStorageConfig:
     """Resolve and validate archive root, age, and every cleanup target root."""
     source_env = os.environ if env is None else env
@@ -199,10 +305,15 @@ def validate_archive_configuration(
     *,
     archive_root: str | os.PathLike[str],
     cleanup_roots: Mapping[str, str | os.PathLike[str]],
+    retention_days: int,
     archive_min_age_days: int = DEFAULT_ARCHIVE_MIN_AGE_DAYS,
-    retention_days: int = DEFAULT_DB_RETENTION_DAYS,
 ) -> ArchiveStorageConfig:
-    """Reject unsafe root overlap and archive ages shorter than DB retention."""
+    """Reject unsafe root overlap and archive ages shorter than DB retention.
+
+    `retention_days` is REQUIRED (#1227): it is the LIVE window read from the
+    deployed retention env file, never a compile-time constant. This is the
+    single min-age comparison site for the mover and the inventory audit.
+    """
     if not cleanup_roots:
         raise ArchiveConfigurationError("cleanup_roots must explicitly contain every cleanup target root")
     if retention_days <= 0:
