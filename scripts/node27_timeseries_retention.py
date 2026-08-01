@@ -31,8 +31,10 @@ Design references (design.md #855 fixture pins H1-H17):
   ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
   per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
-- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk relation is
-  gone; ``pg_total_relation_size`` would fail).
+- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk is gone;
+  ``chunks_detailed_size`` would no longer report it). Sized via
+  ``chunks_detailed_size(<hypertable>).total_bytes`` filtered to the chunk so
+  a compressed chunk's compressed sibling relation counts too (#1125).
 - H5 fail-closed on per-chunk drop failure — whole tick refuses.
 - H6 wire codes byte-identical across code / runbook §8.2 / design #855.
 - H7 predicate ``range_end <= cutoff`` (non-strict; divergence from #851's
@@ -895,21 +897,78 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         connection.close()
 
 
+def _redact_measure_error(error: BaseException, dsn: str) -> str:
+    """Scrub credentials out of a measurement error before it reaches stderr.
+
+    Mirrors the salvage runner's ``_mask_dsn_in_message``
+    (``scripts/node27_db_export_salvage.py:1039-1041``): the shared policy in
+    ``packages/common/redaction.py`` strips the verbatim DSN plus its password
+    in both URL-encoded and driver-decoded forms, and the marker is rendered
+    as ``***`` for operator-facing text.
+
+    libpq additionally echoes the ROLE name back on auth failures
+    (``FATAL:  password authentication failed for user "nwm_writer"``), which
+    the DSN policy does not cover — so that ONE libpq-shaped occurrence is
+    scrubbed too, and only when the name matches the DSN's own username. A
+    bare literal replace of the username is deliberately NOT done: a username
+    like ``nwm`` also occurs inside unrelated substrings (``/home/nwm/...``)
+    and replacing those would mangle the diagnostic.
+
+    The ``redaction`` import is function-local because that module imports
+    ``psycopg2.extensions`` at module scope, and this runner keeps psycopg2
+    strictly deferred (config parsing / ``--help`` must work without the
+    driver installed).
+    """
+    from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
+
+    text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+    try:
+        username = urlsplit(dsn).username
+    except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
+        username = None
+    if username:
+        text = text.replace(f'user "{username}"', 'user "***"')
+    return text
+
+
 def _default_measure_chunk_bytes(
     config: RetentionConfig, chunks: Sequence[ChunkRow]
 ) -> dict[str, int]:
-    """H4: measure ``pg_total_relation_size(...)`` BEFORE drop.
+    """H4: measure ``chunks_detailed_size(...).total_bytes`` BEFORE drop.
 
-    Per-chunk connection (mirrors compression sibling ``:292-338`` exactly):
-    a shared transaction would enter ``InFailedSqlTransaction`` state on the
+    #1125: ``pg_total_relation_size(chunk)`` sizes only the main chunk
+    relation. For a compressed chunk the data lives in the compressed
+    sibling (``_timescaledb_internal.compress_hyper_*``), which
+    ``drop_chunks`` also removes — the main relation reads ~57 kB while the
+    real reclaim is hundreds of MB. TimescaleDB's public
+    ``chunks_detailed_size(<hypertable>::regclass)`` returns
+    ``total_bytes`` inclusive of the compressed sibling and indexes;
+    filtering it to ``(chunk_schema, chunk_name)`` yields this chunk's total
+    reclaim. Deliberate divergence from the compression sibling's private-
+    catalog join (``node27_timeseries_compression.py`` ``_COMPRESSED_SIBLING_QUERY``):
+    retention needs one total-reclaim number the public function returns
+    directly (validated byte-exactly against a live ``pg_database_size``
+    delta), not a two-step computation over private catalog tables.
+
+    Per-chunk connection (mirrors compression sibling
+    ``scripts/node27_timeseries_compression.py:387-428`` — same per-chunk
+    isolation and 60 s statement timeout; the sibling additionally passes
+    ``connect_timeout``, a pre-existing divergence this change does not
+    touch): a shared transaction would enter ``InFailedSqlTransaction`` on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
     the receipt faithful when a single chunk fails to size.
 
     Per-chunk try/except records ``0`` on failure so the drop phase can
-    still proceed and report best-effort ``freed_bytes``. Each connection
-    has a 60 s ``statement_timeout``; the DROP phase opens its own
-    connection (300 s) per chunk.
+    still proceed and report best-effort ``freed_bytes``; a chunk that
+    returns no row (dropped/renamed between enumeration and measurement) or
+    a NULL ``total_bytes`` records ``0`` through the same coercion. A failure
+    additionally emits one JSON diagnostic line on stderr naming the chunk and
+    the (credential-redacted) error — the receipt's ``0`` is otherwise
+    indistinguishable from a genuinely empty chunk; the recorded value and
+    control flow are unchanged.
+    Each connection has a 60 s ``statement_timeout``; the DROP phase opens its
+    own connection (300 s) per chunk.
     """
     import psycopg2  # type: ignore[import-untyped]
 
@@ -924,17 +983,37 @@ def _default_measure_chunk_bytes(
                     with connection.cursor() as cursor:
                         cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
                         cursor.execute(
-                            "SELECT pg_total_relation_size(%s::regclass)",
-                            (chunk.qualified_name,),
+                            "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+                            "WHERE chunk_schema = %s AND chunk_name = %s",
+                            (
+                                f"{chunk.hypertable_schema}.{chunk.hypertable_name}",
+                                chunk.chunk_schema,
+                                chunk.chunk_name,
+                            ),
                         )
                         row = cursor.fetchone()
                         result[chunk.qualified_name] = int((row[0] if row else 0) or 0)
             finally:
                 connection.close()
-        except Exception:
+        except Exception as error:
             # A per-chunk measure failure is not a whole-tick fault. Record
             # 0 so the receipt is faithful; a fresh connection for the next
             # chunk guarantees this chunk's abort does not poison the rest.
+            # The receipt cannot distinguish this 0 from a genuine 0, so the
+            # cause goes to stderr (diagnostic only — no control-flow change).
+            # The error text is credential-redacted: psycopg2 connection
+            # failures echo the DSN and the libpq role name back verbatim.
+            print(
+                json.dumps(
+                    {
+                        "warning": "freed_bytes measurement failed; recording 0",
+                        "chunk": chunk.qualified_name,
+                        "error": _redact_measure_error(error, config.database_url),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
             result[chunk.qualified_name] = 0
     return result
 

@@ -34,8 +34,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import jsonschema
+import psycopg2
 import pytest
 
+# Imported eagerly (not inside a test): the runner defers this import to keep
+# psycopg2 out of module import, and these tests monkeypatch ``psycopg2`` with
+# a fake — importing ``packages.common.redaction`` (which imports
+# ``psycopg2.extensions`` at module scope) under that fake would fail. Loading
+# it here caches the real module before any fake is installed. The same reason
+# applies to the ``psycopg2`` import above: the connect-failure row needs the
+# REAL ``psycopg2.OperationalError`` class, which the fake does not carry.
+from packages.common.redaction import REDACTION_MARKER
 from scripts import node27_timeseries_retention as retention
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -2255,7 +2264,7 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
                 raise RuntimeError("current transaction is aborted (InFailedSqlTransaction)")
             if "statement_timeout" in sql:
                 return
-            if "pg_total_relation_size" in sql:
+            if "chunks_detailed_size" in sql:
                 global_chunk_idx[0] += 1
                 idx = global_chunk_idx[0]
                 if idx == fail_index:
@@ -2312,6 +2321,493 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
     assert measured[chunks[2].qualified_name] == 0  # failed chunk
     assert measured[chunks[3].qualified_name] == 4_444  # NOT zeroed
     assert measured[chunks[4].qualified_name] == 5_555  # NOT zeroed
+
+
+# ---------------------------------------------------------------------------
+# #1125 — default measurement path is compression-aware
+# ---------------------------------------------------------------------------
+
+# Live node-27 probe (TimescaleDB 2.10.2, 2026-08-01, recorded in
+# openspec/changes/fix-retention-freed-bytes-compressed/design.md D1):
+# compressed chunk ``_hyper_3_14_chunk`` reads 57,344 B through
+# ``pg_total_relation_size`` (the 2026-07-25 under-report signature) but
+# 5,904,531,456 B through ``chunks_detailed_size.total_bytes``.
+_PROBE_MAIN_RELATION_BYTES = 57_344
+_PROBE_TOTAL_BYTES = 5_904_531_456
+
+# Synthetic (no live ``met`` probe is recorded in design D1). The met row
+# exists to pin the hypertable regclass parameter and the value round-trip
+# for the second retained hypertable, not to assert a live number.
+_MET_TOTAL_BYTES = 1_073_741_824
+
+# The exact statement ``_default_measure_chunk_bytes`` must issue. Pinning the
+# whole string (not substrings) is what makes a projected-column swap
+# (``total_bytes`` -> ``table_bytes``, which would resurrect the under-report
+# defect with a still-"chunks_detailed_size"-shaped query) and a predicate
+# reorder (which would silently mis-bind the two %s params) go red.
+_EXPECTED_MEASURE_SQL = (
+    "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+    "WHERE chunk_schema = %s AND chunk_name = %s"
+)
+
+# The operator-facing half of the same statement, byte-identical with the two
+# permanent doc surfaces (receipts README resolution note + design #855 H4).
+# Same byte-identity discipline as the wire-code and lock-path rows above.
+_DOC_MEASURE_SQL_PREFIX = "SELECT total_bytes FROM chunks_detailed_size("
+
+_RECEIPTS_README_PATH = (
+    _ROOT
+    / "docs/runbooks/receipts/tier-node27-timeseries-storage"
+    / "timeseries-retention/README.md"
+)
+
+# One JSON line on stderr per failed per-chunk measurement (design D2). It is
+# warning vocabulary, NOT a wire code: it never reaches the receipt and is not
+# a member of ``WIRE_CODES``.
+_MEASURE_WARNING = "freed_bytes measurement failed; recording 0"
+
+# A URI DSN whose password AND libpq role name both appear verbatim in the
+# error text psycopg2 raises on an auth failure. Shared by the two redaction
+# rows (query-time failure and connect-time failure) so both assert the
+# scrubbing against the same secret.
+_MEASURE_PROBE_DSN = "postgresql://alice:supersekret@127.0.0.1:55432/nhms"
+
+
+class _MeasureProbe:
+    """Recorder for the fake psycopg2 driving ``_default_measure_chunk_bytes``.
+
+    ``completions`` gets one entry per connection context-manager exit: True
+    when the ``with connection:`` block unwound cleanly (psycopg2 COMMITs),
+    False when it unwound with an exception (psycopg2 ROLLBACKs). Without it a
+    recorded ``0`` is ambiguous — the D2-mandated coercion path and the
+    best-effort except path both write 0, so a mutation that deletes the
+    coercion would still "pass" while degrading every NULL/edge measurement
+    into a swallowed exception.
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.connect_calls: list[str] = []
+        self.completions: list[bool] = []
+
+    @property
+    def measure_statements(self) -> list[tuple[str, tuple | None]]:
+        """Executed statements excluding the ``SET statement_timeout`` prelude."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" not in sql]
+
+    @property
+    def timeout_statements(self) -> list[tuple[str, tuple | None]]:
+        """The ``SET statement_timeout`` prelude of every connection."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" in sql]
+
+
+# H12: every measurement connection MUST cap itself at 60 s before issuing the
+# now hypertable-wide size walk — deleting the prelude turns a lock-blocked
+# walk into an unbounded wait inside the wrapper/systemd wall.
+_EXPECTED_TIMEOUT_STATEMENT = (f"SET statement_timeout = {retention._QUERY_TIMEOUT_MS}", None)
+
+
+def _install_fake_measure_psycopg2(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Any,
+    *,
+    connect_error: BaseException | None = None,
+) -> _MeasureProbe:
+    """Inject a fake ``psycopg2`` driving ``_default_measure_chunk_bytes``.
+
+    ``responder(params)`` returns the row ``fetchone()`` yields for the
+    measurement statement (or raises to simulate a per-chunk failure).
+
+    ``connect_error``, when given, is raised by the FIRST ``psycopg2.connect``
+    call only; every later call connects normally. This is the one failure the
+    responder cannot reach — it never runs, because there is no cursor — so it
+    is the only way to exercise the connect call's placement inside the
+    per-chunk ``try``.
+    """
+    probe = _MeasureProbe()
+
+    class _FakeCursor:
+        def __init__(self) -> None:
+            self._row: tuple | None = None
+
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, sql: str, params: tuple | None = None) -> None:
+            probe.executed.append((sql, params))
+            if "statement_timeout" in sql:
+                return
+            self._row = responder(params)
+
+        def fetchone(self) -> tuple | None:
+            return self._row
+
+    class _FakeConn:
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            # psycopg2's connection context manager COMMITs on a clean exit and
+            # ROLLBACKs on an exception; record which happened.
+            probe.completions.append(exc_type is None)
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_connect(url: str) -> _FakeConn:
+        probe.connect_calls.append(url)
+        if connect_error is not None and len(probe.connect_calls) == 1:
+            raise connect_error
+        return _FakeConn()
+
+    import types
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "psycopg2", types.SimpleNamespace(connect=_fake_connect)
+    )
+    return probe
+
+
+@pytest.mark.parametrize(
+    ("schema", "hypertable", "chunk_label", "total_bytes"),
+    [
+        ("hydro", "river_timeseries", "_hyper_3_14_chunk", _PROBE_TOTAL_BYTES),
+        ("met", "forcing_station_timeseries", "_hyper_5_21_chunk", _MET_TOTAL_BYTES),
+    ],
+    ids=["hydro-river", "met-forcing-station"],
+)
+def test_default_measure_chunk_bytes_uses_compression_aware_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    schema: str,
+    hypertable: str,
+    chunk_label: str,
+    total_bytes: int,
+) -> None:
+    """#1125: a compressed chunk's freed_bytes carries the compressed sibling.
+
+    The old ``pg_total_relation_size(chunk)`` query sized only the main chunk
+    relation (57,344 B on the live probe). The runner MUST query
+    ``chunks_detailed_size(<hypertable>::regclass)`` filtered by
+    ``(chunk_schema, chunk_name)`` and record its ``total_bytes``.
+
+    Both retained hypertables are exercised so the regclass parameter cannot be
+    hardcoded to ``hydro.river_timeseries``; the SQL is asserted whole so the
+    projected column and the predicate order are both pinned.
+    """
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: (total_bytes,))
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(schema, hypertable, chunk_label, delta_days=60, is_compressed=True)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: total_bytes}
+    assert measured[chunk.qualified_name] != _PROBE_MAIN_RELATION_BYTES
+    assert len(probe.measure_statements) == 1
+    measure_sql, params = probe.measure_statements[0]
+    assert measure_sql == _EXPECTED_MEASURE_SQL
+    assert params == (f"{schema}.{hypertable}", "_timescaledb_internal", chunk_label)
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
+    assert probe.executed[0] == _EXPECTED_TIMEOUT_STATEMENT
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # The clean path is silent — the D2 diagnostic belongs to the failure path
+    # only, so a successful measurement must not add stderr noise to the
+    # wrapper's `retention.log`.
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("row", [None, (None,)], ids=["no-row", "null-total-bytes"])
+def test_default_measure_chunk_bytes_missing_row_records_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    row: tuple | None,
+) -> None:
+    """#1125 D2: the filtered function may return no row (chunk dropped or
+    renamed between enumeration and measurement) or a NULL ``total_bytes``;
+    both coerce to 0 rather than raising.
+
+    The 0 must come from the coercion, NOT from the best-effort except branch:
+    the measurement statement is asserted executed and the connection block
+    asserted to have unwound cleanly, so a lost coercion (``int(None)`` ->
+    TypeError -> except -> 0) is red instead of indistinguishable.
+    """
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: row)
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk("hydro", "river_timeseries", "chk-vanished", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+    assert probe.measure_statements == [
+        (
+            _EXPECTED_MEASURE_SQL,
+            ("hydro.river_timeseries", "_timescaledb_internal", "chk-vanished"),
+        )
+    ]
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # Second, independent witness that this 0 is the coercion and not the
+    # best-effort except branch: the failure path ALWAYS emits the D2
+    # diagnostic line, so silence here proves no exception was swallowed.
+    assert capsys.readouterr().err == ""
+
+
+def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: a per-chunk query failure records 0 for that chunk only; the
+    remaining chunks are still measured on their own fresh connections.
+
+    The failure ALSO emits exactly one JSON diagnostic line on stderr naming
+    the chunk and the cause — without it the receipt's ``0`` is
+    indistinguishable from a genuinely empty chunk. The whole parsed object is
+    asserted (all three keys), so dropping the line, dropping the ``chunk``
+    key, printing non-JSON, or printing to stdout are each red.
+    """
+    sizes = {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        name = f"{params[1]}.{params[2]}"
+        if name == "_timescaledb_internal.chk-b":
+            raise RuntimeError('function chunks_detailed_size(regclass) failed for "chk-b"')
+        return (sizes[name],)
+
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-a", "chk-b", "chk-c"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-b": 0,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+    assert len(probe.connect_calls) == len(chunks)
+    # Only the failing chunk's block unwound with an exception — this is the
+    # counterpart of the missing-row test: here the 0 legitimately comes from
+    # the except branch, and the neighbours still complete cleanly.
+    assert probe.completions == [True, False, True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT] * len(chunks)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        "warning": _MEASURE_WARNING,
+        "chunk": "_timescaledb_internal.chk-b",
+        "error": 'function chunks_detailed_size(regclass) failed for "chk-b"',
+    }
+
+
+def test_default_measure_chunk_bytes_uncoercible_value_records_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: the coercion is PART of the per-chunk measurement, so a value
+    that cannot be coerced is a per-chunk failure — 0 + diagnostic + continue,
+    never a whole-tick abort.
+
+    This pins the coercion's *placement*, which no other row does: only a
+    row whose `total_bytes` actually raises in `int()` distinguishes
+    "coercion inside the connection block and inside the per-chunk try" from
+    a refactor that hoists it out. Hoisted out of the `with connection:`
+    block the failing chunk would COMMIT instead of ROLLBACK
+    (`completions == [True, ...]`); hoisted out of the `try` the exception
+    would escape and take the whole tick down with it.
+    """
+    sizes: dict[str, Any] = {
+        "_timescaledb_internal.chk-bad": "18 GB",  # driver/type surprise
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        return (sizes[f"{params[1]}.{params[2]}"],)
+
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-bad", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-bad": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.completions == [False, True]
+    lines = [line for line in capsys.readouterr().err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-bad"
+    assert "invalid literal for int()" in payload["error"]
+
+
+def test_measure_failure_diagnostic_redacts_dsn_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The D2 diagnostic must not leak the DSN password or the libpq role name.
+
+    A psycopg2 connection failure echoes both back verbatim
+    (``FATAL:  password authentication failed for user "alice"`` plus, for
+    URI DSNs, the connection string itself). The wrapper redirects stderr into
+    a world-readable-ish `retention.log`, so the diagnostic goes through the
+    shared redaction policy first. Recording semantics are unchanged: still 0,
+    still continue.
+    """
+    dsn = _MEASURE_PROBE_DSN
+    message = (
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice" '
+        f"(tried {dsn})"
+    )
+
+    def _responder(_params: tuple | None) -> tuple | None:
+        raise RuntimeError(message)
+
+    _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True, database_url=dsn)
+    chunk = _chunk("hydro", "river_timeseries", "chk-auth", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+
+    captured = capsys.readouterr()
+    assert "supersekret" not in captured.err
+    assert "alice" not in captured.err
+    assert REDACTION_MARKER not in captured.err  # rendered as *** for operators
+    payload = json.loads(captured.err.strip())
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == chunk.qualified_name
+    assert "password authentication failed" in payload["error"]
+
+
+def test_measure_connect_failure_records_zero_redacts_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: a chunk whose CONNECTION cannot even be opened records 0 and
+    the next chunk is still measured on its own fresh connection.
+
+    ``psycopg2.connect`` sits inside the per-chunk ``try``; every other failure
+    row in this file needs a live cursor and therefore cannot see that
+    placement. Hoisting the connect above the loop (one shared connection) or
+    outside the ``try`` turns this per-chunk fault into a whole-tick abort —
+    chunk two would never be measured. The libpq text embeds the DSN role, so
+    the redaction is asserted on the same line.
+    """
+    error = psycopg2.OperationalError(
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice"'
+    )
+    probe = _install_fake_measure_psycopg2(
+        monkeypatch, lambda _params: (4_242,), connect_error=error
+    )
+    config = _build_config(tmp_path, enforce=True, database_url=_MEASURE_PROBE_DSN)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-noconn", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    # Continue semantics: the failed chunk records 0, the neighbour is measured.
+    assert measured == {
+        "_timescaledb_internal.chk-noconn": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.connect_calls == [_MEASURE_PROBE_DSN, _MEASURE_PROBE_DSN]
+    # Only the second chunk ever entered a connection block — the first never
+    # obtained a connection to commit or roll back.
+    assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-noconn"
+    assert "password authentication failed" in payload["error"]
+    # The libpq role name is scrubbed before the wrapper captures stderr.
+    assert "alice" not in captured.err
+
+
+def test_measure_sql_prefix_byte_identical_with_docs() -> None:
+    """Byte-identity: the measurement statement's operator-facing prefix is
+    pinned in the two permanent doc surfaces.
+
+    Same discipline as the wire-code and lock-path rows: a future edit that
+    changes the projected column or the function (e.g. back to
+    ``pg_total_relation_size``, or to ``table_bytes``) without touching the
+    receipts README resolution note and design #855 H4 goes red here instead
+    of silently re-opening the 2026-07-25 under-report with docs that claim
+    otherwise.
+    """
+    assert _EXPECTED_MEASURE_SQL.startswith(_DOC_MEASURE_SQL_PREFIX)
+    readme_text = _RECEIPTS_README_PATH.read_text(encoding="utf-8")
+    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    assert _DOC_MEASURE_SQL_PREFIX in readme_text, (
+        "receipts README resolution note must name the measurement statement"
+    )
+    assert _DOC_MEASURE_SQL_PREFIX in design_text, "design #855 H4 must name the statement"
+
+
+# The token §8.6's disambiguation procedure greps for. It is a PREFIX of the
+# full warning literal, so a rename of the tail alone still greps.
+_MEASURE_WARNING_GREP_TOKEN = "freed_bytes measurement failed"  # §8.6 operator procedure
+
+# The §8.6 item 5 command as the operator copy-pastes it. Quoting matters: this
+# exact string occurs ONLY in §8.6's fenced block, so it pins that section
+# specifically — §8.2.1 names the same token in backticks, which does not
+# match, and an unquoted substring check would have been satisfied by §8.2.1
+# alone (making the §8.6 anchor vacuous).
+_MEASURE_WARNING_GREP_FENCE = "grep 'freed_bytes measurement failed'"
+
+
+def test_measure_warning_byte_identical_with_runbook() -> None:
+    """Byte-identity: the D2 stderr warning is anchored to the runbook.
+
+    §8.2.1 documents the literal line and §8.6 item 5 hands the operator a
+    `grep` command for its prefix. A rename of the code string that does not
+    touch the runbook would silently break that procedure — the operator would
+    grep a literal the runner no longer emits and read "no hit" as "the 0 is
+    real". The three rows are independently falsifiable: the prefix relation
+    (code side), §8.2.1's full literal, and §8.6's executable command.
+    """
+    assert _MEASURE_WARNING.startswith(_MEASURE_WARNING_GREP_TOKEN)
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _MEASURE_WARNING in runbook_text, (
+        "runbook §8.2.1 must carry the full warning literal"
+    )
+    assert _MEASURE_WARNING_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 5 must carry the operator's grep command verbatim"
+    )
 
 
 # ---------------------------------------------------------------------------

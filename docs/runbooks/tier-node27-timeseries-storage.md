@@ -1784,6 +1784,28 @@ COMPLETENESS_RECEIPT_MISSING
                     -> DRILL_COVERAGE_DB_EXPORT_MISSING
 ```
 
+#### 8.2.1 Non-code stderr diagnostics
+
+Not every stderr line is a wire code. The runner also emits **warning**
+lines that never reach the receipt and are not members of the `WIRE_CODES`
+frozenset:
+
+- `{"chunk": "<chunk_schema>.<chunk_name>", "error": "<redacted text>",
+  "warning": "freed_bytes measurement failed; recording 0"}` — the
+  pre-drop size measurement for that ONE chunk RAISED (lock wait hitting the
+  60 s statement timeout, catalog error, connection failure, an uncoercible
+  `total_bytes` value). The runner records `freed_bytes: 0` for that chunk,
+  keeps measuring the remaining chunks on fresh connections, and **still
+  drops** — the tick is not refused and the exit code is unaffected. Grep
+  literal: `freed_bytes measurement failed`. The `error` text is
+  credential-redacted (DSN password and libpq role name are scrubbed)
+  because the wrapper captures stderr into `retention.log`.
+- NOT every best-effort `0` produces a line here. A measurement that
+  returns NO ROW, or a NULL `total_bytes`, is coerced to `0` **silently** —
+  no warning is emitted at all (design D2 coercion path). §8.6 item 5
+  depends on this asymmetry: an absent grep hit does NOT prove the `0` was
+  measured.
+
 ### 8.3 Metadata-table exemption + row-count invariant
 
 The runner targets EXACTLY two hypertables (spec §Window and mechanism):
@@ -1908,6 +1930,47 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 4. **Uncaught error (`RETENTION_UNCAUGHT_ERROR`).** The receipt carries
    the exception class + message. File a bug against #855 (or the
    downstream owner if the class is from a shared helper).
+5. **`freed_bytes: 0` in an `enforced` receipt.** A `0` is ambiguous in the
+   receipt alone: the chunk may have been genuinely empty, or its
+   measurement may have failed. Disambiguate from the wrapper log:
+
+   ```
+   grep 'freed_bytes measurement failed' /path/to/retention.log
+   ```
+
+   Scope the match to THIS tick before reading anything into it.
+   `retention.log` is cumulative — the wrapper appends every tick to the same
+   file (`>>`) — so a bare `grep` also returns warnings from earlier runs.
+   Each tick is bracketed in the log by the wrapper's own
+   `node27-timeseries-retention: start summary=<receipt path>` and
+   `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
+   lines (`scripts/node27_timeseries_retention_once.sh:143,151`): read only
+   the lines between the `start` line naming the receipt under investigation
+   and the matching `done rc=` line. Then require the hit's `chunk` field to
+   name a chunk that appears in THIS receipt's `dropped_chunks[]`. A hit
+   outside that bracket belongs to an earlier tick and says nothing about
+   this receipt's `0`.
+
+   An in-bracket hit names the chunk and the redacted cause (§8.2.1) — the
+   receipt's `freed_bytes` for that chunk is a best-effort 0, not a
+   measurement. The chunk WAS dropped; only the reclaim accounting is
+   degraded. Common cause of a hit: concurrent `compress_chunk` /
+   `decompress_chunk` / manual replay holding an incompatible lock on the
+   same hypertable until the 60 s statement timeout fires.
+
+   No in-bracket hit does NOT prove the 0 was measured — it leaves two
+   possibilities:
+   (a) a real measurement of a small or empty chunk, or (b) the
+   silent-coercion path, where `chunks_detailed_size` returned no row or a
+   NULL `total_bytes` and the runner recorded 0 without emitting any
+   warning (design D2, §8.2.1). Narrowing (b): a chunk that fully vanished
+   mid-tick normally also fails the drop phase and refuses the whole tick
+   (`RETENTION_DROP_FAILED`, H5 fail-closed), so a silent 0 sitting inside
+   an `enforced` receipt points at the NULL / no-row coercion, not at a
+   disappeared chunk.
+
+   No action is required unless the receipt's reclaim total is being
+   reconciled against a `pg_database_size` delta.
 
 ### 8.7 Salvage-backed windows
 
