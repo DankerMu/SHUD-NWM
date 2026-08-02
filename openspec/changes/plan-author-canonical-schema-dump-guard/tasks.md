@@ -53,7 +53,10 @@ decisive hazard #1, and the same universal-claim class the #1265
 loop already convicted once) the "ENTIRE/complete/only consumer
 set" meta-claim omitted the FIFTH consumer chain: plan_author
 embeds --schema-dump-container in the schema_dump_list CAPTURE
-argv (:305 in the shipped frame), capture.py:531/:533 executes
+argv (the capture-argv builder in plan_author — named, not
+numbered: the fix commit's own comment growth drifts self-frame
+numbers, the round-1 C1 lesson one level up), capture.py:531/:533
+executes
 docker exec pg_restore --list from that capture-argv value and
 records list_argv into the forensic bundle, and live_evidence:1522
 compares the whole capture argv by EXACT equality (not
@@ -69,6 +72,24 @@ body. Rider (verifier-recommended, adopted): a `//x` leading-
 double-slash positive for schema_dump_host (argv[-1] and
 association verbatim) makes the MODIFIED scenario's three-label
 `//x` carve-out executable rather than transitive — suite 385→386.
+
+Fix round 2 record (post Phase-7 final review): the final reviewer
+found ONE P2 (contract/record accuracy, docs-only, non-blocking on
+behavior) — proposal.md §What Changes item 2 still carried the
+three-chain "full consumer set" enumeration that fix round 1 had
+completed in the other four artifacts (the comment, the test
+docstring, the spec delta, the runbook); the C2 fix simply skipped
+the proposal. Fixed: the proposal now names BOTH plan_author
+recording sites (pg_restore-list command argv + schema-dump-list
+capture argv) and the (d) capture-argv chain (capture.py :531/:533
+execute+record → live_evidence.py :1522 whole-argv exact
+equality), with a parenthetical recording that the final reviewer
+caught the omission. Plus one note folded: tasks.md's own Fix
+round 1 record cited "(:305 in the shipped frame)" — drifted to
+:315 by the fix commit's comment growth, the round-1 C1 class one
+level up — replaced with a named reference; and the superseded
+task-1 body's three-chain enumeration completed for consistency.
+All edits fixture-text-only; code files untouched in this round.
 
 Triage note: S — one tuple entry in an existing loop + a parametrize
 domain extension + two small tests + one runbook clause + one
@@ -175,8 +196,12 @@ Must preserve:
   `schema_dump_container` stays listed as deliberately unvalidated
   with the adjudication rationale scoped to SYMMETRY ONLY (never in
   artifact_associations — :196's command has empty associations; its
-  entire consumer set — verifier gates :744-749/:1892 and supervisor
-  mirror gates :350-364/:1055-1058 — compares verbatim with zero
+  entire consumer set — verifier gates :744-749/:1892, supervisor
+  mirror gates :350-364/:1055-1058, AND the capture-argv chain
+  (plan_author's schema-dump-list capture argv → capture.py
+  :531/:533 execute+record → live_evidence.py :1522 whole-argv
+  exact equality; fix round 2 completed this enumeration here too) —
+  compares verbatim with zero
   normalization, so the verbatim-vs-normalized false refusal cannot
   occur for it; do NOT claim "no verifier checks it" — the
   supervisor extracts and sha256sums it). `capture_repo` entry

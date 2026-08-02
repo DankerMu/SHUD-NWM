@@ -47,20 +47,32 @@ loop's domain**, so the guard stays one rule, not two.
    the same way.
 2. **`schema_dump_container` adjudicated NOT guarded** (the issue's
    explicit decision point, judged by "what the comparisons actually
-   do"; consumer sweep completed per fixture-review P2-1): its full
-   consumer set is (a) plan_author :196 (pg_restore `--list` argv
-   only; that command's `artifact_associations` are empty, so it
-   never reaches :1439), (b) the verifier's prefix+shape argv gates
-   (`argv[:5]` + `len == 6` + `startswith("/var/lib/postgresql/")`,
-   live_evidence.py:744-749, and the same prefix check on the
-   captured listing at :1892), and (c) the SUPERVISOR's mirror gates —
-   `_assert_exact_argv`'s identical prefix+shape check
-   (supervisor.py:350-364) and
+   do"; consumer sweep completed per fixture-review P2-1 and
+   completed AGAIN per implementation fix round 2 — the final
+   reviewer caught this proposal still carrying the three-chain
+   enumeration after fix round 1 completed it in the other four
+   artifacts): plan_author records the value in TWO places — the
+   pg_restore `--list` command argv (whose
+   `artifact_associations` are empty, so it never reaches :1439)
+   AND the schema-dump-list capture argv — and its full consumer
+   set is (a) that command argv, (b) the verifier's prefix+shape
+   argv gates (`argv[:5]` + `len == 6` +
+   `startswith("/var/lib/postgresql/")`, live_evidence.py:744-749,
+   and the same prefix check on the captured listing at :1892),
+   (c) the SUPERVISOR's mirror gates — `_assert_exact_argv`'s
+   identical prefix+shape check (supervisor.py:350-364) and
    `resolve_container_pg_restore_identity`, which extracts
    `argv[-1]` verbatim (:1055-1058, invoked :1768), asserts the same
    `startswith` as a mount-containment claim, then runs
-   `docker exec sha256sum <path>` on it. Every one of these
-   comparisons is verbatim-symmetric — zero `Path()` normalization
+   `docker exec sha256sum <path>` on it — and (d) the capture-argv
+   chain: capture.py:531/:533 executes
+   `docker exec pg_restore --list` from the capture-argv value and
+   records `list_argv` into the forensic bundle, and
+   live_evidence.py:1522 compares the WHOLE capture argv by exact
+   equality (live_evidence.py:124-128 records both
+   `--schema-dump-*` options as deliberately not value-pinned).
+   Every one of these comparisons is verbatim-symmetric — zero
+   `Path()` normalization
    anywhere on the container path's chain — so the #1268 disease
    (verbatim-vs-normalized false refusal) cannot occur for it; the
    adjudication rests on THAT symmetry, deliberately not on any
