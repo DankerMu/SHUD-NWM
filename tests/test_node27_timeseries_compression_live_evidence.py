@@ -5106,7 +5106,7 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
 
 
 # --------------------------------------------------------------------------- #
-# #1250: self-test seam tokens are structurally invisible to no forensic gate.
+# #1250: the verifier structurally rejects self-test seam tokens in capture argv.
 # A run plan whose capture argv carries a `--self-test-*` flag executed a
 # producer that deviates from what it recorded (stub docker) or fabricated a
 # rollback-feasibility figure (`--self-test-free-bytes`), so it is not
