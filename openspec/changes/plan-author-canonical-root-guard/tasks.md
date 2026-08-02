@@ -19,6 +19,35 @@ protection, only the historical premise became unreachable), Note 2
 (proposal Impact now records that the archived #1263 relation
 scenario was checked and needs no MODIFIED).
 
+Fix round 1 record (post cross-review, verifier batch verdicts):
+two CONFIRMED findings, both FIX_NOW at fixture level. (C1)
+contract-accuracy — the ADDED requirement's purpose clause claimed
+"every path the plan records is canonical byte-for-byte", literally
+false for `--schema-dump-host`/`--schema-dump-container` (CLI :331,
+recorded verbatim into artifact_associations :166, compared at the
+same verbatim :1439 site; end-to-end reproduced with a `//` host
+dump path → "supervisor observed artifact path differs from run
+plan output"). Fix: spec sentence narrowed to repo/root-derived
+paths; `schema_dump_host` recorded as a known residual next to
+`capture_repo`; the guard EXTENSION itself is DEFER (outside this
+issue's declared In-scope) — routed to a follow-up issue via
+issue-scribe. (C2) incomplete-closure — the recorded `..`
+"deliberate boundary" was unsound: `..` is normalization-stable and
+textually symmetric, but `safe_fs._absolute_parts`
+(packages/common/safe_fs.py:597-602) rejects any `..` component in
+the no-follow walkers used by the supervisor's first capture write
+(supervisor.py:1122-1136) and the verifier's artifact reads
+(live_evidence.py:437); prearm normalizes first and passes — so a
+`..` root authors fine, passes prearm, then aborts mid-replay-window
+with "Unsafe path component: '..'" (verifier end-to-end reproduced;
+pre-mutation timing is the mitigating factor). Fix: guard gains the
+`".." in Path(value).parts` conjunct (verifier-validated
+false-positive-free: no non-test call site uses `..`; `//x`
+unaffected — its anchor is filtered before the parts walk), task
+3(d)'s dot_dot boundary positive FLIPS to a guard negative, and the
+guard message / runbook sentence ("no … dot segments") becomes
+literally true.
+
 Triage note: S — one validation clause in plan_author + one test
 rewired + a handful of new tests + one runbook sentence; fully
 hermetic. The decisive hazard is the PR #1264 trailing-slash test
@@ -105,28 +134,43 @@ Must preserve:
 
 - [ ] 1. Guard — plan_author.py :109-111: inside the existing loop,
   after the is_absolute check, add: if `value != str(Path(value))
-  or value.endswith("/")`, raise `PlanAuthorError(f"{label} must be
-  a canonical absolute path (no trailing slash, duplicate slashes
-  or dot segments): ...")` naming the label, the offending value
-  and the canonical rendering (exact wording implementer's choice,
-  those three elements mandatory). The `endswith("/")` conjunct is
-  load-bearing, not redundant (fixture-review P2-1): `"/"` and
-  `"//"` are the ONLY strings that are Path-normalization-stable
-  yet end in a slash — `str(Path("//")) == "//"` — and a `root="//"`
-  would emit `///capture-<kind>.json`, which BOTH verifier-side
-  normalizations collapse to `/capture-<kind>.json`, recreating
-  exactly the false-refusal middle state this change eliminates.
-  With both conjuncts, the enumerated-probe property holds for
-  every accepted root R: `str(Path(f"{R}/x")) == f"{R}/x"`. Comment records: WHY producer-side (the
+  or value.endswith("/") or ".." in Path(value).parts`, raise
+  `PlanAuthorError(f"{label} must be a canonical absolute path (no
+  trailing slash, duplicate slashes or dot segments): ...")` naming
+  the label, the offending value and the canonical rendering (exact
+  wording implementer's choice, those three elements mandatory).
+  The `endswith("/")` conjunct is load-bearing, not redundant
+  (fixture-review P2-1): `"/"` and `"//"` are the ONLY strings that
+  are Path-normalization-stable yet end in a slash —
+  `str(Path("//")) == "//"` — and a `root="//"` would emit
+  `///capture-<kind>.json`, which BOTH verifier-side normalizations
+  collapse to `/capture-<kind>.json`, recreating exactly the
+  false-refusal middle state this change eliminates. The `..`-parts
+  conjunct is load-bearing for a second failure mode (fix round 1,
+  verifier-confirmed C2): `..` is normalization-stable and textually
+  symmetric on both verifier sides, but the no-follow filesystem
+  walkers (`safe_fs._absolute_parts`,
+  packages/common/safe_fs.py:597-602) refuse any `..` component —
+  the supervisor's first capture write and the verifier's artifact
+  reads both die on it, while prearm (which normalizes first)
+  passes: a `..` root authors fine and then aborts inside the
+  one-shot replay window with "Unsafe path component: '..'". With
+  all three conjuncts, every accepted root R satisfies
+  `str(Path(f"{R}/x")) == f"{R}/x"` AND its parts survive the
+  no-follow walkers. Comment records: WHY producer-side (the
   verifier compares plan paths verbatim against Path-normalized
   ledger refs at the two equality sites — a non-canonical root
   authors a bundle that deterministically false-refuses with an
   unrelated message; the verifier deliberately invents no
-  normalization, so canonicality is an authoring precondition), that
-  `..` is deliberately still accepted (Path preserves it —
-  normalization-stable, round-trips both sides), and that
-  `capture_repo` stays unvalidated (hermetic-only kwarg, verifier
-  value-pins --repo anyway).
+  normalization, so canonicality is an authoring precondition), WHY
+  the `..` conjunct (safe_fs chain above — not a normalization
+  concern), that leading `//x` is deliberately accepted (POSIX
+  preserves exactly two leading slashes; normalization-stable,
+  symmetric, and its anchor is filtered before the parts walk so
+  no-follow accepts it), and that `capture_repo` (hermetic-only
+  kwarg, verifier value-pins --repo anyway) and
+  `--schema-dump-host`/`--schema-dump-container` (follow-up issue)
+  stay unvalidated.
 - [ ] 2. Rewire the trailing-slash test
   (tests/…live_evidence.py:6120-6161): drop the `build_run_plan`
   construction; synthesize the double-slash spelling directly —
@@ -148,7 +192,9 @@ Must preserve:
 - [ ] 3. New tests (co-located in tests/…live_evidence.py):
   (a) parametrized guard negatives: for label in {root, repo} ×
   shape in {trailing slash `/x/y/`, duplicate slash `/x//y`, dot
-  segment `/x/./y`}, plus the two slash-roots `/` and `//` (the
+  segment `/x/./y`, dot-dot segment `/x/../y`-style (fix round 1:
+  flipped from boundary positive to negative — the third conjunct's
+  own red)}, plus the two slash-roots `/` and `//` (the
   normalization-stable-yet-trailing-slash pair the second conjunct
   exists for): `build_run_plan` raises `PlanAuthorError`, the
   message contains the label and the canonical rendering, and (for
@@ -162,13 +208,13 @@ Must preserve:
   `plan_author.DEFAULT_REPO` are Path-normalization-stable
   (`v == str(Path(v))`) — the guard can never refuse the module's
   own defaults;
-  (d) deliberate-boundary positives: one `..`-segment root (e.g.
-  f"{tmp_path}/sub/..") authors successfully, and one
-  leading-double-slash root (`//x`-style, POSIX preserves exactly
-  two leading slashes so it is normalization-stable AND its
-  f-string expansions are symmetric on both verifier sides —
-  accepted correctly, fixture-review P2-2) authors successfully —
-  pins both boundaries recorded in the guard comment.
+  (d) deliberate-boundary positive: one leading-double-slash root
+  (`//x`-style, POSIX preserves exactly two leading slashes so it
+  is normalization-stable AND its f-string expansions are symmetric
+  on both verifier sides — accepted correctly, fixture-review P2-2)
+  authors successfully — pins the boundary recorded in the guard
+  comment. (The former `..`-segment boundary positive is gone: fix
+  round 1 flipped it into the (a) negatives.)
 - [ ] 4. Runbook — docs/runbooks/tier-node27-timeseries-storage.md
   plan-author section (~:1034): one sentence noting custom
   `--root`/`--repo` values must be canonical absolute paths (no
@@ -197,7 +243,9 @@ Must preserve:
 - Frozen surfaces zero diff (live_evidence.py included this time);
   ruff + openspec strict green.
 - PR body records: the adopted route and the rejected alternative
-  (verbatim-posture rationale), the `..`/`capture_repo` recorded
-  boundaries, the rewired test's honesty fix (docstring no longer
-  claims the production author emits the spelling), and 偏离记录
-  (explicit "no deviations" otherwise).
+  (verbatim-posture rationale), the `//x`/`capture_repo`/
+  `schema_dump_host` recorded boundaries and residuals (fix round 1:
+  `..` is no longer a boundary — it is a guard negative), the
+  rewired test's honesty fix (docstring no longer claims the
+  production author emits the spelling), and 偏离记录 (explicit "no
+  deviations" otherwise).

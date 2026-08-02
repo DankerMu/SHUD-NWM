@@ -37,29 +37,42 @@ with an unrelated one.
 
 1. **plan_author input canonicalization** (plan_author.py:109-111): the
    existing shared loop gains one check per label — the value must be
-   Path-normalization-stable AND not end in a slash:
-   `value != str(Path(value)) or value.endswith("/")` → refuse. The
-   stability half rejects trailing slashes (`/x/y/`), interior
-   duplicate slashes (`/x//y`), and `/./` segments; the `endswith`
-   half is load-bearing for exactly two inputs — `/` and `//`, the
-   only normalization-stable strings ending in a slash
-   (`str(Path("//")) == "//"` under POSIX), where `root="//"` would
-   emit `///capture-<kind>.json` that both verifier-side
-   normalizations collapse to `/capture-<kind>.json`, recreating the
-   false-refusal middle state. Together the conjuncts give the probe
-   property: for every accepted root R,
-   `str(Path(f"{R}/x")) == f"{R}/x"`. Applied to BOTH `repo` and
-   `root` in the one shared clause (a trailing-slash repo poisons
-   command argv paths against the `expected_executable` literal pins
-   the same way root poisons capture paths). `PlanAuthorError`
-   message names the label, the offending value and its canonical
-   rendering. Deliberately still accepted, recorded: `..` segments
-   (pathlib preserves them — normalization-stable, round-trips
-   verbatim on both sides) and LEADING double slash (`//x` — POSIX
-   preserves exactly two leading slashes, normalization-stable and
-   symmetric on both verifier sides). `capture_repo` (hermetic-only
-   kwarg, value-pinned by the verifier anyway) stays unvalidated,
-   recorded.
+   Path-normalization-stable, not end in a slash, and contain no `..`
+   component: `value != str(Path(value)) or value.endswith("/") or
+   ".." in Path(value).parts` → refuse. The stability half rejects
+   trailing slashes (`/x/y/`), interior duplicate slashes (`/x//y`),
+   and `/./` segments; the `endswith` half is load-bearing for exactly
+   two inputs — `/` and `//`, the only normalization-stable strings
+   ending in a slash (`str(Path("//")) == "//"` under POSIX), where
+   `root="//"` would emit `///capture-<kind>.json` that both
+   verifier-side normalizations collapse to `/capture-<kind>.json`,
+   recreating the false-refusal middle state; the `..` conjunct
+   (fix round 1, verifier-confirmed) closes a DIFFERENT failure mode:
+   `..` is normalization-stable and textually symmetric on both
+   verifier sides, but `safe_fs` (`_absolute_parts`,
+   packages/common/safe_fs.py:597-602) rejects any `..` component in
+   the no-follow walkers that BOTH the supervisor's first capture
+   write (supervisor.py:1122-1136 → atomic_write_bytes_no_follow) and
+   the verifier's artifact reads (live_evidence.py:437) use — a `..`
+   root authors fine, passes prearm (which normalizes first), then
+   aborts inside the one-shot replay window with "Unsafe path
+   component: '..'". Together the conjuncts give the probe property:
+   for every accepted root R, `str(Path(f"{R}/x")) == f"{R}/x"`, and
+   every accepted root's parts survive the no-follow walkers. Applied
+   to BOTH `repo` and `root` in the one shared clause (a
+   trailing-slash repo poisons command argv paths against the
+   `expected_executable` literal pins the same way root poisons
+   capture paths). `PlanAuthorError` message names the label, the
+   offending value and its canonical rendering. Deliberately still
+   accepted, recorded: LEADING double slash (`//x` — POSIX preserves
+   exactly two leading slashes, normalization-stable, symmetric on
+   both verifier sides, and its parts carry no `..`/anchor component
+   so the no-follow walkers accept it). `capture_repo` (hermetic-only
+   kwarg, value-pinned by the verifier anyway) and
+   `--schema-dump-host`/`--schema-dump-container` (recorded verbatim
+   into command artifact associations, compared at the same verbatim
+   :1439 site, no canonicality guard — routed to a follow-up issue)
+   stay unvalidated, recorded.
 2. **The PR #1264 trailing-slash test rewires its construction**
    (tests/test_node27_timeseries_compression_live_evidence.py:6120-6161):
    it can no longer obtain the double-slash spelling from
@@ -77,12 +90,13 @@ with an unrelated one.
    dirname-swap divergence), no longer the claim that the production
    author emits this spelling — after this change it cannot.
 3. **New tests**: parametrized `PlanAuthorError` negatives for
-   root/repo × trailing-slash/double-slash/dot-segment (message names
-   label + canonical rendering); a canonical-root positive (clean root
-   still authors; the existing twelve-kind positive control unchanged);
-   a structural pin that `DEFAULT_ROOT` and `DEFAULT_REPO` are
-   themselves Path-normalization-stable (the guard must never refuse
-   the module's own defaults).
+   root/repo × trailing-slash/double-slash/dot-segment/dot-dot-segment
+   (message names label + canonical rendering); a canonical-root
+   positive (clean root still authors; the existing twelve-kind
+   positive control unchanged); a structural pin that `DEFAULT_ROOT`
+   and `DEFAULT_REPO` are themselves Path-normalization-stable (the
+   guard must never refuse the module's own defaults); the `//x`
+   leading-double-slash boundary stays a recorded positive.
 4. **Docs/spec wording sync** (acceptance requires it for this route):
    one ADDED requirement in the `hypertable-compression` spec (plan
    author rejects non-canonical roots so recorded plan paths are

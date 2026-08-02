@@ -6214,13 +6214,20 @@ _NON_CANONICAL_PATHS = {
     # `/capture-<kind>.json` -- recreating exactly the false refusal this guard kills.
     "bare_slash_root": "/",
     "double_slash_root": "//",
+    # The third conjunct's own red.  `..` IS normalization-stable and symmetric on both
+    # verifier sides, so neither of the first two conjuncts sees it -- but the no-follow
+    # walkers (`safe_fs._absolute_parts`) refuse any `..` component, on the supervisor's
+    # first capture write AND on the verifier's artifact reads, while prearm normalizes
+    # first and passes.  Unguarded, such a root authors fine, prearms green, and aborts
+    # INSIDE the one-shot replay window with "Unsafe path component: '..'".
+    "dot_dot_segment": "/x/../y",
 }
 
 
 @pytest.mark.parametrize("label", ["root", "repo"])
 @pytest.mark.parametrize("shape", sorted(_NON_CANONICAL_PATHS))
 def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str) -> None:
-    """Both labels, all five shapes: refused at authoring with an ACCURATE message.
+    """Both labels, all six shapes: refused at authoring with an ACCURATE message.
 
     `repo` matters as much as `root`: it f-strings the command argv paths the verifier
     pins against `expected_executable` literals, so a trailing-slash repo poisons the
@@ -6273,20 +6280,22 @@ def test_plan_author_module_defaults_are_canonical() -> None:
         assert not value.endswith("/"), name
 
 
-@pytest.mark.parametrize("shape", ["dot_dot_segment", "leading_double_slash"])
-def test_plan_author_accepts_the_recorded_boundary_roots(tmp_path: Path, shape: str) -> None:
-    """The two boundaries the guard comment records as DELIBERATELY still accepted.
+def test_plan_author_accepts_the_recorded_boundary_root() -> None:
+    """The one boundary the guard comment records as DELIBERATELY still accepted.
 
-    `..` segments: pathlib preserves them, so the value is normalization-stable and
-    round-trips verbatim on both verifier sides.  A LEADING double slash: POSIX (and
-    pathlib) preserve exactly two leading slashes, so `//x` is stable too and its
-    f-string expansions stay symmetric -- unlike the bare `//` root, whose `///…`
-    expansion collapses (that asymmetry is why `//` is in the negatives above and
-    `//x` is here).  Both assert the probe property the two conjuncts buy: for every
-    accepted root R, `str(Path(f"{R}/x")) == f"{R}/x"`.
+    A LEADING double slash: POSIX (and pathlib) preserve exactly two leading slashes,
+    so `//x` is normalization-stable and its f-string expansions stay symmetric on
+    both verifier sides -- unlike the bare `//` root, whose `///…` expansion collapses
+    (that asymmetry is why `//` is in the negatives above and `//x` is here).  The
+    third conjunct leaves it alone too: `PurePosixPath("//x").parts` is `("//", "x")`,
+    and the no-follow walkers filter the anchor out before looking for `..`.  Asserts
+    the probe property the guard buys: for every accepted root R,
+    `str(Path(f"{R}/x")) == f"{R}/x"`.  (A `..` root was recorded as a second accepted
+    boundary until fix round 1 of #1265 showed it aborts mid-replay-window on the
+    no-follow walkers; it is now one of the negatives above.)
     """
 
-    root = f"{tmp_path}/sub/.." if shape == "dot_dot_segment" else "//x"
+    root = "//x"
     plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=root)
     capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
     assert capture["output_path"] == f"{root}/capture-sizes_post.json"

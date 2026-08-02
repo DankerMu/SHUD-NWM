@@ -120,23 +120,40 @@ def build_run_plan(
         # verifier judges the recorded bytes and invents no normalization, so the closure
         # belongs here, at the entrance.
         #
-        # BOTH conjuncts are load-bearing.  Normalization-stability refuses trailing
+        # ALL THREE conjuncts are load-bearing.  Normalization-stability refuses trailing
         # slashes (``/x/y/``), interior duplicate slashes (``/x//y``) and ``/./``
         # segments; ``endswith("/")`` refuses ``/`` and ``//``, the ONLY
         # normalization-stable strings that end in a slash (POSIX preserves exactly two
         # leading slashes, so ``str(Path("//")) == "//"``).  Without it a ``root="//"``
         # would emit ``///capture-<kind>.json``, which BOTH verifier-side normalizations
         # collapse to ``/capture-<kind>.json`` -- exactly the false-refusal middle state
-        # this guard exists to eliminate.  Together they give the probe property: for
-        # every accepted root R, ``str(Path(f"{R}/x")) == f"{R}/x"``.
+        # this guard exists to eliminate.  Together those two give the probe property:
+        # for every accepted root R, ``str(Path(f"{R}/x")) == f"{R}/x"``.
         #
-        # Deliberately still ACCEPTED, recorded: ``..`` segments (pathlib preserves them,
-        # so they are normalization-stable and round-trip verbatim on both sides) and a
-        # LEADING double slash (``//x`` -- normalization-stable, and its f-string
-        # expansions are symmetric on both verifier sides).  ``capture_repo`` stays
-        # unvalidated on purpose: it is a hermetic-only test kwarg and the verifier
-        # value-pins ``--repo`` anyway.
-        if value != str(Path(value)) or value.endswith("/"):
+        # The ``..``-parts conjunct closes a DIFFERENT failure mode, and NOT a
+        # normalization one: ``..`` is normalization-stable (pathlib preserves it) and
+        # round-trips symmetrically on both verifier sides, yet
+        # ``safe_fs._absolute_parts`` (packages/common/safe_fs.py :595-600) raises
+        # ``Unsafe path component`` for any ``.``/``..`` component, and the no-follow
+        # walkers built on it are used by BOTH the supervisor's first capture write
+        # (supervisor.py ``_artifact_ref`` :1122-1130 -> ``atomic_write_bytes_no_follow``)
+        # and the verifier's artifact reads (live_evidence.py ``_artifact_bytes`` :429,
+        # ``read_bounded_bytes_with_identity_no_follow`` :456).
+        # Prearm normalizes before it checks, so it PASSES a ``..`` root: the plan authors
+        # fine, prearm goes green, and the run then aborts INSIDE the one-shot replay
+        # window with ``SafeFilesystemError: Unsafe path component: '..'`` -- an
+        # authored-but-aborts-mid-window state, the same disease class as the false
+        # refusal above.
+        #
+        # Deliberately still ACCEPTED, recorded: a LEADING double slash (``//x``) --
+        # normalization-stable, its f-string expansions are symmetric on both verifier
+        # sides, and its ``//`` anchor is filtered out before the parts walk, so the
+        # no-follow primitives take it too.  Left unvalidated on purpose:
+        # ``capture_repo`` (hermetic-only test kwarg; the verifier value-pins ``--repo``
+        # anyway) and ``schema_dump_host``/``schema_dump_container`` (recorded verbatim
+        # into command artifact associations and compared at the same verbatim site --
+        # a real residual, routed to a follow-up issue rather than silently widened here).
+        if value != str(Path(value)) or value.endswith("/") or ".." in Path(value).parts:
             raise PlanAuthorError(
                 f"{label} must be a canonical absolute path (no trailing slash, "
                 f"duplicate slashes or dot segments): {value!r} is not canonical "
