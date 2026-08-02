@@ -6,19 +6,22 @@ worktree `/home/nwm/NWM`).
 
 ## Archive-root path notice (2026-07-26 migration)
 
-Every receipt JSON in this directory records an `archive_root` under the
-node-27 `/home` filesystem — the pre-migration archive root, recorded verbatim
-inside the receipts themselves. That was the live layout when each run
-happened. On 2026-07-26 the archive root moved to
+Five of the six receipt JSONs in this directory — the five listed below —
+record an `archive_root` under the node-27 `/home` filesystem: the
+pre-migration archive root, recorded verbatim inside the receipts themselves.
+(`issue849-post-enforce-verification-20260715T070448Z.json` carries no
+`archive_root` key, only archive-relative paths.) That was the live layout
+when each run happened. On 2026-07-26 the archive root moved to
 `/data/GHDC/nwm-archive` (node-27-local RAID `/dev/md0`) after the old root —
 sharing the `/home` filesystem with pgdata — deadlocked the gated retention
 chain; see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
 (2026-07-26)" for the authoritative current layout.
 
-The five receipt JSONs here — `issue849-terminal-receipt-*`,
+Those five — `issue849-terminal-receipt-*`,
 `issue849-authorized-enforce-*`, `issue849-authorized-dryrun-*`,
 `first-live-run-*`, `controlled-enforce-*` — **intentionally retain the old
-path and MUST NOT be rewritten**. They are point-in-time records of the
+path and MUST NOT be rewritten** (nor may any other committed evidence file in
+this directory). They are point-in-time records of the
 pre-migration layout (several are SHA-256-pinned in the prose below); editing
 them would forge evidence. Only this README's operator-facing prose is updated
 to the current path.

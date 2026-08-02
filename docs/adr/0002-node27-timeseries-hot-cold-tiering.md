@@ -55,11 +55,11 @@ it omits TimescaleDB native compression entirely.
 
 1. **Source of truth for cold data is node-22-produced cycle products**
    (forcing packages, SHUD run outputs, state snapshots) — not a DB
-   re-export. Aged products move to a rotation-exempt archive root on the
-   shared volume: an archive directory on node-27's local `/home` filesystem
-   (original path literal and its claimed node-22 view are superseded — see
-   "Amendment (2026-07-26)"), stored as per-cycle `tar.zst` + manifest with
-   sha256 checksums.
+   re-export. Aged products move to a rotation-exempt archive root: an
+   archive directory on node-27's local `/home` filesystem (original path
+   literal, and the "shared volume"/node-22-view framing around it, are
+   superseded — see "Amendment (2026-07-26)"), stored as per-cycle
+   `tar.zst` + manifest with sha256 checksums.
 2. **One-time DB-export salvage** only for windows whose upstream products
    already rotated away (verified scope; notably forcing station series
    before 2026-06-16): `COPY` to `csv.zst` with manifest, provenance-marked
@@ -120,9 +120,12 @@ the node-27-local RAID
 `/dev/md0` (15 TB total, ~14 TB free at migration). 2.2 GB / 1850 files were
 rsync-verified into the new root; the old directory's contents were removed
 (an empty directory shell remains as residue — operator cleanup is optional
-and has no functional effect). The change is env-only: the five node-27
-archive-lane env files now set `NHMS_ARCHIVE_ROOT` to the new path, and no
-runner code or receipt schema changed.
+and has no functional effect). The change is env-only, and no runner code or
+receipt schema changed. Deployed state (verified 2026-08-01): four of the five
+node-27 archive-lane env files set `NHMS_ARCHIVE_ROOT` to the new path, and
+the fifth (`node27-resource-governance.env`) carries the service-level
+override `NODE27_GOVERNANCE_ARCHIVE_ROOT` set to the same value. All five repo
+`.example` templates set `NHMS_ARCHIVE_ROOT`.
 
 ### Premise correction (the original description was wrong from day one)
 
@@ -173,7 +176,8 @@ archive layout**; the operator-facing current state lives in
 - Steady-state DB size becomes bounded (14-day window, mostly compressed)
   instead of growing ~24 GB/week at 13 basins; the archive grows by
   compressed product tarballs (estimated single-digit GB/month at current
-  scale) on a volume with 839 GB free.
+  scale) on a volume with 839 GB free (pre-migration figure; since 2026-07-26
+  the archive volume is the 15 TB RAID — see "Amendment (2026-07-26)").
 - The mid-June reset failure mode ("delete products, DB silently becomes the
   only copy") is eliminated: deletion anywhere is gated on archive receipts.
 - Rollback: compression is reversible per chunk (`decompress_chunk`);

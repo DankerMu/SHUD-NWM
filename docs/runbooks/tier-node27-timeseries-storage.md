@@ -883,17 +883,22 @@ tick compresses. The committed template
 `=4` on 2026-08-01 (retuned on the box, presumably during the July catch-up).
 The template value is intentionally left alone here — which number is the
 right capacity target is an operator/capacity decision, tracked in
-issue #1156.
+issue #1237.
 
 The number that matters is a capacity relation, not a constant: the per-tick
 bound × timer frequency must compress at least as fast as ingest produces new
-terminal chunks. During July 2026 `hydro.river_timeseries` grew by roughly
-43 GB/day (816 GB total at the 2026-07-26 `/home`-full incident). A per-tick
-bound that cannot keep up leaves uncompressed chunks accumulating on the hot
-tier, which is one of the two inputs to that incident (the other being the
-archive root sharing the hot filesystem — see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
-"Amendment (2026-07-26)"). When retuning, read the live value off the box
-first and record the new value with the receipt that justified it.
+terminal chunks. The compression timer fires **once daily** (`OnCalendar=*-*-*
+04:25:00 UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
+throughput is `bound × 1 tick/day` — 4 chunks/day at the live value. During
+July 2026 `hydro.river_timeseries` grew by roughly 43 GB/day (816 GB total at
+the 2026-07-26 `/home`-full incident). A per-tick bound that cannot keep up
+leaves uncompressed chunks accumulating on the hot tier, which is one of the
+two inputs to that incident (the other being the archive root sharing the hot
+filesystem — see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
+"Amendment (2026-07-26)"). As of 2026-08-01 the latest live compression
+receipt is `outcome=clean` with zero backlog, so the current bound is keeping
+up post-catch-up. When retuning, read the live value off the box first and
+record the new value with the receipt that justified it.
 
 ### 4.0 Controlled initial live run (`#1069`)
 
@@ -2096,8 +2101,9 @@ box:
 - `nhms-node27-timeseries-retention.timer` is `disabled` and `inactive` —
   step 3's `enable --now` line is still commented out in reality, not just in
   this runbook.
-- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` line 15 has
-  `NODE27_TIMESERIES_RETENTION_ENFORCE=0`.
+- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` sets
+  `NODE27_TIMESERIES_RETENTION_ENFORCE=0` (grep the key; that file is
+  gitignored and its line numbers drift).
 
 So the deployment is still at the #1071 Step B posture: refusal tests and
 dry-runs only, with no unattended `drop_chunks`. Nothing in this runbook
