@@ -93,3 +93,20 @@ source-of-truth documentation with a tracked follow-up.
   from the shared constants and their rendered content is unchanged for
   the pinned values
 
+#### Scenario: The capture catalog_post SQL derives from the shared source
+
+- **WHEN** the capture producer renders its catalog_post SQL for the
+  pinned recovery target
+- **THEN** the six identity fields are interpolated from the derived
+  recovery-target mapping, the rendered string is byte-identical to the
+  pre-derivation literal, and the `capture:catalog_post` marker remains
+  the first token
+
+#### Scenario: The verifier decompress argv tail derives from its own bound constant
+
+- **WHEN** the verifier validates a decompress invocation argv
+- **THEN** the expected tail is built from the verifier's own
+  recovery-target constant (itself guard-bound to the shared source),
+  an argv derived from that constant is accepted, and an argv whose
+  tail deviates in any single recovery-target field is rejected
+
