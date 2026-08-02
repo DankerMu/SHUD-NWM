@@ -73,6 +73,14 @@ MAX_GIT_BLOB_BYTES = 8 * 1024**2
 MAX_SUBPROCESS_OUTPUT_BYTES = 16 * 1024**2
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 QUALIFYING_SCHEMA_VERSION = "3.0"
+# Every `argparse.SUPPRESS`-hidden capture-CLI flag carries this prefix: those flags
+# are hermetic self-test seams that change what the producer executes or what it
+# records (`--self-test-docker-seam`, `--self-test-free-bytes`).  Production
+# `plan_author` never emits one, so a run plan carrying such a token is not
+# production forensics and must never reach a PASS verdict.  Frozen as a PREFIX, not
+# an enumerated list, so every future `--self-test-*` flag is rejected by
+# construction rather than by remembering to register it here.
+SELF_TEST_SEAM_PREFIX = "--self-test-"
 EXPECTED_REPO_PATH = "/home/nwm/NWM"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
@@ -998,7 +1006,14 @@ def _validate_supervisor_execution(
             or not Path(output_path).is_absolute()
         ):
             raise EvidenceError("run plan capture identity/output differs")
-        _concrete_argv(capture["argv"], f"run plan capture[{index}].argv")
+        capture_argv = _concrete_argv(capture["argv"], f"run plan capture[{index}].argv")
+        # Plan side only, no ledger-side twin needed: the ledger<->plan binding below
+        # (`event["argv"] != capture["argv"]`) is pure equality, so a ledger capture argv
+        # can only carry a seam if its plan twin carries the same one -- which this check
+        # already refuses.
+        for token in capture_argv:
+            if token.startswith(SELF_TEST_SEAM_PREFIX):
+                raise EvidenceError(f"run plan capture argv carries a self-test seam token: {token}")
         if kind in planned_output_owners:
             raise EvidenceError("run plan output label has duplicate producers")
         planned_output_owners[kind] = (f"capture:{kind}", 0)
