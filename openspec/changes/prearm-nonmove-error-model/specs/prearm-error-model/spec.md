@@ -9,11 +9,14 @@ directory creation, associations directory creation, the association
 destination re-probe, collision probing, and manifest writes, in
 addition to the already-hardened moves — as a `pre-arm reset refused: ` exit-1
 refusal rather than an unhandled traceback, catching both `OSError`
-and `SafeFilesystemError` (which is not an `OSError`). When the
-failure strikes after any file has moved, the refusal SHALL carry
-every completed `from -> to` pair and state the partial-manifest
-status (written, or explicitly NOT written), so out-of-workdir
-association originals remain manually reconstructable.
+and `SafeFilesystemError` (which is not an `OSError`). When a
+NON-MOVE failure strikes after any file has moved, the refusal SHALL
+carry every completed `from -> to` pair and state the
+partial-manifest status (written, or explicitly NOT written), so
+out-of-workdir association originals remain manually
+reconstructable. (A failing move itself keeps the frozen round-1
+behavior — partial manifest plus a refusal pointing at the archive
+directory — per the move-path scenario below.)
 
 #### Scenario: Terminal manifest write fails after a successful sweep
 
