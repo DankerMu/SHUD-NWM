@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -286,8 +288,23 @@ def _capture_stub_dir(bindir: Path, *, schema_dump_container: str) -> None:
 
 
 def _run_capture(
-    kind: str, *, repo: Path, capture_bin: Path, evidence_dir: Path, extra: list[str] | None = None
-) -> dict[str, Any]:
+    kind: str,
+    *,
+    repo: Path,
+    capture_bin: Path,
+    evidence_dir: Path,
+    extra: list[str] | None = None,
+    docker: str | None = None,
+    expect_failure: bool = False,
+) -> Any:
+    """Run the real capture producer as its own process.
+
+    ``docker`` overrides the injected docker CLI (the RECORD/EXEC guard test
+    points it at a deviating stub); ``expect_failure`` returns the raw
+    ``CompletedProcess`` instead of a parsed document, so the caller can assert
+    on exit code/stdout/stderr rather than tripping ``check=True``.
+    """
+
     argv = [
         sys.executable,
         str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
@@ -308,16 +325,16 @@ def _run_capture(
         "--systemctl",
         str(capture_bin / "systemctl"),
         "--docker",
-        str(capture_bin / "docker"),
+        docker if docker is not None else str(capture_bin / "docker"),
         "--journalctl",
         str(capture_bin / "journalctl"),
         "--git",
         str(capture_bin / "git"),
         *(extra or []),
     ]
-    import subprocess
-
-    completed = subprocess.run(argv, capture_output=True, check=True)
+    completed = subprocess.run(argv, capture_output=True, check=not expect_failure)
+    if expect_failure:
+        return completed
     assert completed.stderr == b"", completed.stderr.decode()
     return json.loads(completed.stdout)
 
@@ -427,6 +444,105 @@ def test_capture_catalog_post_document_binds_the_compressed_chunk(tmp_path: Path
 
 
 # --------------------------------------------------------------------------- #
+# RECORD/EXEC docker split guard (#1090)
+# --------------------------------------------------------------------------- #
+def _write_marker_docker_stub(bindir: Path, *, responses_source: Path, marker: Path) -> str:
+    """A RUNNABLE docker stub that records each invocation before answering.
+
+    It reuses the measured responses of the capture stub dir, so with the
+    RECORD/EXEC guard removed this stub really does satisfy the entire
+    ``schema_dump_list`` probe sequence and the producer emits a bundle
+    attesting ``/usr/bin/docker`` -- the false attestation the guard closes.
+    That is also what makes the "marker absent" assertion bite: a nonexistent
+    binary would die inside ``_run`` for an unrelated reason.
+    """
+
+    bindir.mkdir(parents=True, exist_ok=True)
+    body = sup._STUB_TEMPLATE.replace("{python}", sys.executable)
+    anchor = '_argv = " ".join(sys.argv[1:])'
+    assert body.count(anchor) == 1
+    record = (
+        f"with open({str(marker)!r}, 'a', encoding='utf-8') as _marker:\n"
+        f"    _marker.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    )
+    script = bindir / "docker"
+    script.write_text(body.replace(anchor, record + anchor), encoding="utf-8")
+    script.chmod(0o755)
+    (bindir / "docker.responses.json").write_bytes(responses_source.read_bytes())
+    return str(script)
+
+
+def test_schema_dump_list_refuses_a_deviating_docker_without_the_self_test_seam(tmp_path: Path) -> None:
+    """The one capture kind that attests docker argvs must run what it records.
+
+    ``version_argv``/``list_argv`` are recorded as ``HOST_DOCKER_CLI`` while the
+    probes execute ``ctx.docker``; without this guard a caller passing another
+    binary would ship a bundle attesting ``/usr/bin/docker`` for work it never
+    did, and the verifier's literal pin would accept it.
+    """
+
+    repo = _fixture_repo(tmp_path)
+    capture_bin = tmp_path / "capture-bin"
+    schema_dump_container = "/var/lib/postgresql/evidence/schema.dump"
+    _capture_stub_dir(capture_bin, schema_dump_container=schema_dump_container)
+    schema_dump_host = tmp_path / "schema-before.dump"
+    schema_dump_host.write_bytes(b"PGDMP\x00forensic schema\n")
+
+    marker = tmp_path / "deviating-docker.invoked"
+    deviating_docker = _write_marker_docker_stub(
+        tmp_path / "deviating-bin",
+        responses_source=capture_bin / "docker.responses.json",
+        marker=marker,
+    )
+    assert deviating_docker != capture.HOST_DOCKER_CLI
+    assert os.access(deviating_docker, os.X_OK)
+
+    evidence_dir = tmp_path / "ev"
+    completed = _run_capture(
+        "schema_dump_list",
+        repo=repo,
+        capture_bin=capture_bin,
+        evidence_dir=evidence_dir,
+        docker=deviating_docker,
+        expect_failure=True,
+        extra=[
+            "--schema-dump-host",
+            str(schema_dump_host),
+            "--schema-dump-container",
+            schema_dump_container,
+        ],
+    )
+
+    assert completed.returncode != 0
+    stderr = completed.stderr.decode()
+    assert "--self-test-docker-seam" in stderr
+    assert deviating_docker in stderr
+    # No forensic document reached stdout (documents are emitted there, never
+    # written as files) and the evidence dir main() created stayed empty.
+    assert completed.stdout == b""
+    assert evidence_dir.is_dir()
+    assert list(evidence_dir.iterdir()) == []
+    # Fail-closed BEFORE any subprocess: the runnable stub was never invoked.
+    assert not marker.exists()
+
+
+def test_plan_author_never_emits_the_docker_self_test_seam() -> None:
+    """The seam stays test-only: production plans pin the real host docker CLI.
+
+    Load-bearing -- if ``plan_author`` ever auto-emitted the flag (for example
+    whenever ``capture_docker`` deviates), the guard above would be nullified
+    for exactly the future production caller it exists to stop.
+    """
+
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD)
+    for authored_capture in plan["captures"]:
+        assert "--self-test-docker-seam" not in authored_capture["argv"], authored_capture["kind"]
+    listing = next(c for c in plan["captures"] if c["kind"] == "schema_dump_list")
+    argv = list(listing["argv"])
+    assert argv[argv.index("--docker") + 1] == capture.HOST_DOCKER_CLI == "/usr/bin/docker"
+
+
+# --------------------------------------------------------------------------- #
 # Full pipeline dress-rehearsal: real plan-author + real supervisor state
 # machine + real capture-producer against measured-node-27 stub binaries.
 # --------------------------------------------------------------------------- #
@@ -485,6 +601,14 @@ def test_authored_plan_survives_the_real_state_machine_and_verifier_validators(
         capture_journalctl=str(capture_bin / "journalctl"),
         capture_git=str(capture_bin / "git"),
     )
+    # This rehearsal injects a stub docker, so the schema_dump_list capture must
+    # opt into the RECORD/EXEC deviation explicitly (the producer fails closed
+    # otherwise).  Patched post-hoc, exactly like `--self-test-free-bytes`:
+    # `plan_author` must never learn to emit this flag, or a future production
+    # caller would silently re-open the false-attestation hole.
+    for authored_capture in plan["captures"]:
+        if authored_capture["kind"] == "schema_dump_list":
+            authored_capture["argv"] = [*authored_capture["argv"], "--self-test-docker-seam"]
     # The real gate accepts the authored plan before any execution.
     supervisor.validate_run_plan(plan, inherited_env={})
     _stub_command_writers(plan, schema_dump_host)

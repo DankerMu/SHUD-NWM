@@ -115,6 +115,12 @@ class Context:
     # ``--self-test-free-bytes`` flag is passed.  ``None`` in every production
     # invocation, so production always reads the real ``os.statvfs`` headroom.
     self_test_free_bytes: int | None = None
+    # Test-only seam (see ``--self-test-docker-seam``): the explicit opt-in that
+    # allows ``docker`` to deviate from ``HOST_DOCKER_CLI`` in the hermetic
+    # self-tests, which inject a stub docker.  ``False`` in every production
+    # invocation, so production always runs the same binary the forensic
+    # ``version_argv``/``list_argv`` attest.
+    self_test_docker_seam: bool = False
 
 
 def _run(argv: list[str], *, label: str, max_bytes: int = MAX_DOCUMENT_BYTES) -> bytes:
@@ -497,6 +503,15 @@ def _free_bytes(ctx: Context) -> int:
 
 
 def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
+    # RECORD == EXEC, enforced before any subprocess runs or any bundle content
+    # is produced: this is the one capture kind that writes docker invocation
+    # argvs into the forensic bundle, so a deviating EXEC binary would attest a
+    # binary it never ran.  The deviation is legitimate only for the hermetic
+    # self-tests, which must say so explicitly (``--self-test-docker-seam``).
+    if ctx.docker != HOST_DOCKER_CLI and not ctx.self_test_docker_seam:
+        raise CaptureError(
+            "--docker deviates from HOST_DOCKER_CLI without --self-test-docker-seam: " + ctx.docker
+        )
     if not ctx.schema_dump_host or not ctx.schema_dump_container:
         raise CaptureError("schema_dump_list requires --schema-dump-host/--schema-dump-container")
     dump_bytes = Path(ctx.schema_dump_host).read_bytes()
@@ -507,8 +522,10 @@ def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
     # ``--docker`` seam value.  This mirrors the container entrypoint already being
     # recorded as ``/usr/bin/pg_restore`` rather than its pg_wrapper realpath: the
     # ``--docker`` seam redirects EXECUTION for the dress rehearsal, while the
-    # record names the production binary the plan pins (in production the two
-    # coincide, ``ctx.docker == HOST_DOCKER_CLI``).
+    # record names the production binary the plan pins.  The split is no longer
+    # a caller-side convention: the guard at the top of this function enforces
+    # ``ctx.docker == HOST_DOCKER_CLI`` unless the hermetic self-test seam is
+    # explicitly opted in, so a production bundle always attests what it ran.
     version_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
     list_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
     version_argv = [HOST_DOCKER_CLI, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
@@ -753,6 +770,11 @@ def _parser() -> argparse.ArgumentParser:
     # self-test (see ``_free_bytes``).  Production ``plan_author`` never emits it,
     # so production always measures the real ``os.statvfs`` data-volume headroom.
     parser.add_argument("--self-test-free-bytes", type=int, default=None, help=argparse.SUPPRESS)
+    # Test-only seam: the explicit opt-in that lets ``--docker`` deviate from
+    # ``HOST_DOCKER_CLI`` in the hermetic self-tests (see
+    # ``_capture_schema_dump_list``).  Production ``plan_author`` never emits it,
+    # so a production run always executes the pinned host docker CLI it records.
+    parser.add_argument("--self-test-docker-seam", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -777,6 +799,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         schema_dump_host=args.schema_dump_host,
         schema_dump_container=args.schema_dump_container,
         self_test_free_bytes=args.self_test_free_bytes,
+        self_test_docker_seam=args.self_test_docker_seam,
     )
     _emit(_dispatch(ctx, args.kind))
     return 0
