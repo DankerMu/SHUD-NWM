@@ -19,7 +19,10 @@ malformed, when an existing terminal receipt does not match that digest, when
 the failure-intent family is unresolved, when the run plan is present but
 unparsable, or when a plan-authored label would name a destination outside the
 archive.  A move that fails mid-sweep writes a PARTIAL manifest (recording what
-already moved and what failed) and then refuses.
+already moved and what failed) and then refuses.  Non-move filesystem failures
+AFTER the first move (associations-directory creation, the association re-probe,
+the terminal manifest write) take the same shape: they attempt the same PARTIAL
+manifest and carry the completed-move record inside the refusal message.
 """
 
 from __future__ import annotations
@@ -74,7 +77,11 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class PrearmError(RuntimeError):
-    """One fail-closed refusal; the working directory is left byte-identical."""
+    """One fail-closed refusal.
+
+    The working directory is left byte-identical, except post-move refusals,
+    which report what already moved.
+    """
 
 
 def _utc_now() -> datetime:
@@ -425,15 +432,37 @@ def select_workdir_residue(workdir: Path) -> list[str]:
     return [name for name in names if name not in WHITELIST and name != ARCHIVE_DIR_NAME]
 
 
+def _underlying_error_text(error: BaseException) -> str:
+    """Render a wrapped filesystem failure the way the existing PrearmError sites do.
+
+    ``SafeFilesystemError`` is a ``RuntimeError`` subclass, NOT an ``OSError``
+    (``packages/common/safe_fs.py:10``), so it carries no ``strerror`` and is
+    rendered by type name instead.
+    """
+
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return f"{type(error).__name__}: {error}"
+
+
 def _create_archive_dir(archive_root: Path, *, now: datetime) -> Path:
     base = now.strftime("%Y%m%dT%H%M%SZ")
-    os.makedirs(archive_root, exist_ok=True)
+    try:
+        os.makedirs(archive_root, exist_ok=True)
+    except (OSError, SafeFilesystemError) as error:
+        raise PrearmError(
+            f"archive root creation failed ({_underlying_error_text(error)}): {archive_root}"
+        ) from error
     for attempt in range(1000):
         candidate = archive_root / (base if attempt == 0 else f"{base}-{attempt}")
         try:
             os.mkdir(candidate, 0o700)
         except FileExistsError:
             continue
+        except (OSError, SafeFilesystemError) as error:
+            raise PrearmError(
+                f"archive directory creation failed ({_underlying_error_text(error)}): {candidate}"
+            ) from error
         return candidate
     raise PrearmError(f"could not allocate a fresh archive directory under {archive_root}")
 
@@ -617,6 +646,51 @@ def run_prearm(
             ) from error
         moves.append(record)
 
+    def _document(failure: Mapping[str, str] | None) -> dict[str, Any]:
+        return _manifest_document(
+            now=now,
+            unit_state=unit_state,
+            workdir=workdir,
+            archive_dir=archive_dir,
+            run_plan_path=run_plan_path if plan is not None else None,
+            receipt_sha256=receipt_sha256,
+            retained=retained,
+            moves=moves,
+            failure=failure,
+        )
+
+    def _best_effort_partial_manifest(failure: Mapping[str, str]) -> str:
+        """Write the same PARTIAL manifest the move path writes, best effort.
+
+        Only for post-move refusals that are NOT the manifest write itself; the
+        terminal write never retries, because it IS the manifest write.
+        """
+
+        try:
+            manifest_path = _write_manifest(archive_dir, _document(failure))
+        except (OSError, SafeFilesystemError):
+            # A manifest failure must never mask the refusal it is recording.
+            return f"partial {MANIFEST_NAME} manifest was NOT written"
+        return f"partial manifest: {manifest_path}"
+
+    def _post_move_refusal(summary: str, *, manifest_status: str) -> PrearmError:
+        """Carry the sweep forensics INSIDE the refusal message.
+
+        ``main()`` prints the refusal with the ``pre-arm reset refused: ``
+        prefix in ONE call, so the forensics must ride in the message rather
+        than being printed first: otherwise a post-move failure loses the
+        out-of-workdir association originals, which exist nowhere else once the
+        manifest is gone.
+        """
+
+        lines = [summary, f"archive directory: {archive_dir}", manifest_status]
+        if moves:
+            lines.append(f"completed moves ({len(moves)}), restore manually if needed:")
+            lines.extend(f"  {move['from']} -> {move['to']}" for move in moves)
+        else:
+            lines.append("completed moves: <none>")
+        return PrearmError("\n".join(lines))
+
     for name in workdir_residue:
         _archive_move(
             kind="workdir_member",
@@ -627,33 +701,75 @@ def run_prearm(
 
     if association_entries:
         associations_dir = archive_dir / ASSOCIATIONS_DIR_NAME
-        os.makedirs(associations_dir, mode=0o700, exist_ok=True)
+        try:
+            os.makedirs(associations_dir, mode=0o700, exist_ok=True)
+        except (OSError, SafeFilesystemError) as error:
+            text = _underlying_error_text(error)
+            raise _post_move_refusal(
+                f"associations directory creation failed ({text}): {associations_dir}",
+                manifest_status=_best_effort_partial_manifest(
+                    {
+                        "kind": "associations_dir",
+                        "label": ASSOCIATIONS_DIR_NAME,
+                        "path": os.fspath(associations_dir),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                ),
+            ) from error
         for label, target in association_entries:
             try:
                 os.lstat(target)
             except FileNotFoundError:
                 continue
+            except OSError as error:
+                # POST-move: an unreadable re-probe would otherwise escape as a
+                # bare traceback with the workdir residue already relocated.
+                # ``os.lstat`` cannot raise ``SafeFilesystemError``, so plain
+                # ``OSError`` is the whole surface here.
+                raise _post_move_refusal(
+                    f"association re-probe failed ({_underlying_error_text(error)}): {target}",
+                    manifest_status=_best_effort_partial_manifest(
+                        {
+                            "kind": "plan_association",
+                            "label": label,
+                            "path": os.fspath(target),
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    ),
+                ) from error
+            # Narrow on purpose: only the destination probe.  A broad
+            # ``except PrearmError`` around the loop would re-wrap the move's
+            # own refusal and overwrite its partial manifest.
+            try:
+                destination = _collision_safe_destination(associations_dir, f"{label}-{target.name}")
+            except PrearmError as error:
+                raise _post_move_refusal(
+                    str(error),
+                    manifest_status=_best_effort_partial_manifest(
+                        {
+                            "kind": "plan_association",
+                            "label": label,
+                            "path": os.fspath(target),
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    ),
+                ) from error
             _archive_move(
                 kind="plan_association",
                 label=label,
                 source=target,
-                destination=_collision_safe_destination(associations_dir, f"{label}-{target.name}"),
+                destination=destination,
             )
 
-    manifest_path = _write_manifest(
-        archive_dir,
-        _manifest_document(
-            now=now,
-            unit_state=unit_state,
-            workdir=workdir,
-            archive_dir=archive_dir,
-            run_plan_path=run_plan_path if plan is not None else None,
-            receipt_sha256=receipt_sha256,
-            retained=retained,
-            moves=moves,
-            failure=None,
-        ),
-    )
+    try:
+        manifest_path = _write_manifest(archive_dir, _document(None))
+    except (OSError, SafeFilesystemError) as error:
+        text = _underlying_error_text(error)
+        raise _post_move_refusal(
+            f"manifest write failed ({text}): {archive_dir / MANIFEST_NAME}",
+            # The terminal write IS the manifest write: it does not retry.
+            manifest_status=f"{MANIFEST_NAME} manifest was NOT written",
+        ) from error
 
     stdout.write(f"pre-arm archive: {archive_dir}\n")
     stdout.write(f"archived {len(moves)} path(s); manifest: {manifest_path}\n")

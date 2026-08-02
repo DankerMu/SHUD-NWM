@@ -796,3 +796,260 @@ def test_defaults_bind_the_production_literals():
     )
     assert prearm.UNIT_NAME == UNIT
     assert set(prearm.WHITELIST) == {"run-plan.json", "terminal-evidence.json"}
+
+
+# --------------------------------------------------------------------------- #
+# (j) non-move filesystem failures — #1252
+# --------------------------------------------------------------------------- #
+
+
+def _seed_sweep_with_associations(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A workdir residue plus TWO out-of-workdir plan associations.
+
+    The association originals are the paths that exist nowhere else once the
+    manifest is gone, so every post-move refusal test needs at least one.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    (workdir / "benchmark-before.json").write_bytes(b'{"benchmark": "stale"}')
+    schema_dump = tmp_path / "schema-before.dump"
+    schema_dump.write_bytes(b"PGDMP-stale")
+    capture_output = tmp_path / "preflight-activity.json"
+    capture_output.write_bytes(b'{"activity": "stale"}')
+    (workdir / prearm.RUN_PLAN_NAME).write_text(
+        json.dumps(_run_plan_document(schema_dump=schema_dump, capture_output=capture_output, workdir=workdir)),
+        encoding="utf-8",
+    )
+    return workdir, schema_dump, capture_output
+
+
+def _assert_completed_pairs_are_reported(
+    stderr: str,
+    *,
+    workdir: Path,
+    schema_dump: Path,
+    capture_output: Path,
+    archive: Path,
+) -> None:
+    """Every completed ``from -> to`` pair, after the prefixed first line."""
+
+    associations = archive / prearm.ASSOCIATIONS_DIR_NAME
+    forensics = stderr.split("\n", 1)[1]
+    for source, destination in (
+        (workdir / "benchmark-before.json", archive / "benchmark-before.json"),
+        (schema_dump, associations / "schema_dump-schema-before.dump"),
+        (capture_output, associations / "cap-preflight-preflight-activity.json"),
+    ):
+        assert f"{source} -> {destination}" in forensics, (source, forensics)
+
+
+def test_a_terminal_manifest_enospc_refuses_with_the_full_sweep_record(tmp_path, capsys, monkeypatch):
+    """The terminal write is the ONLY space-consuming write and runs LAST.
+
+    Unguarded, ENOSPC there leaves the sweep complete, the association
+    originals renamed under ``associations/`` and NO manifest recording where
+    they came from — the exact unrecoverable state round 1 (#1088) closed for
+    the move path.
+    """
+
+    workdir, schema_dump, capture_output = _seed_sweep_with_associations(tmp_path)
+
+    calls: list[Path] = []
+
+    def enospc_write(path, *args, **kwargs):
+        calls.append(path)
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(prearm, "atomic_write_bytes_no_follow", enospc_write)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    # The terminal write IS the manifest write: it must not retry.
+    assert len(calls) == 1, calls
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "No space left on device" in captured.err
+
+    archive = _sole_archive(workdir)
+    assert str(archive) in captured.err
+    assert not (archive / prearm.MANIFEST_NAME).exists()
+    assert "manifest was NOT written" in captured.err
+    _assert_completed_pairs_are_reported(
+        captured.err,
+        workdir=workdir,
+        schema_dump=schema_dump,
+        capture_output=capture_output,
+        archive=archive,
+    )
+
+    # The bytes are all still in the archive; only the manifest is missing.
+    assert (archive / "benchmark-before.json").read_bytes() == b'{"benchmark": "stale"}'
+    assert (
+        archive / prearm.ASSOCIATIONS_DIR_NAME / "schema_dump-schema-before.dump"
+    ).read_bytes() == b"PGDMP-stale"
+
+
+def test_a_terminal_manifest_safe_filesystem_error_takes_the_same_refusal_path(tmp_path, capsys, monkeypatch):
+    """``SafeFilesystemError`` is a ``RuntimeError``, NOT an ``OSError``.
+
+    ``atomic_write_bytes_no_follow`` converts its own ``OSError`` into one
+    (``packages/common/safe_fs.py:139``), so an ``OSError``-only handler would
+    let the real production failure escape as a bare traceback.
+    """
+
+    workdir, schema_dump, capture_output = _seed_sweep_with_associations(tmp_path)
+
+    def unsafe_write(path, *args, **kwargs):
+        raise prearm.SafeFilesystemError(f"Failed to write {path}: simulated", kind="io")
+
+    monkeypatch.setattr(prearm, "atomic_write_bytes_no_follow", unsafe_write)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "SafeFilesystemError" in captured.err
+
+    archive = _sole_archive(workdir)
+    assert not (archive / prearm.MANIFEST_NAME).exists()
+    assert "manifest was NOT written" in captured.err
+    _assert_completed_pairs_are_reported(
+        captured.err,
+        workdir=workdir,
+        schema_dump=schema_dump,
+        capture_output=capture_output,
+        archive=archive,
+    )
+
+
+def test_an_unwritable_archive_root_refuses_before_anything_moves(tmp_path, capsys, monkeypatch):
+    """Archive-root creation is the only filesystem write BEFORE the first move.
+
+    Injected rather than chmod-ed: the suite may run as root, where a 0500
+    parent is a no-op.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    (workdir / "benchmark-before.json").write_bytes(b'{"benchmark": "stale"}')
+    archive_root = workdir / prearm.ARCHIVE_DIR_NAME
+    real_makedirs = os.makedirs
+
+    def failing_makedirs(path, *args, **kwargs):
+        if os.fspath(path) == str(archive_root):
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_makedirs(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "makedirs", failing_makedirs)
+
+    stderr = _refusal_case(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"), capsys)
+    assert "archive root creation failed" in stderr
+    assert "Permission denied" in stderr
+    assert str(archive_root) in stderr
+
+
+def test_an_unwritable_associations_dir_refuses_but_reports_what_already_moved(tmp_path, capsys, monkeypatch):
+    """POST-move: the workdir residue is already in the archive.
+
+    ``_refusal_case`` does not apply — the working directory is deliberately no
+    longer byte-identical — so the refusal itself has to carry the record.
+    """
+
+    workdir, schema_dump, capture_output = _seed_sweep_with_associations(tmp_path)
+    real_makedirs = os.makedirs
+
+    def failing_makedirs(path, *args, **kwargs):
+        if os.fspath(path).endswith(f"/{prearm.ASSOCIATIONS_DIR_NAME}"):
+            raise OSError(errno.EROFS, "Read-only file system")
+        return real_makedirs(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "makedirs", failing_makedirs)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "Read-only file system" in captured.err
+
+    archive = _sole_archive(workdir)
+    associations_dir = archive / prearm.ASSOCIATIONS_DIR_NAME
+    assert str(associations_dir) in captured.err
+    assert not associations_dir.exists()
+
+    # Every already-moved workdir pair is reported, after the prefixed line.
+    forensics = captured.err.split("\n", 1)[1]
+    assert f"{workdir / 'benchmark-before.json'} -> {archive / 'benchmark-before.json'}" in forensics
+    assert (archive / "benchmark-before.json").read_bytes() == b'{"benchmark": "stale"}'
+
+    # The associations never moved, so their originals are still in place.
+    assert schema_dump.read_bytes() == b"PGDMP-stale"
+    assert capture_output.read_bytes() == b'{"activity": "stale"}'
+
+    manifest_path = archive / prearm.MANIFEST_NAME
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["status"] == "partial"
+        assert [move["label"] for move in manifest["moves"]] == ["benchmark-before.json"]
+        assert manifest["failure"]["path"] == str(associations_dir)
+        assert str(manifest_path) in captured.err
+    else:
+        assert "manifest was NOT written" in captured.err
+
+
+def test_an_unreadable_association_reprobe_refuses_but_reports_what_already_moved(tmp_path, capsys, monkeypatch):
+    """POST-move: the loop re-probes each association right before moving it.
+
+    An EACCES there (an operator revoking traverse on the dump's directory
+    between the pre-move selection and the sweep) is not ENOENT, so an
+    ENOENT-only handler lets it escape ``main()`` as a bare traceback with the
+    workdir residue already relocated and no manifest at all.
+
+    ``select_association_residue`` probes the SAME path before the first move,
+    so the injection arms on the second ``lstat`` of that exact path — the
+    re-probe — and leaves every other path (including pathlib's own stats) on
+    the real ``os.lstat``.
+    """
+
+    workdir, schema_dump, capture_output = _seed_sweep_with_associations(tmp_path)
+    real_lstat = os.lstat
+    probes: list[str] = []
+
+    def failing_lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(schema_dump):
+            probes.append(str(path))
+            if len(probes) == 2:
+                raise OSError(errno.EACCES, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", failing_lstat)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert probes == [str(schema_dump), str(schema_dump)], probes
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "association re-probe failed" in captured.err
+    assert "Permission denied" in captured.err
+    assert str(schema_dump) in captured.err
+
+    archive = _sole_archive(workdir)
+    assert str(archive) in captured.err
+
+    # Every already-moved workdir pair is reported, after the prefixed line.
+    forensics = captured.err.split("\n", 1)[1]
+    assert f"{workdir / 'benchmark-before.json'} -> {archive / 'benchmark-before.json'}" in forensics
+    assert (archive / "benchmark-before.json").read_bytes() == b'{"benchmark": "stale"}'
+
+    # The re-probe precedes the move, so both association originals are intact.
+    assert schema_dump.read_bytes() == b"PGDMP-stale"
+    assert capture_output.read_bytes() == b'{"activity": "stale"}'
+    assert list((archive / prearm.ASSOCIATIONS_DIR_NAME).iterdir()) == []
+
+    manifest_path = archive / prearm.MANIFEST_NAME
+    assert str(manifest_path) in captured.err
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "partial"
+    assert [move["label"] for move in manifest["moves"]] == ["benchmark-before.json"]
+    assert manifest["failure"]["kind"] == "plan_association"
+    assert manifest["failure"]["label"] == "schema_dump"
+    assert manifest["failure"]["path"] == str(schema_dump)
+    assert "Permission denied" in manifest["failure"]["error"]
