@@ -89,6 +89,9 @@ RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 #     ``RECOVERY_PREFLIGHT_SQL`` and ``CATALOG_POST_SQL`` it interpolates (both
 #     rendered strings byte-frozen in
 #     tests/test_node27_timeseries_compression_capture.py, issues #1242/#1244);
+#     and the replay producer's ``TARGET``/``TARGET_RELATION`` in
+#     scripts/node27_timeseries_decompression_replay.py (#1245), whose key set
+#     is also that script's CLI flag contract;
 #   * asserted field-by-field equal to it by the drift guard in
 #     tests/test_node27_timeseries_compression_supervisor.py -- the live-evidence
 #     schema ``$defs.recovery_target`` consts, the schema's
@@ -101,11 +104,12 @@ RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 #     (``_validate_exact_command_argv``, kind ``decompress``), which interpolates
 #     the verifier's own guard-bound ``RECOVERY_TARGET`` rather than importing
 #     the six fields from this module (#1244).
-# Coverage is NOT total: one production copy remains outside the bound set --
-# ``TARGET``/``TARGET_RELATION`` in
-# scripts/node27_timeseries_decompression_replay.py:24-32, which is NOT fully
-# inert (``TARGET`` is the default parameter at :138) -- tracked in issue
-# #1245.
+# Closure as of #1245: no PRODUCTION PYTHON copy of the six-field target remains
+# outside the bound set -- the replay producer above was the last one.  Scoped
+# deliberately: runbook prose (docs/runbooks/tier-node27-timeseries-storage.md)
+# and the intentional byte-freeze literals in the test suites are documentation
+# and frozen oracles, not derivation sites.  Any FUTURE copy that cannot derive
+# from here must be named in this ledger with a tracked follow-up.
 # Note the naming: ``RECOVERY_TARGET`` above is the ``schema.table`` STRING the
 # write-privilege probe interpolates, while this is the six-field mapping the
 # evidence documents carry.
