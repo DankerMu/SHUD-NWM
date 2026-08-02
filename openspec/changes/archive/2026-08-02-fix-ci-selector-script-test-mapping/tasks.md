@@ -24,9 +24,11 @@ Must preserve:
   paths, unknown five-prefix `.py` without same-name test (still
   CORE_SMOKE).
 - Same-name derivation applies to `scripts/**/*.py` ONLY. Other backend
-  prefixes keep today's behavior even when a same-name test exists (13
-  such paths today, e.g. `packages/common/state_qc.py` → CORE_SMOKE);
-  pinned by a scope-guard case.
+  prefixes keep today's behavior even when a same-name test exists (39
+  such same-name pairs today, 27 of them still on CORE_SMOKE fallback —
+  count corrected at final review from the drafted "13" — e.g.
+  `packages/common/state_qc.py` → CORE_SMOKE); pinned by a scope-guard
+  case.
 
 Must add:
 - Same-name mapping with KNOWN semantics (issue acceptance: the 21 orphan
