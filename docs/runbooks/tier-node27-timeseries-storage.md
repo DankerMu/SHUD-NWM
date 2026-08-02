@@ -1038,6 +1038,12 @@ credential in process argv.
    # prints run_plan_id + sha256; the printed sha256 is the run-plan digest pin.
    ```
 
+   The command above uses the canonical defaults and is unaffected, but any custom
+   `--root`/`--repo` must be a canonical absolute path — no trailing slash, no
+   duplicate or dot segments; the plan author refuses anything else (the verifier
+   compares recorded plan paths verbatim, so a non-canonical root would author a
+   plan whose bundle fails verification later with an unrelated message).
+
    Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.
    `Persistent=true` means starting the timer

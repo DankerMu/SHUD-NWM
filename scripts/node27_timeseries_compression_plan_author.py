@@ -109,6 +109,39 @@ def build_run_plan(
     for label, value in (("repo", repo), ("root", root)):
         if not Path(value).is_absolute():
             raise PlanAuthorError(f"{label} must be an absolute path")
+        # Canonicality is a PRODUCER-side precondition, deliberately not a verifier
+        # concern: the verifier renders ledger-side artifact refs through
+        # ``str(Path(...))`` (live_evidence.py :437/:463/:510/:521) while comparing the
+        # plan side VERBATIM at two equality sites (capture ``output_path`` :1534,
+        # command ``artifact_associations`` :1439).  A non-canonical repo/root therefore
+        # authors a plan that looks fine and whose bundle deterministically false-refuses
+        # minutes later with a message ("supervisor capture output path differs") that
+        # says nothing about the operator's actual mistake -- an extra slash.  The
+        # verifier judges the recorded bytes and invents no normalization, so the closure
+        # belongs here, at the entrance.
+        #
+        # BOTH conjuncts are load-bearing.  Normalization-stability refuses trailing
+        # slashes (``/x/y/``), interior duplicate slashes (``/x//y``) and ``/./``
+        # segments; ``endswith("/")`` refuses ``/`` and ``//``, the ONLY
+        # normalization-stable strings that end in a slash (POSIX preserves exactly two
+        # leading slashes, so ``str(Path("//")) == "//"``).  Without it a ``root="//"``
+        # would emit ``///capture-<kind>.json``, which BOTH verifier-side normalizations
+        # collapse to ``/capture-<kind>.json`` -- exactly the false-refusal middle state
+        # this guard exists to eliminate.  Together they give the probe property: for
+        # every accepted root R, ``str(Path(f"{R}/x")) == f"{R}/x"``.
+        #
+        # Deliberately still ACCEPTED, recorded: ``..`` segments (pathlib preserves them,
+        # so they are normalization-stable and round-trip verbatim on both sides) and a
+        # LEADING double slash (``//x`` -- normalization-stable, and its f-string
+        # expansions are symmetric on both verifier sides).  ``capture_repo`` stays
+        # unvalidated on purpose: it is a hermetic-only test kwarg and the verifier
+        # value-pins ``--repo`` anyway.
+        if value != str(Path(value)) or value.endswith("/"):
+            raise PlanAuthorError(
+                f"{label} must be a canonical absolute path (no trailing slash, "
+                f"duplicate slashes or dot segments): {value!r} is not canonical "
+                f"(canonical rendering: {str(Path(value))!r})"
+            )
 
     python = f"{repo}/.venv/bin/python"
     wrapper = f"{repo}/scripts/node27_timeseries_compression_once.sh"
