@@ -176,7 +176,9 @@ Must preserve:
 
 - Red-then-green for (a) and (b) (raw exception escape before,
   prefixed refusal + pairs + errno text after); untouched-workdir
-  proof for (c); mid-sweep forensics proof for (d);
+  proof for (c); mid-sweep forensics proof for (d) and (e) — (e)'s
+  red recorded against the fix commit in isolation (1 failed, 42
+  passed with the fix hunk stashed);
   38-existing-tests-unmodified statement with pass count; move-path
   freeze diff proof; ruff; zero-diff-outside proof; one-line survey
   of other `atomic_write_bytes_no_follow` callers (file a follow-up

@@ -36,8 +36,10 @@ count):
 1. Extend the `except (OSError, SafeFilesystemError) → PrearmError`
    model (with `from error` chaining and the underlying error text,
    matching the file's :412/:424/:617 convention) to
-   `_create_archive_dir`, the associations `os.makedirs`, and the
-   TERMINAL `_write_manifest` call site. Two sites the issue listed
+   `_create_archive_dir`, the associations `os.makedirs`, the
+   association destination re-probe `os.lstat` (OSError only — lstat
+   cannot raise SafeFilesystemError; folded from cross-review round
+   1), and the TERMINAL `_write_manifest` call site. Two sites the issue listed
    take no wrapper, as recorded deviations: the nested :597 write is
    already inside the model (`_archive_move` swallows
    `(OSError, SafeFilesystemError)` at :611-613 and raises the move's
