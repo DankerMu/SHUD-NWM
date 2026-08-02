@@ -157,9 +157,16 @@ SUCCESSOR_LEAD_HOURS = 12
 DEFAULT_CYCLE_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_POLL_SECONDS = 60.0
 
-#: The one cycle whose forcing packages are gone while its raw manifest is not:
-#: it runs through the pre-existing repair surface instead of the replay branch.
-REPAIR_CYCLES: frozenset[tuple[str, str]] = frozenset({("gfs", "2026070712")})
+#: Cycles whose forcing packages are gone while their raw manifests are not:
+#: they run through the pre-existing repair surface instead of the replay branch.
+#: ifs_2026071012 joined after the 2026-08-02 cycle-footprint reset: its five
+#: previously-succeeded rows carry an unfinished ``restart_stage=forecast``
+#: retry plan whose journal forcing record has no ``forcing_package_uri``, so
+#: without the repair reclassification the planner emits the stable
+#: ``missing_forcing_package_uri`` blocker instead of rebuilding forcing.
+REPAIR_CYCLES: frozenset[tuple[str, str]] = frozenset(
+    {("gfs", "2026070712"), ("ifs", "2026071012")}
+)
 
 #: Origin of the replay sequence for the six-basin scope.  The bootstrap
 #: assertion is bound to THIS cycle, never to ``cycles[0]``: a Phase-2 resume

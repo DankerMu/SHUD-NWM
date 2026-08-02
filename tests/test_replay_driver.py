@@ -2697,20 +2697,24 @@ def test_a_reset_receipt_missing_one_model_scope_refuses(site: _Site) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_repair_parameter_set_applies_only_to_gfs_2026070712(tmp_path: Path) -> None:
+def test_the_repair_parameter_set_applies_only_to_the_pinned_repair_cycles(tmp_path: Path) -> None:
     base = _Site(tmp_path, cycles=(CYCLE_1,)).config()
     gfs = ReplayDriverConfig(**{**base.__dict__, "source_id": "gfs"})
     ifs = ReplayDriverConfig(**{**base.__dict__, "source_id": "IFS"})
-    repair_cycle = datetime(2026, 7, 7, 12, tzinfo=UTC)
 
-    repaired = submit_env(gfs, repair_cycle)
-    assert repaired[REPAIR_ENV] == "1"
-    assert repaired[REPAIR_CYCLE_ENV] == "2026-07-07T12:00:00Z"
+    for config, cycle, stamp in (
+        (gfs, datetime(2026, 7, 7, 12, tzinfo=UTC), "2026-07-07T12:00:00Z"),
+        (ifs, datetime(2026, 7, 10, 12, tzinfo=UTC), "2026-07-10T12:00:00Z"),
+    ):
+        repaired = submit_env(config, cycle)
+        assert repaired[REPAIR_ENV] == "1"
+        assert repaired[REPAIR_CYCLE_ENV] == stamp
 
     for config, cycle in (
         (gfs, datetime(2026, 7, 7, 0, tzinfo=UTC)),
         (gfs, datetime(2026, 7, 8, 12, tzinfo=UTC)),
-        (ifs, repair_cycle),
+        (ifs, datetime(2026, 7, 7, 12, tzinfo=UTC)),
+        (gfs, datetime(2026, 7, 10, 12, tzinfo=UTC)),
     ):
         env = submit_env(config, cycle)
         assert env[REPAIR_ENV] == "false"
