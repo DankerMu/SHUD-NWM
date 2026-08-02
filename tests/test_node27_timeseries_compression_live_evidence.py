@@ -158,6 +158,28 @@ def _canonical(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
+def _pinned_capture_options(database: str) -> list[str]:
+    """The capture-argv options the verifier pins by VALUE, production values throughout.
+
+    Both argv templates in this module (`_bundle`'s captures and `_producer_argv`) bind
+    these identically so a template stays a production-shaped argv and every test below
+    corrupts exactly the one field it is about.  `--database` is the only dynamic entry
+    (it tracks the plan's own database); the other seven come from the verifier's public
+    map, whose VALUES are pinned literally and against `plan_author` by the structural
+    tests at the end of this module -- so sharing the map here cannot go tautological.
+    """
+
+    return [
+        "--database",
+        database,
+        *(
+            token
+            for option, value in evidence.EXPECTED_CAPTURE_TOOL_VALUES.items()
+            for token in (option, value)
+        ),
+    ]
+
+
 def _json_ref(tmp_path: Path, name: str, value: Any) -> dict[str, Any]:
     path = tmp_path / name
     raw = _canonical(value)
@@ -1158,6 +1180,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                 kind,
                 "--mutation-head-sha",
                 HEAD,
+                *_pinned_capture_options("nhms"),
             ],
             "output_path": produced_refs[kind]["path"],
         }
@@ -4905,6 +4928,54 @@ def _e2e_child_argv(kind: str, association_path: str | None, dump_container: str
     raise AssertionError(f"unmapped child kind {kind!r}")
 
 
+# The five capture tool options the verifier pins by value, paired with the stub binary
+# `_e2e_capture_bin` writes for each.  The recorded plan keeps the production `/usr/bin/*`
+# values; only the EXECUTED plan variant may point at these stubs.
+_E2E_CAPTURE_TOOL_STUBS = (
+    ("--psql", "psql"),
+    ("--systemctl", "systemctl"),
+    ("--docker", "docker"),
+    ("--journalctl", "journalctl"),
+    ("--git", "git"),
+)
+
+
+def _rebind_argv_option(argv: list[str], option: str, value: str) -> list[str]:
+    """Rebind one option's value by NAME, position-independent.
+
+    `plan_author`'s `capture_common` puts the common options at a fixed offset today, but
+    that layout is not a contract (the verifier deliberately scans by name rather than by
+    position), so the exec-side divergence must not assume it either.  The exactly-once
+    assertion is the anti-no-op guard: a silently missed rebind would leave the executed
+    capture pointing at the REAL host binary.
+    """
+
+    rebound = list(argv)
+    replaced = 0
+    index = 0
+    while index < len(rebound):
+        if rebound[index] == option and index + 1 < len(rebound):
+            rebound[index + 1] = value
+            replaced += 1
+            index += 1
+        index += 1
+    assert replaced == 1, (option, argv)
+    return rebound
+
+
+def _e2e_option_values(argv: list[str], option: str) -> list[str]:
+    """Independent by-name value lookup for the exec-side fidelity pins.
+
+    Deliberately NOT `evidence._argv_option_values`: these pins are about THIS test's own
+    rewrite, so reading the argv through the very helper the gate under test uses would
+    make them circular.  Membership (`str(stub) in argv`) would be worse still -- a
+    partially no-op rewrite that left one option bound to the real host binary would
+    still satisfy it.
+    """
+
+    return [argv[index + 1] for index, token in enumerate(argv) if token == option and index + 1 < len(argv)]
+
+
 def test_real_state_machine_bundle_verifies_task_4_5_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4985,29 +5056,20 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     # plan capture argv outright).  `capture_script` is left at the production default
     # (`/home/nwm/NWM/scripts/...capture.py`) because the verifier now pins the capture
     # producer identity; plan_EXEC below swaps argv[1] to the in-checkout script so the
-    # state machine still executes the REAL capture producer.
+    # state machine still executes the REAL capture producer.  The same split now covers
+    # the capture TOOLING: the verifier pins `--psql/--systemctl/--docker/--journalctl/
+    # --git/--repo/--container` to their committed production values, so plan_prod takes
+    # `plan_author`'s defaults for all of them and the stub paths / test checkout live
+    # exclusively on plan_EXEC.  `schema_dump_host/container` overrides stay -- those
+    # options are deliberately unpinned -- and `capture_python` stays because argv[0] is
+    # unpinned by design.
     plan_prod = plan_author.build_run_plan(
         mutation_head_sha=HEAD,
         root=str(tmp_path),
         schema_dump_host=schema_dump_host,
         schema_dump_container=schema_dump_container,
-        capture_repo=str(fixture_repo),
         capture_python=sys.executable,
-        capture_psql=str(capture_bin / "psql"),
-        capture_systemctl=str(capture_bin / "systemctl"),
-        capture_docker=str(capture_bin / "docker"),
-        capture_journalctl=str(capture_bin / "journalctl"),
-        capture_git=str(capture_bin / "git"),
     )
-    for capture in plan_prod["captures"]:
-        if capture["kind"] == "cleanup":
-            # `_validate_reviewed_file_ref` pins the cleanup repo-unit refs to the
-            # canonical checkout path, so the cleanup capture must read the real
-            # committed systemd units (the fixture repo suffices for the env-mode/
-            # write-guard reads the other captures perform).
-            argv = list(capture["argv"])
-            argv[argv.index("--repo") + 1] = str(ROOT)
-            capture["argv"] = argv
     plan_prod["run_plan_id"] = supervisor.run_plan_id(plan_prod)
     supervisor.validate_run_plan(plan_prod, inherited_env={})
 
@@ -5032,6 +5094,18 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
             str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
             *capture["argv"][2:],
         ]
+        # Same divergence, one level deeper: the production `/usr/bin/*` tools plan_prod
+        # records cannot run hermetically, so the EXECUTED argv points at the stubs.
+        # `--repo` is per kind: `cleanup` reads the committed systemd units and
+        # `_validate_reviewed_file_ref` pins those repo-unit refs to the canonical
+        # checkout path, so it must read THIS checkout; every other kind performs
+        # env-mode/write-guard reads the fixture repo satisfies.
+        argv = _rebind_argv_option(
+            capture["argv"], "--repo", str(ROOT) if capture["kind"] == "cleanup" else str(fixture_repo)
+        )
+        for option, tool in _E2E_CAPTURE_TOOL_STUBS:
+            argv = _rebind_argv_option(argv, option, str(capture_bin / tool))
+        capture["argv"] = argv
         if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
             # The CI runner's real disk headroom is uncontrollable, so the executed
             # capture gets a deterministic figure (honoured value pinned below).
@@ -5087,6 +5161,22 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
         assert executed[-2:] == ["--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
         snapshot_path = next(c["output_path"] for c in plan_prod["captures"] if c["kind"] == selection_kind)
         assert json.loads(Path(snapshot_path).read_bytes())["free_bytes"] == _SELFTEST_FREE_BYTES
+
+    # Second hermetic-fidelity pin, same reason and same position (before the rewrite):
+    # the executed captures really bound the STUB tools and the per-kind test checkout,
+    # so the plan_EXEC tool divergence cannot have been a no-op.  Without this a rewrite
+    # that silently stopped rebinding would run the REAL host binaries -- /usr/bin/git,
+    # /usr/bin/systemctl and friends all exist on the runner -- and the e2e would stay
+    # green while proving nothing about the tool split.  Asserted by option-VALUE
+    # equality, not membership: a partially applied rewrite would still put the stub
+    # directory somewhere in the argv.
+    kind_by_capture_id = {str(c["capture_id"]): str(c["kind"]) for c in plan_prod["captures"]}
+    assert set(executed_capture_argv) == set(kind_by_capture_id)
+    for capture_id, executed in executed_capture_argv.items():
+        for option, tool in _E2E_CAPTURE_TOOL_STUBS:
+            assert _e2e_option_values(executed, option) == [str(capture_bin / tool)], (capture_id, option)
+        expected_repo = str(ROOT) if kind_by_capture_id[capture_id] == "cleanup" else str(fixture_repo)
+        assert _e2e_option_values(executed, "--repo") == [expected_repo], capture_id
 
     # Re-anchor the executed ledger's child argvs to the production binary
     # identities the stubs stood in for (argv[0] pins /usr/bin/pg_dump,
@@ -5258,9 +5348,24 @@ def _replace_capture_argv(bundle: dict[str, Any], tmp_path: Path, *, kind: str, 
 
 
 def _producer_argv(kind: str, *extra: str) -> list[str]:
-    """The production-shaped capture argv, before a single field is corrupted."""
+    """The production-shaped capture argv, before a single field is corrupted.
 
-    return [sys.executable, evidence.EXPECTED_CAPTURE_SCRIPT, "--kind", kind, *extra]
+    Unlike `_bundle`'s template this one does NOT bake `--mutation-head-sha`: it stays
+    caller-supplied through `*extra` because the `[pair_missing]` parametrization below
+    needs a template with NO SHA binding at all.  Baking it in would turn that negative
+    into a fully valid argv (DID NOT RAISE) and silently delete the "producer invoked
+    without any SHA pair" coverage.  Everything the verifier pins by VALUE is baked in,
+    so a test that corrupts the SHA is still refused for the SHA.
+    """
+
+    return [
+        sys.executable,
+        evidence.EXPECTED_CAPTURE_SCRIPT,
+        "--kind",
+        kind,
+        *_pinned_capture_options("nhms"),
+        *extra,
+    ]
 
 
 def test_verifier_rejects_capture_argv_naming_a_rogue_producer(tmp_path: Path) -> None:
@@ -5516,3 +5621,219 @@ def test_capture_cli_has_no_flag_abbreviating_an_anchored_option() -> None:
     # Both gates reject the same domain; drift between them would reopen the rebind on
     # whichever side lagged.
     assert supervisor.ANCHORED_CAPTURE_OPTIONS == evidence.ANCHORED_CAPTURE_OPTIONS
+
+
+# --------------------------------------------------------------------------- #
+# #1261: the anchor pins WHO runs; this pins WITH WHAT.  Before this gate a plan
+# could keep a perfectly anchored argv[0:4] -- committed producer, right kind,
+# right mutation SHA, no seam token -- while binding `--psql/--systemctl/
+# --docker/--journalctl/--git/--repo/--container` to stub binaries under /tmp and
+# fabricating all twelve snapshots.  The command side has had literal
+# `expected_executable` pins since the G-series; the capture side had none.
+# --------------------------------------------------------------------------- #
+import inspect  # noqa: E402
+
+# The substitute tooling a hostile plan would point the committed producer at.
+_STUB_TOOL_PATH = "/tmp/stub-tool"
+_PINNED_TOOL_OPTIONS = tuple(sorted(evidence.EXPECTED_CAPTURE_TOOL_VALUES))
+
+
+def _corrupt_pinned_binding(argv: list[str], option: str, mode: str) -> list[str]:
+    """One production-shaped capture argv with exactly ONE pinned binding broken.
+
+    The four modes are the four shapes a single equality-per-option check has to refuse
+    at once: a wrong value, no value at all, and a last-wins second binding in either
+    argparse spelling (`--flag value` and `--flag=value` are the same binding to the
+    producer's parser, so a gate that scanned only the pair form would let the `=`
+    spelling through).
+    """
+
+    if mode == "mismatched":
+        return _rebind_argv_option(argv, option, _STUB_TOOL_PATH)
+    if mode == "absent":
+        index = argv.index(option)
+        return [*argv[:index], *argv[index + 2 :]]
+    if mode == "duplicated_pair":
+        return [*argv, option, _STUB_TOOL_PATH]
+    if mode == "duplicated_inline":
+        return [*argv, f"{option}={_STUB_TOOL_PATH}"]
+    raise AssertionError(f"unknown corruption mode {mode!r}")
+
+
+@pytest.mark.parametrize("option", _PINNED_TOOL_OPTIONS)
+@pytest.mark.parametrize(
+    "mode", ["mismatched", "absent", "duplicated_pair", "duplicated_inline"]
+)
+def test_verifier_rejects_a_capture_argv_that_misbinds_a_pinned_tool_option(
+    tmp_path: Path, option: str, mode: str
+) -> None:
+    """Every pinned option, every misbinding shape: no PASS verdict.
+
+    `mismatched` is the smoking gun the issue names (an identity-anchored argv aimed at
+    stub tooling); `absent` closes the omission variant (an unbound option is not a
+    production invocation); the two `duplicated` shapes close the last-wins rebind that
+    an exactly-once-free presence check would wave through.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_corrupt_pinned_binding(
+            _producer_argv("sizes_pre", "--mutation-head-sha", HEAD), option, mode
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert option in message
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES[option] in message
+    # The refusal is the tool-value gate's own, not the plan<->ledger equality binding:
+    # `_replace_capture_argv` rewrites BOTH sides, so equality still holds here.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_capture_argv_bound_to_a_foreign_database(tmp_path: Path) -> None:
+    """`--database` is pinned DYNAMICALLY, to the plan database the verifier validated.
+
+    A capture that snapshots another database is not evidence about this run, however
+    production-shaped every other binding is.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_rebind_argv_option(
+            _producer_argv("sizes_pre", "--mutation-head-sha", HEAD), "--database", "postgres"
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--database" in message
+    assert "postgres" in message
+    assert "nhms" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    ("tokens", "option"),
+    [
+        pytest.param(["--ps", _STUB_TOOL_PATH], "--psql", id="ps_abbreviation_pair"),
+        pytest.param(["--do", _STUB_TOOL_PATH], "--docker", id="do_abbreviation_pair"),
+        pytest.param([f"--rep={_STUB_TOOL_PATH}"], "--repo", id="rep_abbreviation_inline"),
+    ],
+)
+def test_verifier_rejects_argparse_rebinding_of_a_pinned_capture_option(
+    tmp_path: Path, tokens: list[str], option: str
+) -> None:
+    """The bypass class an exactly-once check alone cannot see.
+
+    capture.py parses with argparse's default `allow_abbrev=True`, so a trailing
+    `--ps /tmp/stub-tool` reaches `--psql` last-wins while the full-name equality above
+    still reads `/usr/bin/psql` -- the argv passes every value check and the producer
+    still runs the stub.  Closed here the same way #1259 closed it for the identity
+    anchor: the base is a proper prefix of a pinned option, so the token is refused.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert tokens[0] in message
+    assert option in message
+    # `_inject_capture_seam` appends to BOTH sides, so the plan<->ledger equality holds.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option() -> None:
+    """The zero-collision fact the pinned-option abbreviation rejection stands on.
+
+    Refusing every proper prefix of `--psql`/`--docker`/`--repo`/... is only safe while no
+    OTHER registered capture flag is such a prefix.  A future `--do-not-fsync` or `--rep`
+    would make a legitimate spelling something the verifier silently refuses -- it reddens
+    HERE instead, before it can ever reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert len(evidence.PINNED_CAPTURE_VALUE_OPTIONS) == 8
+    for pinned in evidence.PINNED_CAPTURE_VALUE_OPTIONS:
+        assert pinned in options, pinned
+        for option in options - {pinned}:
+            assert not (len(option) >= 3 and pinned.startswith(option)), (option, pinned)
+    # Non-vacuity: the rejection domain really is non-empty -- these bases are exactly the
+    # `len >= 3` proper prefixes the rebinding test above exercises, and none of them is a
+    # registered flag.
+    for base, pinned in (("--ps", "--psql"), ("--do", "--docker"), ("--rep", "--repo")):
+        assert base not in options
+        assert len(base) >= 3 and pinned.startswith(base) and base != pinned
+
+
+def test_expected_capture_tool_values_match_the_plan_author_defaults() -> None:
+    """Drift guard: the verifier RESTATES the production values, it does not import them.
+
+    The restatement keeps the verifier a non-derived oracle (a plan_author edit cannot
+    move the expectation with it), so something has to notice when the two really do
+    diverge -- that is this test.  The five tool values are FUNCTION SIGNATURE defaults,
+    not module constants, so they are read off the signature.
+    """
+
+    signature = inspect.signature(plan_author.build_run_plan)
+    for option, parameter in (
+        ("--psql", "capture_psql"),
+        ("--systemctl", "capture_systemctl"),
+        ("--docker", "capture_docker"),
+        ("--journalctl", "capture_journalctl"),
+        ("--git", "capture_git"),
+    ):
+        assert evidence.EXPECTED_CAPTURE_TOOL_VALUES[option] == signature.parameters[parameter].default, option
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES["--repo"] == plan_author.DEFAULT_REPO
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES["--container"] == plan_author.DEFAULT_CONTAINER
+    # `--database` is pinned dynamically rather than literally, so its production value is
+    # bound through the plan itself; the plan-level check already pins THAT to the bundle.
+    assert plan_author.DEFAULT_DATABASE == "nhms"
+
+
+def test_expected_capture_tool_values_are_the_committed_production_literals() -> None:
+    """Anti-tautology: gate and fixtures share the map, so pin the WHOLE map literally.
+
+    The parametrized suites above iterate `EXPECTED_CAPTURE_TOOL_VALUES`, and the argv
+    templates build from it -- so a map that lost five entries, or whose `--repo` was
+    mis-derived from the ambient `REPO_ROOT` instead of `EXPECTED_REPO_PATH`, would pass
+    every one of them vacuously.  Whole-dict comparison, not key-by-key.
+    """
+
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES == {
+        "--psql": "/usr/bin/psql",
+        "--systemctl": "/usr/bin/systemctl",
+        "--docker": "/usr/bin/docker",
+        "--journalctl": "/usr/bin/journalctl",
+        "--git": "/usr/bin/git",
+        "--repo": "/home/nwm/NWM",
+        "--container": "nhms-db",
+    }
+
+
+def test_default_plan_author_capture_argvs_pass_the_whole_capture_gate_stack(tmp_path: Path) -> None:
+    """Positive control: what production actually authors verifies.
+
+    The runbook invocation passes only `--mutation-head-sha`/`--output`, so every pinned
+    value in a real plan is exactly a `plan_author` default.  Swapping ALL TWELVE capture
+    argvs for the real authored ones (not just one) proves the gate stack admits the
+    production shape end to end -- a gate that were accidentally unsatisfiable, or a map
+    entry with no counterpart in the authored argv, reddens here rather than only ever
+    being exercised by rejections.
+    """
+
+    bundle = _bundle(tmp_path)
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path))
+    assert len(plan["captures"]) == len(evidence.EXPECTED_CAPTURE_SEQUENCE)
+    for capture in plan["captures"]:
+        _replace_capture_argv(bundle, tmp_path, kind=str(capture["kind"]), argv=list(capture["argv"]))
+    result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert result["verdict"] == evidence.PASS_VERDICT

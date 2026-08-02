@@ -96,6 +96,50 @@ EXPECTED_CAPTURE_SCRIPT = f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compr
 # proper prefixes cannot collide with a legitimate flag (pinned structurally by
 # `test_capture_cli_has_no_flag_abbreviating_an_anchored_option`).
 ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
+# WHO runs is only half the forensic claim; this map pins WITH WHAT.  The anchored
+# options above cannot stop a plan from keeping a perfect argv[0:4] while aiming the
+# committed producer at stub binaries under /tmp, fabricating all twelve snapshots
+# without a single seam token -- the command side has had literal `expected_executable`
+# pins since the G-series, the capture side had none.
+#
+# Restated LITERALS on purpose, NOT imported from `plan_author`/`supervisor`: the
+# verifier keeps its independent, non-derived-oracle posture (the same reason the
+# `"nhms-db"`/`"nhms"` literals elsewhere in this module are inline), so a plan_author
+# edit can never silently move the verifier's expectation with it.  The two modules are
+# bound by a drift-guard test instead
+# (`test_expected_capture_tool_values_match_the_plan_author_defaults`), which reddens on
+# divergence rather than following it.
+#
+# Deliberately absent, recorded: `--evidence-dir` (run-scoped, varies per run even in
+# production) and `--schema-dump-host`/`--schema-dump-container` (legitimately
+# parameterized data-file paths whose consuming pg_dump/docker COMMAND identities are
+# already exact-pinned on the command side).  The gate iterates this map; it does not
+# assert parser-viability of the whole argv, so unpinned options stay unconstrained and
+# unrequired.
+EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
+    "--psql": "/usr/bin/psql",
+    "--systemctl": "/usr/bin/systemctl",
+    "--docker": "/usr/bin/docker",
+    "--journalctl": "/usr/bin/journalctl",
+    "--git": "/usr/bin/git",
+    "--repo": EXPECTED_REPO_PATH,
+    "--container": "nhms-db",
+}
+# The value-pinned options, `--database` included: it is pinned dynamically (to the run
+# plan's own validated database) rather than to a literal, so it lives here but not in
+# the map above.  This tuple is the abbreviation-rejection domain's second half: an
+# exactly-once full-name equality without abbreviation closure is bypassed by a trailing
+# `--ps /tmp/stub`, which rebinds `--psql` last-wins while every full-spelling check
+# still reads the pinned value.
+#
+# Measured zero-collision facts this rejection stands on (pinned structurally by
+# `test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option`): no registered
+# capture flag is a proper prefix of a pinned option, no pinned option is a proper prefix
+# of another, and `plan_author` emits full flags only.  Ambiguous bases (`--d` for
+# --database/--docker, `--c` for --container) are rejected the same way -- argparse would
+# refuse them as ambiguous anyway, so rejecting is strictly safe.  `--s` still hits the
+# seam branch first, so the #1250 message tests are unaffected.
+PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database")
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1079,6 +1123,22 @@ def _validate_supervisor_execution(
                 f"run plan capture[{index}] argv must bind --mutation-head-sha exactly once to the "
                 f"plan mutation head SHA {mutation_head_sha}"
             )
+        # WITH WHAT, not merely WHO: the anchor above proves the committed producer was
+        # named and aimed at this kind and this mutation SHA, but says nothing about the
+        # tooling it was pointed at.  One equality per pinned option refuses all four
+        # failure shapes at once -- absent (`[]`), duplicated (two entries), dangling
+        # (`[""]`) and mismatched (the wrong value) -- and the message prints the observed
+        # binding list so the refusal shows WHICH shape it was.  `--database` is the sole
+        # dynamic entry: pinned to the plan database the check at the top of this function
+        # already validated against the bundle, not re-derived here.  The pinned set
+        # applies to every capture kind uniformly; no per-kind exemption exists.
+        for option, expected_value in (*EXPECTED_CAPTURE_TOOL_VALUES.items(), ("--database", database)):
+            observed_values = _argv_option_values(capture_argv, option)
+            if observed_values != [expected_value]:
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv must bind {option} exactly once to the "
+                    f"committed value {expected_value}, not {observed_values}"
+                )
         # Plan side only, no ledger-side twin needed: the ledger<->plan binding below
         # (`event["argv"] != capture["argv"]`) is pure equality, so a ledger capture argv
         # can only carry a seam if its plan twin carries the same one -- which this check
@@ -1099,6 +1159,13 @@ def _validate_supervisor_execution(
         # every full-spelling check still saw the anchored values.  A base equal to the
         # option itself is excluded -- `--mutation-head-sha=SHA` is a legitimate spelling
         # already covered by the exactly-once value checks.
+        #
+        # The same closure covers every VALUE-pinned option (`PINNED_CAPTURE_VALUE_OPTIONS`,
+        # whose zero-collision premise is recorded and structurally pinned there): without
+        # it a trailing `--ps /tmp/stub` rebinds `--psql` last-wins while the exactly-once
+        # full-name equality above still reads `/usr/bin/psql`.  The two option families
+        # get distinct messages: rebinding the identity anchor and repointing the producer
+        # at substitute tooling are different claims about what the bundle is lying about.
         for token in capture_argv:
             base = token.split("=", 1)[0]
             if base.startswith(SELF_TEST_SEAM_PREFIX) or (
@@ -1110,6 +1177,12 @@ def _validate_supervisor_execution(
                     raise EvidenceError(
                         f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
                         f"of {option} that would rebind the anchored capture identity"
+                    )
+            for option in PINNED_CAPTURE_VALUE_OPTIONS:
+                if len(base) >= 3 and base != option and option.startswith(base):
+                    raise EvidenceError(
+                        f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
+                        f"of {option} that would rebind the pinned capture tooling value"
                     )
         if kind in planned_output_owners:
             raise EvidenceError("run plan output label has duplicate producers")
