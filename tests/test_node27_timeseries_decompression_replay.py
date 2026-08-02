@@ -6,13 +6,20 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from packages.common import node27_container_contract as contract
 from scripts import node27_timeseries_decompression_replay as replay
+
+_CONTRACT_RELATION = f"{contract.RECOVERY_TARGET_CHUNK_SCHEMA}.{contract.RECOVERY_TARGET_CHUNK_NAME}"
+
+
+def _catalog_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class _FakeCursor:
@@ -54,13 +61,18 @@ class _FakeConnection:
 
 
 def _responses(*, after_count: int = 7, after_compressed: bool = False) -> list[Any]:
+    # DB-echo semantics: the stub models what the catalog and ``decompress_chunk``
+    # return for the authorized target, so its inputs are the contract values the
+    # producer derives from (the ASSERTIONS below are what anchor expectations).
+    catalog_start = _catalog_datetime(contract.RECOVERY_TARGET_RANGE_START)
+    catalog_end = _catalog_datetime(contract.RECOVERY_TARGET_RANGE_END)
     return [
         ("nhms", "15.2", "2.10.2"),
-        (True, datetime(2026, 5, 28, tzinfo=UTC), datetime(2026, 6, 4, tzinfo=UTC)),
+        (True, catalog_start, catalog_end),
         None,
         (7,),
         (replay.TARGET_RELATION,),
-        (after_compressed, datetime(2026, 5, 28, tzinfo=UTC), datetime(2026, 6, 4, tzinfo=UTC)),
+        (after_compressed, catalog_start, catalog_end),
         None,
         (after_count,),
     ]
@@ -77,13 +89,15 @@ def test_fake_db_exact_decompression_publishes_structured_receipt(tmp_path: Path
     )
     assert connection.committed and connection.closed and not connection.rolled_back
     assert json.loads(receipt_path.read_text()) == receipt
-    assert receipt["target"] == replay.TARGET
-    assert receipt["decompress_return_relation"] == replay.TARGET_RELATION
+    # Anchored to the contract, not to ``replay.TARGET``: a replay-side copy that
+    # drifted from the shared source must fail here (#1245).
+    assert receipt["target"] == dict(contract.RECOVERY_TARGET_FIELDS)
+    assert receipt["decompress_return_relation"] == _CONTRACT_RELATION
     assert receipt["after_row_count"] == 7
     mutation_calls = [
         params for statement, params in connection.cursor_value.executed if "decompress_chunk" in str(statement)
     ]
-    assert mutation_calls == [(replay.TARGET_RELATION,)]
+    assert mutation_calls == [(_CONTRACT_RELATION,)]
 
 
 def test_fake_db_post_state_mismatch_publishes_indeterminate_without_retry(tmp_path: Path) -> None:

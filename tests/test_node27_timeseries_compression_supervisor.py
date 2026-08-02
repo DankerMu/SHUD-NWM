@@ -28,6 +28,7 @@ from packages.common.evidence_io import (
 from scripts import node27_timeseries_compression_capture as compression_capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
+from scripts import node27_timeseries_decompression_replay as replay
 
 
 @pytest.mark.parametrize(
@@ -2844,6 +2845,15 @@ def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> No
     the verifier still never imports the six recovery-target fields from the
     contract (its pre-existing ``node27_container_contract`` import covers
     unrelated constants).
+
+    As of #1245 no PRODUCTION PYTHON copy of the six-field target remains
+    outside the bound set: the replay producer's ``TARGET``/``TARGET_RELATION``
+    (scripts/node27_timeseries_decompression_replay.py) were the last one and
+    now derive from the contract, asserted below.  Those two clauses are
+    definitional against a contract-side flip (both sides move together); what
+    they catch is a replay-side reversion to an independent literal.  Runbook
+    prose and the intentional byte-freeze literals in the test suites are not
+    derivation sites and are deliberately excluded from that closure statement.
     The e2e ``test_real_state_machine_bundle_verifies_task_4_5_pass``
     (tests/test_node27_timeseries_compression_live_evidence.py) stays the
     independent NON-derived oracle: its decompress argv comes from
@@ -2865,3 +2875,6 @@ def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> No
     # The verifier's own recovery-target oracle.
     assert dict(evidence.RECOVERY_TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
     assert evidence.RECOVERY_RETURN_RELATION == relation
+    # The replay producer's target and its synthetic relation (#1245).
+    assert dict(replay.TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
+    assert replay.TARGET_RELATION == relation
