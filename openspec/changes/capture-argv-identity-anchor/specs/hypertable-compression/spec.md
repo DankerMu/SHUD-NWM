@@ -13,9 +13,14 @@ head SHA — and the supervisor SHALL refuse to validate or execute a
 capture whose argv lacks the capture-script suffix or whose `--kind`
 binding mismatches, so that "these snapshots were produced by the
 committed capture producer" is a structural fact on both the
-executor and the forensic verifier. The interpreter (argv[0]) is
-deliberately unpinned: it is an environment fact
-(`sys.executable`), not a committed identity.
+executor and the forensic verifier. Both anchored options (`--kind`,
+`--mutation-head-sha`) SHALL be bound exactly once on the verifier
+side (`--kind` also exactly once on the supervisor side), and both
+gates SHALL reject any token that is an argparse-acceptable proper
+prefix of an anchored option in plain or `=value` form, so a later
+last-wins token cannot rebind what the anchor already validated.
+The interpreter (argv[0]) is deliberately unpinned: it is an
+environment fact (`sys.executable`), not a committed identity.
 
 #### Scenario: A placeholder or rogue producer cannot verify
 
@@ -48,11 +53,16 @@ deliberately unpinned: it is an environment fact
 
 - **WHEN** the supervisor validates a plan (or is asked to execute
   a capture step) whose capture argv[1] does not end with the
-  capture-script suffix, or whose argv[2:4] `--kind` binding names
-  a different kind
+  capture-script suffix, whose argv[2:4] `--kind` binding names a
+  different kind, or whose argv carries a later rebinding token —
+  a second `--kind` or an argparse abbreviation of an anchored
+  option
 - **THEN** both the validate_run_plan gate and the
   run_capture_step gate refuse with an error naming the violation,
-  before any subprocess is spawned
+  before any subprocess is spawned (the `--mutation-head-sha`
+  VALUE stays unchecked on the supervisor side — the plan SHA
+  claim belongs to the verifier; abbreviation rejection there is a
+  rebinding defense, not a SHA assertion)
 
 #### Scenario: The supervisor stays hermetic-execution compatible
 
