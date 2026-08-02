@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -285,6 +287,149 @@ def test_every_tracked_script_with_a_same_name_suite_selects_it_without_core_smo
         if smoke_overlap:
             offenders.append(f"{script_path}: still drags core smoke {smoke_overlap}")
     assert not offenders, "script/test same-name mapping incomplete: " + "; ".join(offenders)
+
+
+CONTRACT_SOURCE_PATH = "packages/common/node27_container_contract.py"
+CONTRACT_MODULE = "packages.common.node27_container_contract"
+CONTRACT_TRANSITIVE_ONLY_TEST = "tests/test_node27_timeseries_compression_live_evidence.py"
+
+# Independent of the AST walk on purpose: a line-shaped reading of both import
+# spellings, used only as a cross-derivation floor under the AST closure.
+_CONTRACT_IMPORT_LINE = re.compile(
+    r"^[ \t]*(?:"
+    r"from[ \t]+packages\.common[ \t]+import[ \t]+[^\n]*\bnode27_container_contract\b"
+    r"|from[ \t]+packages\.common\.node27_container_contract[ \t]+import\b"
+    r"|import[ \t]+packages\.common\.node27_container_contract\b"
+    r")",
+    re.MULTILINE,
+)
+
+
+def _tracked_python_files(pathspec: str) -> list[str]:
+    listing = subprocess.run(
+        ["git", "ls-files", "--", pathspec],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in listing.stdout.splitlines() if line.strip().endswith(".py")]
+
+
+def _imported_module_names(path: str) -> set[str]:
+    """Dotted module names the imports in ``path`` can refer to.
+
+    Both contract spellings collapse to the same dotted name here:
+    ``from packages.common import node27_container_contract`` via the
+    module+alias join, ``from packages.common.node27_container_contract import
+    X`` via the module itself. Relative imports carry no dotted module name and
+    are skipped (the tracked tree uses absolute imports).
+    """
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def _resolved_script_modules(names: set[str], tracked_scripts: set[str]) -> set[str]:
+    """Map dotted ``scripts.*`` names onto the tracked script files they load."""
+    resolved: set[str] = set()
+    for name in names:
+        parts = name.split(".")
+        if parts[0] != "scripts":
+            continue
+        for end in range(2, len(parts) + 1):
+            candidate = "/".join(parts[:end]) + ".py"
+            if candidate in tracked_scripts:
+                resolved.add(candidate)
+    return resolved
+
+
+def _contract_dependent_test_closure() -> set[str]:
+    """Tracked test files that reach the container contract through imports.
+
+    Direct importers (either spelling) plus tests importing a ``scripts/``
+    module whose scripts-import graph reaches the contract. Transitivity is run
+    to a FIXED POINT, not one hop: two-hop chains already exist today
+    (bundle_author -> live_evidence, plan_author -> supervisor), so a future
+    same-name suite for such a module must land in the closure too.
+    """
+    tracked_scripts = set(_tracked_python_files("scripts"))
+    script_imports = {path: _imported_module_names(path) for path in tracked_scripts}
+
+    reaching = {path for path, names in script_imports.items() if CONTRACT_MODULE in names}
+    while True:
+        grown = reaching | {
+            path
+            for path, names in script_imports.items()
+            if _resolved_script_modules(names, tracked_scripts) & reaching
+        }
+        if grown == reaching:
+            break
+        reaching = grown
+
+    closure: set[str] = set()
+    for test_path in _tracked_python_files("tests"):
+        if not PurePosixPath(test_path).name.startswith("test_"):
+            continue
+        names = _imported_module_names(test_path)
+        if CONTRACT_MODULE in names or _resolved_script_modules(names, tracked_scripts) & reaching:
+            closure.add(test_path)
+    return closure
+
+
+def _regex_direct_contract_importer_tests() -> set[str]:
+    return {
+        test_path
+        for test_path in _tracked_python_files("tests")
+        if _CONTRACT_IMPORT_LINE.search(Path(test_path).read_text(encoding="utf-8"))
+    }
+
+
+def test_container_contract_change_selects_its_derived_dependent_closure() -> None:
+    # Mechanized like the same-name pair guard above: the dependent closure is
+    # DERIVED from the tracked tree by import analysis, never frozen here, so a
+    # newly added dependent suite reddens this test (pointing at the rule to
+    # extend) instead of silently dropping into the core-smoke fallback.
+    assert Path(CONTRACT_SOURCE_PATH).is_file()
+    closure = _contract_dependent_test_closure()
+
+    # Anti-vacuity floor 1: the transitive-only member, whose own text never
+    # names the contract — a grep-shaped derivation cannot find it.
+    assert CONTRACT_TRANSITIVE_ONLY_TEST in closure
+    assert not _CONTRACT_IMPORT_LINE.search(Path(CONTRACT_TRANSITIVE_ONLY_TEST).read_text(encoding="utf-8"))
+    # Anti-vacuity floor 2: cross-derivation. A degenerate AST walk fails loudly
+    # without freezing the closure's cardinality here.
+    regex_direct = _regex_direct_contract_importer_tests()
+    assert regex_direct, "expected tracked tests importing the contract directly"
+    assert regex_direct <= closure, f"AST closure missed direct importers: {sorted(regex_direct - closure)}"
+
+    selected = select_tests([CONTRACT_SOURCE_PATH], repo_root=Path("."))
+
+    missing = sorted(closure - set(selected))
+    assert not missing, f"contract change does not select its dependent suites: {missing}"
+    smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
+    assert not smoke_overlap, f"contract change still drags core smoke {smoke_overlap}"
+
+
+def test_container_contract_transitive_walk_stays_scoped_to_scripts() -> None:
+    # The closure walk follows scripts/ imports only. That scoping is sound
+    # while scripts/ holds every non-test importer of the contract; assert the
+    # premise instead of assuming it, so a new packages/services/workers/apps
+    # importer reddens here rather than quietly widening the blind spot.
+    tracked = [
+        path
+        for pathspec in ("apps", "packages", "services", "workers")
+        for path in _tracked_python_files(pathspec)
+        if path != CONTRACT_SOURCE_PATH
+    ]
+    importers = sorted(path for path in tracked if CONTRACT_MODULE in _imported_module_names(path))
+
+    assert not importers, f"contract importers outside scripts/ are not covered by the closure walk: {importers}"
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
