@@ -4991,6 +4991,14 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     for capture in plan_prod["captures"]:
         if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
             capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        if capture["kind"] == "schema_dump_list":
+            # Stub-docker injection deviates from the pinned host CLI, so the
+            # capture must opt into the RECORD/EXEC seam explicitly (production
+            # `plan_author` never emits this flag).  Patched here, inside the
+            # loop, so the `run_plan_id` recompute below and the plan_exec
+            # deepcopy both see the final capture argv the verifier binds the
+            # ledger against.
+            capture["argv"] = [*capture["argv"], "--self-test-docker-seam"]
         if capture["kind"] == "cleanup":
             # `_validate_reviewed_file_ref` pins the cleanup repo-unit refs to the
             # canonical checkout path, so the cleanup capture must read the real
