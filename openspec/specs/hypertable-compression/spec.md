@@ -110,3 +110,14 @@ source-of-truth documentation with a tracked follow-up.
   an argv derived from that constant is accepted, and an argv whose
   tail deviates in any single recovery-target field is rejected
 
+#### Scenario: The replay producer's target derives from the shared source
+
+- **WHEN** the drift-guard test compares the replay producer's module
+  `TARGET` mapping and its synthetic `TARGET_RELATION` string against
+  the shared contract constants
+- **THEN** the six fields and the `chunk_schema.chunk_name` relation
+  match field-by-field, the replay producer's own receipt test asserts
+  the published target against the contract-derived expectation rather
+  than the producer's own constant, and reverting the producer's
+  derivation to an independent drifted literal makes a test fail
+
