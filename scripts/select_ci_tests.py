@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_api.py",
@@ -405,6 +405,11 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                 if rule.stop_on_match:
                     break
 
+        same_name_test = _same_name_script_test(path)
+        if same_name_test is not None and _test_target_exists(same_name_test, repo_root=repo_root):
+            selected.add(same_name_test)
+            matched = True
+
         if _is_backend_python_path(path) and not matched:
             unknown_backend_python = True
 
@@ -430,6 +435,19 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
 
 def _is_backend_python_path(path: str) -> bool:
     return path.endswith(".py") and path.startswith(("apps/api/", "packages/", "services/", "workers/", "scripts/"))
+
+
+def _same_name_script_test(path: str) -> str | None:
+    """Derive the same-name test file for a changed ``scripts/**/*.py`` path.
+
+    Scoped to ``scripts/`` on purpose: other backend prefixes keep their
+    explicit-rule / core-smoke-fallback behavior even when a same-name test
+    exists. Returns the candidate target only; the caller must confirm it
+    exists before treating the path as a known mapping.
+    """
+    if not (path.startswith("scripts/") and path.endswith(".py")):
+        return None
+    return f"tests/test_{PurePosixPath(path).stem}.py"
 
 
 def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:

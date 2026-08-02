@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 from scripts.select_ci_tests import (
     CORE_SMOKE_TESTS,
@@ -196,6 +197,94 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
 
     assert selected == ["tests/test_entropy_audit_script.py"]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_maps_script_to_its_same_name_suite_without_core_smoke_fallback() -> None:
+    selected = select_tests(
+        ["scripts/scheduler_state_index_copyback_replay.py"],
+        repo_root=Path("."),
+    )
+
+    assert "tests/test_scheduler_state_index_copyback_replay.py" in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
+    test_path = tmp_path / "tests" / "test_nested_helper_probe.py"
+    test_path.parent.mkdir()
+    test_path.write_text("def test_nested_helper_probe(): pass\n", encoding="utf-8")
+
+    selected = select_tests(["scripts/nested/sub/nested_helper_probe.py"], repo_root=tmp_path)
+
+    assert selected == ["tests/test_nested_helper_probe.py"]
+
+
+def test_select_tests_keeps_core_smoke_fallback_for_script_without_same_name_suite() -> None:
+    selected = select_tests(["scripts/no_such_helper_xyz.py"], repo_root=Path("."))
+
+    assert not Path("tests/test_no_such_helper_xyz.py").exists()
+    for test_path in CORE_SMOKE_TESTS:
+        assert test_path in selected
+
+
+def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
+    selected = select_tests(["scripts/validate_readonly_db_boundary.py"], repo_root=Path("."))
+
+    assert selected == ["tests/test_readonly_db_validation.py"]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_same_name_derivation_is_scoped_to_scripts_paths() -> None:
+    # packages/common/state_qc.py has a same-name tests/test_state_qc.py, but the
+    # derivation is scripts/-only: this path must keep today's fallback behavior.
+    assert Path("tests/test_state_qc.py").is_file()
+
+    selected = select_tests(["packages/common/state_qc.py"], repo_root=Path("."))
+
+    assert "tests/test_state_qc.py" not in selected
+    for test_path in CORE_SMOKE_TESTS:
+        assert test_path in selected
+
+
+def _tracked_script_same_name_pairs() -> list[tuple[str, str]]:
+    listing = subprocess.run(
+        ["git", "ls-files", "--", "scripts"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    pairs: list[tuple[str, str]] = []
+    for line in listing.stdout.splitlines():
+        script_path = line.strip()
+        if not script_path.endswith(".py"):
+            continue
+        same_name_test = f"tests/test_{PurePosixPath(script_path).stem}.py"
+        if Path(same_name_test).is_file():
+            pairs.append((script_path, same_name_test))
+    return pairs
+
+
+def test_every_tracked_script_with_a_same_name_suite_selects_it_without_core_smoke() -> None:
+    # Mechanized completeness guard: the pair list is derived from the tracked
+    # tree, never frozen here, so a newly added script/test pair is covered the
+    # moment it lands instead of silently falling into the core-smoke fallback.
+    pairs = _tracked_script_same_name_pairs()
+    assert pairs, "expected tracked scripts/<name>.py <-> tests/test_<name>.py pairs"
+
+    offenders: list[str] = []
+    for script_path, same_name_test in pairs:
+        selected = select_tests([script_path], repo_root=Path("."))
+        if same_name_test not in selected:
+            offenders.append(f"{script_path}: {same_name_test} not selected (got {selected})")
+            continue
+        if same_name_test in CORE_SMOKE_TESTS:
+            # Exemption: a same-name test that IS a core-smoke file makes the
+            # no-smoke clause meaningless. No such pair exists today.
+            continue
+        smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
+        if smoke_overlap:
+            offenders.append(f"{script_path}: still drags core smoke {smoke_overlap}")
+    assert not offenders, "script/test same-name mapping incomplete: " + "; ".join(offenders)
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
