@@ -965,9 +965,25 @@ credential in process argv.
    pre-migration catalog. This dump is forensic DDL inventory, not a data
    backup, restore drill, or compressed-storage rollback.
 
-   Before the live replay, run a read-only dry-probe of the container
-   `pg_restore` identity the supervisor binds, so a drifted image/realpath is
-   caught here rather than burning the one-shot replay window at preflight:
+   Before the live replay, run the read-only host-contract dry-probe, so a
+   drifted image/realpath/systemd/PG version is caught here rather than burning
+   the one-shot replay window at preflight. Until a timer or CI workflow is
+   installed (operator-gated, §4.4), **this step is the SOLE pre-mutation
+   interception point** for external-contract drift. Run the committed probe
+   FIRST and continue only on exit 0:
+
+   ```bash
+   set -a; . infra/env/node27-timeseries-compression-replay.env; set +a
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
+   # exit 0 -> continue.  Any non-zero exit stops the run: see §4.4 for the
+   # exit-code table (2 usage / 3 drift / 4 misalignment / 5 probe failure)
+   # and the drift-handling loop.  Never "just update the fixture" here.
+   ```
+
+   If the script is unavailable (e.g. an older checkout), fall back to the
+   manual trio it replaced — it covers the container leg only, so a systemd /
+   server-version drift stays undetected until preflight:
 
    ```bash
    docker inspect --format='{{.Image}}' nhms-db          # -> sha256:...
@@ -1584,6 +1600,99 @@ undone by the scheduled compression runner. If the reingest itself
 completes but the operator wants to abandon the decompress state, force a
 compression pass with the runner's enforce flag once the chunk falls
 outside the lag window.
+
+### 4.4 host-contract snapshot 漂移处置 (`#1089`)
+
+`packages/common/node27_container_contract.py` pins three MEASURED node-27 host
+contracts — `CONTAINER_PG_RESTORE_REALPATH`, `SYSTEMD_UNSET_TIMESTAMP`,
+`CLIENT_BACKEND_TYPE`. CI cannot observe the host they were measured on, so a
+systemd / docker / PostgreSQL / TimescaleDB upgrade (or a moved `pg_wrapper`
+symlink) drifts them silently and the drift surfaces first inside an authorized
+mutation window as a G-class misjudgment. `scripts/node27_external_contract_snapshot.py`
+re-measures them live, READ-ONLY, and diffs against the committed baseline
+`packages/common/node27_external_contract_snapshot.json`.
+
+Read-only by construction: the only argvs it can spawn are `systemctl --user
+show`, `systemctl --version`, `docker --version`, `docker inspect`,
+`docker exec nhms-db /usr/bin/readlink -f ...`, `docker exec nhms-db
+/usr/bin/pg_restore --version`, and `psql -c` with SELECT/SHOW-only SQL from a
+frozen tuple. `--check` never writes a file; `--dump` writes only stdout or an
+explicit `--output`. There is no auto-update path.
+
+**Invocation (out-of-band, any time, no mutation window needed):**
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM && git status --porcelain && git pull --ff-only
+set -a; . infra/env/node27-timeseries-compression-replay.env; set +a   # PG env, never embedded in the repo
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"                    # must be /run/user/$(id -u)
+export XDG_RUNTIME_DIR=/run/user/$(id -u)                             # if unset
+uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
+```
+
+`systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
+unset the probe exits non-zero with "Failed to connect to bus"
+(`scripts/node27_timeseries_compression_supervisor.py:176-183`) and the check
+reports a probe-execution failure — that is a broken probe, not a verdict about
+the host. Fix the environment and rerun.
+
+|exit|meaning|action|
+|---|---|---|
+|0|no drift, fixture aligned with the contract module|continue|
+|2|usage/input error (bad CLI, missing or malformed fixture)|fix the invocation; not a host verdict|
+|4|MISALIGNMENT: fixture `contract` section ≠ `node27_container_contract` constants (decided BEFORE any probe runs, so nothing was measured)|a repo-side bug: the fixture and the constants moved apart. Fix in a PR, never on the node|
+|3|DRIFT: a compared value moved; the report names `section.key`, expected and observed|stop; run the loop below|
+|5|PROBE-EXECUTION FAILURE: a probe could not run, exited non-zero, exited 0 empty, or exited 0 without the property it measures|the probe is broken (env, daemon, container down). Never treated as drift; repair and rerun|
+
+**Drift handling loop (never a silent fixture update):**
+
+1. Capture the `--check` report and a fresh `--dump` verbatim (`uv run python
+   scripts/node27_external_contract_snapshot.py --dump --output
+   ~/node27-contract-snapshot-$(date -u +%Y%m%dT%H%M%SZ).json`). Both are PR
+   evidence.
+2. Decide, in PR review, one of exactly two outcomes:
+   - **accept the new contract** — update the fixture, the
+     `node27_container_contract.py` constants, and the hermetic-lock
+     mutation-RED tests bound to them TOGETHER in one PR (the alignment guard
+     in `tests/test_node27_external_contract_snapshot.py` reds if any of them
+     moves alone), or
+   - **roll back the host change** — revert the upgrade / restore the image and
+     rerun `--check` until it exits 0.
+3. Never commit a fixture update alone to make the check green. A `contract.*`
+   drift means a value that supervisor/verifier predicates are bound to has
+   moved; the consumers must be re-reviewed in the same PR.
+
+**The patch-version-only drift class.** Ubuntu unattended security upgrades bump
+`host_context.docker_version` / `host_context.systemd_version` patch strings
+without touching any pinned behaviour. Handling: confirm no semantic change —
+the `contract` section values are unchanged, the drift report names ONLY
+`host_context.*` version strings, and the version moved by a patch component —
+then update the fixture via PR with the `--dump` attached. This exception is
+deliberately narrow: any drift naming `contract.*`, `nhms_db_image_id`,
+`nhms_db_image_ref` or a MAJOR/MINOR version component is NOT a patch bump and
+goes through the full loop above. Do not let "it's just a version bump" become
+the default answer — a check operators mindlessly re-baseline is a check that
+does nothing (the G9 lesson inverted).
+
+**Limitation (do not over-read a green check).** The unset-timestamp contract is
+witnessed through a reserved never-existing unit
+(`nhms-external-contract-snapshot-witness-does-not-exist.service`), because the
+real recurring compression unit has run this boot (daily 04:25 UTC timer) and so
+renders a real timestamp. That witnesses systemd's *rendering* contract only —
+it does NOT witness the loaded-but-never-started whole-dict shape asserted at
+`scripts/node27_timeseries_compression_supervisor.py:1282-1293` and
+`scripts/node27_timeseries_compression_live_evidence.py:834-845`. A green
+`--check` therefore does NOT imply those two checkpoints pass. The fixture's
+`informational.recurring_unit` records the real unit's live
+ActiveState/SubState/ExecMainStartTimestamp as counter-evidence; that
+pre-existing consumer defect is tracked as its own issue.
+
+**Scheduling is operator-gated.** #1089 installs no timer and no GitHub Actions
+workflow. Until an operator schedules one (a weekly `--check` on the node is the
+intended shape), §4.0 step 3 is the sole pre-mutation interception point.
+`informational` (measured_at, hostname, backend_type distribution, the real
+recurring unit's state) is dump-recorded and NEVER compared, so a scheduled
+check cannot flake on autovacuum or parallel-worker noise.
 
 ## 7. Archive rebuild drill (`archive-rebuild-drill`)
 
