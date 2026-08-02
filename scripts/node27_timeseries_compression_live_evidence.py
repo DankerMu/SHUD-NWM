@@ -87,6 +87,15 @@ EXPECTED_REPO_PATH = "/home/nwm/NWM"
 # capture argv must name the reviewed checkout's capture script and nothing else; shape
 # alone (`_concrete_argv`) would happily accept `/usr/bin/printf`.
 EXPECTED_CAPTURE_SCRIPT = f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_capture.py"
+# The capture-CLI options the identity anchor binds.  capture.py's parser runs with
+# argparse's default `allow_abbrev=True` and both options bind last-wins, so anchoring
+# the FIRST occurrence is not enough: a later `--k <other>`, `--kin=<other>` or
+# `--m <sha>` token would silently rebind what the producer was actually asked to do.
+# Measured zero-collision fact this relies on: `--kind` is the only `--k*` flag and
+# `--mutation-head-sha` the only `--m*` flag in the capture CLI, so rejecting their
+# proper prefixes cannot collide with a legitimate flag (pinned structurally by
+# `test_capture_cli_has_no_flag_abbreviating_an_anchored_option`).
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1056,6 +1065,15 @@ def _validate_supervisor_execution(
                 f"run plan capture[{index}] argv kind binding {capture_argv[2:4]} differs from its "
                 f"declared kind {kind}"
             )
+        # Position AND uniqueness: `--kind` binds last-wins in the producer's parser, so
+        # the fixed-offset check above only pins the FIRST binding.  A second full
+        # `--kind <other>` appended anywhere would leave argv[2:4] intact while the
+        # producer collected a different snapshot entirely.
+        if _argv_option_values(capture_argv, "--kind") != [kind]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv must bind --kind exactly once to its declared "
+                f"kind {kind}"
+            )
         if _argv_option_values(capture_argv, "--mutation-head-sha") != [mutation_head_sha]:
             raise EvidenceError(
                 f"run plan capture[{index}] argv must bind --mutation-head-sha exactly once to the "
@@ -1074,12 +1092,25 @@ def _validate_supervisor_execution(
         # flag; and rejecting the `--s`/`--se` bases outright keeps the gate free of any
         # premise about those flags staying registered to keep `--s` ambiguous.
         # `plan_author` emits full flags only, so no legitimate plan token is ever `--s`.
+        #
+        # The same abbreviation technique is turned on the anchor's OWN options: the
+        # equality checks above match the full spelling only, so `--k <other>` or
+        # `--kin=<other>` would rebind the kind (and `--m <sha>` the mutation SHA) while
+        # every full-spelling check still saw the anchored values.  A base equal to the
+        # option itself is excluded -- `--mutation-head-sha=SHA` is a legitimate spelling
+        # already covered by the exactly-once value checks.
         for token in capture_argv:
             base = token.split("=", 1)[0]
             if base.startswith(SELF_TEST_SEAM_PREFIX) or (
                 len(base) >= 3 and SELF_TEST_SEAM_PREFIX.startswith(base)
             ):
                 raise EvidenceError(f"run plan capture argv carries a self-test seam token: {token}")
+            for option in ANCHORED_CAPTURE_OPTIONS:
+                if len(base) >= 3 and base != option and option.startswith(base):
+                    raise EvidenceError(
+                        f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
+                        f"of {option} that would rebind the anchored capture identity"
+                    )
         if kind in planned_output_owners:
             raise EvidenceError("run plan output label has duplicate producers")
         planned_output_owners[kind] = (f"capture:{kind}", 0)

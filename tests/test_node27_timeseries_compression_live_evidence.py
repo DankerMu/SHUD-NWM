@@ -5409,3 +5409,110 @@ def test_expected_capture_script_is_the_production_producer_path() -> None:
     assert evidence.EXPECTED_CAPTURE_SCRIPT == "/home/nwm/NWM/scripts/node27_timeseries_compression_capture.py"
     # The load-bearing coupling the e2e depends on: production plans really do emit it.
     assert plan_author.DEFAULT_CAPTURE_SCRIPT == evidence.EXPECTED_CAPTURE_SCRIPT
+
+
+# --------------------------------------------------------------------------- #
+# #1259 follow-up: the anchor must be REBIND-proof and ABBREVIATION-proof.
+# capture.py parses with argparse's default `allow_abbrev=True` and both anchored
+# options bind last-wins, so pinning argv[2:4] and the full `--mutation-head-sha`
+# spelling left four PASS-shaped rebinds open: a second full `--kind`, `--k`,
+# `--kin=`, and `--m`.  Each of them re-aims the producer while every fixed-offset
+# and full-spelling check still reads the anchored values.
+# --------------------------------------------------------------------------- #
+
+_OTHER_KIND = "sizes_pre"
+_OTHER_SHA = "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        pytest.param(["--kind", _OTHER_KIND], "exactly once", id="full_second_kind"),
+        pytest.param(["--k", _OTHER_KIND], "abbreviation of --kind", id="k_abbreviation_pair"),
+        pytest.param([f"--kin={_OTHER_KIND}"], f"--kin={_OTHER_KIND}", id="kin_abbreviation_inline"),
+        pytest.param(["--m", _OTHER_SHA], "abbreviation of --mutation-head-sha", id="m_abbreviation_pair"),
+    ],
+)
+def test_verifier_rejects_argparse_rebinding_of_the_anchored_capture_options(
+    tmp_path: Path, tokens: list[str], expected: str
+) -> None:
+    """Each shape verified to PASS before this gate: argv[2:4] and `--mutation-head-sha`
+    both still read the anchored values while the producer would have collected another
+    kind, or recorded another mutation SHA."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert expected in message
+    # The refusal is the identity anchor's own, not the plan<->ledger equality binding:
+    # `_inject_capture_seam` appends to BOTH sides, so equality still holds here.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_rebinding_kind_token_placed_before_the_anchored_pair(tmp_path: Path) -> None:
+    """Prefix position too: argv[2:4] is only the anchor's FIRST binding.
+
+    With the rebinding token ahead of the pair, argv[2:4] is no longer `["--kind", kind]`
+    -- so this shape must be refused by the position check even if the exactly-once
+    check were removed, and vice versa; neither check alone covers both placements.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=[
+            sys.executable,
+            evidence.EXPECTED_CAPTURE_SCRIPT,
+            "--kind",
+            _OTHER_KIND,
+            "--kind",
+            "catalog_before",
+            "--mutation-head-sha",
+            HEAD,
+        ],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "catalog_before" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_second_mutation_sha_binding(tmp_path: Path) -> None:
+    """Last-wins on the SHA side too: a full second `--mutation-head-sha` rebinds it."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="sizes_pre", tokens=["--mutation-head-sha", _OTHER_SHA]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--mutation-head-sha" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_flag_abbreviating_an_anchored_option() -> None:
+    """The zero-collision fact the abbreviation rejection stands on.
+
+    Rejecting every proper prefix of `--kind` / `--mutation-head-sha` is only safe while
+    those are the sole `--k*` / `--m*` flags in the capture CLI.  A future `--keep-going`
+    or `--max-rows` would make `--k` / `--m` a legitimate spelling the verifier silently
+    refuses -- it reddens HERE instead, before it can reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {option for option in options if option.startswith("--k")} == {"--kind"}
+    assert {option for option in options if option.startswith("--m")} == {"--mutation-head-sha"}
+    for anchored in evidence.ANCHORED_CAPTURE_OPTIONS:
+        assert anchored in options, anchored
+        for option in options - {anchored}:
+            assert not (len(option) >= 3 and anchored.startswith(option)), (option, anchored)
+    # Both gates reject the same domain; drift between them would reopen the rebind on
+    # whichever side lagged.
+    assert supervisor.ANCHORED_CAPTURE_OPTIONS == evidence.ANCHORED_CAPTURE_OPTIONS

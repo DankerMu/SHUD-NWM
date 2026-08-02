@@ -3057,3 +3057,115 @@ def test_supervisor_validates_and_executes_a_hermetic_checkout_capture_carrying_
         )
     assert event["kind"] == target["kind"]
     assert json.loads(Path(target["output_path"]).read_text()) == {"owner": target["kind"]}
+
+
+# --- #1259 follow-up: the executor's anchor is rebind- and abbreviation-proof ---
+#
+# capture.py parses with argparse's default `allow_abbrev=True`; `--kind` is its only
+# `--k*` flag, so `--k <other>` binds the kind, and a later binding wins.  Pinning
+# argv[2:4] alone therefore let a re-aimed producer through BOTH supervisor gates.
+
+
+def _kind_rebinding_shapes(kind: str) -> list[tuple[str, list[str], str]]:
+    """(id, extra tokens, expected refusal fragment) for every rebinding spelling."""
+
+    other = next(item for item in supervisor.EXPECTED_CAPTURE_SEQUENCE if item != kind)
+    return [
+        ("full_second_kind", ["--kind", other], "exactly once"),
+        ("k_abbreviation_pair", ["--k", other], "abbreviation of --kind"),
+        ("kin_abbreviation_inline", [f"--kin={other}"], "abbreviation of --kind"),
+        ("m_abbreviation_pair", ["--m", "b" * 40], "abbreviation of --mutation-head-sha"),
+    ]
+
+
+_REBINDING_PARAMS = [
+    pytest.param(tokens, fragment, id=name)
+    for name, tokens, fragment in _kind_rebinding_shapes("preflight_evidence")
+]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    _REBINDING_PARAMS,
+)
+def test_validate_run_plan_refuses_a_capture_argv_that_rebinds_its_anchored_identity(
+    extra: list[str], expected: str
+) -> None:
+    plan = _plan()
+    capture = next(item for item in plan["captures"] if item["kind"] == "preflight_evidence")
+    capture["argv"] = [*capture["argv"], *extra]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    _REBINDING_PARAMS,
+)
+def test_run_capture_step_refuses_a_rebinding_argv_before_any_spawn(
+    tmp_path: Path, extra: list[str], expected: str
+) -> None:
+    """The spawn gate is the load-bearing one: `run_capture_step` is callable directly."""
+
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture.json"
+    stub = _capture_stub(
+        tmp_path, f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n"
+    )
+    capture = {
+        "capture_id": "capture-preflight",
+        "kind": "preflight_evidence",
+        "argv": _capture_argv(stub, "preflight_evidence", *extra),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "rebind-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_capture_anchor_still_accepts_the_full_production_option_set(tmp_path: Path) -> None:
+    """Non-vacuity for the abbreviation domain: the REAL producer options are not in it.
+
+    `plan_author` emits `--database/--repo/--container/--evidence-dir/--psql/--systemctl/
+    --docker/--journalctl/--git` plus the anchored pair; none of them is a proper prefix
+    of an anchored option, so a gate that rejected too broadly would redden here.
+    """
+
+    plan = _plan()
+    stub = _capture_stub(tmp_path, _OWNER_CAPTURE_STUB)
+    for capture in plan["captures"]:
+        capture["output_path"] = str(tmp_path / f"capture-{capture['kind']}.json")
+        capture["argv"] = _capture_argv(
+            stub,
+            str(capture["kind"]),
+            "--database",
+            "nhms",
+            "--mutation-head-sha",
+            "a" * 40,
+            "--repo",
+            "/home/nwm/NWM",
+            "--container",
+            "nhms-db",
+            "--evidence-dir",
+            str(tmp_path),
+            "--psql",
+            "/usr/bin/psql",
+            "--systemctl",
+            "/usr/bin/systemctl",
+            "--docker",
+            "/usr/bin/docker",
+            "--journalctl",
+            "/usr/bin/journalctl",
+            "--git",
+            "/usr/bin/git",
+        )
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    validated = supervisor.validate_run_plan(plan, inherited_env={})
+    assert validated["captures"][0]["argv"] == plan["captures"][0]["argv"]
