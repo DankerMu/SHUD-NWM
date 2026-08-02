@@ -75,10 +75,13 @@ key order verbatim:
 
 ### Red-proof honesty (corrected from the issue's AC framing)
 
-Under the derivation route the new guard clauses are definitional
-against a CONTRACT-side flip (both sides move together), so the issue's
-"flip `contract.RECOVERY_TARGET_CHUNK_NAME` → the new guard must go
-red" is unsatisfiable as written. The honest proof obligations are:
+Under the derivation route the two NEW guard clauses are definitional
+against a CONTRACT-side flip (both sides move together). The issue's
+AC text ("新增/扩展的守卫必须 red") is still satisfied by the
+EXTENDED guard test as a whole — on either contract-side flip it goes
+red via its pre-existing schema-consts clause — but the new clauses'
+own contribution is the replay-side reversion catch, not contract-side
+sensitivity. The honest proof obligations are:
 
 - (a) replay-side reversion: scratch-replace the derivation with a
   drifted literal (chunk_name flipped — chosen deliberately: it is one
