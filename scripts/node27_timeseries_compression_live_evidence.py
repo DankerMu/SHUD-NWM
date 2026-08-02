@@ -110,12 +110,22 @@ ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
 # (`test_expected_capture_tool_values_match_the_plan_author_defaults`), which reddens on
 # divergence rather than following it.
 #
-# Deliberately absent, recorded: `--evidence-dir` (run-scoped, varies per run even in
-# production) and `--schema-dump-host`/`--schema-dump-container` (legitimately
-# parameterized data-file paths whose consuming pg_dump/docker COMMAND identities are
-# already exact-pinned on the command side).  The gate iterates this map; it does not
-# assert parser-viability of the whole argv, so unpinned options stay unconstrained and
-# unrequired.
+# `--evidence-dir` used to sit in this deliberately-absent list as "run-scoped, varies
+# per run even in production".  That under-recorded its identity: it is a MEASUREMENT
+# INPUT, not a cosmetic run-scoped path.  capture.py's `_free_bytes` (:490-502) runs
+# `os.statvfs(ctx.evidence_dir)` (:501) and the resulting snapshot `free_bytes` (:472)
+# feeds this module's `MIN_FREE_BYTES` hard gates, so pointing `--evidence-dir` at any
+# roomy filesystem makes the recorded headroom a fact about THAT volume rather than the
+# one the capture outputs claim.  #1250 closed the
+# `--self-test-free-bytes` SEAM route to fabricated headroom; this directory-identity
+# route stayed open until the sixth capture gate below closed it -- RELATIONALLY, against
+# the capture's own verifier-bound `output_path`, so nothing run-varying is pinned here.
+#
+# Still deliberately absent, recorded: `--schema-dump-host`/`--schema-dump-container`
+# (legitimately parameterized data-file paths whose consuming pg_dump/docker COMMAND
+# identities are already exact-pinned on the command side).  The gate iterates this map;
+# it does not assert parser-viability of the whole argv, so unpinned options stay
+# unconstrained and unrequired.
 EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
     "--psql": "/usr/bin/psql",
     "--systemctl": "/usr/bin/systemctl",
@@ -139,7 +149,15 @@ EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
 # --database/--docker, `--c` for --container) are rejected the same way -- argparse would
 # refuse them as ambiguous anyway, so rejecting is strictly safe.  `--s` still hits the
 # seam branch first, so the #1250 message tests are unaffected.
-PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database")
+#
+# `--evidence-dir` joins the same domain for the same reason: it too is pinned
+# dynamically (relationally, to the capture's own output directory) rather than to a
+# literal, and its equality gate matches the full spelling only, so a trailing
+# `--ev /elsewhere` -- or `--e`, which is length 3 and so reaches the `len >= 3`
+# mechanism -- would rebind the measured directory last-wins while the relational
+# equality still read the derived value.  Measured zero-collision fact (pinned by the
+# same structural test): `--evidence-dir` is the only registered `--e*` capture flag.
+PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database", "--evidence-dir")
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1098,6 +1116,16 @@ def _validate_supervisor_execution(
         # argv[0] is deliberately NOT pinned: production `plan_author` records
         # `sys.executable` resolved at authoring time -- an environment fact, not a
         # committed identity.
+        # Capability consequence, recorded rather than gated: argv[0] (the interpreter)
+        # together with the repo checkout the pinned argv[1] path is loaded from remain
+        # the residual TRUST ROOTS of this forensic claim.  A plan may record any
+        # interpreter there, and that interpreter -- plus whatever checkout supplies the
+        # script at the committed path -- decides what the pinned argv[1] actually does,
+        # so the identity gate proves the argv NAMES the committed producer, not that the
+        # committed producer's reviewed code ran.  Closing that is producer-side hardening
+        # (#1261 alternative 2: the producer attests its own interpreter/checkout), NOT a
+        # verifier gate: pinning argv[0] here would pin an environment fact the verifier
+        # cannot know without inventing a production interpreter path.
         if len(capture_argv) < 4 or capture_argv[1] != EXPECTED_CAPTURE_SCRIPT:
             named = capture_argv[1] if len(capture_argv) > 1 else "<absent>"
             raise EvidenceError(
@@ -1139,6 +1167,29 @@ def _validate_supervisor_execution(
                     f"run plan capture[{index}] argv must bind {option} exactly once to the "
                     f"committed value {expected_value}, not {observed_values}"
                 )
+        # WHERE the disk-headroom measurement was taken, on top of who ran and with what:
+        # capture.py's `_free_bytes` runs `os.statvfs(--evidence-dir)` and the snapshot
+        # `free_bytes` it records feeds this module's MIN_FREE_BYTES hard gates, so an
+        # argv pointing that option at some other, roomier filesystem measures a volume
+        # this plan never claims anything about.  Pinned RELATIONALLY, to the capture's
+        # own `output_path` (already validated absolute above): plain string `rsplit`, NO
+        # `Path` normalization, because this is the exact textual inverse of
+        # `plan_author`'s two same-`root` f-strings -- `--evidence-dir` is
+        # f"{root}/capture-artifacts" (:219) and `output_path` is
+        # f"{root}/capture-{kind}.json" (:239).  Textual inversion is what makes the
+        # relation total: even a trailing-slash `root` round-trips consistently through
+        # both f-strings, so no plan_author-authored plan is ever refused, while a
+        # normalizing comparison would start accepting spellings the producer never
+        # emitted.  One equality refuses all four shapes at once (absent, duplicated,
+        # dangling, mismatched), and no run-varying literal enters this module.
+        expected_evidence_dir = output_path.rsplit("/", 1)[0] + "/capture-artifacts"
+        observed_evidence_dirs = _argv_option_values(capture_argv, "--evidence-dir")
+        if observed_evidence_dirs != [expected_evidence_dir]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv must bind --evidence-dir exactly once to this "
+                f"capture's own output directory {expected_evidence_dir}, not "
+                f"{observed_evidence_dirs}"
+            )
         # Plan side only, no ledger-side twin needed: the ledger<->plan binding below
         # (`event["argv"] != capture["argv"]`) is pure equality, so a ledger capture argv
         # can only carry a seam if its plan twin carries the same one -- which this check
@@ -1172,6 +1223,39 @@ def _validate_supervisor_execution(
                 len(base) >= 3 and SELF_TEST_SEAM_PREFIX.startswith(base)
             ):
                 raise EvidenceError(f"run plan capture argv carries a self-test seam token: {token}")
+            # Same early-exit family as the seam branch, one step earlier in the producer:
+            # capture.py builds its parser with argparse's default `add_help=True` and
+            # `main` calls `parse_args` FIRST, so any help token makes the recorded
+            # producer leave inside argparse before a single capture runs.  The refusal
+            # covers the whole family, including the FULL `--help` spelling -- unlike the
+            # anchored/pinned options below, where the full spelling is the legitimate
+            # binding, no member of this family is ever production.  Wording stays
+            # spelling-safe on purpose: the bare spellings print the help text and exit 0
+            # while `--help=x` is an argparse usage error exiting 2 with no help printed,
+            # so the message claims only what holds for every spelling -- an exit inside
+            # argparse, before anything is collected.  The single-dash arm is a PREFIX, not
+            # an equality: argparse parses a single-dash token as a CLUSTER of short
+            # options, so `-hx`, `-hh`, `-help` and `-hs` all reach the same auto help
+            # action that `-h` does (`-h` consumes no value, so whatever follows in the
+            # cluster is argparse's problem, not the producer's -- help is printed and the
+            # process exits either way).  An equality on `-h` alone would leave that whole
+            # cluster family PASS-shaped.  Rejecting the entire `-h*` single-dash domain is
+            # safe on the measured premise (pinned by
+            # `test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain`):
+            # the capture CLI registers no `--h*` business flag and NO single-dash flag at
+            # all beyond argparse's auto `-h`, so nothing legitimate is spelled `-h...`.
+            # The two arms do not overlap (`"--help".startswith("-h")` is False) and
+            # `-h=x` normalizes to base `-h`, so the prefix covers it too.  Clusters that
+            # merely CONTAIN `h` without leading with it (`-xh`) exit 2 inside argparse
+            # before any help action runs; they are a whole-argv parser-viability question,
+            # which this module deliberately does not answer (see the tool-value map's
+            # recorded boundary), so they stay outside this gate's declared scope.
+            if base.startswith("-h") or (len(base) >= 3 and "--help".startswith(base)):
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv carries {token}, an argparse help "
+                    f"early-exit token: the recorded producer would exit inside argparse "
+                    f"without collecting the snapshot this capture claims"
+                )
             for option in ANCHORED_CAPTURE_OPTIONS:
                 if len(base) >= 3 and base != option and option.startswith(base):
                     raise EvidenceError(

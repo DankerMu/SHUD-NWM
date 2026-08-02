@@ -159,7 +159,7 @@ def _canonical(value: Any) -> bytes:
 
 
 def _pinned_capture_options(database: str) -> list[str]:
-    """The capture-argv options the verifier pins by VALUE, production values throughout.
+    """The capture-argv options this helper can bind to PRODUCTION values, all of them.
 
     Both argv templates in this module (`_bundle`'s captures and `_producer_argv`) bind
     these identically so a template stays a production-shaped argv and every test below
@@ -167,6 +167,11 @@ def _pinned_capture_options(database: str) -> list[str]:
     (it tracks the plan's own database); the other seven come from the verifier's public
     map, whose VALUES are pinned literally and against `plan_author` by the structural
     tests at the end of this module -- so sharing the map here cannot go tautological.
+
+    `--evidence-dir` is value-pinned by the verifier too, but deliberately NOT bound here:
+    the verifier derives its expected value RELATIONALLY from each capture's own
+    `output_path`, so there is no production literal to share -- every caller binds it
+    from the tmp root its captures actually write to.
     """
 
     return [
@@ -1180,6 +1185,14 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                 kind,
                 "--mutation-head-sha",
                 HEAD,
+                # Bound RELATIONALLY, exactly as the verifier derives it: every capture
+                # `output_path` in this template lives directly under `tmp_path`, so the
+                # sibling the gate computes is `tmp_path/capture-artifacts` for all twelve
+                # kinds.  Derived, never hardcoded -- without this binding every negative
+                # below would be refused for a missing `--evidence-dir` instead of the one
+                # field it corrupts.
+                "--evidence-dir",
+                str(tmp_path / "capture-artifacts"),
                 *_pinned_capture_options("nhms"),
             ],
             "output_path": produced_refs[kind]["path"],
@@ -5347,7 +5360,7 @@ def _replace_capture_argv(bundle: dict[str, Any], tmp_path: Path, *, kind: str, 
     bundle["execution"]["ledger"] = _file_ref(ledger_path)
 
 
-def _producer_argv(kind: str, *extra: str) -> list[str]:
+def _producer_argv(kind: str, *extra: str, evidence_dir: str) -> list[str]:
     """The production-shaped capture argv, before a single field is corrupted.
 
     Unlike `_bundle`'s template this one does NOT bake `--mutation-head-sha`: it stays
@@ -5356,6 +5369,12 @@ def _producer_argv(kind: str, *extra: str) -> list[str]:
     into a fully valid argv (DID NOT RAISE) and silently delete the "producer invoked
     without any SHA pair" coverage.  Everything the verifier pins by VALUE is baked in,
     so a test that corrupts the SHA is still refused for the SHA.
+
+    `evidence_dir` is REQUIRED and caller-supplied for the opposite reason: the verifier
+    derives its expected value from the capture's own `output_path`, which is tmp-scoped,
+    so no default (module constant or otherwise) could be correct.  A missing binding
+    would re-attribute every negative below to the `--evidence-dir` gate instead of the
+    field it corrupts.
     """
 
     return [
@@ -5363,6 +5382,8 @@ def _producer_argv(kind: str, *extra: str) -> list[str]:
         evidence.EXPECTED_CAPTURE_SCRIPT,
         "--kind",
         kind,
+        "--evidence-dir",
+        evidence_dir,
         *_pinned_capture_options("nhms"),
         *extra,
     ]
@@ -5407,7 +5428,9 @@ def test_verifier_rejects_capture_argv_bound_to_a_different_kind(tmp_path: Path)
         bundle,
         tmp_path,
         kind="catalog_before",
-        argv=_producer_argv("sizes_pre", "--mutation-head-sha", HEAD),
+        argv=_producer_argv(
+            "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+        ),
     )
     with pytest.raises(evidence.EvidenceError) as excinfo:
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
@@ -5433,7 +5456,10 @@ def test_verifier_rejects_capture_argv_without_the_plan_mutation_sha(
 
     bundle = _bundle(tmp_path)
     _replace_capture_argv(
-        bundle, tmp_path, kind="sizes_pre", argv=_producer_argv("sizes_pre", *extra)
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_producer_argv("sizes_pre", *extra, evidence_dir=str(tmp_path / "capture-artifacts")),
     )
     with pytest.raises(evidence.EvidenceError) as excinfo:
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
@@ -5452,7 +5478,12 @@ def test_verifier_accepts_the_inline_mutation_sha_form_when_it_matches(tmp_path:
 
     bundle = _bundle(tmp_path)
     _replace_capture_argv(
-        bundle, tmp_path, kind="sizes_pre", argv=_producer_argv("sizes_pre", f"--mutation-head-sha={HEAD}")
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_producer_argv(
+            "sizes_pre", f"--mutation-head-sha={HEAD}", evidence_dir=str(tmp_path / "capture-artifacts")
+        ),
     )
     result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
     assert result["verdict"] == evidence.PASS_VERDICT
@@ -5681,7 +5712,11 @@ def test_verifier_rejects_a_capture_argv_that_misbinds_a_pinned_tool_option(
         tmp_path,
         kind="sizes_pre",
         argv=_corrupt_pinned_binding(
-            _producer_argv("sizes_pre", "--mutation-head-sha", HEAD), option, mode
+            _producer_argv(
+                "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+            ),
+            option,
+            mode,
         ),
     )
     with pytest.raises(evidence.EvidenceError) as excinfo:
@@ -5707,7 +5742,11 @@ def test_verifier_rejects_a_capture_argv_bound_to_a_foreign_database(tmp_path: P
         tmp_path,
         kind="sizes_pre",
         argv=_rebind_argv_option(
-            _producer_argv("sizes_pre", "--mutation-head-sha", HEAD), "--database", "postgres"
+            _producer_argv(
+                "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+            ),
+            "--database",
+            "postgres",
         ),
     )
     with pytest.raises(evidence.EvidenceError) as excinfo:
@@ -5761,7 +5800,7 @@ def test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option() -> None:
 
     parser = _capture._parser()
     options = {option for action in parser._actions for option in action.option_strings}
-    assert len(evidence.PINNED_CAPTURE_VALUE_OPTIONS) == 8
+    assert len(evidence.PINNED_CAPTURE_VALUE_OPTIONS) == 9
     for pinned in evidence.PINNED_CAPTURE_VALUE_OPTIONS:
         assert pinned in options, pinned
         for option in options - {pinned}:
@@ -5772,6 +5811,10 @@ def test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option() -> None:
     for base, pinned in (("--ps", "--psql"), ("--do", "--docker"), ("--rep", "--repo")):
         assert base not in options
         assert len(base) >= 3 and pinned.startswith(base) and base != pinned
+    # #1263: `--evidence-dir` joined the tuple on the same premise -- it is the ONLY
+    # registered `--e*` flag, so refusing `--e`/`--ev`/`--evi`/... collides with nothing.
+    # A future `--exclude-...` would redden here before it could reach a plan.
+    assert {option for option in options if option.startswith("--e")} == {"--evidence-dir"}
 
 
 def test_expected_capture_tool_values_match_the_plan_author_defaults() -> None:
@@ -5837,3 +5880,301 @@ def test_default_plan_author_capture_argvs_pass_the_whole_capture_gate_stack(tmp
         _replace_capture_argv(bundle, tmp_path, kind=str(capture["kind"]), argv=list(capture["argv"]))
     result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
     assert result["verdict"] == evidence.PASS_VERDICT
+
+
+# --------------------------------------------------------------------------- #
+# #1263: the three residual argv shapes the anchor series left verifying PASS.
+# (1) A help early-exit token -- `-h`, `--help`, `--help=x` or an unambiguous
+# abbreviation -- makes the recorded producer leave inside argparse before it
+# collects anything, so the argv provably did NOT produce the snapshot it is
+# recorded against.  (2) `--evidence-dir` is the `os.statvfs` measurement input
+# behind the MIN_FREE_BYTES hard gates, so it is now bound RELATIONALLY to the
+# capture's own output directory.  argv[0] stays unpinned by design (its residual
+# trust root is recorded in the verifier, closure is producer-side).
+# --------------------------------------------------------------------------- #
+
+# The distinguishing substring of the relational evidence-dir gate's message: used to
+# assert the OTHER refusal classes are not it (and vice versa).
+_EVIDENCE_DIR_GATE_WORDING = "own output directory"
+# The seam and abbreviation refusal wordings, for the same attribution discipline.
+_SEAM_TOKEN_WORDING = "self-test seam token"
+_ABBREVIATION_WORDING = "an argparse abbreviation"
+_HELP_EARLY_EXIT_TOKENS = (
+    "-h",
+    "--help",
+    "--help=x",
+    "--h",
+    "--he",
+    "--hel",
+    # Single-dash CLUSTERS: argparse reads `-hx` as the short options `-h` + `-x`, so the
+    # auto help action fires exactly as it does for a bare `-h`.  An equality check on
+    # `-h` alone left this whole family verifying PASS.
+    "-hx",
+    "-hh",
+    "-help",
+    "-hs",
+)
+
+
+@pytest.mark.parametrize("token", _HELP_EARLY_EXIT_TOKENS)
+def test_verifier_rejects_a_capture_argv_carrying_a_help_early_exit_token(
+    tmp_path: Path, token: str
+) -> None:
+    """Every spelling of the help family, appended to an OTHERWISE VALID argv.
+
+    Measured (issue #1263): capture.py's parser keeps argparse's default
+    `add_help=True` and `main` calls `parse_args` first, so `-h`/`--help`/`--h`/`--he`/
+    `--hel` print the help text and `SystemExit(0)` while `--help=x` is a usage error
+    exiting 2 -- no capture runs in any of those cases.  Before this branch each one
+    verified PASS: identity-anchored, value-pinned, seam-free, and forensically false.
+
+    The single-dash CLUSTERS (`-hx`, `-hh`, `-help`, `-hs`) are the PR #1264 review's
+    bypass: argparse expands a single-dash token into short options, so each of them
+    reaches the very same auto help action, printing help and exiting 0 with zero
+    captures -- while an equality-on-`-h` gate saw nothing to refuse.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=[token])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert token in message
+    # A refusal class of its own: not the seam branch, not either abbreviation branch,
+    # not the relational evidence-dir gate, and not the plan<->ledger equality binding
+    # (`_inject_capture_seam` appends to BOTH sides, so that equality still holds).
+    assert _SEAM_TOKEN_WORDING not in message
+    assert _ABBREVIATION_WORDING not in message
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_help_token_placed_between_the_pinned_bindings(tmp_path: Path) -> None:
+    """Position independence: the scan is per token, so a mid-argv `--help` is the same.
+
+    A trailing-token-only rejection would be trivially dodged by an author who put the
+    early-exit token anywhere else -- argparse does not care where it sits either.
+    """
+
+    bundle = _bundle(tmp_path)
+    argv = _producer_argv(
+        "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+    )
+    index = argv.index("--psql")
+    _replace_capture_argv(
+        bundle, tmp_path, kind="sizes_pre", argv=[*argv[:index], "--help", *argv[index:]]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--help" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain() -> None:
+    """The zero-collision fact the help-token rejection stands on.
+
+    The gate refuses two DOMAINS: the whole single-dash `-h*` prefix (argparse expands
+    single-dash tokens into short-option clusters, so `-hx` reaches help exactly as `-h`
+    does) and every `len >= 3` prefix of `--help`.  Both are only safe while the capture
+    CLI registers no `--h*` business flag and no single-dash flag at all beyond
+    argparse's auto `-h`.  A future `--hosts` or `-v` would make a legitimate spelling
+    something the verifier silently refuses (or leave a single-dash flag outside the
+    rejection) -- it reddens HERE instead, before it can ever reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {option for option in options if option.startswith("--h")} == {"--help"}
+    assert {option for option in options if not option.startswith("--")} == {"-h"}
+    # Non-vacuity: the abbreviations the gate refuses really are unregistered prefixes of
+    # the auto help flag -- argparse's `allow_abbrev=True` is what makes them reach it.
+    for base in ("--h", "--he", "--hel"):
+        assert base not in options
+        assert len(base) >= 3 and "--help".startswith(base)
+    # Same non-vacuity for the single-dash domain: `-h` is the only registered token the
+    # `-h*` prefix rejection swallows, so the cluster spellings it also refuses cost the
+    # capture CLI nothing.  (`"--help".startswith("-h")` is False, so the two arms of the
+    # gate address disjoint domains.)
+    assert not "--help".startswith("-h")
+    for cluster in ("-hx", "-hh", "-help", "-hs"):
+        assert cluster not in options
+        assert cluster.startswith("-h")
+
+
+@pytest.mark.parametrize(
+    "mode", ["mismatched", "absent", "duplicated_pair", "dangling_inline"]
+)
+def test_verifier_rejects_a_capture_argv_that_misbinds_the_evidence_dir(
+    tmp_path: Path, mode: str
+) -> None:
+    """The four shapes one relational equality has to refuse at once.
+
+    `mismatched` is the issue's smoking gun (an EXISTING, roomier sibling directory: the
+    statvfs headroom the snapshot records would be about that filesystem, not the one the
+    capture outputs claim); `absent` closes the omission; `duplicated_pair` and
+    `dangling_inline` close the last-wins rebind an exactly-once-free check waves through.
+    """
+
+    bundle = _bundle(tmp_path)
+    expected = str(tmp_path / "capture-artifacts")
+    other = tmp_path / "elsewhere-artifacts"
+    other.mkdir()
+    argv = _producer_argv("sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=expected)
+    if mode == "mismatched":
+        argv = _rebind_argv_option(argv, "--evidence-dir", str(other))
+    elif mode == "absent":
+        index = argv.index("--evidence-dir")
+        argv = [*argv[:index], *argv[index + 2 :]]
+    elif mode == "duplicated_pair":
+        argv = [*argv, "--evidence-dir", str(other)]
+    else:
+        argv = [*argv, "--evidence-dir="]
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_pre", argv=argv)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--evidence-dir" in message
+    # The DERIVED expectation is printed, so the refusal shows what the relation demanded.
+    assert expected in message
+    assert _EVIDENCE_DIR_GATE_WORDING in message
+    # `_replace_capture_argv` rewrites BOTH sides, so this is the gate, not the equality.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    "base", ["--ev", "--e"], ids=["ev_abbreviation_pair", "e_abbreviation_pair"]
+)
+def test_verifier_rejects_argparse_rebinding_of_the_evidence_dir_option(
+    tmp_path: Path, base: str
+) -> None:
+    """Abbreviation closure for the newly pinned option, in the SAME change.
+
+    The relational equality matches the full spelling only, so a trailing `--ev /roomy`
+    (or `--e`, which is length 3 and so reaches the mechanism) would rebind the measured
+    directory last-wins while the equality still read the derived value.  This is the
+    existing pinned-prefix branch doing its job on a widened tuple -- so the wording is
+    that branch's, and the relational gate itself never fires on such a token.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="catalog_before", tokens=[base, str(tmp_path / "elsewhere-artifacts")]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert base in message
+    assert "--evidence-dir" in message
+    assert "pinned capture tooling value" in message
+    # The two refusals stay distinct: this is the abbreviation branch, not the equality
+    # gate (which the argv still satisfies), and not the plan<->ledger binding.
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def _relocated_sizes_post_bundle(tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    """A bundle whose `sizes_post` capture writes into a tmp SUBDIRECTORY.
+
+    The relation the gate enforces is `output_path`-relative, so moving one capture's
+    output moves its expected `--evidence-dir` with it -- that is what the two tests
+    below pin from opposite sides.
+    """
+
+    bundle = _bundle(tmp_path)
+    nested = tmp_path / "nested-capture-root"
+    nested.mkdir()
+    ref = _json_ref(nested, "sizes-post.json", _sizes(post=True))
+    bundle["sizes"]["post"] = ref
+    _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
+    return bundle, nested
+
+
+def test_verifier_accepts_an_evidence_dir_bound_to_a_relocated_capture_output(
+    tmp_path: Path,
+) -> None:
+    """Relational, NOT absolute: the gate follows `output_path`, it does not pin a root.
+
+    A gate hardcoded to the plan's top-level root would refuse this bundle even though
+    its `--evidence-dir` is exactly the sibling of the capture's own output -- and would
+    equally refuse a production plan authored with any other `--root`.
+    """
+
+    bundle, nested = _relocated_sizes_post_bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_post",
+        argv=_producer_argv(
+            "sizes_post", "--mutation-head-sha", HEAD, evidence_dir=str(nested / "capture-artifacts")
+        ),
+    )
+    try:
+        result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    except evidence.EvidenceError as error:  # pragma: no cover - defensive attribution
+        assert _EVIDENCE_DIR_GATE_WORDING not in str(error), str(error)
+    else:
+        assert result["verdict"] == evidence.PASS_VERDICT
+
+
+def test_evidence_dir_gate_accepts_a_plan_authored_with_a_trailing_slash_root(
+    tmp_path: Path,
+) -> None:
+    """The derivation is TEXTUAL (`rsplit`), and this is why that is load-bearing.
+
+    `plan_author` builds both fields by f-string from the same `--root`, so a root with a
+    trailing slash yields `{root}//capture-artifacts` AND `{root}//capture-<kind>.json` --
+    a spelling the production author really does emit.  String `rsplit` inverts that
+    exactly; a `Path(...).parent` / `os.path.dirname` "cleanup" would normalize the double
+    slash away, derive `{root}/capture-artifacts`, and refuse a plan `plan_author` wrote.
+    This test is the guard against that refactor.
+
+    The bundle cannot reach PASS in this spelling for a reason that predates #1263 and is
+    NOT this gate's: `_artifact_bytes` returns `str(Path(ref["path"]))`, so the ledger
+    side of the capture output binding arrives normalized while the plan's `output_path`
+    stays raw, and the pre-existing equality at the ledger<->plan capture binding refuses
+    the pair.  That refusal is precisely the assertion: reaching it proves execution ran
+    PAST the relational evidence-dir gate, which is many checks earlier -- so the gate
+    accepted the double-slash round-trip.  Under a normalizing derivation the refusal
+    would instead be the evidence-dir gate's own, and this test reddens.
+    """
+
+    bundle = _bundle(tmp_path)
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path) + "/")
+    capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
+    output_path = str(capture["output_path"])
+    # The double-slash spelling really is what the production author emits for this root,
+    # on BOTH fields -- otherwise the test would pin nothing.
+    assert output_path == f"{tmp_path}//capture-sizes_post.json"
+    assert f"{tmp_path}//capture-artifacts" in capture["argv"]
+    raw = Path(bundle["sizes"]["post"]["path"]).read_bytes()
+    Path(output_path).write_bytes(raw)
+    ref = {"path": output_path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    bundle["sizes"]["post"] = ref
+    _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_post", argv=list(capture["argv"]))
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert message == "supervisor capture output path differs"
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+
+
+def test_verifier_rejects_an_evidence_dir_stranded_by_a_relocated_capture_output(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same relation: the template value is no longer the sibling.
+
+    Same relocation as the positive above, with `--evidence-dir` left at the top-level
+    `tmp_path/capture-artifacts` -- proving the derived expectation really tracks THIS
+    capture's `output_path` rather than any fixed root the fixture happens to use.
+    """
+
+    bundle, nested = _relocated_sizes_post_bundle(tmp_path)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--evidence-dir" in message
+    assert str(nested / "capture-artifacts") in message
+    assert str(tmp_path / "capture-artifacts") in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
