@@ -30,9 +30,12 @@ is `2026-07-04T12:00:00Z` and archive/raw/DB-retention cutoff is
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md` (the
   archive resolver is never imported by `apps/api/**` or `apps/frontend/**`).
 
-Since 2026-07-26 the archive tier lives on its own filesystem: the mover and
-audit write under `/data/GHDC/nwm-archive`, backed by the node-27-local RAID
-`/dev/md0` mounted at `/data/GHDC` (15 TB, ~14 TB free at migration). The hot
+Since 2026-07-26 the archive tier lives on its own filesystem: the mover
+writes under `/data/GHDC/nwm-archive` and the inventory audit reads it
+(the audit is read-only against the archive — it verifies manifests/sha and
+publishes its receipt under `/home/nwm/node27-storage-inventory-audit-logs/`),
+backed by the node-27-local RAID `/dev/md0` mounted at `/data/GHDC`
+(15 TB, ~14 TB free at migration). The hot
 tier — pgdata (`/home/nwm/nhms-pgdata`) and the object store
 (`/home/ghdc/nwm/object-store`) — stays on `/home`. Free-space watermarks
 defend the **archive** filesystem: the mover refuses enforce before touching
