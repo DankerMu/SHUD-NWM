@@ -37,7 +37,11 @@ POSTGRES_ADMIN_URL=postgresql://REPLACE_ME_ADMIN:REPLACE_ME_PW@127.0.0.1:55432/p
 # Shared archive root — must match node27-product-archive.env and
 # node27-storage-inventory-audit.env. The drill reads product manifests +
 # `.tar.zst` files here plus salvage objects under `db-export/`.
-NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+# NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot
+# tier: the free-space refuse-gate would deadlock the entire gated
+# retention chain (2026-07-26 incident). See ADR 0002 Amendment
+# 2026-07-26.
+NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Filesystem workspace where per-cycle extract trees land. Bounded by the
 # per-file / per-tree / per-source caps that mirror the mover's guards.

@@ -9,6 +9,10 @@ Policy clarification: 2026-07-21 (all 7/14-day lifecycle ages are anchored to
 the latest node-27 displayable forecast cycle, not host wall time; wall time is
 used only for receipt generation and gate freshness)
 
+Layout amendment: 2026-07-26 (archive root moved off the `/home` hot
+filesystem to `/data/GHDC/nwm-archive`; see "Amendment (2026-07-26)" below,
+which supersedes Decision item 1's path wording)
+
 ## Status
 
 Accepted
@@ -51,10 +55,11 @@ it omits TimescaleDB native compression entirely.
 
 1. **Source of truth for cold data is node-22-produced cycle products**
    (forcing packages, SHUD run outputs, state snapshots) — not a DB
-   re-export. Aged products move to a rotation-exempt archive root on the
-   shared volume: `/home/ghdc/nwm/archive/` (node-22 view:
-   `/ghdc/data/nwm/archive/`), stored as per-cycle `tar.zst` + manifest with
-   sha256 checksums.
+   re-export. Aged products move to a rotation-exempt archive root: an
+   archive directory on node-27's local `/home` filesystem (original path
+   literal, and the "shared volume"/node-22-view framing around it, are
+   superseded — see "Amendment (2026-07-26)"), stored as per-cycle
+   `tar.zst` + manifest with sha256 checksums.
 2. **One-time DB-export salvage** only for windows whose upstream products
    already rotated away (verified scope; notably forcing station series
    before 2026-06-16): `COPY` to `csv.zst` with manifest, provenance-marked
@@ -97,12 +102,82 @@ it omits TimescaleDB native compression entirely.
    station history API surface (ADR 0001 owns that boundary), and
    `met.best_available_selection` (currently 0 chunks).
 
+## Amendment (2026-07-26)
+
+The Decision text above is preserved as history, with one exception: Decision
+item 1's archive path literal was replaced by a pointer to this section,
+because that literal was both wrong and stale (below). For the archive tier's
+physical location this section supersedes Decision item 1 entirely: **the
+current layout is whatever this amendment says**. The exact pre-migration path
+survives verbatim in the committed receipt JSONs, in
+`openspec/changes/tier-node27-timeseries-storage/`, and in git history.
+
+### What changed
+
+The archive root moved from the Decision item 1 location (a directory on
+node-27's local `/home` filesystem) to **`/data/GHDC/nwm-archive`**, backed by
+the node-27-local RAID
+`/dev/md0` (15 TB total, ~14 TB free at migration). 2.2 GB / 1850 files were
+rsync-verified into the new root; the old directory's contents were removed
+(an empty directory shell remains as residue — operator cleanup is optional
+and has no functional effect). The change is env-only, and no runner code or
+receipt schema changed. Deployed state (verified 2026-08-01): four of the five
+node-27 archive-lane env files set `NHMS_ARCHIVE_ROOT` to the new path, and
+the fifth (`node27-resource-governance.env`) carries the service-level
+override `NODE27_GOVERNANCE_ARCHIVE_ROOT` set to the same value. All five repo
+`.example` templates set `NHMS_ARCHIVE_ROOT`.
+
+### Premise correction (the original description was wrong from day one)
+
+Decision item 1's original "shared volume" path wording named a node-27 path
+and paired it with a claimed node-22 view of the same bytes. That was never
+true on node-27: the path it named lived on the **local `/home` filesystem**,
+not on the NFS share node-22 mounts. The claimed shared/node-22 view of the
+archive never functioned. It also never mattered: `grep -rn
+"ghdc/data/nwm/archive"` has zero hits across all code, scripts, and env files
+— node-22 has no runtime consumer of any archive path. This amendment
+therefore retires the "shared volume / node-22 view" wording entirely; the
+archive tier is node-27-local storage, and node-22 remains unaffected by the
+migration.
+
+### Anti-pattern this amendment encodes
+
+**The archive tier MUST NOT share a filesystem with the hot tier (pgdata /
+object-store) it exists to relieve.** When it does, the free-space guard that
+protects the archive lane becomes a self-lock: as the hot tier fills the shared
+filesystem, the mover refuses with `refused_free_space`, so the mover frontier
+stops advancing, so the archive-completeness receipt stays pending, so
+`scripts/node27_timeseries_retention.py` refuses to drop chunks — the one
+mechanism able to free the disk is deadlocked by the very disk it protects.
+
+That is exactly the 2026-07-26 incident: node-27 `/home` filled
+(`hydro.river_timeseries` at 816 GB, growing ~43 GB/day during July), the mover
+frontier had been stuck at 2026-06-20, PostgreSQL crashed twice, and the
+display surfaced as "Layer is not registered by the API". Moving the archive
+root to its own filesystem restored `outcome=success` on the mover and a clean
+`free_space` band. Any future relocation of `NHMS_ARCHIVE_ROOT` must preserve
+the separate-filesystem property; the env templates carry this as an inline
+warning.
+
+### Disposition of the superseded path wording
+
+`openspec/changes/tier-node27-timeseries-storage/` intentionally keeps the
+original archive path wording (`proposal.md:22`,
+`specs/timeseries-product-archive/spec.md:8-9`), and the committed
+pre-migration receipts under
+`docs/runbooks/receipts/tier-node27-timeseries-storage/product-archive/` keep
+it too. Both are point-in-time records of what was delivered and are not
+rewritten. **This ADR amendment is the authoritative source for the current
+archive layout**; the operator-facing current state lives in
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
+
 ## Consequences
 
 - Steady-state DB size becomes bounded (14-day window, mostly compressed)
   instead of growing ~24 GB/week at 13 basins; the archive grows by
   compressed product tarballs (estimated single-digit GB/month at current
-  scale) on a volume with 839 GB free.
+  scale) on a volume with 839 GB free (pre-migration figure; since 2026-07-26
+  the archive volume is the 15 TB RAID — see "Amendment (2026-07-26)").
 - The mid-June reset failure mode ("delete products, DB silently becomes the
   only copy") is eliminated: deletion anywhere is gated on archive receipts.
 - Rollback: compression is reversible per chunk (`decompress_chunk`);

@@ -10,7 +10,10 @@ NODE27_STORAGE_INVENTORY_AUDIT_REPO_ROOT=/home/nwm/NWM
 NODE27_STORAGE_INVENTORY_AUDIT_LOG_ROOT=/home/nwm/node27-storage-inventory-audit-logs
 
 # Archive root (shared with the mover and later drill/salvage).
-NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+# NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot tier:
+# the free-space refuse-gate would deadlock the entire gated retention chain
+# (2026-07-26 incident). See ADR 0002 Amendment 2026-07-26.
+NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Free-space watermarks. The audit itself does not enforce watermarks, but
 # these two vars are documented here so all three archive-lane env files
