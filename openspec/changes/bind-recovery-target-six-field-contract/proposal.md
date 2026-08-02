@@ -60,12 +60,20 @@ equal to it (values unchanged everywhere):
    supervisor decompress fixture's chunk/range values from the shared
    constants.
 
-Known remaining copy, deliberately outside this diff: plan_author's
-`_RECOVERY_TARGET_ARGS` is transitively guarded by
+Known remaining copies, deliberately outside this diff:
+plan_author's `_RECOVERY_TARGET_ARGS` is transitively guarded by
 `test_plan_author_emits_a_plan_the_real_supervisor_gate_accepts`
 (tests/test_node27_timeseries_compression_capture.py:282), whose argv
 flows through the supervisor's `_assert_exact_argv` — a contract-side
-flip turns that test red. Single-sourcing it is out of scope here.
+flip turns that test red. Two copies remain UNBOUND (cross-review
+finding, claims narrowed accordingly, tracked in follow-up #1244):
+capture's `_capture_catalog_post` SQL literals
+(scripts/node27_timeseries_compression_capture.py:449-452) and the
+verifier's inline expected decompress argv
+(scripts/node27_timeseries_compression_live_evidence.py:666-677) — a
+one-sided mutation of either still ships green and only dies on the
+armed replay lane; binding them needs the byte-freeze pattern extended
+to catalog_post and a decision on deriving the verifier argv tail.
 
 The schema JSON is data and stays untouched — the guard binds Python
 constants to it, so mutating either side alone fails the guard (the

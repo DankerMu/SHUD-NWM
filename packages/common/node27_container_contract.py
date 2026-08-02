@@ -82,18 +82,29 @@ RECOVERY_TARGET_CHUNK_NAME = "_hyper_3_7_chunk"
 RECOVERY_TARGET_RANGE_START = "2026-05-28T00:00:00Z"
 RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 
-# THE single assembly point of the six-field recovery-target contract.  Every
-# production copy is either derived from this mapping (the supervisor's expected
-# decompress argv, the capture producer's emitted target and recovery-preflight
-# SQL) or asserted field-by-field equal to it by the drift guard in
-# tests/test_node27_timeseries_compression_supervisor.py (the live-evidence
-# schema ``$defs.recovery_target`` consts, the synthetic
-# ``decompress_return_relation`` const, and the verifier's own
-# ``RECOVERY_TARGET``/``RECOVERY_RETURN_RELATION`` acceptance oracle).  Mutating
-# any single copy alone therefore fails a test instead of shipping a
-# half-migrated target.  Note the naming: ``RECOVERY_TARGET`` above is the
-# ``schema.table`` STRING the write-privilege probe interpolates, while this is
-# the six-field mapping the evidence documents carry.
+# THE single assembly point of the six-field recovery-target contract.  Bound to
+# this mapping today, so mutating one of them alone fails a test:
+#   * derived from it directly -- the supervisor's expected decompress argv and
+#     the capture producer's ``RECOVERY_TARGET`` dict plus the
+#     ``RECOVERY_PREFLIGHT_SQL`` it interpolates;
+#   * asserted field-by-field equal to it by the drift guard in
+#     tests/test_node27_timeseries_compression_supervisor.py -- the live-evidence
+#     schema ``$defs.recovery_target`` consts, the schema's
+#     ``decompress_return_relation`` const, and the verifier's own
+#     ``RECOVERY_TARGET``/``RECOVERY_RETURN_RELATION`` module constants;
+#   * bound transitively -- ``plan_author``'s ``_RECOVERY_TARGET_ARGS`` literals,
+#     because the plan it emits must pass the real supervisor gate in
+#     tests/test_node27_timeseries_compression_capture.py, whose expected argv is
+#     derived from here.
+# Coverage is NOT total: two production copies are known unbound and tracked in a
+# follow-up issue -- the capture producer's ``_capture_catalog_post`` SQL
+# literals (scripts/node27_timeseries_compression_capture.py:449-452) and the
+# verifier's inline expected decompress argv
+# (scripts/node27_timeseries_compression_live_evidence.py:666-677).  Both still
+# spell the six fields out by hand, so a retarget must edit them by hand too.
+# Note the naming: ``RECOVERY_TARGET`` above is the ``schema.table`` STRING the
+# write-privilege probe interpolates, while this is the six-field mapping the
+# evidence documents carry.
 RECOVERY_TARGET_FIELDS = {
     "hypertable_schema": RECOVERY_TARGET_SCHEMA,
     "hypertable_name": RECOVERY_TARGET_TABLE,

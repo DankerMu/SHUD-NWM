@@ -2821,11 +2821,24 @@ def test_supervised_hypertable_whitelist_matches_every_verifier_copy() -> None:
 
 
 def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> None:
-    """Bind every remaining recovery-target copy to the shared contract (#1242).
+    """Bind the schema and verifier recovery-target copies to the contract (#1242).
 
     The schema JSON is data and the verifier owns its own acceptance oracle, so
     neither can import the contract; this guard is what makes a one-sided change
-    fail instead of shipping a half-migrated target.
+    to them fail instead of shipping a half-migrated target.  It covers the
+    schema ``$defs.recovery_target`` consts, the schema's
+    ``decompress_return_relation`` const, and the verifier's
+    ``RECOVERY_TARGET``/``RECOVERY_RETURN_RELATION`` module constants; the
+    supervisor's expected decompress argv and the capture producer's
+    ``RECOVERY_TARGET``/``RECOVERY_PREFLIGHT_SQL`` are bound by deriving from the
+    contract, and ``plan_author``'s argv literals transitively via the supervisor
+    gate test in tests/test_node27_timeseries_compression_capture.py.
+
+    Two production copies remain KNOWN UNBOUND (tracked in a follow-up issue):
+    the capture producer's ``_capture_catalog_post`` SQL literals
+    (scripts/node27_timeseries_compression_capture.py:449-452) and the verifier's
+    inline expected decompress argv
+    (scripts/node27_timeseries_compression_live_evidence.py:666-677).
     """
 
     schema = json.loads(

@@ -9,14 +9,15 @@ The recovery target SHALL be defined as one six-field contract
 end) with a single Python source of truth; the supervisor expected
 decompress argv and the capture evidence target SHALL derive from that
 source, and an automated guard SHALL assert field-by-field equality
-between the source and every remaining production copy — the schema
-consts that pin the same values, the synthetic
-`decompress_return_relation` const, and the verifier's own
-recovery-target oracle — so that mutating any single copy fails a
-test instead of shipping a half-migrated target. Copies that cannot
-derive from the source directly MAY instead be covered by a test whose
-failure is triggered by a one-sided change (direct equality assertion
-or a gate test the copy flows through).
+between the source and the bound copy set — the schema consts that pin
+the same values, the synthetic `decompress_return_relation` const, and
+the verifier's recovery-target module constants — so that mutating any
+copy in that set alone fails a test instead of shipping a half-migrated
+target. Copies that cannot derive from the source directly MAY instead
+be covered by a test whose failure is triggered by a one-sided change
+(direct equality assertion or a gate test the copy flows through), and
+any copy known to remain outside the bound set MUST be named in the
+source-of-truth documentation with a tracked follow-up.
 
 #### Scenario: All six schema consts and the verifier oracle are bound to the shared source
 
