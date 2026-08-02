@@ -19,7 +19,8 @@ Two modes:
 * ``--check [--fixture PATH]`` -- assert the fixture's ``contract`` section
   equals the contract module's measured constants (lazy import, decided BEFORE
   any probe runs), then re-measure and diff the compared sections.  ``--check``
-  never writes a file.
+  itself writes nothing (CPython may still create ``__pycache__`` for the lazy
+  import, which is the interpreter's doing, not this tool's).
 
 Read-only by construction: every spawned argv comes from the frozen ``PROBES``
 table below (``systemctl --user show`` / ``systemctl --version`` /
@@ -430,7 +431,7 @@ def alignment_mismatches(document: Mapping[str, Any]) -> list[str]:
 
     try:
         from packages.common import node27_container_contract as contract_module
-    except ImportError as error:  # pragma: no cover - exercised on-node only
+    except ImportError as error:
         return [
             "MISALIGNMENT contract: cannot import packages.common.node27_container_contract "
             f"({error}); run from the repo root or set PYTHONPATH=/home/nwm/NWM"

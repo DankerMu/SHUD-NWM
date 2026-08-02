@@ -21,6 +21,21 @@ from scripts import node27_external_contract_snapshot as snapshot
 
 FIXTURE_PATH = snapshot.DEFAULT_FIXTURE
 
+CONTRACT_MODULE_NAME = "packages.common.node27_container_contract"
+
+# Byte-frozen independent oracle: THE four SQL statements this tool is allowed to
+# send, transcribed here as literals.  Never derived from ``snapshot.PROBE_SQL``
+# -- a whitelist that reads the source it audits is a tautology and stays green
+# while the source swaps in, say, `SELECT pg_terminate_backend(...)`, which
+# satisfies every keyword/terminator rule below.  Changing a statement must red
+# this file and force the new text through review.
+FROZEN_PROBE_SQL: tuple[str, ...] = (
+    "SHOW server_version",
+    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'",
+    "SELECT backend_type FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+    "SELECT backend_type, count(*) FROM pg_stat_activity GROUP BY backend_type ORDER BY backend_type",
+)
+
 _STUB_TEMPLATE = """#!{python}
 import json
 import os
@@ -187,6 +202,46 @@ def test_tampered_host_context_value_exits_drift_and_names_that_field(
     assert _calls(stub_bin), "the drift verdict must rest on real spawned observations"
 
 
+def test_live_contract_field_drift_against_the_aligned_fixture_exits_drift(
+    stub_bin: Path,
+    committed: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The committed fixture is used UNTAMPERED, so the alignment gate passes and
+    # the verdict can only come from a live observation.  Only the host moved:
+    # systemd now renders an unset ExecMainStartTimestamp as '-' instead of the
+    # pinned 'n/a'.  This is THE failure mode the tool exists for -- a silent
+    # `contract.*` rot that would otherwise surface first inside an authorized
+    # mutation window -- and it must be reachable through the compared sections,
+    # not just through host_context.
+    _override(
+        stub_bin,
+        "systemctl",
+        [
+            {
+                "match": [snapshot.RESERVED_WITNESS_UNIT],
+                "exit": 0,
+                "stdout": "LoadState=not-found\nExecMainStartTimestamp=-\n",
+            }
+        ],
+    )
+    assert snapshot.alignment_mismatches(committed) == []
+
+    code = snapshot.main(["--check"])
+
+    out = capsys.readouterr().out
+    assert code == snapshot.EXIT_DRIFT == 3
+    drift_lines = [line for line in out.splitlines() if line.startswith("DRIFT ")]
+    assert len(drift_lines) == 1
+    assert "DRIFT contract.systemd_unset_timestamp" in drift_lines[0]
+    assert "expected 'n/a'" in drift_lines[0]
+    assert "observed '-'" in drift_lines[0]
+    # A real observation, not a swallowed probe failure or an alignment refusal.
+    assert "MISALIGNMENT" not in out
+    assert "PROBE-FAILURE" not in out
+    assert _calls(stub_bin), "the drift verdict must rest on real spawned observations"
+
+
 def test_tampered_contract_value_exits_misalignment_without_spawning_a_probe(
     tmp_path: Path,
     stub_bin: Path,
@@ -207,6 +262,40 @@ def test_tampered_contract_value_exits_misalignment_without_spawning_a_probe(
     assert "node27_container_contract.SYSTEMD_UNSET_TIMESTAMP" in out
     assert "DRIFT" not in out
     # The misalignment verdict is reached BEFORE any probe exists.
+    assert _calls(stub_bin) == []
+
+
+def test_unimportable_contract_module_is_a_misalignment_without_spawning_a_probe(
+    stub_bin: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # On-node reality: a copy of the script run from outside the repo root cannot
+    # import `packages.common`, so the fixture's contract section is
+    # UNVERIFIABLE.  Unverifiable must fail closed with the same exit as a real
+    # misalignment and must never spawn a probe -- a green-looking check whose
+    # alignment gate silently did nothing is exactly the false assurance this
+    # tool exists to remove.  The report has to carry the operator's remedy,
+    # which is an on-node environment fix, not a repo change.
+    import packages.common as common_package
+
+    class _Blocker:
+        def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
+            if fullname == CONTRACT_MODULE_NAME:
+                raise ModuleNotFoundError(f"blocked by test: {fullname}", name=fullname)
+            return None
+
+    monkeypatch.delitem(sys.modules, CONTRACT_MODULE_NAME, raising=False)
+    monkeypatch.delattr(common_package, "node27_container_contract", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_Blocker(), *sys.meta_path])
+
+    code = snapshot.main(["--check"])
+
+    out = capsys.readouterr().out
+    assert code == snapshot.EXIT_MISALIGNMENT == 4
+    assert f"MISALIGNMENT contract: cannot import {CONTRACT_MODULE_NAME}" in out
+    assert "PYTHONPATH=/home/nwm/NWM" in out
+    assert "DRIFT" not in out
     assert _calls(stub_bin) == []
 
 
@@ -255,7 +344,9 @@ def test_every_spawnable_argv_matches_the_frozen_read_only_whitelist() -> None:
         ("docker", ("inspect", "--format={{.Config.Image}}|{{.Image}}", "nhms-db")),
         ("docker", ("exec", "nhms-db", "/usr/bin/readlink", "-f", "/usr/bin/pg_restore")),
         ("docker", ("exec", "nhms-db", "/usr/bin/pg_restore", "--version")),
-        *[("psql", ("--dbname", "nhms", "--no-psqlrc", "-At", "-c", sql)) for sql in snapshot.PROBE_SQL],
+        # Frozen literals, NOT snapshot.PROBE_SQL: the oracle must not be able to
+        # follow the source's SQL wherever it goes.
+        *[("psql", ("--dbname", "nhms", "--no-psqlrc", "-At", "-c", sql)) for sql in FROZEN_PROBE_SQL],
     }
     assert {(probe.binary, probe.args) for probe in snapshot.PROBES} == allowed_tails
 
@@ -282,11 +373,15 @@ def test_every_spawnable_argv_matches_the_frozen_read_only_whitelist() -> None:
                     assert probe.args[3:] == ("--version",)
         else:
             assert probe.args[:5] == ("--dbname", "nhms", "--no-psqlrc", "-At", "-c")
-            assert probe.args[5] in snapshot.PROBE_SQL
+            assert probe.args[5] in FROZEN_PROBE_SQL
 
 
 def test_every_sql_string_is_a_single_select_or_show_statement() -> None:
-    assert len(snapshot.PROBE_SQL) == 4
+    # Byte-freeze first: the statement TEXT is pinned against an oracle outside
+    # the module, so a swapped-in statement reds here even though it would pass
+    # every structural rule that follows.
+    assert set(snapshot.PROBE_SQL) == set(FROZEN_PROBE_SQL)
+    assert len(snapshot.PROBE_SQL) == len(FROZEN_PROBE_SQL) == 4
     for sql in snapshot.PROBE_SQL:
         assert re.match(r"^(SELECT|SHOW)\b", sql), sql
         # No statement terminator at all, so nothing can be chained after it.

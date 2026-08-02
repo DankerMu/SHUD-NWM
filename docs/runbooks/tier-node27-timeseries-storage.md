@@ -1640,9 +1640,9 @@ the host. Fix the environment and rerun.
 |---|---|---|
 |0|no drift, fixture aligned with the contract module|continue|
 |2|usage/input error (bad CLI, missing or malformed fixture)|fix the invocation; not a host verdict|
-|4|MISALIGNMENT: fixture `contract` section ≠ `node27_container_contract` constants (decided BEFORE any probe runs, so nothing was measured)|a repo-side bug: the fixture and the constants moved apart. Fix in a PR, never on the node|
+|4|MISALIGNMENT: fixture `contract` section ≠ `node27_container_contract` constants (decided BEFORE any probe runs, so nothing was measured). The same exit also fires when the contract module cannot be IMPORTED at all — the section is then unverifiable, which fails closed identically|read the report line: a constant-vs-fixture mismatch is a repo-side bug (fix in a PR, never on the node); an import failure is an on-node environment fix — run from the repo root or `PYTHONPATH=/home/nwm/NWM uv run python scripts/node27_external_contract_snapshot.py --check` and rerun, no PR needed|
 |3|DRIFT: a compared value moved; the report names `section.key`, expected and observed|stop; run the loop below|
-|5|PROBE-EXECUTION FAILURE: a probe could not run, exited non-zero, exited 0 empty, or exited 0 without the property it measures|the probe is broken (env, daemon, container down). Never treated as drift; repair and rerun|
+|5|PROBE-EXECUTION FAILURE: a probe could not run, exited non-zero, exited 0 empty, or exited 0 without the property it measures. A zero-exit EMPTY result lands here too (e.g. the `timescaledb` extension row disappearing returns nothing, not a changed value), so a genuine host change can present as a probe failure|the probe is usually broken (env, daemon, container down). Never treated as drift; repair and rerun — but check the probe the report NAMES against the host first, before concluding "probe bug"|
 
 **Drift handling loop (never a silent fixture update):**
 

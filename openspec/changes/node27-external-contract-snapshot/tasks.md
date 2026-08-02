@@ -68,7 +68,7 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. `scripts/node27_external_contract_snapshot.py`: probes +
+- [x] 1. `scripts/node27_external_contract_snapshot.py`: probes +
   `--dump [--output PATH]` / `--check [--fixture PATH]` CLI. Probe set
   (all read-only): unset-timestamp rendering via `systemctl --user
   show <reserved never-existing unit> -p LoadState -p
@@ -96,13 +96,13 @@ Must preserve:
   contract-module constants via lazy import; the dump path must run
   importless so a single copied file works on node-27 without a
   branch checkout.
-- [ ] 2. `packages/common/node27_external_contract_snapshot.json`:
+- [x] 2. `packages/common/node27_external_contract_snapshot.json`:
   committed baseline from task 5's real `--dump`, with `contract` /
   `host_context` / `informational` sections. Every compared entry is
   `{"value": ..., "_provenance": {command, date, source}}`; comparison
   and alignment read `value` ONLY — `_provenance` never participates
   in any diff, so a provenance-only edit reds nothing. No secrets.
-- [ ] 3. `tests/test_node27_external_contract_snapshot.py` (hermetic,
+- [x] 3. `tests/test_node27_external_contract_snapshot.py` (hermetic,
   stub-bin seam): (a) alignment guard, BOTH directions —
   fixture.contract equals the three `node27_container_contract`
   constants AND the count of `# MEASURED`-prefixed constant blocks in
@@ -126,7 +126,7 @@ Must preserve:
   and no new file exists in its directory (never-writes binding);
   (j) dump shape — `--dump` output parses and carries the three
   sections with compared entries in `{"value", "_provenance"}` form.
-- [ ] 4. Runbook `docs/runbooks/tier-node27-timeseries-storage.md`,
+- [x] 4. Runbook `docs/runbooks/tier-node27-timeseries-storage.md`,
   two deliverables: (4a) new "host-contract snapshot 漂移处置"
   section — invocation recipe (ssh, source
   `infra/env/node27-timeseries-compression-replay.env`, confirm
@@ -147,7 +147,7 @@ Must preserve:
   keep the manual trio as script-unavailable fallback, and state
   that until a timer/workflow is installed this step is the sole
   pre-mutation interception point.
-- [ ] 5. Real node-27 baseline (read-only, authorized): copy the
+- [x] 5. Real node-27 baseline (read-only, authorized): copy the
   single script file to a node-27 temp dir (NOT a branch checkout of
   /home/nwm/NWM), source the env file, run `--dump`, save output as
   the committed fixture (task 2), attach the dump verbatim to the PR
@@ -159,7 +159,27 @@ Must preserve:
   green proof). Note the difference from the runbook recipe (which
   assumes a checked-out tree post-merge). Remove the temp copy
   afterwards.
-- [ ] 6. Oracle: `uv run pytest -q
+- [x] 6. Cross-review round 1 repair (verifier: 3 CONFIRMED FIX_NOW +
+  1 PLAUSIBLE ride-along): (P1) the new test file itself joins the
+  contract's dependent closure — `scripts/select_ci_tests.py`
+  contract PathTestRule extended with
+  `tests/test_node27_external_contract_snapshot.py` (the #1247
+  closure guard was RED at e0fe92d4 exactly as designed, caught
+  pre-merge); (P2) SQL whitelist made an independent oracle —
+  PROBE_SQL byte-frozen as four literals + literal psql tails (the
+  prior derivation was tautological: an in-place
+  `SELECT pg_terminate_backend(...)` substitution kept 17/17 green);
+  (P2) task 3(b) under-specified drift to host_context — added the
+  live `contract.*` drift case (witness renders `-` against the
+  aligned committed fixture → exit 3 naming
+  `contract.systemd_unset_timestamp`; red when comparison narrowed to
+  host_context); (P3 ride-along) unimportable-contract branch now
+  hermetically tested (exit 4 stands per docstring/spec — remap to 2
+  rejected by verifier), runbook exit-4 row gains the PYTHONPATH
+  clause and exit-5 row the zero-rows caveat; docstring
+  "never writes" claim scoped to the script itself (__pycache__
+  caveat).
+- [x] 7. Oracle: `uv run pytest -q
   tests/test_node27_external_contract_snapshot.py` green;
   `uv run ruff check .`; `openspec validate
   node27-external-contract-snapshot --strict --no-interactive`;

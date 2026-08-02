@@ -318,6 +318,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_container_contract.py",
         (
+            "tests/test_node27_external_contract_snapshot.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_capture.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
