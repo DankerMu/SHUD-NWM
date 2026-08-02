@@ -1,0 +1,43 @@
+# ADR 0003: Keep review-lens rotation in follow-up cross-review rounds
+
+Date: 2026-08-02
+
+## Status
+
+Accepted (autonomous default-keep; revisit at the next audit sample or on
+maintainer override)
+
+## Context
+
+The subagent-workflow review loop rotates additional reviewer lenses into
+follow-up (post-fix) cross-review rounds instead of re-running only the
+round-1 lens mix. `scripts/loop_log_audit.py` (the cross-run accountability
+audit over `docs/review-loop-log.jsonl`) tracks whether later-round verified
+catches come from the pinned-core round-1 lenses or from rotated-in lenses,
+and flags a keep/cut decision once the attribution sample reaches ~8
+multi-round merged PRs.
+
+After PR #1236 (issue #1153) merged, the audit reached the sample and
+returned DECIDABLE: **8 multi-round merged PRs, later-round catches
+core=2 vs rotated=8**.
+
+## Decision
+
+**Keep rotation.** Later-round catches concentrate in rotated-in lenses
+(8 of 10), which is precisely the audit's own keep criterion: rotation is
+buying real union recall that re-running the round-1 mix would miss. This
+is also the workflow's default (correctness over cost) and changes no
+behavior.
+
+Recorded under the run's autonomous default-keep rule — keep/cut is a human
+call, and this ADR is the recorded default pending any maintainer override,
+not a new policy.
+
+## Consequences
+
+- Follow-up rounds continue to rotate lenses per
+  `risk-adaptive-cross-review`; no change to reviewer briefs or budgets.
+- Revisit when the audit next flags rotation attribution (larger sample or
+  a shifted core/rotated ratio), or immediately on maintainer decision;
+  cutting later means reverting follow-up rounds to the round-1 mix as
+  described in the workflow's rotation criterion.
