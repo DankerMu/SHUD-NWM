@@ -182,7 +182,7 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. Guard domain — plan_author.py :109: the tuple gains
+- [x] 1. Guard domain — plan_author.py :109: the tuple gains
   `("schema_dump_host", schema_dump_host)` as the THIRD entry
   (after repo, root — order is contract). Rewrite the comment
   block's unvalidated list (:150-155): `schema_dump_host` moves from
@@ -206,14 +206,14 @@ Must preserve:
   occur for it; do NOT claim "no verifier checks it" — the
   supervisor extracts and sha256sums it). `capture_repo` entry
   unchanged.
-- [ ] 2. Negatives — tests :6227: label parametrize becomes
+- [x] 2. Negatives — tests :6227: label parametrize becomes
   `["root", "repo", "schema_dump_host"]` (6 shapes × 3 labels = 18
   ids); assertion body unchanged (label in message, value, canonical
   rendering, not `_CAPTURE_OUTPUT_PATH_ERROR`); docstring extended
   to say why the third label is the same disease one field over
   (verbatim into artifact_associations :183, compared verbatim at
   :1439 against the normalized ledger ref).
-- [ ] 3. Positives and pins:
+- [x] 3. Positives and pins:
   (a) canonical custom host path: `build_run_plan(mutation_head_sha=
   HEAD, schema_dump_host=<canonical tmp-derived .dump path>)` authors,
   and the pg_dump command's `artifact_associations["schema_dump"]`
@@ -238,14 +238,14 @@ Must preserve:
   that this branch's message deliberately lacks the value/canonical
   rendering — pinning the branch so a future refactor moving the
   is_absolute check cannot silently drop the refusal.
-- [ ] 4. Runbook :1041-1046: extend the paragraph — custom
+- [x] 4. Runbook :1041-1046: extend the paragraph — custom
   `--schema-dump-host` joins `--root`/`--repo` under the same
   canonical-absolute-path constraint; one clause records that
   `--schema-dump-container` is a container-internal path checked
   only by verbatim-symmetric prefix/shape gates (verifier and
   supervisor mirror alike) and deliberately not
   canonicality-guarded.
-- [ ] 5. Spec delta (in this change): MODIFIED requirement "The plan
+- [x] 5. Spec delta (in this change): MODIFIED requirement "The plan
   author MUST reject non-canonical repo and root paths at authoring
   time" — guard domain now repo, root and `schema_dump_host`
   (labeled by kwarg name); rationale layers restated to cover the
@@ -258,7 +258,7 @@ Must preserve:
   adjudication. `openspec validate
   plan-author-canonical-schema-dump-guard --strict --no-interactive`
   green.
-- [ ] 6. Full verification (orchestrator Phase 2 reproduces): three
+- [x] 6. Full verification (orchestrator Phase 2 reproduces): three
   suites green (live_evidence baseline 374 + new ids; 14/141
   frozen); red proof by reverting ONLY the tuple-entry hunk → ALL 7
   schema_dump_host negatives DID NOT RAISE (per-id list): the 6
