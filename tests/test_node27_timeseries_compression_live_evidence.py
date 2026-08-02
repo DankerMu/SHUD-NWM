@@ -6122,12 +6122,17 @@ def test_evidence_dir_gate_accepts_a_plan_authored_with_a_trailing_slash_root(
 ) -> None:
     """The derivation is TEXTUAL (`rsplit`), and this is why that is load-bearing.
 
-    `plan_author` builds both fields by f-string from the same `--root`, so a root with a
-    trailing slash yields `{root}//capture-artifacts` AND `{root}//capture-<kind>.json` --
-    a spelling the production author really does emit.  String `rsplit` inverts that
-    exactly; a `Path(...).parent` / `os.path.dirname` "cleanup" would normalize the double
-    slash away, derive `{root}/capture-artifacts`, and refuse a plan `plan_author` wrote.
-    This test is the guard against that refactor.
+    The double-slash spelling is SYNTHESIZED here by hand, and since #1265 that is the
+    only honest way to obtain it: `plan_author` now refuses a non-canonical `--root` at
+    authoring time (`test_plan_author_rejects_non_canonical_repo_and_root`), so the
+    production author can no longer emit `{root}//capture-artifacts` AND
+    `{root}//capture-<kind>.json`.  What this pin guards is therefore no longer a claim
+    about the producer but the VERIFIER's own verbatim textual posture: `--evidence-dir`
+    is derived from this capture's `output_path` by plain string `rsplit`, so whatever
+    spelling the two fields share round-trips exactly, while a `Path(...).parent` /
+    `os.path.dirname` "cleanup" would normalize the double slash away, derive
+    `{tmp_path}/capture-artifacts`, and refuse this bundle at the evidence-dir gate.  The
+    dirname-swap redness proof still holds; only the construction changed.
 
     The bundle cannot reach PASS in this spelling for a reason that predates #1263 and is
     NOT this gate's: `_artifact_bytes` returns `str(Path(ref["path"]))`, so the ledger
@@ -6140,19 +6145,24 @@ def test_evidence_dir_gate_accepts_a_plan_authored_with_a_trailing_slash_root(
     """
 
     bundle = _bundle(tmp_path)
-    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path) + "/")
-    capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
-    output_path = str(capture["output_path"])
-    # The double-slash spelling really is what the production author emits for this root,
-    # on BOTH fields -- otherwise the test would pin nothing.
-    assert output_path == f"{tmp_path}//capture-sizes_post.json"
-    assert f"{tmp_path}//capture-artifacts" in capture["argv"]
+    output_path = f"{tmp_path}//capture-sizes_post.json"
+    capture = next(
+        item for item in _read_ref(bundle["execution"]["run_plan"])["captures"] if item["kind"] == "sizes_post"
+    )
+    argv = list(capture["argv"])
+    # Rewritten BY OPTION NAME, not by offset: only this one value moves to the
+    # double-slash sibling, whatever shape the template argv happens to have.
+    argv[argv.index("--evidence-dir") + 1] = f"{tmp_path}//capture-artifacts"
+    # The two synthesized fields must satisfy the gate's textual relation BEFORE
+    # verification runs -- otherwise they could drift apart and the test would stop
+    # reaching (and therefore stop pinning) the gate at all.
+    assert argv[argv.index("--evidence-dir") + 1] == output_path.rsplit("/", 1)[0] + "/capture-artifacts"
     raw = Path(bundle["sizes"]["post"]["path"]).read_bytes()
     Path(output_path).write_bytes(raw)
     ref = {"path": output_path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
     bundle["sizes"]["post"] = ref
     _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
-    _replace_capture_argv(bundle, tmp_path, kind="sizes_post", argv=list(capture["argv"]))
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_post", argv=argv)
     with pytest.raises(evidence.EvidenceError) as excinfo:
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
     message = str(excinfo.value)
@@ -6178,3 +6188,115 @@ def test_verifier_rejects_an_evidence_dir_stranded_by_a_relocated_capture_output
     assert str(nested / "capture-artifacts") in message
     assert str(tmp_path / "capture-artifacts") in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+# --------------------------------------------------------------------------- #
+# #1265: path canonicality is a PRODUCER-side precondition.  The verifier renders
+# ledger-side artifact refs through `str(Path(...))` but compares the plan side
+# VERBATIM, so a non-canonical `--root`/`--repo` used to author a perfectly
+# shape-valid plan whose bundle then deterministically FAILED the forensic gate
+# with "supervisor capture output path differs" -- a message about nothing the
+# operator actually did.  `plan_author` now refuses such input at the entrance;
+# the verifier's verbatim posture is untouched (that is the point of the route).
+# --------------------------------------------------------------------------- #
+
+# The forensic refusal a non-canonical root used to end up at, minutes later and with
+# an unrelated message.  Asserted ABSENT from the authoring refusals below: the guard
+# must be non-vacuously the new failure mode, not a rename of the old one.
+_CAPTURE_OUTPUT_PATH_ERROR = "supervisor capture output path differs"
+_NON_CANONICAL_PATHS = {
+    "trailing_slash": "/x/y/",
+    "duplicate_slash": "/x//y",
+    "dot_segment": "/x/./y",
+    # The two normalization-stable-yet-slash-terminated strings the guard's second
+    # conjunct exists for (`str(Path("//")) == "//"`): a `root="//"` would emit
+    # `///capture-<kind>.json`, which BOTH verifier-side normalizations collapse to
+    # `/capture-<kind>.json` -- recreating exactly the false refusal this guard kills.
+    "bare_slash_root": "/",
+    "double_slash_root": "//",
+    # The third conjunct's own red.  `..` IS normalization-stable and symmetric on both
+    # verifier sides, so neither of the first two conjuncts sees it -- but the no-follow
+    # walkers (`safe_fs._absolute_parts`) refuse any `..` component, on the supervisor's
+    # first capture write AND on the verifier's artifact reads, while prearm normalizes
+    # first and passes.  Unguarded, such a root authors fine, prearms green, and aborts
+    # INSIDE the one-shot replay window with "Unsafe path component: '..'".
+    "dot_dot_segment": "/x/../y",
+}
+
+
+@pytest.mark.parametrize("label", ["root", "repo"])
+@pytest.mark.parametrize("shape", sorted(_NON_CANONICAL_PATHS))
+def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str) -> None:
+    """Both labels, all six shapes: refused at authoring with an ACCURATE message.
+
+    `repo` matters as much as `root`: it f-strings the command argv paths the verifier
+    pins against `expected_executable` literals, so a trailing-slash repo poisons the
+    command side exactly the way a trailing-slash root poisons the capture side.  The
+    message must name the label, the offending value and its canonical rendering --
+    an operator who mistypes a slash should learn that from the author, not from a
+    forensic verdict about capture output paths half an hour later.
+    """
+
+    value = _NON_CANONICAL_PATHS[shape]
+    with pytest.raises(plan_author.PlanAuthorError) as excinfo:
+        plan_author.build_run_plan(mutation_head_sha=HEAD, **{label: value})
+    message = str(excinfo.value)
+    assert label in message
+    assert value in message
+    assert str(Path(value)) in message
+    assert _CAPTURE_OUTPUT_PATH_ERROR not in message
+
+
+def test_plan_author_accepts_a_canonical_root(tmp_path: Path) -> None:
+    """Positive: a canonical root still authors, and every path it records is canonical.
+
+    The end-to-end control is
+    `test_default_plan_author_capture_argvs_pass_the_whole_capture_gate_stack`, which
+    authors with `root=str(tmp_path)` and verifies all twelve capture argvs to PASS.
+    This one adds the attribution that control cannot give on its own: authoring raises
+    nothing, and each recorded `output_path` is Path-normalization-stable -- the exact
+    property the verifier's verbatim plan-side comparisons depend on.
+    """
+
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path))
+    assert len(plan["captures"]) == len(evidence.EXPECTED_CAPTURE_SEQUENCE)
+    for capture in plan["captures"]:
+        output_path = str(capture["output_path"])
+        assert output_path == str(Path(output_path)), output_path
+
+
+def test_plan_author_module_defaults_are_canonical() -> None:
+    """Structural: the guard can never refuse the module's own defaults.
+
+    The runbook's authorized command passes neither `--root` nor `--repo`, so both
+    defaults go straight through the new clause on every production authoring.  The
+    negatives above prove the clause really does refuse; without this pin a stray
+    trailing slash in either literal would ship an author that cannot author at all.
+    """
+
+    for name in ("DEFAULT_ROOT", "DEFAULT_REPO"):
+        value = getattr(plan_author, name)
+        assert value == str(Path(value)), name
+        assert not value.endswith("/"), name
+
+
+def test_plan_author_accepts_the_recorded_boundary_root() -> None:
+    """The one boundary the guard comment records as DELIBERATELY still accepted.
+
+    A LEADING double slash: POSIX (and pathlib) preserve exactly two leading slashes,
+    so `//x` is normalization-stable and its f-string expansions stay symmetric on
+    both verifier sides -- unlike the bare `//` root, whose `///…` expansion collapses
+    (that asymmetry is why `//` is in the negatives above and `//x` is here).  The
+    third conjunct leaves it alone too: `PurePosixPath("//x").parts` is `("//", "x")`,
+    and the no-follow walkers filter the anchor out before looking for `..`.  Asserts
+    the probe property the guard buys: for every accepted root R,
+    `str(Path(f"{R}/x")) == f"{R}/x"`.  (A `..` root was recorded as a second accepted
+    boundary until fix round 1 of #1265 showed it aborts mid-replay-window on the
+    no-follow walkers; it is now one of the negatives above.)
+    """
+
+    root = "//x"
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=root)
+    capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
+    assert capture["output_path"] == f"{root}/capture-sizes_post.json"
+    assert str(Path(capture["output_path"])) == capture["output_path"]
