@@ -153,14 +153,16 @@ def _plan() -> dict[str, Any]:
                 "hydro",
                 "--hypertable-name",
                 "river_timeseries",
+                # Chunk/range come from the shared six-field contract (#1242);
+                # the hypertable literals above stay pinned in the fixture.
                 "--chunk-schema",
-                "_timescaledb_internal",
+                contract.RECOVERY_TARGET_CHUNK_SCHEMA,
                 "--chunk-name",
-                "_hyper_3_7_chunk",
+                contract.RECOVERY_TARGET_CHUNK_NAME,
                 "--range-start",
-                "2026-05-28T00:00:00Z",
+                contract.RECOVERY_TARGET_RANGE_START,
                 "--range-end",
-                "2026-06-04T00:00:00Z",
+                contract.RECOVERY_TARGET_RANGE_END,
             ]
         elif kind.startswith("compression_"):
             associations = (
@@ -2819,9 +2821,24 @@ def test_supervised_hypertable_whitelist_matches_every_verifier_copy() -> None:
 
 
 def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> None:
+    """Bind every remaining recovery-target copy to the shared contract (#1242).
+
+    The schema JSON is data and the verifier owns its own acceptance oracle, so
+    neither can import the contract; this guard is what makes a one-sided change
+    fail instead of shipping a half-migrated target.
+    """
+
     schema = json.loads(
         (Path(__file__).parents[1] / "schemas/timeseries_compression_live_evidence.schema.json").read_text()
     )
     recovery_target = schema["$defs"]["recovery_target"]["properties"]
-    assert recovery_target["hypertable_schema"]["const"] == contract.RECOVERY_TARGET_SCHEMA
-    assert recovery_target["hypertable_name"]["const"] == contract.RECOVERY_TARGET_TABLE
+    assert set(recovery_target) == set(contract.RECOVERY_TARGET_FIELDS)
+    assert {field: spec["const"] for field, spec in recovery_target.items()} == dict(
+        contract.RECOVERY_TARGET_FIELDS
+    )
+    relation = f"{contract.RECOVERY_TARGET_CHUNK_SCHEMA}.{contract.RECOVERY_TARGET_CHUNK_NAME}"
+    recovery = schema["properties"]["recovery"]["properties"]
+    assert recovery["decompress_return_relation"]["const"] == relation
+    # The verifier's own recovery-target oracle (live_evidence.py stays untouched).
+    assert dict(evidence.RECOVERY_TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
+    assert evidence.RECOVERY_RETURN_RELATION == relation

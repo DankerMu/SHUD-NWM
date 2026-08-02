@@ -27,7 +27,9 @@ from typing import Any
 
 import pytest
 
+from packages.common import node27_container_contract as contract
 from scripts import node27_timeseries_compression_bundle_author as bundle_author
+from scripts import node27_timeseries_compression_capture as capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
@@ -36,6 +38,23 @@ from tests import test_node27_timeseries_compression_supervisor as sup
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "904d488538d3c5c8459525c19daf4dbb769b9df3"
 CATALOG_KINDS = ("catalog_before", "catalog_after_first", "catalog_after_second")
+
+# Verbatim copy of the recovery-preflight SQL literal as it stood before #1242
+# replaced it with an interpolation of the shared contract constants.  This SQL
+# executes on the node-27 primary during the live capture, so "the rendered
+# string did not move a single byte" is the zero-change oracle -- the marker
+# comment included, since it must stay the first token (the psql stub below
+# dispatches on it, and the matcher is prefix-sensitive).
+_FROZEN_RECOVERY_PREFLIGHT_SQL = (
+    "/* capture:recovery_preflight */ SELECT json_build_object("
+    "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
+    "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
+    "'before_compressed', c.is_compressed, 'before_row_count', "
+    "(SELECT count(*) FROM _timescaledb_internal._hyper_3_7_chunk)) "
+    "FROM timescaledb_information.chunks c "
+    "WHERE c.hypertable_schema = 'hydro' AND c.hypertable_name = 'river_timeseries' "
+    "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'"
+)
 
 _DB_IDENTITY = {
     "dbname": "nhms",
@@ -296,6 +315,26 @@ def test_plan_author_binds_the_mutation_head_into_the_decompress_command() -> No
     assert decompress["argv"][5] == HEAD
     list_command = next(c for c in plan["commands"] if c["kind"] == "pg_restore_list")
     assert list_command["argv"][-1].startswith("/var/lib/postgresql/")
+
+
+# --------------------------------------------------------------------------- #
+# Recovery-target contract (#1242)
+# --------------------------------------------------------------------------- #
+def test_capture_recovery_target_keeps_the_schema_mandated_six_key_shape() -> None:
+    schema = json.loads((ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text())
+    # The emitted target is validated with `additionalProperties: false` plus the
+    # verifier's `_require_exact_keys`, so the key SET is the binding shape (key
+    # order is irrelevant -- emission sorts keys).
+    assert set(capture.RECOVERY_TARGET) == set(schema["$defs"]["recovery_target"]["required"])
+    # Definitional now that the dict derives from the shared source; asserted
+    # once for completeness -- the load-bearing binding is the key set above and
+    # the schema<->contract equality in the supervisor-side drift guard.
+    assert capture.RECOVERY_TARGET == dict(contract.RECOVERY_TARGET_FIELDS)
+
+
+def test_capture_recovery_preflight_sql_is_byte_identical_to_the_frozen_literal() -> None:
+    assert capture.RECOVERY_PREFLIGHT_SQL == _FROZEN_RECOVERY_PREFLIGHT_SQL
+    assert capture.RECOVERY_PREFLIGHT_SQL.startswith("/* capture:recovery_preflight */ ")
 
 
 # --------------------------------------------------------------------------- #

@@ -15,7 +15,8 @@ It covers three measured node-27 host contracts:
 
 It additionally pins one contract that is NOT a measured host value but a
 repo-side decision: the hypertable this supervision plane recovers and guards
-(``RECOVERY_TARGET_SCHEMA``/``RECOVERY_TARGET_TABLE``/``RECOVERY_TARGET``), the
+(``RECOVERY_TARGET_SCHEMA``/``RECOVERY_TARGET_TABLE``/``RECOVERY_TARGET``) plus
+the exact chunk and time window it recovers (``RECOVERY_TARGET_FIELDS``), the
 supervised-hypertable whitelist, and the fail-closed ``validated_probe_target``
 every write-privilege probe must pass its target through.  It lives here for
 the same reason as the measured values: it was hard-coded identically in two
@@ -71,6 +72,36 @@ CLIENT_BACKEND_TYPE = "client backend"
 RECOVERY_TARGET_SCHEMA = "hydro"
 RECOVERY_TARGET_TABLE = "river_timeseries"
 RECOVERY_TARGET = f"{RECOVERY_TARGET_SCHEMA}.{RECOVERY_TARGET_TABLE}"
+
+# The recovery target is not the hypertable pair alone: the exact-chunk recovery
+# names one chunk of that hypertable and the time window it covers (issue
+# #1242).  Those four fields used to live in mutually independent copies, so a
+# retarget could move the hypertable half and strand the chunk/range half.
+RECOVERY_TARGET_CHUNK_SCHEMA = "_timescaledb_internal"
+RECOVERY_TARGET_CHUNK_NAME = "_hyper_3_7_chunk"
+RECOVERY_TARGET_RANGE_START = "2026-05-28T00:00:00Z"
+RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
+
+# THE single assembly point of the six-field recovery-target contract.  Every
+# production copy is either derived from this mapping (the supervisor's expected
+# decompress argv, the capture producer's emitted target and recovery-preflight
+# SQL) or asserted field-by-field equal to it by the drift guard in
+# tests/test_node27_timeseries_compression_supervisor.py (the live-evidence
+# schema ``$defs.recovery_target`` consts, the synthetic
+# ``decompress_return_relation`` const, and the verifier's own
+# ``RECOVERY_TARGET``/``RECOVERY_RETURN_RELATION`` acceptance oracle).  Mutating
+# any single copy alone therefore fails a test instead of shipping a
+# half-migrated target.  Note the naming: ``RECOVERY_TARGET`` above is the
+# ``schema.table`` STRING the write-privilege probe interpolates, while this is
+# the six-field mapping the evidence documents carry.
+RECOVERY_TARGET_FIELDS = {
+    "hypertable_schema": RECOVERY_TARGET_SCHEMA,
+    "hypertable_name": RECOVERY_TARGET_TABLE,
+    "chunk_schema": RECOVERY_TARGET_CHUNK_SCHEMA,
+    "chunk_name": RECOVERY_TARGET_CHUNK_NAME,
+    "range_start": RECOVERY_TARGET_RANGE_START,
+    "range_end": RECOVERY_TARGET_RANGE_END,
+}
 
 # The complete set of hypertables this plane supervises; any probe target
 # outside it is a bug, not a configuration.  Mirrors ``HYPERTABLE_KEYS`` in the
