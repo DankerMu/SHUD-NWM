@@ -30,11 +30,23 @@ is `2026-07-04T12:00:00Z` and archive/raw/DB-retention cutoff is
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md` (the
   archive resolver is never imported by `apps/api/**` or `apps/frontend/**`).
 
-The mover and audit share the 1.7 TB volume that also backs
-`/home/ghdc/nwm/object-store` and `/home/ghdc/nwm/archive`. Free-space
-watermarks defend that shared volume — the mover refuses enforce before
-touching any source when free bytes fall below the configured refuse
-threshold.
+Since 2026-07-26 the archive tier lives on its own filesystem: the mover and
+audit write under `/data/GHDC/nwm-archive`, backed by the node-27-local RAID
+`/dev/md0` mounted at `/data/GHDC` (15 TB, ~14 TB free at migration). The hot
+tier — pgdata (`/home/nwm/nhms-pgdata`) and the object store
+(`/home/ghdc/nwm/object-store`) — stays on `/home`. Free-space watermarks
+defend the **archive** filesystem: the mover refuses enforce before touching
+any source when free bytes there fall below the configured refuse threshold.
+
+That separation is mandatory, not cosmetic. While the archive root sat on
+`/home` alongside pgdata, a full `/home` made the mover refuse
+(`refused_free_space`), which froze the mover frontier, which left the
+archive-completeness receipt pending, which made retention refuse to drop —
+the only mechanism able to free the disk was deadlocked by the disk it
+protects (2026-07-26 incident). Never point `NHMS_ARCHIVE_ROOT` back at a
+filesystem that carries pgdata or the object store. See
+`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
+(2026-07-26)".
 
 ## Install (node-27, `nwm` user)
 
@@ -96,6 +108,35 @@ system-level (root) units for this lane.
    env carries the shared archive vars — the archive root free-space
    band as well. See "Free-space watermark tuning" for band semantics
    and "Refuse-threshold behavior" for what a `refuse` band triggers.
+
+### Live-state notes (verified 2026-08-01)
+
+Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
+0600). Read them on the box before quoting any value; these are the deltas
+against the committed `.example` templates as of 2026-08-01:
+
+- **Archive root.** `node27-product-archive.env`,
+  `node27-storage-inventory-audit.env`, `node27-archive-rebuild-drill.env`,
+  and `node27-db-export-salvage.env` all carry
+  `NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive`, matching the templates.
+- **Governance uses a service-specific key.** `node27-resource-governance.env`
+  has no `NHMS_ARCHIVE_ROOT` line at all; it sets
+  `NODE27_GOVERNANCE_ARCHIVE_ROOT=/data/GHDC/nwm-archive` instead. That is a
+  supported override — `scripts/node27_resource_governance.py` resolves
+  `--archive-root`, then `NODE27_GOVERNANCE_ARCHIVE_ROOT`, then
+  `NHMS_ARCHIVE_ROOT`. The *value* is consistent with the other four env
+  files, so governance reports the same archive root the mover uses; only the
+  variable name differs from the `.example`. If you edit either, keep the
+  values equal.
+- **Old archive directory residue.** The pre-migration archive directory under
+  the node-27 `/home` filesystem still exists as an **empty** shell (contents
+  migrated and removed 2026-07-26). Nothing reads or writes it; removing the
+  empty directory is optional operator cleanup. Its exact path is recorded
+  verbatim in the committed pre-migration receipts under
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/product-archive/`.
+- **Compression per-tick bound is retuned live.** See §4 "Per-tick capacity
+  (live state 2026-08-01)".
+- **DB retention timer is not enabled.** See §8.1 "Current bringup state".
 
 ## Timer cadence order (UTC)
 
@@ -281,8 +322,9 @@ are exactly two exits — no warn-only mode exists, because a warning is the
 comment-level coupling this guard replaced:
 
 1. raise `NHMS_ARCHIVE_MIN_AGE_DAYS` to >= the live window in BOTH archive env
-   files, after assessing free space on the shared 1.7 TB volume (a longer hot
-   window means more hot bytes); or
+   files, after assessing free space on the `/home` hot-tier filesystem that
+   carries pgdata and the object store (a longer hot window means more hot
+   bytes there, not in the archive); or
 2. lower `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` back to the value the
    archive envs already satisfy.
 
@@ -831,6 +873,27 @@ only (age older than the configurable lag, default 7 d) by the receipted
 runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
+
+### Per-tick capacity (live state 2026-08-01)
+
+`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
+tick compresses. The committed template
+(`infra/env/node27-timeseries-compression.example`) ships `=5`; the deployed
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env` was verified at
+`=4` on 2026-08-01 (retuned on the box, presumably during the July catch-up).
+The template value is intentionally left alone here — which number is the
+right capacity target is an operator/capacity decision, tracked in
+issue #1156.
+
+The number that matters is a capacity relation, not a constant: the per-tick
+bound × timer frequency must compress at least as fast as ingest produces new
+terminal chunks. During July 2026 `hydro.river_timeseries` grew by roughly
+43 GB/day (816 GB total at the 2026-07-26 `/home`-full incident). A per-tick
+bound that cannot keep up leaves uncompressed chunks accumulating on the hot
+tier, which is one of the two inputs to that incident (the other being the
+archive root sharing the hot filesystem — see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
+"Amendment (2026-07-26)"). When retuning, read the live value off the box
+first and record the new value with the receipt that justified it.
 
 ### 4.0 Controlled initial live run (`#1069`)
 
@@ -2024,6 +2087,24 @@ are prepared for the follow-up commit.
    The service and timer files are installed under
    `~/.config/systemd/user/` from the checked-in
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`.
+
+#### Current bringup state (verified 2026-08-01)
+
+The retention timer has **never been enabled** on node-27. Verified on the
+box:
+
+- `nhms-node27-timeseries-retention.timer` is `disabled` and `inactive` —
+  step 3's `enable --now` line is still commented out in reality, not just in
+  this runbook.
+- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` line 15 has
+  `NODE27_TIMESERIES_RETENTION_ENFORCE=0`.
+
+So the deployment is still at the #1071 Step B posture: refusal tests and
+dry-runs only, with no unattended `drop_chunks`. Nothing in this runbook
+implies the timer is running; if you need retention to actually free space,
+that is an explicit operator bringup step (enable the timer *and* flip
+`ENFORCE`), gated as always on the completeness + drill receipts covering the
+window.
 
 ### 8.2 Wire-format codes
 

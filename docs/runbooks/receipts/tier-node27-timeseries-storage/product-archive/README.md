@@ -4,6 +4,25 @@ This directory holds committed live receipts from
 `scripts/node27_product_archive.py` on node-27 (`nwm` user, main
 worktree `/home/nwm/NWM`).
 
+## Archive-root path notice (2026-07-26 migration)
+
+Every receipt JSON in this directory records an `archive_root` under the
+node-27 `/home` filesystem — the pre-migration archive root, recorded verbatim
+inside the receipts themselves. That was the live layout when each run
+happened. On 2026-07-26 the archive root moved to
+`/data/GHDC/nwm-archive` (node-27-local RAID `/dev/md0`) after the old root —
+sharing the `/home` filesystem with pgdata — deadlocked the gated retention
+chain; see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
+(2026-07-26)" for the authoritative current layout.
+
+The five receipt JSONs here — `issue849-terminal-receipt-*`,
+`issue849-authorized-enforce-*`, `issue849-authorized-dryrun-*`,
+`first-live-run-*`, `controlled-enforce-*` — **intentionally retain the old
+path and MUST NOT be rewritten**. They are point-in-time records of the
+pre-migration layout (several are SHA-256-pinned in the prose below); editing
+them would forge evidence. Only this README's operator-facing prose is updated
+to the current path.
+
 ## Receipts
 
 ### `controlled-enforce-20260715T054015Z.json`
@@ -65,8 +84,14 @@ cascade bootstrap). Provenance:
 
 Node-27 setup done for this run (recorded here so it's reproducible):
 
-- `/home/ghdc/nwm/archive` created by operator via `sudo mkdir + chown
+- The then-current archive root (the pre-migration path recorded verbatim in
+  this run's receipt) was created by the operator via `sudo mkdir + chown
   nwm:nwm` (dir was 1103/nfsdata before; `nwm` couldn't write to it).
+  **Superseded 2026-07-26**: the archive root is now
+  `/data/GHDC/nwm-archive` on the node-27-local RAID `/dev/md0`; the old
+  path is an empty directory residue. See
+  `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
+  (2026-07-26)".
 - `/home/nwm/node27-product-archive-logs` +
   `/home/nwm/node27-storage-inventory-audit-logs` created by `nwm`.
 - `/home/nwm/NWM/infra/env/node27-product-archive.env` (mode 0600) +
@@ -96,9 +121,12 @@ Node-27 setup done for this run (recorded here so it's reproducible):
   (env-file mode 0600, absolute paths, zstd executable check, etc.).
 - ✅ **Free-space guard operates**: `free_space.band=clean` computed
   against real disk (706 GiB free vs 300 GiB warn / 150 GiB refuse).
-- ✅ **Archive tier ownership resolved**: `/home/ghdc/nwm/archive/` is
-  now writable by `nwm` (was structurally blocked before this run;
-  documented as an operator-driven `sudo mkdir + chown` step).
+- ✅ **Archive tier ownership resolved**: the then-current archive root
+  (pre-migration path, recorded verbatim in the receipt) was made
+  writable by `nwm` (was structurally blocked before this run;
+  documented as an operator-driven `sudo mkdir + chown` step). The same
+  ownership requirement now applies to the current root
+  `/data/GHDC/nwm-archive` (migrated 2026-07-26).
 
 ## What this receipt reveals (3 latent bugs; retention live cascade blocked)
 
@@ -166,7 +194,7 @@ authorization to enter #856.
 On node-27 as `nwm`:
 
 ```bash
-# Preconditions: /home/ghdc/nwm/archive exists (nwm-writable);
+# Preconditions: /data/GHDC/nwm-archive exists (nwm-writable);
 # infra/env/node27-product-archive.env populated + mode 0600;
 # uv sync --all-extras --dev already run in /home/nwm/NWM.
 cd /home/nwm/NWM
