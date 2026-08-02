@@ -12,9 +12,19 @@ It covers three measured node-27 host contracts:
 * the ``nhms-db`` DB-container ``pg_restore`` entrypoint realpath,
 * the ``systemctl show`` rendering of an *unset* timestamp property, and
 * the ``pg_stat_activity.backend_type`` value naming an external client session.
+
+It additionally pins one contract that is NOT a measured host value but a
+repo-side decision: the hypertable this supervision plane recovers and guards
+(``RECOVERY_TARGET_SCHEMA``/``RECOVERY_TARGET_TABLE``/``RECOVERY_TARGET``), the
+supervised-hypertable whitelist, and the fail-closed ``validated_probe_target``
+every write-privilege probe must pass its target through.  It lives here for
+the same reason as the measured values: it was hard-coded identically in two
+planes with nothing forcing the copies to move together (issue #1087).
 """
 
 from __future__ import annotations
+
+import re
 
 # MEASURED on the real node-27 ``nhms-db`` container (timescale/timescaledb-ha:
 # pg15-latest): inside the container ``/usr/bin/pg_restore`` is a symlink whose
@@ -47,3 +57,41 @@ SYSTEMD_UNSET_TIMESTAMP = "n/a"
 # planes capture every session at full fidelity but judge conflicts on
 # ``backend_type == CLIENT_BACKEND_TYPE`` only.
 CLIENT_BACKEND_TYPE = "client backend"
+
+# REPO-SIDE PINNED CONTRACT (not a measured host value, gap G14 / issue #1087):
+# the single recovery target of this supervision plane.  The supervisor pins it
+# twice -- once in the expected decompress argv
+# (``--hypertable-schema``/``--hypertable-name``) and once inside the
+# ``has_write_privilege_on_target`` probe that decides whether a concurrent
+# session is a conflicting writer -- and the benchmark carries a third copy in
+# its own activity SQL.  Sourcing all three here is what stops a future target
+# switch from silently leaving the probe pointed at the old table, where a real
+# writer on the new target would be judged ``has_write_privilege_on_target =
+# false`` and the checkpoint would pass.
+RECOVERY_TARGET_SCHEMA = "hydro"
+RECOVERY_TARGET_TABLE = "river_timeseries"
+RECOVERY_TARGET = f"{RECOVERY_TARGET_SCHEMA}.{RECOVERY_TARGET_TABLE}"
+
+# The complete set of hypertables this plane supervises; any probe target
+# outside it is a bug, not a configuration.  Mirrors ``HYPERTABLE_KEYS`` in the
+# live-evidence verifier and the capture helper (guarded by tests).
+SUPERVISED_HYPERTABLES = ("hydro.river_timeseries", "met.forcing_station_timeseries")
+
+# A probe target is interpolated into SQL as a bare literal, so it must be a
+# strict lowercase ``schema.table`` identifier -- no quoting, whitespace,
+# comment or statement terminator can survive this.
+_PROBE_TARGET_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
+
+
+def validated_probe_target(target: str) -> str:
+    """Return ``target`` unchanged, or raise before any probe SQL can exist.
+
+    Fail-closed on both axes: the target must name a supervised hypertable AND
+    match the strict ``schema.table`` identifier form.
+    """
+
+    if target not in SUPERVISED_HYPERTABLES:
+        raise ValueError(f"probe target is not a supervised hypertable: {target!r}")
+    if _PROBE_TARGET_PATTERN.fullmatch(target) is None:
+        raise ValueError(f"probe target is not a strict schema.table identifier: {target!r}")
+    return target

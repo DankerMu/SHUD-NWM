@@ -19,11 +19,13 @@ import pytest
 
 from packages.common import compression_terminal_state as terminal_state
 from packages.common import evidence_io
+from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import (
     BoundedEvidenceError,
     assert_output_disjoint_from_closure,
     resolve_artifact_closure,
 )
+from scripts import node27_timeseries_compression_capture as compression_capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
 
@@ -2770,3 +2772,56 @@ def test_full_state_machine_executes_real_producers_against_stub_binaries(
     restore_event = next(event for event in events if event.get("kind") == "pg_restore_version")
     assert restore_event["artifact_associations"]["dump_sha256"] == "c" * 64
     assert restore_event["artifact_associations"]["container_image_id"] == "sha256:" + "a" * 64
+
+
+# Frozen pre-#1087 literal of the checkpoint activity SQL (supervisor
+# :1177-1185 before the target was single-sourced).  Folded with implicit
+# concatenation only -- the bytes are unchanged.
+_FROZEN_SUPERVISOR_ACTIVITY_SQL = (
+    "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
+    "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
+    "COALESCE(has_table_privilege(usename,'hydro.river_timeseries',"
+    "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
+    "FROM pg_stat_activity "
+    "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+    "AND state<>'idle') s"
+)
+
+
+def test_default_target_activity_sql_is_byte_identical_to_the_pre_change_literal() -> None:
+    assert supervisor._build_activity_sql() == _FROZEN_SUPERVISOR_ACTIVITY_SQL
+    assert supervisor._build_activity_sql(contract.RECOVERY_TARGET) == _FROZEN_SUPERVISOR_ACTIVITY_SQL
+
+
+def test_switching_the_target_moves_the_write_privilege_probe_with_it() -> None:
+    sql = supervisor._build_activity_sql("met.forcing_station_timeseries")
+    assert "'met.forcing_station_timeseries'" in sql
+    assert "hydro.river_timeseries" not in sql
+    assert "AS has_write_privilege_on_target" in sql
+
+
+@pytest.mark.parametrize("target", ["public.evil", "hydro.river; DROP"])
+def test_probe_target_outside_the_whitelist_or_malformed_fails_before_any_sql(target: str) -> None:
+    with pytest.raises(ValueError):
+        contract.validated_probe_target(target)
+    with pytest.raises(ValueError):
+        supervisor._build_activity_sql(target)
+
+
+def test_expected_decompress_argv_binds_the_shared_recovery_target() -> None:
+    assert contract.RECOVERY_TARGET == f"{contract.RECOVERY_TARGET_SCHEMA}.{contract.RECOVERY_TARGET_TABLE}"
+    assert contract.RECOVERY_TARGET in _FROZEN_SUPERVISOR_ACTIVITY_SQL
+
+
+def test_supervised_hypertable_whitelist_matches_every_verifier_copy() -> None:
+    assert contract.SUPERVISED_HYPERTABLES == evidence.HYPERTABLE_KEYS
+    assert contract.SUPERVISED_HYPERTABLES == compression_capture.HYPERTABLE_KEYS
+
+
+def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> None:
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas/timeseries_compression_live_evidence.schema.json").read_text()
+    )
+    recovery_target = schema["$defs"]["recovery_target"]["properties"]
+    assert recovery_target["hypertable_schema"]["const"] == contract.RECOVERY_TARGET_SCHEMA
+    assert recovery_target["hypertable_name"]["const"] == contract.RECOVERY_TARGET_TABLE

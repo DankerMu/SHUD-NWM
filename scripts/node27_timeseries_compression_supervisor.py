@@ -43,7 +43,11 @@ from packages.common.evidence_io import (
 from packages.common.node27_container_contract import (
     CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
+    RECOVERY_TARGET,
+    RECOVERY_TARGET_SCHEMA,
+    RECOVERY_TARGET_TABLE,
     SYSTEMD_UNSET_TIMESTAMP,
+    validated_probe_target,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
@@ -373,9 +377,9 @@ def _assert_exact_argv(argv: list[str], *, kind: str, associations: Mapping[str,
             "--receipt-path",
             str(associations["recovery_receipt"]),
             "--hypertable-schema",
-            "hydro",
+            RECOVERY_TARGET_SCHEMA,
             "--hypertable-name",
-            "river_timeseries",
+            RECOVERY_TARGET_TABLE,
             "--chunk-schema",
             "_timescaledb_internal",
             "--chunk-name",
@@ -1153,6 +1157,28 @@ def _assert_no_client_backend_session(activity: Any) -> None:
             raise SupervisorError("checkpoint observed a conflicting database session")
 
 
+def _build_activity_sql(target: str = RECOVERY_TARGET) -> str:
+    """Build the G14 checkpoint activity SQL for one validated probe target.
+
+    The target is validated before any SQL exists, so a target that is not a
+    supervised hypertable (or is not a strict ``schema.table`` identifier) can
+    never reach the probe.  The default is the pinned recovery target, which
+    the expected decompress argv binds from the same constants.
+    """
+
+    probe_target = validated_probe_target(target)
+    return (
+        "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
+        "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
+        "COALESCE(has_table_privilege("
+        f"usename,'{probe_target}',"
+        "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
+        "FROM pg_stat_activity "
+        "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+        "AND state<>'idle') s"
+    )
+
+
 def capture_checkpoint(
     checkpoint: Mapping[str, Any],
     *,
@@ -1174,15 +1200,7 @@ def capture_checkpoint(
     # the fact that does.  Every session is still captured for forensics --
     # only the judgment narrows.  ``COALESCE(..., false)`` fails closed for
     # background workers where ``usename`` is NULL.
-    activity_sql = (
-        "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
-        "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
-        "COALESCE(has_table_privilege(usename,'hydro.river_timeseries',"
-        "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
-        "FROM pg_stat_activity "
-        "WHERE datname=current_database() AND pid<>pg_backend_pid() "
-        "AND state<>'idle') s"
-    )
+    activity_sql = _build_activity_sql()
     lock_sql = (
         "SELECT json_build_object('conflicts',COALESCE(json_agg(l ORDER BY pid),'[]'::json)) "
         "FROM (SELECT pid,locktype,mode,granted FROM pg_locks WHERE NOT granted) l"
