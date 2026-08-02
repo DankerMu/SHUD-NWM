@@ -1039,10 +1039,14 @@ credential in process argv.
    ```
 
    The command above uses the canonical defaults and is unaffected, but any custom
-   `--root`/`--repo` must be a canonical absolute path — no trailing slash, no
-   duplicate or dot segments; the plan author refuses anything else (the verifier
-   compares recorded plan paths verbatim, so a non-canonical root would author a
-   plan whose bundle fails verification later with an unrelated message).
+   `--root`, `--repo` or `--schema-dump-host` must be a canonical absolute path — no
+   trailing slash, no duplicate or dot segments; the plan author refuses anything else
+   (the verifier compares recorded plan paths verbatim, so a non-canonical root or host
+   dump path would author a plan whose bundle fails verification later with an unrelated
+   message, and a `..` component aborts inside the one-shot replay window instead).
+   `--schema-dump-container` is deliberately **not** canonicality-guarded: it is a
+   container-internal path checked only by verbatim-symmetric prefix/shape gates
+   (verifier and supervisor mirror alike), so it cannot produce that false refusal.
 
    Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.

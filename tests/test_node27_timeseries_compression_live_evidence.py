@@ -6224,10 +6224,10 @@ _NON_CANONICAL_PATHS = {
 }
 
 
-@pytest.mark.parametrize("label", ["root", "repo"])
+@pytest.mark.parametrize("label", ["root", "repo", "schema_dump_host"])
 @pytest.mark.parametrize("shape", sorted(_NON_CANONICAL_PATHS))
 def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str) -> None:
-    """Both labels, all six shapes: refused at authoring with an ACCURATE message.
+    """All three labels, all six shapes: refused at authoring with an ACCURATE message.
 
     `repo` matters as much as `root`: it f-strings the command argv paths the verifier
     pins against `expected_executable` literals, so a trailing-slash repo poisons the
@@ -6235,6 +6235,16 @@ def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str)
     message must name the label, the offending value and its canonical rendering --
     an operator who mistypes a slash should learn that from the author, not from a
     forensic verdict about capture output paths half an hour later.
+
+    `schema_dump_host` (#1268) is the same disease one field over: the value goes
+    verbatim into the pg_dump argv and into that command's `artifact_associations`
+    (plan_author :183), while the verifier renders the ledger-side artifact ref through
+    `str(Path(...))` and compares the plan side VERBATIM at :1439 -- so a `//`-bearing
+    host dump path authored a plan whose bundle could only ever fail with "supervisor
+    observed artifact path differs from run plan output".  A `..` component takes a
+    different route to the same class: prearm passes it (`is_absolute` only), and the
+    supervisor's produced-artifact no-follow inspect aborts the moment pg_dump exits,
+    inside the one-shot replay window.
     """
 
     value = _NON_CANONICAL_PATHS[shape]
@@ -6265,16 +6275,35 @@ def test_plan_author_accepts_a_canonical_root(tmp_path: Path) -> None:
         assert output_path == str(Path(output_path)), output_path
 
 
+def test_plan_author_accepts_a_canonical_custom_schema_dump_host(tmp_path: Path) -> None:
+    """Positive for the #1268 label: a canonical host dump path authors, VERBATIM.
+
+    The guard's job is to refuse, never to rewrite: the value the operator passed must
+    land byte-identical in the pg_dump argv and in that command's
+    `artifact_associations["schema_dump"]`, because the verifier compares exactly those
+    recorded bytes against the Path-normalized ledger ref (live_evidence.py :1439).  A
+    guard that silently canonicalized instead of refusing would make the plan's recorded
+    bytes differ from what the operator reviewed -- a different, quieter defect.
+    """
+
+    dump = str(tmp_path / "schema-before.dump")
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, schema_dump_host=dump)
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_dump")
+    assert command["artifact_associations"]["schema_dump"] == dump
+    assert command["argv"][-1] == dump
+
+
 def test_plan_author_module_defaults_are_canonical() -> None:
     """Structural: the guard can never refuse the module's own defaults.
 
-    The runbook's authorized command passes neither `--root` nor `--repo`, so both
-    defaults go straight through the new clause on every production authoring.  The
-    negatives above prove the clause really does refuse; without this pin a stray
-    trailing slash in either literal would ship an author that cannot author at all.
+    The runbook's authorized command passes neither `--root` nor `--repo` -- and no
+    `--schema-dump-host` either -- so all three defaults go straight through the clause
+    on every production authoring.  The negatives above prove the clause really does
+    refuse; without this pin a stray trailing slash in any of the literals would ship
+    an author that cannot author at all.
     """
 
-    for name in ("DEFAULT_ROOT", "DEFAULT_REPO"):
+    for name in ("DEFAULT_ROOT", "DEFAULT_REPO", "DEFAULT_SCHEMA_DUMP_HOST"):
         value = getattr(plan_author, name)
         assert value == str(Path(value)), name
         assert not value.endswith("/"), name
@@ -6300,3 +6329,56 @@ def test_plan_author_accepts_the_recorded_boundary_root() -> None:
     capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
     assert capture["output_path"] == f"{root}/capture-sizes_post.json"
     assert str(Path(capture["output_path"])) == capture["output_path"]
+
+
+def test_plan_author_leaves_the_container_dump_path_unguarded_by_adjudication() -> None:
+    """The recorded adjudication (#1268), in executable form: container path NOT guarded.
+
+    `--schema-dump-container` names a path inside the DB container, and the ruling that
+    it stays outside the canonicality guard rests on SYMMETRY ALONE -- not on any "no
+    verifier checks it" claim, which is false: the supervisor extracts it and
+    `sha256sum`s it in the container.  The complete consumer set is (a) plan_author :196,
+    the pg_restore `--list` argv, whose command records NO artifact associations, so the
+    verbatim-vs-normalized comparison at :1439 never sees it; (b) the verifier's
+    prefix+shape argv gate (live_evidence.py :744-749) and the same prefix check on the
+    captured listing (:1892); (c) the supervisor's mirror gates -- `_assert_exact_argv`
+    (supervisor.py :350-364) and `resolve_container_pg_restore_identity`
+    (:1055-1058, invoked :1768), which takes `argv[-1]` verbatim, asserts the same
+    `startswith` mount containment and hashes that exact string.  Every one of those is
+    textual with zero `Path()` normalization on either side, so the false-refusal disease
+    this guard exists for cannot reach this field.  This test is the "no third silent
+    state" pin: an interior `//` container path (still prefix-compatible with the gates)
+    AUTHORS, and lands verbatim as the pg_restore list argv's last element.  If a future
+    change decides to guard the container path, THIS is the test that must be flipped
+    consciously -- the ruling cannot erode by accident.
+    """
+
+    container_dump = "/var/lib/postgresql//evidence/schema-before.dump"
+    plan = plan_author.build_run_plan(
+        mutation_head_sha=HEAD, schema_dump_container=container_dump
+    )
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_restore_list")
+    assert command["argv"][-1] == container_dump
+    assert command["artifact_associations"] == {}
+
+
+@pytest.mark.parametrize("label", ["root", "repo", "schema_dump_host"])
+def test_plan_author_rejects_relative_paths_for_every_guarded_label(label: str) -> None:
+    """The fifth shape: a RELATIVE value, refused by the pre-existing absolute branch.
+
+    That branch (`{label} must be an absolute path`) runs first inside the same loop, so
+    extending the loop's domain extended it to `schema_dump_host` for free.  Its message
+    posture is deliberately WEAKER than the canonicality branch's: it names the label but
+    NOT the offending value and NOT a canonical rendering -- there is no meaningful
+    canonical rendering for a relative path, and this test records that difference rather
+    than claiming the two messages are equivalent.  Pinning the branch per label means a
+    future refactor that moves the `is_absolute` check out of the loop cannot silently
+    drop the refusal for one of them.
+    """
+
+    value = "relative/schema.dump"
+    with pytest.raises(plan_author.PlanAuthorError) as excinfo:
+        plan_author.build_run_plan(mutation_head_sha=HEAD, **{label: value})
+    message = str(excinfo.value)
+    assert label in message
+    assert "must be an absolute path" in message
