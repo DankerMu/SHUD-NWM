@@ -68,7 +68,7 @@ count):
 
 Spec relation: the prearm refusal semantics currently live in the
 `hypertable-compression` capability (openspec/specs/
-hypertable-compression/spec.md:161 — "A failure in the middle of the
+hypertable-compression/spec.md:179 — "A failure in the middle of the
 sweep MUST surface as the script's own refusal message and leave a
 manifest covering what already moved"). This change's
 `prearm-error-model` capability REFINES that mid-sweep clause — the

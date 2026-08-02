@@ -19,7 +19,10 @@ malformed, when an existing terminal receipt does not match that digest, when
 the failure-intent family is unresolved, when the run plan is present but
 unparsable, or when a plan-authored label would name a destination outside the
 archive.  A move that fails mid-sweep writes a PARTIAL manifest (recording what
-already moved and what failed) and then refuses.
+already moved and what failed) and then refuses.  Non-move filesystem failures
+AFTER the first move (associations-directory creation, the association re-probe,
+the terminal manifest write) take the same shape: they attempt the same PARTIAL
+manifest and carry the completed-move record inside the refusal message.
 """
 
 from __future__ import annotations
@@ -430,7 +433,7 @@ def select_workdir_residue(workdir: Path) -> list[str]:
 
 
 def _underlying_error_text(error: BaseException) -> str:
-    """Render a wrapped filesystem failure the way :412/:424/:617 already do.
+    """Render a wrapped filesystem failure the way the existing PrearmError sites do.
 
     ``SafeFilesystemError`` is a ``RuntimeError`` subclass, NOT an ``OSError``
     (``packages/common/safe_fs.py:10``), so it carries no ``strerror`` and is
@@ -718,6 +721,22 @@ def run_prearm(
                 os.lstat(target)
             except FileNotFoundError:
                 continue
+            except OSError as error:
+                # POST-move: an unreadable re-probe would otherwise escape as a
+                # bare traceback with the workdir residue already relocated.
+                # ``os.lstat`` cannot raise ``SafeFilesystemError``, so plain
+                # ``OSError`` is the whole surface here.
+                raise _post_move_refusal(
+                    f"association re-probe failed ({_underlying_error_text(error)}): {target}",
+                    manifest_status=_best_effort_partial_manifest(
+                        {
+                            "kind": "plan_association",
+                            "label": label,
+                            "path": os.fspath(target),
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    ),
+                ) from error
             # Narrow on purpose: only the destination probe.  A broad
             # ``except PrearmError`` around the loop would re-wrap the move's
             # own refusal and overwrite its partial manifest.

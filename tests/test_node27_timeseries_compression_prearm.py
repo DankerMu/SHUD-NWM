@@ -993,3 +993,63 @@ def test_an_unwritable_associations_dir_refuses_but_reports_what_already_moved(t
         assert str(manifest_path) in captured.err
     else:
         assert "manifest was NOT written" in captured.err
+
+
+def test_an_unreadable_association_reprobe_refuses_but_reports_what_already_moved(tmp_path, capsys, monkeypatch):
+    """POST-move: the loop re-probes each association right before moving it.
+
+    An EACCES there (an operator revoking traverse on the dump's directory
+    between the pre-move selection and the sweep) is not ENOENT, so an
+    ENOENT-only handler lets it escape ``main()`` as a bare traceback with the
+    workdir residue already relocated and no manifest at all.
+
+    ``select_association_residue`` probes the SAME path before the first move,
+    so the injection arms on the second ``lstat`` of that exact path — the
+    re-probe — and leaves every other path (including pathlib's own stats) on
+    the real ``os.lstat``.
+    """
+
+    workdir, schema_dump, capture_output = _seed_sweep_with_associations(tmp_path)
+    real_lstat = os.lstat
+    probes: list[str] = []
+
+    def failing_lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(schema_dump):
+            probes.append(str(path))
+            if len(probes) == 2:
+                raise OSError(errno.EACCES, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", failing_lstat)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert probes == [str(schema_dump), str(schema_dump)], probes
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "association re-probe failed" in captured.err
+    assert "Permission denied" in captured.err
+    assert str(schema_dump) in captured.err
+
+    archive = _sole_archive(workdir)
+    assert str(archive) in captured.err
+
+    # Every already-moved workdir pair is reported, after the prefixed line.
+    forensics = captured.err.split("\n", 1)[1]
+    assert f"{workdir / 'benchmark-before.json'} -> {archive / 'benchmark-before.json'}" in forensics
+    assert (archive / "benchmark-before.json").read_bytes() == b'{"benchmark": "stale"}'
+
+    # The re-probe precedes the move, so both association originals are intact.
+    assert schema_dump.read_bytes() == b"PGDMP-stale"
+    assert capture_output.read_bytes() == b'{"activity": "stale"}'
+    assert list((archive / prearm.ASSOCIATIONS_DIR_NAME).iterdir()) == []
+
+    manifest_path = archive / prearm.MANIFEST_NAME
+    assert str(manifest_path) in captured.err
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "partial"
+    assert [move["label"] for move in manifest["moves"]] == ["benchmark-before.json"]
+    assert manifest["failure"]["kind"] == "plan_association"
+    assert manifest["failure"]["label"] == "schema_dump"
+    assert manifest["failure"]["path"] == str(schema_dump)
+    assert "Permission denied" in manifest["failure"]["error"]
