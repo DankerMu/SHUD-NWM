@@ -92,7 +92,7 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. `scripts/node27_timeseries_compression_live_evidence.py`:
+- [x] 1. `scripts/node27_timeseries_compression_live_evidence.py`:
   add module constant `SELF_TEST_SEAM_PREFIX = "--self-test-"` near
   the other constants, and in `_validate_supervisor_execution`'s
   captures loop — at the point where each capture's argv has just
@@ -104,7 +104,7 @@ Must preserve:
   Check the PLAN capture argv only; do not add a ledger-side twin
   (the :1253 equality binding covers it — record this reasoning in
   a one-line comment at the check site). No other logic changes.
-- [ ] 2. Restructure `test_real_state_machine_bundle_verifies_task_4_5_pass`
+- [x] 2. Restructure `test_real_state_machine_bundle_verifies_task_4_5_pass`
   (:4901): (i) remove ONLY the seam appends from the plan_prod loop
   (:4991-5009) — the loop carries one load-bearing non-seam
   mutation that MUST stay: the cleanup capture's `--repo` rewrite
@@ -133,7 +133,7 @@ Must preserve:
   turns out to bind capture events to plan_exec argv in a way the
   rewrite cannot satisfy, STOP and report the blocker — do not
   weaken any verifier check or existing assertion to force green.
-- [ ] 3. Tests (append-only apart from task 2's restructure):
+- [x] 3. Tests (append-only apart from task 2's restructure):
   (a) negative docker-seam — build/obtain a verifying bundle (reuse
   the e2e's helpers or the smallest PASS fixture already used by
   neighboring tests), inject `--self-test-docker-seam` into ONE
@@ -167,7 +167,7 @@ Must preserve:
   registered-prefix seam sail through the verifier — the exact
   leak-by-forgetting hole the issue's acceptance criterion 3
   targets;
-- [ ] 4. Oracle: `uv run pytest -q
+- [x] 4. Oracle: `uv run pytest -q
   tests/test_node27_timeseries_compression_live_evidence.py
   tests/test_node27_timeseries_compression_capture.py` all green
   (record before/after counts; capture file count unchanged);
