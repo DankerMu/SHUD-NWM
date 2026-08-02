@@ -67,6 +67,13 @@ RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
+CAPTURE_SCRIPT_SUFFIX = "/scripts/node27_timeseries_compression_capture.py"
+# Options whose binding the capture anchor protects from argparse abbreviation rebinding.
+# capture.py parses with the default `allow_abbrev=True` and binds last-wins, so a later
+# `--k <other>` / `--kin=<other>` / `--m <sha>` token would re-aim the producer past the
+# full-spelling checks below.  `--kind` is the only `--k*` and `--mutation-head-sha` the
+# only `--m*` flag in that CLI, so rejecting their proper prefixes collides with nothing.
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
 # The container pg_restore entrypoint realpath is the single-source-of-truth
 # external contract shared with the verifier; see node27_container_contract.
 # Bind the wrapper and fail closed on any drift.
@@ -484,6 +491,66 @@ def _assert_concrete_argv(
     return normalized
 
 
+def _capture_option_values(argv: list[str], option: str) -> list[str]:
+    """Every value bound to `option`, position-independent, both argparse forms.
+
+    Deliberately a local scan rather than an import of the verifier's twin: the executor
+    trusts nothing from the forensic layer and must stay runnable on its own.
+    """
+
+    values: list[str] = []
+    index = 0
+    while index < len(argv):
+        base, separator, inline = argv[index].partition("=")
+        if base == option:
+            if separator:
+                values.append(inline)
+            elif index + 1 < len(argv):
+                values.append(argv[index + 1])
+                index += 1
+            else:
+                # A dangling flag binds no value; recorded as an unbindable sentinel so
+                # the caller's equality test refuses it instead of silently ignoring it.
+                values.append("")
+        index += 1
+    return values
+
+
+def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
+    """Bind a capture argv to the committed capture producer and its declared kind.
+
+    Suffix, not `EXPECTED_REPO`: recorded executor-vs-verifier asymmetry.  This process
+    EXECUTES plans, and a hermetic plan legitimately runs the capture script out of a
+    test checkout, so the production-path claim belongs to the forensic verifier alone;
+    what the supervisor can insist on is that the thing it spawns for a capture step is
+    the capture producer, invoked for the kind the plan says it is.  No seam check here
+    either -- the executor must be able to run seam-carrying hermetic plans (#1250).
+
+    The `--mutation-head-sha` VALUE is likewise not checked here -- the plan's mutation
+    SHA is a forensic claim the verifier owns -- but its abbreviations ARE rejected,
+    because an abbreviation is a rebinding technique, not a claim about the SHA.
+    """
+
+    if len(argv) < 4 or not argv[1].endswith(CAPTURE_SCRIPT_SUFFIX):
+        named = argv[1] if len(argv) > 1 else "<absent>"
+        raise SupervisorError(f"capture {kind} argv producer {named} is not the capture script")
+    if argv[2:4] != ["--kind", kind]:
+        raise SupervisorError(f"capture {kind} argv kind binding {argv[2:4]} differs from its declared kind")
+    # Position alone pins only the FIRST binding; `--kind` binds last-wins, so a second
+    # full `--kind <other>` appended anywhere would re-aim the spawned producer while
+    # argv[2:4] still read correctly.
+    if _capture_option_values(argv, "--kind") != [kind]:
+        raise SupervisorError(f"capture {kind} argv must bind --kind exactly once to its declared kind")
+    for token in argv:
+        base = token.split("=", 1)[0]
+        for option in ANCHORED_CAPTURE_OPTIONS:
+            if len(base) >= 3 and base != option and option.startswith(base):
+                raise SupervisorError(
+                    f"capture {kind} argv carries {token}, an argparse abbreviation of {option} "
+                    f"that would rebind the anchored capture identity"
+                )
+
+
 def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[str, Any]:
     """Validate exact cardinality, provenance and concrete commands before spawn."""
 
@@ -591,6 +658,7 @@ def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[st
         ):
             raise SupervisorError("run plan capture identity/output differs")
         argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+        _assert_capture_producer_argv(argv, kind=str(kind))
         capture_ids.add(capture_id)
         normalized_captures.append({**dict(capture), "argv": argv})
     if tuple(item["kind"] for item in normalized_captures) != EXPECTED_CAPTURE_SEQUENCE:
@@ -890,6 +958,10 @@ def run_capture_step(
     kind = str(capture["kind"])
     output_path = Path(str(capture["output_path"]))
     argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+    # Refused before any spawn: the executing gate is not merely a restatement of the
+    # plan gate -- `run_capture_step` is callable directly with a capture the plan
+    # validator never saw.
+    _assert_capture_producer_argv(argv, kind=kind)
     try:
         os.lstat(output_path)
     except FileNotFoundError:

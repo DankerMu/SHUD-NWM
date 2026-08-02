@@ -1151,7 +1151,14 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         {
             "capture_id": f"capture-{kind}",
             "kind": kind,
-            "argv": ["/usr/bin/printf", "{}"],
+            "argv": [
+                sys.executable,
+                evidence.EXPECTED_CAPTURE_SCRIPT,
+                "--kind",
+                kind,
+                "--mutation-head-sha",
+                HEAD,
+            ],
             "output_path": produced_refs[kind]["path"],
         }
         for kind in evidence.EXPECTED_CAPTURE_SEQUENCE
@@ -4975,7 +4982,10 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     # plan_PROD carries the pinned PRODUCTION command AND capture argvs the verifier
     # requires: seam-free, so `run_plan_id`, the bundle's run plan and the verifier all
     # see a production plan (the verifier refuses any `--self-test-*` token in a run
-    # plan capture argv outright).
+    # plan capture argv outright).  `capture_script` is left at the production default
+    # (`/home/nwm/NWM/scripts/...capture.py`) because the verifier now pins the capture
+    # producer identity; plan_EXEC below swaps argv[1] to the in-checkout script so the
+    # state machine still executes the REAL capture producer.
     plan_prod = plan_author.build_run_plan(
         mutation_head_sha=HEAD,
         root=str(tmp_path),
@@ -4983,7 +4993,6 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
         schema_dump_container=schema_dump_container,
         capture_repo=str(fixture_repo),
         capture_python=sys.executable,
-        capture_script=str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
         capture_psql=str(capture_bin / "psql"),
         capture_systemctl=str(capture_bin / "systemctl"),
         capture_docker=str(capture_bin / "docker"),
@@ -5014,6 +5023,15 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
             str(command["kind"]), association_path, schema_dump_container, src_dir
         )
     for capture in plan_exec["captures"]:
+        # The executed capture must be the real capture producer in THIS checkout; the
+        # production path plan_prod claims does not exist on a hermetic runner.  The
+        # supervisor's capture anchor is suffix-based precisely so this stays legal, and
+        # the ledger rewrite below restores the plan_prod argv the verifier pins.
+        capture["argv"] = [
+            capture["argv"][0],
+            str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
+            *capture["argv"][2:],
+        ]
         if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
             # The CI runner's real disk headroom is uncontrollable, so the executed
             # capture gets a deterministic figure (honoured value pinned below).
@@ -5204,3 +5222,297 @@ def test_verifier_rejects_unregistered_self_test_prefix_token(tmp_path: Path) ->
     message = str(excinfo.value)
     assert "--self-test-unregistered-probe" in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+# --------------------------------------------------------------------------- #
+# #1259: capture argv is anchored to the COMMITTED PRODUCER, not merely to a
+# concrete shape.  Before this gate a bundle could claim production forensics
+# while its run plan recorded `/usr/bin/printf` as the producer of all twelve
+# snapshots -- shape-valid, seam-free, and PASS-shaped.
+# --------------------------------------------------------------------------- #
+
+
+def _replace_capture_argv(bundle: dict[str, Any], tmp_path: Path, *, kind: str, argv: list[str]) -> None:
+    """Rewrite one plan capture's argv AND its equality-bound ledger twin.
+
+    Both sides move together on purpose: with only the plan side rewritten, a refusal
+    could be the ledger<->plan equality binding rather than the identity anchor, so the
+    tests below could not tell a load-bearing gate from an accidental one.
+    """
+
+    def _swap(plan: dict[str, Any]) -> None:
+        capture = next(item for item in plan["captures"] if item["kind"] == kind)
+        capture["argv"] = list(argv)
+
+    _rewrite_run_plan(bundle, tmp_path, _swap)
+    ledger_path = Path(bundle["execution"]["ledger"]["path"])
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    swapped = 0
+    for event in events:
+        if event.get("event_type") == "capture" and event["kind"] == kind:
+            event["argv"] = list(argv)
+            swapped += 1
+    assert swapped == 1
+    ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger_path)
+
+
+def _producer_argv(kind: str, *extra: str) -> list[str]:
+    """The production-shaped capture argv, before a single field is corrupted."""
+
+    return [sys.executable, evidence.EXPECTED_CAPTURE_SCRIPT, "--kind", kind, *extra]
+
+
+def test_verifier_rejects_capture_argv_naming_a_rogue_producer(tmp_path: Path) -> None:
+    """The pre-#1259 smoking gun: twelve `/usr/bin/printf` captures verified to PASS."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(bundle, tmp_path, kind="schema_dump_list", argv=["/usr/bin/printf", "{}"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    # The refusal names the producer the bundle FAILED to invoke; the offending token
+    # itself is pinned by the rogue-argv[1] case below (here argv[1] is printf's `{}`).
+    assert evidence.EXPECTED_CAPTURE_SCRIPT in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_capture_argv_naming_a_rogue_binary_in_argv1(tmp_path: Path) -> None:
+    """argv[0] is unpinned, so the identity claim must live entirely in argv[1]."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=[sys.executable, "/usr/bin/docker", "--kind", "catalog_before", "--mutation-head-sha", HEAD],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "/usr/bin/docker" in message
+    assert evidence.EXPECTED_CAPTURE_SCRIPT in message
+
+
+def test_verifier_rejects_capture_argv_bound_to_a_different_kind(tmp_path: Path) -> None:
+    """A capture claiming `catalog_before` while invoking the producer for `sizes_pre`."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=_producer_argv("sizes_pre", "--mutation-head-sha", HEAD),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "catalog_before" in message
+    assert "sizes_pre" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param([], id="pair_missing"),
+        pytest.param(["--mutation-head-sha", "f" * 40], id="value_mismatched"),
+        pytest.param(["--mutation-head-sha=" + "f" * 40], id="inline_form_mismatched"),
+        pytest.param(["--mutation-head-sha"], id="flag_without_value"),
+    ],
+)
+def test_verifier_rejects_capture_argv_without_the_plan_mutation_sha(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    """The producer must be invoked FOR THIS RUN: `--flag value` and `--flag=value` alike."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle, tmp_path, kind="sizes_pre", argv=_producer_argv("sizes_pre", *extra)
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert HEAD in message
+    assert "--mutation-head-sha" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_accepts_the_inline_mutation_sha_form_when_it_matches(tmp_path: Path) -> None:
+    """Non-vacuity for the parametrized rejections: `=` form is a FORM, not a violation.
+
+    Without this, an implementation that rejected every inline token outright would pass
+    the mismatch cases while quietly refusing a legitimate spelling.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle, tmp_path, kind="sizes_pre", argv=_producer_argv("sizes_pre", f"--mutation-head-sha={HEAD}")
+    )
+    result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert result["verdict"] == evidence.PASS_VERDICT
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        pytest.param(["--self-t", str(_SELFTEST_FREE_BYTES)], id="abbreviated_seam_with_value"),
+        pytest.param(["--se"], id="two_letter_abbreviation_alone"),
+        pytest.param(["--s"], id="one_letter_abbreviation_alone"),
+        pytest.param([f"--self-t={_SELFTEST_FREE_BYTES}"], id="abbreviated_seam_inline_form"),
+    ],
+)
+def test_verifier_rejects_argparse_abbreviations_of_a_seam_flag(tmp_path: Path, tokens: list[str]) -> None:
+    """Facet B: capture.py runs with `allow_abbrev=True`, so prefixes ARE the seam.
+
+    Today `--self-t` is ambiguous only because two seams share that prefix -- an
+    accidental, unrecorded premise.  With one seam registered it would bind
+    `--self-test-free-bytes` while carrying no `--self-test-` prefix at all.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="post_dry_selection", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert tokens[0] in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_non_seam_flag_in_the_abbreviation_rejection_domain() -> None:
+    """No legitimate capture flag ever enters the `--se` rejection domain.
+
+    The facet-B gate refuses every base from `--s` to `--self-test-`; this pins the
+    measured zero-collision fact (`--systemctl`, `--schema-dump-*` are the only non-seam
+    `--s*` flags) so a future `--session-...` flag reddens HERE rather than becoming a
+    plan token the verifier silently refuses.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    non_seam = {option for option in options if not option.startswith(evidence.SELF_TEST_SEAM_PREFIX)}
+    assert {"--systemctl", "--schema-dump-host", "--schema-dump-container"} <= non_seam
+    for option in non_seam:
+        assert not option.startswith("--se"), option
+    # Non-vacuity: the seams themselves DO live in the domain the gate rejects.
+    assert any(option.startswith("--se") for option in options - non_seam)
+
+
+def test_expected_capture_script_is_the_production_producer_path() -> None:
+    """Anti-tautology: gate and fixture share the constant, so pin its VALUE literally.
+
+    A constant mis-derived from `REPO_ROOT` (the ambient checkout) instead of
+    `EXPECTED_REPO_PATH` passes every other test in this module -- the fixture would move
+    with it -- while silently accepting captures from any checkout the verifier runs in.
+    """
+
+    assert evidence.EXPECTED_CAPTURE_SCRIPT == "/home/nwm/NWM/scripts/node27_timeseries_compression_capture.py"
+    # The load-bearing coupling the e2e depends on: production plans really do emit it.
+    assert plan_author.DEFAULT_CAPTURE_SCRIPT == evidence.EXPECTED_CAPTURE_SCRIPT
+
+
+# --------------------------------------------------------------------------- #
+# #1259 follow-up: the anchor must be REBIND-proof and ABBREVIATION-proof.
+# capture.py parses with argparse's default `allow_abbrev=True` and both anchored
+# options bind last-wins, so pinning argv[2:4] and the full `--mutation-head-sha`
+# spelling left four PASS-shaped rebinds open: a second full `--kind`, `--k`,
+# `--kin=`, and `--m`.  Each of them re-aims the producer while every fixed-offset
+# and full-spelling check still reads the anchored values.
+# --------------------------------------------------------------------------- #
+
+_OTHER_KIND = "sizes_pre"
+_OTHER_SHA = "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        pytest.param(["--kind", _OTHER_KIND], "exactly once", id="full_second_kind"),
+        pytest.param(["--k", _OTHER_KIND], "abbreviation of --kind", id="k_abbreviation_pair"),
+        pytest.param([f"--kin={_OTHER_KIND}"], f"--kin={_OTHER_KIND}", id="kin_abbreviation_inline"),
+        pytest.param(["--m", _OTHER_SHA], "abbreviation of --mutation-head-sha", id="m_abbreviation_pair"),
+    ],
+)
+def test_verifier_rejects_argparse_rebinding_of_the_anchored_capture_options(
+    tmp_path: Path, tokens: list[str], expected: str
+) -> None:
+    """Each shape verified to PASS before this gate: argv[2:4] and `--mutation-head-sha`
+    both still read the anchored values while the producer would have collected another
+    kind, or recorded another mutation SHA."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert expected in message
+    # The refusal is the identity anchor's own, not the plan<->ledger equality binding:
+    # `_inject_capture_seam` appends to BOTH sides, so equality still holds here.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_rebinding_kind_token_placed_before_the_anchored_pair(tmp_path: Path) -> None:
+    """Prefix position too: argv[2:4] is only the anchor's FIRST binding.
+
+    With the rebinding token ahead of the pair, argv[2:4] is no longer `["--kind", kind]`
+    -- so this shape must be refused by the position check even if the exactly-once
+    check were removed, and vice versa; neither check alone covers both placements.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=[
+            sys.executable,
+            evidence.EXPECTED_CAPTURE_SCRIPT,
+            "--kind",
+            _OTHER_KIND,
+            "--kind",
+            "catalog_before",
+            "--mutation-head-sha",
+            HEAD,
+        ],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "catalog_before" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_second_mutation_sha_binding(tmp_path: Path) -> None:
+    """Last-wins on the SHA side too: a full second `--mutation-head-sha` rebinds it."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="sizes_pre", tokens=["--mutation-head-sha", _OTHER_SHA]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--mutation-head-sha" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_flag_abbreviating_an_anchored_option() -> None:
+    """The zero-collision fact the abbreviation rejection stands on.
+
+    Rejecting every proper prefix of `--kind` / `--mutation-head-sha` is only safe while
+    those are the sole `--k*` / `--m*` flags in the capture CLI.  A future `--keep-going`
+    or `--max-rows` would make `--k` / `--m` a legitimate spelling the verifier silently
+    refuses -- it reddens HERE instead, before it can reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {option for option in options if option.startswith("--k")} == {"--kind"}
+    assert {option for option in options if option.startswith("--m")} == {"--mutation-head-sha"}
+    for anchored in evidence.ANCHORED_CAPTURE_OPTIONS:
+        assert anchored in options, anchored
+        for option in options - {anchored}:
+            assert not (len(option) >= 3 and anchored.startswith(option)), (option, anchored)
+    # Both gates reject the same domain; drift between them would reopen the rebind on
+    # whichever side lagged.
+    assert supervisor.ANCHORED_CAPTURE_OPTIONS == evidence.ANCHORED_CAPTURE_OPTIONS
