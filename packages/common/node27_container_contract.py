@@ -86,7 +86,9 @@ RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 # this mapping today, so mutating one of them alone fails a test:
 #   * derived from it directly -- the supervisor's expected decompress argv and
 #     the capture producer's ``RECOVERY_TARGET`` dict plus the
-#     ``RECOVERY_PREFLIGHT_SQL`` it interpolates;
+#     ``RECOVERY_PREFLIGHT_SQL`` and ``CATALOG_POST_SQL`` it interpolates (both
+#     rendered strings byte-frozen in
+#     tests/test_node27_timeseries_compression_capture.py, issues #1242/#1244);
 #   * asserted field-by-field equal to it by the drift guard in
 #     tests/test_node27_timeseries_compression_supervisor.py -- the live-evidence
 #     schema ``$defs.recovery_target`` consts, the schema's
@@ -95,13 +97,15 @@ RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 #   * bound transitively -- ``plan_author``'s ``_RECOVERY_TARGET_ARGS`` literals,
 #     because the plan it emits must pass the real supervisor gate in
 #     tests/test_node27_timeseries_compression_capture.py, whose expected argv is
-#     derived from here.
-# Coverage is NOT total: two production copies are known unbound and tracked in a
-# follow-up issue -- the capture producer's ``_capture_catalog_post`` SQL
-# literals (scripts/node27_timeseries_compression_capture.py:449-452) and the
-# verifier's inline expected decompress argv
-# (scripts/node27_timeseries_compression_live_evidence.py:666-677).  Both still
-# spell the six fields out by hand, so a retarget must edit them by hand too.
+#     derived from here; and the verifier's expected decompress argv tail
+#     (``_validate_exact_command_argv``, kind ``decompress``), which interpolates
+#     the verifier's own guard-bound ``RECOVERY_TARGET`` rather than importing
+#     this module (#1244).
+# Coverage is NOT total: one production copy remains outside the bound set --
+# ``TARGET``/``TARGET_RELATION`` in
+# scripts/node27_timeseries_decompression_replay.py:24-32, which is NOT fully
+# inert (``TARGET`` is the default parameter at :138) -- tracked in issue
+# #1245.
 # Note the naming: ``RECOVERY_TARGET`` above is the ``schema.table`` STRING the
 # write-privilege probe interpolates, while this is the six-field mapping the
 # evidence documents carry.

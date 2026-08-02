@@ -103,6 +103,45 @@ IDENTITY = {
     "range_start": "2026-05-28T00:00:00Z",
     "range_end": "2026-06-04T00:00:00Z",
 }
+# The replay entrypoint's option name for each recovery-target field, in the exact
+# order the decompress argv carries them (#1244).
+_RECOVERY_TARGET_OPTIONS = {
+    "hypertable_schema": "--hypertable-schema",
+    "hypertable_name": "--hypertable-name",
+    "chunk_schema": "--chunk-schema",
+    "chunk_name": "--chunk-name",
+    "range_start": "--range-start",
+    "range_end": "--range-end",
+}
+
+
+def _recovery_target_argv_tail(**overrides: str) -> list[str]:
+    """The six exact-chunk options, built from the verifier's own bound constant.
+
+    The bundle fixture below no longer keeps an independent literal copy of the
+    tail, so this helper is definitional against the verifier for the accepted
+    case; the oracles that stay independent are the per-field deviation
+    rejections that pass ``overrides``, the contract drift guard in
+    tests/test_node27_timeseries_compression_supervisor.py, and the plan_author
+    e2e (``test_real_state_machine_bundle_verifies_task_4_5_pass``).
+    """
+
+    values = {**evidence.RECOVERY_TARGET, **overrides}
+    return [token for field, option in _RECOVERY_TARGET_OPTIONS.items() for token in (option, values[field])]
+
+
+def _decompress_argv(receipt_path: str, **overrides: str) -> list[str]:
+    return [
+        "/home/nwm/NWM/.venv/bin/python",
+        "/home/nwm/NWM/scripts/node27_timeseries_decompression_replay.py",
+        "--database",
+        "nhms",
+        "--mutation-head-sha",
+        HEAD,
+        "--receipt-path",
+        receipt_path,
+        *_recovery_target_argv_tail(**overrides),
+    ]
 
 
 def _intent_context() -> dict[str, str]:
@@ -1006,18 +1045,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                 HEAD,
                 "--receipt-path",
                 str(tmp_path / "recovery-receipt.json"),
-                "--hypertable-schema",
-                "hydro",
-                "--hypertable-name",
-                "river_timeseries",
-                "--chunk-schema",
-                "_timescaledb_internal",
-                "--chunk-name",
-                "_hyper_3_7_chunk",
-                "--range-start",
-                "2026-05-28T00:00:00Z",
-                "--range-end",
-                "2026-06-04T00:00:00Z",
+                *_recovery_target_argv_tail(),
             ],
         ),
         (
@@ -2856,6 +2884,34 @@ def test_recovery_rejects_target_drift(tmp_path: Path, artifact_name: str) -> No
     bundle["recovery"][artifact_name] = _json_ref(tmp_path, f"recovery-target-{artifact_name}.json", raw)
     with pytest.raises(evidence.EvidenceError, match="exact authorized chunk"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_decompress_argv_derived_from_the_recovery_target_is_accepted(tmp_path: Path) -> None:
+    """An argv whose tail comes from the verifier's own bound constant passes (#1244)."""
+
+    receipt_path = str(tmp_path / "recovery-receipt.json")
+    evidence._validate_exact_command_argv(
+        _decompress_argv(receipt_path),
+        kind="decompress",
+        associations={"recovery_receipt": receipt_path},
+        label="run plan command[2]",
+    )
+
+
+@pytest.mark.parametrize("field", list(_RECOVERY_TARGET_OPTIONS))
+def test_decompress_argv_rejects_any_single_recovery_target_field_deviation(tmp_path: Path, field: str) -> None:
+    """Every one of the six fields is load-bearing in the expected tail (#1244)."""
+
+    receipt_path = str(tmp_path / "recovery-receipt.json")
+    argv = _decompress_argv(receipt_path, **{field: f"{evidence.RECOVERY_TARGET[field]}-drift"})
+    assert len(argv) == 20
+    with pytest.raises(evidence.EvidenceError, match="decompress argv differs"):
+        evidence._validate_exact_command_argv(
+            argv,
+            kind="decompress",
+            associations={"recovery_receipt": receipt_path},
+            label="run plan command[2]",
+        )
 
 
 def test_recovery_rejects_row_parity_failure(tmp_path: Path) -> None:

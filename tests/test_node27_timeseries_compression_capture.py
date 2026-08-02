@@ -20,6 +20,7 @@ turns this suite RED -- the exact class caught live five times.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -55,6 +56,32 @@ _FROZEN_RECOVERY_PREFLIGHT_SQL = (
     "WHERE c.hypertable_schema = 'hydro' AND c.hypertable_name = 'river_timeseries' "
     "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'"
 )
+
+# Verbatim copy of the catalog_post SQL as it stood before #1244 replaced its six
+# hand-written chunk-identity literals with an interpolation of the derived
+# ``RECOVERY_TARGET`` mapping, extracted from the pre-change module by AST and
+# pinned together with its digest so this oracle never re-derives what it checks.
+# Same zero-change standard as the recovery-preflight freeze above: this SQL runs
+# on the node-27 primary during the live capture.
+_FROZEN_CATALOG_POST_SQL = (
+    "/* capture:catalog_post */ SELECT json_build_object("
+    "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
+    "'catalog', (SELECT json_build_object("
+    "'hypertables', json_build_object("
+    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
+    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
+    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
+    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
+    "timescaledb_information.compression_settings s), '[]'::json),"
+    "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
+    "WHERE j.proc_name = 'policy_compression'), '[]'::json))),"
+    "'compressed_chunk_identities', json_build_array(json_build_object("
+    "'hypertable_schema','hydro','hypertable_name','river_timeseries',"
+    "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
+    "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))"
+)
+_FROZEN_CATALOG_POST_SQL_SHA256 = "c68db1f99df431bf3f5baeb3d6f73eae03d63d440abae2f0c08729535f43567e"
 
 _DB_IDENTITY = {
     "dbname": "nhms",
@@ -335,6 +362,24 @@ def test_capture_recovery_target_keeps_the_schema_mandated_six_key_shape() -> No
 def test_capture_recovery_preflight_sql_is_byte_identical_to_the_frozen_literal() -> None:
     assert capture.RECOVERY_PREFLIGHT_SQL == _FROZEN_RECOVERY_PREFLIGHT_SQL
     assert capture.RECOVERY_PREFLIGHT_SQL.startswith("/* capture:recovery_preflight */ ")
+
+
+def test_capture_catalog_post_sql_is_byte_identical_to_the_frozen_literal() -> None:
+    """The derived catalog_post SQL did not move a byte (#1244).
+
+    Honest scope of the marker assertions: the test psql stub matches by
+    substring containment over the joined argv (see the supervisor suite's stub
+    semantics, ``all(token in argv)``), NOT by prefix -- so the hard constraint
+    the capture dress rehearsal depends on is that ``/* capture:catalog_post */``
+    appears verbatim and stays unique among the stub's responses.  The
+    ``startswith`` assertion below is a byte-freeze detail, kept because the
+    rendered statement is what executes on the node-27 primary.
+    """
+
+    assert hashlib.sha256(_FROZEN_CATALOG_POST_SQL.encode()).hexdigest() == _FROZEN_CATALOG_POST_SQL_SHA256
+    assert capture.CATALOG_POST_SQL == _FROZEN_CATALOG_POST_SQL
+    assert capture.CATALOG_POST_SQL.count("/* capture:catalog_post */") == 1
+    assert capture.CATALOG_POST_SQL.startswith("/* capture:catalog_post */ ")
 
 
 # --------------------------------------------------------------------------- #
