@@ -1045,8 +1045,9 @@ credential in process argv.
    dump path would author a plan whose bundle fails verification later with an unrelated
    message, and a `..` component aborts inside the one-shot replay window instead).
    `--schema-dump-container` is deliberately **not** canonicality-guarded: it is a
-   container-internal path checked only by verbatim-symmetric prefix/shape gates
-   (verifier and supervisor mirror alike), so it cannot produce that false refusal.
+   container-internal path checked only by verbatim-symmetric textual comparisons —
+   prefix/shape gates and a whole-argv exact-equality gate — (verifier and supervisor
+   mirror alike), so it cannot produce that false refusal.
 
    Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.

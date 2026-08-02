@@ -6237,9 +6237,9 @@ def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str)
     forensic verdict about capture output paths half an hour later.
 
     `schema_dump_host` (#1268) is the same disease one field over: the value goes
-    verbatim into the pg_dump argv and into that command's `artifact_associations`
-    (plan_author :183), while the verifier renders the ledger-side artifact ref through
-    `str(Path(...))` and compares the plan side VERBATIM at :1439 -- so a `//`-bearing
+    verbatim into the pg_dump argv and into that command's `artifact_associations`, while
+    the verifier renders the ledger-side artifact ref through `str(Path(...))` and
+    compares the plan side VERBATIM at live_evidence.py :1439 -- so a `//`-bearing
     host dump path authored a plan whose bundle could only ever fail with "supervisor
     observed artifact path differs from run plan output".  A `..` component takes a
     different route to the same class: prearm passes it (`is_absolute` only), and the
@@ -6293,6 +6293,28 @@ def test_plan_author_accepts_a_canonical_custom_schema_dump_host(tmp_path: Path)
     assert command["argv"][-1] == dump
 
 
+def test_plan_author_accepts_the_boundary_double_slash_schema_dump_host() -> None:
+    """The `//x` boundary, extended to the third guarded label (#1268).
+
+    `test_plan_author_accepts_the_recorded_boundary_root` pins the LEADING double slash
+    for `root`; the guard is one shared loop, so the carve-out is transitive in the code
+    but only executable for one label.  This makes it executable for `schema_dump_host`
+    as well: POSIX (and pathlib) preserve exactly two leading slashes, so
+    `//x/schema-before.dump` is normalization-stable, and both sides that compare this
+    value -- the verifier's verbatim plan-side association read and the `str(Path(...))`
+    ledger-side rendering -- land on the same bytes.  Asserts the recording is VERBATIM
+    on both the pg_dump argv slot and the association, the same posture the canonical
+    positive above pins.
+    """
+
+    dump = "//x/schema-before.dump"
+    assert str(Path(dump)) == dump
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, schema_dump_host=dump)
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_dump")
+    assert command["artifact_associations"]["schema_dump"] == dump
+    assert command["argv"][-1] == dump
+
+
 def test_plan_author_module_defaults_are_canonical() -> None:
     """Structural: the guard can never refuse the module's own defaults.
 
@@ -6337,20 +6359,24 @@ def test_plan_author_leaves_the_container_dump_path_unguarded_by_adjudication() 
     `--schema-dump-container` names a path inside the DB container, and the ruling that
     it stays outside the canonicality guard rests on SYMMETRY ALONE -- not on any "no
     verifier checks it" claim, which is false: the supervisor extracts it and
-    `sha256sum`s it in the container.  The complete consumer set is (a) plan_author :196,
-    the pg_restore `--list` argv, whose command records NO artifact associations, so the
-    verbatim-vs-normalized comparison at :1439 never sees it; (b) the verifier's
+    `sha256sum`s it in the container.  The complete consumer set is (a) plan_author's
+    pg_restore `--list` command block, whose command records NO artifact associations, so
+    the verbatim-vs-normalized comparison at :1439 never sees it; (b) the verifier's
     prefix+shape argv gate (live_evidence.py :744-749) and the same prefix check on the
     captured listing (:1892); (c) the supervisor's mirror gates -- `_assert_exact_argv`
     (supervisor.py :350-364) and `resolve_container_pg_restore_identity`
     (:1055-1058, invoked :1768), which takes `argv[-1]` verbatim, asserts the same
-    `startswith` mount containment and hashes that exact string.  Every one of those is
-    textual with zero `Path()` normalization on either side, so the false-refusal disease
-    this guard exists for cannot reach this field.  This test is the "no third silent
-    state" pin: an interior `//` container path (still prefix-compatible with the gates)
-    AUTHORS, and lands verbatim as the pg_restore list argv's last element.  If a future
-    change decides to guard the container path, THIS is the test that must be flipped
-    consciously -- the ruling cannot erode by accident.
+    `startswith` mount containment and hashes that exact string; and (d) the CAPTURE argv
+    route -- plan_author's `schema_dump_list` capture argv carries
+    `--schema-dump-container` too, capture.py :531/:533 executes `docker exec pg_restore
+    --list` on that value and records `list_argv` into the forensic bundle, and
+    live_evidence.py :1522 compares the WHOLE capture argv by EXACT equality.  Every one
+    of those is textual with zero `Path()` normalization on either side, so the
+    false-refusal disease this guard exists for cannot reach this field.  This test is the
+    "no third silent state" pin: an interior `//` container path (still prefix-compatible
+    with the gates) AUTHORS, and lands verbatim as the pg_restore list argv's last
+    element.  If a future change decides to guard the container path, THIS is the test
+    that must be flipped consciously -- the ruling cannot erode by accident.
     """
 
     container_dump = "/var/lib/postgresql//evidence/schema-before.dump"

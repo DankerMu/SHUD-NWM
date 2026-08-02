@@ -34,12 +34,13 @@ outside this guard: `capture_repo` (hermetic-only kwarg,
 value-pinned by the verifier) and `--schema-dump-container`
 (deliberately not canonicality-guarded, on symmetry grounds alone:
 it never enters artifact associations — its command records none —
-and every comparison over it, the verifier's prefix/shape argv gates
-and the supervisor's mirror gate and verbatim argv-tail extraction,
-is textual with zero normalization on either side, so the
-verbatim-vs-normalized false refusal this requirement exists to
-eliminate cannot occur for it; a pinned adjudication test keeps this
-ruling executable).
+and every comparison over it is textual with zero normalization on
+either side: the verifier's prefix/shape argv gates, the
+whole-capture-argv exact-equality gate over the schema-dump-list
+capture that also carries it, and the supervisor's mirror gate and
+verbatim argv-tail extraction — so the verbatim-vs-normalized false
+refusal this requirement exists to eliminate cannot occur for it; a
+pinned adjudication test keeps this ruling executable).
 
 #### Scenario: A non-canonical root fails at authoring, not at the forensic gate or mid-run
 

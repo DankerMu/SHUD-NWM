@@ -147,9 +147,11 @@ def build_run_plan(
         #
         # ``schema_dump_host`` (#1268) is the SAME disease one field over, so it joined
         # this loop rather than growing a second rule: it is recorded verbatim into the
-        # pg_dump argv (:181) and into that command's ``artifact_associations`` (:183),
-        # and all three conjuncts carry for it.  An interior ``//`` false-refuses at the
-        # verbatim-vs-normalized association comparison (live_evidence.py :1439,
+        # pg-dump command block below (its argv ``--file`` slot and that command's
+        # ``artifact_associations``), and all three conjuncts carry for it.  (Anchors into
+        # THIS file are named, never numbered -- an edit to this comment shifts its own
+        # line numbers; the cross-file numbers below are verified.)  An interior ``//``
+        # false-refuses at the verbatim-vs-normalized association comparison (live_evidence.py :1439,
         # "supervisor observed artifact path differs from run plan output"), because the
         # ledger-side ref arrives ``str(Path(...))``-rendered.  A ``..`` component gets
         # past prearm (prearm.py :363 checks only ``is_absolute``), but the SUPERVISOR's
@@ -166,16 +168,24 @@ def build_run_plan(
         # anyway) and ``schema_dump_container`` -- the latter on SYMMETRY grounds ALONE,
         # never on a "no verifier checks it" claim (the supervisor does check it, and
         # ``sha256sum``s it inside the container).  It never enters artifact associations
-        # (:196's command records none, so :1439 never sees it), and its ENTIRE consumer
-        # set compares it textually with zero normalization on either side: the verifier's
-        # prefix+shape argv gate (live_evidence.py :744-749) and the same prefix check on
-        # the captured listing (:1892), plus the supervisor's mirror gates -- the identical
-        # prefix+shape check in ``_assert_exact_argv`` (supervisor.py :350-364) and
+        # (the pg-restore-list command block below records none, so :1439 never sees it),
+        # and its ENTIRE consumer set -- all five chains -- compares it textually with zero
+        # normalization on either side: the verifier's prefix+shape argv gate
+        # (live_evidence.py :744-749) and the same prefix check on the captured listing
+        # (:1892), the supervisor's mirror gates -- the identical prefix+shape check in
+        # ``_assert_exact_argv`` (supervisor.py :350-364) and
         # ``resolve_container_pg_restore_identity`` (:1055-1058, invoked :1768), which
         # takes ``argv[-1]`` verbatim, asserts the same ``startswith`` mount containment
-        # and ``docker exec sha256sum``s that exact string.  The verbatim-vs-normalized
-        # false refusal therefore cannot occur for it; an adjudication test pins that
-        # ruling so a future change guarding it must flip the test consciously.
+        # and ``docker exec sha256sum``s that exact string -- and, fifth, the CAPTURE argv
+        # route: the schema-dump-list capture argv built below also carries
+        # ``--schema-dump-container``, capture.py :531/:533 runs ``docker exec pg_restore
+        # --list`` on that value and records ``list_argv`` into the forensic bundle, and
+        # live_evidence.py :1522 compares the WHOLE capture argv by EXACT equality --
+        # again verbatim, zero normalization (live_evidence.py :124-128 records both
+        # ``--schema-dump-*`` options as deliberately not value-pinned).  The
+        # verbatim-vs-normalized false refusal therefore cannot occur for it; an
+        # adjudication test pins that ruling so a future change guarding it must flip the
+        # test consciously.
         if value != str(Path(value)) or value.endswith("/") or ".." in Path(value).parts:
             raise PlanAuthorError(
                 f"{label} must be a canonical absolute path (no trailing slash, "

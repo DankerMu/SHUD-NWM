@@ -28,7 +28,7 @@ and the difference recorded as deliberate). P3-1 (predicate anchor
 :157 → :156; :157 is the raise). P3-2 (blast-radius claim inverted:
 two call sites DO pass schema_dump_host —
 tests/…capture.py:643-648 with the value built at capture-test
-:634 and tests/…live_evidence.py:5079-5081 with the value built at
+:634 and tests/…live_evidence.py:5079-5082 with the value built at
 :5014, both `str(tmp_path / "schema-before.dump")` hence canonical
 and guard-passing — rewritten as verified fact, which is exactly
 what makes the capture-file zero-diff freeze satisfiable). P3-3
@@ -37,6 +37,38 @@ SUPERVISOR's produced-artifact inspect supervisor.py:897-909, not
 first at the verifier read; prearm.py:363 checks only is_absolute —
 proposal and spec wording corrected to name the supervisor stage
 first).
+
+Fix round 1 record (post cross-review, verifier batch verdicts):
+three CONFIRMED, all FIX_NOW as one folded text-only pass (zero
+code-behavior, zero assertion, zero predicate change; both lenses
+found C1 and C2 independently). (C1, P3 record-accuracy) the NEW
+plan_author comment block cited SELF-file anchors in the master
+frame (:181/:183/:196) which its own +23 inserted lines shifted to
+:204/:206/:219 — the fix replaces bare self-file line numbers with
+stable references (the pg-dump command block / the pg-restore-list
+command block / the schema-dump-list capture argv) so later edits
+cannot re-drift them; same fix in the two test docstrings that
+echoed :183/:196. (C2, P2 contract-accuracy — the fixture's own
+decisive hazard #1, and the same universal-claim class the #1265
+loop already convicted once) the "ENTIRE/complete/only consumer
+set" meta-claim omitted the FIFTH consumer chain: plan_author
+embeds --schema-dump-container in the schema_dump_list CAPTURE
+argv (:305 in the shipped frame), capture.py:531/:533 executes
+docker exec pg_restore --list from that capture-argv value and
+records list_argv into the forensic bundle, and live_evidence:1522
+compares the whole capture argv by EXACT equality (not
+prefix/shape); the chain carries zero Path() normalization
+(verifier-confirmed independently), so the RULING stands — the fix
+completes the enumeration in all four artifacts (comment, test
+docstring, spec delta residual sentence, runbook) and corrects the
+runbook's literally-false "only prefix/shape gates" to symmetric
+textual comparisons (prefix/shape + whole-argv exact equality).
+(C3, P3 record-accuracy) the :5079-5081 span missed the kwarg line
+:5082 — corrected here in tasks.md (both spans) and in the PR
+body. Rider (verifier-recommended, adopted): a `//x` leading-
+double-slash positive for schema_dump_host (argv[-1] and
+association verbatim) makes the MODIFIED scenario's three-label
+`//x` carve-out executable rather than transitive — suite 385→386.
 
 Triage note: S — one tuple entry in an existing loop + a parametrize
 domain extension + two small tests + one runbook clause + one
@@ -95,7 +127,7 @@ Blast radius (verified, fixture-review P3-2): exactly two call
 sites pass a custom schema_dump_host —
 tests/test_node27_timeseries_compression_capture.py:643-648 (value
 built at :634) and
-tests/test_node27_timeseries_compression_live_evidence.py:5079-5081
+tests/test_node27_timeseries_compression_live_evidence.py:5079-5082
 (value built at :5014), both `str(tmp_path / "schema-before.dump")`
 hence canonical and guard-passing; this verified fact is what makes
 the capture-test-file zero-diff freeze satisfiable. Production and
