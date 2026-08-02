@@ -4972,8 +4972,10 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     _e2e_capture_bin(capture_bin, starts, child)
     monkeypatch.setattr(supervisor, "SUPERVISOR_BIN_DIR", checkpoint_bin)
 
-    # plan_PROD carries the pinned PRODUCTION command argvs the verifier requires;
-    # its capture argvs run the REAL capture producer against the stubs.
+    # plan_PROD carries the pinned PRODUCTION command AND capture argvs the verifier
+    # requires: seam-free, so `run_plan_id`, the bundle's run plan and the verifier all
+    # see a production plan (the verifier refuses any `--self-test-*` token in a run
+    # plan capture argv outright).
     plan_prod = plan_author.build_run_plan(
         mutation_head_sha=HEAD,
         root=str(tmp_path),
@@ -4989,16 +4991,6 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
         capture_git=str(capture_bin / "git"),
     )
     for capture in plan_prod["captures"]:
-        if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
-            capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
-        if capture["kind"] == "schema_dump_list":
-            # Stub-docker injection deviates from the pinned host CLI, so the
-            # capture must opt into the RECORD/EXEC seam explicitly (production
-            # `plan_author` never emits this flag).  Patched here, inside the
-            # loop, so the `run_plan_id` recompute below and the plan_exec
-            # deepcopy both see the final capture argv the verifier binds the
-            # ledger against.
-            capture["argv"] = [*capture["argv"], "--self-test-docker-seam"]
         if capture["kind"] == "cleanup":
             # `_validate_reviewed_file_ref` pins the cleanup repo-unit refs to the
             # canonical checkout path, so the cleanup capture must read the real
@@ -5010,8 +5002,10 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     plan_prod["run_plan_id"] = supervisor.run_plan_id(plan_prod)
     supervisor.validate_run_plan(plan_prod, inherited_env={})
 
-    # plan_EXEC shares captures/checkpoints but swaps the command argvs for stub
-    # producers (the production binaries cannot run hermetically).
+    # plan_EXEC shares checkpoints but swaps the command argvs for stub producers (the
+    # production binaries cannot run hermetically) and appends the hermetic capture
+    # seams.  Exactly the command-side pattern below: the state machine really executes
+    # this argv, and the ledger identities are rewritten back to plan_prod afterwards.
     plan_exec = copy.deepcopy(plan_prod)
     for command in plan_exec["commands"]:
         associations = command["artifact_associations"]
@@ -5019,6 +5013,16 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
         command["argv"] = _e2e_child_argv(
             str(command["kind"]), association_path, schema_dump_container, src_dir
         )
+    for capture in plan_exec["captures"]:
+        if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
+            # The CI runner's real disk headroom is uncontrollable, so the executed
+            # capture gets a deterministic figure (honoured value pinned below).
+            capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        if capture["kind"] == "schema_dump_list":
+            # Stub-docker injection deviates from the pinned host CLI, so the executed
+            # capture must opt into the RECORD/EXEC seam explicitly (production
+            # `plan_author` never emits this flag, and the verifier now refuses it).
+            capture["argv"] = [*capture["argv"], "--self-test-docker-seam"]
 
     ledger_path = tmp_path / "supervisor-ledger.jsonl"
     checkpoints_by_phase = {(str(c["phase"]), c["command_id"]): c for c in plan_exec["checkpoints"]}
@@ -5049,16 +5053,38 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
             ),
         )
 
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+
+    # Hermetic-fidelity pin, asserted BEFORE the rewrite below so the rewrite can never
+    # be vacuous: the state machine really spawned capture.py with the seam tokens on
+    # its argv (as recorded by `run_capture_step`), AND the free-bytes seam was really
+    # HONOURED -- without the value pin a capture that silently stops consuming
+    # `--self-test-free-bytes` would still pass on any runner with >300 GiB free.
+    executed_capture_argv = {
+        str(event["capture_id"]): list(event["argv"]) for event in events if event.get("event_type") == "capture"
+    }
+    assert "--self-test-docker-seam" in executed_capture_argv["capture-schema_dump_list"]
+    for selection_kind in ("post_dry_selection", "pre_enforce_selection"):
+        executed = executed_capture_argv[f"capture-{selection_kind}"]
+        assert executed[-2:] == ["--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        snapshot_path = next(c["output_path"] for c in plan_prod["captures"] if c["kind"] == selection_kind)
+        assert json.loads(Path(snapshot_path).read_bytes())["free_bytes"] == _SELFTEST_FREE_BYTES
+
     # Re-anchor the executed ledger's child argvs to the production binary
     # identities the stubs stood in for (argv[0] pins /usr/bin/pg_dump,
-    # {repo}/.venv/bin/python, ... which cannot exist on a hermetic runner).  Only
-    # the command argv identity is rewritten; every produced artifact path, sha,
-    # association and timestamp is exactly what the real state machine emitted.
+    # {repo}/.venv/bin/python, ... which cannot exist on a hermetic runner), and the
+    # executed capture argvs to their seam-free plan_prod twins (the verifier refuses
+    # any `--self-test-*` token in the run plan, and binds ledger capture argv to plan
+    # capture argv by equality).  Only the argv identity is rewritten; every produced
+    # artifact path, sha, association and timestamp is exactly what the real state
+    # machine emitted.
     prod_argv_by_command = {str(c["command_id"]): c["argv"] for c in plan_prod["commands"]}
-    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    prod_argv_by_capture = {str(c["capture_id"]): c["argv"] for c in plan_prod["captures"]}
     for event in events:
         if event.get("event_type") == "child_exit":
             event["argv"] = prod_argv_by_command[str(event["command_id"])]
+        elif event.get("event_type") == "capture":
+            event["argv"] = prod_argv_by_capture[str(event["capture_id"])]
     ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
     run_plan_path = tmp_path / "run-plan.json"
     run_plan_path.write_bytes(_canonical(plan_prod))
@@ -5077,3 +5103,104 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     result = evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
     assert result["qualifies_task_4_5"] is True
     assert result["verdict"] == evidence.PASS_VERDICT
+
+
+# --------------------------------------------------------------------------- #
+# #1250: self-test seam tokens are structurally invisible to no forensic gate.
+# A run plan whose capture argv carries a `--self-test-*` flag executed a
+# producer that deviates from what it recorded (stub docker) or fabricated a
+# rollback-feasibility figure (`--self-test-free-bytes`), so it is not
+# production forensics and can never reach a PASS verdict.
+# --------------------------------------------------------------------------- #
+import argparse  # noqa: E402
+
+from scripts import node27_timeseries_compression_capture as _capture  # noqa: E402
+
+# The verifier's message when ledger capture argv != plan capture argv.  The seam
+# gate must fire on its own, BEFORE this equality binding, otherwise a seam that is
+# injected consistently into both sides would sail through.
+_CAPTURE_EQUALITY_ERROR = "supervisor capture execution differs from its plan"
+
+
+def _inject_capture_seam(bundle: dict[str, Any], tmp_path: Path, *, kind: str, tokens: list[str]) -> None:
+    """Append `tokens` to one plan capture's argv AND to its equality-bound ledger event."""
+
+    def _append(plan: dict[str, Any]) -> None:
+        capture = next(item for item in plan["captures"] if item["kind"] == kind)
+        capture["argv"] = [*capture["argv"], *tokens]
+
+    _rewrite_run_plan(bundle, tmp_path, _append)
+    ledger_path = Path(bundle["execution"]["ledger"]["path"])
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    injected = 0
+    for event in events:
+        if event.get("event_type") == "capture" and event["kind"] == kind:
+            event["argv"] = [*event["argv"], *tokens]
+            injected += 1
+    # Non-vacuity: the ledger twin really received the seam, so the refusal below
+    # cannot be an artefact of an untouched or missing capture event.
+    assert injected == 1
+    ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger_path)
+
+
+def test_verifier_rejects_run_plan_capture_carrying_docker_seam(tmp_path: Path) -> None:
+    """A PASS-shaped bundle whose capture argv carries `--self-test-docker-seam` cannot verify."""
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=["--self-test-docker-seam"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-docker-seam" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_run_plan_capture_carrying_free_bytes_seam(tmp_path: Path) -> None:
+    """A fabricated disk-headroom seam is refused before the `free_bytes` gates are reached."""
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle,
+        tmp_path,
+        kind="post_dry_selection",
+        tokens=["--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-free-bytes" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_hidden_flags_are_all_self_test_seams() -> None:
+    """Every `--help`-suppressed capture flag carries the rejected seam prefix.
+
+    A future hidden flag outside the prefix reddens here, forcing it onto the
+    prefix before it can become a new invisible seam.  The prefix is spelled
+    literally on purpose: this is a producer-side structural check on capture.py's
+    own parser, independent of the verifier module.
+    """
+    parser = _capture._parser()
+    hidden: set[str] = set()
+    for action in parser._actions:
+        if not action.option_strings or action.help != argparse.SUPPRESS:
+            continue
+        assert all(option.startswith("--self-test-") for option in action.option_strings), action.option_strings
+        hidden.update(action.option_strings)
+    # Non-vacuity: renaming/moving the seams out of this parser must not silently
+    # turn the loop above into an empty scan.
+    assert {"--self-test-free-bytes", "--self-test-docker-seam"} <= hidden
+
+
+def test_verifier_rejects_unregistered_self_test_prefix_token(tmp_path: Path) -> None:
+    """The gate is a PREFIX rule: a never-registered `--self-test-*` token is refused too.
+
+    An enumerated two-token implementation would let the NEXT seam through the
+    verifier -- exactly the leak-by-forgetting hole this issue closes.
+    """
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=["--self-test-unregistered-probe"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-unregistered-probe" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
