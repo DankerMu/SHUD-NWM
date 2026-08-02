@@ -171,7 +171,7 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. Help-token rejection —
+- [x] 1. Help-token rejection —
   `scripts/node27_timeseries_compression_live_evidence.py`, per-token
   scan (:1169-1186): new branch immediately after the seam branch
   (:1171-1174), before the anchored/pinned prefix loops (domains are
@@ -194,7 +194,7 @@ Must preserve:
   spelling `--help` is rejected too — unlike anchored options, where
   the full spelling is the legitimate binding, every member of the
   help family is non-production.
-- [ ] 2. argv[0] comment expansion (:1098-1100): keep the three
+- [x] 2. argv[0] comment expansion (:1098-1100): keep the three
   existing sentences byte-identical; append the capability consequence
   — argv[0] (the interpreter) plus the repo checkout behind argv[1]
   remain the residual trust roots of the forensic claim, a plan may
@@ -202,7 +202,7 @@ Must preserve:
   hardening (#1261 alternative 2), explicitly NOT a verifier gate
   (pinning argv[0] would pin an environment fact). No code change for
   this shape.
-- [ ] 3. Relational `--evidence-dir` gate:
+- [x] 3. Relational `--evidence-dir` gate:
   (a) sixth gate immediately after the tool-value loop (:1135-1141),
   before the token scan: `expected_evidence_dir =
   output_path.rsplit("/", 1)[0] + "/capture-artifacts"` (the
@@ -231,7 +231,7 @@ Must preserve:
   closed the seam route, this gate closes the directory-identity
   route) and that the binding is relational; the `--schema-dump-*`
   sentence stays.
-- [ ] 4. Template extension
+- [x] 4. Template extension
   (`tests/test_node27_timeseries_compression_live_evidence.py`) —
   single-point change per template, attribution-preserving:
   (a) `_bundle` capture template (:1172-1188) gains
@@ -255,7 +255,7 @@ Must preserve:
   tmp-derived, not production — either exclude it from that helper and
   bind it in the templates, or amend the docstring; do not let a
   stale claim ship).
-- [ ] 5. New tests (all reusing `_replace_capture_argv` /
+- [x] 5. New tests (all reusing `_replace_capture_argv` /
   `_producer_argv` + `_CAPTURE_EQUALITY_ERROR not in message`
   non-vacuity discipline):
   (a) help-token rejection, parametrized over the six spellings
@@ -298,7 +298,7 @@ Must preserve:
   run unmodified and green (they are the production-relation and
   hermetic-relation positive controls — no new positive needed
   there, but their green-ness is part of this change's evidence).
-- [ ] 6. Full suites + red proofs (orchestrator Phase 2 reproduces):
+- [x] 6. Full suites + red proofs (orchestrator Phase 2 reproduces):
   `uv run pytest -q tests/test_node27_timeseries_compression_live_evidence.py
   tests/test_node27_timeseries_compression_capture.py
   tests/test_node27_timeseries_compression_supervisor.py` all green
