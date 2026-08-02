@@ -526,12 +526,16 @@ def test_schema_dump_list_refuses_a_deviating_docker_without_the_self_test_seam(
     assert not marker.exists()
 
 
-def test_plan_author_never_emits_the_docker_self_test_seam() -> None:
+def test_plan_author_never_emits_the_docker_self_test_seam(tmp_path: Path) -> None:
     """The seam stays test-only: production plans pin the real host docker CLI.
 
     Load-bearing -- if ``plan_author`` ever auto-emitted the flag (for example
     whenever ``capture_docker`` deviates), the guard above would be nullified
-    for exactly the future production caller it exists to stop.
+    for exactly the future production caller it exists to stop.  The default
+    plan alone cannot see that regression (its ``capture_docker`` never
+    deviates), so the deviating-caller case below is what actually bites: a
+    plan author that "helpfully" pairs a non-pinned docker with the seam flag
+    is exactly the superficially-DRY route the proposal forbids.
     """
 
     plan = plan_author.build_run_plan(mutation_head_sha=HEAD)
@@ -540,6 +544,55 @@ def test_plan_author_never_emits_the_docker_self_test_seam() -> None:
     listing = next(c for c in plan["captures"] if c["kind"] == "schema_dump_list")
     argv = list(listing["argv"])
     assert argv[argv.index("--docker") + 1] == capture.HOST_DOCKER_CLI == "/usr/bin/docker"
+
+    deviating_docker = str(tmp_path / "stub-bin" / "docker")
+    assert deviating_docker != capture.HOST_DOCKER_CLI
+    deviating_plan = plan_author.build_run_plan(
+        mutation_head_sha=HEAD, capture_docker=deviating_docker
+    )
+    for authored_capture in deviating_plan["captures"]:
+        assert "--self-test-docker-seam" not in authored_capture["argv"], authored_capture["kind"]
+    deviating_listing = next(
+        c for c in deviating_plan["captures"] if c["kind"] == "schema_dump_list"
+    )
+    deviating_argv = list(deviating_listing["argv"])
+    assert deviating_argv[deviating_argv.index("--docker") + 1] == deviating_docker
+
+
+def test_the_pinned_host_docker_without_the_seam_passes_the_guard_untouched(tmp_path: Path) -> None:
+    """Spec scenario 3: the production default path is unaffected by the guard.
+
+    Pass-through is not observable as "no error" -- the production probes need a
+    real docker.  It IS observable in WHICH error comes out: with the pinned
+    host CLI and no seam, control must fall through to the pre-existing
+    ``--schema-dump-host``/``--schema-dump-container`` check (capture.py:516),
+    so the message is that one and never mentions the seam.  An over-broad
+    guard (dropping the ``ctx.docker != HOST_DOCKER_CLI`` term) would raise the
+    seam error here instead, and no docker binary is involved either way.
+    """
+
+    ctx = capture.Context(
+        database="nhms",
+        mutation_head_sha=HEAD,
+        repo=str(tmp_path / "repo"),
+        container="nhms-db",
+        evidence_dir=tmp_path / "ev",
+        psql="/usr/bin/psql",
+        systemctl="/usr/bin/systemctl",
+        docker=capture.HOST_DOCKER_CLI,
+        journalctl="/usr/bin/journalctl",
+        git="/usr/bin/git",
+        schema_dump_host=None,
+        schema_dump_container=None,
+    )
+    assert ctx.self_test_docker_seam is False
+
+    with pytest.raises(capture.CaptureError) as raised:
+        capture._capture_schema_dump_list(ctx)
+
+    message = str(raised.value)
+    assert "schema_dump_list requires --schema-dump-host/--schema-dump-container" in message
+    assert "--self-test-docker-seam" not in message
 
 
 # --------------------------------------------------------------------------- #

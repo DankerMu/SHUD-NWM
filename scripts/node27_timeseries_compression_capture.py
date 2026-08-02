@@ -525,7 +525,8 @@ def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
     # record names the production binary the plan pins.  The split is no longer
     # a caller-side convention: the guard at the top of this function enforces
     # ``ctx.docker == HOST_DOCKER_CLI`` unless the hermetic self-test seam is
-    # explicitly opted in, so a production bundle always attests what it ran.
+    # explicitly opted in, so whenever this capture kind runs without that seam
+    # the argvs below attest the binary it actually executed.
     version_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
     list_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
     version_argv = [HOST_DOCKER_CLI, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]

@@ -90,7 +90,12 @@ Must preserve:
   `--self-test-docker-seam`, and the `schema_dump_list` capture argv
   contains `--docker` followed by `/usr/bin/docker` — pins the
   "plan_author never emits the seam" invariant (issue AC 4; makes the
-  spec's production-default scenario testable).
+  spec's production-default scenario testable). Review round 1
+  (verifier CONFIRMED): the production-default plan alone is blind to
+  the named regression (deviation-conditional auto-emission never
+  fires under defaults), so the SAME test also builds a plan with a
+  deviating `capture_docker` and asserts no capture argv carries the
+  seam flag — red under the auto-emission mutation, green at HEAD.
 - [x] 6. Red proof (scratch mutation, restored, outputs recorded):
   comment out the new assertion → the negative test goes red because
   the producer now EXITS 0 and emits on stdout a document whose
@@ -103,13 +108,25 @@ Must preserve:
 - [x] 7. Oracle: `uv run pytest -q
   tests/test_node27_timeseries_compression_capture.py
   tests/test_node27_timeseries_compression_live_evidence.py` → green
-  (capture 11→13: +1 negative +1 plan_author guard; live_evidence 277
-  unchanged); `uv run pytest -q
+  (capture 11→14: +1 negative +1 plan_author guard +1 scenario-3
+  pass-through; live_evidence 277 unchanged); `uv run pytest -q
   tests/test_node27_timeseries_compression_supervisor.py` → 127
   (regression, untouched); `uv run ruff check .`; `git diff --stat` →
   capture.py + 2 test files (+ fixture); plan_author/verifier/schemas
   zero diff; `openspec validate guard-capture-docker-record-exec
   --strict --no-interactive`.
+- [x] 8. Review round 1 fix pass (2× verifier-CONFIRMED coverage
+  gaps): (a) extend task-5 test with the deviating-caller case (see
+  task 5); (b) NEW in-process scenario-3 test — `Context` with
+  `docker == HOST_DOCKER_CLI`, no seam, `schema_dump_host=None` →
+  `_capture_schema_dump_list` raises the PRE-EXISTING
+  "requires --schema-dump-host/--schema-dump-container" CaptureError
+  and never mentions the seam flag, proving the guard passes through
+  on the pinned path (red under an over-broad
+  `if not ctx.self_test_docker_seam` mutant); (c) rescope the
+  RECORD/EXEC comment's final sentence to this capture kind + no-seam
+  condition. Deferred with routing: seam invisibility to downstream
+  verifier gates (fixture non-goal) → follow-up issue #1250.
 
 ## Required evidence
 
@@ -118,7 +135,7 @@ Must preserve:
   red-proof false-attestation bundle excerpt (stdout document with
   HOST_DOCKER_CLI-attesting argvs under a deviating runnable stub)
   with the assertion disabled; plan_author guard test output; pytest
-  counts (13/277/127); ruff; zero-diff proof for plan_author.py.
+  counts (14/277/127); ruff; zero-diff proof for plan_author.py.
 
 ## Non-goals
 

@@ -43,8 +43,8 @@ code-enforced invariant:
    post-hoc; plan_author has zero knowledge of that flag either).
 3. Tests: (a) the two genuine stub-docker execution sites —
    `test_authored_plan_survives_the_real_state_machine_and_verifier_validators`
-   (capture tests :458-516) and the merged G-series hermetic e2e
-   (live_evidence tests :4977-5042) — append `--self-test-docker-seam`
+   (capture tests) and the merged G-series hermetic e2e
+   (live_evidence tests) — append `--self-test-docker-seam`
    to the `schema_dump_list` capture argv only; (b) NEW negative test
    in capture tests: run the capture producer with a RUNNABLE stub
    docker at a path != HOST_DOCKER_CLI and NO seam flag → non-zero
@@ -57,7 +57,15 @@ code-enforced invariant:
    `--self-test-docker-seam`, and the `schema_dump_list` capture argv
    carries `--docker /usr/bin/docker` — this pins the load-bearing
    "plan_author never emits the seam" invariant in code instead of
-   convention; (d) the capture argv gains a flag only in test plans —
+   convention; the same test ALSO builds a plan with a deviating
+   `capture_docker` and asserts the seam flag is still absent, because
+   the production-default plan alone cannot see a deviation-conditional
+   auto-emission (review round 1, verifier CONFIRMED); (e) NEW
+   in-process pass-through test binding spec scenario 3: with
+   `docker == HOST_DOCKER_CLI` and no seam, `_capture_schema_dump_list`
+   falls through the guard to the pre-existing schema-dump-args
+   CaptureError — observable locally with no docker binary (review
+   round 1, verifier CONFIRMED); (d) the capture argv gains a flag only in test plans —
    safe because captures are structurally excluded from every
    exact-argv gate (supervisor `_assert_exact_argv` covers only
    `commands` kinds; captures get `_assert_concrete_argv` without
