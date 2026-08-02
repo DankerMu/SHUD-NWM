@@ -29,9 +29,10 @@ while the verifier still judges with the old dict, dying late with
 
 ## What Changes
 
-Issue's recommended route — complete the single source and widen the
-guard so every production copy is either derived from it or asserted
-equal to it (values unchanged everywhere):
+Issue's recommended route — complete the single source and bind the
+targeted copy set to it, each copy either derived from the source or
+asserted equal to it (values unchanged everywhere; the two copies that
+remain outside the bound set are enumerated below and tracked):
 
 1. `packages/common/node27_container_contract.py`: alongside the
    existing `RECOVERY_TARGET_SCHEMA`/`RECOVERY_TARGET_TABLE`, add
@@ -65,15 +66,21 @@ plan_author's `_RECOVERY_TARGET_ARGS` is transitively guarded by
 `test_plan_author_emits_a_plan_the_real_supervisor_gate_accepts`
 (tests/test_node27_timeseries_compression_capture.py:282), whose argv
 flows through the supervisor's `_assert_exact_argv` — a contract-side
-flip turns that test red. Two copies remain UNBOUND (cross-review
-finding, claims narrowed accordingly, tracked in follow-up #1244):
-capture's `_capture_catalog_post` SQL literals
-(scripts/node27_timeseries_compression_capture.py:449-452) and the
-verifier's inline expected decompress argv
-(scripts/node27_timeseries_compression_live_evidence.py:666-677) — a
-one-sided mutation of either still ships green and only dies on the
-armed replay lane; binding them needs the byte-freeze pattern extended
-to catalog_post and a decision on deriving the verifier argv tail.
+flip turns that test red. Two copies remain outside the contract-bound
+set (cross-review finding, claims narrowed accordingly, tracked in
+follow-up #1244), with different exposure — final review measured both
+by isolated single-side flips: capture's `_capture_catalog_post` SQL
+literals (scripts/node27_timeseries_compression_capture.py:449-452)
+are the truly silent copy — a one-sided mutation ships green through
+every suite and only dies on the armed replay lane; the verifier's
+inline expected decompress argv
+(scripts/node27_timeseries_compression_live_evidence.py:666-677) is
+not contract-derived and not in the drift guard, but a one-sided
+mutation IS caught (125 failures) by the live_evidence bundle
+fixtures — gate-test coverage of the kind the spec delta permits,
+just not single-sourced. Binding them needs the byte-freeze pattern
+extended to catalog_post and a decision on deriving the verifier argv
+tail.
 
 The schema JSON is data and stays untouched — the guard binds Python
 constants to it, so mutating either side alone fails the guard (the
