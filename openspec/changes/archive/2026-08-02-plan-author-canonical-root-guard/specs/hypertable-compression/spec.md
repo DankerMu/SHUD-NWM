@@ -27,11 +27,12 @@ requirement eliminates. The verifier itself stays verbatim: it judges
 the recorded bytes and invents no normalization; the closure lives
 entirely at the producer entrance. Known recorded residuals outside
 this guard: `capture_repo` (hermetic-only kwarg, value-pinned by the
-verifier) and `--schema-dump-host`/`--schema-dump-container` data
-paths (recorded verbatim into command artifact associations and
-compared at the same verbatim site without a canonicality guard —
-routed to a follow-up issue, not silently covered by this
-requirement).
+verifier); `--schema-dump-host` (recorded verbatim into command
+artifact associations and compared at the same verbatim site without
+a canonicality guard); and `--schema-dump-container` (recorded only
+into the exact-compared command argv, a narrower exposure). The
+schema-dump guard extension is routed to follow-up issue #1268, not
+silently covered by this requirement.
 
 #### Scenario: A non-canonical root fails at authoring, not at the forensic gate or mid-run
 

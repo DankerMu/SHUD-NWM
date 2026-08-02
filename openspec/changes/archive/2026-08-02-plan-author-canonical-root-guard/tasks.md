@@ -132,7 +132,7 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. Guard — plan_author.py :109-111: inside the existing loop,
+- [x] 1. Guard — plan_author.py :109-111: inside the existing loop,
   after the is_absolute check, add: if `value != str(Path(value))
   or value.endswith("/") or ".." in Path(value).parts`, raise
   `PlanAuthorError(f"{label} must be a canonical absolute path (no
@@ -171,7 +171,7 @@ Must preserve:
   kwarg, verifier value-pins --repo anyway) and
   `--schema-dump-host`/`--schema-dump-container` (follow-up issue)
   stay unvalidated.
-- [ ] 2. Rewire the trailing-slash test
+- [x] 2. Rewire the trailing-slash test
   (tests/…live_evidence.py:6120-6161): drop the `build_run_plan`
   construction; synthesize the double-slash spelling directly —
   `output_path = f"{tmp_path}//capture-sizes_post.json"`, argv =
@@ -189,7 +189,7 @@ Must preserve:
   (`argv` binds `--evidence-dir` to exactly
   `output_path.rsplit("/", 1)[0] + "/capture-artifacts"`) so the
   synthesized spelling cannot silently drift apart.
-- [ ] 3. New tests (co-located in tests/…live_evidence.py):
+- [x] 3. New tests (co-located in tests/…live_evidence.py):
   (a) parametrized guard negatives: for label in {root, repo} ×
   shape in {trailing slash `/x/y/`, duplicate slash `/x//y`, dot
   segment `/x/./y`, dot-dot segment `/x/../y`-style (fix round 1:
@@ -215,13 +215,13 @@ Must preserve:
   authors successfully — pins the boundary recorded in the guard
   comment. (The former `..`-segment boundary positive is gone: fix
   round 1 flipped it into the (a) negatives.)
-- [ ] 4. Runbook — docs/runbooks/tier-node27-timeseries-storage.md
+- [x] 4. Runbook — docs/runbooks/tier-node27-timeseries-storage.md
   plan-author section (~:1034): one sentence noting custom
   `--root`/`--repo` values must be canonical absolute paths (no
   trailing slash — the plan author refuses otherwise); the
   authorized command itself uses the canonical defaults and is
   unaffected.
-- [ ] 5. Full verification (orchestrator Phase 2 reproduces):
+- [x] 5. Full verification (orchestrator Phase 2 reproduces):
   three suites green (live_evidence baseline 359 + new ids; 14/141
   frozen); red proof by reverting the guard clause hunk → all new
   guard negatives DID NOT RAISE (per-test-id list) while everything
