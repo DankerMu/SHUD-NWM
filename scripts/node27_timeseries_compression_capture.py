@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
 
 # The host contract values the verifier pins by exact equality; they are node-27
@@ -60,14 +61,10 @@ EXPECTED_UNITS = (
     "nhms-node27-timeseries-compression.service",
     "nhms-node27-timeseries-compression-replay.service",
 )
-RECOVERY_TARGET = {
-    "hypertable_schema": "hydro",
-    "hypertable_name": "river_timeseries",
-    "chunk_schema": "_timescaledb_internal",
-    "chunk_name": "_hyper_3_7_chunk",
-    "range_start": "2026-05-28T00:00:00Z",
-    "range_end": "2026-06-04T00:00:00Z",
-}
+# The six-field recovery target comes from the shared contract module (issue
+# #1242) -- note ``contract.RECOVERY_TARGET`` is the ``schema.table`` STRING the
+# probe interpolates, while this is the six-field mapping the evidence carries.
+RECOVERY_TARGET = dict(contract.RECOVERY_TARGET_FIELDS)
 CATALOG_PHASES = {
     "catalog_before": "pre-migration",
     "catalog_after_first": "after-first-apply",
@@ -413,18 +410,7 @@ def _capture_preflight_evidence(ctx: Context) -> dict[str, Any]:
 
 def _capture_recovery_preflight(ctx: Context) -> dict[str, Any]:
     core = _preflight_core(ctx)
-    extra = _psql_json(
-        ctx,
-        "/* capture:recovery_preflight */ SELECT json_build_object("
-        "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
-        "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
-        "'before_compressed', c.is_compressed, 'before_row_count', "
-        "(SELECT count(*) FROM _timescaledb_internal._hyper_3_7_chunk)) "
-        "FROM timescaledb_information.chunks c "
-        "WHERE c.hypertable_schema = 'hydro' AND c.hypertable_name = 'river_timeseries' "
-        "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'",
-        label="recovery preflight target",
-    )
+    extra = _psql_json(ctx, RECOVERY_PREFLIGHT_SQL, label="recovery preflight target")
     return {
         **core,
         "target": dict(RECOVERY_TARGET),
@@ -616,6 +602,25 @@ def _capture_cleanup(ctx: Context) -> dict[str, Any]:
         "compression_service_activations": [],
     }
 
+
+# The exact-chunk recovery preflight, interpolated from the same shared
+# contract constants the emitted ``target`` payload and the supervisor's
+# expected decompress argv derive from (issue #1242).  The rendered string is
+# byte-frozen by tests/test_node27_timeseries_compression_capture.py, including
+# the leading ``/* capture:recovery_preflight */`` marker, which must stay the
+# FIRST token: the capture test's psql stub dispatches on it.
+RECOVERY_PREFLIGHT_SQL = (
+    "/* capture:recovery_preflight */ SELECT json_build_object("
+    "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
+    "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
+    "'before_compressed', c.is_compressed, 'before_row_count', "
+    f"(SELECT count(*) FROM {RECOVERY_TARGET['chunk_schema']}.{RECOVERY_TARGET['chunk_name']})) "
+    "FROM timescaledb_information.chunks c "
+    f"WHERE c.hypertable_schema = '{RECOVERY_TARGET['hypertable_schema']}' "
+    f"AND c.hypertable_name = '{RECOVERY_TARGET['hypertable_name']}' "
+    f"AND c.chunk_schema = '{RECOVERY_TARGET['chunk_schema']}' "
+    f"AND c.chunk_name = '{RECOVERY_TARGET['chunk_name']}'"
+)
 
 _CATALOG_BODY_SQL = (
     "(SELECT json_build_object("
