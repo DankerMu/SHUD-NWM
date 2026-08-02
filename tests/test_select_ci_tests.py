@@ -292,6 +292,7 @@ def test_every_tracked_script_with_a_same_name_suite_selects_it_without_core_smo
 
 
 CONTRACT_SOURCE_PATH = "packages/common/node27_container_contract.py"
+CONTRACT_SNAPSHOT_FIXTURE_PATH = "packages/common/node27_external_contract_snapshot.json"
 CONTRACT_MODULE = "packages.common.node27_container_contract"
 CONTRACT_TRANSITIVE_ONLY_TEST = "tests/test_node27_timeseries_compression_live_evidence.py"
 
@@ -442,6 +443,19 @@ def test_container_contract_change_selects_its_derived_dependent_closure() -> No
     assert not missing, f"contract change does not select its dependent suites: {missing}"
     smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
     assert not smoke_overlap, f"contract change still drags core smoke {smoke_overlap}"
+
+
+def test_contract_snapshot_fixture_change_selects_its_snapshot_suite() -> None:
+    # The committed fixture is the hermetic suite's ground truth, so a
+    # fixture-only PR (the runbook's patch-version drift disposition) must still
+    # select a suite that asserts; otherwise CI degrades to the collect-only
+    # smoke and re-baselines drift with zero assertions.
+    assert Path(CONTRACT_SNAPSHOT_FIXTURE_PATH).is_file()
+
+    selected = select_tests([CONTRACT_SNAPSHOT_FIXTURE_PATH], repo_root=Path("."))
+
+    assert selected == ["tests/test_node27_external_contract_snapshot.py"]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
 def test_container_contract_transitive_walk_stays_scoped_to_scripts() -> None:

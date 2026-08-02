@@ -179,7 +179,18 @@ Must preserve:
   clause and exit-5 row the zero-rows caveat; docstring
   "never writes" claim scoped to the script itself (__pycache__
   caveat).
-- [x] 7. Oracle: `uv run pytest -q
+- [x] 7. Final-review round 2 repair (P2, same class as round 1's P1
+  recurring on a sibling surface — coverage gap in the CI selector
+  registration of a NEW artifact): the committed fixture JSON itself
+  selected zero tests, so the fixture-only PR path that runbook §4.4's
+  patch-version disposition prescribes would ride the collect-only
+  zero-assertion CI branch. Fixed red-first: exact-path accumulate
+  PathTestRule (fixture JSON → its suite) + same-shape selector test.
+  Invariant audit (repeat-class, Phase 6.2): every new artifact this
+  change adds is now selector/lint-registered — script (#1191
+  same-name rule), test file (self), fixture JSON (this rule),
+  runbook (markdown-lint), openspec (validate). Class closed in-PR.
+- [x] 8. Oracle: `uv run pytest -q
   tests/test_node27_external_contract_snapshot.py` green;
   `uv run ruff check .`; `openspec validate
   node27-external-contract-snapshot --strict --no-interactive`;

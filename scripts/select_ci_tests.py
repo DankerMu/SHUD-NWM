@@ -327,6 +327,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "packages/common/node27_external_contract_snapshot.json",
+        ("tests/test_node27_external_contract_snapshot.py",),
+    ),
+    PathTestRule(
         "apps/api/**",
         (
             "tests/test_api.py",
