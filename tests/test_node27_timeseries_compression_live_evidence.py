@@ -5899,7 +5899,21 @@ _EVIDENCE_DIR_GATE_WORDING = "own output directory"
 # The seam and abbreviation refusal wordings, for the same attribution discipline.
 _SEAM_TOKEN_WORDING = "self-test seam token"
 _ABBREVIATION_WORDING = "an argparse abbreviation"
-_HELP_EARLY_EXIT_TOKENS = ("-h", "--help", "--help=x", "--h", "--he", "--hel")
+_HELP_EARLY_EXIT_TOKENS = (
+    "-h",
+    "--help",
+    "--help=x",
+    "--h",
+    "--he",
+    "--hel",
+    # Single-dash CLUSTERS: argparse reads `-hx` as the short options `-h` + `-x`, so the
+    # auto help action fires exactly as it does for a bare `-h`.  An equality check on
+    # `-h` alone left this whole family verifying PASS.
+    "-hx",
+    "-hh",
+    "-help",
+    "-hs",
+)
 
 
 @pytest.mark.parametrize("token", _HELP_EARLY_EXIT_TOKENS)
@@ -5911,8 +5925,13 @@ def test_verifier_rejects_a_capture_argv_carrying_a_help_early_exit_token(
     Measured (issue #1263): capture.py's parser keeps argparse's default
     `add_help=True` and `main` calls `parse_args` first, so `-h`/`--help`/`--h`/`--he`/
     `--hel` print the help text and `SystemExit(0)` while `--help=x` is a usage error
-    exiting 2 -- no capture runs in any of the six cases.  Before this branch each one
+    exiting 2 -- no capture runs in any of those cases.  Before this branch each one
     verified PASS: identity-anchored, value-pinned, seam-free, and forensically false.
+
+    The single-dash CLUSTERS (`-hx`, `-hh`, `-help`, `-hs`) are the PR #1264 review's
+    bypass: argparse expands a single-dash token into short options, so each of them
+    reaches the very same auto help action, printing help and exiting 0 with zero
+    captures -- while an equality-on-`-h` gate saw nothing to refuse.
     """
 
     bundle = _bundle(tmp_path)
@@ -5955,11 +5974,13 @@ def test_verifier_rejects_a_help_token_placed_between_the_pinned_bindings(tmp_pa
 def test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain() -> None:
     """The zero-collision fact the help-token rejection stands on.
 
-    Refusing `-h` and every `len >= 3` prefix of `--help` is only safe while the capture
-    CLI registers no `--h*` business flag and no single-dash flag beyond argparse's auto
-    `-h`.  A future `--hosts` or `-v` would make a legitimate spelling something the
-    verifier silently refuses (or leave a single-dash flag outside the rejection) -- it
-    reddens HERE instead, before it can ever reach a plan.
+    The gate refuses two DOMAINS: the whole single-dash `-h*` prefix (argparse expands
+    single-dash tokens into short-option clusters, so `-hx` reaches help exactly as `-h`
+    does) and every `len >= 3` prefix of `--help`.  Both are only safe while the capture
+    CLI registers no `--h*` business flag and no single-dash flag at all beyond
+    argparse's auto `-h`.  A future `--hosts` or `-v` would make a legitimate spelling
+    something the verifier silently refuses (or leave a single-dash flag outside the
+    rejection) -- it reddens HERE instead, before it can ever reach a plan.
     """
 
     parser = _capture._parser()
@@ -5971,6 +5992,14 @@ def test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain() -
     for base in ("--h", "--he", "--hel"):
         assert base not in options
         assert len(base) >= 3 and "--help".startswith(base)
+    # Same non-vacuity for the single-dash domain: `-h` is the only registered token the
+    # `-h*` prefix rejection swallows, so the cluster spellings it also refuses cost the
+    # capture CLI nothing.  (`"--help".startswith("-h")` is False, so the two arms of the
+    # gate address disjoint domains.)
+    assert not "--help".startswith("-h")
+    for cluster in ("-hx", "-hh", "-help", "-hs"):
+        assert cluster not in options
+        assert cluster.startswith("-h")
 
 
 @pytest.mark.parametrize(
@@ -6086,6 +6115,49 @@ def test_verifier_accepts_an_evidence_dir_bound_to_a_relocated_capture_output(
         assert _EVIDENCE_DIR_GATE_WORDING not in str(error), str(error)
     else:
         assert result["verdict"] == evidence.PASS_VERDICT
+
+
+def test_evidence_dir_gate_accepts_a_plan_authored_with_a_trailing_slash_root(
+    tmp_path: Path,
+) -> None:
+    """The derivation is TEXTUAL (`rsplit`), and this is why that is load-bearing.
+
+    `plan_author` builds both fields by f-string from the same `--root`, so a root with a
+    trailing slash yields `{root}//capture-artifacts` AND `{root}//capture-<kind>.json` --
+    a spelling the production author really does emit.  String `rsplit` inverts that
+    exactly; a `Path(...).parent` / `os.path.dirname` "cleanup" would normalize the double
+    slash away, derive `{root}/capture-artifacts`, and refuse a plan `plan_author` wrote.
+    This test is the guard against that refactor.
+
+    The bundle cannot reach PASS in this spelling for a reason that predates #1263 and is
+    NOT this gate's: `_artifact_bytes` returns `str(Path(ref["path"]))`, so the ledger
+    side of the capture output binding arrives normalized while the plan's `output_path`
+    stays raw, and the pre-existing equality at the ledger<->plan capture binding refuses
+    the pair.  That refusal is precisely the assertion: reaching it proves execution ran
+    PAST the relational evidence-dir gate, which is many checks earlier -- so the gate
+    accepted the double-slash round-trip.  Under a normalizing derivation the refusal
+    would instead be the evidence-dir gate's own, and this test reddens.
+    """
+
+    bundle = _bundle(tmp_path)
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path) + "/")
+    capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
+    output_path = str(capture["output_path"])
+    # The double-slash spelling really is what the production author emits for this root,
+    # on BOTH fields -- otherwise the test would pin nothing.
+    assert output_path == f"{tmp_path}//capture-sizes_post.json"
+    assert f"{tmp_path}//capture-artifacts" in capture["argv"]
+    raw = Path(bundle["sizes"]["post"]["path"]).read_bytes()
+    Path(output_path).write_bytes(raw)
+    ref = {"path": output_path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    bundle["sizes"]["post"] = ref
+    _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_post", argv=list(capture["argv"]))
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert message == "supervisor capture output path differs"
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
 
 
 def test_verifier_rejects_an_evidence_dir_stranded_by_a_relocated_capture_output(

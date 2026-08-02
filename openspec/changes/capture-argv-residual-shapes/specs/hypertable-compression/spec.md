@@ -5,8 +5,11 @@
 ### Requirement: Run-plan capture argv MUST be free of help early-exit tokens and MUST bind `--evidence-dir` relationally to its own output path
 
 The live-evidence verifier SHALL reject any bundle whose run-plan capture
-argv carries an argparse help early-exit token — `-h`, `--help` (either
-spelling, including `--help=x`), or any unambiguous abbreviation of
+argv carries an argparse help early-exit token — `-h`, any single-dash
+short-option cluster beginning with `-h` (e.g. `-hx`, `-hh`, which
+argparse resolves to the same auto help action because `-h` is the only
+registered single-dash flag), `--help` (either spelling, including
+`--help=x`), or any unambiguous abbreviation of
 `--help` (`--h`, `--he`, `--hel`) — because such an argv makes the
 recorded producer exit before collecting anything (the bare spellings
 print help and exit 0; the `--help=x` spelling is an argparse usage
@@ -28,8 +31,9 @@ verifier; no argv[0] gate is added.
 #### Scenario: A help token cannot verify
 
 - **WHEN** a run-plan capture argv that satisfies every identity anchor
-  and value pin additionally carries `-h`, `--help`, `--help=x`, `--h`,
-  `--he`, or `--hel` in any position
+  and value pin additionally carries `-h`, a `-h`-prefixed cluster form
+  such as `-hx` or `-hh`, `--help`, `--help=x`, `--h`, `--he`, or
+  `--hel` in any position
 - **THEN** `verify_bundle` refuses with an error naming the offending
   token and the help early-exit refusal class, and no PASS verdict is
   produced

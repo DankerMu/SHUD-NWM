@@ -114,9 +114,9 @@ ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
 # per run even in production".  That under-recorded its identity: it is a MEASUREMENT
 # INPUT, not a cosmetic run-scoped path.  capture.py's `_free_bytes` (:490-502) runs
 # `os.statvfs(ctx.evidence_dir)` (:501) and the resulting snapshot `free_bytes` (:472)
-# feeds this module's `MIN_FREE_BYTES` hard gates (:2046-2047, :2201-2203), so pointing
-# `--evidence-dir` at any roomy filesystem makes the recorded headroom a fact about THAT
-# volume rather than the one the capture outputs claim.  #1250 closed the
+# feeds this module's `MIN_FREE_BYTES` hard gates, so pointing `--evidence-dir` at any
+# roomy filesystem makes the recorded headroom a fact about THAT volume rather than the
+# one the capture outputs claim.  #1250 closed the
 # `--self-test-free-bytes` SEAM route to fabricated headroom; this directory-identity
 # route stayed open until the sixth capture gate below closed it -- RELATIONALLY, against
 # the capture's own verifier-bound `output_path`, so nothing run-varying is pinned here.
@@ -1232,15 +1232,25 @@ def _validate_supervisor_execution(
             # binding, no member of this family is ever production.  Wording stays
             # spelling-safe on purpose: the bare spellings print the help text and exit 0
             # while `--help=x` is an argparse usage error exiting 2 with no help printed,
-            # so the message claims only what holds for all six -- an exit inside argparse,
-            # before anything is collected.  `-h` is length 2 and therefore falls outside
-            # the `len >= 3` abbreviation mechanism the branches below use, so its explicit
-            # equality case is load-bearing rather than redundant.  Measured zero-collision
-            # premise (pinned by
+            # so the message claims only what holds for every spelling -- an exit inside
+            # argparse, before anything is collected.  The single-dash arm is a PREFIX, not
+            # an equality: argparse parses a single-dash token as a CLUSTER of short
+            # options, so `-hx`, `-hh`, `-help` and `-hs` all reach the same auto help
+            # action that `-h` does (`-h` consumes no value, so whatever follows in the
+            # cluster is argparse's problem, not the producer's -- help is printed and the
+            # process exits either way).  An equality on `-h` alone would leave that whole
+            # cluster family PASS-shaped.  Rejecting the entire `-h*` single-dash domain is
+            # safe on the measured premise (pinned by
             # `test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain`):
-            # the capture CLI registers no `--h*` business flag and no single-dash flag at
-            # all beyond argparse's auto `-h`, so this domain overlaps no legitimate token.
-            if base == "-h" or (len(base) >= 3 and "--help".startswith(base)):
+            # the capture CLI registers no `--h*` business flag and NO single-dash flag at
+            # all beyond argparse's auto `-h`, so nothing legitimate is spelled `-h...`.
+            # The two arms do not overlap (`"--help".startswith("-h")` is False) and
+            # `-h=x` normalizes to base `-h`, so the prefix covers it too.  Clusters that
+            # merely CONTAIN `h` without leading with it (`-xh`) exit 2 inside argparse
+            # before any help action runs; they are a whole-argv parser-viability question,
+            # which this module deliberately does not answer (see the tool-value map's
+            # recorded boundary), so they stay outside this gate's declared scope.
+            if base.startswith("-h") or (len(base) >= 3 and "--help".startswith(base)):
                 raise EvidenceError(
                     f"run plan capture[{index}] argv carries {token}, an argparse help "
                     f"early-exit token: the recorded producer would exit inside argparse "

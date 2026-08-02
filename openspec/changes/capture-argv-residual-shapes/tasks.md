@@ -26,6 +26,35 @@ red proof expects exactly ONE pre-existing red: the zero-collision
 cardinality pin 9-vs-8 AssertionError, the :142 hunk's own
 attribution proof, listed separately from the DID-NOT-RAISE list).
 
+Fix round 1 (post cross-review, PR #1264 HEAD 8d72c4f7): both lenses
+independently found and the verifier CONFIRMED (FIX_NOW) that the
+help branch's single-dash arm matched `-h` by exact equality only,
+while argparse short-option cluster parsing routes every
+`-h<suffix>` token (`-hx`, `-hh`, `-hjunk`, `-help`, … — 156
+enumerated) to the same auto help action: SystemExit(0), full help,
+zero captures, yet verify_bundle returned PASS_TASK_4_5 — the
+delivered code violated the delta's own universal SHALL sentence.
+Fold: the single-dash arm becomes `base.startswith("-h")` (verifier
+exhaustively probed: 0 escapes remain, 0 false positives — no
+plan_author/template/e2e token begins with `-h`; `-h=x` normalizes
+to `-h` unchanged; double-dash arm untouched since
+`"--help".startswith("-h")` is False; `-xh`-style clusters exit 2
+before help and stay outside this gate's declared scope, recorded
+as the exit-2 residual family). Spec delta requirement + scenario
+updated to name the cluster family; `_HELP_EARLY_EXIT_TOKENS`
+extended with cluster ids; the "explicit equality case is
+load-bearing" comment rationale superseded by "the single-dash
+domain is rejected wholesale by `-h` prefix". Two CONFIRMED P3s
+ride along: the :117 in-module self-citation of the MIN_FREE_BYTES
+gate lines (stale at birth, +74 drift) goes symbolic (no line
+numbers — the file's only in-module line citation); and one
+trailing-slash-root positive test pins the rsplit-vs-normalizing
+derivation choice (verifier probe: a `Path.parent` swap stayed
+green on all 354 — the divergence the gate comment claims was
+untested). Proposal-overstatement candidate REFUTED (sentence is
+explicitly pre-change-scoped; spec/comment wording already matches
+delivered strength).
+
 Triage note: S — one code surface (verifier) + one test file, fully
 hermetic; suggested level from the issue is p3/S but the fixture stays
 expanded because the risk surface is identical to #1259/#1261 (the
