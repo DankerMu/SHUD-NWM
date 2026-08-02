@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 from scripts.select_ci_tests import (
     CORE_SMOKE_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
@@ -315,23 +317,49 @@ def _tracked_python_files(pathspec: str) -> list[str]:
     return [line.strip() for line in listing.stdout.splitlines() if line.strip().endswith(".py")]
 
 
+def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
+    """Dotted prefix an ``ImportFrom`` in ``path`` resolves against, or ``None``.
+
+    Absolute imports keep their own module. Relative ones resolve against the
+    importer's package, derived from the repo-relative POSIX path (as emitted by
+    ``git ls-files``), not the process cwd: ``packages/common/x.py`` sits in
+    ``packages.common``, ``level == 1`` means that package and each further
+    level strips one more part. A level deeper than the path allows contributes
+    nothing rather than raising — the walk runs over arbitrary tracked files.
+    """
+    if node.level == 0:
+        return node.module or None
+    package_parts = list(PurePosixPath(path).parent.parts)
+    strip = node.level - 1
+    if strip > len(package_parts):
+        return None
+    parts = package_parts[: len(package_parts) - strip]
+    if node.module:
+        parts.append(node.module)
+    return ".".join(parts) or None
+
+
 def _imported_module_names(path: str) -> set[str]:
     """Dotted module names the imports in ``path`` can refer to.
 
-    Both contract spellings collapse to the same dotted name here:
+    All contract spellings collapse to the same dotted name here:
     ``from packages.common import node27_container_contract`` via the
     module+alias join, ``from packages.common.node27_container_contract import
-    X`` via the module itself. Relative imports carry no dotted module name and
-    are skipped (the tracked tree uses absolute imports).
+    X`` via the module itself, and the relative spellings via the same joins
+    once resolved against the importer's package path (see
+    ``_import_from_base``) — so an in-package importer stays visible.
     """
     tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module)
-            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = _import_from_base(path, node)
+            if base is None:
+                continue
+            names.add(base)
+            names.update(f"{base}.{alias.name}" for alias in node.names)
     return names
 
 
@@ -430,6 +458,35 @@ def test_container_contract_transitive_walk_stays_scoped_to_scripts() -> None:
     importers = sorted(path for path in tracked if CONTRACT_MODULE in _imported_module_names(path))
 
     assert not importers, f"contract importers outside scripts/ are not covered by the closure walk: {importers}"
+
+
+def test_import_walk_resolves_relative_imports_against_importer_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both guards above read the tree through _imported_module_names, so a
+    # relative in-package importer must reach the SAME dotted name as the
+    # absolute spellings. Otherwise a future packages/common sibling using
+    # `from .` is invisible to the closure AND to the scope guard: both stay
+    # green while its suite silently falls back to core smoke.
+    package_dir = tmp_path / "packages" / "common"
+    package_dir.mkdir(parents=True)
+    spellings = {
+        "node27_recovery_helper.py": "from .node27_container_contract import RECOVERY_TARGET_CHUNK_NAME\n",
+        "node27_recovery_probe.py": "from . import node27_container_contract\n",
+        "node27_recovery_sibling.py": "from ..common.node27_container_contract import RECOVERY_TARGET_CHUNK_NAME\n",
+    }
+    for name, source in spellings.items():
+        (package_dir / name).write_text(source, encoding="utf-8")
+    # Malformed depth must contribute nothing rather than raise: the walk runs
+    # over arbitrary tracked files, not only well-formed packages.
+    (package_dir / "node27_recovery_overshoot.py").write_text("from ..... import whatever\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    for name in spellings:
+        names = _imported_module_names(f"packages/common/{name}")
+        assert CONTRACT_MODULE in names, f"{name}: relative import lost the contract module, got {sorted(names)}"
+    assert _imported_module_names("packages/common/node27_recovery_overshoot.py") == set()
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:

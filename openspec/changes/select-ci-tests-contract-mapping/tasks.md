@@ -51,13 +51,13 @@ Must preserve:
 
 ## Implementation tasks
 
-- [ ] 1. `scripts/select_ci_tests.py`: add one `PathTestRule` for
+- [x] 1. `scripts/select_ci_tests.py`: add one `PathTestRule` for
   `packages/common/node27_container_contract.py` → the five suites
   (`tests/test_node27_timeseries_compression_benchmark.py`,
   `..._capture.py`, `..._supervisor.py`, `..._live_evidence.py`,
   `tests/test_node27_timeseries_decompression_replay.py`), placed
   with the existing packages/common per-file rules (:284-317 style).
-- [ ] 2. `tests/test_select_ci_tests.py`: NEW meta-guard (style
+- [x] 2. `tests/test_select_ci_tests.py`: NEW meta-guard (style
   anchor: the existing tracked-script same-name meta-test) —
   (a) derive the contract's dependent closure: enumerate tracked
   `tests/test_*.py` via `git ls-files`, parse with `ast`, collect
@@ -73,16 +73,32 @@ Must preserve:
   ⊇ closure AND `set(CORE_SMOKE_TESTS) & set(selected) == set()`
   (disjoint, matching the #1191 meta-guard's no-overlap binding —
   not a weak `!=`).
-- [ ] 3. Red proof (scratch mutation, restored, output recorded):
+- [x] 3. Red proof (scratch mutation, restored, output recorded):
   remove the new PathTestRule → the meta-guard goes red (selection
   falls back to CORE_SMOKE, superset assertion fails); restore →
   green.
-- [ ] 4. Optional flip evidence (issue's bonus AC, cheap): scratch
+- [x] 4. Optional flip evidence (issue's bonus AC, cheap): scratch
   pytest plugin flips `RECOVERY_TARGET_CHUNK_NAME` at import time and
   runs the five newly-selected suites → they go red (recorded count),
   proving the newly selected gate carries information. Do NOT modify
   any repo file for this; plugin lives in the scratchpad.
-- [ ] 5. Oracle: acceptance command
+- [x] 5. Cross-review round 1 repair (verifier CONFIRMED P3,
+  FIX_NOW — coverage gap in the new guard itself):
+  `_imported_module_names` dropped relative imports and its docstring
+  asserted a false premise ("the tracked tree uses absolute imports"
+  — services/workers hold 49 relative ImportFrom nodes; packages/**
+  holds 0 today, so the hole was latent). Fixed by resolving
+  `level >= 1` against the importer's package path
+  (`_import_from_base`) so a future `packages/common` sibling using
+  `from .node27_container_contract import ...` lands in the closure
+  and reddens the scope guard; new negative-case test covers three
+  relative spellings + overshoot-depth returns empty instead of
+  raising. Red proof: pre-change helper logic → new test fails with
+  empty set; restored → 31 passed. Second verified finding
+  (meta-guard not self-selected on a tests/**-only PR) adjudicated
+  pre-existing selector architecture (#1191 guard identical) →
+  deferred with routing, not fixed here.
+- [x] 6. Oracle: acceptance command
   `printf 'packages/common/node27_container_contract.py\n' > <scratch>/diff.txt
   && uv run python scripts/select_ci_tests.py --changed-file
   <scratch>/diff.txt --repo-root .` output includes the five suites
