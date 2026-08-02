@@ -316,6 +316,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_redaction.py",),
     ),
     PathTestRule(
+        "packages/common/node27_container_contract.py",
+        (
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_capture.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_decompression_replay.py",
+        ),
+    ),
+    PathTestRule(
         "apps/api/**",
         (
             "tests/test_api.py",
