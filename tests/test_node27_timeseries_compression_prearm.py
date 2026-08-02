@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -374,6 +375,88 @@ def test_refuses_when_the_intent_gate_state_is_not_idle(tmp_path, capsys, state)
     assert "idle" in stderr
 
 
+@pytest.mark.parametrize("expected_stale", ["REPLACE_WITH_64_HEX_DIGEST", ""])
+def test_refuses_a_missing_or_malformed_expected_stale_digest_without_a_receipt(tmp_path, capsys, expected_stale):
+    """The supervisor requires the pin on EVERY arm, receipt on disk or not.
+
+    ``node27_timeseries_compression_supervisor.py`` refuses unless the digest is
+    64-hex AND a matching receipt exists (no first-arm branch), so an unset or
+    placeholder pin must refuse here too instead of sweeping and green-lighting.
+    """
+
+    workdir = _seed_workdir(tmp_path, with_receipt=False)
+    (workdir / "supervisor-ledger.jsonl").write_bytes(b"{}\n")
+    env_path = _env_file(tmp_path, expected_stale=expected_stale)
+    stderr = _refusal_case(workdir, env_path, _fake_systemctl(tmp_path, "inactive"), capsys)
+    assert prearm.EXPECTED_STALE_ENV_KEY in stderr
+    assert "64-hex" in stderr
+
+
+def test_refuses_an_absolute_artifact_association_label(tmp_path, capsys):
+    """An absolute label lands the archived evidence OUTSIDE the archive.
+
+    ``_collision_safe_destination`` joins the label onto the associations
+    directory, and ``Path("dir") / "/abs"`` is ``/abs``.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    (workdir / "benchmark-before.json").write_bytes(b"{}")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = tmp_path / "schema-before.dump"
+    victim.write_bytes(b"PGDMP-stale")
+    (workdir / prearm.RUN_PLAN_NAME).write_text(
+        json.dumps(
+            {
+                "commands": [{"artifact_associations": {str(outside / "ESCAPED"): str(victim)}}],
+                "captures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stderr = _refusal_case(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"), capsys)
+    assert "single safe path component" in stderr
+    assert str(outside / "ESCAPED") in stderr
+    assert list(outside.iterdir()) == []
+    assert victim.read_bytes() == b"PGDMP-stale"
+
+
+def test_refuses_a_traversing_capture_id(tmp_path, capsys):
+    """A traversing capture_id writes back INTO the replay working directory.
+
+    That is the next arm's "output exists before spawn" mine, planted by the
+    very tool whose job is to clear it.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    (workdir / "benchmark-before.json").write_bytes(b"{}")
+    capture_output = tmp_path / "preflight-activity.json"
+    capture_output.write_bytes(b'{"activity": "stale"}')
+    (workdir / prearm.RUN_PLAN_NAME).write_text(
+        json.dumps(
+            {
+                "commands": [],
+                "captures": [
+                    {
+                        "capture_id": "../../../TRAVERSED",
+                        "kind": "preflight_activity",
+                        "argv": ["/usr/bin/true"],
+                        "output_path": str(capture_output),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stderr = _refusal_case(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"), capsys)
+    assert "single safe path component" in stderr
+    assert "TRAVERSED" in stderr
+    assert not [path for path in tmp_path.rglob("*TRAVERSED*")]
+    assert capture_output.read_bytes() == b'{"activity": "stale"}'
+
+
 def test_refuses_when_the_intent_gate_state_is_unreadable(tmp_path, capsys):
     workdir = _seed_workdir(tmp_path)
     gate = workdir / f".{prearm.RECEIPT_NAME}.intent-gate.json"
@@ -388,18 +471,36 @@ def test_refuses_when_the_intent_gate_state_is_unreadable(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 
 
-def test_missing_receipt_proceeds_as_the_first_arm(tmp_path, capsys):
+def test_missing_receipt_sweeps_but_warns_the_arm_will_refuse(tmp_path, capsys):
+    """An absent receipt is NOT a first-arm green light.
+
+    ``node27_timeseries_compression_supervisor.py`` refuses unconditionally
+    without a receipt matching the pin, so the sweep proceeds (it is still
+    valid) but the operator must be told the arm cannot start yet, and the
+    retained line must not name a file that does not exist.
+    """
+
     workdir = _seed_workdir(tmp_path, with_receipt=False)
     (workdir / "supervisor-ledger.jsonl").write_bytes(b"{}\n")
 
     code = _invoke(workdir, _env_file(tmp_path, expected_stale="a" * 64), _fake_systemctl(tmp_path, "inactive"))
-    capsys.readouterr()
+    out = capsys.readouterr().out
     assert code == 0
+
+    assert f"warning: {prearm.RECEIPT_NAME} is absent" in out
+    assert "expected-stale gate" in out
+    assert f"next: systemctl --user start {UNIT}" not in out
+    assert f"next (blocked until {prearm.RECEIPT_NAME} is seeded and pinned): systemctl --user start {UNIT}" in out
+    retained_line = next(line for line in out.splitlines() if line.startswith("retained in place: "))
+    assert retained_line == f"retained in place: {prearm.RUN_PLAN_NAME}"
 
     archive = _sole_archive(workdir)
     assert (archive / "supervisor-ledger.jsonl").is_file()
     manifest = json.loads((archive / prearm.MANIFEST_NAME).read_text(encoding="utf-8"))
     assert manifest["receipt_sha256"] is None
+    assert manifest["retained"] == [prearm.RUN_PLAN_NAME]
+    assert manifest["status"] == "complete"
+    assert manifest["failure"] is None
 
 
 def test_missing_run_plan_sweeps_in_notice_bearing_sweep_only_mode(tmp_path, capsys):
@@ -491,11 +592,107 @@ def test_clean_workdir_is_a_noop_that_still_prints_the_next_step(tmp_path, capsy
 
 
 # --------------------------------------------------------------------------- #
+# (g2) move-phase failure handling and cross-device semantics
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_move_writes_a_partial_manifest_and_refuses(tmp_path, capsys, monkeypatch):
+    """A mid-sweep ENOSPC must not escape as a traceback with no manifest.
+
+    The manifest is written last, so an unguarded failure leaves the working
+    directory half swept, a truncated copy in the archive and NOTHING recording
+    where the evidence went.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    (workdir / "a-first.json").write_bytes(b'{"first": true}')
+    (workdir / "b-second.json").write_bytes(b'{"second": true}')
+
+    real_move = prearm.shutil.move
+    calls: list[str] = []
+
+    def flaky_move(source, destination, *args, **kwargs):
+        calls.append(str(source))
+        if len(calls) == 2:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_move(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(prearm.shutil, "move", flaky_move)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err.startswith("pre-arm reset refused: ")
+    assert "archive move failed" in captured.err
+    assert str(workdir / "b-second.json") in captured.err
+
+    archive = _sole_archive(workdir)
+    manifest = json.loads((archive / prearm.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["status"] == "partial"
+    assert [move["label"] for move in manifest["moves"]] == ["a-first.json"]
+    assert manifest["failure"]["label"] == "b-second.json"
+    assert manifest["failure"]["from"] == str(workdir / "b-second.json")
+    assert manifest["failure"]["to"] == str(archive / "b-second.json")
+    assert "No space left on device" in manifest["failure"]["error"]
+
+    # What already moved is findable; what failed is still at its source.
+    assert (archive / "a-first.json").read_bytes() == b'{"first": true}'
+    assert (workdir / "b-second.json").read_bytes() == b'{"second": true}'
+    assert (workdir / prearm.RECEIPT_NAME).read_bytes() == RECEIPT_BODY
+
+
+def test_a_cross_device_association_move_still_archives_the_bytes(tmp_path, capsys, monkeypatch):
+    """EXDEV is allowed: the node-27 schema dump may live on another mount.
+
+    ``shutil.move`` falls back to a copy and only then drops the source, so the
+    content exists at the destination before the source goes away.
+    """
+
+    workdir = _seed_workdir(tmp_path)
+    schema_dump = tmp_path / "schema-before.dump"
+    schema_dump.write_bytes(b"PGDMP-stale")
+    capture_output = tmp_path / "preflight-activity.json"
+    capture_output.write_bytes(b'{"activity": "stale"}')
+    (workdir / prearm.RUN_PLAN_NAME).write_text(
+        json.dumps(_run_plan_document(schema_dump=schema_dump, capture_output=capture_output, workdir=workdir)),
+        encoding="utf-8",
+    )
+
+    real_rename = os.rename
+
+    def cross_device_rename(source, destination, **kwargs):
+        if os.fspath(source) == str(schema_dump):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+
+    code = _invoke(workdir, _env_file(tmp_path), _fake_systemctl(tmp_path, "inactive"))
+    capsys.readouterr()
+    assert code == 0
+
+    archive = _sole_archive(workdir)
+    associations = archive / prearm.ASSOCIATIONS_DIR_NAME
+    assert (associations / "schema_dump-schema-before.dump").read_bytes() == b"PGDMP-stale"
+    assert not schema_dump.exists()
+    manifest = json.loads((archive / prearm.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert str(schema_dump) in {move["from"] for move in manifest["moves"]}
+
+
+# --------------------------------------------------------------------------- #
 # (h) no-delete guarantee
 # --------------------------------------------------------------------------- #
 
 
 def test_module_source_uses_no_deletion_api():
+    """Scope: THIS module calls no deletion API directly.
+
+    It does not claim shutil never drops a source internally — a cross-device
+    ``shutil.move`` copies to the archive first and then drops the source (see
+    ``test_a_cross_device_association_move_still_archives_the_bytes``).
+    """
+
     source = Path(prearm.__file__).read_text(encoding="utf-8")
     for token in ("unlink", "rmtree", "os.remove", "rmdir", ".remove("):
         assert token not in source, token

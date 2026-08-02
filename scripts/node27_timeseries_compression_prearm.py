@@ -7,12 +7,19 @@ correct anti-evidence-shadow trust boundary.  What was missing is the committed
 counterpart: a rerun-safe reset that relocates the PREVIOUS arm's residue so the
 next arm can spawn at all.
 
-This tool never destroys evidence.  Every eviction is a ``shutil.move`` into a
-timestamped ``prearm-archive/<UTC>/`` directory with a manifest; no deletion API
-is used anywhere in this module.  It fails closed BEFORE the first move when the
-replay unit is not ``inactive``/``failed``, when an existing terminal receipt
-does not match the pinned expected-stale digest, when the failure-intent family
-is unresolved, or when the run plan is present but unparsable.
+This tool never discards evidence: every eviction is a move-only relocation
+(``shutil.move``) into a timestamped ``prearm-archive/<UTC>/`` directory with a
+manifest, and this module calls no deletion API directly.  A same-device move is
+a rename; a cross-device move (the schema dump may live on another mount) copies
+the bytes into the archive first and only then lets shutil's own fallback drop
+the source, so the content exists at the destination before the source goes
+away.  It fails closed BEFORE the first move when the replay unit is not
+``inactive``/``failed``, when the pinned expected-stale digest is missing or
+malformed, when an existing terminal receipt does not match that digest, when
+the failure-intent family is unresolved, when the run plan is present but
+unparsable, or when a plan-authored label would name a destination outside the
+archive.  A move that fails mid-sweep writes a PARTIAL manifest (recording what
+already moved and what failed) and then refuses.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from packages.common import compression_terminal_state as terminal_state
-from packages.common.safe_fs import atomic_write_bytes_no_follow
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNIT_NAME = "nhms-node27-timeseries-compression-replay.service"
@@ -186,10 +193,31 @@ def probe_unit_state(systemctl: str) -> str:
     return state
 
 
-def assert_receipt_matches_expected_stale(receipt_path: Path, expected_sha256: str) -> str | None:
-    """Gate (b): an existing receipt must be the pinned expected-stale one.
+def assert_expected_stale_digest(env: Mapping[str, str]) -> str:
+    """Gate (b1): the pinned expected-stale digest must be a 64-hex sha256.
 
-    A missing receipt is the first-arm case and proceeds.
+    Validated UNCONDITIONALLY, including when the receipt is absent: the
+    supervisor requires ``re.fullmatch(r"[0-9a-f]{64}", expected_stale_sha256)``
+    AND an existing receipt on every arm (no first-arm branch exists), so a
+    placeholder digest is a pre-arm defect no matter what is on disk.
+    """
+
+    value = env.get(EXPECTED_STALE_ENV_KEY, "").strip()
+    if _SHA256_RE.fullmatch(value) is None:
+        reported = value or "<unset>"
+        raise PrearmError(
+            f"{EXPECTED_STALE_ENV_KEY} must be a 64-hex sha256, found {reported!r}; "
+            "the supervisor's expected-stale gate requires it on every arm"
+        )
+    return value
+
+
+def assert_receipt_matches_expected_stale(receipt_path: Path, expected_sha256: str) -> str | None:
+    """Gate (b2): an existing receipt must be the pinned expected-stale one.
+
+    ``None`` means the receipt is ABSENT.  That is not a "first arm" green
+    light — the supervisor refuses without it — but the sweep itself is still
+    valid, so the caller proceeds and warns.
     """
 
     try:
@@ -198,10 +226,6 @@ def assert_receipt_matches_expected_stale(receipt_path: Path, expected_sha256: s
         raise PrearmError(f"terminal receipt identity is unusable: {error}") from error
     if identity is None:
         return None
-    if _SHA256_RE.fullmatch(expected_sha256) is None:
-        raise PrearmError(
-            f"{EXPECTED_STALE_ENV_KEY} must be a 64-hex sha256 to validate the existing {receipt_path.name}"
-        )
     if identity.sha256 != expected_sha256:
         raise PrearmError(
             f"{receipt_path} sha256 {identity.sha256} differs from the pinned "
@@ -283,6 +307,32 @@ def load_run_plan(run_plan_path: Path) -> dict[str, Any] | None:
     return dict(parsed)
 
 
+def _assert_safe_label(label: str, *, kind: str, run_plan_path: Path) -> str:
+    """Refuse a plan-authored name that is not ONE safe path component.
+
+    Archive destinations are named from these labels
+    (``_collision_safe_destination``), and ``Path("dir") / "/abs"`` is ``/abs``:
+    an absolute label lands the archived evidence OUTSIDE the archive entirely,
+    and a traversing one ("../../..") lands it back in the replay working
+    directory as the next arm's "output exists before spawn" mine.  Checked
+    inside gate (d), i.e. BEFORE the first move.
+    """
+
+    separators = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    if (
+        not label
+        or "\x00" in label
+        or any(separator in label for separator in separators)
+        or label in {".", ".."}
+        or os.path.isabs(label)
+    ):
+        raise PrearmError(
+            f"run plan {kind} {label!r} must be a single safe path component "
+            f"(non-empty, no path separator, not '.'/'..', not absolute): {run_plan_path}"
+        )
+    return label
+
+
 def plan_owned_paths(plan: Mapping[str, Any], *, run_plan_path: Path) -> list[tuple[str, Path]]:
     """Every path the supervisor refuses to overwrite, as (label, path) pairs.
 
@@ -305,6 +355,7 @@ def plan_owned_paths(plan: Mapping[str, Any], *, run_plan_path: Path) -> list[tu
         for label, value in associations.items():
             if not isinstance(label, str) or not label or not isinstance(value, str) or not Path(value).is_absolute():
                 raise PrearmError(f"run plan artifact associations must be named absolute paths: {run_plan_path}")
+            _assert_safe_label(label, kind="artifact association label", run_plan_path=run_plan_path)
             entries.append((label, _absolute(value)))
 
     captures = plan.get("captures")
@@ -317,7 +368,10 @@ def plan_owned_paths(plan: Mapping[str, Any], *, run_plan_path: Path) -> list[tu
         if not isinstance(output_path, str) or not Path(output_path).is_absolute():
             raise PrearmError(f"run plan capture output_path must be an absolute path: {run_plan_path}")
         raw_label = capture.get("capture_id") or capture.get("kind") or "capture"
-        entries.append((str(raw_label), _absolute(output_path)))
+        if not isinstance(raw_label, str):
+            raise PrearmError(f"run plan capture label must be a string: {run_plan_path}")
+        label = _assert_safe_label(raw_label, kind="capture label", run_plan_path=run_plan_path)
+        entries.append((label, _absolute(output_path)))
 
     return entries
 
@@ -393,6 +447,58 @@ def _collision_safe_destination(directory: Path, name: str) -> Path:
     raise PrearmError(f"could not allocate a collision-free destination for {name} under {directory}")
 
 
+def _manifest_document(
+    *,
+    now: datetime,
+    unit_state: str,
+    workdir: Path,
+    archive_dir: Path,
+    run_plan_path: Path | None,
+    receipt_sha256: str | None,
+    retained: Sequence[str],
+    moves: Sequence[Mapping[str, str]],
+    failure: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "unit": UNIT_NAME,
+        "unit_state": unit_state,
+        "workdir": os.fspath(workdir),
+        "archive_dir": os.fspath(archive_dir),
+        "run_plan_path": os.fspath(run_plan_path) if run_plan_path is not None else None,
+        "receipt_sha256": receipt_sha256,
+        "retained": list(retained),
+        "status": "partial" if failure is not None else "complete",
+        "failure": dict(failure) if failure is not None else None,
+        "moves": [dict(move) for move in moves],
+    }
+
+
+def _write_next_step(stdout: TextIO, *, receipt_present: bool) -> None:
+    """The next-step line, qualified when the arm cannot actually start.
+
+    The supervisor requires an existing receipt matching the pin on EVERY arm,
+    so a bare green light without one would send the operator into a guaranteed
+    refusal.
+    """
+
+    if receipt_present:
+        stdout.write(f"next: {NEXT_STEP_COMMAND}\n")
+        return
+    stdout.write(f"next (blocked until {RECEIPT_NAME} is seeded and pinned): {NEXT_STEP_COMMAND}\n")
+
+
+def _write_manifest(archive_dir: Path, document: Mapping[str, Any]) -> Path:
+    manifest_path = archive_dir / MANIFEST_NAME
+    atomic_write_bytes_no_follow(
+        manifest_path,
+        json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+        mode=0o600,
+    )
+    return manifest_path
+
+
 def run_prearm(
     *,
     workdir: Path,
@@ -422,8 +528,15 @@ def run_prearm(
     receipt_path = workdir / RECEIPT_NAME
     run_plan_path = workdir / RUN_PLAN_NAME
 
-    # (b) expected-stale receipt digest.
-    receipt_sha256 = assert_receipt_matches_expected_stale(receipt_path, env.get(EXPECTED_STALE_ENV_KEY, ""))
+    # (b) expected-stale receipt digest: the pin is validated unconditionally,
+    # the comparison only when a receipt exists.
+    expected_stale = assert_expected_stale_digest(env)
+    receipt_sha256 = assert_receipt_matches_expected_stale(receipt_path, expected_stale)
+    if receipt_sha256 is None:
+        stdout.write(
+            f"warning: {RECEIPT_NAME} is absent; the arm will refuse at the supervisor "
+            "expected-stale gate until the stale receipt is seeded\n"
+        )
 
     # (c) failure-intent family.
     assert_intent_family_resolved(receipt_path)
@@ -443,10 +556,14 @@ def run_prearm(
 
     workdir_residue = select_workdir_residue(workdir)
 
+    # Whitelisted members are never moved, so this is stable across the sweep;
+    # only the ones that actually exist may be reported as retained.
+    retained = sorted(name for name in WHITELIST if os.path.lexists(workdir / name))
+
     # Every gate has passed; only now may anything move.
     if not workdir_residue and not association_entries:
         stdout.write(f"pre-arm reset: nothing to archive; {workdir} is already clean\n")
-        stdout.write(f"next: {NEXT_STEP_COMMAND}\n")
+        _write_next_step(stdout, receipt_present=receipt_sha256 is not None)
         return {
             "archive_dir": None,
             "unit_state": unit_state,
@@ -458,17 +575,54 @@ def run_prearm(
     archive_dir = _create_archive_dir(workdir / ARCHIVE_DIR_NAME, now=now)
     moves: list[dict[str, str]] = []
 
+    def _archive_move(*, kind: str, label: str, source: Path, destination: Path) -> None:
+        """Move one path, or write a PARTIAL manifest and refuse.
+
+        Without this the first ENOSPC mid-sweep escapes as a raw traceback with
+        the working directory half swept and NO manifest at all (the manifest is
+        written last), which is exactly the state an operator cannot reconstruct.
+        """
+
+        record = {
+            "kind": kind,
+            "label": label,
+            "from": os.fspath(source),
+            "to": os.fspath(destination),
+        }
+        try:
+            shutil.move(os.fspath(source), os.fspath(destination))
+        except (OSError, shutil.Error) as error:
+            failure = {**record, "error": f"{type(error).__name__}: {error}"}
+            try:
+                _write_manifest(
+                    archive_dir,
+                    _manifest_document(
+                        now=now,
+                        unit_state=unit_state,
+                        workdir=workdir,
+                        archive_dir=archive_dir,
+                        run_plan_path=run_plan_path if plan is not None else None,
+                        receipt_sha256=receipt_sha256,
+                        retained=retained,
+                        moves=moves,
+                        failure=failure,
+                    ),
+                )
+            except (OSError, SafeFilesystemError):
+                # A manifest failure must never mask the move failure below.
+                pass
+            raise PrearmError(
+                f"archive move failed: {source} -> {destination} ({error}); "
+                f"the partial sweep and its manifest are under {archive_dir}"
+            ) from error
+        moves.append(record)
+
     for name in workdir_residue:
-        source = workdir / name
-        destination = archive_dir / name
-        shutil.move(os.fspath(source), os.fspath(destination))
-        moves.append(
-            {
-                "kind": "workdir_member",
-                "label": name,
-                "from": os.fspath(source),
-                "to": os.fspath(destination),
-            }
+        _archive_move(
+            kind="workdir_member",
+            label=name,
+            source=workdir / name,
+            destination=archive_dir / name,
         )
 
     if association_entries:
@@ -479,42 +633,34 @@ def run_prearm(
                 os.lstat(target)
             except FileNotFoundError:
                 continue
-            destination = _collision_safe_destination(associations_dir, f"{label}-{target.name}")
-            shutil.move(os.fspath(target), os.fspath(destination))
-            moves.append(
-                {
-                    "kind": "plan_association",
-                    "label": label,
-                    "from": os.fspath(target),
-                    "to": os.fspath(destination),
-                }
+            _archive_move(
+                kind="plan_association",
+                label=label,
+                source=target,
+                destination=_collision_safe_destination(associations_dir, f"{label}-{target.name}"),
             )
 
-    manifest = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
-        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "unit": UNIT_NAME,
-        "unit_state": unit_state,
-        "workdir": os.fspath(workdir),
-        "archive_dir": os.fspath(archive_dir),
-        "run_plan_path": os.fspath(run_plan_path) if plan is not None else None,
-        "receipt_sha256": receipt_sha256,
-        "retained": sorted(WHITELIST),
-        "moves": moves,
-    }
-    manifest_path = archive_dir / MANIFEST_NAME
-    atomic_write_bytes_no_follow(
-        manifest_path,
-        json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n",
-        mode=0o600,
+    manifest_path = _write_manifest(
+        archive_dir,
+        _manifest_document(
+            now=now,
+            unit_state=unit_state,
+            workdir=workdir,
+            archive_dir=archive_dir,
+            run_plan_path=run_plan_path if plan is not None else None,
+            receipt_sha256=receipt_sha256,
+            retained=retained,
+            moves=moves,
+            failure=None,
+        ),
     )
 
     stdout.write(f"pre-arm archive: {archive_dir}\n")
     stdout.write(f"archived {len(moves)} path(s); manifest: {manifest_path}\n")
     for move in moves:
         stdout.write(f"  {move['from']} -> {move['to']}\n")
-    stdout.write(f"retained in place: {', '.join(sorted(WHITELIST))}\n")
-    stdout.write(f"next: {NEXT_STEP_COMMAND}\n")
+    stdout.write(f"retained in place: {', '.join(retained) if retained else '<none>'}\n")
+    _write_next_step(stdout, receipt_present=receipt_sha256 is not None)
 
     return {
         "archive_dir": archive_dir,

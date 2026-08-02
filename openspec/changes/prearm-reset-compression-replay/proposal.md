@@ -83,12 +83,17 @@ one test file; supervisor and all other production files zero-diff):
    (`active`, `activating`, `unknown`, invocation failure) refuses;
    rc alone is NOT the gate because a running oneshot reports
    `activating` with nonzero rc.
-   (b) if `<workdir>/terminal-evidence.json` exists, its sha256 (via
+   (b) the pinned `NODE27_COMPRESSION_EXPECTED_STALE_SHA256` must be
+   present and 64-hex unconditionally; if
+   `<workdir>/terminal-evidence.json` exists, its sha256 (via
    `packages.common.compression_terminal_state.terminal_identity`,
    the same helper the supervisor consumes at :1766-1773) must equal
-   the pinned `NODE27_COMPRESSION_EXPECTED_STALE_SHA256` (64-hex
-   required); mismatch or malformed digest refuses. A missing receipt
-   is fine (first arm).
+   the pin; mismatch or malformed digest refuses. A missing receipt
+   proceeds (sweeping is still valid) but WITH an explicit warning:
+   the supervisor has NO first-arm branch — :1767-1773 unconditionally
+   refuses an absent receipt — so the next-step guidance is qualified
+   until the stale receipt is seeded (review round 1 corrected the
+   original "missing receipt = first arm" premise here).
    (c) UNRESOLVED FAILURE-INTENT refuses: if the
    `.terminal-evidence.json.failure-intent/` directory or any
    `.terminal-evidence.json.failure-intent.consumed-*` sibling
@@ -142,7 +147,20 @@ one test file; supervisor and all other production files zero-diff):
    UTC timestamp and every from→to pair; print the archive path and
    the next arm command
    (`systemctl --user start nhms-node27-timeseries-compression-replay.service`)
-   on stdout. Exit 0 also when there was nothing to move (rerun-safe).
+   on stdout (qualified when the receipt is absent; `retained in
+   place` lists only files actually present). Exit 0 also when there
+   was nothing to move (rerun-safe).
+6. Move-phase robustness (review round 1, verifier-CONFIRMED with
+   real-fs reproductions): archive destination names derived from
+   plan labels/capture_ids are validated as single safe path
+   components pre-move (an absolute label escaped the archive; a
+   traversal capture_id wrote into the replay workdir); both move
+   loops convert OSError/shutil.Error into a PrearmError AFTER a
+   best-effort partial manifest write (ENOSPC mid-sweep had produced
+   a raw traceback with no manifest); cross-device moves remain
+   allowed with documented copy-before-source-removal semantics
+   (EXDEV-monkeypatch test) — the module itself still calls no
+   deletion API, and the docstring states that scope precisely.
 
 ## Non-goals
 
