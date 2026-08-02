@@ -67,6 +67,7 @@ RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
+CAPTURE_SCRIPT_SUFFIX = "/scripts/node27_timeseries_compression_capture.py"
 # The container pg_restore entrypoint realpath is the single-source-of-truth
 # external contract shared with the verifier; see node27_container_contract.
 # Bind the wrapper and fail closed on any drift.
@@ -484,6 +485,24 @@ def _assert_concrete_argv(
     return normalized
 
 
+def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
+    """Bind a capture argv to the committed capture producer and its declared kind.
+
+    Suffix, not `EXPECTED_REPO`: recorded executor-vs-verifier asymmetry.  This process
+    EXECUTES plans, and a hermetic plan legitimately runs the capture script out of a
+    test checkout, so the production-path claim belongs to the forensic verifier alone;
+    what the supervisor can insist on is that the thing it spawns for a capture step is
+    the capture producer, invoked for the kind the plan says it is.  No seam check here
+    either -- the executor must be able to run seam-carrying hermetic plans (#1250).
+    """
+
+    if len(argv) < 4 or not argv[1].endswith(CAPTURE_SCRIPT_SUFFIX):
+        named = argv[1] if len(argv) > 1 else "<absent>"
+        raise SupervisorError(f"capture {kind} argv producer {named} is not the capture script")
+    if argv[2:4] != ["--kind", kind]:
+        raise SupervisorError(f"capture {kind} argv kind binding {argv[2:4]} differs from its declared kind")
+
+
 def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[str, Any]:
     """Validate exact cardinality, provenance and concrete commands before spawn."""
 
@@ -591,6 +610,7 @@ def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[st
         ):
             raise SupervisorError("run plan capture identity/output differs")
         argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+        _assert_capture_producer_argv(argv, kind=str(kind))
         capture_ids.add(capture_id)
         normalized_captures.append({**dict(capture), "argv": argv})
     if tuple(item["kind"] for item in normalized_captures) != EXPECTED_CAPTURE_SEQUENCE:
@@ -890,6 +910,10 @@ def run_capture_step(
     kind = str(capture["kind"])
     output_path = Path(str(capture["output_path"]))
     argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+    # Refused before any spawn: the executing gate is not merely a restatement of the
+    # plan gate -- `run_capture_step` is callable directly with a capture the plan
+    # validator never saw.
+    _assert_capture_producer_argv(argv, kind=kind)
     try:
         os.lstat(output_path)
     except FileNotFoundError:
