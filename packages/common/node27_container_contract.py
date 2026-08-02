@@ -100,7 +100,7 @@ RECOVERY_TARGET_RANGE_END = "2026-06-04T00:00:00Z"
 #     derived from here; and the verifier's expected decompress argv tail
 #     (``_validate_exact_command_argv``, kind ``decompress``), which interpolates
 #     the verifier's own guard-bound ``RECOVERY_TARGET`` rather than importing
-#     this module (#1244).
+#     the six fields from this module (#1244).
 # Coverage is NOT total: one production copy remains outside the bound set --
 # ``TARGET``/``TARGET_RELATION`` in
 # scripts/node27_timeseries_decompression_replay.py:24-32, which is NOT fully
