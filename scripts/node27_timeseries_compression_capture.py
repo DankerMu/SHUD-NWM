@@ -441,17 +441,7 @@ def _capture_catalog(ctx: Context, kind: str) -> dict[str, Any]:
 
 
 def _capture_catalog_post(ctx: Context) -> dict[str, Any]:
-    body = _psql_json(
-        ctx,
-        "/* capture:catalog_post */ SELECT json_build_object("
-        "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
-        "'catalog', " + _CATALOG_BODY_SQL + ","
-        "'compressed_chunk_identities', json_build_array(json_build_object("
-        "'hypertable_schema','hydro','hypertable_name','river_timeseries',"
-        "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
-        "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))",
-        label="catalog_post",
-    )
+    body = _psql_json(ctx, CATALOG_POST_SQL, label="catalog_post")
     return {
         "captured_at": str(body["captured_at"]),
         "snapshot_id": str(uuid.uuid4()),
@@ -634,6 +624,31 @@ _CATALOG_BODY_SQL = (
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
     "WHERE j.proc_name = 'policy_compression'), '[]'::json)))"
 )
+
+# The post-run catalog snapshot names the exact chunk this plane decompressed, so
+# its six identity fields are interpolated from the same derived
+# ``RECOVERY_TARGET`` mapping the emitted ``target`` payload and
+# ``RECOVERY_PREFLIGHT_SQL`` use (issue #1244); they used to be hand-written
+# literals a retarget had to remember.  Defined AFTER ``_CATALOG_BODY_SQL``
+# because it embeds it.  The rendered string is byte-frozen by
+# tests/test_node27_timeseries_compression_capture.py, marker included: the
+# capture test's psql stub dispatches on ``/* capture:catalog_post */``, so that
+# comment must appear verbatim and stay unique among the stub's responses (the
+# stub matches by substring containment; the frozen string keeps it leading).
+CATALOG_POST_SQL = (
+    "/* capture:catalog_post */ SELECT json_build_object("
+    "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
+    "'catalog', " + _CATALOG_BODY_SQL + ","
+    "'compressed_chunk_identities', json_build_array(json_build_object("
+    f"'hypertable_schema','{RECOVERY_TARGET['hypertable_schema']}',"
+    f"'hypertable_name','{RECOVERY_TARGET['hypertable_name']}',"
+    f"'chunk_schema','{RECOVERY_TARGET['chunk_schema']}',"
+    f"'chunk_name','{RECOVERY_TARGET['chunk_name']}',"
+    f"'range_start','{RECOVERY_TARGET['range_start']}',"
+    f"'range_end','{RECOVERY_TARGET['range_end']}')))"
+)
+
+
 def _selection_sql(kind: str) -> str:
     """Reproduce the runner's uncompressed terminal-chunk selection, read-only.
 

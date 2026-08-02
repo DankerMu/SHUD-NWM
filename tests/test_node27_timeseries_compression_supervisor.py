@@ -2834,11 +2834,21 @@ def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> No
     contract, and ``plan_author``'s argv literals transitively via the supervisor
     gate test in tests/test_node27_timeseries_compression_capture.py.
 
-    Two production copies remain KNOWN UNBOUND (tracked in a follow-up issue):
-    the capture producer's ``_capture_catalog_post`` SQL literals
-    (scripts/node27_timeseries_compression_capture.py:449-452) and the verifier's
-    inline expected decompress argv
-    (scripts/node27_timeseries_compression_live_evidence.py:666-677).
+    The two copies that used to be spelled out by hand are derived as of #1244:
+    the capture producer's ``CATALOG_POST_SQL`` interpolates capture's own
+    contract-derived ``RECOVERY_TARGET`` (byte-frozen in
+    tests/test_node27_timeseries_compression_capture.py), and the verifier's
+    expected decompress argv tail is built from its own ``RECOVERY_TARGET``
+    module constant -- which this guard's evidence<->contract clause below is
+    what closes transitively: that derivation added no new contract import, and
+    the verifier still never imports the six recovery-target fields from the
+    contract (its pre-existing ``node27_container_contract`` import covers
+    unrelated constants).
+    The e2e ``test_real_state_machine_bundle_verifies_task_4_5_pass``
+    (tests/test_node27_timeseries_compression_live_evidence.py) stays the
+    independent NON-derived oracle: its decompress argv comes from
+    ``plan_author``'s own literals through the real ``verify_bundle`` path, so an
+    evidence-side one-sided flip turns it red too.
     """
 
     schema = json.loads(
@@ -2852,6 +2862,6 @@ def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> No
     relation = f"{contract.RECOVERY_TARGET_CHUNK_SCHEMA}.{contract.RECOVERY_TARGET_CHUNK_NAME}"
     recovery = schema["properties"]["recovery"]["properties"]
     assert recovery["decompress_return_relation"]["const"] == relation
-    # The verifier's own recovery-target oracle (live_evidence.py stays untouched).
+    # The verifier's own recovery-target oracle.
     assert dict(evidence.RECOVERY_TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
     assert evidence.RECOVERY_RETURN_RELATION == relation

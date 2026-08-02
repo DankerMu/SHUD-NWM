@@ -648,6 +648,29 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
     ]
     if kind == "migration_apply" and argv != migration_argv:
         raise EvidenceError("migration argv differs")
+    # The exact-chunk tail is interpolated from this module's own
+    # ``RECOVERY_TARGET`` constant instead of being spelled out a second time
+    # (issue #1244).  That constant is asserted field-by-field equal to the shared
+    # repo contract by the drift guard in
+    # tests/test_node27_timeseries_compression_supervisor.py, so the expected argv
+    # is bound to the contract transitively -- the verifier keeps owning its own
+    # acceptance oracle and imports nothing new.
+    decompress_tail = [
+        "--receipt-path",
+        str(associations.get("recovery_receipt", "")),
+        "--hypertable-schema",
+        RECOVERY_TARGET["hypertable_schema"],
+        "--hypertable-name",
+        RECOVERY_TARGET["hypertable_name"],
+        "--chunk-schema",
+        RECOVERY_TARGET["chunk_schema"],
+        "--chunk-name",
+        RECOVERY_TARGET["chunk_name"],
+        "--range-start",
+        RECOVERY_TARGET["range_start"],
+        "--range-end",
+        RECOVERY_TARGET["range_end"],
+    ]
     if kind == "decompress" and (
         len(argv) != 20
         or argv[:5]
@@ -659,23 +682,7 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
             "--mutation-head-sha",
         ]
         or re.fullmatch(r"[0-9a-f]{40}", argv[5]) is None
-        or argv[6:]
-        != [
-            "--receipt-path",
-            str(associations.get("recovery_receipt", "")),
-            "--hypertable-schema",
-            "hydro",
-            "--hypertable-name",
-            "river_timeseries",
-            "--chunk-schema",
-            "_timescaledb_internal",
-            "--chunk-name",
-            "_hyper_3_7_chunk",
-            "--range-start",
-            "2026-05-28T00:00:00Z",
-            "--range-end",
-            "2026-06-04T00:00:00Z",
-        ]
+        or argv[6:] != decompress_tail
     ):
         raise EvidenceError("decompress argv differs")
     if kind.startswith("compression_"):
