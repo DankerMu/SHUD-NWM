@@ -10,6 +10,8 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
+from apps.api.display_cache import clear_display_catalog_cache, stop_display_catalog_warmer
+
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -79,6 +81,30 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip_e2e)
         if "grib" in item.keywords and grib_skip_reason:
             item.add_marker(skip_grib)
+
+
+@pytest.fixture(autouse=True)
+def _stop_display_catalog_warmer() -> Iterator[None]:
+    """每个用例后停掉 display-catalog 预热线程，禁止它活到下一个用例。
+
+    任何构造出 display_readonly app 的用例都会作为副作用启动名为
+    ``display-catalog-warmer`` 的 daemon 线程；它消费进程全局的
+    `time.monotonic`，会污染后续 monkeypatch 了全局时钟的用例。什么都没启动
+    时代价是一次 Event 检查 + 一次 dict 清空。
+
+    stop 失败（join 超时）会响在**当前**用例上，且在那个线程退出前每个后续
+    teardown 都会继续响——这是设计上的级联，不是 stop 坏了。
+    """
+    yield
+    stopped = stop_display_catalog_warmer()
+    assert stopped, (
+        "display-catalog-warmer thread did not stop within the join timeout; "
+        "it is likely stuck inside a display_cache._replay_targets ASGI replay "
+        "(httpx per-path timeout is 120s). Every subsequent test teardown will "
+        "keep failing until that thread exits — investigate the thread, not "
+        "stop_display_catalog_warmer()."
+    )
+    clear_display_catalog_cache()
 
 
 @pytest.fixture(scope="session")
