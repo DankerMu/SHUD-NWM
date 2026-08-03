@@ -533,8 +533,10 @@ def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
     SHA is a forensic claim the verifier owns -- but its abbreviations ARE rejected,
     because an abbreviation is a rebinding technique, not a claim about the SHA.
 
-    `--schema-dump-container` is the one VALUE this gate does adjudicate (#1269), and
-    the asymmetry with the SHA is the whole point: mount containment is an
+    `--schema-dump-container` is the one PATH value this gate adjudicates (#1269) --
+    and the only value it judges against an INTRINSIC predicate rather than against
+    the plan's own declared kind, which is how `--kind` is judged below.  The
+    asymmetry with the SHA is the whole point: mount containment is an
     EXECUTION-SAFETY property of what the spawned capture will actually do -- for a
     `schema_dump_list` kind, capture.py runs `docker exec <container>
     /usr/bin/pg_restore --list <value>` on exactly this string -- so refusing an

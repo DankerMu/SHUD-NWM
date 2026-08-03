@@ -1,5 +1,11 @@
 # Tasks — container-dump-path-traversal-guard (#1269)
 
+Every `file:line` anchor below was verified at master 49b7b452, the
+base this change was authored against; the change's own line growth
+shifts some of them (live_evidence +8 above line 110, supervisor +3
+above 80 and +26 above 556), so read them against that base, not
+against the merge result.
+
 Risk triage: fixture level **expanded** (issue has no suggested level;
 S-size but it edits two forensic gate scripts whose refusal semantics
 are the lane's trust boundary, and it corrects a false security claim
@@ -58,9 +64,10 @@ knowingly-partial fix ("只改其一等于没改").
   `/var/lib/postgresql/evidence/schema-before.dump`, interior-`//`
   in-mount value, trailing-slash in-mount value
   `/var/lib/postgresql/evidence/` (parts drops the trailing empty —
-  today's gate behavior preserved; a `resolve()`-based
-  mis-implementation would flip this row), bare mount root
-  `/var/lib/postgresql/` (today's behavior, recorded), and an `a..b`
+  today's gate behavior preserved), bare mount root
+  `/var/lib/postgresql/` (today's behavior, recorded — and measured to
+  be the ONE accept row a normalize-then-compare mis-implementation
+  would flip, so it carries that discrimination), and an `a..b`
   filename component; rejects
   `/var/lib/postgresql/../../../etc/shadow`,
   `/var/lib/postgresql/evidence/../../../../etc/passwd`,

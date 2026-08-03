@@ -24,10 +24,14 @@ planes with nothing forcing the copies to move together (issue #1087).
 
 For the same reason it pins a second repo-side decision: the DB-container data
 mount and the containment predicate over it
-(``CONTAINER_DB_MOUNT_PREFIX``/``container_dump_path_within_mount``).  Five
-admission gates across the two planes each carried their own inline copy of it,
-spelled as a bare string prefix that does not enforce the containment their
-refusal messages claim (issue #1269).
+(``CONTAINER_DB_MOUNT_PREFIX``/``container_dump_path_within_mount``).  Four
+admission gates across the two planes each carried their own inline copy of the
+mount literal, spelled as a bare string prefix that constrains the string's
+opening and not containment at all; a fifth chain -- the supervisor's pre-spawn
+capture argv -- judged the path not at all, and this issue is what gave it a
+gate.  Of the four inline copies only ``resolve_container_pg_restore_identity``
+CLAIMED containment in its refusal message; the other three refuse with "argv
+differs" / "argv/output ownership differs" / "not verifiable" (issue #1269).
 """
 
 from __future__ import annotations
@@ -156,16 +160,22 @@ def validated_probe_target(target: str) -> str:
 
 
 # REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the DB
-# container data mount every forensic container dump path must live inside.  The
-# five admission gates that judge that path -- the verifier's pg_restore list
-# argv gate and its captured schema-dump-list listing gate, the supervisor's
-# mirror argv gate, ``resolve_container_pg_restore_identity`` and the
-# supervisor's pre-spawn capture-argv gate -- each spelled containment as their
-# own inline ``startswith`` of this literal, which constrains the string's
-# OPENING and not containment at all: ``/var/lib/postgresql/../../../etc/shadow``
-# satisfies the prefix and normalizes to ``/etc/shadow``, while the supervisor
-# really ``docker exec sha256sum``s that path into the forensic bundle and the
-# spawned capture producer really ``docker exec pg_restore --list``s it.
+# container data mount every forensic container dump path must live inside.
+# FIVE gates judge that path today, but they did not start level.  FOUR carried
+# their own inline ``startswith`` of this literal -- the verifier's pg_restore
+# list argv gate and its captured schema-dump-list listing gate, the
+# supervisor's mirror argv gate and ``resolve_container_pg_restore_identity`` --
+# which constrains the string's OPENING and not containment at all:
+# ``/var/lib/postgresql/../../../etc/shadow`` satisfies the prefix and
+# normalizes to ``/etc/shadow``, while the supervisor really
+# ``docker exec sha256sum``s that path into the forensic bundle.  The FIFTH --
+# the supervisor's pre-spawn capture-argv gate -- carried no containment check
+# at all until this issue added one, so the ``--schema-dump-container`` value
+# the spawned capture producer really ``docker exec pg_restore --list``s went
+# unjudged on that route.  Only the ``resolve_container_pg_restore_identity``
+# copy ever claimed containment in its refusal ("pg_restore dump path is outside
+# the DB container data mount"); the other three say only that an argv "differs"
+# or that an identity is "not verifiable".
 CONTAINER_DB_MOUNT_PREFIX = "/var/lib/postgresql/"
 
 
@@ -180,11 +190,29 @@ def container_dump_path_within_mount(value: str) -> bool:
     empty components, so an interior double slash
     (``/var/lib/postgresql//evidence/...``) and a trailing slash stay admitted
     exactly as the bare prefix admitted them, leaving the #1268 authoring
-    adjudication untouched; a ``resolve()``-based implementation would silently
-    flip both rows.  Recorded residual: a symlink planted INSIDE the mount still
-    escapes the container ``sha256sum``, which follows symlinks -- planting one
-    needs write access inside the DB container, an actor strictly stronger than
-    this predicate's threat model.
+    adjudication untouched -- and both of those rows survive normalization too,
+    so they are NOT what separates this implementation from a
+    ``resolve()``/``normpath``-based one.  The single accept row that would flip
+    is the bare mount root ``/var/lib/postgresql/``: it normalizes to
+    ``/var/lib/postgresql``, which no longer carries the trailing-slash prefix
+    and would be refused.
+
+    Two recorded residuals, both outside what a textual predicate can reach:
+
+    * A symlink planted INSIDE the mount still escapes the container
+      ``sha256sum``, which follows symlinks.  Planting one does NOT require
+      access inside the DB container: the mount's HOST side is where the plan's
+      own ``pg_dump`` writes ``--file <schema_dump_host>``, so a host-side writer
+      can create the link and name it through its container path.  That is the
+      same actor class the pinned-plan boundary already assumes, not a stronger
+      one.  What this predicate closes is the pure-string traversal, which needs
+      no filesystem foothold at all; a planted symlink stays open.
+    * ``/var/lib/postgresql/..\\x00/etc`` (Python escape form) is ADMITTED:
+      ``PurePosixPath`` keeps ``..\\x00`` as one component, so the ``..``
+      conjunct never matches it, while an ``execve``-truncated reading of the
+      same bytes means ``/var/lib``.  Not an escape in practice -- CPython raises
+      ``ValueError: embedded null byte`` before any spawn -- and the argv token
+      model's lack of a NUL check is pre-existing and out of scope here.
     """
 
     return value.startswith(CONTAINER_DB_MOUNT_PREFIX) and ".." not in PurePosixPath(value).parts

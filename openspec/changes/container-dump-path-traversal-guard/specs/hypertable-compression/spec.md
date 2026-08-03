@@ -37,9 +37,11 @@ container data mount" message states a property the check actually
 enforces; the pre-spawn capture gate SHALL refuse before the capture
 producer process exists. Existing refusal messages stay spelled as
 they are (the pre-spawn value refusal is a new message, its claim
-truthful from birth). An automated drift guard SHALL keep the
-predicate single-source: no gate module retains an inline
-mount-prefix `startswith` of its own.
+truthful from birth). An automated source scan SHALL back the
+predicate's single-source status by refusing the old inline
+mount-prefix spellings in either gate module; the load-bearing
+guarantee remains the per-gate behavioural refusal tests, since a
+source scan can only refuse the spellings it enumerates.
 
 #### Scenario: A traversal path is refused at every gate independently
 
@@ -129,10 +131,11 @@ value-pinned by the verifier) and `--schema-dump-container`
 (deliberately not canonicality-guarded, on symmetry grounds alone:
 it never enters artifact associations — its command records none —
 and every comparison over it is textual with zero normalization on
-either side: the verifier's prefix/shape argv gates, the
+either side: the verifier's containment/shape argv gates, the
 whole-capture-argv exact-equality gate over the schema-dump-list
-capture that also carries it, and the supervisor's mirror gate and
-verbatim argv-tail extraction — so the verbatim-vs-normalized false
+capture that also carries it, and the supervisor's mirror gate,
+pre-spawn capture-argv gate and verbatim argv-tail extraction — so
+the verbatim-vs-normalized false
 refusal this requirement exists to eliminate cannot occur for it; a
 pinned adjudication test keeps this ruling executable). That
 authoring ruling is orthogonal to mount containment: the five
@@ -185,7 +188,7 @@ symmetry rationale and the adjudication stand unchanged.
 
 - **WHEN** `build_run_plan` is called with a `schema_dump_container`
   carrying an interior double slash that still satisfies the
-  verifier's prefix gate (e.g. `/var/lib/postgresql//evidence/…`)
+  verifier's containment gate (e.g. `/var/lib/postgresql//evidence/…`)
 - **THEN** authoring succeeds and the value lands verbatim as the
   pg_restore list argv's final element — the pinned executable form
   of the ruling that every comparison over this path is

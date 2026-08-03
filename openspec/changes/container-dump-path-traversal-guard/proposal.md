@@ -163,16 +163,21 @@ on the capture-argv route.
    covers it); direct predicate unit tests pin the accept/reject
    table (default, interior `//`, bare mount root, trailing-slash
    in-mount, `a..b` filename component vs `..` segment); a
-   source-scan drift guard asserts no gate module retains an inline
-   `startswith("/var/lib/postgresql/")`.
+   source-scan drift guard refuses the old inline mount-prefix
+   spellings in either gate module (a scan can only refuse the
+   spellings it enumerates — the per-gate behavioural refusals are
+   the load-bearing guarantee).
 6. **Prose de-staling** (fixture-review P2-3): two surfaces describe
-   the gates as prefix-only and would become false —
-   plan_author.py:172-186 (comment: "asserts the same `startswith`
-   mount containment") and the #1268 adjudication pin test's
-   docstring (tests/test_node27_timeseries_compression_live_evidence
-   .py:6357-6380, "still prefix-compatible with the gates"). Both get
-   comment/docstring-only updates; assertions and pinned behavior
-   stay byte-identical.
+   the gates as prefix-only and would become false — the container
+   dump path comment block in plan_author.py ("asserts the same
+   `startswith` mount containment") and the #1268 adjudication pin
+   test's docstring ("still prefix-compatible with the gates"). Both
+   get comment/docstring-only updates; assertions and pinned behavior
+   stay byte-identical. The de-staling also re-points those blocks'
+   cross-file anchors at symbol names rather than line numbers,
+   because this change's own line growth invalidates numbers written
+   in the same commit (the #1268 depth-retro rule, extended from
+   self-file to cross-file anchors).
 7. **Spec**: one ADDED requirement (the five gates judge containment
    through the single shared predicate, refuse independently, refuse
    before container side effects, and rewrite nothing) and one
@@ -188,13 +193,29 @@ see plan_author output when a bundle is hand-crafted);
 normalize-then-compare (weakens "bundle matches the reviewed plan
 byte-for-byte").
 
-Recorded residual (out of scope, bounded by the same
-already-authorized-plan trust boundary): the predicate is
-string-level, so an in-container symlink under `/var/lib/postgresql/`
-pointing outside the mount still escapes `docker exec sha256sum`
-(which follows symlinks); planting such a symlink requires write
-access inside the DB container, an actor strictly stronger than this
-guard's threat model.
+Recorded residuals (out of scope, bounded by the same
+already-authorized-plan trust boundary):
+
+- The predicate is string-level, so a symlink planted inside the
+  mount and pointing outside it still escapes `docker exec sha256sum`
+  (which follows symlinks). Correction to this change's first draft
+  of this paragraph, made after review measured it: planting such a
+  symlink does NOT require access inside the DB container. The mount's
+  host side is `/home/nwm/nhms-evidence` — plan_author records the
+  host/container pair as defaults with the same basename and the
+  pg_dump command writes `--file <schema_dump_host>` host-side INTO
+  the mount — so host-side write access as the plan-authoring user
+  suffices, exactly the actor class the pinned-plan boundary already
+  admits. What the predicate closes is the pure-string traversal,
+  which needs no filesystem foothold at all; closing the symlink route
+  needs a container-side no-follow check, deliberately not attempted
+  here.
+- `PurePosixPath` keeps `..\x00` as a single component, so a
+  NUL-bearing value such as `/var/lib/postgresql/..\x00/etc` is
+  admitted by the predicate although `execve` would truncate it to
+  `/var/lib`. Not reachable as an escape — CPython refuses the argv
+  with `ValueError` before any spawn — and the argv token model's
+  lack of a NUL check predates this change.
 
 ## Impact
 
