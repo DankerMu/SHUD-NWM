@@ -22,11 +22,12 @@ every write-privilege probe must pass its target through.  It lives here for
 the same reason as the measured values: it was hard-coded identically in two
 planes with nothing forcing the copies to move together (issue #1087).
 
-For the same reason it pins a second repo-side decision: the DB-container data
-mount and the containment predicate over it
+For the same reason it pins a second repo-side decision: the container-side path
+prefix every forensic container dump path must live inside, and the containment
+predicate over it
 (``CONTAINER_DB_MOUNT_PREFIX``/``container_dump_path_within_mount``).  Four
 admission gates across the two planes each carried their own inline copy of the
-mount literal, spelled as a bare string prefix that constrains the string's
+prefix literal, spelled as a bare string prefix that constrains the string's
 opening and not containment at all; a fifth chain -- the supervisor's pre-spawn
 capture argv -- judged the path not at all, and this issue is what gave it a
 gate.  Of the four inline copies only ``resolve_container_pg_restore_identity``
@@ -159,8 +160,15 @@ def validated_probe_target(target: str) -> str:
     return target
 
 
-# REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the DB
-# container data mount every forensic container dump path must live inside.
+# REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the
+# container-side path prefix every forensic container dump path must live
+# inside.  Repo-side is the DECISION of where dumps must live; the mount layout
+# it is drawn over is measured (``docker inspect nhms-db``, 2026-08-02):
+# ``/var/lib/postgresql/`` is the container-side postgres home and is NOT itself
+# a mount -- its ``evidence`` SUBTREE is the host bind mount
+# (``/home/nwm/nhms-evidence`` -> ``/var/lib/postgresql/evidence``, RW), and the
+# DB's own data directory is a SEPARATE mount (``/home/nwm/nhms-pgdata`` ->
+# ``/home/postgres/pgdata/data``), outside this prefix.
 # FIVE gates judge that path today, but they did not start level.  FOUR carried
 # their own inline ``startswith`` of this literal -- the verifier's pg_restore
 # list argv gate and its captured schema-dump-list listing gate, the
@@ -174,28 +182,30 @@ def validated_probe_target(target: str) -> str:
 # the spawned capture producer really ``docker exec pg_restore --list``s went
 # unjudged on that route.  Only the ``resolve_container_pg_restore_identity``
 # copy ever claimed containment in its refusal ("pg_restore dump path is outside
-# the DB container data mount"); the other three say only that an argv "differs"
-# or that an identity is "not verifiable".
+# the DB container data mount" -- deliberately kept byte-unchanged, this change
+# edits no refusal text; "the DB container data mount" there denotes the prefix
+# as scoped above); the other three say only that an argv "differs" or that an
+# identity is "not verifiable".
 CONTAINER_DB_MOUNT_PREFIX = "/var/lib/postgresql/"
 
 
 def container_dump_path_within_mount(value: str) -> bool:
-    """Whether ``value`` names a path inside the DB container data mount.
+    """Whether ``value`` names a path inside the pinned container dump prefix.
 
     Judges, never rewrites: the caller keeps recording and comparing the plan's
     original string, so the lane's verbatim forensic posture survives intact (no
     ``normpath``, no ``Path()`` write-back anywhere on this route).  Two textual
-    conjuncts -- the mount prefix AND no ``..`` component, the same ``..``-parts
-    shape the plan author's own canonicality guard uses.  ``PurePosixPath`` drops
-    empty components, so an interior double slash
-    (``/var/lib/postgresql//evidence/...``) and a trailing slash stay admitted
-    exactly as the bare prefix admitted them, leaving the #1268 authoring
-    adjudication untouched -- and both of those rows survive normalization too,
-    so they are NOT what separates this implementation from a
+    conjuncts -- the prefix scoped at ``CONTAINER_DB_MOUNT_PREFIX`` AND no ``..``
+    component, the same ``..``-parts shape the plan author's own canonicality
+    guard uses.  ``PurePosixPath`` drops empty components, so an interior double
+    slash (``/var/lib/postgresql//evidence/...``) and a trailing slash stay
+    admitted exactly as the bare prefix admitted them, leaving the #1268
+    authoring adjudication untouched -- and both of those rows survive
+    normalization too, so they are NOT what separates this implementation from a
     ``resolve()``/``normpath``-based one.  The single accept row that would flip
-    is the bare mount root ``/var/lib/postgresql/``: it normalizes to
-    ``/var/lib/postgresql``, which no longer carries the trailing-slash prefix
-    and would be refused.
+    is the bare prefix root ``/var/lib/postgresql/`` (test id
+    ``bare_mount_root``): it normalizes to ``/var/lib/postgresql``, which no
+    longer carries the trailing-slash prefix and would be refused.
 
     Two recorded residuals, both outside what a textual predicate can reach:
 

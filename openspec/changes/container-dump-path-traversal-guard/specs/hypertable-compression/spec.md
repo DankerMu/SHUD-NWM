@@ -19,8 +19,15 @@ exact-base scan on either side); the
 predicate being exported by the lane's cross-plane contract module
 (`packages.common.node27_container_contract`):
 the value must start with `/var/lib/postgresql/` AND contain no `..`
-component (`PurePosixPath(value).parts`). String prefix alone is not
-containment: `/var/lib/postgresql/../../../etc/shadow` satisfies the
+component (`PurePosixPath(value).parts`). Scope of that prefix, kept
+precise because this requirement exists to stop gates from
+overclaiming: it spans the container-side postgres home, of which the
+host bind mount (`/home/nwm/nhms-evidence` →
+`/var/lib/postgresql/evidence`, measured read-only on node-27) is a
+subtree, and the DB's own data directory is a different mount
+entirely; the pre-existing refusal message's phrase "DB container
+data mount" is kept byte-unchanged, and this sentence is what the
+phrase means. String prefix alone is not containment: `/var/lib/postgresql/../../../etc/shadow` satisfies the
 prefix yet normalizes to `/etc/shadow`, and before this requirement it
 passed every gate, after which the supervisor really executed
 `docker exec <container> /usr/bin/sha256sum` against it and recorded
