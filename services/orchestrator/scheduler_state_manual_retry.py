@@ -64,20 +64,61 @@ def _manual_retry_markers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
             )
         )
     for order, event in enumerate(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
         details = event.get("details")
-        if event.get("event_type") in {"retry", "manual_retry"} and isinstance(details, Mapping):
-            if details.get("trigger") == "manual" or details.get("manual_retry_marker") is True:
-                markers.append(
-                    _manual_retry_marker_record(
-                        details,
-                        state=event,
-                        source="event",
-                        order=order,
-                        event_id=event.get("event_id"),
-                        entity_id=event.get("entity_id"),
-                    )
-                )
+        markers.append(
+            _manual_retry_marker_record(
+                details,
+                state=event,
+                source="event",
+                order=order,
+                event_id=event.get("event_id"),
+                entity_id=event.get("entity_id"),
+            )
+        )
     return markers
+
+def _manual_retry_marker_shape(event: Mapping[str, Any]) -> bool:
+    """Marker-shape test only: no candidate attribution, no scope semantics."""
+    details = event.get("details")
+    if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
+        return False
+    return details.get("trigger") == "manual" or details.get("manual_retry_marker") is True
+
+def _candidate_model_ids(state: Mapping[str, Any]) -> set[str]:
+    """Model ids derived from the candidate state's job rows (empty set closes the escape)."""
+    return {str(job.get("model_id")) for job in _state_jobs(state) if job.get("model_id") not in (None, "")}
+
+def _event_model_attribution(event: Mapping[str, Any]) -> Any | None:
+    details = event.get("details")
+    if isinstance(details, Mapping) and details.get("model_id") not in (None, ""):
+        return details.get("model_id")
+    model_id = event.get("model_id")
+    return model_id if model_id not in (None, "") else None
+
+def _manual_retry_marker_is_candidate_attributed(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Knife 1: cycle-granularity markers need explicit model attribution; all other markers pass."""
+    if event.get("entity_type") != "forecast_cycle":
+        return True
+    model_id = _event_model_attribution(event)
+    if model_id is None:
+        return False
+    return str(model_id) in _candidate_model_ids(state)
+
+def _event_is_adopted_manual_retry_marker(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    return _manual_retry_marker_shape(event) and _manual_retry_marker_is_candidate_attributed(state, event)
+
+def _event_resolves_to_cycle_scope_job(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Knife 2 guard: event entity resolves to a model-less (cycle-scope) pipeline job row."""
+    entity_id = event.get("entity_id")
+    if entity_id in (None, ""):
+        return False
+    entity_id_text = str(entity_id)
+    for job in _state_jobs(state):
+        if str(job.get("job_id") or job.get("pipeline_job_id") or "") == entity_id_text:
+            return job.get("model_id") in (None, "")
+    return False
 
 def _manual_retry_marker_record(
     payload: Mapping[str, Any],
@@ -332,10 +373,8 @@ def _manual_retry_blocking_hydro_status(status: str | None) -> bool:
     return status in ACTIVE_HYDRO_STATUSES or status in {"failed", "cancelled", "permanently_failed"}
 
 def _event_is_manual_retry_marker(event: Mapping[str, Any]) -> bool:
-    details = event.get("details")
-    if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
-        return False
-    return details.get("trigger") == "manual" or details.get("manual_retry_marker") is True
+    """Blocker-scan exclusion: marker-shaped events are never blockers, regardless of attribution."""
+    return _manual_retry_marker_shape(event)
 
 def _state_truth_sort_key(truth: Mapping[str, Any]) -> tuple[int, datetime, int, int, int]:
     timestamp = truth.get("timestamp")
@@ -364,19 +403,18 @@ def _manual_retry_payload(state: Mapping[str, Any]) -> dict[str, Any]:
         if value not in (None, ""):
             payload.setdefault(key, value)
     for event in reversed(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
         details = event.get("details")
-        if event.get("event_type") in {"retry", "manual_retry"} and isinstance(details, Mapping):
-            if details.get("trigger") != "manual" and details.get("manual_retry_marker") is not True:
-                continue
-            payload.setdefault("marker", True)
-            payload.setdefault("requested", True)
-            if details.get("retry_count") not in (None, ""):
-                payload.setdefault("new_attempt", _coerce_int(details.get("retry_count"), default=0))
-            for key in ("prior_failure_reason", "previous_error", "previous_job_id", "slurm_job_id"):
-                value = details.get(key)
-                if value not in (None, ""):
-                    payload.setdefault(key, value)
-            break
+        payload.setdefault("marker", True)
+        payload.setdefault("requested", True)
+        if details.get("retry_count") not in (None, "") and not _event_resolves_to_cycle_scope_job(state, event):
+            payload.setdefault("new_attempt", _coerce_int(details.get("retry_count"), default=0))
+        for key in ("prior_failure_reason", "previous_error", "previous_job_id", "slurm_job_id"):
+            value = details.get(key)
+            if value not in (None, ""):
+                payload.setdefault(key, value)
+        break
     return _evidence_safe(payload)
 
 def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int) -> int:
@@ -386,13 +424,11 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         if value not in (None, ""):
             return _coerce_int(value, default=previous_attempt + 1)
     for event in reversed(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
+        if _event_resolves_to_cycle_scope_job(state, event):
+            continue
         details = event.get("details")
-        if not isinstance(details, Mapping):
-            continue
-        if event.get("event_type") not in {"retry", "manual_retry"}:
-            continue
-        if details.get("trigger") != "manual" and details.get("manual_retry_marker") is not True:
-            continue
         value = details.get("retry_count")
         if value not in (None, ""):
             return _coerce_int(value, default=previous_attempt + 1)

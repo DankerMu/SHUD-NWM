@@ -1,0 +1,103 @@
+# Design — manual-retry-marker-attribution (#1205)
+
+## 修订史
+
+fixture review round 1 证伪了初版设计的两个核心选择（P1-1/P1-2，
+均经 in-memory 等价实现在既有套件上实测复现回归），本版为修复后
+形态；初版要点保留在下文"否决记录"以防回退。
+
+## 核心判断：哪一类 marker 是缺陷、哪一类是产品语义
+
+既有产品语义（被 spec + 测试锁定，**不得**收窄）：
+
+- cycle 级 stage（download_source_cycle / convert 等）的人工重试
+  就是要被该 cycle 的候选采信——
+  `openspec/specs/job-retry-mechanism/spec.md`（Retry Scope：
+  cycle-level stage failure 重试整个 stage）、
+  `openspec/specs/retry-runtime-roots/spec.md:34`、
+  `openspec/specs/multibasin-state-idempotency/spec.md:61-62`；
+  `tests/test_production_scheduler.py` 5 个用例
+  （`:2671/:5753/:15154/:15562/:15700`）实测锁定：无 entity_id 的
+  marker、无 job 行的 state、cycle-scope job 的 marker 都必须能让
+  候选走 `manual_retry` 决策。
+- 真正的缺陷只有两条（issue 验收通道）：
+  1. `entity_type=forecast_cycle` 的 cycle 粒度 marker 无任何 model
+     归属却被全体 sibling 采信（#1164 现场 event 907 即此形）；
+  2. cycle-scope job marker 的 `retry_count` 钉死候选 forecast 级
+     `new_attempt`/`retry_attempt`（采信合法、**钉值**越界）。
+
+因此修复分两刀，互不越界：
+
+**刀 1（采信侧，窄）**：仅当 `event.entity_type == "forecast_cycle"`
+且无显式 model 归属时，marker 不被采信。显式归属出口：事件
+`details.model_id` **或事件顶层 `model_id`**（合成/历史 state 把
+model 放顶层，`tests/test_production_scheduler.py:15165`；生产
+journal/DB 事件行均无 model 列——`file_orchestration_journal.py:
+3222-3231` 不持久化、`chain_repository_state.py:537-546` 不 SELECT
+——所以生产 forecast_cycle 事件现状 100% 走 fail-closed，出口是
+为写入侧未来补 model_id 预留的对齐面）∈ 候选 model 集合。
+其余 marker（entity 是 job、无 entity_id、任何非 forecast_cycle
+形）采信语义一律不变。
+
+**刀 2（钉值侧）**：`new_attempt` 派生（`_manual_retry_new_attempt`
+及 payload 的 attempt 字段）跳过**正向解析为 cycle-scope job** 的
+事件的 `retry_count`（entity_id 在 `_state_jobs` 查回且该 job
+`model_id` 为空）——回落 `previous_attempt + 1`。采信（requested/
+marker 点亮）不受刀 2 影响；entity 查不到 job 的事件（含无
+entity_id）钉值行为不变（`:15154` 型合成 state 依赖）。刀 2 只切
+attempt：payload 其余字段（`previous_job_id`/`prior_failure_reason`/
+`slurm_job_id` 的 setdefault）与 markers 列表记录里的 `attempt`
+（`_manual_retry_marker_record:106`，参与 bound_to_blocker 判定与
+max() 排序）**保留外来值**——采信语义不变即应如此，仅 forecast 级
+new_attempt 派生不越界。
+
+**site 4 不接线**：`_event_is_manual_retry_marker` 保持 scope
+无关。理由（review P1-2 实测）：它的唯一语义是把 marker 形事件
+排除出 blocker 扫描（`scheduler_state_manual_retry.py:198`；
+第二消费者 `scheduler_state_failure.py:1034` 同语义），blocker
+扫描无 event_type 过滤、真实人工重试事件带 `status_to="pending"`
+（`retry.py:517`）∈ ACTIVE——合取归属谓词后外来 marker 会变成
+active blocker 直接压死候选自己的人工重试（实测 requested
+True→False 回归）。marker 形事件无论归属都不该当 blocker；且
+候选自己的真实 blocker 事件不是 marker 形，从不会被误跳——
+初版立论（"泄漏使真实 blocker 被跳过"）不成立。
+
+## 候选 model 集合（仅刀 1 出口比对用）
+
+`_candidate_model_ids(state)` = `_state_jobs(state)` 非空
+`model_id` 值集。空集 → 出口关闭（forecast_cycle 无归属 marker
+照拒）。该派生仅用于**新增能力**（显式归属出口）的比对，不参与
+任何既有采信路径，故空集退化无既有语义可破坏——这与初版"全量
+fail-closed + 派生身份"不同，后者把派生集合放上了全部 marker 的
+关键路径（P1-1 翻红 5 用例的根源）。
+
+## 否决记录
+
+- **初版全量 fail-closed 谓词**（job 查回非空 model 采信 /
+  cycle-scope 拒 / 查不到拒）：review 实测
+  `tests/test_production_scheduler.py` 5 failed——cycle 级 stage
+  人工重试对全体候选失效，违反 3 份既有 spec。否决。
+- **路线 B（candidate 线程穿签名）**：`scheduler_state_identity_filter
+  .py:594-622` 先例确为该形状，但本修复收窄后不再需要真实
+  model 相等比对（刀 1 只看 entity_type + 显式归属出口；刀 2 只看
+  job 行自身的 model_id 空否），签名扩散（≥3 模块，evidence owner
+  为冻结面）无对应收益。维持否决，先例矛盾在此记录并解释。
+- **site 4 合取**：见上，P1-2 实测否决。
+
+## 回归测试 oracle（与刀对齐）
+
+- 通道 1 判别对：forecast_cycle 无归属 marker → sibling
+  `_manual_retry_requested` False、`_manual_retry_payload` 不点亮；
+  同事件 `details.model_id`（及顶层 `model_id` 变体）=候选自身 →
+  True。
+- 通道 2 判别对：cycle-scope job marker（entity_id 查回、model_id
+  空、`retry_count=5`）→ `_manual_retry_new_attempt(state,
+  previous_attempt=0)` == 1（未被钉成 5+1 或 5），
+  `_manual_retry_state_evidence` 的 `manual_retry.new_attempt` ==
+  previous+1；同构对照：本 model job marker `retry_count=5` →
+  new_attempt 与既有语义一致（钉住）。
+- site 4 守卫：外来 marker 形事件（status_to=pending）+ 本候选
+  自身 marker 共存 → requested 仍 True（marker 形事件未被当
+  blocker）。
+- 修复前红：backup-copy + `cmp` restore，通道 1/2 负向必红；
+  全部既有正向绿。

@@ -466,6 +466,170 @@ def test_historical_event_ids_do_not_collide_with_new_file_events(tmp_path: Path
     assert scheduler_module._manual_retry_requested(state) is True
 
 
+_CYCLE_SCOPE_JOB = {
+    "job_id": "job_cycle_gfs_2026070100_download",
+    "run_id": "cycle_gfs_2026070100",
+    "model_id": None,
+    "stage": "download",
+    "status": "failed",
+    "retry_count": 0,
+    "updated_at": "2026-07-01T00:00:00Z",
+}
+_OWN_MODEL_JOB = {
+    "job_id": "job_model_a_forecast",
+    "run_id": "fcst_gfs_2026070100_model_a",
+    "model_id": "model_a",
+    "stage": "forecast",
+    "status": "failed",
+    "retry_count": 0,
+    "updated_at": "2026-07-01T00:00:00Z",
+}
+
+
+def _manual_retry_marker_event(
+    *,
+    entity_id: str,
+    retry_count: int,
+    entity_type: str = "pipeline_job",
+    event_id: int = 9,
+    details_model_id: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "trigger": "manual",
+        "manual_retry_marker": True,
+        "retry_count": retry_count,
+        "created_at": "2026-07-01T01:00:00Z",
+    }
+    if details_model_id is not None:
+        details["model_id"] = details_model_id
+    return {
+        "event_id": event_id,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "event_type": "retry",
+        "created_at": "2026-07-01T01:00:00Z",
+        "details": details,
+        **extra,
+    }
+
+
+def test_unattributed_cycle_granularity_manual_marker_is_not_adopted_by_model_candidate() -> None:
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="gfs_2026070100",
+                retry_count=5,
+                entity_type="forecast_cycle",
+            )
+        ],
+    }
+
+    payload = scheduler_module._manual_retry_payload(state)
+
+    assert scheduler_module._manual_retry_requested(state) is False
+    assert "marker" not in payload
+    assert "requested" not in payload
+    assert "new_attempt" not in payload
+
+
+@pytest.mark.parametrize("attribution", ["details", "event_top_level"])
+def test_cycle_granularity_manual_marker_naming_candidate_model_is_adopted(attribution: str) -> None:
+    if attribution == "details":
+        event = _manual_retry_marker_event(
+            entity_id="gfs_2026070100",
+            retry_count=5,
+            entity_type="forecast_cycle",
+            details_model_id="model_a",
+        )
+    else:
+        event = _manual_retry_marker_event(
+            entity_id="gfs_2026070100",
+            retry_count=5,
+            entity_type="forecast_cycle",
+            model_id="model_a",
+        )
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        # The escape hatch compares against model ids derived from job rows: an
+        # empty derived set closes the escape, so the state must carry one.
+        "pipeline_jobs": [dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [event],
+    }
+
+    payload = scheduler_module._manual_retry_payload(state)
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert payload["marker"] is True
+    assert payload["requested"] is True
+
+
+def test_cycle_scope_job_manual_marker_does_not_pin_candidate_new_attempt() -> None:
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "download",
+        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(entity_id="job_cycle_gfs_2026070100_download", retry_count=5)
+        ],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+    assert evidence["manual_retry"]["previous_attempt"] == 0
+    assert evidence["manual_retry"]["new_attempt"] == 1
+
+
+def test_own_model_job_manual_marker_still_pins_candidate_new_attempt() -> None:
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [_manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=5)],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+    assert evidence["manual_retry"]["new_attempt"] == 5
+
+
+def test_foreign_marker_shaped_event_does_not_block_own_manual_retry() -> None:
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="gfs_2026070100",
+                retry_count=5,
+                entity_type="forecast_cycle",
+                event_id=20,
+                status_to="pending",
+            ),
+            _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=1, event_id=21),
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+
+
 def test_terminal_job_row_shadows_stale_active_pipeline_event_for_retry_blocker() -> None:
     state = {
         "pipeline_jobs": [
