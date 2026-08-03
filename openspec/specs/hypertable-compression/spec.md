@@ -491,12 +491,21 @@ value-pinned by the verifier) and `--schema-dump-container`
 (deliberately not canonicality-guarded, on symmetry grounds alone:
 it never enters artifact associations — its command records none —
 and every comparison over it is textual with zero normalization on
-either side: the verifier's prefix/shape argv gates, the
+either side: the verifier's containment/shape argv gates, the
 whole-capture-argv exact-equality gate over the schema-dump-list
-capture that also carries it, and the supervisor's mirror gate and
-verbatim argv-tail extraction — so the verbatim-vs-normalized false
+capture that also carries it, and the supervisor's mirror gate,
+pre-spawn capture-argv gate and verbatim argv-tail extraction — so
+the verbatim-vs-normalized false
 refusal this requirement exists to eliminate cannot occur for it; a
-pinned adjudication test keeps this ruling executable).
+pinned adjudication test keeps this ruling executable). That
+authoring ruling is orthogonal to prefix containment: the five
+consuming gates additionally refuse `..` components under the
+requirement "The container dump path gates MUST refuse `..`
+traversal before any container side effect" — including the
+`schema_dump_list` capture argv's `--schema-dump-container` value,
+now judged pre-spawn for containment — a containment judgment at
+the gates, still textual, still rewriting nothing — so the
+symmetry rationale and the adjudication stand unchanged.
 
 #### Scenario: A non-canonical root fails at authoring, not at the forensic gate or mid-run
 
@@ -539,11 +548,116 @@ pinned adjudication test keeps this ruling executable).
 
 - **WHEN** `build_run_plan` is called with a `schema_dump_container`
   carrying an interior double slash that still satisfies the
-  verifier's prefix gate (e.g. `/var/lib/postgresql//evidence/…`)
+  verifier's containment gate (e.g. `/var/lib/postgresql//evidence/…`)
 - **THEN** authoring succeeds and the value lands verbatim as the
   pg_restore list argv's final element — the pinned executable form
   of the ruling that every comparison over this path is
   verbatim-symmetric (verifier and supervisor gates alike), so the
   false-refusal disease cannot reach it; a future change that guards
   it must consciously flip this scenario
+
+### Requirement: The container dump path gates MUST refuse `..` traversal before any container side effect
+
+The five container dump path gates SHALL judge containment in the
+pinned container dump path prefix with one shared predicate — the gates being the verifier's
+pg_restore list argv gate and its captured schema-dump-list listing
+gate, the supervisor's mirror argv gate and
+`resolve_container_pg_restore_identity`, and the supervisor's
+pre-spawn capture-argv gate (`_assert_capture_producer_argv`, which
+for a declared `schema_dump_list` kind judges every value bound to
+`--schema-dump-container` in either argparse form, and whose
+anchored-option tuple — mirrored across both planes under a pinned
+cross-plane equality — gains `--schema-dump-container` so
+abbreviation spellings cannot smuggle the binding past the
+exact-base scan on either side); the
+predicate being exported by the lane's cross-plane contract module
+(`packages.common.node27_container_contract`):
+the value must start with `/var/lib/postgresql/` AND contain no `..`
+component (`PurePosixPath(value).parts`). What that prefix is, stated
+only as far as a cited command determines it — this requirement
+exists to stop gates from overclaiming, and the record about the
+prefix has to hold itself to the same rule: `docker inspect nhms-db`
+(read-only, node-27) shows the host bind mount
+`/home/nwm/nhms-evidence` landing at the prefix's `evidence` subtree
+(RW) and the DB's own data directory living at a different mount
+entirely, so the host-writable region is a subtree of the prefix; the
+requirement asserts nothing further about the parent directory. The
+four pre-existing refusal messages keep their bytes, including the
+phrase "DB container data mount", which denotes this prefix. String
+prefix alone is not containment: `/var/lib/postgresql/../../../etc/shadow` satisfies the
+prefix yet normalizes to `/etc/shadow`, and before this requirement it
+passed every gate, after which the supervisor really executed
+`docker exec <container> /usr/bin/sha256sum` against it and recorded
+the digest as `dump_sha256` in the forensic bundle — while on the
+capture-argv route the spawned capture producer really executed
+`docker exec pg_restore --list` against it. The predicate
+judges and never rewrites: admitted values keep being recorded and
+compared as the plan's original strings — no normalization anywhere,
+preserving the verbatim forensic posture. Each gate refuses on its
+own; no gate may delegate refusal to an upstream gate.
+`resolve_container_pg_restore_identity` SHALL refuse before spawning
+any container probe, so its "pg_restore dump path is outside the DB
+container data mount" message states a property the check actually
+enforces; the pre-spawn capture gate SHALL refuse before the capture
+producer process exists. The four pre-existing refusal messages stay
+spelled as they are; the pre-spawn value refusal is a new message and
+SHALL name the pinned prefix the predicate actually enforces rather
+than inherit the older phrasing. An automated source scan SHALL back the
+predicate's single-source status by refusing the old inline
+mount-prefix spellings in either gate module; the load-bearing
+guarantee remains the per-gate behavioural refusal tests, since a
+source scan can only refuse the spellings it enumerates.
+
+#### Scenario: A traversal path is refused at every gate independently
+
+- **WHEN** a run plan or bundle carries
+  `/var/lib/postgresql/../../../etc/shadow` or
+  `/var/lib/postgresql/evidence/../../../../etc/passwd` as the
+  pg_restore list argv tail
+- **THEN** the verifier's argv gate and captured-listing gate each
+  raise `EvidenceError`, and the supervisor's mirror gate and identity
+  resolver each raise `SupervisorError`, each proved by a test that
+  reaches that gate directly with hand-crafted input rather than
+  relying on an upstream refusal
+
+#### Scenario: Identity resolution refuses with zero container side effects
+
+- **WHEN** `resolve_container_pg_restore_identity` receives a
+  traversal path
+- **THEN** it raises the containment refusal without invoking
+  `docker` at all — proved hermetically by a stub arrangement in which
+  any docker invocation would surface as a distinguishably different
+  failure
+
+#### Scenario: The capture-argv route is refused before the capture producer spawns
+
+- **WHEN** a plan's `schema_dump_list` capture argv binds
+  `--schema-dump-container` to a traversal value — in either argparse
+  form, via an abbreviation spelling such as `--schema-dump-c=…`, as
+  a dangling flag, or as a late second binding after a clean first
+  one
+- **THEN** the supervisor's pre-spawn capture gate raises
+  `SupervisorError` before any capture process exists (so the
+  in-container `docker exec pg_restore --list` on the escaped path
+  never runs), while an absent option and the committed capture argv
+  shapes stay admitted
+
+#### Scenario: In-prefix values, including the interior-double-slash shape, stay admitted verbatim
+
+- **WHEN** the container dump path is the default
+  `/var/lib/postgresql/evidence/schema-before.dump` or an in-prefix
+  value with an interior double slash
+  (`/var/lib/postgresql//evidence/…`)
+- **THEN** every gate admits it, recorded and compared values stay
+  byte-identical to the plan spelling, and both the existing
+  identity-resolution positive control and the recorded authoring
+  adjudication for `schema_dump_container` stay green unchanged
+
+#### Scenario: The containment predicate has a single source
+
+- **WHEN** the two gate modules are scanned for the inline pattern
+  `startswith("/var/lib/postgresql/")`
+- **THEN** no gate site carries its own copy — all five call the
+  shared predicate, and the automated drift guard fails if a future
+  edit reintroduces an inline prefix check
 

@@ -53,14 +53,14 @@ knowingly-partial fix ("只改其一等于没改").
 
 ## 1. Shared predicate
 
-- [ ] 1.1 Add `CONTAINER_DB_MOUNT_PREFIX` and
+- [x] 1.1 Add `CONTAINER_DB_MOUNT_PREFIX` and
   `container_dump_path_within_mount(value: str) -> bool` to
   `packages/common/node27_container_contract.py` (prefix conjunct AND
   `".." not in PurePosixPath(value).parts`; module gains
   `from pathlib import PurePosixPath`). Additive only; no existing
   symbol in the module is touched; no snapshot refresh (the snapshot
   script's contract mapping is explicit per-constant).
-- [ ] 1.2 Direct predicate unit tests (in
+- [x] 1.2 Direct predicate unit tests (in
   `tests/test_node27_timeseries_compression_live_evidence.py`, beside
   the other structural pins): accepts the default
   `/var/lib/postgresql/evidence/schema-before.dump`, interior-`//`
@@ -79,18 +79,18 @@ knowingly-partial fix ("只改其一等于没改").
 
 ## 2. Four call sites
 
-- [ ] 2.1 Gate 1 (live_evidence.py:744-749): replace the inline
+- [x] 2.1 Gate 1 (live_evidence.py:744-749): replace the inline
   `startswith` with `container_dump_path_within_mount` imported
   by-name from `packages.common.node27_container_contract` (the
   existing import form at live_evidence.py:49 / supervisor.py:43);
   message `"pg_restore list argv differs"` unchanged.
-- [ ] 2.2 Gate 2 (live_evidence.py:1887-1892): same swap on
+- [x] 2.2 Gate 2 (live_evidence.py:1887-1892): same swap on
   `list_argv[-1]`; message `"schema forensic dump/list identity is not
   verifiable"` unchanged.
-- [ ] 2.3 Gate 3 (supervisor.py:350-364): same swap in
+- [x] 2.3 Gate 3 (supervisor.py:350-364): same swap in
   `_assert_exact_argv`; message `"pg_restore list argv/output
   ownership differs"` unchanged.
-- [ ] 2.4 Gate 4 (supervisor.py:1055-1059): same swap as the
+- [x] 2.4 Gate 4 (supervisor.py:1055-1059): same swap as the
   function's first statement (ahead of every `_run_capture_argv`);
   message `"pg_restore dump path is outside the DB container data
   mount"` unchanged byte-for-byte — its noun denotes the pinned prefix
@@ -98,7 +98,7 @@ knowingly-partial fix ("只改其一等于没改").
   denotation once, and "in-mount"/"mount root" shorthand in these tasks
   and in the tests' own ids means exactly that prefix), and the check
   behind it now enforces containment rather than a string opening.
-- [ ] 2.5 Gate 5 (supervisor.py:519-551 `_assert_capture_producer_argv`):
+- [x] 2.5 Gate 5 (supervisor.py:519-551 `_assert_capture_producer_argv`):
   when `kind == "schema_dump_list"`, every value from
   `_capture_option_values(argv, "--schema-dump-container")` must pass
   the predicate (absent option → empty list → nothing to judge, and
@@ -129,24 +129,24 @@ knowingly-partial fix ("只改其一等于没改").
 
 ## 3. Tests — refusal side
 
-- [ ] 3.1 Per-gate traversal negatives: each of the four gates gets
+- [x] 3.1 Per-gate traversal negatives: each of the four gates gets
   its own test(s) covering both traversal shapes
   (`/var/lib/postgresql/../../../etc/shadow`,
   `/var/lib/postgresql/evidence/../../../../etc/passwd`), asserting
   the gate's own exception type and message, reaching the gate
   directly (hand-crafted argv/listing/plan input) — never inferring
   refusal from an upstream gate.
-- [ ] 3.2 Strengthen
+- [x] 3.2 Strengthen
   `test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump`
   into a parametrized battery: prefix miss `/tmp/schema.dump` plus the
   two traversal shapes.
-- [ ] 3.3 Zero-docker-exec proof for gate 4: with `probe_bin`
+- [x] 3.3 Zero-docker-exec proof for gate 4: with `probe_bin`
   installing a docker stub whose empty responses list makes ANY
   invocation surface as a distinguishably different failure (stub
   exits 97 → `_run_capture_argv` raises its label-bearing "checkpoint
   probe" SupervisorError), assert the raise is exactly the
   mount-containment message — proving no `docker exec` ran.
-- [ ] 3.4 Gate 5 negatives: direct unit tests of
+- [x] 3.4 Gate 5 negatives: direct unit tests of
   `_assert_capture_producer_argv` with `kind="schema_dump_list"`
   covering (a) both traversal shapes in both argparse forms
   (`--schema-dump-container <v>` and `--schema-dump-container=<v>`),
@@ -163,23 +163,23 @@ knowingly-partial fix ("只改其一等于没改").
 
 ## 4. Tests — preservation side
 
-- [ ] 4.1 Positive non-regression: existing identity positive
+- [x] 4.1 Positive non-regression: existing identity positive
   (:2494-2509) and all five gates' existing positive paths green and
   unmodified (gate 5 positives: the committed capture argv shape with
   a clean `--schema-dump-container`, with the option absent, and for
   the other capture kinds untouched by the new check); add a
   gate-level interior-`//` in-mount positive where one does not
   already exist (gate 4 direct call is sufficient there).
-- [ ] 4.2 Verbatim posture: assert admitted values are recorded and
+- [x] 4.2 Verbatim posture: assert admitted values are recorded and
   compared as original strings (existing whole-argv equality tests
   count as coverage; no normalization site appears in the diff).
-- [ ] 4.3 Source-scan drift guard: a test asserting the pattern
+- [x] 4.3 Source-scan drift guard: a test asserting the pattern
   `startswith("/var/lib/postgresql/")` appears zero times in
   `scripts/node27_timeseries_compression_live_evidence.py` and
   `scripts/node27_timeseries_compression_supervisor.py` (all five
   sites go through the shared predicate; plan_author's DEFAULT
   constant is a value literal, not a check, and stays out of scope).
-- [ ] 4.4 The #1268 adjudication pin test's assertions and pinned
+- [x] 4.4 The #1268 adjudication pin test's assertions and pinned
   behavior stay byte-identical and green; its docstring (and the
   plan_author.py:172-186 comment block) get docstring/comment-ONLY
   de-staling — both currently describe the gates as prefix-only,
@@ -188,18 +188,18 @@ knowingly-partial fix ("只改其一等于没改").
 
 ## 5. Spec + validation
 
-- [ ] 5.1 Spec delta: ADDED requirement (five gates, containment
+- [x] 5.1 Spec delta: ADDED requirement (five gates, containment
   predicate, independent refusal, refusal-before-side-effect
   including the pre-spawn capture-argv route, verbatim posture,
   single-source drift guard) + MODIFIED #1268 requirement (residual
   paragraph notes the gates' new `..` refusal without reopening the
   authoring adjudication).
-- [ ] 5.2 `openspec validate container-dump-path-traversal-guard
+- [x] 5.2 `openspec validate container-dump-path-traversal-guard
   --strict --no-interactive` green.
 
 ## Evidence Floor
 
-- [ ] E1 `uv run pytest -q
+- [x] E1 `uv run pytest -q
   tests/test_node27_timeseries_compression_live_evidence.py
   tests/test_node27_timeseries_compression_supervisor.py
   tests/test_node27_timeseries_compression_capture.py` green — the
@@ -207,9 +207,9 @@ knowingly-partial fix ("只改其一等于没改").
   runs `validate_run_plan` → :661 and the producer state machine →
   :964 over a real authored plan) — plus the plan_author suite if any
   shared test module is touched.
-- [ ] E2 `uv run ruff check .` green.
-- [ ] E3 openspec strict validation green (5.2).
-- [ ] E4 **Red proof**: with the predicate's `..` conjunct removed
+- [x] E2 `uv run ruff check .` green.
+- [x] E3 openspec strict validation green (5.2).
+- [x] E4 **Red proof**: with the predicate's `..` conjunct removed
   (backup-copy mutation of the shared function, never `git checkout`
   on uncommitted work), the expected-red set is exactly: the per-gate
   traversal negatives across all five gates (3.1, 3.4a, and 3.4d
@@ -221,11 +221,11 @@ knowingly-partial fix ("只改其一等于没改").
   `/var/lib/postgresql/x/..`) — prefix-miss/empty-string rows stay
   green; nothing else reddens; restore byte-identical and re-run
   green.
-- [ ] E5 Surface check (`git diff --name-only` + per-file review): the
+- [x] E5 Surface check (`git diff --name-only` + per-file review): the
   changed set is exactly the seven files the proposal's Impact section
   enumerates, plus this openspec change; plan_author.py diff proven
   comment-only (zero non-comment changed lines); frozen list
   untouched. Check the Impact list against `git diff --name-only`
   itself, not against this sentence — a hand-written count is the
   thing that went stale here twice.
-- [ ] E6 Zero-docker-exec proof (3.3) present and green.
+- [x] E6 Zero-docker-exec proof (3.3) present and green.
