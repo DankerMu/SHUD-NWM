@@ -1557,7 +1557,11 @@ class RealSlurmGateway(SlurmGateway):
         if value in {"", "Unknown", "None", "N/A"}:
             return None
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # sacct prints bare local-time timestamps (no offset, no "Z") using the
+            # timezone of the calling environment, which the sacct subprocess inherits
+            # from this process. Interpreting naive values as process-local time and
+            # converting makes the returned datetime always tz-aware UTC.
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
         except ValueError as exc:
             raise SlurmParseError(
                 "Unable to parse Slurm timestamp.",
