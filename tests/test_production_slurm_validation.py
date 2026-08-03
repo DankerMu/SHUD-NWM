@@ -9,6 +9,7 @@ import pytest
 
 from packages.common import safe_fs
 from services.production_closure import slurm_validation
+from tests.slurm_template_helpers import _join_line_continuations
 
 
 @pytest.fixture(autouse=True)
@@ -93,10 +94,12 @@ def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypat
     assert "NON_FINITE_FLOW" in rendered
     assert "parse_rivqdown_file" in rendered
     assert "controlled_failure.rivqdown" in rendered
+    # Command form only: the heredoc-region assertions above keep judging the
+    # raw rendering, where bash performs no continuation.
     assert (
         'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
         '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
-    ) in rendered
+    ) in _join_line_continuations(rendered)
 
     manifest_index = json.loads((lane_dir / "manifest_index.json").read_text(encoding="utf-8"))
     assert len(manifest_index) == 2
