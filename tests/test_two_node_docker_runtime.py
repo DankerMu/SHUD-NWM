@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -3764,17 +3765,21 @@ def test_static_report_explicit_evidence_run_id_overrides_scratch_path_inference
     repo_root = tmp_path
     report_path = Path("/scratch/frd_muziyao/nwm-test/run-static-explicit/docker-security/static.json")
     result = docker_runtime.StaticCheckResult(status="PASS", findings=())
+    written_path: Path | None = None
 
-    written_path = docker_runtime.write_static_report(
-        result,
-        report_path,
-        repo_root,
-        evidence_run_id="run-static-explicit",
-    )
+    try:
+        written_path = docker_runtime.write_static_report(
+            result,
+            report_path,
+            repo_root,
+            evidence_run_id="run-static-explicit",
+        )
 
-    payload = json.loads(written_path.read_text(encoding="utf-8"))
-    assert payload["evidence_run_id"] == "run-static-explicit"
-    written_path.unlink()
+        payload = json.loads(written_path.read_text(encoding="utf-8"))
+        assert payload["evidence_run_id"] == "run-static-explicit"
+    finally:
+        with contextlib.suppress(OSError):
+            (written_path or report_path).unlink(missing_ok=True)
 
 
 def test_preflight_defaults_tmpdir_to_repo_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
