@@ -110,14 +110,24 @@ def _event_is_adopted_manual_retry_marker(state: Mapping[str, Any], event: Mappi
     return _manual_retry_marker_shape(event) and _manual_retry_marker_is_candidate_attributed(state, event)
 
 def _event_resolves_to_cycle_scope_job(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
-    """Knife 2 guard: event entity resolves to a model-less (cycle-scope) pipeline job row."""
+    """Knife 2 guard: event entity resolves to a model-less (cycle-scope) pipeline job row.
+
+    Mirrors the journal's strict ``_is_model_less_cycle_scope_job`` semantics: cycle
+    scope requires an empty ``model_id`` AND the ``cycle_<source>_<stamp>[_suffix]``
+    run-id grammar.  ``model_id`` alone is not sufficient — multi-basin cohorts persist
+    model-less rows for the candidate's OWN ``fcst_...`` run, and treating those as
+    cycle scope would silently discard the operator-pinned attempt number.  Scheduler
+    state carries no source/cycle context, so the grammar is checked by prefix.
+    """
     entity_id = event.get("entity_id")
     if entity_id in (None, ""):
         return False
     entity_id_text = str(entity_id)
     for job in _state_jobs(state):
         if str(job.get("job_id") or job.get("pipeline_job_id") or "") == entity_id_text:
-            return job.get("model_id") in (None, "")
+            if job.get("model_id") not in (None, ""):
+                return False
+            return str(job.get("run_id") or "").startswith("cycle_")
     return False
 
 def _manual_retry_marker_record(
@@ -423,13 +433,18 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         value = manual.get(key)
         if value not in (None, ""):
             return _coerce_int(value, default=previous_attempt + 1)
+    # Newest retry_count-carrying adopted marker decides, matching the payload scan's
+    # break-at-newest semantics.  A cycle-scope hit is TERMINAL: falling through to an
+    # older own-model marker would replay an attempt number already consumed.  Markers
+    # without a retry_count carry no attempt claim, so the scan keeps walking back.
     for event in reversed(_state_events(state)):
         if not _event_is_adopted_manual_retry_marker(state, event):
             continue
-        if _event_resolves_to_cycle_scope_job(state, event):
-            continue
         details = event.get("details")
         value = details.get("retry_count")
-        if value not in (None, ""):
-            return _coerce_int(value, default=previous_attempt + 1)
+        if value in (None, ""):
+            continue
+        if _event_resolves_to_cycle_scope_job(state, event):
+            return previous_attempt + 1
+        return _coerce_int(value, default=previous_attempt + 1)
     return previous_attempt + 1

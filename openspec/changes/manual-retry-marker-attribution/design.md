@@ -42,7 +42,13 @@ journal/DB 事件行均无 model 列——`file_orchestration_journal.py:
 **刀 2（钉值侧）**：`new_attempt` 派生（`_manual_retry_new_attempt`
 及 payload 的 attempt 字段）跳过**正向解析为 cycle-scope job** 的
 事件的 `retry_count`（entity_id 在 `_state_jobs` 查回且该 job
-`model_id` 为空）——回落 `previous_attempt + 1`。采信（requested/
+`model_id` 为空 **且 `run_id` 匹配 `cycle_<source>_<stamp>[_suffix]`
+文法**——镜像 journal `_is_model_less_cycle_scope_job:8405-8414`
+的双合取；round-1 修订，见下）——回落 `previous_attempt + 1`，
+且回落是**终止性**的：最新携带 `retry_count` 的 adopted marker
+定权（与 payload 环 break-at-newest 同语义），不回扫更早 marker
+（否则落到候选自己过期 marker 的 retry_count，产出
+`new_attempt == previous_attempt` 的已消耗 attempt 号）。采信（requested/
 marker 点亮）不受刀 2 影响；entity 查不到 job 的事件（含无
 entity_id）钉值行为不变（`:15154` 型合成 state 依赖）。刀 2 只切
 attempt：payload 其余字段（`previous_job_id`/`prior_failure_reason`/
@@ -83,6 +89,32 @@ fail-closed + 派生身份"不同，后者把派生集合放上了全部 marker 
   job 行自身的 model_id 空否），签名扩散（≥3 模块，evidence owner
   为冻结面）无对应收益。维持否决，先例矛盾在此记录并解释。
 - **site 4 合取**：见上，P1-2 实测否决。
+
+## Round-1 cross-review 修订（PR #1286）
+
+round-1 交叉审核 + 独立 verifier（3 CONFIRMED / FIX_NOW）修订三处，
+上文刀 2 描述为修订后形态：
+
+1. **回落终止性**（P1，attempt-derivation）：初版 `continue` 形在
+   多 marker 状态回扫到候选自己过期 marker 的 `retry_count`，实测
+   `new_attempt == previous_attempt`（already-consumed attempt →
+   静默 no-op）。修订为最新携值 adopted marker 定权、cycle-scope
+   命中即终止回落 `previous_attempt + 1`。
+2. **cycle-scope 谓词补 run-id 文法合取**（predicate-domain）：
+   初版仅 `model_id` 空判据在多流域生产 cycle 误伤全部 marker——
+   `chain_runtime_utils.py:65-68`（`len(all_basins) != 1` →
+   所有 stage 行 model-less）+ `accepted_submit_identity.py:316-328`
+   （forecast-cohort 行强制 model-less）。修订为 `model_id` 空 ∧
+   `run_id` 前缀 `cycle_` 文法（候选 run 是 `fcst_...`）。
+3. **归属出口 mutation 盲区补断言**（test-coverage）：verifier
+   实测出口成员判断换 `return True` 后套件全绿；补 foreign-model
+   负向与派生集空关出口两断言。
+
+已披露的残留（多流域 cohort 形）：全部 job 行 model-less 时
+`_candidate_model_ids` 恒空 → 刀 1 显式归属出口在该形**永久
+fail-closed**（今日生产事件行本就无 model 列、出口本就不可达，
+性质为保守方向；写入侧未来补 model_id 时需同时评估 cohort 形
+的派生集来源，记录于 PR body 兼容性节）。
 
 ## 回归测试 oracle（与刀对齐）
 

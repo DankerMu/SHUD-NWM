@@ -170,7 +170,8 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
 
 - [x] E1 修复前红证明（orchestrator backup-copy + `cmp` restore）：
   仅还原 `scheduler_state_manual_retry.py` 至 master 形态 → 2.1/2.2
-  负向用例红（requested 翻 True / new_attempt 被钉 6）、2.3 与
+  负向用例红（requested 翻 True / new_attempt 被钉 5，实测
+  `assert 5 == 1`）、2.3 与
   归属出口及全部既有正向用例绿（2.3 在 master 上本就绿——它守卫
   的是"修复不引入 active-blocker 回归"，非判别 oracle，如实标注）；
   恢复后全绿。`cmp` 确认还原字节一致。
