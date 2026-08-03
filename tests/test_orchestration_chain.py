@@ -3973,7 +3973,7 @@ def test_poll_timeout_persists_failed_job_and_is_retry_eligible(monkeypatch, tmp
         job_timeout_seconds=1,
     )
     monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
-    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values, float("inf")))
     monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
@@ -4010,7 +4010,7 @@ def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_ur
         job_timeout_seconds=1,
     )
     monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
-    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values, float("inf")))
     monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
 
     expected = (
@@ -4050,7 +4050,7 @@ def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_adver
         job_timeout_seconds=1,
     )
     monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
-    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values, float("inf")))
     monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
 
     expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/convert.log"
@@ -11787,7 +11787,7 @@ def test_round10_forecast_poll_timeout_stops_chain_as_reconciling(
         job_timeout_seconds=1,
     )
     monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
-    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values, float("inf")))
     monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
 
     basins = _basins(2)
