@@ -244,7 +244,14 @@ def _bind_current_file_cohort(
     assert result.committed
 
 
-def _append_cohort_placeholders(repository: Any, count: int = 18, *, source_id: str = "gfs") -> None:
+def _append_cohort_placeholders(
+    repository: Any,
+    count: int = 18,
+    *,
+    source_id: str = "gfs",
+    common_updates: dict[str, Any] | None = None,
+    updates_by_index: dict[int, dict[str, Any]] | None = None,
+) -> None:
     from packages.common.source_identity import normalize_source_id
     from services.orchestrator.chain_config import scenario_for_source
 
@@ -252,31 +259,32 @@ def _append_cohort_placeholders(repository: Any, count: int = 18, *, source_id: 
     source_id = canonical_source_id.lower()
     scenario_id = scenario_for_source(canonical_source_id)
     for index in range(count):
-        repository.append_historical_hydro_run(
-            {
-                "run_id": f"fcst_{source_id}_2026071200_model_{index}",
-                "candidate_id": f"{canonical_source_id}:2026-07-12T00:00:00Z:model_{index}:{scenario_id}",
-                "run_type": "forecast",
-                "scenario_id": scenario_id,
-                "model_id": f"model_{index}",
-                "basin_id": f"basin_{index}",
-                "array_task_id": index,
-                "basin_version_id": f"basin_v{index}",
-                "forcing_version_id": f"forc_{source_id}_2026071200_model_{index}",
-                "init_state_id": f"state_{index}",
-                "source_id": canonical_source_id,
-                "cycle_time": "2026-07-12T00:00:00Z",
-                "start_time": "2026-07-12T00:00:00Z",
-                "end_time": "2026-07-12T18:00:00Z",
-                "status": "failed",
-                "submission_attempt": 1,
-                "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
-                "output_uri": f"s3://nhms/runs/model_{index}/output",
-                "log_uri": f"s3://nhms/runs/model_{index}/logs",
-                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
-                "error_message": "transport timeout",
-            }
-        )
+        row = {
+            "run_id": f"fcst_{source_id}_2026071200_model_{index}",
+            "candidate_id": f"{canonical_source_id}:2026-07-12T00:00:00Z:model_{index}:{scenario_id}",
+            "run_type": "forecast",
+            "scenario_id": scenario_id,
+            "model_id": f"model_{index}",
+            "basin_id": f"basin_{index}",
+            "array_task_id": index,
+            "basin_version_id": f"basin_v{index}",
+            "forcing_version_id": f"forc_{source_id}_2026071200_model_{index}",
+            "init_state_id": f"state_{index}",
+            "source_id": canonical_source_id,
+            "cycle_time": "2026-07-12T00:00:00Z",
+            "start_time": "2026-07-12T00:00:00Z",
+            "end_time": "2026-07-12T18:00:00Z",
+            "status": "failed",
+            "submission_attempt": 1,
+            "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
+            "output_uri": f"s3://nhms/runs/model_{index}/output",
+            "log_uri": f"s3://nhms/runs/model_{index}/logs",
+            "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+            "error_message": "transport timeout",
+        }
+        row.update(common_updates or {})
+        row.update((updates_by_index or {}).get(index) or {})
+        repository.append_historical_hydro_run(row)
 
 
 def _seed_unrelated_history(repository: Any, *, count: int = 10) -> None:
@@ -2312,6 +2320,94 @@ def test_file_cohort_terminal_projects_when_accounting_stores_no_comment(
         projection["array_task_outcome"] == "succeeded"
         for projection in cohort["candidate_projections"]
     )
+
+
+def test_file_cohort_terminal_projects_when_hydro_run_rows_lack_planning_identity(
+    tmp_path: Any,
+) -> None:
+    """The chain per-model trigger writes ``hydro_run`` rows without
+    ``candidate_id``/``basin_id``/``array_task_id`` (all ``None`` — the run
+    manifest and run context carry none of them). Absent means "not stored",
+    not "different job": a fully proven sacct terminal must project
+    ``matched_bound`` instead of wedging on ``identity_mismatch_blocked``
+    forever (IFS 2026071100 incident, node-22, 2026-08-03)."""
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(tmp_path, with_runtime_rows=False)
+    _append_cohort_placeholders(
+        repository,
+        common_updates={"candidate_id": None, "basin_id": None, "array_task_id": None},
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    tasks = tuple(
+        SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+        for index in range(18)
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "terminal"
+    assert outcome.status == "succeeded"
+    cohort = repository.get_pipeline_job(job_id)
+    assert cohort["status"] == "succeeded"
+    assert cohort["reconciliation_decision"] == "matched_bound"
+    assert all(
+        projection["array_task_outcome"] == "succeeded"
+        for projection in cohort["candidate_projections"]
+    )
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {"candidate_id": "foreign-candidate"},
+        {"basin_id": "foreign-basin"},
+        {"array_task_id": 99},
+    ],
+)
+def test_file_cohort_present_but_different_runtime_identity_still_blocks(
+    tmp_path: Any,
+    field_updates: dict[str, Any],
+) -> None:
+    """Absent-field degrade must not weaken the present case: a ``hydro_run``
+    row that *claims* a planning identity differing from the cohort member
+    stays ``identity_mismatch_blocked`` with zero durable writes."""
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(tmp_path, with_runtime_rows=False)
+    _append_cohort_placeholders(repository, updates_by_index={0: field_updates})
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    before = repository.get_pipeline_job(job_id)
+    tasks = tuple(
+        SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+        for index in range(18)
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "identity_mismatch_blocked"
+    assert outcome.durable_write_count == 0
+    assert repository.get_pipeline_job(job_id) == before
 
 
 @pytest.mark.parametrize("member_count", [2, 256])
