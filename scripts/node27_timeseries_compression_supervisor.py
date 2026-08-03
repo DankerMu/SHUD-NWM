@@ -51,6 +51,7 @@ from packages.common.node27_container_contract import (
     RECOVERY_TARGET_SCHEMA,
     RECOVERY_TARGET_TABLE,
     SYSTEMD_UNSET_TIMESTAMP,
+    container_dump_path_within_mount,
     validated_probe_target,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
@@ -70,10 +71,12 @@ EXPECTED_CONTAINER = "nhms-db"
 CAPTURE_SCRIPT_SUFFIX = "/scripts/node27_timeseries_compression_capture.py"
 # Options whose binding the capture anchor protects from argparse abbreviation rebinding.
 # capture.py parses with the default `allow_abbrev=True` and binds last-wins, so a later
-# `--k <other>` / `--kin=<other>` / `--m <sha>` token would re-aim the producer past the
-# full-spelling checks below.  `--kind` is the only `--k*` and `--mutation-head-sha` the
-# only `--m*` flag in that CLI, so rejecting their proper prefixes collides with nothing.
-ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
+# `--k <other>` / `--kin=<other>` / `--m <sha>` / `--schema-dump-c=<escape>` token would
+# re-aim the producer past the full-spelling checks below.  `--kind` is the only `--k*`,
+# `--mutation-head-sha` the only `--m*` and `--schema-dump-container` the only
+# `--schema-dump-c*` flag in that CLI, so rejecting their proper prefixes collides with
+# nothing.  The verifier mirrors this tuple and a test pins the two equal (#1269).
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha", "--schema-dump-container")
 # The container pg_restore entrypoint realpath is the single-source-of-truth
 # external contract shared with the verifier; see node27_container_contract.
 # Bind the wrapper and fail closed on any drift.
@@ -359,7 +362,7 @@ def _assert_exact_argv(argv: list[str], *, kind: str, associations: Mapping[str,
                 "--list",
             ]
             or len(argv) != 6
-            or not argv[-1].startswith("/var/lib/postgresql/")
+            or not container_dump_path_within_mount(argv[-1])
         ):
             raise SupervisorError("pg_restore list argv/output ownership differs")
     elif kind == "migration_apply":
@@ -529,6 +532,18 @@ def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
     The `--mutation-head-sha` VALUE is likewise not checked here -- the plan's mutation
     SHA is a forensic claim the verifier owns -- but its abbreviations ARE rejected,
     because an abbreviation is a rebinding technique, not a claim about the SHA.
+
+    `--schema-dump-container` is the one PATH value this gate adjudicates (#1269) --
+    and the only value it judges against an INTRINSIC predicate rather than against
+    the plan's own declared kind, which is how `--kind` is judged below.  The
+    asymmetry with the SHA is the whole point: prefix containment is an
+    EXECUTION-SAFETY property of what the spawned capture will actually do -- for a
+    `schema_dump_list` kind, capture.py runs `docker exec <container>
+    /usr/bin/pg_restore --list <value>` on exactly this string -- so refusing an
+    escaping value belongs to the process that is about to spawn that producer, before
+    it exists.  The SHA, by contrast, claims nothing about what runs.  The judgment is
+    textual and rewrites nothing: an admitted value stays the plan's original string
+    everywhere downstream.
     """
 
     if len(argv) < 4 or not argv[1].endswith(CAPTURE_SCRIPT_SUFFIX):
@@ -548,6 +563,19 @@ def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
                 raise SupervisorError(
                     f"capture {kind} argv carries {token}, an argparse abbreviation of {option} "
                     f"that would rebind the anchored capture identity"
+                )
+    if kind == "schema_dump_list":
+        # An ABSENT option binds no value, so there is nothing to judge here -- and such
+        # a run cannot fabricate anything either: the option is registered
+        # `default=None` and `_capture_schema_dump_list` refuses the capture outright.
+        # A DANGLING flag yields the `""` sentinel, which the predicate refuses on the
+        # prefix conjunct, and a late second binding is judged like the first, so
+        # last-wins smuggling is refused too.
+        for value in _capture_option_values(argv, "--schema-dump-container"):
+            if not container_dump_path_within_mount(value):
+                raise SupervisorError(
+                    f"capture {kind} argv binds --schema-dump-container to {value!r}, which is "
+                    f"outside the pinned container dump path prefix"
                 )
 
 
@@ -1055,7 +1083,7 @@ def _run_capture_argv(argv: list[str], *, wall: HardWall, label: str, max_bytes:
 def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> dict[str, str]:
     """Resolve the actual container image, binary and mounted dump identities."""
 
-    if not dump_path.startswith("/var/lib/postgresql/"):
+    if not container_dump_path_within_mount(dump_path):
         raise SupervisorError("pg_restore dump path is outside the DB container data mount")
     image_id = (
         _run_capture_argv(

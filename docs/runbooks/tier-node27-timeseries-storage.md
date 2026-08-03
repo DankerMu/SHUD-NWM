@@ -1044,10 +1044,16 @@ credential in process argv.
    (the verifier compares recorded plan paths verbatim, so a non-canonical root or host
    dump path would author a plan whose bundle fails verification later with an unrelated
    message, and a `..` component aborts inside the one-shot replay window instead).
-   `--schema-dump-container` is deliberately **not** canonicality-guarded: it is a
-   container-internal path checked only by verbatim-symmetric textual comparisons —
-   prefix/shape gates and a whole-argv exact-equality gate — (verifier and supervisor
-   mirror alike), so it cannot produce that false refusal.
+   `--schema-dump-container` is deliberately **not** canonicality-guarded at authoring
+   time: it is a container-internal path checked only by verbatim-symmetric textual
+   comparisons — the verifier's containment/shape argv gates, a whole-argv
+   exact-equality gate, and on the supervisor side the mirror gate, the pre-spawn
+   capture-argv gate and verbatim argv-tail extraction — so it cannot produce that
+   false refusal. Those gates do judge containment in the pinned container dump path
+   prefix `/var/lib/postgresql/` (that prefix plus no `..` component, one shared
+   predicate in `packages/common/node27_container_contract.py`), so a traversal spelling
+   such as `/var/lib/postgresql/../../../etc/shadow` is refused — textually, without
+   rewriting the recorded value.
 
    Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.

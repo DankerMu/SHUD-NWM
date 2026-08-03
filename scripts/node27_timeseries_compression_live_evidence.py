@@ -50,6 +50,7 @@ from packages.common.node27_container_contract import (
     CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
     SYSTEMD_UNSET_TIMESTAMP,
+    container_dump_path_within_mount,
 )
 
 SCHEMA_VERSION = "3.0"
@@ -88,14 +89,21 @@ EXPECTED_REPO_PATH = "/home/nwm/NWM"
 # alone (`_concrete_argv`) would happily accept `/usr/bin/printf`.
 EXPECTED_CAPTURE_SCRIPT = f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_capture.py"
 # The capture-CLI options the identity anchor binds.  capture.py's parser runs with
-# argparse's default `allow_abbrev=True` and both options bind last-wins, so anchoring
-# the FIRST occurrence is not enough: a later `--k <other>`, `--kin=<other>` or
-# `--m <sha>` token would silently rebind what the producer was actually asked to do.
-# Measured zero-collision fact this relies on: `--kind` is the only `--k*` flag and
-# `--mutation-head-sha` the only `--m*` flag in the capture CLI, so rejecting their
-# proper prefixes cannot collide with a legitimate flag (pinned structurally by
+# argparse's default `allow_abbrev=True` and all three options bind last-wins, so
+# anchoring the FIRST occurrence is not enough: a later `--k <other>`, `--kin=<other>`
+# or `--m <sha>` token would silently rebind what the producer was actually asked to do.
+# `--schema-dump-container` joined the domain with #1269: the supervisor's pre-spawn
+# capture gate now judges that option's VALUE for DB-container mount containment, and an
+# abbreviation is a rebinding technique that would smuggle a traversal value past any
+# exact-base scan.  This tuple is mirrored in the supervisor and their equality is
+# pinned, so the abbreviation domain cannot drift between the planes -- which is why the
+# entry lands here too even though the verifier keeps leaving the VALUE unpinned.
+# Measured zero-collision fact this relies on: `--kind` is the only `--k*` flag,
+# `--mutation-head-sha` the only `--m*` flag and `--schema-dump-container` the only
+# `--schema-dump-c*` flag in the capture CLI, so rejecting their proper prefixes cannot
+# collide with a legitimate flag (pinned structurally by
 # `test_capture_cli_has_no_flag_abbreviating_an_anchored_option`).
-ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha")
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha", "--schema-dump-container")
 # WHO runs is only half the forensic claim; this map pins WITH WHAT.  The anchored
 # options above cannot stop a plan from keeping a perfect argv[0:4] while aiming the
 # committed producer at stub binaries under /tmp, fabricating all twelve snapshots
@@ -744,7 +752,7 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
     if kind == "pg_restore_list" and (
         argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
         or len(argv) != 6
-        or not argv[-1].startswith("/var/lib/postgresql/")
+        or not container_dump_path_within_mount(argv[-1])
     ):
         raise EvidenceError("pg_restore list argv differs")
     migration_argv = [
@@ -1889,7 +1897,7 @@ def _validate_dump_listing(
         or version_argv != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--version"]
         or list_argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
         or len(list_argv) != 6
-        or not list_argv[-1].startswith("/var/lib/postgresql/")
+        or not container_dump_path_within_mount(list_argv[-1])
         or not isinstance(listing["container_image_id"], str)
         or not listing["container_image_id"].startswith("sha256:")
         or listing["binary_realpath"] != CONTAINER_PG_RESTORE_REALPATH

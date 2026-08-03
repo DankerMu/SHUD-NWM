@@ -5635,16 +5635,21 @@ def test_verifier_rejects_a_second_mutation_sha_binding(tmp_path: Path) -> None:
 def test_capture_cli_has_no_flag_abbreviating_an_anchored_option() -> None:
     """The zero-collision fact the abbreviation rejection stands on.
 
-    Rejecting every proper prefix of `--kind` / `--mutation-head-sha` is only safe while
-    those are the sole `--k*` / `--m*` flags in the capture CLI.  A future `--keep-going`
-    or `--max-rows` would make `--k` / `--m` a legitimate spelling the verifier silently
-    refuses -- it reddens HERE instead, before it can reach a plan.
+    Rejecting every proper prefix of `--kind` / `--mutation-head-sha` /
+    `--schema-dump-container` is only safe while those are the sole `--k*` / `--m*` /
+    `--schema-dump-c*` flags in the capture CLI.  A future `--keep-going`, `--max-rows`
+    or `--schema-dump-cache` would make `--k` / `--m` / `--schema-dump-c` a legitimate
+    spelling the verifier silently refuses -- it reddens HERE instead, before it can
+    reach a plan.
     """
 
     parser = _capture._parser()
     options = {option for action in parser._actions for option in action.option_strings}
     assert {option for option in options if option.startswith("--k")} == {"--kind"}
     assert {option for option in options if option.startswith("--m")} == {"--mutation-head-sha"}
+    assert {option for option in options if option.startswith("--schema-dump-c")} == {
+        "--schema-dump-container"
+    }
     for anchored in evidence.ANCHORED_CAPTURE_OPTIONS:
         assert anchored in options, anchored
         for option in options - {anchored}:
@@ -6239,7 +6244,7 @@ def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str)
     `schema_dump_host` (#1268) is the same disease one field over: the value goes
     verbatim into the pg_dump argv and into that command's `artifact_associations`, while
     the verifier renders the ledger-side artifact ref through `str(Path(...))` and
-    compares the plan side VERBATIM at live_evidence.py :1439 -- so a `//`-bearing
+    compares the plan side VERBATIM in `_validate_supervisor_execution` -- so a `//`-bearing
     host dump path authored a plan whose bundle could only ever fail with "supervisor
     observed artifact path differs from run plan output".  A `..` component takes a
     different route to the same class: prearm passes it (`is_absolute` only), and the
@@ -6281,9 +6286,10 @@ def test_plan_author_accepts_a_canonical_custom_schema_dump_host(tmp_path: Path)
     The guard's job is to refuse, never to rewrite: the value the operator passed must
     land byte-identical in the pg_dump argv and in that command's
     `artifact_associations["schema_dump"]`, because the verifier compares exactly those
-    recorded bytes against the Path-normalized ledger ref (live_evidence.py :1439).  A
-    guard that silently canonicalized instead of refusing would make the plan's recorded
-    bytes differ from what the operator reviewed -- a different, quieter defect.
+    recorded bytes against the Path-normalized ledger ref (the association comparison in
+    `_validate_supervisor_execution`).  A guard that silently canonicalized instead of
+    refusing would make the plan's recorded bytes differ from what the operator reviewed
+    -- a different, quieter defect.
     """
 
     dump = str(tmp_path / "schema-before.dump")
@@ -6361,22 +6367,31 @@ def test_plan_author_leaves_the_container_dump_path_unguarded_by_adjudication() 
     verifier checks it" claim, which is false: the supervisor extracts it and
     `sha256sum`s it in the container.  The complete consumer set is (a) plan_author's
     pg_restore `--list` command block, whose command records NO artifact associations, so
-    the verbatim-vs-normalized comparison at :1439 never sees it; (b) the verifier's
-    prefix+shape argv gate (live_evidence.py :744-749) and the same prefix check on the
-    captured listing (:1892); (c) the supervisor's mirror gates -- `_assert_exact_argv`
-    (supervisor.py :350-364) and `resolve_container_pg_restore_identity`
-    (:1055-1058, invoked :1768), which takes `argv[-1]` verbatim, asserts the same
-    `startswith` mount containment and hashes that exact string; and (d) the CAPTURE argv
-    route -- plan_author's `schema_dump_list` capture argv carries
-    `--schema-dump-container` too, capture.py :531/:533 executes `docker exec pg_restore
-    --list` on that value and records `list_argv` into the forensic bundle, and
-    live_evidence.py :1522 compares the WHOLE capture argv by EXACT equality.  Every one
-    of those is textual with zero `Path()` normalization on either side, so the
-    false-refusal disease this guard exists for cannot reach this field.  This test is the
-    "no third silent state" pin: an interior `//` container path (still prefix-compatible
-    with the gates) AUTHORS, and lands verbatim as the pg_restore list argv's last
-    element.  If a future change decides to guard the container path, THIS is the test
-    that must be flipped consciously -- the ruling cannot erode by accident.
+    the verbatim-vs-normalized association comparison in `_validate_supervisor_execution`
+    never sees it; (b) the verifier's containment+shape argv gate
+    (`_validate_exact_command_argv`, `pg_restore_list` branch) and the same containment
+    check on the captured listing (`_validate_dump_listing`); (c) the supervisor's mirror
+    gates -- `_assert_exact_argv` and `resolve_container_pg_restore_identity` (invoked
+    from `execute_producer_state_machine`), which takes
+    `argv[-1]` verbatim, asserts the same mount containment and hashes that exact string;
+    and (d) the CAPTURE argv route -- plan_author's `schema_dump_list` capture argv
+    carries `--schema-dump-container` too, the supervisor's pre-spawn capture gate
+    (`_assert_capture_producer_argv`) asserts the same containment on that bound value,
+    capture.py :531/:533 then executes `docker exec pg_restore --list` on it and records
+    `list_argv` into the forensic bundle, and the capture-argv equality inside
+    `_validate_supervisor_execution` compares the WHOLE capture argv by EXACT equality.
+    (Cross-file sites are named by SYMBOL, not by line number: #1269 shifted both gate
+    modules and staled every number this docstring used to carry.)  Since #1269 all five
+    of those gates ask the shared
+    `container_dump_path_within_mount` predicate (mount prefix AND no `..` component),
+    which JUDGES and never rewrites -- so every one of them stays textual with zero
+    `Path()` normalization on either side, and the false-refusal disease this guard
+    exists for still cannot reach this field.  This test is the "no third silent state"
+    pin: an interior `//` container path (which the predicate admits, `PurePosixPath`
+    dropping the empty component) AUTHORS, and lands verbatim as the pg_restore list
+    argv's last element.  If a future change decides to guard the container path AT
+    AUTHORING TIME, THIS is the test that must be flipped consciously -- the ruling
+    cannot erode by accident.
     """
 
     container_dump = "/var/lib/postgresql//evidence/schema-before.dump"
@@ -6408,3 +6423,216 @@ def test_plan_author_rejects_relative_paths_for_every_guarded_label(label: str) 
     message = str(excinfo.value)
     assert label in message
     assert "must be an absolute path" in message
+
+
+# --------------------------------------------------------------------------- #
+# #1269: the container dump path gates judge CONTAINMENT, not a string opening.
+# FOUR of today's five gates used to spell "inside the DB container data mount"
+# as a bare `startswith("/var/lib/postgresql/")`; the fifth -- the supervisor's
+# pre-spawn capture-argv gate -- did not judge the path at all until this change
+# gave it a check.  So `/var/lib/postgresql/../../../etc/shadow` passed every
+# route and then got `docker exec sha256sum`-ed (its digest recorded as
+# `dump_sha256`) and `docker exec pg_restore --list`-ed inside the container.  Of
+# the four inline copies only `resolve_container_pg_restore_identity`'s refusal
+# claimed containment ("pg_restore dump path is outside the DB container data
+# mount"); the other three say only "argv differs" / "argv/output ownership
+# differs" / "not verifiable".  One shared predicate now answers the question for
+# all five, and it JUDGES ONLY -- no normalization enters the lane, so the
+# verbatim posture and the #1268 authoring adjudication are both untouched.
+# --------------------------------------------------------------------------- #
+
+# The predicate is exercised through the verifier module's by-name binding rather than
+# through a direct `node27_container_contract` import: this suite is the pinned
+# TRANSITIVE-ONLY member of the contract's CI dependent closure
+# (tests/test_select_ci_tests.py's anti-vacuity floor), so a direct import line here
+# would quietly demote that floor to a grep-findable one.  The binding is the same
+# function object either way, and the drift guard below asserts both gate planes hold
+# exactly that object.
+
+# One leaves straight from the mount root, the other from a real subdirectory.
+_MOUNT_ROOT_TRAVERSAL = "/var/lib/postgresql/../../../etc/shadow"
+_SUBDIR_TRAVERSAL = "/var/lib/postgresql/evidence/../../../../etc/passwd"
+_CONTAINER_DUMP_TRAVERSALS = (_MOUNT_ROOT_TRAVERSAL, _SUBDIR_TRAVERSAL)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("/var/lib/postgresql/evidence/schema-before.dump", id="plan_author_default"),
+        # #1268's adjudicated shape: `PurePosixPath` drops the empty component, so the
+        # gates see no `..` and admit it exactly as the bare prefix did.
+        pytest.param("/var/lib/postgresql//evidence/schema.dump", id="interior_double_slash"),
+        # `parts` drops the trailing empty component too -- today's gate behaviour,
+        # and normalization leaves this row admitted as well, so it discriminates
+        # nothing between implementations.
+        pytest.param("/var/lib/postgresql/evidence/", id="trailing_slash"),
+        # THE discriminating accept row: a `resolve()`/`normpath`-based
+        # implementation turns this into `/var/lib/postgresql`, which no longer
+        # carries the trailing-slash prefix, so this is the one accept row such an
+        # implementation would silently flip to a refusal.
+        pytest.param("/var/lib/postgresql/", id="bare_mount_root"),
+        # `..` is a whole-COMPONENT test, not a substring one: a filename may contain it.
+        pytest.param("/var/lib/postgresql/evidence/a..b.dump", id="dots_inside_a_filename"),
+    ],
+)
+def test_container_dump_path_within_mount_accepts_in_mount_values(value: str) -> None:
+    assert evidence.container_dump_path_within_mount(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_MOUNT_ROOT_TRAVERSAL, id="traversal_from_mount_root"),
+        pytest.param(_SUBDIR_TRAVERSAL, id="traversal_from_subdirectory"),
+        pytest.param("/var/lib/postgresql/..", id="bare_parent_of_the_mount"),
+        # The shortest escape that still looks like it descends first.
+        pytest.param("/var/lib/postgresql/x/..", id="escape_after_one_real_segment"),
+        # The dangling-flag sentinel gate 5 hands over; it fails the prefix conjunct.
+        pytest.param("", id="empty_string_sentinel"),
+        pytest.param("/tmp/schema.dump", id="prefix_miss"),
+    ],
+)
+def test_container_dump_path_within_mount_rejects_escaping_values(value: str) -> None:
+    assert evidence.container_dump_path_within_mount(value) is False
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_verifier_pg_restore_list_argv_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Gate 1, reached directly: the plan-side argv gate refuses on its own.
+
+    Hand-crafted argv, no upstream gate involved -- a bundle whose plan never passed
+    through `plan_author` is exactly the case these gates exist for.
+    """
+
+    with pytest.raises(evidence.EvidenceError, match="pg_restore list argv differs"):
+        evidence._validate_exact_command_argv(
+            ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path],
+            kind="pg_restore_list",
+            associations={},
+            label="run plan command[2]",
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_verifier_pg_restore_list_argv_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity for the gate-1 refusal, including the #1268 interior-`//` shape."""
+
+    evidence._validate_exact_command_argv(
+        ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path],
+        kind="pg_restore_list",
+        associations={},
+        label="run plan command[2]",
+    )
+
+
+def _dump_listing(dump_path: str) -> dict[str, Any]:
+    """A schema-dump-list document whose only variable is the container dump path."""
+
+    listing = {
+        "captured_at": "2026-07-15T11:20:00Z",
+        "snapshot_id": "schema-dump-list",
+        "mutation_head_sha": HEAD,
+        **_pg_restore_record("3" * 64),
+    }
+    listing["list_argv"][-1] = dump_path
+    return listing
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_captured_listing_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Gate 2, reached directly with a hand-crafted listing document.
+
+    This is the gate that judges what the capture producer ALREADY ran, so it has to
+    refuse independently of whether the plan-side gate above ever saw the same value.
+    """
+
+    with pytest.raises(
+        evidence.EvidenceError, match="schema forensic dump/list identity is not verifiable"
+    ):
+        evidence._validate_dump_listing(
+            _dump_listing(dump_path),
+            dump_ref={"sha256": "3" * 64},
+            mutation_head_sha=HEAD,
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_captured_listing_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity for gate 2, and the verbatim posture: the value comes back unrewritten."""
+
+    validated = evidence._validate_dump_listing(
+        _dump_listing(dump_path),
+        dump_ref={"sha256": "3" * 64},
+        mutation_head_sha=HEAD,
+    )
+    assert validated["list_argv"][-1] == dump_path
+
+
+def test_verifier_plan_capture_gate_refuses_a_container_dump_abbreviation(tmp_path: Path) -> None:
+    """The mirrored anchored tuple's own behaviour change, on the verifier plane.
+
+    `--schema-dump-container` joined `ANCHORED_CAPTURE_OPTIONS` so an abbreviation cannot
+    smuggle the binding past the supervisor's exact-base value scan; because the tuples
+    are pinned equal cross-plane, the verifier's plan-capture gate newly refuses the same
+    spelling.  No committed producer emits abbreviations, so nothing legitimate moves.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle,
+        tmp_path,
+        kind="schema_dump_list",
+        tokens=[f"--schema-dump-c={_MOUNT_ROOT_TRAVERSAL}"],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "abbreviation of --schema-dump-container" in message
+
+
+def test_no_gate_module_retains_an_inline_container_mount_prefix_check() -> None:
+    """Single-source drift guard: the predicate has exactly one home.
+
+    A future edit that "just adds the prefix check back" at one gate would reopen the
+    hole at that gate alone.  This guard is a SPELLING scan, so state exactly what it
+    buys: it catches the three spellings such an edit would plausibly reach for -- the
+    double-quoted literal the four old gates used, its single-quoted twin (ruff selects
+    only E,F,I here, so no rule forces one quote style), and a `startswith` of the now
+    exported `CONTAINER_DB_MOUNT_PREFIX`.  It cannot catch every possible re-spelling
+    (`value[: len(prefix)] == prefix`, a locally re-declared literal, ...); the real
+    backstop against a reopened hole is the per-gate behavioural traversal refusals --
+    the verifier gates above, the supervisor gates in
+    `test_node27_timeseries_compression_supervisor.py` -- which judge what each gate
+    DOES rather than how it is written.
+    Scoped to the two GATE modules: `plan_author`'s DEFAULT container path is a value
+    literal, not a containment check, and stays deliberately out of scope.
+    """
+
+    inline_checks = (
+        'startswith("/var/lib/postgresql/")',
+        "startswith('/var/lib/postgresql/')",
+        "startswith(CONTAINER_DB_MOUNT_PREFIX)",
+    )
+    for name in (
+        "scripts/node27_timeseries_compression_live_evidence.py",
+        "scripts/node27_timeseries_compression_supervisor.py",
+    ):
+        source = (ROOT / name).read_text(encoding="utf-8")
+        for inline_check in inline_checks:
+            assert source.count(inline_check) == 0, (name, inline_check)
+        assert "container_dump_path_within_mount" in source, name
+    # Single SOURCE, not merely a single spelling: both planes hold the one function
+    # object the contract module exports, so there is no second copy to drift.
+    assert supervisor.container_dump_path_within_mount is evidence.container_dump_path_within_mount

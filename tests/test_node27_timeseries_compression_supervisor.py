@@ -30,6 +30,14 @@ from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
 from scripts import node27_timeseries_decompression_replay as replay
 
+# The two container-dump-path escapes every mount-containment gate must refuse (#1269):
+# one leaving straight from the mount root, one leaving from a real subdirectory.  Both
+# satisfied the bare `startswith("/var/lib/postgresql/")` the gates used to spell
+# containment as, and both normalize to a file the DB container never meant to expose.
+_MOUNT_ROOT_TRAVERSAL = "/var/lib/postgresql/../../../etc/shadow"
+_SUBDIR_TRAVERSAL = "/var/lib/postgresql/evidence/../../../../etc/passwd"
+_CONTAINER_DUMP_TRAVERSALS = (_MOUNT_ROOT_TRAVERSAL, _SUBDIR_TRAVERSAL)
+
 
 @pytest.mark.parametrize(
     ("row", "expected"),
@@ -2508,11 +2516,72 @@ def test_resolve_container_pg_restore_identity_reads_real_docker_probes(
     }
 
 
-def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump() -> None:
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        pytest.param("/tmp/schema.dump", id="prefix_miss"),
+        pytest.param(_MOUNT_ROOT_TRAVERSAL, id="traversal_from_mount_root"),
+        pytest.param(_SUBDIR_TRAVERSAL, id="traversal_from_subdirectory"),
+    ],
+)
+def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump(dump_path: str) -> None:
+    """The message claims mount CONTAINMENT; before #1269 only the prefix miss honoured it.
+
+    A bare `startswith` constrains the string's opening, not containment: both traversal
+    shapes satisfied it and then got `docker exec sha256sum`-ed inside the container,
+    with the digest of whatever they resolved to recorded as `dump_sha256`.
+    """
+
     with pytest.raises(supervisor.SupervisorError, match="outside the DB container data mount"):
         supervisor.resolve_container_pg_restore_identity(
-            wall=supervisor.HardWall.start(30), dump_path="/tmp/schema.dump"
+            wall=supervisor.HardWall.start(30), dump_path=dump_path
         )
+
+
+def test_resolve_container_pg_restore_identity_refuses_a_traversal_with_zero_docker_calls(
+    probe_bin, tmp_path: Path
+) -> None:
+    """Refusal precedes every container side effect, proved by discrimination.
+
+    The docker stub is installed with an EMPTY response table, so ANY invocation the
+    resolver makes exits 97 and surfaces as `_run_capture_argv`'s label-bearing
+    "checkpoint probe failed".  Getting the containment message instead is only possible
+    if no `docker` process was ever created.  The second half is the non-vacuity control:
+    the very same stub arrangement DOES produce the probe failure for an in-mount path,
+    so the first half is not passing because the stub is inert.
+    """
+
+    probe_bin("docker", [])
+    with pytest.raises(supervisor.SupervisorError) as escaping:
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30), dump_path=_MOUNT_ROOT_TRAVERSAL
+        )
+    assert str(escaping.value) == "pg_restore dump path is outside the DB container data mount"
+
+    with pytest.raises(supervisor.SupervisorError) as contained:
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30),
+            dump_path="/var/lib/postgresql/evidence/schema.dump",
+        )
+    assert str(contained.value) == "DB container image identity checkpoint probe failed"
+
+
+def test_resolve_container_pg_restore_identity_admits_an_interior_double_slash_dump(
+    probe_bin, tmp_path: Path
+) -> None:
+    """The #1268 adjudication survives at the gate: interior `//` is in-mount, not escape.
+
+    `PurePosixPath` drops empty components, so the shape the plan author is allowed to
+    emit keeps resolving identity exactly as before -- and keeps being passed to docker
+    verbatim, unnormalized (the stub matches on the spelling it is given).
+    """
+
+    dump_path = "/var/lib/postgresql//evidence/schema.dump"
+    probe_bin("docker", _docker_responses(dump_path=dump_path))
+    identity = supervisor.resolve_container_pg_restore_identity(
+        wall=supervisor.HardWall.start(30), dump_path=dump_path
+    )
+    assert identity["dump_sha256"] == "c" * 64
 
 
 @pytest.mark.parametrize(
@@ -2753,6 +2822,45 @@ def test_decompress_argv_rejects_wrong_association_label_as_supervisor_error() -
         supervisor._assert_exact_argv(
             argv, kind="decompress", associations={"dry_run_receipt": "/tmp/x.json"}
         )
+
+
+# --- #1269: the mirror argv gate judges containment, not a string opening ---------
+
+
+def _pg_restore_list_argv(dump_path: str) -> list[str]:
+    return ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path]
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_pg_restore_list_argv_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Reached directly with a hand-crafted argv: this gate refuses on its own.
+
+    No upstream gate is in the picture -- a bundle whose plan was hand-written never
+    passes through plan_author, so this mirror gate has to be independently closed.
+    """
+
+    with pytest.raises(
+        supervisor.SupervisorError, match="pg_restore list argv/output ownership differs"
+    ):
+        supervisor._assert_exact_argv(
+            _pg_restore_list_argv(dump_path), kind="pg_restore_list", associations={}
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        # The #1268 adjudicated shape: interior `//` is in-mount and stays admitted.
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_pg_restore_list_argv_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity: the refusal above is about the escape, not about the gate rejecting all."""
+
+    supervisor._assert_exact_argv(
+        _pg_restore_list_argv(dump_path), kind="pg_restore_list", associations={}
+    )
 
 
 # --- F3: full producer state machine drives the real producers -------------
@@ -3169,3 +3277,181 @@ def test_capture_anchor_still_accepts_the_full_production_option_set(tmp_path: P
     plan["run_plan_id"] = supervisor.run_plan_id(plan)
     validated = supervisor.validate_run_plan(plan, inherited_env={})
     assert validated["captures"][0]["argv"] == plan["captures"][0]["argv"]
+
+
+# --- #1269: the pre-spawn capture-argv containment gate ---------------------------
+#
+# The fifth route to the same container side effect.  A plan whose pg_restore_list
+# COMMAND tail is clean can still bind `--schema-dump-container` to an escaping value in
+# the schema_dump_list CAPTURE argv; capture.py then really runs
+# `docker exec <container> /usr/bin/pg_restore --list <value>` on it.  This gate is a
+# pure function called before every spawn (`validate_run_plan` and `run_capture_step`),
+# so reaching it directly is the whole proof of refusal-before-spawn.
+
+_IN_MOUNT_DUMP = "/var/lib/postgresql/evidence/schema-before.dump"
+
+
+def _schema_dump_list_capture_argv(*extra: str, kind: str = "schema_dump_list") -> list[str]:
+    """A producer-shaped capture argv for `kind`, plus whatever tokens the case needs."""
+
+    return [
+        "/home/nwm/NWM/.venv/bin/python",
+        f"/home/nwm/NWM{supervisor.CAPTURE_SCRIPT_SUFFIX}",
+        "--kind",
+        kind,
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        pytest.param(
+            ["--schema-dump-container", _MOUNT_ROOT_TRAVERSAL],
+            "outside the pinned container dump path prefix",
+            id="mount_root_traversal_pair_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-container={_MOUNT_ROOT_TRAVERSAL}"],
+            "outside the pinned container dump path prefix",
+            id="mount_root_traversal_inline_form",
+        ),
+        pytest.param(
+            ["--schema-dump-container", _SUBDIR_TRAVERSAL],
+            "outside the pinned container dump path prefix",
+            id="subdirectory_traversal_pair_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-container={_SUBDIR_TRAVERSAL}"],
+            "outside the pinned container dump path prefix",
+            id="subdirectory_traversal_inline_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-c={_MOUNT_ROOT_TRAVERSAL}"],
+            "abbreviation of --schema-dump-container",
+            id="abbreviation_spelling",
+        ),
+        pytest.param(
+            ["--schema-dump-container"],
+            "outside the pinned container dump path prefix",
+            id="dangling_flag",
+        ),
+        pytest.param(
+            [
+                "--schema-dump-container",
+                _IN_MOUNT_DUMP,
+                "--schema-dump-container",
+                _MOUNT_ROOT_TRAVERSAL,
+            ],
+            "outside the pinned container dump path prefix",
+            id="late_second_binding_after_a_clean_first",
+        ),
+    ],
+)
+def test_capture_producer_argv_refuses_an_escaping_container_dump_binding(
+    extra: list[str], expected: str
+) -> None:
+    """Every spelling that reaches capture.py's parser is judged, not just the tidy one.
+
+    argparse binds last-wins and expands unambiguous prefixes, so the pair form, the
+    inline form, the `--schema-dump-c=` abbreviation and a late second binding are all
+    the same instruction to the producer.  The dangling flag binds no value and surfaces
+    as `_capture_option_values`' `""` sentinel, which fails the prefix conjunct -- a
+    refusal, never a silent skip.
+    """
+
+    with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+        supervisor._assert_capture_producer_argv(
+            _schema_dump_list_capture_argv(*extra), kind="schema_dump_list"
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param([], id="option_absent"),
+        pytest.param(["--schema-dump-container", _IN_MOUNT_DUMP], id="in_mount_pair_form"),
+        pytest.param([f"--schema-dump-container={_IN_MOUNT_DUMP}"], id="in_mount_inline_form"),
+        pytest.param(
+            ["--schema-dump-container", "/var/lib/postgresql//evidence/schema-before.dump"],
+            id="in_mount_interior_double_slash",
+        ),
+        pytest.param(
+            ["--schema-dump-host", "/home/nwm/node27-timeseries-compression/schema-before.dump"],
+            id="sibling_host_option_untouched",
+        ),
+    ],
+)
+def test_capture_producer_argv_admits_the_committed_schema_dump_list_shapes(
+    extra: list[str],
+) -> None:
+    """Non-vacuity, and the recorded absent-option semantics.
+
+    An absent option binds no value, so there is nothing for this gate to judge -- and
+    nothing is lost: `--schema-dump-container` is registered `default=None` and
+    `_capture_schema_dump_list` refuses such a run itself.  The in-mount default authors
+    today, and the interior-`//` shape #1268 adjudicated stays admitted here too.
+    """
+
+    supervisor._assert_capture_producer_argv(
+        _schema_dump_list_capture_argv(*extra), kind="schema_dump_list"
+    )
+
+
+def test_capture_producer_argv_scopes_the_containment_check_to_schema_dump_list() -> None:
+    """Recorded scope: only the kind that actually docker-execs the value is judged.
+
+    For any other kind capture.py never reads `--schema-dump-container` (it builds no
+    pg_restore argv at all), so there is no execution-safety property to enforce and this
+    gate deliberately says nothing about the value.
+    """
+
+    argv = _schema_dump_list_capture_argv(
+        "--schema-dump-container", _MOUNT_ROOT_TRAVERSAL, kind="catalog_before"
+    )
+    supervisor._assert_capture_producer_argv(argv, kind="catalog_before")
+
+
+def test_validate_run_plan_refuses_an_escaping_capture_dump_binding_before_any_spawn() -> None:
+    """The gate's production caller: a whole plan carrying the escape never validates."""
+
+    plan = _plan()
+    capture = next(item for item in plan["captures"] if item["kind"] == "schema_dump_list")
+    capture["argv"] = [*capture["argv"], "--schema-dump-container", _MOUNT_ROOT_TRAVERSAL]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(
+        supervisor.SupervisorError, match="outside the pinned container dump path prefix"
+    ):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+def test_run_capture_step_refuses_an_escaping_capture_dump_binding_before_any_spawn(
+    tmp_path: Path,
+) -> None:
+    """The other caller, and the only one that could spawn: no process, no output, no ledger."""
+
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture-schema_dump_list.json"
+    stub = _capture_stub(
+        tmp_path,
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n",
+    )
+    capture = {
+        "capture_id": "capture-schema_dump_list",
+        "kind": "schema_dump_list",
+        "argv": _capture_argv(
+            stub, "schema_dump_list", "--schema-dump-container", _SUBDIR_TRAVERSAL
+        ),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "container-dump-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(
+            supervisor.SupervisorError, match="outside the pinned container dump path prefix"
+        ):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
