@@ -158,8 +158,9 @@ delivery), but shipped together they are the defense-in-depth layer.
   interval 0.02, start, `assert called.wait(2.0)`; stop and heal
   module state before exit.
   (c) loud-timeout pin: monkeypatch `_replay_targets` with a fake
-  that first signals entry (`entered.set()`) then blocks ~0.5 s
-  (waits on a release-Event with timeout), seed `_hot_paths`
+  that first signals entry (`entered.set()`) then blocks on an
+  UNBOUNDED release-Event wait (delivered form per 1.4 — a ~0.5 s
+  self-release reopens a measured flake window), seed `_hot_paths`
   (fresh-timestamped as in (b)), start with interval 0.02,
   `assert entered.wait(2.0)` — the stop call MUST land while the
   thread is inside the blocking replay, else the first
@@ -245,5 +246,5 @@ delivery), but shipped together they are the defense-in-depth layer.
 - [x] E7 Surface check: `git diff master...HEAD --name-only` = the 5
   named files + this openspec change, nothing else; frozen surfaces
   zero diff via the branch-scoped form.
-- [ ] E8 CI `Unit Tests` green on the PR head (Linux oracle;
+- [x] E8 CI `Unit Tests` green on the PR head (Linux oracle;
   changed test files selected directly; no node-27).
