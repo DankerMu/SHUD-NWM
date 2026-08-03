@@ -99,20 +99,20 @@ oracle，缺它则修复在 UTC CI 上不可证）。
 
 ## Evidence Floor
 
-- [ ] E1 修复前红证明（orchestrator backup-copy + `cmp` restore）：
+- [x] E1 修复前红证明（orchestrator backup-copy + `cmp` restore）：
   仅还原 `real_backend.py` 至 master 形态跑新增判别用例 (a) → red
   （naive 08:00 被 relabel 成 08:00Z ≠ 00:00Z）；record 级 (c) →
   red（tzinfo None）；恢复修复后同用例 green。`cmp` 确认还原
   字节一致。
-- [ ] E2 计数对齐：`uv run pytest -q
+- [x] E2 计数对齐：`uv run pytest -q
   tests/test_real_slurm_gateway.py` 修复前 **223 passed** →
   修复后 **226 passed**（+3 新增回归）；`uv run pytest -q
   tests/test_file_orchestration_journal.py
   tests/test_gateway_reconcile.py`（issue Verification 指定）前后
   均 **686 passed**（零 diff 文件，基线本机 2fe829cd 实测）。
-- [ ] E3 `uv run ruff check .` green; openspec strict green.
-- [ ] E4 Surface check: `git diff master...HEAD --name-only` = 1
+- [x] E3 `uv run ruff check .` green; openspec strict green.
+- [x] E4 Surface check: `git diff master...HEAD --name-only` = 1
   生产文件 + 1 测试文件 + 本 openspec change；frozen 面零 diff。
-- [ ] E5 CI `Unit Tests` green on PR head（UTC 主机上判别用例经
+- [x] E5 CI `Unit Tests` green on PR head（UTC 主机上判别用例经
   TZ pin 仍有判别力——(a) 用例自带 Asia/Shanghai，不依赖 runner
   时区）。
