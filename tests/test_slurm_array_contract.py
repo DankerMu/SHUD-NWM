@@ -15,11 +15,43 @@ from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import ManifestValidationError as GatewayManifestValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
+from tests.slurm_template_helpers import _join_line_continuations
 from workers.canonical_converter import cli as canonical_cli
 from workers.data_adapters import cli as data_cli
 from workers.forcing_producer import cli as forcing_cli
 from workers.output_parser import cli as output_cli
 from workers.shud_runtime import cli as runtime_cli
+
+# Canonical single-line spelling of the worker commands rendered by the three
+# array templates that branch on ``target_python_runtime``. The templates lay
+# these out across backslash-continued lines; assertions fold the continuation
+# (see ``_join_line_continuations``) and keep this recorded vocabulary.
+_FORCING_CONSOLE_COMMAND = (
+    'nhms-forcing produce --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+)
+_SHUD_CONSOLE_COMMAND = (
+    'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+)
+_STATE_CONSOLE_COMMAND = 'nhms-state save --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+_FORCING_TARGET_RUNTIME_COMMAND = (
+    '"$NHMS_TARGET_PYTHON_RUNTIME" -m workers.forcing_producer.cli produce '
+    '--manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+)
+_SHUD_TARGET_RUNTIME_COMMAND = (
+    '"$NHMS_TARGET_PYTHON_RUNTIME" -m workers.shud_runtime.cli execute '
+    '--manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+)
+_STATE_TARGET_RUNTIME_COMMAND = (
+    '"$NHMS_TARGET_PYTHON_RUNTIME" -m packages.common.state_cli save '
+    '--manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"'
+)
+
+# (job_type, target-runtime branch command, console-entrypoint branch command).
+_BRANCHED_ARRAY_TEMPLATES = [
+    ("produce_forcing_array", _FORCING_TARGET_RUNTIME_COMMAND, _FORCING_CONSOLE_COMMAND),
+    ("run_shud_forecast_array", _SHUD_TARGET_RUNTIME_COMMAND, _SHUD_CONSOLE_COMMAND),
+    ("save_state_snapshot_array", _STATE_TARGET_RUNTIME_COMMAND, _STATE_CONSOLE_COMMAND),
+]
 
 
 def _write_profiles(tmp_path: Path) -> Path:
@@ -69,6 +101,21 @@ def _render_manifest(tmp_path: Path, job_type: str) -> dict[str, Any]:
         "cycle_time": "2026051200",
         "workspace_dir": str(tmp_path / "workspace"),
         "manifest_index_path": str(tmp_path / "manifest_index.json"),
+    }
+
+
+def _target_python_binding(tmp_path: Path) -> dict[str, str]:
+    """Manifest fields that select the templates' target-runtime IF branch."""
+
+    runtime = tmp_path / "target" / ".venv" / "bin" / "python-target"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o700)
+    source_root = tmp_path / "target" / "src"
+    source_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "target_python_runtime": str(runtime),
+        "target_python_source_root": str(source_root),
     }
 
 
@@ -126,17 +173,24 @@ def _main_exit_code(main: Callable[[Sequence[str]], int], argv: Sequence[str]) -
     return int(result)
 
 
-def _rendered_command_argv(rendered: str, *, manifest_index_path: Path) -> list[str]:
-    command = [
-        line.strip()
-        for line in rendered.splitlines()
-        if line.strip() and not line.lstrip().startswith(("#", "export "))
-    ][-1]
+def _substituted_argv(command: str, *, manifest_index_path: Path) -> list[str]:
     substitutions = {
         "$NHMS_MANIFEST_INDEX": str(manifest_index_path),
         "${SLURM_ARRAY_TASK_ID:-0}": "0",
     }
     return [substitutions.get(arg, arg) for arg in shlex.split(command)]
+
+
+def _rendered_command_argv(rendered: str, *, manifest_index_path: Path) -> list[str]:
+    # Fold continuations first: the templates lay their worker command out
+    # across backslash-continued lines, so last-line selection on the raw text
+    # would drop the executable name.
+    command = [
+        line.strip()
+        for line in _join_line_continuations(rendered).splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "export "))
+    ][-1]
+    return _substituted_argv(command, manifest_index_path=manifest_index_path)
 
 
 def _mock_array_cli_dependencies(monkeypatch: pytest.MonkeyPatch, executable: str) -> Callable[[Sequence[str]], int]:
@@ -187,25 +241,51 @@ class _FakeParser:
         )
 
 
+def test_join_line_continuations_folds_continued_command_into_single_line() -> None:
+    rendered = 'nhms-forcing produce \\\n  --manifest-index "$NHMS_MANIFEST_INDEX"\n'
+
+    assert _join_line_continuations(rendered) == 'nhms-forcing produce --manifest-index "$NHMS_MANIFEST_INDEX"\n'
+
+
+def test_join_line_continuations_leaves_rendering_without_continuation_byte_identical() -> None:
+    rendered = 'set -euo pipefail\n\nexport NHMS_RUN_ID=run_001\nnhms-state save --task-id "0"\n'
+
+    assert _join_line_continuations(rendered) == rendered
+
+
+def test_join_line_continuations_folds_continuation_on_the_last_line() -> None:
+    rendered = "nhms-forcing produce \\\n"
+
+    assert _join_line_continuations(rendered) == "nhms-forcing produce "
+
+
+def test_join_line_continuations_does_not_splice_across_a_blank_line() -> None:
+    # Bash TERMINATES the command when a continuation is followed by an empty
+    # line, so these stay two commands; a ``\s*`` fold would splice them.
+    rendered = "nhms-forcing produce \\\n\nmkdir -p /x\n"
+
+    folded = _join_line_continuations(rendered)
+
+    assert folded == "nhms-forcing produce \nmkdir -p /x\n"
+    assert folded.splitlines() == ["nhms-forcing produce ", "mkdir -p /x"]
+
+
+def test_join_line_continuations_ignores_interior_backslashes_and_plain_newlines() -> None:
+    rendered = 'grep -E "a\\|b" file\nnhms-state save\n  --task-id "0"\n'
+
+    assert _join_line_continuations(rendered) == rendered
+
+
 @pytest.mark.parametrize(
     ("job_type", "expected_command"),
     [
-        (
-            "produce_forcing_array",
-            'nhms-forcing produce --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
-        ),
-        (
-            "run_shud_forecast_array",
-            'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
-        ),
+        ("produce_forcing_array", _FORCING_CONSOLE_COMMAND),
+        ("run_shud_forecast_array", _SHUD_CONSOLE_COMMAND),
         (
             "parse_output_array",
             'nhms-parse shud-output --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
         ),
-        (
-            "save_state_snapshot_array",
-            'nhms-state save --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
-        ),
+        ("save_state_snapshot_array", _STATE_CONSOLE_COMMAND),
         ("publish_tiles", 'nhms-pipeline publish-tiles --cycle-id "$NHMS_CYCLE_ID"'),
         (
             "convert_canonical",
@@ -220,7 +300,7 @@ def test_real_templates_render_supported_cli_commands(tmp_path, job_type, expect
         str(tmp_path / "manifest_index.json"),
     )
 
-    assert expected_command in rendered
+    assert expected_command in _join_line_continuations(rendered)
 
 
 def test_state_save_array_template_exports_db_free_state_index_env(tmp_path: Path) -> None:
@@ -402,10 +482,10 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     assert "export SHUD_THREADS=8" in rendered
     assert "export OMP_NUM_THREADS=8" in rendered
     assert "export NHMS_MANIFEST_INDEX=" in rendered
-    assert (
-        'nhms-shud-runtime execute --manifest-index "$NHMS_MANIFEST_INDEX" '
-        '--task-id "${SLURM_ARRAY_TASK_ID:-0}"'
-    ) in rendered
+    # Only the command form tolerates continuations; the SBATCH/export
+    # assertions above keep judging the raw rendering, as does the quoted
+    # `<<'PY'` heredoc this template carries (bash folds nothing in there).
+    assert _SHUD_CONSOLE_COMMAND in _join_line_continuations(rendered)
 
 
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
@@ -489,6 +569,77 @@ def test_rendered_template_command_parses_without_error(monkeypatch, tmp_path, j
     assert argv[0] == expected_executable
     main = _mock_array_cli_dependencies(monkeypatch, argv[0])
     _invoke_main(main, argv[1:])
+
+
+@pytest.mark.parametrize(
+    ("job_type", "target_runtime_command", "console_command"),
+    _BRANCHED_ARRAY_TEMPLATES,
+)
+def test_branched_array_template_renders_full_target_runtime_command(
+    tmp_path: Path,
+    job_type: str,
+    target_runtime_command: str,
+    console_command: str,
+) -> None:
+    manifest = {
+        **_render_manifest(tmp_path, job_type),
+        **_target_python_binding(tmp_path),
+    }
+
+    rendered = _gateway(tmp_path).render_template(
+        job_type,
+        manifest,
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    normalized = _join_line_continuations(rendered)
+    assert target_runtime_command in normalized
+    assert console_command not in normalized
+
+
+@pytest.mark.parametrize(
+    ("job_type", "target_runtime_command", "console_command"),
+    _BRANCHED_ARRAY_TEMPLATES,
+)
+def test_branched_array_template_renders_full_console_entrypoint_command(
+    tmp_path: Path,
+    job_type: str,
+    target_runtime_command: str,
+    console_command: str,
+) -> None:
+    rendered = _gateway(tmp_path).render_template(
+        job_type,
+        _render_manifest(tmp_path, job_type),
+        str(tmp_path / "manifest_index.json"),
+    )
+
+    normalized = _join_line_continuations(rendered)
+    assert console_command in normalized
+    assert target_runtime_command not in normalized
+
+
+@pytest.mark.parametrize(
+    ("job_type", "expected_command"),
+    [(job_type, console_command) for job_type, _, console_command in _BRANCHED_ARRAY_TEMPLATES],
+)
+def test_line_continued_rendering_extracts_same_argv_as_single_line_command(
+    tmp_path: Path,
+    job_type: str,
+    expected_command: str,
+) -> None:
+    manifest_index_path = _manifest_index(tmp_path)
+    rendered = _gateway(tmp_path).render_template(
+        job_type,
+        _render_manifest(tmp_path, job_type),
+        str(manifest_index_path),
+    )
+
+    # Pin the premise: these templates really do continue their command.
+    assert "\\\n" in rendered
+
+    argv = _rendered_command_argv(rendered, manifest_index_path=manifest_index_path)
+
+    assert argv == _substituted_argv(expected_command, manifest_index_path=manifest_index_path)
 
 
 def test_forcing_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
