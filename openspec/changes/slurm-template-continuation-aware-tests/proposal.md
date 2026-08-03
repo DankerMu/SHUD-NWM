@@ -47,12 +47,16 @@ Adopted route (the issue's recommendation): **test-side continuation
 normalization, single-sourced.**
 
 1. One shared helper `_join_line_continuations(rendered: str) -> str`
-   that folds exactly the bash continuation sequence — a backslash at
-   end-of-line plus the following line's leading whitespace — into a
-   single space. It folds nothing else: ordinary newlines, quoting and
-   spacing inside a line are untouched, so an assertion still expresses
-   "this exact command exists in the rendering", merely tolerating the
-   one layout freedom bash itself grants. Single definition consumed by
+   that folds each line continuation — any horizontal whitespace
+   before the backslash, the backslash at end-of-line, the newline,
+   and the next line's leading spaces or tabs — into a single space
+   (the adjudicated regex `[ \t]*\\\n[ \t]*`; horizontal whitespace
+   only on both sides, never `\s`, which would splice across the
+   blank line bash treats as command termination). It folds nothing
+   else — ordinary newlines and quoting are untouched — so an
+   assertion still expresses "this exact command exists in the
+   rendering", tolerating the one layout freedom bash grants for
+   continuations at token boundaries in unquoted command text. Single definition consumed by
    both test files (suggested home: a small shared test helper module;
    two private copies would just re-create the drift this issue is
    cleaning up — final placement is the implementer's call, recorded in

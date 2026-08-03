@@ -47,7 +47,7 @@ while leaving the guard disarmed, the worst outcome the issue names.
 
 ## 1. Shared helper
 
-- [ ] 1.1 `_join_line_continuations(rendered: str) -> str`: folds the
+- [x] 1.1 `_join_line_continuations(rendered: str) -> str`: folds the
   sequence horizontal whitespace + backslash + newline + the next
   line's leading SPACES/TABS (`[ \t]*\\\n[ \t]*` — horizontal
   whitespace ONLY on both sides, never `\s`, which would cross
@@ -70,7 +70,7 @@ while leaving the guard disarmed, the worst outcome the issue names.
 
 ## 2. Assertion sites
 
-- [ ] 2.1 The 5 verbatim substring assertions (fake-lane evidence test
+- [x] 2.1 The 5 verbatim substring assertions (fake-lane evidence test
   in test_production_slurm_validation.py; 3 changed parametrize rows
   and the shared-contract shud test in test_slurm_array_contract.py)
   assert against the helper-normalized rendering; expected strings
@@ -81,14 +81,14 @@ while leaving the guard disarmed, the worst outcome the issue names.
   (run_shud_forecast_array carries a quoted `<<'PY'` heredoc where
   bash performs no continuation; normalizing those pinned strings
   would be a false-green vector).
-- [ ] 2.2 `_rendered_command_argv` normalizes via the helper before
+- [x] 2.2 `_rendered_command_argv` normalizes via the helper before
   last-line selection; its substitution map and callers unchanged.
   `argv[0]` binds again for all three battery rows and `_invoke_main`
   runs.
 
 ## 3. New coverage
 
-- [ ] 3.1 Argument-level IF-branch assertions for the three branched
+- [x] 3.1 Argument-level IF-branch assertions for the three branched
   templates: with `target_python_runtime` set, the normalized
   rendering contains the FULL command
   `"$NHMS_TARGET_PYTHON_RUNTIME" -m <module> <command>
@@ -103,7 +103,7 @@ while leaving the guard disarmed, the worst outcome the issue names.
   (test_real_slurm_gateway.py round18 pair) stay untouched — this
   closes the argument-level residual they leave, not a duplicate of
   them.
-- [ ] 3.2 Regression lock: a rendering containing a backslash
+- [x] 3.2 Regression lock: a rendering containing a backslash
   continuation yields, after normalization, the same argv as the
   canonical single-line expected constant already recorded in the
   parametrize table (`shlex.split` of that constant under the same
@@ -115,24 +115,24 @@ while leaving the guard disarmed, the worst outcome the issue names.
 
 ## 4. Spec + validation
 
-- [ ] 4.1 Spec delta: MODIFIED "Real-template smoke tests cover mock
+- [x] 4.1 Spec delta: MODIFIED "Real-template smoke tests cover mock
   blind spots" requirement in `slurm-array-execution-contract` —
   smoke tests judge the continuation-normalized rendering, extract
   the full argv including the executable, and cover both
   `target_python_runtime` branches of every branched template at
   argument level.
-- [ ] 4.2 `openspec validate slurm-template-continuation-aware-tests
+- [x] 4.2 `openspec validate slurm-template-continuation-aware-tests
   --strict --no-interactive` green.
 
 ## Evidence Floor
 
-- [ ] E1 `uv run pytest -q tests/test_slurm_array_contract.py
+- [x] E1 `uv run pytest -q tests/test_slurm_array_contract.py
   tests/test_production_slurm_validation.py
   tests/test_real_slurm_gateway.py` green; the 7 issue-table ids all
   pass.
-- [ ] E2 `uv run ruff check .` green.
-- [ ] E3 openspec strict validation green (4.2).
-- [ ] E4 **Red proofs (discrimination)**, each via backup-copy
+- [x] E2 `uv run ruff check .` green.
+- [x] E3 openspec strict validation green (4.2).
+- [x] E4 **Red proofs (discrimination)**, each via backup-copy
   mutation restored byte-identical (`cmp`) afterwards:
   (i) the `[ \t]*`-vs-`\s*` discrimination proof runs at helper
   unit-test level on a SYNTHETIC input (no current rendering
@@ -148,12 +148,12 @@ while leaving the guard disarmed, the worst outcome the issue names.
   `argv[0]` assertion — the re-armed guard demonstrably guards;
   (iii) with the `--manifest-index` option name corrupted the same
   way, `_invoke_main` reds — parser execution, not string luck.
-- [ ] E5 Surface check: `git diff --name-only` lands only under
+- [x] E5 Surface check: `git diff --name-only` lands only under
   `tests/` plus this openspec change; `infra/sbatch/**`,
   `services/slurm_gateway/**`, `tests/test_real_slurm_gateway.py`
   zero diff. Check against the command's own output, not this
   sentence.
-- [ ] E6 Full-suite spot: `uv run pytest -q
+- [x] E6 Full-suite spot: `uv run pytest -q
   -m "not e2e and not grib and not integration"` no longer lists any
   of the 7 ids (the 4 known #1274 reds are out of scope and expected
   to persist locally on macOS).
