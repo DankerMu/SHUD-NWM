@@ -6612,8 +6612,10 @@ def test_no_gate_module_retains_an_inline_container_mount_prefix_check() -> None
     only E,F,I here, so no rule forces one quote style), and a `startswith` of the now
     exported `CONTAINER_DB_MOUNT_PREFIX`.  It cannot catch every possible re-spelling
     (`value[: len(prefix)] == prefix`, a locally re-declared literal, ...); the real
-    backstop against a reopened hole is the per-gate behavioural traversal refusals
-    above, which judge what each gate DOES rather than how it is written.
+    backstop against a reopened hole is the per-gate behavioural traversal refusals --
+    the verifier gates above, the supervisor gates in
+    `test_node27_timeseries_compression_supervisor.py` -- which judge what each gate
+    DOES rather than how it is written.
     Scoped to the two GATE modules: `plan_author`'s DEFAULT container path is a value
     literal, not a containment check, and stays deliberately out of scope.
     """

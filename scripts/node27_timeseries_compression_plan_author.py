@@ -164,7 +164,8 @@ def build_run_plan(
         # ``str(Path(...))``-rendered.  A ``..`` component gets past prearm (its
         # ``plan_owned_paths`` checks only ``is_absolute``), but the SUPERVISOR's
         # produced-artifact no-follow inspect (the ``inspect_bounded_file_no_follow``
-        # walk over ``artifact_associations`` in ``run_child``) refuses it the
+        # walk over ``artifact_associations`` in ``run_child``) refuses it the moment
+        # pg_dump exits -- before any ledger ref exists -- and the VERIFIER's own
         # no-follow artifact read would refuse it identically.  The slash-roots degenerate
         # exactly as for ``root``.
         #
@@ -197,8 +198,7 @@ def build_run_plan(
         # equality -- again verbatim, zero normalization (the
         # ``EXPECTED_CAPTURE_TOOL_VALUES`` header comment there records both
         # ``--schema-dump-*`` options as deliberately not value-pinned).  Since #1269
-        # those five gates
-        # spell containment through the shared
+        # those five gates spell containment through the shared
         # ``node27_container_contract.container_dump_path_within_mount`` predicate --
         # mount prefix AND no ``..`` component -- which JUDGES and never rewrites, so
         # they stay textual and this symmetry argument is untouched (an interior ``//``

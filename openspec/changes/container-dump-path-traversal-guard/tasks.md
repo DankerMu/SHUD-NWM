@@ -2,9 +2,11 @@
 
 Every `file:line` anchor below was verified at master 49b7b452, the
 base this change was authored against; the change's own line growth
-shifts some of them (live_evidence +8 above line 110, supervisor +3
-above 80 and +26 above 556), so read them against that base, not
-against the merge result.
+shifts some of them, so read them against that base, not against the
+merge result. (No shift amounts are quantified here on purpose: this
+change's first attempt at this paragraph did quantify them, and its
+own next commit invalidated the numbers — a quantified delta is just
+another anchor that rots.)
 
 Risk triage: fixture level **expanded** (issue has no suggested level;
 S-size but it edits two forensic gate scripts whose refusal semantics

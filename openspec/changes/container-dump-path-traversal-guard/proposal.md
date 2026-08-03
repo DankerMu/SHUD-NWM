@@ -197,19 +197,28 @@ Recorded residuals (out of scope, bounded by the same
 already-authorized-plan trust boundary):
 
 - The predicate is string-level, so a symlink planted inside the
-  mount and pointing outside it still escapes `docker exec sha256sum`
-  (which follows symlinks). Correction to this change's first draft
-  of this paragraph, made after review measured it: planting such a
-  symlink does NOT require access inside the DB container. The mount's
-  host side is `/home/nwm/nhms-evidence` — plan_author records the
-  host/container pair as defaults with the same basename and the
-  pg_dump command writes `--file <schema_dump_host>` host-side INTO
-  the mount — so host-side write access as the plan-authoring user
-  suffices, exactly the actor class the pinned-plan boundary already
-  admits. What the predicate closes is the pure-string traversal,
-  which needs no filesystem foothold at all; closing the symlink route
-  needs a container-side no-follow check, deliberately not attempted
-  here.
+  bind-mounted evidence directory and pointing outside it still
+  escapes `docker exec sha256sum` (which follows symlinks).
+  Correction to this change's first draft of this paragraph, made
+  after review challenged it: planting such a symlink does NOT
+  require access inside the DB container. MEASURED on node-27
+  (read-only, `docker inspect nhms-db --format '{{json .Mounts}}'`,
+  2026-08-02):
+
+  ```json
+  {"Type":"bind","Source":"/home/nwm/nhms-evidence",
+   "Destination":"/var/lib/postgresql/evidence","RW":true}
+  ```
+
+  so host-side write access as the plan-authoring user suffices —
+  exactly the actor class the pinned-plan boundary already admits —
+  and the reachable region is the `evidence` subtree, narrower than
+  the `/var/lib/postgresql/` prefix the predicate spans (the rest of
+  that prefix is container-internal; the DB's own data directory is a
+  separate mount at `/home/postgres/pgdata/data`). What the predicate
+  closes is the pure-string traversal, which needs no filesystem
+  foothold at all; closing the symlink route needs a container-side
+  no-follow check, deliberately not attempted here.
 - `PurePosixPath` keeps `..\x00` as a single component, so a
   NUL-bearing value such as `/var/lib/postgresql/..\x00/etc` is
   admitted by the predicate although `execve` would truncate it to

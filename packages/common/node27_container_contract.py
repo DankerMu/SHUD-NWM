@@ -205,8 +205,13 @@ def container_dump_path_within_mount(value: str) -> bool:
       own ``pg_dump`` writes ``--file <schema_dump_host>``, so a host-side writer
       can create the link and name it through its container path.  That is the
       same actor class the pinned-plan boundary already assumes, not a stronger
-      one.  What this predicate closes is the pure-string traversal, which needs
-      no filesystem foothold at all; a planted symlink stays open.
+      one.  Measured node-27 shape (``docker inspect nhms-db``, 2026-08-02): the
+      bind mount is host ``/home/nwm/nhms-evidence`` -> container
+      ``/var/lib/postgresql/evidence`` (RW), i.e. the host-writable region is a
+      SUBTREE of the prefix this predicate spans; the rest of the prefix is
+      container-internal (the DB data directory is a separate mount).  What this
+      predicate closes is the pure-string traversal, which needs no filesystem
+      foothold at all; a planted symlink stays open.
     * ``/var/lib/postgresql/..\\x00/etc`` (Python escape form) is ADMITTED:
       ``PurePosixPath`` keeps ``..\\x00`` as one component, so the ``..``
       conjunct never matches it, while an ``execve``-truncated reading of the
