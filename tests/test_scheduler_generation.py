@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 
 from services.orchestrator import scheduler_generation as generation
+from services.orchestrator.scheduler_generation import MAX_CUTOVER_DECLARATION_BYTES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -694,21 +695,31 @@ def test_load_cutover_declaration_handles_recursion_error_on_deeply_nested_json(
     """A deeply-nested-but-under-256KB payload must NOT crash the scheduler
     pass — round-1 B3 fix adds ``RecursionError`` to the loader's except.
 
-    R2-B5 (round-2 review): pin the deterministic branch on CPython 3.11 (the
-    CI Python — see .github/workflows/ci.yml).  The default recursion limit
-    is 1000; ``json.loads`` on 2000-depth nested lists deterministically
-    raises ``RecursionError`` before the top-level array parses, so the
-    loader routes to ``declaration_malformed_json``.  A future Python bump
-    that raises the recursion limit high enough for the array to parse would
-    surface as ``declaration_wrong_schema`` (the schema requires an object,
-    not a list); the pin is deliberately deterministic so a silent branch
-    shift on the CI interpreter is caught, and a Python-version bump has to
-    consciously update this assertion.
+    The depth is pinned at a value measured to raise ``RecursionError``
+    deterministically on every supported CPython version (``requires-python =
+    ">=3.11"``; 3.11 — the CI Python, see .github/workflows/ci.yml — through
+    3.14 measured), so the ``declaration_malformed_json`` branch is really
+    exercised everywhere instead of only where one interpreter's internal
+    limits happen to bite.  The ``setrecursionlimit(1000)`` wrapper stays: on
+    3.11 it is the determinism source (the JSON scanner honors the Python-level
+    limit, so parsing dies at depth 995), while 3.12+ guard C recursion
+    independently of that limit and the threshold is version-dependent —
+    measured first-raising depth 9998 on 3.12, 9999 on 3.13, and ~74.4k on 3.14
+    (74381 here; 3.14 sizes the guard off actual C-stack headroom, so that one
+    drifts with the stack in use).  Depth 20000 therefore PARSES on 3.14 and
+    would falsely red as ``declaration_not_object``; depth 100000 was measured
+    through this very loader to return ``declaration_malformed_json`` on all of
+    3.11/3.12/3.13/3.14.  The payload also stays under
+    ``MAX_CUTOVER_DECLARATION_BYTES`` (200000 < 262144, asserted below) so the
+    loader reaches the JSON parse rather than the oversize branch.  The
+    adjacent non-recursive malformed shape (a top-level list) is pinned by its
+    own case below, so neither error code depends on the interpreter version.
     """
-    depth = 2000
+    depth = 100000
     payload = "[" * depth + "]" * depth
     path = tmp_path / "cutover-deep.json"
     path.write_text(payload, encoding="utf-8")
+    assert path.stat().st_size < MAX_CUTOVER_DECLARATION_BYTES
     previous_recursion_limit = sys.getrecursionlimit()
     try:
         sys.setrecursionlimit(1000)
@@ -717,6 +728,22 @@ def test_load_cutover_declaration_handles_recursion_error_on_deeply_nested_json(
         sys.setrecursionlimit(previous_recursion_limit)
     assert isinstance(result, dict)
     assert result.get("_load_error") == "declaration_malformed_json"
+
+
+def test_load_cutover_declaration_reports_not_object_on_top_level_list(
+    tmp_path: Path,
+) -> None:
+    """A shallow top-level JSON list is well-formed JSON of the wrong shape: the
+    loader routes it to ``declaration_not_object``.  This case involves no
+    nesting, so the code is pinned independently of any interpreter's recursion
+    behavior — it can never become the accidental outcome of the recursion case
+    above.
+    """
+    path = tmp_path / "cutover-list.json"
+    path.write_text(json.dumps([{"model_id": "model_a"}]), encoding="utf-8")
+    assert path.stat().st_size < MAX_CUTOVER_DECLARATION_BYTES
+    result = generation.load_cutover_declaration(str(path), now=NOW)
+    assert result == {"_load_error": "declaration_not_object"}
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ import json
 import os
 import shlex
 import subprocess
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +16,7 @@ from fastapi import FastAPI
 
 from services.production_closure import readonly_db_validation
 from services.production_closure.readonly_db_validation import (
+    APPROVED_EVIDENCE_ROOTS,
     ProbeExecution,
     ProbeTarget,
     PsycopgReadonlyDbProbeAdapter,
@@ -32,6 +35,83 @@ from services.production_closure.readonly_db_validation import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Canonical (published, GNU-coreutils) stat invocation -> BSD equivalent.  One
+# table shared by the executed-snippet shim below and by
+# ``test_stat_dialect_substitution_table_is_guard_equivalent``.
+STAT_DIALECT_SUBSTITUTIONS = (
+    ("stat -c '%a'", "stat -f '%Lp'"),
+    ("stat -c '%U'", "stat -f '%Su'"),
+    ("stat -c '%A'", "stat -f '%Sp'"),
+)
+
+
+@lru_cache(maxsize=1)
+def _gnu_stat_available() -> bool:
+    """Probe once per session whether the platform's ``stat`` accepts ``-c FORMAT``."""
+    with tempfile.NamedTemporaryFile(prefix="nhms-stat-dialect-probe-") as probe:
+        result = subprocess.run(
+            ["stat", "-c", "%a", probe.name],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    return result.returncode == 0 and result.stdout.strip().isdigit()
+
+
+@lru_cache(maxsize=1)
+def _bsd_stat_available() -> bool:
+    """Probe once per session whether the platform's ``stat`` accepts ``-f FORMAT``."""
+    with tempfile.NamedTemporaryFile(prefix="nhms-stat-dialect-probe-") as probe:
+        result = subprocess.run(
+            ["stat", "-f", "%Lp", probe.name],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    return result.returncode == 0 and result.stdout.strip().isdigit()
+
+
+def _portable_stat_script(script: str) -> str:
+    """Return the EXECUTED copy of a guard snippet in the running platform's stat dialect.
+
+    The guard snippets executed by this module are verbatim copies of the
+    node-27 runbook guards, which use the GNU-coreutils-only ``stat -c``
+    dialect by design.  BSD stat (macOS) rejects ``-c``, which diverts every
+    guard into its "cannot stat" fail-closed branch instead of the mode/owner
+    branch each test names.  When the probe finds no GNU ``stat``, exactly the
+    tool invocations listed in ``STAT_DIALECT_SUBSTITUTIONS`` are rewritten;
+    the guard's control flow, comparisons and BLOCKED messages stay
+    byte-identical.
+
+    Only the ``%a``→``%Lp`` pair has repo precedent: seven scripts under
+    ``scripts/`` already ship ``stat -c '%a' … 2>/dev/null || stat -f '%Lp' …``
+    fallbacks, two of which are pinned by
+    tests/test_scheduler_file_provider_refresh.py.  The ``%U``→``%Su`` and
+    ``%A``→``%Sp`` pairs have no prior occurrence in the repo and are new here,
+    justified by the equivalence unit test named below rather than by
+    convention.
+
+    Equivalence is conditional and holds inside these guards' input domain:
+    ``%U``↔``%Su`` (owner name) and ``%A``↔``%Sp`` (symbolic mode, whose
+    positional characters — the guard reads ``${perms:5:1}`` / ``${perms:8:1}``
+    — sit at the same indices in both dialects) are exact.  ``%a``↔``%Lp``
+    agrees on the permission bits ONLY: BSD ``%Lp`` DROPS setuid/setgid/sticky
+    (a 04600 file yields GNU ``%a``=4600 but ``%Lp``=600, which would slip past
+    a fail-closed ``!= "600"`` comparison in the unsafe direction).  That is
+    immaterial for the high-bit-free modes (0600/0644/0664) these guards chmod
+    themselves, and the boundary is pinned as a recorded fact by
+    ``test_stat_dialect_substitution_table_is_guard_equivalent``.
+
+    Substitution applies ONLY to the executed script copy: the neighbouring
+    runbook doc-equality assertions contain the same ``stat -c '%a'`` substring
+    and must keep comparing the canonical GNU text byte-identically.
+    """
+    if _gnu_stat_available():
+        return script
+    for gnu_invocation, bsd_invocation in STAT_DIALECT_SUBSTITUTIONS:
+        script = script.replace(gnu_invocation, bsd_invocation)
+    return script
 
 
 def test_absent_readonly_database_url_writes_blocked_evidence_without_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -884,9 +964,14 @@ def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -
         ("duplicate_source", "READONLY_DB_MERGE_DUPLICATE_SOURCE"),
         ("missing_source", "READONLY_DB_MERGE_SOURCE_MISSING"),
         ("outside_root", "READONLY_DB_EVIDENCE_ROOT_UNAPPROVED"),
+        ("symlink_component", "READONLY_DB_EVIDENCE_PATH_UNSAFE"),
     ],
 )
-def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: str, error_code: str) -> None:
+def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(
+    mutator: str,
+    error_code: str,
+    tmp_path: Path,
+) -> None:
     evidence_root = _evidence_root()
     run_id = _run_id(f"merge-{mutator}")
     gfs_config = _seed_live_readonly_source(
@@ -949,8 +1034,26 @@ def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: st
         _write_json(ifs_config.lane_dir / "route_smoke.json", ifs_summary["route_smoke"])
     elif mutator == "missing_source":
         source_dirs = [gfs_config.lane_dir]
-    else:
-        source_dirs[0] = Path("/tmp/nhms-readonly-db-forged")
+    elif mutator == "outside_root":
+        # resolve() flattens the platform's tempdir symlinks (macOS /var -> private/var)
+        # so this row reaches the approved-root gate instead of the symlink gate.
+        forged = Path(tempfile.gettempdir()).resolve() / "nhms-readonly-db-forged"
+        if _is_under_approved_evidence_root(forged):
+            # A Slurm-style $TMPDIR can resolve under /scratch/frd_muziyao; this
+            # row's oracle must never depend on where the host puts its tempdir.
+            forged = Path("/nhms-readonly-db-forged-outside-approved-roots")
+        assert not _is_under_approved_evidence_root(forged)
+        source_dirs[0] = forged
+    elif mutator == "symlink_component":
+        # A REAL symlink component pointing at an EXISTING directory: the gate
+        # fires on ``component.exists() and component.is_symlink()``, so a
+        # dangling link would not trigger it.
+        symlink_free_base = tmp_path.resolve()
+        real_lane = symlink_free_base / "real" / "db" / "readonly-db-boundary"
+        real_lane.mkdir(parents=True)
+        linked_root = symlink_free_base / "linked"
+        linked_root.symlink_to(symlink_free_base / "real", target_is_directory=True)
+        source_dirs[0] = linked_root / "db" / "readonly-db-boundary"
 
     if mutator in {"duplicate_source", "missing_source"}:
         summary = merge_readonly_db_source_evidence(
@@ -1497,6 +1600,71 @@ def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> No
     assert runbook.index(source_command) < runbook.index(validator_command)
 
 
+def _stat_output(flag: str, fmt: str, path: Path) -> str:
+    result = subprocess.run(["stat", flag, fmt, str(path)], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_stat_dialect_substitution_table_is_guard_equivalent(tmp_path: Path) -> None:
+    """The shim's three pairs answer identically inside the guards' input domain.
+
+    On a platform carrying only one dialect the available one is exercised
+    (both sides are asserted against the same independently-known expected
+    values, so a cross-dialect divergence reds wherever it can be observed).
+
+    The one recorded boundary: BSD ``%Lp`` drops setuid/setgid/sticky, so the
+    pair is guard-equivalent on the permission bits only — pinned below with a
+    04600 scratch file (0o4600 specifically: setuid survives ``chmod``
+    regardless of group membership, while macOS silently clears the setgid bit
+    when the file's group is one the caller does not belong to).  The guards
+    themselves only ever chmod high-bit-free modes (0600/0644/0664), where the
+    pair is exact.
+    """
+    assert STAT_DIALECT_SUBSTITUTIONS == (
+        ("stat -c '%a'", "stat -f '%Lp'"),
+        ("stat -c '%U'", "stat -f '%Su'"),
+        ("stat -c '%A'", "stat -f '%Sp'"),
+    )
+    gnu_stat = _gnu_stat_available()
+    bsd_stat = _bsd_stat_available()
+    assert gnu_stat or bsd_stat, "neither the GNU nor the BSD stat dialect is available"
+
+    secret_like = tmp_path / "mode-0600.env"
+    secret_like.write_text("x\n", encoding="utf-8")
+    secret_like.chmod(0o600)
+    unit_like = tmp_path / "mode-0664.service"
+    unit_like.write_text("[Service]\n", encoding="utf-8")
+    unit_like.chmod(0o664)
+    owner = secret_like.owner()
+
+    if gnu_stat:
+        assert _stat_output("-c", "%a", secret_like) == "600"
+        assert _stat_output("-c", "%a", unit_like) == "664"
+        assert _stat_output("-c", "%U", secret_like) == owner
+        gnu_symbolic = _stat_output("-c", "%A", unit_like)
+        assert gnu_symbolic == "-rw-rw-r--"
+        assert gnu_symbolic[5] == "w"  # the guard's ${perms:5:1} group-write slot
+        assert gnu_symbolic[8] == "-"  # the guard's ${perms:8:1} world-write slot
+
+    if bsd_stat:
+        assert _stat_output("-f", "%Lp", secret_like) == "600"
+        assert _stat_output("-f", "%Lp", unit_like) == "664"
+        assert _stat_output("-f", "%Su", secret_like) == owner
+        bsd_symbolic = _stat_output("-f", "%Sp", unit_like)
+        assert bsd_symbolic == "-rw-rw-r--"
+        assert bsd_symbolic[5] == "w"
+        assert bsd_symbolic[8] == "-"
+
+        high_bit_file = tmp_path / "mode-04600.env"
+        high_bit_file.write_text("x\n", encoding="utf-8")
+        high_bit_file.chmod(0o4600)
+        assert high_bit_file.stat().st_mode & 0o7777 == 0o4600
+        assert _stat_output("-f", "%Lp", high_bit_file) == "600"
+        if gnu_stat:
+            assert _stat_output("-c", "%a", high_bit_file) == "4600"
+
+
 def test_readonly_secret_source_guard_blocks_readable_file_before_source_or_validator(tmp_path: Path) -> None:
     secret_source = tmp_path / "display-readonly-secrets.env"
     secret_source.write_text("touch sourced-sentinel\n", encoding="utf-8")
@@ -1504,7 +1672,8 @@ def test_readonly_secret_source_guard_blocks_readable_file_before_source_or_vali
     tmp_path_q = shlex.quote(str(tmp_path))
     secret_source_q = shlex.quote(str(secret_source))
 
-    script = f"""
+    script = _portable_stat_script(
+        f"""
 set -u
 cd {tmp_path_q}
 READONLY_SECRET_SOURCE={secret_source_q}
@@ -1527,11 +1696,16 @@ set -a
 set +a
 touch validator-sentinel
 """
+    )
 
     result = subprocess.run(["bash", "-c", script], cwd=tmp_path, text=True, capture_output=True, check=False)
 
     assert result.returncode == 1
-    assert "BLOCKED:" in result.stderr
+    # The named branch is the 0644 mode refusal — not the "cannot stat" nor the
+    # "not a regular file" refusal, which would also satisfy a bare "BLOCKED:".
+    assert f"BLOCKED: {secret_source} must be mode 0600 before sourcing" in result.stderr
+    assert f"BLOCKED: cannot stat {secret_source} before sourcing" not in result.stderr
+    assert "must be a regular 0600 file before sourcing" not in result.stderr
     assert not (tmp_path / "sourced-sentinel").exists()
     assert not (tmp_path / "validator-sentinel").exists()
 
@@ -1543,7 +1717,8 @@ def test_readonly_secret_source_guard_preserves_existing_secret_file(tmp_path: P
     secret_source.chmod(0o600)
     secret_source_q = shlex.quote(str(secret_source))
 
-    script = f"""
+    script = _portable_stat_script(
+        f"""
 set -u
 READONLY_SECRET_SOURCE={secret_source_q}
 if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
@@ -1561,6 +1736,7 @@ if [ "$readonly_secret_mode" != "600" ]; then
   exit 1
 fi
 """
+    )
 
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
 
@@ -1578,7 +1754,8 @@ def test_operator_auth_source_guard_blocks_readable_file_before_source_or_header
     tmp_path_q = shlex.quote(str(tmp_path))
     secret_dir_q = shlex.quote(str(secret_dir))
 
-    script = f"""
+    script = _portable_stat_script(
+        f"""
 set -u
 cd {tmp_path_q}
 OPERATOR_SECRET_DIR={secret_dir_q}
@@ -1603,11 +1780,14 @@ mkdir -p "$OPERATOR_SECRET_DIR"
 OPERATOR_CURL_HEADER="$(mktemp "$OPERATOR_SECRET_DIR/operator-auth-header.XXXXXX")"
 touch header-sentinel
 """
+    )
 
     result = subprocess.run(["bash", "-c", script], cwd=tmp_path, text=True, capture_output=True, check=False)
 
     assert result.returncode == 1
-    assert "BLOCKED:" in result.stderr
+    # The named branch is the 0644 mode refusal, not the "cannot stat" refusal.
+    assert "BLOCKED: infra/env/operator-auth.env must be mode 0600 before sourcing" in result.stderr
+    assert "BLOCKED: cannot stat infra/env/operator-auth.env before sourcing" not in result.stderr
     assert not (tmp_path / "sourced-auth-sentinel").exists()
     assert not secret_dir.exists()
     assert not (tmp_path / "header-sentinel").exists()
@@ -1720,7 +1900,8 @@ def test_systemd_source_path_guard_rejects_group_world_writable_sources(tmp_path
     unit_source_q = shlex.quote(str(unit_source))
     sentinel_q = shlex.quote(str(tmp_path / "systemctl-sentinel"))
 
-    script = f"""
+    script = _portable_stat_script(
+        f"""
 set -euo pipefail
 TRUSTED_DOCKER_OPERATORS="$(id -un)"
 block_systemd_preflight() {{
@@ -1747,6 +1928,7 @@ check_systemd_source_path() {{
 check_systemd_source_path {unit_source_q}
 touch {sentinel_q}
 """
+    )
 
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
 
@@ -2140,6 +2322,18 @@ def _assert_stale_authoritative_evidence_preserved(config: ReadonlyDbValidationC
 
 def _evidence_root() -> Path:
     return REPO_ROOT / "artifacts" / "test-readonly-db-validation"
+
+
+def _is_under_approved_evidence_root(path: Path) -> bool:
+    """Mirror the production containment test against ``APPROVED_EVIDENCE_ROOTS``."""
+    resolved = path.expanduser().resolve()
+    for root in APPROVED_EVIDENCE_ROOTS:
+        try:
+            resolved.relative_to(root.expanduser().resolve())
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _run_id(prefix: str) -> str:
