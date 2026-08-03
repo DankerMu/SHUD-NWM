@@ -37,8 +37,9 @@ call sites.
 #### Scenario: Host-independent verdict
 
 - **WHEN** the meta-guard runs on a host without a writable
-  `/scratch/frd_muziyao` (macOS/CI), where the Class C smoke tests
-  themselves are skipped
+  `/scratch/frd_muziyao` (e.g. a macOS dev machine — CI provisions
+  that path and runs the Class C tests), where the Class C smoke
+  tests themselves are skipped
 - **THEN** the guard still executes and judges every call site,
   including the Class C ones, with the same verdict as on node-22
 
