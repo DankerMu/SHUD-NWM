@@ -109,26 +109,76 @@ def _manual_retry_marker_is_candidate_attributed(state: Mapping[str, Any], event
 def _event_is_adopted_manual_retry_marker(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
     return _manual_retry_marker_shape(event) and _manual_retry_marker_is_candidate_attributed(state, event)
 
-def _event_resolves_to_cycle_scope_job(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
-    """Knife 2 guard: event entity resolves to a model-less (cycle-scope) pipeline job row.
+def _job_is_cycle_scope_row(job: Mapping[str, Any]) -> bool:
+    """Row-level cycle-scope test, shared by the marker predicate and the pin rule.
 
     Mirrors the journal's strict ``_is_model_less_cycle_scope_job`` semantics: cycle
     scope requires an empty ``model_id`` AND the ``cycle_<source>_<stamp>[_suffix]``
-    run-id grammar.  ``model_id`` alone is not sufficient — multi-basin cohorts persist
-    model-less rows for the candidate's OWN ``fcst_...`` run, and treating those as
-    cycle scope would silently discard the operator-pinned attempt number.  Scheduler
-    state carries no source/cycle context, so the grammar is checked by prefix.
+    run-id grammar.  ``model_id`` alone is not sufficient — model-less rows can also
+    carry the candidate's OWN ``fcst_...`` run id, and treating those as cycle scope
+    would silently discard the operator-pinned attempt number.  Scheduler state
+    carries no source/cycle context, so the grammar is checked by prefix.
     """
+    if job.get("model_id") not in (None, ""):
+        return False
+    return str(job.get("run_id") or "").startswith("cycle_")
+
+def _event_entity_job_row(state: Mapping[str, Any], event: Mapping[str, Any]) -> Mapping[str, Any] | None:
     entity_id = event.get("entity_id")
     if entity_id in (None, ""):
-        return False
+        return None
     entity_id_text = str(entity_id)
     for job in _state_jobs(state):
         if str(job.get("job_id") or job.get("pipeline_job_id") or "") == entity_id_text:
-            if job.get("model_id") not in (None, ""):
-                return False
-            return str(job.get("run_id") or "").startswith("cycle_")
+            return job
+    return None
+
+def _event_resolves_to_cycle_scope_job(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Knife 2 guard: event entity resolves to a model-less (cycle-scope) pipeline job row.
+
+    Cohort master rows persist with the ``cycle_<source>_<stamp>_<stage>_<model_id>``
+    (or ``..._cohort_<digest>``) grammar, so they resolve as cycle scope here; whether
+    such a marker still pins its attempt number is decided separately by
+    ``_cycle_scope_marker_pins_attempt``.
+    """
+    job = _event_entity_job_row(state, event)
+    return job is not None and _job_is_cycle_scope_row(job)
+
+def _job_status_text(job: Mapping[str, Any]) -> str:
+    return str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+
+def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
+    """True when any non-cycle-scope job row is still in a failed pipeline status."""
+    for job in _state_jobs(state):
+        if _job_is_cycle_scope_row(job):
+            continue
+        if _job_status_text(job) in FAILED_PIPELINE_STATUSES:
+            return True
     return False
+
+def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str, Any]) -> bool:
+    """Whether a cycle-scope job's counter belongs to the attempt this decision derives.
+
+    The derived attempt and the scope it is spent against must share an origin: a
+    cycle-scope counter may only be pinned when the cycle stage's failure IS what this
+    decision repairs.  That holds when ``failed_stage`` names the marker job's own stage
+    (explicit same-stage repair), or when the cycle failure is the only failure left in
+    the state (nothing else could be the repair target).  A resolved job that is no
+    longer failed is a stale marker and pins nothing.
+    """
+    if _job_status_text(job) not in FAILED_PIPELINE_STATUSES:
+        return False
+    failed_stage = state.get("failed_stage")
+    if failed_stage not in (None, "") and str(failed_stage) == str(job.get("stage") or ""):
+        return True
+    return not _state_has_candidate_scope_failed_job(state)
+
+def _marker_event_pins_attempt(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Attempt-derivation gate for one adopted marker: cycle-scope rows need the pin rule."""
+    if not _event_resolves_to_cycle_scope_job(state, event):
+        return True
+    job = _event_entity_job_row(state, event)
+    return job is not None and _cycle_scope_marker_pins_attempt(state, job)
 
 def _manual_retry_marker_record(
     payload: Mapping[str, Any],
@@ -418,7 +468,7 @@ def _manual_retry_payload(state: Mapping[str, Any]) -> dict[str, Any]:
         details = event.get("details")
         payload.setdefault("marker", True)
         payload.setdefault("requested", True)
-        if details.get("retry_count") not in (None, "") and not _event_resolves_to_cycle_scope_job(state, event):
+        if details.get("retry_count") not in (None, "") and _marker_event_pins_attempt(state, event):
             payload.setdefault("new_attempt", _coerce_int(details.get("retry_count"), default=0))
         for key in ("prior_failure_reason", "previous_error", "previous_job_id", "slurm_job_id"):
             value = details.get(key)
@@ -433,10 +483,11 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         value = manual.get(key)
         if value not in (None, ""):
             return _coerce_int(value, default=previous_attempt + 1)
-    # Newest retry_count-carrying adopted marker decides, matching the payload scan's
-    # break-at-newest semantics.  A cycle-scope hit is TERMINAL: falling through to an
-    # older own-model marker would replay an attempt number already consumed.  Markers
-    # without a retry_count carry no attempt claim, so the scan keeps walking back.
+    # The newest retry_count-carrying adopted marker decides.  (The payload scan breaks
+    # at the newest adopted marker regardless of retry_count; here markers without a
+    # retry_count carry no attempt claim, so the scan keeps walking back past them.)
+    # A non-pinning hit is TERMINAL: falling through to an older own-model marker would
+    # replay an attempt number already consumed.
     for event in reversed(_state_events(state)):
         if not _event_is_adopted_manual_retry_marker(state, event):
             continue
@@ -444,7 +495,7 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         value = details.get("retry_count")
         if value in (None, ""):
             continue
-        if _event_resolves_to_cycle_scope_job(state, event):
+        if not _marker_event_pins_attempt(state, event):
             return previous_attempt + 1
         return _coerce_int(value, default=previous_attempt + 1)
     return previous_attempt + 1

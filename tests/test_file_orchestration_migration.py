@@ -493,6 +493,7 @@ def _manual_retry_marker_event(
     entity_type: str = "pipeline_job",
     event_id: int = 9,
     details_model_id: str | None = None,
+    previous_job_id: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     details: dict[str, Any] = {
@@ -503,6 +504,8 @@ def _manual_retry_marker_event(
     }
     if details_model_id is not None:
         details["model_id"] = details_model_id
+    if previous_job_id is not None:
+        details["previous_job_id"] = previous_job_id
     return {
         "event_id": event_id,
         "entity_type": entity_type,
@@ -570,15 +573,51 @@ def test_cycle_granularity_manual_marker_naming_candidate_model_is_adopted(attri
     assert payload["requested"] is True
 
 
-def test_cycle_scope_job_manual_marker_does_not_pin_candidate_new_attempt() -> None:
+def test_same_stage_cycle_scope_manual_marker_pins_attempt() -> None:
+    """Same-stage cycle-scope manual retry keeps operator/master attempt parity.
+
+    ``failed_stage`` names the very stage the marker's job failed at, so the cycle job's
+    attempt counter IS the budget this decision spends.
+    """
+
     candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
     state = {
         "pipeline_status": "failed",
         "retry_count": 0,
         "failed_stage": "download",
-        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_jobs": [{**_CYCLE_SCOPE_JOB, "retry_count": 4}, dict(_OWN_MODEL_JOB)],
         "pipeline_events": [
-            _manual_retry_marker_event(entity_id="job_cycle_gfs_2026070100_download", retry_count=5)
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+    assert evidence["manual_retry"]["new_attempt"] == 5
+
+
+def test_cross_stage_cycle_marker_does_not_pin_forecast_attempt() -> None:
+    """Channel 2 harm shape: a download-stage cycle counter must not enter the forecast budget."""
+
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [{**_CYCLE_SCOPE_JOB, "retry_count": 4}, dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
         ],
     }
 
@@ -587,8 +626,57 @@ def test_cycle_scope_job_manual_marker_does_not_pin_candidate_new_attempt() -> N
     assert scheduler_module._manual_retry_requested(state) is True
     assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
     assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
-    assert evidence["manual_retry"]["previous_attempt"] == 0
     assert evidence["manual_retry"]["new_attempt"] == 1
+
+
+def test_stale_cycle_marker_on_succeeded_job_does_not_pin() -> None:
+    """A marker whose resolved cycle job already succeeded is stale: it pins nothing."""
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "status": "succeeded", "retry_count": 5},
+            dict(_OWN_MODEL_JOB),
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+def test_cohort_download_failure_shape_pins_marker_attempt() -> None:
+    """Production projection: no explicit ``failed_stage`` and the cycle job is the only failure."""
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4},
+            {**_OWN_MODEL_JOB, "status": "succeeded"},
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
 
 
 def test_own_model_job_manual_marker_still_pins_candidate_new_attempt() -> None:

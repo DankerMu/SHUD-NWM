@@ -17,10 +17,15 @@ the cycle's candidates. Separately, the `retry_count` of a marker
 that resolves to a cycle-scope pipeline job — a model-less job row
 whose `run_id` carries the `cycle_<source>_<stamp>` grammar (a
 model-less row with a candidate-run `fcst_...` id is NOT
-cycle-scope) — SHALL NOT pin any model candidate's forecast-level
-attempt derivation: the derived `new_attempt` falls back to the
-candidate's own `previous_attempt + 1`, and the fallback is
-terminal — the newest retry-count-bearing adopted marker decides;
+cycle-scope) — SHALL pin the derived attempt only when that cycle
+stage's failure is the repair target: the resolved job is still in
+a failed status AND either the state's failed stage equals the
+resolved job's stage or the candidate has no failed model-scoped
+job row of its own. In every other case — a candidate-scoped
+failure of a different stage, or a marker whose resolved job is no
+longer failed (stale) — the derived `new_attempt` falls back to
+the candidate's own `previous_attempt + 1`, and the fallback is
+terminal: the newest retry-count-bearing adopted marker decides;
 older markers are not consulted. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
@@ -39,15 +44,23 @@ events stay visible in every candidate's state for diagnostics.
   model-scoped job row (the derived model set is non-empty), exactly
   that candidate adopts it
 
-#### Scenario: Cycle-scope job marker does not pin candidate-level attempts
+#### Scenario: Cycle-scope job marker pins only when its stage is the repair target
 
-- **WHEN** a manual retry event targets a cycle-scope pipeline job
-  (`model_id` empty and `run_id` in the `cycle_<source>_<stamp>`
-  grammar) visible to every model candidate in the cycle, carrying
-  a `retry_count`
-- **THEN** each candidate's derived `new_attempt` is its own
-  `previous_attempt + 1`, not the event's `retry_count`, while the
-  marker's adoption for retry eligibility is unchanged
+- **WHEN** a manual retry event targets a still-failed cycle-scope
+  pipeline job (`model_id` empty and `run_id` in the
+  `cycle_<source>_<stamp>` grammar) and that cycle stage's failure
+  is what the candidate decision repairs — the failed stage matches
+  the job's stage, or the candidate has no failed model-scoped job
+  row of its own (the production cohort-download shape)
+- **THEN** the derived `new_attempt` pins the marker's
+  `retry_count`, so the operator's cycle-level manual retry stays
+  effective and the minted retry identity does not reuse a consumed
+  attempt number
+- **AND** when the candidate's own failure is at a different stage,
+  or the marker's resolved job is no longer failed (stale), the
+  derived `new_attempt` falls back to `previous_attempt + 1` — the
+  cycle job's counter is never charged to the candidate's
+  forecast-level budget
 - **AND** the fallback is terminal even when the candidate has an
   older own-model marker: the stale marker's `retry_count` does not
   leak into `new_attempt`

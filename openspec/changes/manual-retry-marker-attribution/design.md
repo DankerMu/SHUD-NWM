@@ -116,6 +116,36 @@ fail-closed**（今日生产事件行本就无 model 列、出口本就不可达
 性质为保守方向；写入侧未来补 model_id 时需同时评估 cohort 形
 的派生集来源，记录于 PR body 兼容性节）。
 
+## Round-2 cross-review 修订（PR #1286，pattern escalation）
+
+round-2 全量复审（integration 全量 scope + verifier 实测裁定 + 只读
+诊断在 5 个形上定标）证伪了 round-1 修订的"无条件 previous+1 终止
+回落"——它把 issue 通道 2（不钉 **forecast 级** 预算）过度推广到了
+同 stage 的 cycle 级预算，实测把 operator 钉的 download attempt 从
+5 塌成 1（master parity 破坏；生产投影 cohort-download 形在完整
+decision 路径复现）。修订为 **stage 感知钉值**：
+
+- cycle-scope marker 钉值判据（诊断五形 A/B/C/D/E 实测定标）：
+  resolved job 仍 ∈ FAILED 态 ∧（raw `failed_stage` == job.stage
+  ∨ 候选无自身 model 域 failed 行）→ 钉 marker retry_count
+  （A 手搭同 stage=5、B 生产投影=5 恢复 parity）；否则终止回落
+  previous+1（C stale=1、D 多 marker=4、E 双失败=4 不越预算）。
+- **2.2 oracle 修订**（verifier r2 裁定：原断言 `new_attempt==1`
+  在 rc=0 下无判别力且编码了过度推广语义）：改为同 stage 正向
+  （download job rc=4 + marker rc=5 → 钉 5，master parity）；
+  通道 2 负向移到真实危害形（候选 forecast 失败 + 交叉 stage
+  cycle marker → 1）。这是有 spec 依据的 oracle 变更，非削弱。
+- cohort master 前提句更正（r2-cand-02）：cohort master 行 run_id
+  恒为 `cycle_` 前缀（`cycle_<src>_<stamp>_<stage>_<model_id>` /
+  `..._cohort_<digest>`），会被谓词判为 cycle-scope；钉/不钉由
+  钉值判据决定。round-1 §2 的"候选 run 是 `fcst_...`"表述仅对
+  真 fcst 行成立。
+- 诊断陷阱备案：投影形 `failed_stage` 为 None（`stage` 从候选
+  succeeded 行填充）；`download` 不在 DOWNSTREAM_STAGE_ALIASES →
+  `_state_retry_attempt(stage="download")` 走 flat 分支；
+  identity_filter 对 details 无 job id 字段的 marker 整体消毒
+  （测试 marker 必带 `previous_job_id`）。
+
 ## 回归测试 oracle（与刀对齐）
 
 - 通道 1 判别对：forecast_cycle 无归属 marker → sibling
