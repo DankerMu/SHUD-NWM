@@ -146,7 +146,7 @@ remaining family; shipping one would leave the issue half-closed).
 
 ## Evidence Floor
 
-- [ ] E1 Paired failure-path discrimination proof (scratchpad
+- [x] E1 Paired failure-path discrimination proof (scratchpad
   replica per ORACLE ROUTING above — whitelisted `artifacts` roots,
   POST-write forced-false assertion, file-exists anti-vacuity
   precondition, body taken from the SHIPPED function via
@@ -163,17 +163,17 @@ remaining family; shipping one would leave the issue half-closed).
   needs (`_make_checkout`/`_run_preflight`/`_current_owner`;
   `docker_runtime`) — a SKIP outcome is a FAILED proof, never
   counted as the red arm.
-- [ ] E2 macOS suite parity: `uv run pytest -q
+- [x] E2 macOS suite parity: `uv run pytest -q
   tests/test_two_node_docker_source_trust.py
   tests/test_two_node_docker_runtime.py` before (at master
   8553f9ca) and after — identical counts (`436 passed, 3 skipped`
   combined, measured at 8553f9ca this session), the two wrapped
   tests still SKIP with unchanged reasons (`-rs` output pasted).
-- [ ] E3 `uv run ruff check .` green; openspec strict green.
-- [ ] E4 Surface check: `git diff master...HEAD --name-only` = the
+- [x] E3 `uv run ruff check .` green; openspec strict green.
+- [x] E4 Surface check: `git diff master...HEAD --name-only` = the
   2 test files + this openspec change, nothing else; frozen
   surfaces zero diff via the branch-scoped form.
-- [ ] E5 CI `Unit Tests` green on the PR head — the accepted Linux
+- [x] E5 CI `Unit Tests` green on the PR head — the accepted Linux
   oracle actually EXECUTES both wrapped tests (ci.yml provisions
   `/scratch/frd_muziyao`), covering the issue's success-path
   node-22 items: un-skipped run, real write, green, cleanup.
