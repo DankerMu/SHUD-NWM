@@ -1320,21 +1320,21 @@ class FileOrchestrationJournalRepository:
                 hydro_run = model_rows.hydro_run if model_rows is not None else None
                 if hydro_run is None:
                     return False
-                if {
-                    "candidate_id": str(hydro_run.get("candidate_id") or ""),
-                    "run_id": str(hydro_run.get("run_id") or ""),
-                    "model_id": str(hydro_run.get("model_id") or ""),
-                    "basin_id": str(hydro_run.get("basin_id") or ""),
-                    "scenario_id": str(hydro_run.get("scenario_id") or ""),
-                    "array_task_id": int(hydro_run.get("array_task_id")),
-                } != {
-                    "candidate_id": str(member.get("candidate_id") or ""),
-                    "run_id": str(member.get("run_id") or ""),
-                    "model_id": str(member.get("model_id") or ""),
-                    "basin_id": str(member.get("basin_id") or ""),
-                    "scenario_id": str(member.get("scenario_id") or ""),
-                    "array_task_id": int(member.get("array_task_id")),
-                }:
+                for field in ("run_id", "model_id", "scenario_id"):
+                    if str(hydro_run.get(field) or "") != str(member.get(field) or ""):
+                        return False
+                # The file-journal per-model writers never persist
+                # ``candidate_id``/``basin_id``/``array_task_id`` (the run
+                # manifest and run context carry none of them), so ``None``
+                # means "not stored", not "different job" — same semantics as
+                # the sacct comment gate in ``reconcile``. A present-but-
+                # different value stays fatal.
+                for field in ("candidate_id", "basin_id"):
+                    observed = hydro_run.get(field)
+                    if observed is not None and str(observed) != str(member.get(field) or ""):
+                        return False
+                observed_task_id = hydro_run.get("array_task_id")
+                if observed_task_id is not None and int(observed_task_id) != int(member.get("array_task_id")):
                     return False
                 if (
                     _normalize_file_source_id(hydro_run.get("source_id"), field="source_id") != source_id
