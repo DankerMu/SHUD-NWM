@@ -3308,22 +3308,22 @@ def _schema_dump_list_capture_argv(*extra: str, kind: str = "schema_dump_list") 
     [
         pytest.param(
             ["--schema-dump-container", _MOUNT_ROOT_TRAVERSAL],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="mount_root_traversal_pair_form",
         ),
         pytest.param(
             [f"--schema-dump-container={_MOUNT_ROOT_TRAVERSAL}"],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="mount_root_traversal_inline_form",
         ),
         pytest.param(
             ["--schema-dump-container", _SUBDIR_TRAVERSAL],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="subdirectory_traversal_pair_form",
         ),
         pytest.param(
             [f"--schema-dump-container={_SUBDIR_TRAVERSAL}"],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="subdirectory_traversal_inline_form",
         ),
         pytest.param(
@@ -3333,7 +3333,7 @@ def _schema_dump_list_capture_argv(*extra: str, kind: str = "schema_dump_list") 
         ),
         pytest.param(
             ["--schema-dump-container"],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="dangling_flag",
         ),
         pytest.param(
@@ -3343,7 +3343,7 @@ def _schema_dump_list_capture_argv(*extra: str, kind: str = "schema_dump_list") 
                 "--schema-dump-container",
                 _MOUNT_ROOT_TRAVERSAL,
             ],
-            "outside the DB container data mount",
+            "outside the pinned container dump path prefix",
             id="late_second_binding_after_a_clean_first",
         ),
     ],
@@ -3420,7 +3420,7 @@ def test_validate_run_plan_refuses_an_escaping_capture_dump_binding_before_any_s
     capture["argv"] = [*capture["argv"], "--schema-dump-container", _MOUNT_ROOT_TRAVERSAL]
     plan["run_plan_id"] = supervisor.run_plan_id(plan)
     with pytest.raises(
-        supervisor.SupervisorError, match="outside the DB container data mount"
+        supervisor.SupervisorError, match="outside the pinned container dump path prefix"
     ):
         supervisor.validate_run_plan(plan, inherited_env={})
 
@@ -3447,7 +3447,7 @@ def test_run_capture_step_refuses_an_escaping_capture_dump_binding_before_any_sp
     ledger_path = tmp_path / "container-dump-ledger.jsonl"
     with _ledger(ledger_path) as ledger:
         with pytest.raises(
-            supervisor.SupervisorError, match="outside the DB container data mount"
+            supervisor.SupervisorError, match="outside the pinned container dump path prefix"
         ):
             supervisor.run_capture_step(
                 capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path

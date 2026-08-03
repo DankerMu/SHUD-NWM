@@ -163,12 +163,15 @@ def validated_probe_target(target: str) -> str:
 # REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the
 # container-side path prefix every forensic container dump path must live
 # inside.  Repo-side is the DECISION of where dumps must live; the mount layout
-# it is drawn over is measured (``docker inspect nhms-db``, 2026-08-02):
-# ``/var/lib/postgresql/`` is the container-side postgres home and is NOT itself
-# a mount -- its ``evidence`` SUBTREE is the host bind mount
-# (``/home/nwm/nhms-evidence`` -> ``/var/lib/postgresql/evidence``, RW), and the
-# DB's own data directory is a SEPARATE mount (``/home/nwm/nhms-pgdata`` ->
-# ``/home/postgres/pgdata/data``), outside this prefix.
+# it is drawn over is measured (``docker inspect nhms-db --format
+# '{{json .Mounts}}'``, 2026-08-02), and that output determines exactly this
+# much: the container carries two host bind mounts, of which the only one
+# landing under this prefix is ``/home/nwm/nhms-evidence`` ->
+# ``/var/lib/postgresql/evidence`` (RW), while the DB's own data directory is
+# the OTHER mount (``/home/nwm/nhms-pgdata`` -> ``/home/postgres/pgdata/data``),
+# outside this prefix.  So the host-writable region inside the prefix is that
+# ``evidence`` SUBTREE.  Nothing is claimed here about what the prefix path
+# itself is or is not -- a mount list cannot determine that.
 # FIVE gates judge that path today, but they did not start level.  FOUR carried
 # their own inline ``startswith`` of this literal -- the verifier's pg_restore
 # list argv gate and its captured schema-dump-list listing gate, the
@@ -180,12 +183,14 @@ def validated_probe_target(target: str) -> str:
 # the supervisor's pre-spawn capture-argv gate -- carried no containment check
 # at all until this issue added one, so the ``--schema-dump-container`` value
 # the spawned capture producer really ``docker exec pg_restore --list``s went
-# unjudged on that route.  Only the ``resolve_container_pg_restore_identity``
-# copy ever claimed containment in its refusal ("pg_restore dump path is outside
-# the DB container data mount" -- deliberately kept byte-unchanged, this change
-# edits no refusal text; "the DB container data mount" there denotes the prefix
-# as scoped above); the other three say only that an argv "differs" or that an
-# identity is "not verifiable".
+# unjudged on that route.  Of those FOUR inline copies only
+# ``resolve_container_pg_restore_identity`` ever claimed containment in its
+# refusal ("pg_restore dump path is outside the DB container data mount" --
+# deliberately kept byte-unchanged, this change edits none of the four
+# pre-existing refusal texts; "the DB container data mount" there denotes the
+# prefix as scoped above); the other three say only that an argv "differs" or
+# that an identity is "not verifiable".  The fifth gate's refusal is text this
+# change writes, and it names this prefix rather than that older noun.
 CONTAINER_DB_MOUNT_PREFIX = "/var/lib/postgresql/"
 
 
@@ -215,11 +220,12 @@ def container_dump_path_within_mount(value: str) -> bool:
       own ``pg_dump`` writes ``--file <schema_dump_host>``, so a host-side writer
       can create the link and name it through its container path.  That is the
       same actor class the pinned-plan boundary already assumes, not a stronger
-      one.  Measured node-27 shape (``docker inspect nhms-db``, 2026-08-02): the
-      bind mount is host ``/home/nwm/nhms-evidence`` -> container
+      one.  Measured node-27 mount list (``docker inspect nhms-db --format
+      '{{json .Mounts}}'``, 2026-08-02): the only bind mount landing under this
+      prefix is host ``/home/nwm/nhms-evidence`` -> container
       ``/var/lib/postgresql/evidence`` (RW), i.e. the host-writable region is a
-      SUBTREE of the prefix this predicate spans; the rest of the prefix is
-      container-internal (the DB data directory is a separate mount).  What this
+      SUBTREE of the prefix this predicate spans, and the DB data directory is a
+      separate mount outside it (``/home/postgres/pgdata/data``).  What this
       predicate closes is the pure-string traversal, which needs no filesystem
       foothold at all; a planted symlink stays open.
     * ``/var/lib/postgresql/..\\x00/etc`` (Python escape form) is ADMITTED:

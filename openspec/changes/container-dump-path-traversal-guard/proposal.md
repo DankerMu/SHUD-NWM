@@ -3,8 +3,10 @@
 ## Why
 
 Four gates admit the container dump path into the forensic lane, and
-all four express "the path is inside the DB container data mount" as a
-bare string prefix — `startswith("/var/lib/postgresql/")` — which
+all four express "the path is inside the DB container data mount" —
+the messages' own phrase for the pinned prefix `/var/lib/postgresql/`,
+kept verbatim throughout this document and denoting nothing more than
+that prefix — as a bare string prefix — `startswith("/var/lib/postgresql/")` — which
 constrains the literal opening of the string, not path containment
 (all anchors re-verified at master 49b7b452):
 
@@ -27,7 +29,7 @@ constrains the literal opening of the string, not path containment
    data mount")`.
 
 `/var/lib/postgresql/../../../etc/shadow` satisfies the prefix at all
-four gates, yet normalizes to `/etc/shadow` — outside the mount. The
+four gates, yet normalizes to `/etc/shadow` — outside the prefix. The
 value flows verbatim from the plan's pg_restore list argv tail
 (supervisor.py:1768 `str(list_command["argv"][-1])`) into gate 4,
 which then really executes `docker exec <container> /usr/bin/sha256sum
@@ -55,7 +57,7 @@ read-only disclosure (an arbitrary in-container file's sha256 plus a
 pg_restore --list success/failure signal), gated behind an
 already-authorized/pinned run plan (`NODE27_COMPRESSION_RUN_PLAN_SHA256`,
 supervisor.py:1817-1821) — the severity is bounded, but the gate is
-lying: it is the lane's only assertion of mount containment, and
+lying: it is the lane's only containment assertion over this path, and
 `tests/test_node27_timeseries_compression_supervisor.py:2511-2516`
 stamps the false claim with a `/tmp/schema.dump` case that only
 exercises the prefix miss. Introduced by 71125485 (2026-07-16), all
@@ -103,8 +105,13 @@ on the capture-argv route.
 2. **Four admission gates swap their inline prefix check for the
    predicate** — gates 1-3 keep their existing refusal messages
    verbatim (the argv still "differs"); gate 4 keeps "pg_restore dump
-   path is outside the DB container data mount", which becomes
-   truthful. No message churn, no reordering: gate 4's check stays
+   path is outside the DB container data mount" byte-for-byte, and the
+   check behind it now enforces containment rather than a string
+   opening. The exported symbol names (`CONTAINER_DB_MOUNT_PREFIX`,
+   `container_dump_path_within_mount`) keep the same historical noun on
+   purpose: renaming a cross-plane contract symbol is a separate,
+   snapshot-audited change, and the noun denotes the pinned prefix here
+   exactly as it does in the message. No message churn, no reordering: gate 4's check stays
    the function's first statement, ahead of every
    `_run_capture_argv`, so refusal happens with **zero docker
    invocations**.
@@ -119,7 +126,7 @@ on the capture-argv route.
    there is nothing to judge — and capture itself fails such a run
    (the option is registered `default=None`, capture.py:769, and
    `_capture_schema_dump_list` raises `CaptureError` at :515-516; the
-   in-mount default belongs to plan_author, not capture).
+   in-prefix default belongs to plan_author, not capture).
    `--schema-dump-container` additionally joins
    `ANCHORED_CAPTURE_OPTIONS` — in BOTH planes, supervisor.py:76 and
    live_evidence.py:98, because the tuples' equality is pinned by an
@@ -142,7 +149,7 @@ on the capture-argv route.
    rewrites. Admitted values keep being recorded and compared as the
    plan's original strings — no `posixpath.normpath`, no `Path()`
    write-back, no widening of `EXPECTED_CAPTURE_TOOL_VALUES`.
-   Interior-double-slash in-mount values
+   Interior-double-slash in-prefix values
    (`/var/lib/postgresql//evidence/…`) stay admitted:
    `PurePosixPath(...).parts` drops empty components without ever
    seeing a `..`, so the #1268 adjudication pin scenario (interior
@@ -161,19 +168,23 @@ on the capture-argv route.
    refusal-before-spawn is structural: the pure function is called
    before spawn at supervisor.py:661/:964, and a direct unit test
    covers it); direct predicate unit tests pin the accept/reject
-   table (default, interior `//`, bare mount root, trailing-slash
-   in-mount, `a..b` filename component vs `..` segment); a
+   table (default, interior `//`, bare prefix root, trailing-slash
+   in-prefix, `a..b` filename component vs `..` segment); a
    source-scan drift guard refuses the old inline mount-prefix
    spellings in either gate module (a scan can only refuse the
    spellings it enumerates — the per-gate behavioural refusals are
    the load-bearing guarantee).
-6. **Prose de-staling** (fixture-review P2-3): two surfaces describe
-   the gates as prefix-only and would become false — the container
-   dump path comment block in plan_author.py ("asserts the same
-   `startswith` mount containment") and the #1268 adjudication pin
-   test's docstring ("still prefix-compatible with the gates"). Both
-   get comment/docstring-only updates; assertions and pinned behavior
-   stay byte-identical. The de-staling also re-points those blocks'
+6. **Prose de-staling**: four surfaces describe the gates as
+   prefix-only and would become false — the container dump path
+   comment block in plan_author.py ("asserts the same `startswith`
+   mount containment"), the #1268 adjudication pin test's docstring
+   ("still prefix-compatible with the gates"), the MODIFIED
+   requirement's own residual sentence ("the verifier's prefix/shape
+   argv gates"), and the runbook's `--schema-dump-container`
+   paragraph. The first two were named by fixture review; the last two
+   came from the grep sweep that review's finding forced. All get
+   comment/docstring/prose-only updates; assertions and pinned
+   behavior stay byte-identical. The de-staling also re-points those blocks'
    cross-file anchors at symbol names rather than line numbers,
    because this change's own line growth invalidates numbers written
    in the same commit (the #1268 depth-retro rule, extended from
@@ -214,8 +225,9 @@ already-authorized-plan trust boundary):
   exactly the actor class the pinned-plan boundary already admits —
   and the reachable region is the `evidence` subtree, narrower than
   the `/var/lib/postgresql/` prefix the predicate spans (the rest of
-  that prefix is container-internal; the DB's own data directory is a
-  separate mount at `/home/postgres/pgdata/data`). What the predicate
+  that prefix carries no other host bind mount in that same listing;
+  the DB's own data directory is mounted outside the prefix entirely,
+  at `/home/postgres/pgdata/data`). What the predicate
   closes is the pure-string traversal, which needs no filesystem
   foothold at all; closing the symlink route needs a container-side
   no-follow check, deliberately not attempted here.
@@ -238,8 +250,13 @@ already-authorized-plan trust boundary):
   `tests/test_node27_timeseries_compression_supervisor.py`,
   `tests/test_node27_timeseries_compression_live_evidence.py`;
   comment/docstring-only: `scripts/node27_timeseries_compression_plan_author.py`
-  (:172-186 prose de-staling, zero non-comment changed lines) and the
-  #1268 pin test's docstring.
+  (the container dump path comment block, zero non-comment changed
+  lines), the #1268 pin test's docstring, and
+  `docs/runbooks/tier-node27-timeseries-storage.md` (the
+  `--schema-dump-container` paragraph). That is the complete
+  seven-file non-spec set; it is enumerated from
+  `git diff --name-only`, not from memory, because earlier rounds of
+  this change added files without updating this list.
 - Frozen surfaces (zero diff):
   `scripts/node27_timeseries_compression_capture.py`,
   `scripts/node27_timeseries_compression_prearm.py`,

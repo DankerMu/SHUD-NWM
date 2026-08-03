@@ -4,8 +4,8 @@
 
 ### Requirement: The container dump path gates MUST refuse `..` traversal before any container side effect
 
-The five container dump path gates SHALL judge mount containment
-with one shared predicate — the gates being the verifier's
+The five container dump path gates SHALL judge containment in the
+pinned container dump path prefix with one shared predicate — the gates being the verifier's
 pg_restore list argv gate and its captured schema-dump-list listing
 gate, the supervisor's mirror argv gate and
 `resolve_container_pg_restore_identity`, and the supervisor's
@@ -19,15 +19,18 @@ exact-base scan on either side); the
 predicate being exported by the lane's cross-plane contract module
 (`packages.common.node27_container_contract`):
 the value must start with `/var/lib/postgresql/` AND contain no `..`
-component (`PurePosixPath(value).parts`). Scope of that prefix, kept
-precise because this requirement exists to stop gates from
-overclaiming: it spans the container-side postgres home, of which the
-host bind mount (`/home/nwm/nhms-evidence` →
-`/var/lib/postgresql/evidence`, measured read-only on node-27) is a
-subtree, and the DB's own data directory is a different mount
-entirely; the pre-existing refusal message's phrase "DB container
-data mount" is kept byte-unchanged, and this sentence is what the
-phrase means. String prefix alone is not containment: `/var/lib/postgresql/../../../etc/shadow` satisfies the
+component (`PurePosixPath(value).parts`). What that prefix is, stated
+only as far as a cited command determines it — this requirement
+exists to stop gates from overclaiming, and the record about the
+prefix has to hold itself to the same rule: `docker inspect nhms-db`
+(read-only, node-27) shows the host bind mount
+`/home/nwm/nhms-evidence` landing at the prefix's `evidence` subtree
+(RW) and the DB's own data directory living at a different mount
+entirely, so the host-writable region is a subtree of the prefix; the
+requirement asserts nothing further about the parent directory. The
+four pre-existing refusal messages keep their bytes, including the
+phrase "DB container data mount", which denotes this prefix. String
+prefix alone is not containment: `/var/lib/postgresql/../../../etc/shadow` satisfies the
 prefix yet normalizes to `/etc/shadow`, and before this requirement it
 passed every gate, after which the supervisor really executed
 `docker exec <container> /usr/bin/sha256sum` against it and recorded
@@ -42,9 +45,10 @@ own; no gate may delegate refusal to an upstream gate.
 any container probe, so its "pg_restore dump path is outside the DB
 container data mount" message states a property the check actually
 enforces; the pre-spawn capture gate SHALL refuse before the capture
-producer process exists. Existing refusal messages stay spelled as
-they are (the pre-spawn value refusal is a new message, its claim
-truthful from birth). An automated source scan SHALL back the
+producer process exists. The four pre-existing refusal messages stay
+spelled as they are; the pre-spawn value refusal is a new message and
+SHALL name the pinned prefix the predicate actually enforces rather
+than inherit the older phrasing. An automated source scan SHALL back the
 predicate's single-source status by refusing the old inline
 mount-prefix spellings in either gate module; the load-bearing
 guarantee remains the per-gate behavioural refusal tests, since a
@@ -66,7 +70,7 @@ source scan can only refuse the spellings it enumerates.
 
 - **WHEN** `resolve_container_pg_restore_identity` receives a
   traversal path
-- **THEN** it raises the mount-containment message without invoking
+- **THEN** it raises the containment refusal without invoking
   `docker` at all — proved hermetically by a stub arrangement in which
   any docker invocation would surface as a distinguishably different
   failure
@@ -84,10 +88,10 @@ source scan can only refuse the spellings it enumerates.
   never runs), while an absent option and the committed capture argv
   shapes stay admitted
 
-#### Scenario: In-mount values, including the interior-double-slash shape, stay admitted verbatim
+#### Scenario: In-prefix values, including the interior-double-slash shape, stay admitted verbatim
 
 - **WHEN** the container dump path is the default
-  `/var/lib/postgresql/evidence/schema-before.dump` or an in-mount
+  `/var/lib/postgresql/evidence/schema-before.dump` or an in-prefix
   value with an interior double slash
   (`/var/lib/postgresql//evidence/…`)
 - **THEN** every gate admits it, recorded and compared values stay
@@ -145,7 +149,7 @@ pre-spawn capture-argv gate and verbatim argv-tail extraction — so
 the verbatim-vs-normalized false
 refusal this requirement exists to eliminate cannot occur for it; a
 pinned adjudication test keeps this ruling executable). That
-authoring ruling is orthogonal to mount containment: the five
+authoring ruling is orthogonal to prefix containment: the five
 consuming gates additionally refuse `..` components under the
 requirement "The container dump path gates MUST refuse `..`
 traversal before any container side effect" — including the

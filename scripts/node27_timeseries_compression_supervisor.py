@@ -536,7 +536,7 @@ def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
     `--schema-dump-container` is the one PATH value this gate adjudicates (#1269) --
     and the only value it judges against an INTRINSIC predicate rather than against
     the plan's own declared kind, which is how `--kind` is judged below.  The
-    asymmetry with the SHA is the whole point: mount containment is an
+    asymmetry with the SHA is the whole point: prefix containment is an
     EXECUTION-SAFETY property of what the spawned capture will actually do -- for a
     `schema_dump_list` kind, capture.py runs `docker exec <container>
     /usr/bin/pg_restore --list <value>` on exactly this string -- so refusing an
@@ -575,7 +575,7 @@ def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
             if not container_dump_path_within_mount(value):
                 raise SupervisorError(
                     f"capture {kind} argv binds --schema-dump-container to {value!r}, which is "
-                    f"outside the DB container data mount"
+                    f"outside the pinned container dump path prefix"
                 )
 
 

@@ -93,7 +93,11 @@ knowingly-partial fix ("只改其一等于没改").
 - [ ] 2.4 Gate 4 (supervisor.py:1055-1059): same swap as the
   function's first statement (ahead of every `_run_capture_argv`);
   message `"pg_restore dump path is outside the DB container data
-  mount"` unchanged and now truthful.
+  mount"` unchanged byte-for-byte — its noun denotes the pinned prefix
+  `/var/lib/postgresql/` (the proposal's Why section records that
+  denotation once, and "in-mount"/"mount root" shorthand in these tasks
+  and in the tests' own ids means exactly that prefix), and the check
+  behind it now enforces containment rather than a string opening.
 - [ ] 2.5 Gate 5 (supervisor.py:519-551 `_assert_capture_producer_argv`):
   when `kind == "schema_dump_list"`, every value from
   `_capture_option_values(argv, "--schema-dump-container")` must pass
@@ -217,8 +221,11 @@ knowingly-partial fix ("只改其一等于没改").
   `/var/lib/postgresql/x/..`) — prefix-miss/empty-string rows stay
   green; nothing else reddens; restore byte-identical and re-run
   green.
-- [ ] E5 Surface check (`git diff --stat` + per-file review): only the
-  six in-scope code/test files plus openspec change; plan_author.py
-  diff proven comment-only (zero non-comment changed lines); frozen
-  list untouched.
+- [ ] E5 Surface check (`git diff --name-only` + per-file review): the
+  changed set is exactly the seven files the proposal's Impact section
+  enumerates, plus this openspec change; plan_author.py diff proven
+  comment-only (zero non-comment changed lines); frozen list
+  untouched. Check the Impact list against `git diff --name-only`
+  itself, not against this sentence — a hand-written count is the
+  thing that went stale here twice.
 - [ ] E6 Zero-docker-exec proof (3.3) present and green.

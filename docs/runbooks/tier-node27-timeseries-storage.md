@@ -1049,8 +1049,9 @@ credential in process argv.
    comparisons — the verifier's containment/shape argv gates, a whole-argv
    exact-equality gate, and on the supervisor side the mirror gate, the pre-spawn
    capture-argv gate and verbatim argv-tail extraction — so it cannot produce that
-   false refusal. Those gates do judge mount containment (mount prefix plus no `..`
-   component, `packages/common/node27_container_contract.py`), so a traversal spelling
+   false refusal. Those gates do judge containment in the pinned container dump path
+   prefix `/var/lib/postgresql/` (that prefix plus no `..` component, one shared
+   predicate in `packages/common/node27_container_contract.py`), so a traversal spelling
    such as `/var/lib/postgresql/../../../etc/shadow` is refused — textually, without
    rewriting the recorded value.
 
