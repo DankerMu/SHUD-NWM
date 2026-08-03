@@ -84,10 +84,13 @@ def _portable_stat_script(script: str) -> str:
     the guard's control flow, comparisons and BLOCKED messages stay
     byte-identical.
 
-    This mapping is the repo's existing production convention, not a novel one:
-    seven scripts under ``scripts/`` already ship
-    ``stat -c '%a' … 2>/dev/null || stat -f '%Lp' …`` fallbacks, pinned by
-    tests/test_scheduler_file_provider_refresh.py.
+    Only the ``%a``→``%Lp`` pair has repo precedent: seven scripts under
+    ``scripts/`` already ship ``stat -c '%a' … 2>/dev/null || stat -f '%Lp' …``
+    fallbacks, two of which are pinned by
+    tests/test_scheduler_file_provider_refresh.py.  The ``%U``→``%Su`` and
+    ``%A``→``%Sp`` pairs have no prior occurrence in the repo and are new here,
+    justified by the equivalence unit test named below rather than by
+    convention.
 
     Equivalence is conditional and holds inside these guards' input domain:
     ``%U``↔``%Su`` (owner name) and ``%A``↔``%Sp`` (symbolic mode, whose
@@ -1612,9 +1615,11 @@ def test_stat_dialect_substitution_table_is_guard_equivalent(tmp_path: Path) -> 
 
     The one recorded boundary: BSD ``%Lp`` drops setuid/setgid/sticky, so the
     pair is guard-equivalent on the permission bits only — pinned below with a
-    04600 scratch file (0o4600 specifically: macOS refuses ``chmod 2600`` for a
-    non-member group).  The guards themselves only ever chmod high-bit-free
-    modes (0600/0644/0664), where the pair is exact.
+    04600 scratch file (0o4600 specifically: setuid survives ``chmod``
+    regardless of group membership, while macOS silently clears the setgid bit
+    when the file's group is one the caller does not belong to).  The guards
+    themselves only ever chmod high-bit-free modes (0600/0644/0664), where the
+    pair is exact.
     """
     assert STAT_DIALECT_SUBSTITUTIONS == (
         ("stat -c '%a'", "stat -f '%Lp'"),

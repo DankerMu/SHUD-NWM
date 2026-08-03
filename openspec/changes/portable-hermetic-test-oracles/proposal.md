@@ -40,9 +40,11 @@ per-case (anchors verified at master b2a39d36; issue reproduction at
    `declaration_malformed_json`. Its docstring's prediction about what
    3.12 would yield is itself wrong, and — the real coverage loss —
    `scheduler_generation.py`'s `RecursionError` except branch has ZERO
-   coverage on 3.12 today. Measured: depth 20000 (~40 KB, well under
+   coverage on 3.12 today. Measured at issue time: depth 20000 (~40 KB, well under
    `MAX_CUTOVER_DECLARATION_BYTES` = 256 KiB) raises deterministically
-   on both 3.11 and 3.12.
+   on 3.11 and 3.12 — cross-review later measured 3.14's threshold at
+   ~74384 (20000 parses there), so the delivered pin is 100000
+   (200000 bytes, still under the limit; raises on 3.11–3.14).
 
 Two sibling tests are green-for-the-wrong-reason on macOS and must be
 handled in the same change (issue's 受影响面):
@@ -77,9 +79,12 @@ preservation, never blanket skips:
    BSD `%Lp` drops setuid/setgid/sticky bits, immaterial for the
    high-bit-free modes these guards chmod themselves and pinned
    explicitly by a unit test so the boundary stays a recorded fact.
-   The mapping follows the repo's existing production convention
-   (`stat -c … 2>/dev/null || stat -f …` in seven scripts under
-   `scripts/`, pinned by tests/test_scheduler_file_provider_refresh.py).
+   The `%a`→`%Lp` pair follows the repo's existing production
+   convention (`stat -c … 2>/dev/null || stat -f …` in seven scripts
+   under `scripts/`, two pinned by
+   tests/test_scheduler_file_provider_refresh.py); the `%U`→`%Su` and
+   `%A`→`%Sp` pairs are new here, justified by the equivalence unit
+   test rather than precedent.
 2. **Sibling assertions tightened**: both green-for-wrong-reason
    siblings assert the specific BLOCKED message of the refusal branch
    they name, so a wrong-branch pass becomes impossible on any
@@ -94,7 +99,11 @@ preservation, never blanket skips:
    `READONLY_DB_EVIDENCE_PATH_UNSAFE`, giving each refusal gate its
    own row instead of two intents sharing one fixture.
 4. **Recursion depth re-pinned for cross-version determinism**: depth
-   20000, asserted `declaration_malformed_json`, docstring rewritten
+   100000 (measured through the production loader to raise
+   `RecursionError` on CPython 3.11/3.12/3.13/3.14; the originally
+   planned 20000 parses on 3.14, whose C-level threshold rose to
+   ~74384 — caught in cross-review), asserted
+   `declaration_malformed_json`, docstring rewritten
    to state the cross-interpreter determinism rationale (and the
    falsified 3.11-only prediction removed); a NEW independent case
    pins the top-level-list payload to `declaration_not_object`, so
