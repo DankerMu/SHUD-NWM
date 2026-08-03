@@ -148,9 +148,20 @@ def _job_status_text(job: Mapping[str, Any]) -> str:
     return str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
 
 def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
-    """True when any non-cycle-scope job row is still in a failed pipeline status."""
+    """True when any non-cycle-scope job row is still a LIVE failure.
+
+    "Live" is this module's existing failure domain, mirrored from the blocker scan: a
+    repaired stage-evidence row and an unsubmitted auto-retry placeholder both keep a
+    literal failed status while carrying no blocking force, so neither may count here.
+    Counting one would make the cycle failure look like "not the only failure left" and
+    silently discard the operator-pinned attempt number.
+    """
     for job in _state_jobs(state):
         if _job_is_cycle_scope_row(job):
+            continue
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
+        if _job_is_unsubmitted_auto_retry_placeholder(job):
             continue
         if _job_status_text(job) in FAILED_PIPELINE_STATUSES:
             return True
@@ -163,10 +174,11 @@ def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str,
     cycle-scope counter may only be pinned when the cycle stage's failure IS what this
     decision repairs.  That holds when ``failed_stage`` names the marker job's own stage
     (explicit same-stage repair), or when the cycle failure is the only failure left in
-    the state (nothing else could be the repair target).  A resolved job that is no
-    longer failed is a stale marker and pins nothing.
+    the state (nothing else could be the repair target).  A job that is no longer a LIVE
+    failure — resolved, or repaired stage evidence whose failed status is historical — is
+    a stale marker target and pins nothing, even when ``failed_stage`` names its stage.
     """
-    if _job_status_text(job) not in FAILED_PIPELINE_STATUSES:
+    if _pipeline_job_is_repaired_stage_evidence(job) or _job_status_text(job) not in FAILED_PIPELINE_STATUSES:
         return False
     failed_stage = state.get("failed_stage")
     if failed_stage not in (None, "") and str(failed_stage) == str(job.get("stage") or ""):

@@ -654,6 +654,136 @@ def test_stale_cycle_marker_on_succeeded_job_does_not_pin() -> None:
     assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
 
 
+def test_repaired_stage_evidence_row_does_not_block_cycle_marker_pin() -> None:
+    """A repaired candidate-scope row is not a live failure: it must not close the pin rule.
+
+    ``repair_status == "repaired"`` rows keep a literal ``failed`` status while carrying no
+    blocking force anywhere else in this module (see the blocker scan's skip).  Treating one
+    as a live candidate-scope failure would make the cycle download the *not-the-only-failure*
+    case and silently drop the operator-pinned attempt number.
+    """
+
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 1,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4},
+            {**_OWN_MODEL_JOB, "repair_status": "repaired"},
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=1) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+    assert evidence["manual_retry"]["new_attempt"] == 5
+
+
+def test_unsubmitted_auto_retry_placeholder_does_not_block_cycle_marker_pin() -> None:
+    """An unsubmitted auto-retry placeholder is not a live failure either.
+
+    Same live-failure domain as the blocker scan: ``submission_failed`` placeholders that were
+    never handed to Slurm carry no blocking force, so they must not steal the cycle marker's pin.
+    """
+
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4},
+            {
+                **_OWN_MODEL_JOB,
+                "job_id": "job_model_a_forecast_retry_1",
+                "status": "submission_failed",
+                "retry_count": 1,
+                "slurm_job_id": None,
+                "array_task_id": None,
+                "manual_retry_marker": False,
+            },
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+    assert evidence["manual_retry"]["new_attempt"] == 5
+
+
+def test_repaired_cycle_scope_row_marker_does_not_pin() -> None:
+    """A repaired cycle-scope row is a stale marker target: it pins nothing.
+
+    Marker carries no ``previous_job_id`` so the historical-repair veto does not pre-empt the
+    pin rule; the repaired cycle row must be rejected by the pin rule itself.
+    """
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "download",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4, "repair_status": "repaired"},
+            {**_OWN_MODEL_JOB, "status": "succeeded"},
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(entity_id="job_cycle_gfs_2026070100_download", retry_count=5)
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+def test_succeeded_same_stage_cycle_job_marker_does_not_pin() -> None:
+    """Guard: the resolved-status arm outranks the same-stage arm.
+
+    ``failed_stage`` names the marker job's own stage, but that job already succeeded — the
+    stage name must not resurrect a stale counter.
+    """
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "download",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "status": "succeeded", "retry_count": 5},
+            dict(_OWN_MODEL_JOB),
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026070100_download",
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
 def test_cohort_download_failure_shape_pins_marker_attempt() -> None:
     """Production projection: no explicit ``failed_stage`` and the cycle job is the only failure."""
 

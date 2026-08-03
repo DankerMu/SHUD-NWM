@@ -145,6 +145,14 @@ decision 路径复现）。修订为 **stage 感知钉值**：
   `_state_retry_attempt(stage="download")` 走 flat 分支；
   identity_filter 对 details 无 job id 字段的 marker 整体消毒
   （测试 marker 必带 `previous_job_id`）。
+- Phase 6.2 审计补钉（活失败域）：钉值判据中"失败行"一律取
+  repo 既有**活失败**域——status ∈ FAILED 且非
+  repaired-stage-evidence 且非 unsubmitted auto-retry
+  placeholder（与本模块 blocker 扫描同域）；spec 的
+  "failed model-scoped job row" / "still in a failed status"
+  均按此域解读。arm 2 误关（repaired/placeholder 行挡钉值，
+  实测 5→2/1 回归）与状态臂半开（repaired cycle-scope 行钉 5）
+  两洞同轮修复。
 
 ## 回归测试 oracle（与刀对齐）
 
