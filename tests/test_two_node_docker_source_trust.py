@@ -5,6 +5,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -77,31 +78,27 @@ def test_source_trust_single_role_report_is_role_scoped_and_explicit_run_bound(t
     checkout = _make_checkout(tmp_path / "checkout")
     evidence_root = Path("/scratch/frd_muziyao/nwm-test/source-trust-explicit/docker-security")
 
-    result = _run_preflight(
-        checkout_root=checkout,
-        evidence_root=evidence_root,
-        trust_root=tmp_path,
-        trusted_owners=[_current_owner()],
-        roles=["compute"],
-        evidence_run_id="source-trust-explicit",
-    )
+    try:
+        result = _run_preflight(
+            checkout_root=checkout,
+            evidence_root=evidence_root,
+            trust_root=tmp_path,
+            trusted_owners=[_current_owner()],
+            roles=["compute"],
+            evidence_run_id="source-trust-explicit",
+        )
 
-    assert result.returncode == 0
-    summary = json.loads((evidence_root / "two-node-docker-source-trust-compute.json").read_text(encoding="utf-8"))
-    assert summary["status"] == "PASS"
-    assert summary["evidence_run_id"] == "source-trust-explicit"
-    assert summary["roles"] == ["compute"]
-    checked_labels = {item["label"] for item in summary["checked_paths"]}
-    assert "compute role env" in checked_labels
-    assert "display role env" not in checked_labels
-    assert not (evidence_root / "two-node-docker-source-trust.json").exists()
-    for path in (
-        evidence_root / "two-node-docker-source-trust-compute.json",
-        evidence_root / "two-node-docker-source-trust-compute.txt",
-    ):
-        path.unlink()
-    evidence_root.rmdir()
-    evidence_root.parent.rmdir()
+        assert result.returncode == 0
+        summary = json.loads((evidence_root / "two-node-docker-source-trust-compute.json").read_text(encoding="utf-8"))
+        assert summary["status"] == "PASS"
+        assert summary["evidence_run_id"] == "source-trust-explicit"
+        assert summary["roles"] == ["compute"]
+        checked_labels = {item["label"] for item in summary["checked_paths"]}
+        assert "compute role env" in checked_labels
+        assert "display role env" not in checked_labels
+        assert not (evidence_root / "two-node-docker-source-trust.json").exists()
+    finally:
+        shutil.rmtree(evidence_root.parent, ignore_errors=True)
 
 
 def test_source_trust_allows_repo_artifacts_evidence_root(tmp_path: Path) -> None:
