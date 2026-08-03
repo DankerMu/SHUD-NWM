@@ -54,10 +54,13 @@ Must-preserve behavior:
   (`/usr/share/postgresql-common/pg_wrapper`, `n/a`,
   `client backend`).
 - The `:163-239` #1271-written records byte-unchanged (line
-  NUMBERS will shift as comment lengths change; no repo file anchors
-  this module by line number — `git grep
-  "node27_container_contract.py:"` → 0 hits — so byte-identity of
-  the record text is the invariant, not line positions).
+  NUMBERS will shift as comment lengths change; no file OUTSIDE
+  this change anchors the module by line number — `git grep
+  "node27_container_contract.py:" --
+  ':!openspec/changes/contract-record-citation-convergence'` → 0
+  hits (the unscoped grep hits this fixture's own master-scoped
+  anchors, which is expected) — so byte-identity of the record text
+  is the invariant, not line positions).
 - Both planes' test suites stay green untouched. Machine lock
   discovered at implementation:
   `tests/test_node27_external_contract_snapshot.py::test_measured_constant_count_matches_the_fixture_contract_section`
@@ -94,7 +97,7 @@ the module half-compliant with the very invariant the change cites.
 
 ## 1. Record rewrites (comments only)
 
-- [ ] 1.1 `CONTAINER_PG_RESTORE_REALPATH` (:43-49): rewrite the
+- [x] 1.1 `CONTAINER_PG_RESTORE_REALPATH` (:43-49): rewrite the
   comment so every remaining clause is determined by a named snapshot
   entry — image tag by `host_context.nhms_db_image_ref`
   (`docker inspect '--format={{.Config.Image}}|{{.Image}}' nhms-db`,
@@ -108,7 +111,7 @@ the module half-compliant with the very invariant the change cites.
   stable entrypoint the child actually invokes" (readlink determines
   no exec behavior); `Source:` becomes the snapshot fixture path +
   entry names (repo-resolvable), the `.workplans/1069` line deleted.
-- [ ] 1.2 `SYSTEMD_UNSET_TIMESTAMP` (:51-59): narrow the general
+- [x] 1.2 `SYSTEMD_UNSET_TIMESTAMP` (:51-59): narrow the general
   claim to the witness command's coverage with a DUAL-CARRIER
   citation — value/command from `contract.systemd_unset_timestamp`
   (`systemctl --user show
@@ -141,7 +144,7 @@ the module half-compliant with the very invariant the change cites.
   these CURRENT line anchors, not the stale `:1282-1293`/`:834-845`
   pair recorded inside the snapshot script's own comment
   (pre-existing drift, that script is frozen here, do not fix it).
-- [ ] 1.3 `CLIENT_BACKEND_TYPE` (:61-73): value cited to
+- [x] 1.3 `CLIENT_BACKEND_TYPE` (:61-73): value cited to
   `contract.client_backend_type` (own-session `pg_stat_activity`
   probe, 2026-08-02); the `PG 15` clause KEPT with its determining
   citation `host_context.pg_server_version`
@@ -173,29 +176,40 @@ the module half-compliant with the very invariant the change cites.
   `scripts/node27_timeseries_compression_supervisor.py:1226-1229`,
   and dropping "deterministically". DOWNGRADE the "always accompanied
   by its leader client backend" universal to this plane's design
-  ruling — conflicts are judged on
-  `backend_type == CLIENT_BACKEND_TYPE` only, stated as the plane's
-  decision, with no PostgreSQL-universality assertion attached.
+  ruling, stated as the plane's decision with no
+  PostgreSQL-universality assertion — and state the DELIVERED
+  predicate, which is two-conjunct (cross-review F1, verified P2:
+  the old "judged on client backends only" wording is contradicted
+  by the committed code): client-backend-ness is the necessary
+  eligibility conjunct AND `has_write_privilege_on_target` is the
+  G14 narrowing, per
+  `scripts/node27_timeseries_compression_supervisor.py:1230-1241`
+  (G14 measurement: the read-only display pool also renders as
+  'client backend', so client-backend-only aborts every
+  post-decompress checkpoint) and the predicates at
+  supervisor `:1257-1261` / live_evidence `:943-947` (the
+  one-line-earlier ranges land on the preceding statement's last
+  line — corrected during the fix pass).
 
 ## 2. Spec + validation
 
-- [ ] 2.1 Spec delta: ADDED requirement in `hypertable-compression` —
+- [x] 2.1 Spec delta: ADDED requirement in `hypertable-compression` —
   measured records in the cross-plane contract module SHALL cite
   repo-resolvable artifacts whose commands determine each stated
   claim, with 3 scenarios (dangling source, claim beyond command,
   falsified-by-snapshot narrative).
-- [ ] 2.2 `openspec validate contract-record-citation-convergence
+- [x] 2.2 `openspec validate contract-record-citation-convergence
   --strict --no-interactive` green.
 
 ## Evidence Floor
 
-- [ ] E1 Per-clause mapping table in the PR body: every clause of the
+- [x] E1 Per-clause mapping table in the PR body: every clause of the
   three OLD records → kept-with-citation / narrowed-to-citation /
   deleted / replaced-by-snapshot-fact, one row each, with the
   covering snapshot entry named. (The table is the review oracle for
   a records-only change; there is no runtime red-proof and that is
   recorded here explicitly.)
-- [ ] E2 AST identity: `uv run python -c` comparing
+- [x] E2 AST identity: `uv run python -c` comparing
   `ast.dump(ast.parse(git show master:...))` against the working
   file → `True`, pasted output. Constant values re-asserted by the
   machine lock: `uv run pytest -q
@@ -206,10 +220,10 @@ the module half-compliant with the very invariant the change cites.
   (cheap; proves citation-to-fixture correspondence by output rather
   than by claim): `jq` out every snapshot entry the new records cite
   and paste the outputs in the PR body next to the record text.
-- [ ] E3 `git grep -n "\.workplans/" -- packages scripts apps
+- [x] E3 `git grep -n "\.workplans/" -- packages scripts apps
   services workers` → zero hits (acceptance criterion #2 of the
   issue), pasted output.
-- [ ] E4 `uv run pytest -q
+- [x] E4 `uv run pytest -q
   tests/test_node27_timeseries_compression_live_evidence.py
   tests/test_node27_timeseries_compression_supervisor.py
   tests/test_node27_timeseries_compression_capture.py
@@ -217,7 +231,7 @@ the module half-compliant with the very invariant the change cites.
   counts unchanged per the issue's acceptance bar (live_evidence 407
   / supervisor 164 / capture 14 = 585, plus the snapshot suite);
   `uv run ruff check .` green.
-- [ ] E5 Surface check: `git diff master...HEAD --name-only` = the
+- [x] E5 Surface check: `git diff master...HEAD --name-only` = the
   one module file plus this openspec change, nothing else; snapshot
   fixture and script zero diff via the same branch-scoped form.
-- [ ] E6 openspec strict green (2.2).
+- [x] E6 openspec strict green (2.2).

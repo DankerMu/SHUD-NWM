@@ -45,8 +45,9 @@ from pathlib import PurePosixPath
 # ``host_context.nhms_db_image_ref``: ``docker inspect
 # '--format={{.Config.Image}}|{{.Image}}' nhms-db``, 2026-08-02): inside the
 # container ``/usr/bin/pg_restore`` is a symlink whose ``readlink -f`` realpath
-# is the pg_wrapper dispatcher below, NOT ``/usr/bin/pg_restore`` itself --
-# cited to ``contract.container_pg_restore_realpath`` (``docker exec nhms-db
+# is the ``/usr/share/postgresql-common/pg_wrapper`` path below, NOT
+# ``/usr/bin/pg_restore`` itself -- cited to
+# ``contract.container_pg_restore_realpath`` (``docker exec nhms-db
 # /usr/bin/readlink -f /usr/bin/pg_restore``, 2026-08-02), whose output
 # DIFFERING from its input path is what determines both of those clauses.
 # Nothing is claimed here about what any child process execs: a path-resolution
@@ -89,7 +90,8 @@ CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 # member of a whole-dict equality over the recurring unit's ``systemctl show``
 # properties -- scripts/node27_timeseries_compression_supervisor.py:1382-1393
 # and scripts/node27_timeseries_compression_live_evidence.py:953-964 -- while
-# the "is-active" side rejects it explicitly (live_evidence.py:971-978).
+# the is-active side of each plane rejects it explicitly
+# (supervisor.py:1401-1404, live_evidence.py:971-978).
 # Source: packages/common/node27_external_contract_snapshot.json --
 # ``contract.systemd_unset_timestamp``, ``host_context.systemd_version``,
 # ``informational.recurring_unit`` + ``informational.measured_at``; witness
@@ -130,10 +132,19 @@ SYSTEMD_UNSET_TIMESTAMP = "n/a"
 # retold from the same source at
 # scripts/node27_timeseries_compression_supervisor.py:1226-1229.
 # DESIGN RULING of this plane (a decision, not a measurement): the external
-# writers the trust boundary targets are judged on ``backend_type ==
-# CLIENT_BACKEND_TYPE`` only, so both planes capture every session at full
-# fidelity but judge conflicts on client backends alone.  Nothing is asserted
-# here about PostgreSQL's semantics for any other backend type.
+# writers the trust boundary targets are judged on a TWO-CONJUNCT predicate --
+# ``backend_type == CLIENT_BACKEND_TYPE`` AND
+# ``has_write_privilege_on_target is True`` -- carried identically by both
+# planes (scripts/node27_timeseries_compression_supervisor.py:1257-1261,
+# scripts/node27_timeseries_compression_live_evidence.py:943-947).  Client-
+# backend-ness is the NECESSARY first conjunct, the eligibility filter for
+# "external writer" -- it is not sufficient: the display API's read-only
+# ``nhms_display_ro`` pool renders as ``'client backend'`` too, so a
+# client-backend-only judgment was measured to abort every post-decompress
+# checkpoint on a live node with the display API up, and the second conjunct is
+# the resulting G14 narrowing (supervisor.py:1230-1241).  Both planes still
+# capture every session at full fidelity; only the judgment narrows.  Nothing
+# is asserted here about PostgreSQL's semantics for any other backend type.
 # Source: packages/common/node27_external_contract_snapshot.json --
 # ``contract.client_backend_type``, ``host_context.pg_server_version``,
 # ``informational.backend_type_distribution`` + ``informational.measured_at``.

@@ -44,9 +44,10 @@ report-not-fixed the three pre-existing `MEASURED` records at
    2026-08-02 measured distribution does not even contain
    `parallel worker`.
 
-The risk is record-integrity, not runtime: the "judge conflicts on
-`backend_type == 'client backend'` only" predicate is a trust-boundary
-core ruling, and if its recorded rationale cannot be re-derived, a
+The risk is record-integrity, not runtime: the client-backend
+conflict-eligibility ruling (delivered as the two-conjunct predicate
+with `has_write_privilege_on_target`) is a trust-boundary core
+ruling, and if its recorded rationale cannot be re-derived, a
 future PG/TimescaleDB upgrade leaves no way to decide whether to
 tighten or relax it except trusting an uncited "always".
 
@@ -89,7 +90,10 @@ a proven carrier, never authoring replacement claims), zero runtime:
    2026-08-02 `informational.backend_type_distribution` set (which
    contains no `parallel worker`); the universal "always accompanied
    by its leader" semantics claim is DOWNGRADED to this plane's design
-   ruling ("this plane judges conflicts on client backends only") with
+   ruling stated with the DELIVERED two-conjunct predicate
+   (client-backend eligibility AND `has_write_privilege_on_target`,
+   the G14 narrowing — the bare "client backends only" wording is
+   contradicted by the committed predicates; cross-review F1) with
    no universality assertion; the autovacuum anecdote (launch 7
    postflight, 2026-07-17) has no repo-resolvable artifact and is kept
    only as an explicitly marked unverifiable field anecdote (the
