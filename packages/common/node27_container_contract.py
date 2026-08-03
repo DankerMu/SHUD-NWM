@@ -21,11 +21,19 @@ supervised-hypertable whitelist, and the fail-closed ``validated_probe_target``
 every write-privilege probe must pass its target through.  It lives here for
 the same reason as the measured values: it was hard-coded identically in two
 planes with nothing forcing the copies to move together (issue #1087).
+
+For the same reason it pins a second repo-side decision: the DB-container data
+mount and the containment predicate over it
+(``CONTAINER_DB_MOUNT_PREFIX``/``container_dump_path_within_mount``).  Five
+admission gates across the two planes each carried their own inline copy of it,
+spelled as a bare string prefix that does not enforce the containment their
+refusal messages claim (issue #1269).
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 
 # MEASURED on the real node-27 ``nhms-db`` container (timescale/timescaledb-ha:
 # pg15-latest): inside the container ``/usr/bin/pg_restore`` is a symlink whose
@@ -145,3 +153,38 @@ def validated_probe_target(target: str) -> str:
     if _PROBE_TARGET_PATTERN.fullmatch(target) is None:
         raise ValueError(f"probe target is not a strict schema.table identifier: {target!r}")
     return target
+
+
+# REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the DB
+# container data mount every forensic container dump path must live inside.  The
+# five admission gates that judge that path -- the verifier's pg_restore list
+# argv gate and its captured schema-dump-list listing gate, the supervisor's
+# mirror argv gate, ``resolve_container_pg_restore_identity`` and the
+# supervisor's pre-spawn capture-argv gate -- each spelled containment as their
+# own inline ``startswith`` of this literal, which constrains the string's
+# OPENING and not containment at all: ``/var/lib/postgresql/../../../etc/shadow``
+# satisfies the prefix and normalizes to ``/etc/shadow``, while the supervisor
+# really ``docker exec sha256sum``s that path into the forensic bundle and the
+# spawned capture producer really ``docker exec pg_restore --list``s it.
+CONTAINER_DB_MOUNT_PREFIX = "/var/lib/postgresql/"
+
+
+def container_dump_path_within_mount(value: str) -> bool:
+    """Whether ``value`` names a path inside the DB container data mount.
+
+    Judges, never rewrites: the caller keeps recording and comparing the plan's
+    original string, so the lane's verbatim forensic posture survives intact (no
+    ``normpath``, no ``Path()`` write-back anywhere on this route).  Two textual
+    conjuncts -- the mount prefix AND no ``..`` component, the same ``..``-parts
+    shape the plan author's own canonicality guard uses.  ``PurePosixPath`` drops
+    empty components, so an interior double slash
+    (``/var/lib/postgresql//evidence/...``) and a trailing slash stay admitted
+    exactly as the bare prefix admitted them, leaving the #1268 authoring
+    adjudication untouched; a ``resolve()``-based implementation would silently
+    flip both rows.  Recorded residual: a symlink planted INSIDE the mount still
+    escapes the container ``sha256sum``, which follows symlinks -- planting one
+    needs write access inside the DB container, an actor strictly stronger than
+    this predicate's threat model.
+    """
+
+    return value.startswith(CONTAINER_DB_MOUNT_PREFIX) and ".." not in PurePosixPath(value).parts

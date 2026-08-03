@@ -170,22 +170,29 @@ def build_run_plan(
         # ``sha256sum``s it inside the container).  It never enters artifact associations
         # (the pg-restore-list command block below records none, so :1439 never sees it),
         # and its ENTIRE consumer set -- all five chains -- compares it textually with zero
-        # normalization on either side: the verifier's prefix+shape argv gate
-        # (live_evidence.py :744-749) and the same prefix check on the captured listing
-        # (:1892), the supervisor's mirror gates -- the identical prefix+shape check in
-        # ``_assert_exact_argv`` (supervisor.py :350-364) and
+        # normalization on either side: the verifier's containment+shape argv gate
+        # (live_evidence.py :744-749) and the same containment check on the captured
+        # listing (:1892), the supervisor's mirror gates -- the identical
+        # containment+shape check in ``_assert_exact_argv`` (supervisor.py :350-364) and
         # ``resolve_container_pg_restore_identity`` (:1055-1058, invoked :1768), which
-        # takes ``argv[-1]`` verbatim, asserts the same ``startswith`` mount containment
-        # and ``docker exec sha256sum``s that exact string -- and, fifth, the CAPTURE argv
+        # takes ``argv[-1]`` verbatim, asserts the same mount containment and
+        # ``docker exec sha256sum``s that exact string -- and, fifth, the CAPTURE argv
         # route: the schema-dump-list capture argv built below also carries
-        # ``--schema-dump-container``, capture.py :531/:533 runs ``docker exec pg_restore
-        # --list`` on that value and records ``list_argv`` into the forensic bundle, and
-        # live_evidence.py :1522 compares the WHOLE capture argv by EXACT equality --
-        # again verbatim, zero normalization (live_evidence.py :124-128 records both
-        # ``--schema-dump-*`` options as deliberately not value-pinned).  The
+        # ``--schema-dump-container``, the supervisor's pre-spawn capture gate
+        # (``_assert_capture_producer_argv``) asserts the same containment on that bound
+        # value, capture.py :531/:533 then runs ``docker exec pg_restore --list`` on it
+        # and records ``list_argv`` into the forensic bundle, and live_evidence.py :1522
+        # compares the WHOLE capture argv by EXACT equality -- again verbatim, zero
+        # normalization (live_evidence.py :124-128 records both ``--schema-dump-*``
+        # options as deliberately not value-pinned).  Since #1269 all five of those gates
+        # spell containment through the shared
+        # ``node27_container_contract.container_dump_path_within_mount`` predicate --
+        # mount prefix AND no ``..`` component -- which JUDGES and never rewrites, so
+        # they stay textual and this symmetry argument is untouched (an interior ``//``
+        # still passes every one of them; the predicate refuses only escapes).  The
         # verbatim-vs-normalized false refusal therefore cannot occur for it; an
-        # adjudication test pins that ruling so a future change guarding it must flip the
-        # test consciously.
+        # adjudication test pins that ruling so a future change guarding it AT AUTHORING
+        # TIME must flip the test consciously.
         if value != str(Path(value)) or value.endswith("/") or ".." in Path(value).parts:
             raise PlanAuthorError(
                 f"{label} must be a canonical absolute path (no trailing slash, "
