@@ -730,6 +730,41 @@ def test_unsubmitted_auto_retry_placeholder_does_not_block_cycle_marker_pin() ->
     assert evidence["manual_retry"]["new_attempt"] == 5
 
 
+def test_placeholder_cycle_scope_row_marker_does_not_pin() -> None:
+    """The pin rule's live-failure domain must match the blocker scan's on BOTH sides.
+
+    An unsubmitted auto-retry placeholder is already excluded when scanning candidate-scope
+    rows; a cycle-scope placeholder is the same non-blocking shape, so it is a stale marker
+    target too and must not hand its counter to this decision.
+    """
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "download",
+        "pipeline_jobs": [
+            {
+                **_CYCLE_SCOPE_JOB,
+                "job_id": "job_cycle_gfs_2026070100_download_retry_1",
+                "status": "submission_failed",
+                "retry_count": 1,
+                "model_id": None,
+                "slurm_job_id": None,
+                "array_task_id": None,
+            },
+            {**_OWN_MODEL_JOB, "status": "succeeded"},
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download_retry_1", retry_count=5
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
 def test_repaired_cycle_scope_row_marker_does_not_pin() -> None:
     """A repaired cycle-scope row is a stale marker target: it pins nothing.
 
@@ -856,12 +891,17 @@ def test_stale_own_marker_does_not_leak_attempt_when_newer_cycle_scope_marker_ex
 
 
 def test_model_less_candidate_run_job_marker_still_pins_attempt_in_cohort_shape() -> None:
-    """Multi-basin cohorts persist model-less job rows; only cycle run-id grammar is cycle scope."""
+    """Multi-basin cohorts persist model-less job rows; only cycle run-id grammar is cycle scope.
+
+    Both pin-rule arms are closed here on purpose — ``failed_stage`` names another stage and a
+    live model-domain failure exists — so ONLY the run-id conjunct of the cycle-scope test can
+    keep the operator-pinned attempt number.  Drop that conjunct and this state derives 1.
+    """
 
     state = {
         "pipeline_status": "failed",
         "retry_count": 0,
-        "failed_stage": "forecast",
+        "failed_stage": "download",
         "pipeline_jobs": [
             {
                 "job_id": "job_model_a_forecast",
@@ -871,7 +911,16 @@ def test_model_less_candidate_run_job_marker_still_pins_attempt_in_cohort_shape(
                 "status": "failed",
                 "retry_count": 0,
                 "updated_at": "2026-07-01T00:00:00Z",
-            }
+            },
+            {
+                "job_id": "job_model_a_download",
+                "run_id": "fcst_gfs_2026070100_model_a",
+                "model_id": "model_a",
+                "stage": "download",
+                "status": "failed",
+                "retry_count": 0,
+                "updated_at": "2026-07-01T00:00:00Z",
+            },
         ],
         "pipeline_events": [_manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=5)],
     }

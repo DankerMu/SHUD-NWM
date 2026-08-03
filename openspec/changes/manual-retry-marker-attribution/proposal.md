@@ -63,12 +63,24 @@ design.md）。
    forecast_cycle marker 现状 100% fail-closed，出口为写入侧未来
    定向重试预留）。其余 marker（entity 是 job、无 entity_id、任何
    非 forecast_cycle 形）采信语义一律不变——cycle 级 stage 人工
-   重试保持有效。
-2. **刀 2（钉值侧）**：`_manual_retry_new_attempt`（及 payload 的
-   attempt 字段）跳过**正向解析为 cycle-scope job**（entity_id 在
-   `_state_jobs` 查回且该 job model_id 为空）的事件的
-   `retry_count`，回落 `previous_attempt + 1`（issue 验收通道 2：
-   采信合法、钉值越界）。entity 查不到 job 的事件钉值行为不变。
+   重试保持有效。**Round-3 修订（decision-path 可达性）**：刀 1
+   判据字段 `entity_type`/`model_id` 曾被 identity_filter 的
+   decision-event 消毒剥离（过滤态恒放行）；修复为消毒白名单放行
+   这三个判据键（`entity_type` + 顶层与 details `model_id`），
+   它们是 fail-closed 判据的只读输入而非身份声明（design.md
+   Round-3 节，378 个 decision-state 差分纯增量实测）。
+2. **刀 2（钉值侧，round-1/2/3 修订后形态）**：最新携带
+   `retry_count` 的 adopted marker 定权（终止性）；事件正向解析为
+   cycle-scope job（`model_id` 空 ∧ `run_id` 前缀 `cycle_` 文法）
+   时按 **stage 感知钉值规则**裁定——resolved job 活失败 ∧
+   （`failed_stage` == job.stage ∨ 候选无自身 model 域活失败行）
+   → 钉 marker `retry_count`，否则终止回落 `previous_attempt + 1`
+   （issue 验收通道 2：cycle 计数不计入候选 forecast 级预算，但
+   cycle 级 stage 修复目标本身的运维钉值保持有效——round-2 实测
+   定标，design.md 五形 A/B/C/D/E）。entity 查不回 job 的事件默认
+   钉值行为不变，**除非** entity_id 命中 cycle-scope job-id 文法
+   `^job_cycle_<src>_<stamp>_...`（decision state 删除 cohort
+   master 行后的 fail-open 洞，round-3 N1′ 窄化）。
    接线点共 3 处：`_manual_retry_markers` 扫描环、
    `_manual_retry_payload`、`_manual_retry_new_attempt`；
    `_event_is_manual_retry_marker` **不接线**（review P1-2 实测：
@@ -76,9 +88,11 @@ design.md）。
    人工重试；marker 形事件无论归属都不该当 blocker）。
 3. 回归测试（判别对形式，见 design.md oracle 节）：
    - 通道 1 负向 + 归属出口正向（details 与顶层 model_id 两变体）；
-   - 通道 2 负向（cycle-scope job marker retry_count=5 →
-     new_attempt == previous+1 未被钉）+ 本 model job 同构对照
-     （钉住语义不变）；
+   - 通道 2 判别族（round-2 修订后）：同 stage cycle-scope marker
+     钉 5（master parity）、交叉 stage / stale 形回落 previous+1
+     （不越 forecast 预算）+ 本 model job 同构对照（钉住语义
+     不变）；round-3 起另须 decision-path（identity_filter 过滤态）
+     判别对（见 tasks.md ORACLE ROUTING）；
    - site 4 守卫：外来 marker 形事件（status_to=pending）与本候选
      自身 marker 共存 → requested 仍 True；
    - 既有正向：`tests/test_file_orchestration_journal.py:2473-2513`、

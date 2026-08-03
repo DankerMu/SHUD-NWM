@@ -465,7 +465,13 @@ def _candidate_state_decision_event(
     if authoritative:
         return dict(event)
     sanitized: dict[str, Any] = {}
-    for key in ("event_id", "entity_id", "created_at", "updated_at"):
+    # ``entity_type``/``model_id`` are DECISION PREDICATES, not identity claims: the
+    # cycle-granularity marker attribution knife reads them to decide whether a marker may
+    # be adopted at all.  Sanitizing them away makes that knife fail OPEN on the filtered
+    # state (a cycle-wide marker reads as a plain pipeline_job marker and gets adopted by
+    # every model).  They are read-only inputs to a fail-closed test and can never widen the
+    # candidate's scope by themselves — the marker still has to name THIS candidate's model.
+    for key in ("event_id", "entity_id", "entity_type", "model_id", "created_at", "updated_at"):
         value = event.get(key)
         if value not in (None, ""):
             sanitized[key] = value
@@ -476,6 +482,9 @@ def _candidate_state_decision_event(
         if event.get("event_type") in {"retry", "manual_retry"} and retry_binding_id not in (None, ""):
             sanitized["event_type"] = event.get("event_type")
             for key in (
+                # Same decision-predicate carve-out as the top-level keys above: the
+                # attribution knife reads details.model_id before the event may be adopted.
+                "model_id",
                 "trigger",
                 "manual_retry_marker",
                 "retry_count",

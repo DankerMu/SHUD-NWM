@@ -154,6 +154,56 @@ decision 路径复现）。修订为 **stage 感知钉值**：
   实测 5→2/1 回归）与状态臂半开（repaired cycle-scope 行钉 5）
   两洞同轮修复。
 
+## Round-3 cross-review 修订（PR #1286，decision-path 可达性；三轮门 depth retro）
+
+round-3 全量复审（钉定双 pack + full-scope + 三批独立 verifier）
+CONFIRMED：两刀的判据字段在**生产 decision 路径**上不可见——
+`_candidate_state_decision_event`（identity_filter.py:458-523）的
+消毒白名单不保留 `entity_type`/`model_id`（刀 1 过滤态恒放行，
+本文件上一节"生产 forecast_cycle 事件现状 100% 走 fail-closed"的
+结论在 decision 路径上不成立——不持久化身份列导致的是**恒被消毒**
+而非恒 fail-closed）；cohort master 行（`_cohort_<digest>`/sibling
+文法非 authoritative）被 :71-72 删除后刀 2 的 entity-unresolvable
+carve-out 反向放行钉值。本 PR 全部 17 个新测试只打 raw-state
+helper，无一经过 decision state——fixture 盲区，retro-r3 记录。
+
+修复（r4-diagnosis 实测定标，1287+1522 例零回归、378 个
+decision-state 差分纯增量）：
+
+1. **identity_filter 白名单放行三判据键**（entity_type + 顶层与
+   details model_id；details 键置于 retry-marker 分支内最窄放置）。
+   三键缺一不可：仅 entity_type 会把两个显式归属出口在过滤态关死
+   （过度收窄）。`entity_type` 在 scheduler_state 层唯一读者是刀 1。
+   披露：details.model_id 参与 `_nested_state_identity_payloads`
+   scoping，方向保守（≠候选 → 行被排除），实测零兑现。
+2. **刀 2 N1′ 窄化**：entity 查不回行时，entity_id 命中
+   `^job_cycle_([^_]+)_(\d{10})_.+$`（镜像 journal
+   `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE:173`；cohort master job_id =
+   `job_{run_id}_{stage}` → `job_cycle_...` 前缀）→ 不钉；其余
+   unresolvable 形保持 fail-open（`:15154`/`:15700` 合成 state
+   依赖）。`:2671` 的 `job_cycle_` 形 entity 数值恒等（1==1）不受
+   影响；同 cycle download 行走 filter carve-out 保行、钉值仍由
+   stage 判据裁定（round-2 parity 不破）；跨 cycle download 形
+   5→1 属顺带修复（外 cycle counter 不得钉本候选）。
+3. **A3（requested False→True 翻转）定标为不加规则**：32 格矩阵 +
+   无-foreign-marker 对照 C1 证明——刀 1 拒掉 max 后 state 行为与
+   "外来 marker 不存在"逐格一致，`repairs_historical_failure` 在
+   新 max（older own marker）上正确重新求值；master 的 raw False
+   是"foreign suppressed marker 恰为 max"的偶然跨模型压制，正是
+   #1205 要消灭的形。披露的真实语义变化（decision 层）：own
+   marker target 已 repaired 的形，reason 从 `manual_retry_requested`
+   变 `retry_failed_candidate`（action 仍 retry；收紧方向）。
+4. **活失败域第三处对齐**（round-3 B2）：状态臂补 placeholder
+   排除，6.2 节"一律活失败域"规则至此三处齐一。
+5. **测试网升级**：decision-path 判别对 T1-T11（tasks.md 2b.5）+
+   run-id 合取真判别锚（round-3 C1：原 :858 守卫被 same-stage 臂
+   遮蔽，mutant 1088 例零红）。ORACLE ROUTING 增补 decision-path
+   规则，E4 冻结面规则改为"零未经诊断定标的 diff"。
+
+DEFER（master 既有，issue-scribe 立项）：arm 2 域 cancelled/hydro
+扩展（B1）；sibling `pipeline_job` marker 钉值（E1，#1164 变形）；
+无 retry_count marker 的终止性缺口（E2）。
+
 ## 回归测试 oracle（与刀对齐）
 
 - 通道 1 判别对：forecast_cycle 无归属 marker → sibling

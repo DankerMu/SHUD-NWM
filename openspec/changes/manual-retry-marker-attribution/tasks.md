@@ -59,6 +59,12 @@ ORACLE ROUTING（本 run 常设纪律：不使用 node-22）：
   修复前 True/点亮、修复后 False/不点亮。零写入、零 env 变更。
   27 不可达或快照缺失不阻塞 merge（该项是 confirmatory receipt，
   判定力已由判别用例承担），但结果必须如实记录进 PR body。
+- **Decision-path 判别对规则（round-3 retro 修正动作 F-E，防复发）**：
+  两刀的每个测试家族必须含至少一个经
+  `_candidate_state_decision_state`（或 `_candidate_state_decision`）
+  求值的判别对——raw-state helper 层的绿**不构成**生产 decision
+  路径的证据（round-3 A1/A2 教训：identity_filter 消毒使 17 个
+  raw 层测试对两刀在 decision 路径的失效全盲）。
 
 Must-preserve behavior:
 
@@ -84,7 +90,13 @@ Must-preserve behavior:
   用例放哪个文件由 implementer 按就近 fixture 风格定，两文件计数
   合计 +6±1；数值在 PR body 复述）。
 - Frozen（零 diff）：proposal Impact 列出的 9 个下游/读侧生产文件
-  + `scheduler_state_rows.py` + `scheduler_state_identity_filter.py`。
+  + `scheduler_state_rows.py`。**Round-3 修订**：
+  `scheduler_state_identity_filter.py` 从冻结面移出——round-3
+  verifier CONFIRMED 其 decision-event 消毒白名单剥离刀 1 判据字段
+  （`entity_type`/`model_id`），冻结前提"零 diff 即安全"被证伪；
+  改动限定为消毒白名单放行三个判据键（r4-diagnosis 实测 378 个
+  decision-state 差分纯增量、1287+1522 例零回归）。冻结面规则
+  同步修订为"零**未经诊断定标**的 diff"。
 
 Seams under test (upstream-declared, consumed not renegotiated):
 
@@ -127,13 +139,14 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   重复收敛。`_event_is_manual_retry_marker` **不接线**（design.md
   否决记录；其 blocker 排除语义 scope 无关，第二消费者
   `scheduler_state_failure.py:1034` 因此同样不受影响）。
-- [x] 1.2 刀 2（钉值侧）：`_manual_retry_new_attempt` 与
-  `_manual_retry_payload` 的 attempt 派生跳过正向解析为
-  cycle-scope job（entity_id 在 `_state_jobs` 按
-  `job_id`/`pipeline_job_id` 查回且该 job `model_id` 为空）的事件
-  `retry_count`，回落 `previous_attempt + 1`；采信（requested/
-  marker 点亮）与 entity 查不到 job 的事件钉值行为不变。函数签名
-  保持 `(state)` 形，零调用点扩散。
+- [x] 1.2 刀 2（钉值侧；本条 round-1/2 修订后形态，初版"无条件
+  回落"已被 round-2 实测证伪并废止）：最新携 `retry_count` 的
+  adopted marker 定权（终止性）；正向解析为 cycle-scope job
+  （`model_id` 空 ∧ `run_id` 前缀 `cycle_` 文法）的事件按 stage
+  感知钉值规则裁定——resolved job 活失败 ∧（failed_stage ==
+  job.stage ∨ 候选无自身 model 域活失败行）→ 钉 `retry_count`，
+  否则终止回落 `previous_attempt + 1`。采信（requested/marker
+  点亮）不受刀 2 影响。函数签名保持 `(state)` 形，零调用点扩散。
 
 ## 2. 回归测试
 
@@ -144,18 +157,43 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   同断言（出口两形验证）。出口用例的 state **必须含至少一条带
   model_id 的 job 行**（派生集合空则出口关闭——这是规定行为，
   不得为让用例转绿而放宽谓词）。
-- [x] 2.2 通道 2 判别对（oracle 修正：`_manual_retry_state_evidence`
-  的 `manual_retry.new_attempt` 字段恒存在——
-  `scheduler_state_failure.py:1080-1100` 兜底 previous+1——可判别
-  oracle 是**值**）：cycle-scope job marker（`retry_count=5`）→
-  `_manual_retry_new_attempt(state, previous_attempt=0)` == 1 且
-  `_manual_retry_state_evidence` 的 `manual_retry.new_attempt` ==
-  previous+1（未被钉成 5/6）；同构对照：本 model job marker
-  `retry_count=5` → 钉住语义与既有一致。
+- [x] 2.2 通道 2 判别族（round-2 有 spec 依据修订，verifier 裁定
+  原 `== 1` 断言在 rc=0 下无判别力且编码了过度推广语义；oracle 是
+  `_manual_retry_new_attempt` 与 `_manual_retry_state_evidence` 的
+  **值**）：同 stage cycle-scope marker（rc=5）→ new_attempt ==
+  **5**（master parity，`test_same_stage_cycle_scope_manual_marker_
+  pins_attempt`）；通道 2 危害负向移到真实形——候选 forecast 失败
+  + 交叉 stage cycle marker → new_attempt == previous+1（cycle
+  计数不越 forecast 预算）；stale（resolved job 已 succeeded/
+  repaired）→ 回落；同构对照：本 model job marker rc=5 → 钉住
+  语义与既有一致。
 - [x] 2.3 site 4 守卫（防回归而非新语义）：外来 marker 形事件
   （`status_to="pending"`，`retry.py:517` 生产形）与本候选自身
   marker 共存 → `_manual_retry_requested` 仍 True（外来 marker 未
   被当成 active blocker 压制）。
+
+## 2b. Round-4 decision-path 修复（三轮门 retro-r3 修正动作）
+
+- [x] 2b.1 F-A1 identity_filter 消毒白名单放行三判据键
+  （`entity_type` + 顶层与 details `model_id`，附判据注释）；
+- [x] 2b.2 F-A2 刀 2 entity-unresolvable N1′ 窄化
+  （`^job_cycle_<src>_<stamp>_...` fullmatch → 不钉；镜像
+  journal `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`）；
+- [x] 2b.3 F-B `_cycle_scope_marker_pins_attempt` 状态臂补
+  placeholder 排除（活失败域第三处对齐）+ 判别测试；
+- [x] 2b.4 F-C `test_model_less_candidate_run_job_marker_still_pins_
+  attempt_in_cohort_shape` 改造为 run-id 合取的真判别锚
+  （交叉 failed_stage + 活失败 model 域行；mutant 必红验证）；
+- [x] 2b.5 decision-path 判别对 T1-T11 落地
+  `tests/test_production_scheduler.py`（含 A2 杀手 T7/T8、parity
+  守卫 T9、`:15700` 守卫 T10、顶层 model_id 唯一杀手 T3、
+  `_candidate_state_decision_event` 消毒契约 T11）；
+- [x] 2b.6 F-D proposal/tasks 与 round-2/3 已交付语义对齐
+  （本节与 1.2/2.2/Frozen/ORACLE ROUTING 修订即是）；
+- [x] 2b.7 A3（requested 翻转）经 32 格矩阵定标为**不加规则**
+  （C1 对照 == 矩阵行 1；抑制在新 max 上正确重求值），decision
+  reason 收紧（`manual_retry_requested`→`retry_failed_candidate`
+  于 own-target-repaired 形）在 design.md 与 PR body 披露。
 
 ## 3. Spec + validation
 

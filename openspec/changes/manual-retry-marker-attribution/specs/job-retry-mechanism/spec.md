@@ -43,6 +43,11 @@ events stay visible in every candidate's state for diagnostics.
   `model_id` and that candidate's state carries at least one
   model-scoped job row (the derived model set is non-empty), exactly
   that candidate adopts it
+- **AND** the gate holds on the identity-filtered decision state:
+  event sanitization preserves the attribution predicate fields
+  (`entity_type`, top-level and details `model_id`) so the
+  fail-closed test and its explicit escape behave identically on the
+  raw and filtered state
 
 #### Scenario: Cycle-scope job marker pins only when its stage is the repair target
 
@@ -67,6 +72,13 @@ events stay visible in every candidate's state for diagnostics.
 - **AND** a model-less job row carrying a candidate-run `fcst_...`
   id is not cycle-scope — a marker targeting it keeps pinning
   `new_attempt` to its `retry_count`
+- **AND** the rule survives candidate-state filtering: a marker
+  whose entity cannot be resolved to any job row but whose entity id
+  carries the cycle-scope pipeline-job grammar
+  (`job_cycle_<source>_<stamp>_...`, the shape left behind when a
+  non-authoritative cohort master row is dropped from the decision
+  state) does not pin the candidate's attempt, while markers with
+  other unresolvable entity ids keep their existing pinning behavior
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 
