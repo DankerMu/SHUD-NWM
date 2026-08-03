@@ -159,6 +159,6 @@ Minimal mergeable slice: the single meta-test IS the slice.
   nothing else; frozen surfaces
   (`scripts/validate_two_node_docker_runtime.py`,
   `.github/workflows/ci.yml`) zero diff via the branch-scoped form.
-- [ ] E6 CI `Unit Tests` green on the PR head (the target file is
+- [x] E6 CI `Unit Tests` green on the PR head (the target file is
   selected directly by `select_ci_tests` when changed; Linux
   oracle confirms host-independence).
