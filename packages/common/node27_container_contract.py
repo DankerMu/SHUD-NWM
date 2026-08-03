@@ -40,36 +40,114 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-# MEASURED on the real node-27 ``nhms-db`` container (timescale/timescaledb-ha:
-# pg15-latest): inside the container ``/usr/bin/pg_restore`` is a symlink whose
-# ``readlink -f`` realpath is the pg_wrapper dispatcher below (the stable
-# entrypoint the child actually invokes), NOT ``/usr/bin/pg_restore`` itself.
-# Source: .workplans/1069/review/round-5/node27-external-contract-gate.md (§G2,
-# re-measured post-fix).
+# MEASURED on the real node-27 ``nhms-db`` container (image ref
+# ``timescale/timescaledb-ha:pg15-latest``, cited to
+# ``host_context.nhms_db_image_ref``: ``docker inspect
+# '--format={{.Config.Image}}|{{.Image}}' nhms-db``, 2026-08-02): inside the
+# container ``/usr/bin/pg_restore`` is a symlink whose ``readlink -f`` realpath
+# is the ``/usr/share/postgresql-common/pg_wrapper`` path below, NOT
+# ``/usr/bin/pg_restore`` itself -- cited to
+# ``contract.container_pg_restore_realpath`` (``docker exec nhms-db
+# /usr/bin/readlink -f /usr/bin/pg_restore``, 2026-08-02), whose output
+# DIFFERING from its input path is what determines both of those clauses.
+# Nothing is claimed here about what any child process execs: a path-resolution
+# command determines no exec behavior.
+# Source: packages/common/node27_external_contract_snapshot.json --
+# ``contract.container_pg_restore_realpath`` and
+# ``host_context.nhms_db_image_ref``, each with its ``_provenance.command`` and
+# date.
 CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 
-# MEASURED on the real node-27 host (systemd 249, Ubuntu 22.04): for a unit that
-# has never started in the current boot, ``systemctl --user show`` renders the
+# MEASURED on the real node-27 host (``systemd 249 (249.11-0ubuntu3.21)``,
+# cited to ``host_context.systemd_version``: ``systemctl --version``,
+# 2026-08-02): for a NONEXISTENT unit, ``systemctl --user show`` renders the
 # unset ``ExecMainStartTimestamp`` property as the literal string ``"n/a"``, NOT
-# as an empty value.  The inactive recurring compression unit therefore reports
-# ``ExecMainStartTimestamp=n/a`` while the replay unit that is actively starting
-# reports a real timestamp.  Both planes pin this literal so an inactive-unit
-# checkpoint accepts ``n/a`` while an "is-active" assertion rejects it.
-# Source: tonight's live arming attempt (#1069, gap G6, measured post-fix).
+# as an empty value.  DUAL-CARRIER citation, because no single entry determines
+# that whole sentence: value and command come from
+# ``contract.systemd_unset_timestamp`` (``systemctl --user show
+# nhms-external-contract-snapshot-witness-does-not-exist.service -p LoadState -p
+# ExecMainStartTimestamp``, 2026-08-02), which records no LoadState and so
+# cannot by itself establish "nonexistent"; the nonexistence comes from that
+# probe's design in scripts/node27_external_contract_snapshot.py --
+# ``RESERVED_WITNESS_UNIT`` is a name deliberately never installed (:88-107),
+# and collection refuses fail-closed unless the probe reports
+# ``LoadState == "not-found"`` (:307-315).
+# The same committed snapshot measures the other direction too: an
+# inactive/dead unit CAN report a real ``ExecMainStartTimestamp``.
+# ``informational.recurring_unit`` records
+# ``nhms-node27-timeseries-compression.service`` as ``ActiveState=inactive`` /
+# ``SubState=dead`` with ``ExecMainStartTimestamp="Sun 2026-08-02 12:25:00
+# CST"``.  Dual-carrier again, since ``informational.*`` entries carry no
+# ``_provenance`` wrapper by design: date from ``informational.measured_at``
+# (``2026-08-02T11:13:05.968511Z``), command from the frozen
+# ``PROBE_RECURRING_UNIT`` argv (snapshot script :180-184).  ``informational.*``
+# sits OUTSIDE the drift lock -- ``COMPARED_SECTIONS`` holds only
+# ``contract``/``host_context``, so these entries are dump-recorded diagnostics,
+# never compared, and carry no ``contract.*``-grade guarantee.  The runtime
+# consequence for the inactive-unit checkpoints below is tracked as #1255; this
+# record states the measured fact only.
+# Both planes REQUIRE this literal (they do not merely accept it): it is one
+# member of a whole-dict equality over the recurring unit's ``systemctl show``
+# properties -- scripts/node27_timeseries_compression_supervisor.py:1382-1393
+# and scripts/node27_timeseries_compression_live_evidence.py:953-964 -- while
+# the is-active side of each plane rejects it explicitly
+# (supervisor.py:1401-1404, live_evidence.py:971-978).
+# Source: packages/common/node27_external_contract_snapshot.json --
+# ``contract.systemd_unset_timestamp``, ``host_context.systemd_version``,
+# ``informational.recurring_unit`` + ``informational.measured_at``; witness
+# design and fail-closed refusal in
+# scripts/node27_external_contract_snapshot.py (:88-107, :180-184, :307-315).
 SYSTEMD_UNSET_TIMESTAMP = "n/a"
 
-# MEASURED on the real node-27 primary (PG 15, launch 7 postflight, 2026-07-17
-# 00:17 CST, gap G9): ``pg_stat_activity.backend_type`` renders external client
-# sessions as the literal ``'client backend'`` and PostgreSQL-owned workers as
-# other literals (``'autovacuum worker'``, TimescaleDB background workers,
-# parallel workers, ...).  The bound-1 recompress deterministically woke
-# autovacuum on the compressed chunk it had just created within the same
+# MEASURED on the real node-27 primary (PG 15 -- ``15.2 (Ubuntu
+# 15.2-1.pgdg22.04+1)``, cited to ``host_context.pg_server_version``: ``psql
+# --dbname nhms --no-psqlrc -At -c 'SHOW server_version'``, 2026-08-02):
+# ``pg_stat_activity.backend_type`` renders an external client session as the
+# literal ``'client backend'`` -- cited to ``contract.client_backend_type``
+# (``psql --dbname nhms --no-psqlrc -At -c 'SELECT backend_type FROM
+# pg_stat_activity WHERE pid = pg_backend_pid()'``, 2026-08-02, i.e. the
+# probe's own external session).
+# The other literals are not enumerated speculatively.  The measured 2026-08-02
+# distribution over every session, ``informational.backend_type_distribution``,
+# is: ``TimescaleDB Background Worker Launcher`` 1, ``TimescaleDB Background
+# Worker Scheduler`` 2, ``autovacuum launcher`` 1, ``background writer`` 1,
+# ``checkpointer`` 1, ``client backend`` 14, ``logical replication launcher`` 1,
+# ``walwriter`` 1.  Note what that set does and does not contain: it carries
+# ``autovacuum launcher`` and NOT ``autovacuum worker``, and it contains no
+# ``parallel worker`` at all.  Dual-carrier citation, as ``informational.*``
+# carries no ``_provenance`` wrapper by design: date from
+# ``informational.measured_at`` (``2026-08-02T11:13:05.968511Z``), command from
+# the frozen ``PROBE_BACKEND_TYPE_DISTRIBUTION`` argv (snapshot script
+# :204-208); and ``informational.*`` sits OUTSIDE the drift lock
+# (``COMPARED_SECTIONS`` holds only ``contract``/``host_context``), so this set
+# is a dump-recorded diagnostic, never compared -- one host at one instant, not
+# a guarantee.
+# FIELD ANECDOTE (launch 7 postflight, 2026-07-17 00:17 CST, gap G9), cited as
+# unverifiable field anecdote (no committed artifact; the #1069 arm-session
+# bundles lived in the gitignored ``.workplans`` tree -- issue directory
+# ``1069`` -- which resolves nowhere in this repository): the bound-1 recompress
+# woke autovacuum on the compressed chunk it had just created within the same
 # second postflight ran, so an "ANY non-idle session = conflict" predicate can
-# essentially never pass a post-mutation checkpoint.  Only client backends can
-# be the external writers the trust boundary targets (a parallel worker of an
-# external query is always accompanied by its leader client backend), so both
-# planes capture every session at full fidelity but judge conflicts on
-# ``backend_type == CLIENT_BACKEND_TYPE`` only.
+# essentially never pass a post-mutation checkpoint.  The same anecdote is
+# retold from the same source at
+# scripts/node27_timeseries_compression_supervisor.py:1226-1229.
+# DESIGN RULING of this plane (a decision, not a measurement): the external
+# writers the trust boundary targets are judged on a TWO-CONJUNCT predicate --
+# ``backend_type == CLIENT_BACKEND_TYPE`` AND
+# ``has_write_privilege_on_target is True`` -- carried identically by both
+# planes (scripts/node27_timeseries_compression_supervisor.py:1257-1261,
+# scripts/node27_timeseries_compression_live_evidence.py:943-947).  Client-
+# backend-ness is the NECESSARY first conjunct, the eligibility filter for
+# "external writer" -- it is not sufficient: the display API's read-only
+# ``nhms_display_ro`` pool renders as ``'client backend'`` too, so a
+# client-backend-only judgment was measured to abort every post-decompress
+# checkpoint on a live node with the display API up, and the second conjunct is
+# the resulting G14 narrowing (supervisor.py:1230-1241).  Both planes still
+# capture every session at full fidelity; only the judgment narrows.  Nothing
+# is asserted here about PostgreSQL's semantics for any other backend type.
+# Source: packages/common/node27_external_contract_snapshot.json --
+# ``contract.client_backend_type``, ``host_context.pg_server_version``,
+# ``informational.backend_type_distribution`` + ``informational.measured_at``.
 CLIENT_BACKEND_TYPE = "client backend"
 
 # REPO-SIDE PINNED CONTRACT (not a measured host value, gap G14 / issue #1087):
