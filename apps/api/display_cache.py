@@ -97,7 +97,12 @@ def display_catalog_cached(request: Request, key: str, loader: Callable[[], Any]
 
 
 def start_display_catalog_warmer(app: FastAPI) -> threading.Thread | None:
-    """display_readonly 启动自预热线程（进程级单例；daemon，不阻塞退出）。"""
+    """display_readonly 启动自预热线程（进程级单例；daemon，不阻塞退出）。
+
+    `thread.start()` 失败（OS 起不了线程）时回滚模块状态并原样抛出，调用方只看到那
+    一次真实错误；否则会留下"已登记但从未启动"的句柄，之后每次 stop() 都在 join 处炸
+    ``cannot join thread before it is started``，级联无法自愈。
+    """
     global _warmer_started, _warmer_thread
     with _lock:
         if _warmer_started:
@@ -106,7 +111,13 @@ def start_display_catalog_warmer(app: FastAPI) -> threading.Thread | None:
         _stop_event.clear()
         thread = threading.Thread(target=_warm_loop, args=(app,), daemon=True, name="display-catalog-warmer")
         _warmer_thread = thread
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        with _lock:
+            _warmer_started = False
+            _warmer_thread = None
+        raise
     return thread
 
 

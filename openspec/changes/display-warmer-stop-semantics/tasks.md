@@ -107,6 +107,17 @@ delivery), but shipped together they are the defense-in-depth layer.
 - [x] 1.3 Idempotence + restartability: stop-when-never-started
   returns `True` and is a no-op; start after successful stop spawns
   a fresh thread (the guard test pins both).
+- [x] 1.4 (round-1 verified CL-1) Start-failure state coherence:
+  `thread.start()` raising (OS thread exhaustion) must restore
+  module state under `_lock` (`_warmer_started = False`, handle
+  `None`) and re-raise — otherwise every later stop() raises
+  `RuntimeError: cannot join thread before it is started` and the
+  teardown cascade never heals. Pinned by a guard test that patches
+  the thread's `start()` to raise. (Round-1 verified CL-4 rides
+  along: the loud-timeout guard's blocking fake uses an UNBOUNDED
+  `release.wait()` — a 0.5 s self-release reopens a measured ~13%
+  duty-cycle flake window; the `finally` always sets `release`, so
+  no leak path.)
 
 ## 2. Test-suite hygiene
 

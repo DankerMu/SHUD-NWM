@@ -142,6 +142,39 @@ def test_warmer_starts_stops_and_restarts_without_leaking_thread(monkeypatch: py
     assert _warmer_threads() == []
 
 
+def test_start_warmer_rolls_back_state_when_thread_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 起线程失败（OS 起不来）不能留下“已登记但从未启动”的句柄：那之后每一次 stop 都会在
+    # join 处炸 cannot join thread before it is started，重置代码根本走不到，级联不可自愈。
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    app = FastAPI()
+
+    def _failing_start(self: threading.Thread) -> None:
+        del self
+        raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(threading.Thread, "start", _failing_start)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            start_display_catalog_warmer(app)
+
+    # 真实 OS 错误只抛一次；模块状态必须自洽，后续 stop 是干净的 no-op。
+    assert display_cache._warmer_started is False
+    assert display_cache._warmer_thread is None
+    assert _warmer_threads() == []
+    assert stop_display_catalog_warmer() is True
+
+    # 撤销补丁后仍能真的起一遍并停掉，证明失败路径没有毒化模块状态。
+    thread = start_display_catalog_warmer(app)
+    assert thread is not None
+    try:
+        assert _warmer_threads() == [thread]
+    finally:
+        assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []
+    assert display_cache._warmer_started is False
+    assert display_cache._warmer_thread is None
+
+
 def test_stop_warmer_when_never_started_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
     assert display_cache._warmer_started is False
@@ -183,7 +216,10 @@ def test_stop_warmer_reports_join_timeout_without_resetting_state(monkeypatch: p
     async def blocking_replay(app: Any, targets: list[str]) -> None:
         del app, targets
         entered.set()
-        release.wait(0.5)
+        # 必须无限等：带超时的自释放会重开一个窗口——主线程被调度器抢下去时线程已跑完
+        # 回放回到 `_stop_event.wait`，stop(timeout=0.05) 就成功了，断言 `is False` 变 flaky。
+        # 下面的 finally 无条件 set（断言失败时也走到），且线程是 daemon，无泄漏路径。
+        release.wait()
 
     monkeypatch.setattr(display_cache, "_replay_targets", blocking_replay)
     monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
