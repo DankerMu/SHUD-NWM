@@ -107,11 +107,7 @@ on the capture-argv route.
    verbatim (the argv still "differs"); gate 4 keeps "pg_restore dump
    path is outside the DB container data mount" byte-for-byte, and the
    check behind it now enforces containment rather than a string
-   opening. The exported symbol names (`CONTAINER_DB_MOUNT_PREFIX`,
-   `container_dump_path_within_mount`) keep the same historical noun on
-   purpose: renaming a cross-plane contract symbol is a separate,
-   snapshot-audited change, and the noun denotes the pinned prefix here
-   exactly as it does in the message. No message churn, no reordering: gate 4's check stays
+   opening. No message churn, no reordering: gate 4's check stays
    the function's first statement, ahead of every
    `_run_capture_argv`, so refusal happens with **zero docker
    invocations**.

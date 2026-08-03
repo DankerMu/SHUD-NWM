@@ -163,15 +163,16 @@ def validated_probe_target(target: str) -> str:
 # REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the
 # container-side path prefix every forensic container dump path must live
 # inside.  Repo-side is the DECISION of where dumps must live; the mount layout
-# it is drawn over is measured (``docker inspect nhms-db --format
-# '{{json .Mounts}}'``, 2026-08-02), and that output determines exactly this
-# much: the container carries two host bind mounts, of which the only one
+# it is drawn over is measured (``docker inspect nhms-db``, 2026-08-02), and
+# that output determines exactly this much (its ``.Mounts`` for the binds, its
+# ``Config.Env`` ``PGDATA`` for which directory is the DB's own data directory):
+# the container carries two host bind mounts, of which the only one
 # landing under this prefix is ``/home/nwm/nhms-evidence`` ->
 # ``/var/lib/postgresql/evidence`` (RW), while the DB's own data directory is
 # the OTHER mount (``/home/nwm/nhms-pgdata`` -> ``/home/postgres/pgdata/data``),
 # outside this prefix.  So the host-writable region inside the prefix is that
 # ``evidence`` SUBTREE.  Nothing is claimed here about what the prefix path
-# itself is or is not -- a mount list cannot determine that.
+# itself is or is not -- that inspect output cannot determine it.
 # FIVE gates judge that path today, but they did not start level.  FOUR carried
 # their own inline ``startswith`` of this literal -- the verifier's pg_restore
 # list argv gate and its captured schema-dump-list listing gate, the
@@ -220,9 +221,10 @@ def container_dump_path_within_mount(value: str) -> bool:
       own ``pg_dump`` writes ``--file <schema_dump_host>``, so a host-side writer
       can create the link and name it through its container path.  That is the
       same actor class the pinned-plan boundary already assumes, not a stronger
-      one.  Measured node-27 mount list (``docker inspect nhms-db --format
-      '{{json .Mounts}}'``, 2026-08-02): the only bind mount landing under this
-      prefix is host ``/home/nwm/nhms-evidence`` -> container
+      one.  Measured node-27 container shape (``docker inspect nhms-db``,
+      2026-08-02; its ``.Mounts`` for the binds, its ``Config.Env`` ``PGDATA``
+      for which directory is the DB's data directory): the only bind mount
+      landing under this prefix is host ``/home/nwm/nhms-evidence`` -> container
       ``/var/lib/postgresql/evidence`` (RW), i.e. the host-writable region is a
       SUBTREE of the prefix this predicate spans, and the DB data directory is a
       separate mount outside it (``/home/postgres/pgdata/data``).  What this
