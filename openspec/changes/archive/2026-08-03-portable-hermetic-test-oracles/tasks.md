@@ -139,9 +139,9 @@ disease this issue names.
   rewritten: the depth is chosen for deterministic `RecursionError`
   on every supported CPython version — measured through the
   production loader on 3.11/3.12/3.13/3.14 (C-level thresholds under
-  `setrecursionlimit(1000)`: 995 / 9998 / 9999 / 74384; the
+  `setrecursionlimit(1000)`: 995 / 9998 / 9999 / ~74.4k (74381/74384 measured on this machine across runs; drifts with C-stack headroom); the
   originally planned 20000 PARSES on 3.14, whose threshold rose to
-  74384 — caught in cross-review, re-pinned to 100000) — and the
+  ~74.4k (74381/74384 measured on this machine across runs; drifts with C-stack headroom) — caught in cross-review, re-pinned to 100000) — and the
   falsified "3.12 would yield declaration_wrong_schema" prediction
   removed. Keep the existing `sys.setrecursionlimit(1000)` wrapper:
   on 3.11 it is the determinism source; on newer versions it is
@@ -186,7 +186,7 @@ disease this issue names.
   real directory, that row reds (expects PATH_UNSAFE, gets
   ROOT_UNAPPROVED or admission) — the row really pins the symlink
   gate;
-  (iv) with depth 20000 reverted to 2000, the recursion case reds on
+  (iv) with depth 100000 reverted to 2000, the recursion case reds on
   3.12 (reproducing the original defect) — restore afterwards.
 - [x] E5 Surface check: `git diff master...HEAD --name-only` = the
   two test files plus this openspec change, nothing else; frozen
@@ -194,9 +194,9 @@ disease this issue names.
   `git diff master...HEAD --stat -- services/ docs/ infra/ scripts/`
   (the un-scoped worktree-vs-index form prints 0 on any clean tree
   and determines nothing). Check against the commands' own output.
-- [ ] E6 Cross-platform oracle: PR CI `Unit Tests` green on
+- [x] E6 Cross-platform oracle: PR CI `Unit Tests` green on
   ubuntu-latest/3.11 with both files selected (they are changed test
   files, so the selector picks them directly); no node-27 execution.
-- [ ] E7 Full-suite spot on macOS: the 4 ids absent from failures;
+- [x] E7 Full-suite spot on macOS: the 4 ids absent from failures;
   expected residual reds: none from this family (#1276's flake may
   or may not appear; it is tracked and out of scope).

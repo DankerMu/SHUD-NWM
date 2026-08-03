@@ -43,7 +43,7 @@ per-case (anchors verified at master b2a39d36; issue reproduction at
    coverage on 3.12 today. Measured at issue time: depth 20000 (~40 KB, well under
    `MAX_CUTOVER_DECLARATION_BYTES` = 256 KiB) raises deterministically
    on 3.11 and 3.12 — cross-review later measured 3.14's threshold at
-   ~74384 (20000 parses there), so the delivered pin is 100000
+   ~74.4k (measured 74381-74384; drifts with C-stack headroom) (20000 parses there), so the delivered pin is 100000
    (200000 bytes, still under the limit; raises on 3.11–3.14).
 
 Two sibling tests are green-for-the-wrong-reason on macOS and must be
@@ -102,7 +102,7 @@ preservation, never blanket skips:
    100000 (measured through the production loader to raise
    `RecursionError` on CPython 3.11/3.12/3.13/3.14; the originally
    planned 20000 parses on 3.14, whose C-level threshold rose to
-   ~74384 — caught in cross-review), asserted
+   ~74.4k (measured 74381-74384; drifts with C-stack headroom) — caught in cross-review), asserted
    `declaration_malformed_json`, docstring rewritten
    to state the cross-interpreter determinism rationale (and the
    falsified 3.11-only prediction removed); a NEW independent case
