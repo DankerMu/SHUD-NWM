@@ -469,8 +469,11 @@ def _candidate_state_decision_event(
     # cycle-granularity marker attribution knife reads them to decide whether a marker may
     # be adopted at all.  Sanitizing them away makes that knife fail OPEN on the filtered
     # state (a cycle-wide marker reads as a plain pipeline_job marker and gets adopted by
-    # every model).  They are read-only inputs to a fail-closed test and can never widen the
-    # candidate's scope by themselves — the marker still has to name THIS candidate's model.
+    # every model).  NOTE the scope consequence: a self-declared MATCHING ``model_id`` DOES
+    # re-admit a sanitized event under shared-cycle scoping (``_shared_cycle_row_is_candidate_scoped``
+    # accepts a single matching identity field).  Foreign model ids stay excluded, and within
+    # one source-cycle aggregate a model id maps to exactly one candidate, so the re-admitted
+    # event is candidate-own by construction.
     for key in ("event_id", "entity_id", "entity_type", "model_id", "created_at", "updated_at"):
         value = event.get(key)
         if value not in (None, ""):

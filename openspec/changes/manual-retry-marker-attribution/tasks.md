@@ -195,6 +195,23 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   reason 收紧（`manual_retry_requested`→`retry_failed_candidate`
   于 own-target-repaired 形）在 design.md 与 PR body 披露。
 
+## 2c. Round-5 N1′ 证据等价化（第二次 depth retro 修正动作，硬顶轮）
+
+- [x] 2c.1 F-N1 `_marker_event_pins_attempt` job-is-None 分支实现
+  fixA（verifier 五树实测定标：entity `(source,stamp)` 与 state
+  `run_id` 比对 cycle 归属；同 cycle 同 stage 钉 / failed_stage
+  缺失走 arm 2 / 异 cycle 或无法判定不钉 / 非 cycle 文法
+  fail-open 不变）；
+- [x] 2c.2 F-N2 测试锚：同 cycle cohort 判别锚（HEAD 红==1）、
+  真实 `candidate_state_from_rows` 截断锚（HEAD 红==1）、T10
+  rc=7 判别力恢复、M6 文法锚、V-E 4 格 characterization；
+- [x] 2c.3 F-N3 文本：spec N1′ 子句改写为证据等价语义（消除与
+  requirement 主句自相矛盾）、design.md round-4 修订节（含 F5′
+  保守残留与方向 (ii) 否决记录）、identity_filter 注释假不变量
+  更正、V-E 披露两方向补齐；
+- [x] 2c.4 V-D 13 形矩阵作为回归断言复跑一致 + mutant 复核
+  （helper 恒 False / fullmatch→startswith 必红）。
+
 ## 3. Spec + validation
 
 - [x] 3.1 Spec delta: ADDED requirement in `job-retry-mechanism` ——
@@ -222,9 +239,11 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   tests/test_file_orchestration_migration.py
   tests/test_production_scheduler.py tests/test_orchestration_chain.py`。
 - [x] E3 `uv run ruff check .` green; openspec strict green.
-- [x] E4 Surface check: `git diff master...HEAD --name-only` = 1
-  生产文件 + 测试文件（1-2 个）+ 本 openspec change；frozen 面
-  零 diff。
+- [x] E4 Surface check: `git diff master...HEAD --name-only` = 2
+  生产文件（`scheduler_state_manual_retry.py` +
+  `scheduler_state_identity_filter.py`，后者 round-3 修订经诊断
+  定标解冻，见 Frozen 节）+ 2 测试文件 + 本 openspec change +
+  review-gate 状态文件；其余 frozen 面零 diff。
 - [ ] E5 CI `Unit Tests` green on PR head。
 - [ ] E6 node-27 read-only 真实快照 receipt（confirmatory，见
   ORACLE ROUTING：结果如实记录，缺失不阻塞）。

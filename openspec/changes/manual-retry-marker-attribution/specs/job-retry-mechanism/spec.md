@@ -72,13 +72,21 @@ events stay visible in every candidate's state for diagnostics.
 - **AND** a model-less job row carrying a candidate-run `fcst_...`
   id is not cycle-scope — a marker targeting it keeps pinning
   `new_attempt` to its `retry_count`
-- **AND** the rule survives candidate-state filtering: a marker
-  whose entity cannot be resolved to any job row but whose entity id
-  carries the cycle-scope pipeline-job grammar
-  (`job_cycle_<source>_<stamp>_...`, the shape left behind when a
-  non-authoritative cohort master row is dropped from the decision
-  state) does not pin the candidate's attempt, while markers with
-  other unresolvable entity ids keep their existing pinning behavior
+- **AND** the rule survives candidate-state filtering with
+  equivalent evidence: a marker whose entity cannot be resolved to
+  any job row but whose entity id carries the cycle-scope
+  pipeline-job grammar (`job_cycle_<source>_<stamp>_...`, the shape
+  left behind when a non-authoritative cohort master row is dropped
+  from the decision state or truncated from the row window) pins the
+  candidate's attempt exactly when the id's cycle is the candidate's
+  own cycle AND the id's stage is the repair target (the id ends
+  with the state's failed stage, or with no failed stage the
+  candidate has no live failure of its own) — so an operator's
+  manual retry of the candidate's own cohort cycle stage stays
+  effective even though the row is invisible, while a
+  foreign-cycle or cross-stage cycle counter still never charges
+  the candidate's budget; markers with other unresolvable entity
+  ids keep their existing pinning behavior
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 

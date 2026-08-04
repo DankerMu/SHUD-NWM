@@ -174,17 +174,30 @@ decision-state 差分纯增量）：
    details model_id；details 键置于 retry-marker 分支内最窄放置）。
    三键缺一不可：仅 entity_type 会把两个显式归属出口在过滤态关死
    （过度收窄）。`entity_type` 在 scheduler_state 层唯一读者是刀 1。
-   披露：details.model_id 参与 `_nested_state_identity_payloads`
-   scoping，方向保守（≠候选 → 行被排除），实测零兑现。
-2. **刀 2 N1′ 窄化**：entity 查不回行时，entity_id 命中
-   `^job_cycle_([^_]+)_(\d{10})_.+$`（镜像 journal
+   披露（round-4 V-E 裁定更正后的完整两方向）：model_id（顶层为
+   `_legacy_identity_values` 一级别名，details 经
+   `_nested_state_identity_payloads`）参与 shared-cycle scoping
+   ——**排除**方向保守（≠候选 → 事件不保留，实测恒闭）；
+   **纳入**方向是实打实的行为变更：自称 == 候选 model 的
+   non-authoritative 事件会被 `_shared_cycle_row_is_candidate_
+   scoped` 单字段相等重新保留进 decision state（实测可把
+   permanent_failure_guard 翻成 manual_retry_requested）。今日
+   生产零流量（写入面 AST 全扫零 model_id 键；历史 JSONB 迁移与
+   journal 读取无键白名单为残留活化通道）；aggregate 内 model_id
+   唯一确定候选 → 被纳入事件确属本候选，行为语义正确，故裁定
+   保留行为、更正本披露与 identity_filter 注释措辞，并以 4 格
+   characterization 用例（own/foreign × top/details）钉住该面。
+2. **刀 2 N1′ 窄化**（初版；**round-4 复审证伪其单判据形，
+   round-5 修订为证据等价形，见下节**）：entity 查不回行时，
+   entity_id 命中 `^job_cycle_([^_]+)_(\d{10})_.+$`（镜像 journal
    `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE:173`；cohort master job_id =
-   `job_{run_id}_{stage}` → `job_cycle_...` 前缀）→ 不钉；其余
-   unresolvable 形保持 fail-open（`:15154`/`:15700` 合成 state
-   依赖）。`:2671` 的 `job_cycle_` 形 entity 数值恒等（1==1）不受
-   影响；同 cycle download 行走 filter carve-out 保行、钉值仍由
-   stage 判据裁定（round-2 parity 不破）；跨 cycle download 形
-   5→1 属顺带修复（外 cycle counter 不得钉本候选）。
+   `job_{run_id}_{stage}` → `job_cycle_...` 前缀）→ 不钉。初版
+   安全论证"同 cycle download 行走 filter carve-out 保行"只对裸
+   `cycle_<src>_<stamp>` run-id 形成立——carve-out 的
+   `_source_cycle_identity_matches_expected` 拒绝 cohort-digest
+   文法，且截断（job/event 双独立 LIMIT 100）可使任何合法自有行
+   缺席——两形均被 round-4 verifier 实测为 operator 钉值 5→1
+   回归。
 3. **A3（requested False→True 翻转）定标为不加规则**：32 格矩阵 +
    无-foreign-marker 对照 C1 证明——刀 1 拒掉 max 后 state 行为与
    "外来 marker 不存在"逐格一致，`repairs_historical_failure` 在
@@ -200,9 +213,49 @@ decision-state 差分纯增量）：
    遮蔽，mutant 1088 例零红）。ORACLE ROUTING 增补 decision-path
    规则，E4 冻结面规则改为"零未经诊断定标的 diff"。
 
-DEFER（master 既有，issue-scribe 立项）：arm 2 域 cancelled/hydro
-扩展（B1）；sibling `pipeline_job` marker 钉值（E1，#1164 变形）；
-无 retry_count marker 的终止性缺口（E2）。
+DEFER（master 既有，已立项）：arm 2 域 cancelled/hydro
+扩展（#1287）；sibling 具名行/`pipeline_job` marker 钉值
+（#1288，#1164 变形）；无 retry_count marker 的终止性缺口
+（#1289）。
+
+## Round-4 cross-review 修订（PR #1286，N1′ 证据等价化；第二次 depth retro）
+
+round-4 复审 + verifier 五树实测（master/64e2ecbd/HEAD/fixA/fixB
++ 13 形兼容矩阵）CONFIRMED：N1′ 的文法**单判据**在证据缺失时默认
+拒绝，但文法不携带 cycle 归属与 stage 证据——(a) 多候选 cohort
+master（`cycle_<src>_<stamp>_<stage>_cohort_<digest>`，生产常态形，
+`DOWNSTREAM_RESTART_STAGES` 的 state_save_qc/convert 等）行恒非
+authoritative 被删，同 cycle 同 stage 的 operator 钉值 5→1；
+(b) 截断（`candidate_state_from_rows` job/event 双独立 LIMIT 100，
+job 按纯时间近因排序，e2e 实证 N=120）使合法自有行缺席同样 5→1
+——两形均为 round-4 引入回归。verifier 另证：N1′ 原本防御的
+**异 cycle 形经两条读路径均不可达**（PG 查询全绑 run_id/cycle_id、
+journal 只读本 cycle 段），真实威胁只存在于合成/legacy 态。
+
+修订为 **fixA（证据等价）**：unresolvable ∧ 文法命中 → 用
+entity_id 自带的 `(source, stamp)` 与 state 顶层 `run_id`
+（`^fcst_<src>_<stamp>_` 恒在、filter 从不 strip，五组过滤态探针
+实证）比对 cycle 归属；异 cycle/无法判定 → 不钉；同 cycle →
+`endswith(f"_{failed_stage}")` 同 stage → 钉，failed_stage 缺失 →
+arm 2（`not _state_has_candidate_scope_failed_job`）；非 cycle
+文法 → fail-open 不变。13 形矩阵 fixA 全过（M1/M2/M5/F3/F5 恢复 5、
+T7/T8/Q2-c2 保持 1、T9 parity 5、T10 fail-open、:2671 恒等、M3
+镜像 arm 1）。
+
+**已披露残留**：F5′——带 model_id 的 `job_cycle_*` 行缺席 ∧
+failed_stage 与行 stage 不同 → fixA 欠钉（行在场时钉 5）。方向
+与"cycle 计数不入候选预算"不变量同向（保守），无既有测试/spec
+场景覆盖；触发需模型域 cohort 行被截断 + 交叉 stage 失败双重
+条件。
+
+方向 (ii)（filter carve-out 扩展）否决记录：对截断形结构性无效
+（截断在 repository 读取层，早于 filter）；把非 authoritative
+失败行放进 decision state 冲撞 filter 模块唯一职责。
+
+测试网补钉：同 cycle cohort 判别锚（HEAD 红）、真实
+`candidate_state_from_rows` 截断锚（HEAD 红）、T10 判别力恢复
+（rc=7≠prev+1）、M6 文法锚（前缀命中不合文法仍 fail-open）、
+V-E 4 格 characterization。
 
 ## 回归测试 oracle（与刀对齐）
 

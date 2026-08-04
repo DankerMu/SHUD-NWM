@@ -31,6 +31,9 @@ from services.orchestrator.scheduler_state_types import (
 # Mirrors ``file_orchestration_journal._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE``: cycle-scope
 # (cohort master) job ids are persisted as ``job_cycle_<source>_<stamp>_<suffix>``.
 _CYCLE_SCOPE_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
+# The candidate's own run id: ``fcst_<source>_<stamp>_<model_id>``.  Both patterns capture
+# ``(source, stamp)``, so a marker entity id's cycle can be compared with the candidate's own.
+_CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_")
 
 
 def _manual_retry_requested(state: Mapping[str, Any]) -> bool:
@@ -138,20 +141,32 @@ def _event_entity_job_row(state: Mapping[str, Any], event: Mapping[str, Any]) ->
             return job
     return None
 
-def _entity_id_is_cycle_scope_job_id(entity_id: Any) -> bool:
-    """Grammar-only cycle-scope test for a marker's entity id, used when no row resolves.
+def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], entity_id: Any) -> bool:
+    """Pin gate for markers whose entity resolves to no job row.
 
     The decision state deletes non-authoritative cohort master rows (see
-    ``scheduler_state_identity_filter._candidate_state_decision_state``, which skips
-    ``pipeline_jobs[i]`` sources that carry no candidate proof), so ``_event_entity_job_row``
-    cannot resolve such a marker on the path production actually decides on.  Without this
-    grammar check the pin gate would fail OPEN there and hand a foreign cycle counter to the
-    candidate.  Cohort master ids persist as ``job_cycle_<source>_<stamp>_<stage>_<model_id>``
-    (or ``..._cohort_<digest>``), which is exactly what this matches.
+    ``scheduler_state_identity_filter._candidate_state_decision_state``), and the repository
+    projection truncates jobs and events independently, so a marker routinely outlives its
+    target row on the path production decides on.  Row absence therefore proves nothing by
+    itself, and the id has to carry the evidence instead.
+
+    Non-cycle-grammar ids keep the historical fail-open (synthetic and compacted states depend
+    on it).  Cycle-grammar ids pin only with evidence equivalent to the resolved-row rule: the
+    id's cycle must be the candidate's own (foreign-cycle rows are unreachable through both
+    read paths, but sanitized/legacy states can still carry foreign markers), and the id's
+    stage must be the repair target (suffix match on ``failed_stage``; with no ``failed_stage``,
+    the "only failure left" arm applies, mirroring ``_cycle_scope_marker_pins_attempt``).
     """
-    if entity_id in (None, ""):
+    match = _CYCLE_SCOPE_JOB_ID_RE.fullmatch(str(entity_id)) if entity_id not in (None, "") else None
+    if match is None:
+        return True
+    run_match = _CANDIDATE_RUN_ID_RE.match(str(state.get("run_id") or ""))
+    if run_match is None or run_match.groups() != match.groups():
         return False
-    return _CYCLE_SCOPE_JOB_ID_RE.fullmatch(str(entity_id)) is not None
+    failed_stage = state.get("failed_stage")
+    if failed_stage not in (None, ""):
+        return str(entity_id).endswith(f"_{failed_stage}")
+    return not _state_has_candidate_scope_failed_job(state)
 
 def _job_status_text(job: Mapping[str, Any]) -> str:
     return str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
@@ -204,9 +219,7 @@ def _marker_event_pins_attempt(state: Mapping[str, Any], event: Mapping[str, Any
     """Attempt-derivation gate for one adopted marker: cycle-scope rows need the pin rule."""
     job = _event_entity_job_row(state, event)
     if job is None:
-        # Unresolvable entity: fail OPEN only when the id is not cycle-scope grammar
-        # (synthetic states with unresolvable non-cycle ids depend on that fail-open).
-        return not _entity_id_is_cycle_scope_job_id(event.get("entity_id"))
+        return _unresolvable_marker_entity_pins_attempt(state, event.get("entity_id"))
     if not _job_is_cycle_scope_row(job):
         return True
     return _cycle_scope_marker_pins_attempt(state, job)
