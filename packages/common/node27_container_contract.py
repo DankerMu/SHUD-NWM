@@ -241,14 +241,16 @@ def validated_probe_target(target: str) -> str:
 # REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1269): the
 # container-side path prefix every forensic container dump path must live
 # inside.  Repo-side is the DECISION of where dumps must live; the mount layout
-# it is drawn over is measured (``docker inspect nhms-db``, 2026-08-02), and
-# that output determines exactly this much (its ``.Mounts`` for the binds, its
-# ``Config.Env`` ``PGDATA`` for which directory is the DB's own data directory):
-# the container carries two host bind mounts, of which the only one
-# landing under this prefix is ``/home/nwm/nhms-evidence`` ->
+# it is drawn over is measured (``docker inspect nhms-db``, re-measured
+# 2026-08-06), and that output determines exactly this much (its ``.Mounts``
+# for the binds, its ``Config.Env`` ``PGDATA`` for which directory is the DB's
+# own data directory): the container carries three host bind mounts, of which
+# the only one landing under this prefix is ``/home/nwm/nhms-evidence`` ->
 # ``/var/lib/postgresql/evidence`` (RW), while the DB's own data directory is
-# the OTHER mount (``/home/nwm/nhms-pgdata`` -> ``/home/postgres/pgdata/data``),
-# outside this prefix.  So the host-writable region inside the prefix is that
+# ``/home/nwm/nhms-pgdata`` -> ``/home/postgres/pgdata/data`` and the third is
+# the ``ghdc`` tablespace ``/data/GHDC/nwm-archive/nhms-tablespace`` ->
+# ``/home/postgres/pgdata/tablespaces/ghdc`` (added 2026-08-06) -- both outside
+# this prefix, so the conclusion below is unchanged.  So the host-writable region inside the prefix is that
 # ``evidence`` SUBTREE.  Nothing is claimed here about what the prefix path
 # itself is or is not -- that inspect output cannot determine it.
 # FIVE gates judge that path today, but they did not start level.  FOUR carried

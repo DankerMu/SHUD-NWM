@@ -1025,8 +1025,13 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment (2026-08-06)"）。
 运维含义：DB 增长会挤压归档层的 refuse 阈值，可能重现 mover ↔ retention 死锁。
 
-容量核查必须**两块盘都看**：`df -h /home /data/GHDC`。治理 receipt 目前只统计
-`/home/nwm/nhms-pgdata`，看不到 `ghdc`，也不枚举 `/data/GHDC`（issue #1290）。
+容量核查必须**两块盘都看**：`df -h /home /data/GHDC`。治理 receipt 的口径是
+partial 且**两个方向都失真**：`archive_root` 块**确实**报 `/dev/md0` 的
+free/total 并带 warn/refuse 告警（需 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
+两个都设，否则 `band=unconfigured` 不告警）；但 `pgdata_root` 只 `du`
+`/home/nwm/nhms-pgdata`，DB 体量**少报**迁走的字节；而 `archive_root.used_bytes`
+是整个归档根的 `du`，表空间就在根下面，归档体量**多报**了约 502 GB。单独量归档用
+`du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive`。issue #1290。
 
 重建 `nhms-db` 容器的流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿

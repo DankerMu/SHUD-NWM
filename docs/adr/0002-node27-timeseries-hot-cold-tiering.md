@@ -211,12 +211,27 @@ and making retention refuse to drop. Accepted because `/dev/md0` holds ~19 GB
 of archive against 15 TB, and the archive grows at single-digit GB/month —
 i.e. headroom, not a structural fix. Terms:
 
-- The archive free-space refuse/warn band must reserve headroom for the
-  tablespace's working set, not just archive growth; decompression can
-  transiently double a chunk.
-- `/data/GHDC` must be read manually (`df -h /home /data/GHDC`) until
-  governance collection covers it — `scripts/node27_resource_governance.py`
-  reports neither the tablespace bytes nor that filesystem (issue #1290).
+- The tablespace's working set must be bounded (re-compress promptly, never
+  hold more uncompressed than the chunks actively being reingested). This is
+  the only lever that protects `/dev/md0`. The archive free-space band is
+  **not** such a lever: it is the mover's entry gate, it reserves nothing,
+  and PostgreSQL enforces no tablespace quota — raising it makes the mover
+  refuse at higher free space, i.e. it advances the deadlock above instead of
+  preventing it.
+- Governance visibility is partial, and distorted in both directions.
+  `scripts/node27_resource_governance.py` *does* report `/dev/md0` free/total
+  and warn/refuse recommendations through its `archive_root` block (live only
+  when both `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES` are set). But its
+  `pgdata_root` `du` covers only `/home/nwm/nhms-pgdata`, so the DB footprint
+  under-reports by the migrated bytes; and `archive_root.used_bytes` is a `du`
+  of the whole archive root, which now *contains* the tablespace — so the
+  archive's reported size absorbed ~502 GB of database and the
+  "single-digit GB/month" growth signal this exception relies on is no longer
+  readable from it. Read `df -h /home /data/GHDC` manually, and size the
+  archive alone with `du -s --exclude=nhms-tablespace`. Issue #1290.
+- `/dev/md0` is not NHMS-exclusive (`root`/`ghdcadmin` trees share it, ~1 TB
+  in use at the 2026-07-26 migration), so free space can fall without any
+  NHMS growth.
 - Prefer a dedicated filesystem for `ghdc` the next time root-level
   provisioning is available on node-27. This amendment is an exception with a
   reason, not a new rule; the 2026-07-26 separation principle still stands for

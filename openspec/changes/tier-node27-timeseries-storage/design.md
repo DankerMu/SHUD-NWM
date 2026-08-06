@@ -176,10 +176,12 @@ registered in the governance audit's unit list). Node-22 is untouched.
   2026-08-06: the sharing returned inverted — PostgreSQL tablespace `ghdc`
   (`/data/GHDC/nwm-archive/nhms-tablespace`) now puts ~502 GB of
   `river_timeseries` / `forcing_station_timeseries` chunks on the archive
-  filesystem, so DB growth can starve the mover. Also, "volume growth visible
-  in every governance receipt" is currently **false** for those bytes:
-  `scripts/node27_resource_governance.py` neither counts the tablespace nor
-  enumerates `/data/GHDC` (issue #1290) — read it by hand meanwhile. Both
+  filesystem, so DB growth can starve the mover. "Volume growth visible in
+  every governance receipt" also no longer means what it says: the
+  `archive_root` block does report `/dev/md0` free/total, but its `used_bytes`
+  is a `du` of the whole archive root and now absorbs the ~502 GB tablespace,
+  while `pgdata_root` under-reports the DB by the same bytes — the archive's
+  own growth signal is unreadable from the receipt (issue #1290). Both
   amendments are recorded in
   `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`; operator-facing
   detail in `docs/runbooks/tier-node27-timeseries-storage.md`.

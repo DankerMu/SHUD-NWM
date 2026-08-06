@@ -83,26 +83,96 @@ retention refuse to drop. Same cycle, different filler.
 
 **Required mitigations while the exception stands:**
 
-- **Reserve headroom explicitly.** The archive free-space refuse/warn band
-  must be set high enough that it still refuses *before* the tablespace's
-  working set (decompression can transiently double a chunk) can starve the
-  mover. Do not tune the band against archive growth alone — archive grows at
-  single-digit GB/month, the tablespace moves in hundreds of GB.
-- **Read both devices, every time.** `df -h /home /data/GHDC`. Governance
-  receipts currently report neither the tablespace bytes nor the `/data/GHDC`
-  filesystem (see the capacity caveat below), so this check is manual.
+- **The free-space band cannot reserve anything — do not treat it as a
+  reservation.** `NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES` is purely the mover's
+  entry gate: `_measure_archive_free_space` reads
+  `shutil.disk_usage(archive_root).free` and, in the `refuse` band, the mover
+  publishes a refusal receipt and returns before any candidate discovery
+  (`scripts/node27_product_archive.py`, and §"Refuse-threshold behavior"
+  below). Nothing preallocates or quotas — PostgreSQL enforces no tablespace
+  quota either. Raising the threshold makes the mover refuse at *higher* free
+  space, i.e. it advances the deadlock described above rather than preventing
+  it. Halting the mover does passively leave bytes for PostgreSQL, but the
+  price is exactly the frozen frontier this section warns about. Tune the band
+  only together with a retention/capacity plan, never as a way to "reserve"
+  space for `ghdc`.
+- **Bound the tablespace's working set instead.** That is the only lever that
+  actually protects `/dev/md0`: re-compress promptly after a decompress, never
+  hold more than the chunks you are actively reingesting in uncompressed form,
+  and treat a `warn`-band governance recommendation as a signal to
+  re-compress or relocate chunks — not to move the band.
+- **Read both devices, every time.** `df -h /home /data/GHDC`. See the
+  capacity caveat below for exactly what the governance receipt does and does
+  not tell you.
 - **Do not treat headroom as permanent.** 15 TB with ~19 GB of archive and
   ~502 GB of tablespace is comfortable today; that is the reason the exception
-  was accepted, not a reason it is safe indefinitely. Revisit when either tier
-  changes shape, and prefer a dedicated filesystem for `ghdc` the next time
-  root-level provisioning is available on node-27.
+  was accepted, not a reason it is safe indefinitely. `/dev/md0` is also not
+  NHMS-exclusive — `/data/GHDC` carries `root`- and `ghdcadmin`-owned trees
+  (~1 TB was already in use at the 2026-07-26 migration), so free space can
+  fall without any NHMS growth at all. Revisit when either tier changes shape
+  or when third-party usage moves, and prefer a dedicated filesystem for
+  `ghdc` the next time root-level provisioning is available on node-27.
 
-**Capacity receipts currently under-report.**
-`scripts/node27_resource_governance.py` `du`s
-`NODE27_GOVERNANCE_PGDATA_ROOT` (`/home/nwm/nhms-pgdata`) and enumerates only
-`/`, `/home`, the repo filesystem and the object-store filesystem. Bytes that
-moved to `ghdc` vanished from the reported DB footprint with nothing deleted —
-do not read that drop as retention succeeding. Tracked in issue #1290.
+**What the governance receipt actually shows (read this before quoting it).**
+`scripts/node27_resource_governance.py`:
+
+- **Does** report `/dev/md0`'s free/total: `collect_archive_root` runs
+  `shutil.disk_usage()` on the archive root (deployed
+  `NODE27_GOVERNANCE_ARCHIVE_ROOT=/data/GHDC/nwm-archive`) and publishes an
+  `archive_root` block with `total_bytes` / `free_bytes` / `band`, and emits
+  `ARCHIVE_FREE_BELOW_REFUSE` (critical) / `ARCHIVE_FREE_BELOW_WARN`
+  recommendations. **Caveat:** the band is live only when *both*
+  `NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES` and `..._REFUSE_BYTES` are set —
+  neither set yields `band = "unconfigured"` and no recommendation ever
+  fires; exactly one set raises `ValueError` (fail-closed). Confirm both are
+  set before relying on this as the `/dev/md0` alarm.
+- **Does not** list `/data/GHDC` in the receipt's `filesystems` block —
+  `collect_filesystem()` enumerates only `/`, `/home`, the repo filesystem
+  and the object-store filesystem, and the `df -ih` inode check covers only
+  `/` and `/home`.
+- **Under-reports the DB.** `path_sizes["pgdata_root"]` is a `du` of
+  `NODE27_GOVERNANCE_PGDATA_ROOT` (`/home/nwm/nhms-pgdata`) only, so the ~502 GB
+  that moved to `ghdc` vanished from the reported DB footprint with nothing
+  deleted. Do not read that drop as retention succeeding.
+- **Over-reports the archive, which is the more dangerous distortion.**
+  `archive_root.used_bytes` is `du -s` of the whole archive root, and
+  `nhms-tablespace/` sits *inside* it — so the archive's reported size now
+  silently includes the entire tablespace, and `free_bytes` now moves with
+  database growth. The "archive grows at single-digit GB/month" signal that
+  this exception's acceptance rests on is no longer readable from that field.
+  Size the archive alone with
+  `du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive` until the collector
+  separates the two.
+
+Tracked in issue #1290.
+
+**Establishing or relocating the tablespace** (needed for DR, a pgdata
+rebuild, or the promised move to a dedicated filesystem). Order matters — the
+container must carry the mount *before* `CREATE TABLESPACE` runs, because the
+`LOCATION` is a container path:
+
+1. Host directory, empty, owned by the container's uid/gid:
+
+   ```bash
+   mkdir -p /data/GHDC/nwm-archive/nhms-tablespace
+   chown nwm:nwm /data/GHDC/nwm-archive/nhms-tablespace
+   chmod 0700 /data/GHDC/nwm-archive/nhms-tablespace
+   ```
+
+2. Recreate the container with the bind mount — §4.3.3 below.
+
+3. Create the tablespace (superuser; the target directory must be empty):
+
+   ```sql
+   CREATE TABLESPACE ghdc LOCATION '/home/postgres/pgdata/tablespaces/ghdc';
+   ```
+
+4. Move chunks and **their indexes** into it — see §4.3.2 step 3a for the
+   `format(%I)` + `\gexec` form.
+
+Once a second tablespace exists, any file-level backup or restore must cover
+the `pg_tblspc` link targets as well as `PGDATA`; a `PGDATA`-only copy is no
+longer a complete backup.
 
 **Tablespace residency is per chunk and is not part of the schema.** Nothing
 under `db/` or `packages/common/migrate.py` references a tablespace; `ghdc` is
@@ -1765,11 +1835,26 @@ indexes in the `ghdc` tablespace.
 Never type the DB password: carry the environment over from the running
 container into a `0600` file and delete it once `docker run` has read it.
 
+**Never run this from the floating `pg15-latest` tag.**
+`packages/common/node27_external_contract_snapshot.json` pins
+`host_context.nhms_db_image_id` to a specific `sha256:` digest (TimescaleDB
+2.10.2 / PostgreSQL 15.2), and `scripts/node27_external_contract_snapshot.py`
+compares that field (`COMPARED_SECTIONS` includes `host_context`), exiting `3`
+on drift — which §4.4 classifies as stop-and-full-PR-loop, not a patch bump.
+Re-resolving the tag is the one moment that field can move: a newer
+`pg15-latest` ships a TimescaleDB shared library that may not carry `2.10.2`,
+and the extension then fails to load against the on-disk catalog — on the
+production primary, inside the recreate window. Pin by digest.
+
 1. Quiesce writers — stop `nhms-node27-autopipe.timer` and any in-flight
    `node27_autopipeline.py`, and wait for `/tmp/autopipe.cron.lock` to free.
+   Also stop the other node-27 timers for the duration
+   (`nhms-node27-timeseries-compression`, `-timeseries-retention`,
+   `-product-archive`, `-storage-inventory-audit`, `-resource-governance`);
+   they will otherwise fire against a stopped DB and litter failure receipts.
 
-2. Capture env, stop, and **rename rather than remove** the old container so
-   it stays available as a rollback:
+2. Capture the full prior spec, stop, and **rename rather than remove** the
+   old container so it stays available as a rollback:
 
    ```bash
    TS=$(date -u +%Y%m%dT%H%M%SZ)
@@ -1777,11 +1862,21 @@ container into a `0600` file and delete it once `docker run` has read it.
    umask 077
    docker inspect nhms-db --format '{{range .Config.Env}}{{println .}}{{end}}' \
      | grep -v '^$' > "$ENVFILE"
-   docker stop nhms-db
+   # Full prior spec, to diff against after recreate (step 4).
+   docker inspect nhms-db > /home/nwm/nhms-db-inspect-$TS.json
+   # Pin the engine: local image id, plus the registry digest as a pullable
+   # fallback if the local cache is cold (host rebuild, another machine).
+   IMAGE=$(docker inspect nhms-db --format '{{.Image}}')
+   IMAGE_DIGEST=$(docker inspect nhms-db --format '{{index .RepoDigests 0}}')
+   echo "pinned: $IMAGE / $IMAGE_DIGEST"
+   # -t 300: a multi-hundred-GB instance can exceed docker's 10s default and
+   # get SIGKILLed into crash recovery.
+   docker stop -t 300 nhms-db
+   docker logs --tail 20 nhms-db   # expect "database system is shut down"
    docker rename nhms-db nhms-db-pretbs-$TS
    ```
 
-3. Recreate with the full mount set:
+3. Recreate with the full mount set, from the pinned image:
 
    ```bash
    docker run -d \
@@ -1793,23 +1888,49 @@ container into a `0600` file and delete it once `docker run` has read it.
      -v /home/nwm/nhms-pgdata:/home/postgres/pgdata/data \
      -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
      -v /data/GHDC/nwm-archive/nhms-tablespace:/home/postgres/pgdata/tablespaces/ghdc \
-     timescale/timescaledb-ha:pg15-latest postgres
+     "$IMAGE" postgres
    rm -f "$ENVFILE"
    ```
+
+   Use `"$IMAGE_DIGEST"` instead of `"$IMAGE"` when the local cache is cold —
+   it is pullable, whereas a bare local image id turns a cache miss into a hard
+   `docker run` failure mid-window. Never substitute the bare tag.
 
    `--user 1005:1005` is the host `nwm` uid/gid and must match the ownership
    of all three host paths; the tablespace directory is `nwm:nwm` mode `0700`.
 
-4. Verify before declaring success:
+4. Verify before declaring success. Source credentials rather than typing
+   them: `set -a; . /home/nwm/NWM/infra/env/node27-ingest.env; set +a`.
 
    ```bash
+   # (a) The mount is present AND actually serving data. `ls -ld` and
+   #     pg_tablespace_location() both succeed even when the third -v is
+   #     missing — docker silently creates an empty bind source and
+   #     pg_tablespace_location() just reads the pg_tblspc symlink. Only a
+   #     real read of a ghdc-resident chunk proves the mount.
    docker exec nhms-db ls -ld /home/postgres/pgdata/tablespaces/ghdc
-   psql "$DATABASE_URL" -c "SELECT spcname, pg_tablespace_location(oid) FROM pg_tablespace ORDER BY 1"
+   psql "$DATABASE_URL" -c \
+     "SELECT count(*) FROM _timescaledb_internal._hyper_3_10_chunk"
+   psql "$DATABASE_URL" -c \
+     "SELECT spcname, pg_tablespace_location(oid) FROM pg_tablespace ORDER BY 1"
+
+   # (b) The engine did not drift.
+   uv run python scripts/node27_external_contract_snapshot.py --check   # expect exit 0
+
+   # (c) Nothing else in the container spec was silently dropped
+   #     (shm-size, ulimits, network, log-opts, healthcheck …).
+   diff <(jq -S '.[0].HostConfig' /home/nwm/nhms-db-inspect-$TS.json) \
+        <(docker inspect nhms-db | jq -S '.[0].HostConfig')
+
+   # (d) Display is live.
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
    ```
 
-   Expect `ghdc` present at `/home/postgres/pgdata/tablespaces/ghdc` and the
-   display API returning `200`. Then restart the timers stopped in step 1.
+   Expect: a non-zero row count from the `ghdc`-resident chunk; `ghdc` at
+   `/home/postgres/pgdata/tablespaces/ghdc`; `--check` exit `0` (on exit `3`
+   stop and follow §4.4); the `HostConfig` diff showing only the intended
+   third mount; and `200` from the display API. Then restart the timers
+   stopped in step 1.
 
 Rollback: `docker stop nhms-db && docker rm nhms-db && docker rename
 nhms-db-pretbs-$TS nhms-db && docker start nhms-db`. Valid only while no chunk

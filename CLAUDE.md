@@ -207,7 +207,8 @@ node-27 DB 存储自 2026-08-06 起分布在两个表空间：`pg_default` 在
 容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit），三个 bind
 mount 缺一不可；重建流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3。容量核查要
-`df -h /home /data/GHDC` 两块都看。
+`df -h /home /data/GHDC` 两块都看：治理 receipt 的 `archive_root` 块报 `/dev/md0`
+余量，但 DB 体量少报迁走的字节、归档体量多报了整个表空间（issue #1290）。
 
 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
 
