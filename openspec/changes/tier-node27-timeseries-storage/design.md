@@ -171,6 +171,20 @@ registered in the governance audit's unit list). Node-22 is untouched.
 - [Archive shares the 1.7 TB volume with pgdata] → governance watermark:
   archive mover refuses enforce below a free-space threshold; volume growth
   visible in every governance receipt.
+  **Superseded twice.** 2026-07-26: the archive moved to its own filesystem
+  (`/data/GHDC` on `/dev/md0`), so it no longer shares a volume with pgdata.
+  2026-08-06: the sharing returned inverted — PostgreSQL tablespace `ghdc`
+  (`/data/GHDC/nwm-archive/nhms-tablespace`) now puts ~502 GB of
+  `river_timeseries` / `forcing_station_timeseries` chunks on the archive
+  filesystem, so DB growth can starve the mover. "Volume growth visible in
+  every governance receipt" also no longer means what it says: the
+  `archive_root` block does report `/dev/md0` free/total, but its `used_bytes`
+  is a `du` of the whole archive root and now absorbs the ~502 GB tablespace,
+  while `pgdata_root` under-reports the DB by the same bytes — the archive's
+  own growth signal is unreadable from the receipt (issue #1290). Both
+  amendments are recorded in
+  `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`; operator-facing
+  detail in `docs/runbooks/tier-node27-timeseries-storage.md`.
 - [Inventory audit finds river product gaps] → salvage lane already covers
   arbitrary selectors; scope grows without design change.
 - [tar.zst CPU/IO pressure on 27] → bounded cycles per tick, off-peak timer
