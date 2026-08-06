@@ -180,7 +180,7 @@ directory bound to the same container path would start a cluster whose
 into the empty directory, splitting the tablespace across two host paths.
 
 1. Stop the container cleanly (`docker stop -t 300 nhms-db` — §4.3.3 step 2
-   discipline, including the timer quiesce).
+   discipline, plus the step 1 timer quiesce).
 2. Copy the old host directory to the new device, preserving everything:
 
    ```bash
@@ -1908,11 +1908,15 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
    umask 077
    docker inspect nhms-db --format '{{range .Config.Env}}{{println .}}{{end}}' \
      | grep -v '^$' > "$ENVFILE"
-   # HostConfig only, to diff against after recreate (step 4). Do NOT save the
-   # full inspect: its .Config.Env carries the DB password and would outlive
-   # the 0600-and-delete discipline this section mandates.
+   # HostConfig + a credential-free Config subset, to diff against after
+   # recreate (step 4). Do NOT save the full inspect: its .Config.Env carries
+   # the DB password and would outlive the 0600-and-delete discipline this
+   # section mandates. Healthcheck/Cmd/Entrypoint/Labels live in .Config, not
+   # .HostConfig, so both captures are needed for real coverage.
    docker inspect nhms-db | jq -S '.[0].HostConfig' \
      > /home/nwm/nhms-db-hostconfig-$TS.json
+   docker inspect nhms-db | jq -S 'del(.[0].Config.Env) | .[0].Config' \
+     > /home/nwm/nhms-db-config-$TS.json
    # Pin the engine. RepoDigests is an IMAGE field — querying it on the
    # container is a template error (verified on node-27 2026-08-06), so
    # resolve the image id first, then ask the image for its digest.
@@ -1976,6 +1980,19 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
      If step 2 recorded `<no registry digest>`, this branch does not exist;
      restore the renamed container instead.
 
+   A fallback `_ref` drift is **permanent** (`.Config.Image` is fixed at
+   container creation), so every later `--check` — including §4.0's
+   pre-mutation gate — exits 3 until it is closed. Never leave it standing:
+   a check operators learn to look past for one key is a check that does
+   nothing. Close it, after step 4 has fully passed, by either
+   - **returning to green locally** (preferred, registry-free on the assert
+     branch): `docker tag "$IMAGE" timescale/timescaledb-ha:pg15-latest`
+     (cold-cache branch: `docker pull "$IMAGE_DIGEST"` first), then repeat
+     steps 2-4 once more running the tag — both compared fields match
+     again; or
+   - **re-baselining via §4.4**: a full-loop PR updating
+     `nhms_db_image_ref` in the fixture, with the `--dump` attached.
+
    `--user 1005:1005` is the host `nwm` uid/gid and must match the ownership
    of all three host paths; the tablespace directory is `nwm:nwm` mode `0700`.
 
@@ -2007,10 +2024,13 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
    export XDG_RUNTIME_DIR=/run/user/$(id -u)
    uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
 
-   # (c) Nothing else in the container spec was silently dropped
-   #     (shm-size, ulimits, network, log-opts, healthcheck …).
+   # (c) Nothing else in the container spec was silently dropped.
+   #     HostConfig covers shm-size/ulimits/network/log-opts; the Config
+   #     subset covers healthcheck/cmd/entrypoint/labels/user.
    diff <(jq -S . /home/nwm/nhms-db-hostconfig-$TS.json) \
         <(docker inspect nhms-db | jq -S '.[0].HostConfig')
+   diff <(jq -S . /home/nwm/nhms-db-config-$TS.json) \
+        <(docker inspect nhms-db | jq -S 'del(.[0].Config.Env) | .[0].Config')
 
    # (d) Display is live.
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
