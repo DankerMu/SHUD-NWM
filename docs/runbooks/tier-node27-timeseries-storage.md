@@ -146,10 +146,10 @@ retention refuse to drop. Same cycle, different filler.
 
 Tracked in issue #1290.
 
-**Establishing or relocating the tablespace** (needed for DR, a pgdata
-rebuild, or the promised move to a dedicated filesystem). Order matters — the
-container must carry the mount *before* `CREATE TABLESPACE` runs, because the
-`LOCATION` is a container path:
+**Establishing the tablespace for the first time** (DR from scratch, or a
+brand-new tablespace). Order matters — the container must carry the mount
+*before* `CREATE TABLESPACE` runs, because the `LOCATION` is a container
+path:
 
 1. Host directory, empty, owned by the container's uid/gid:
 
@@ -169,6 +169,33 @@ container must carry the mount *before* `CREATE TABLESPACE` runs, because the
 
 4. Move chunks and **their indexes** into it — see §4.3.2 step 3a for the
    `format(%I)` + `\gexec` form.
+
+**Relocating the existing tablespace to another filesystem** (the promised
+move to a dedicated device) is a *different* procedure — the 502 GB must move
+with it, and `CREATE TABLESPACE` must NOT run (the tablespace already exists;
+PostgreSQL resolves it through the `pg_tblspc` symlink, which lands wherever
+the container mount points). Recreating the container with an empty new
+directory bound to the same container path would start a cluster whose
+`ghdc` chunks are simply gone — and PostgreSQL would happily write new files
+into the empty directory, splitting the tablespace across two host paths.
+
+1. Stop the container cleanly (`docker stop -t 300 nhms-db` — §4.3.3 step 2
+   discipline, including the timer quiesce).
+2. Copy the old host directory to the new device, preserving everything:
+
+   ```bash
+   rsync -aHAX --numeric-ids \
+     /data/GHDC/nwm-archive/nhms-tablespace/ /new/device/nhms-tablespace/
+   diff <(cd /data/GHDC/nwm-archive/nhms-tablespace && find . -type f | sort) \
+        <(cd /new/device/nhms-tablespace && find . -type f | sort)
+   du -sb /data/GHDC/nwm-archive/nhms-tablespace /new/device/nhms-tablespace
+   ```
+
+   File list identical, byte totals equal, ownership `nwm:nwm`, mode `0700`.
+3. Recreate the container per §4.3.3 with the **new** host path bound to the
+   **same** container path `/home/postgres/pgdata/tablespaces/ghdc`.
+4. Verify with the real chunk read from §4.3.3 step 4(a). Only after that
+   passes, retire the old directory.
 
 Once a second tablespace exists, any file-level backup or restore must cover
 the `pg_tblspc` link targets as well as `PGDATA`; a `PGDATA`-only copy is no
@@ -1835,16 +1862,30 @@ indexes in the `ghdc` tablespace.
 Never type the DB password: carry the environment over from the running
 container into a `0600` file and delete it once `docker run` has read it.
 
-**Never run this from the floating `pg15-latest` tag.**
-`packages/common/node27_external_contract_snapshot.json` pins
-`host_context.nhms_db_image_id` to a specific `sha256:` digest (TimescaleDB
-2.10.2 / PostgreSQL 15.2), and `scripts/node27_external_contract_snapshot.py`
-compares that field (`COMPARED_SECTIONS` includes `host_context`), exiting `3`
-on drift — which §4.4 classifies as stop-and-full-PR-loop, not a patch bump.
-Re-resolving the tag is the one moment that field can move: a newer
-`pg15-latest` ships a TimescaleDB shared library that may not carry `2.10.2`,
-and the extension then fails to load against the on-disk catalog — on the
-production primary, inside the recreate window. Pin by digest.
+**Never re-resolve the floating `pg15-latest` tag from a registry.**
+`packages/common/node27_external_contract_snapshot.json` pins two compared
+fields: `host_context.nhms_db_image_id` (a `sha256:` image id — TimescaleDB
+2.10.2 / PostgreSQL 15.2) and `host_context.nhms_db_image_ref` (the literal
+tag string `timescale/timescaledb-ha:pg15-latest`, measured from
+`.Config.Image`, i.e. from whatever argument `docker run` was given).
+`scripts/node27_external_contract_snapshot.py` compares both
+(`COMPARED_SECTIONS` includes `host_context`), exiting `3` on drift — which
+§4.4 classifies as stop-and-full-PR-loop, not a patch bump.
+
+That double pin constrains the recreate in both directions:
+
+- `docker pull` before recreating (or a cold cache resolving the tag anew)
+  can move `nhms_db_image_id` — a newer `pg15-latest` ships a TimescaleDB
+  library that may not carry `2.10.2`, and the extension fails to load
+  against the on-disk catalog, on the production primary, mid-window.
+- Passing the digest itself to `docker run` moves `nhms_db_image_ref`
+  (`.Config.Image` would become the `sha256:` string instead of the tag) —
+  a guaranteed exit-3 that §4.4 then tells you to treat as a full-loop stop.
+
+The procedure below threads both: **verify the local tag still resolves to
+the pinned image id, then run the tag.** Both compared fields stay unchanged
+and `--check` can genuinely return 0. Fall back to the digest only when the
+tag is gone/cold — and then expect and record the benign `_ref`-only drift.
 
 1. Quiesce writers — stop `nhms-node27-autopipe.timer` and any in-flight
    `node27_autopipeline.py`, and wait for `/tmp/autopipe.cron.lock` to free.
@@ -1856,25 +1897,53 @@ production primary, inside the recreate window. Pin by digest.
 2. Capture the full prior spec, stop, and **rename rather than remove** the
    old container so it stays available as a rollback:
 
+   Run steps 2-4 in one `tmux`/`screen` session — `$TS`, `$ENVFILE`, `$IMAGE`
+   and `$IMAGE_DIGEST` are shell variables and do not survive a dropped ssh
+   session. If you must reconnect, re-derive `TS` from the file names before
+   continuing.
+
    ```bash
    TS=$(date -u +%Y%m%dT%H%M%SZ)
    ENVFILE=/home/nwm/.nhms-db.env.$TS
    umask 077
    docker inspect nhms-db --format '{{range .Config.Env}}{{println .}}{{end}}' \
      | grep -v '^$' > "$ENVFILE"
-   # Full prior spec, to diff against after recreate (step 4).
-   docker inspect nhms-db > /home/nwm/nhms-db-inspect-$TS.json
-   # Pin the engine: local image id, plus the registry digest as a pullable
-   # fallback if the local cache is cold (host rebuild, another machine).
+   # HostConfig only, to diff against after recreate (step 4). Do NOT save the
+   # full inspect: its .Config.Env carries the DB password and would outlive
+   # the 0600-and-delete discipline this section mandates.
+   docker inspect nhms-db | jq -S '.[0].HostConfig' \
+     > /home/nwm/nhms-db-hostconfig-$TS.json
+   # Pin the engine. RepoDigests is an IMAGE field — querying it on the
+   # container is a template error (verified on node-27 2026-08-06), so
+   # resolve the image id first, then ask the image for its digest.
    IMAGE=$(docker inspect nhms-db --format '{{.Image}}')
-   IMAGE_DIGEST=$(docker inspect nhms-db --format '{{index .RepoDigests 0}}')
-   echo "pinned: $IMAGE / $IMAGE_DIGEST"
+   IMAGE_DIGEST=$(docker image inspect "$IMAGE" \
+     --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}')
+   echo "pinned: $IMAGE / ${IMAGE_DIGEST:-<no registry digest>}"
+   # Assert the local tag still resolves to the pinned image id. This is what
+   # lets step 3 run the tag (keeping .Config.Image == the pinned
+   # nhms_db_image_ref) without risking a silently newer engine.
+   TAG_ID=$(docker image inspect timescale/timescaledb-ha:pg15-latest \
+     --format '{{.Id}}' 2>/dev/null)
+   [ "$TAG_ID" = "$IMAGE" ] \
+     && echo "tag OK: pg15-latest -> $TAG_ID" \
+     || echo "TAG MISMATCH OR ABSENT: use the \$IMAGE / \$IMAGE_DIGEST branch in step 3"
+   # If IMAGE_DIGEST is empty the image was never pulled by digest — the
+   # cold-cache fallback in step 3 does not exist. Keep the old container
+   # until a pull of the pinned digest is proven from this host.
    # -t 300: a multi-hundred-GB instance can exceed docker's 10s default and
    # get SIGKILLed into crash recovery.
    docker stop -t 300 nhms-db
    docker logs --tail 20 nhms-db   # expect "database system is shut down"
    docker rename nhms-db nhms-db-pretbs-$TS
    ```
+
+   Measured on node-27 (2026-08-06): `IMAGE` resolves to the exact digest the
+   contract fixture pins (`sha256:ad39c4fb…`), `.Config.Image` is
+   `timescale/timescaledb-ha:pg15-latest` (matching the pinned
+   `nhms_db_image_ref`), and the registry digest is
+   `timescale/timescaledb-ha@sha256:a8e3322e…` (non-empty, so the fallback is
+   real on this host).
 
 3. Recreate with the full mount set, from the pinned image:
 
@@ -1888,49 +1957,75 @@ production primary, inside the recreate window. Pin by digest.
      -v /home/nwm/nhms-pgdata:/home/postgres/pgdata/data \
      -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
      -v /data/GHDC/nwm-archive/nhms-tablespace:/home/postgres/pgdata/tablespaces/ghdc \
-     "$IMAGE" postgres
+     timescale/timescaledb-ha:pg15-latest postgres
    rm -f "$ENVFILE"
    ```
 
-   Use `"$IMAGE_DIGEST"` instead of `"$IMAGE"` when the local cache is cold —
-   it is pullable, whereas a bare local image id turns a cache miss into a hard
-   `docker run` failure mid-window. Never substitute the bare tag.
+   Running the *tag* is deliberate — but only because the assert above proved
+   it still resolves to `$IMAGE`. It keeps `.Config.Image` equal to the pinned
+   `nhms_db_image_ref`, so a clean recreate leaves **both** compared fields
+   untouched and `--check` can genuinely return 0. Two failure branches:
+
+   - Assert fails (tag now resolves elsewhere, e.g. someone pulled): run
+     `"$IMAGE"` instead, accept that `--check` will report an
+     `nhms_db_image_ref`-only drift, and record it as procedure-induced —
+     `nhms_db_image_id` must still match; if *it* differs, stop, §4.4.
+   - Cold cache (tag absent entirely): run `"$IMAGE_DIGEST"` — it is
+     pullable, whereas the bare image id would turn the cache miss into a
+     hard `docker run` failure mid-window. Same `_ref`-only drift applies.
+     If step 2 recorded `<no registry digest>`, this branch does not exist;
+     restore the renamed container instead.
 
    `--user 1005:1005` is the host `nwm` uid/gid and must match the ownership
    of all three host paths; the tablespace directory is `nwm:nwm` mode `0700`.
 
-4. Verify before declaring success. Source credentials rather than typing
-   them: `set -a; . /home/nwm/NWM/infra/env/node27-ingest.env; set +a`.
+4. Verify before declaring success. Two distinct environments are needed:
+   `node27-ingest.env` supplies `DATABASE_URL` for the psql checks in (a);
+   the contract check in (b) needs the §4.4 canonical setup instead — repo
+   cwd, the *replay* env (PG connection vars, not just a DSN), and
+   `XDG_RUNTIME_DIR` for the `systemctl --user` probes. Mixing them up makes
+   (b) fail with a probe error (exit 5), not a verdict.
 
    ```bash
    # (a) The mount is present AND actually serving data. `ls -ld` and
    #     pg_tablespace_location() both succeed even when the third -v is
    #     missing — docker silently creates an empty bind source and
    #     pg_tablespace_location() just reads the pg_tblspc symlink. Only a
-   #     real read of a ghdc-resident chunk proves the mount.
+   #     real read of a ghdc-resident chunk proves the mount. LIMIT 1 —
+   #     it opens the relation files without scanning the multi-hundred-GB
+   #     chunk on a cold cache.
+   set -a; . /home/nwm/NWM/infra/env/node27-ingest.env; set +a
    docker exec nhms-db ls -ld /home/postgres/pgdata/tablespaces/ghdc
    psql "$DATABASE_URL" -c \
-     "SELECT count(*) FROM _timescaledb_internal._hyper_3_10_chunk"
+     "SELECT 1 FROM _timescaledb_internal._hyper_3_10_chunk LIMIT 1"
    psql "$DATABASE_URL" -c \
      "SELECT spcname, pg_tablespace_location(oid) FROM pg_tablespace ORDER BY 1"
 
-   # (b) The engine did not drift.
-   uv run python scripts/node27_external_contract_snapshot.py --check   # expect exit 0
+   # (b) The engine did not drift — §4.4 canonical invocation, verbatim.
+   cd /home/nwm/NWM
+   set -a; . infra/env/node27-timeseries-compression-replay.env; set +a
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
 
    # (c) Nothing else in the container spec was silently dropped
    #     (shm-size, ulimits, network, log-opts, healthcheck …).
-   diff <(jq -S '.[0].HostConfig' /home/nwm/nhms-db-inspect-$TS.json) \
+   diff <(jq -S . /home/nwm/nhms-db-hostconfig-$TS.json) \
         <(docker inspect nhms-db | jq -S '.[0].HostConfig')
 
    # (d) Display is live.
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
    ```
 
-   Expect: a non-zero row count from the `ghdc`-resident chunk; `ghdc` at
-   `/home/postgres/pgdata/tablespaces/ghdc`; `--check` exit `0` (on exit `3`
-   stop and follow §4.4); the `HostConfig` diff showing only the intended
-   third mount; and `200` from the display API. Then restart the timers
-   stopped in step 1.
+   Expect: one row (`?column? = 1`) from the `ghdc`-resident chunk — a
+   `could not open file` error here means the mount is wrong; `ghdc` at
+   `/home/postgres/pgdata/tablespaces/ghdc`; `--check` exit `0` on the
+   tag path (on the `$IMAGE`/`$IMAGE_DIGEST` branches an
+   `nhms_db_image_ref`-only drift is the expected, recorded outcome — any
+   other drifted key: stop, §4.4); the `HostConfig` diff showing only the
+   intended third mount; and `200` from the display API. Then restart the
+   timers stopped in step 1, and delete
+   `/home/nwm/nhms-db-hostconfig-$TS.json` (it is spec-only, no credentials,
+   but there is no reason to accumulate them).
 
 Rollback: `docker stop nhms-db && docker rm nhms-db && docker rename
 nhms-db-pretbs-$TS nhms-db && docker start nhms-db`. Valid only while no chunk

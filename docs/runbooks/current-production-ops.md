@@ -1028,7 +1028,8 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 容量核查必须**两块盘都看**：`df -h /home /data/GHDC`。治理 receipt 的口径是
 partial 且**两个方向都失真**：`archive_root` 块**确实**报 `/dev/md0` 的
 free/total 并带 warn/refuse 告警（需 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
-两个都设，否则 `band=unconfigured` 不告警）；但 `pgdata_root` 只 `du`
+两个都设——两个都不设则 `band=unconfigured` 静默不告警；只设一个是
+`ValueError`，整个治理 audit fail-closed、连 receipt 都不产出）；但 `pgdata_root` 只 `du`
 `/home/nwm/nhms-pgdata`，DB 体量**少报**迁走的字节；而 `archive_root.used_bytes`
 是整个归档根的 `du`，表空间就在根下面，归档体量**多报**了约 502 GB。单独量归档用
 `du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive`。issue #1290。

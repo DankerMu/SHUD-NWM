@@ -21,6 +21,9 @@ DATABASE_URL=postgresql://REPLACE_ME_READONLY:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot tier:
 # the free-space refuse-gate would deadlock the entire gated retention chain
 # (2026-07-26 incident). See ADR 0002 Amendment 2026-07-26.
+# Exception recorded 2026-08-06: the ghdc tablespace (~502 GB of DB chunks)
+# shares this filesystem at nwm-archive/nhms-tablespace — see ADR 0002
+# Amendment (2026-08-06). Do not extend the exception.
 NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Absolute path to the archive-completeness receipt emitted by the storage

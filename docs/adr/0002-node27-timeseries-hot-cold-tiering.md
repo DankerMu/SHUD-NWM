@@ -235,8 +235,11 @@ i.e. headroom, not a structural fix. Terms:
 - Prefer a dedicated filesystem for `ghdc` the next time root-level
   provisioning is available on node-27. This amendment is an exception with a
   reason, not a new rule; the 2026-07-26 separation principle still stands for
-  everything else, and `NHMS_ARCHIVE_ROOT` must still never be pointed at a
-  filesystem carrying pgdata or the object store.
+  everything else. Concretely: the exception is bounded to the `ghdc`
+  tablespace directory already present under the archive root — do not point
+  `NHMS_ARCHIVE_ROOT` at the filesystem carrying `pg_default`
+  (`/home/nwm/nhms-pgdata`) or the object store, and do not place further DB
+  data on `/dev/md0`.
 
 Operator-facing detail: `docs/runbooks/tier-node27-timeseries-storage.md`
 section "Recorded exception (2026-08-06)".

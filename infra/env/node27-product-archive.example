@@ -18,6 +18,9 @@ NODE27_DISPLAY_WATERMARK_DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@12
 # NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot tier:
 # the free-space refuse-gate would deadlock the entire gated retention chain
 # (2026-07-26 incident). See ADR 0002 Amendment 2026-07-26.
+# Exception recorded 2026-08-06: the ghdc tablespace (~502 GB of DB chunks)
+# shares this filesystem at nwm-archive/nhms-tablespace — see ADR 0002
+# Amendment (2026-08-06). Do not extend the exception.
 NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Object-store source root the mover discovers products from.

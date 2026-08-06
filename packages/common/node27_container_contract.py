@@ -302,7 +302,8 @@ def container_dump_path_within_mount(value: str) -> bool:
       can create the link and name it through its container path.  That is the
       same actor class the pinned-plan boundary already assumes, not a stronger
       one.  Measured node-27 container shape (``docker inspect nhms-db``,
-      2026-08-02; its ``.Mounts`` for the binds, its ``Config.Env`` ``PGDATA``
+      re-measured 2026-08-06 — three binds since the ``ghdc`` tablespace
+      mount; its ``.Mounts`` for the binds, its ``Config.Env`` ``PGDATA``
       for which directory is the DB's data directory): the only bind mount
       landing under this prefix is host ``/home/nwm/nhms-evidence`` -> container
       ``/var/lib/postgresql/evidence`` (RW), i.e. the host-writable region is a
