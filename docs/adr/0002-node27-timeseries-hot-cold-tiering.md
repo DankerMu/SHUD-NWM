@@ -171,6 +171,61 @@ rewritten. **This ADR amendment is the authoritative source for the current
 archive layout**; the operator-facing current state lives in
 [`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
 
+## Amendment (2026-08-06): the archive filesystem now also carries part of the DB
+
+The 2026-07-26 amendment separated the archive tier onto `/dev/md0` precisely
+so that a full `/home` could not deadlock the mover ↔ retention loop. That
+separation is now partially undone, knowingly, in the opposite direction.
+
+### What changed
+
+PostgreSQL tablespace **`ghdc`** was created at host path
+`/data/GHDC/nwm-archive/nhms-tablespace` (container
+`/home/postgres/pgdata/tablespaces/ghdc`), on the same `/dev/md0` that backs
+`/data/GHDC/nwm-archive`. Four chunks — `_hyper_3_10_chunk` and
+`_hyper_3_14_chunk` of `hydro.river_timeseries`, `_hyper_1_12_chunk` and
+`_hyper_1_13_chunk` of `met.forcing_station_timeseries` — plus all 18 of their
+indexes were moved there, roughly 502 GB decompressed. The `nhms-db` container
+was recreated to add the bind mount; `pg_default` and the object store stay on
+`/home`.
+
+### Why
+
+The six-basin production replay (#1164) had to decompress those four chunks to
+lift the compressed-chunk write guard, and `/home` had ~357 GB free against a
+~502 GB requirement. Sequencing could not avoid it: each backfilled cycle's
+forecast window spans both the 07-02…07-09 and 07-09…07-16 chunks, so both had
+to be uncompressed simultaneously. On `/data/GHDC` the only `nwm`-writable
+location is `nwm-archive/` — the rest of that mount is `root`/`ghdcadmin`
+owned and a sibling mount point needs root. The alternatives were rejected:
+`/srv` has 434 GB free (below the requirement), and dropping the replay's
+older 17 cycles would have failed the issue's "controlled replacement of the
+six basins' historical runs" requirement.
+
+### What this costs, and the terms it is accepted on
+
+This re-opens the 2026-07-26 deadlock with the operands swapped: **database**
+growth can now push the archive filesystem below the mover's refuse threshold,
+freezing the mover frontier, leaving the archive-completeness receipt pending,
+and making retention refuse to drop. Accepted because `/dev/md0` holds ~19 GB
+of archive against 15 TB, and the archive grows at single-digit GB/month —
+i.e. headroom, not a structural fix. Terms:
+
+- The archive free-space refuse/warn band must reserve headroom for the
+  tablespace's working set, not just archive growth; decompression can
+  transiently double a chunk.
+- `/data/GHDC` must be read manually (`df -h /home /data/GHDC`) until
+  governance collection covers it — `scripts/node27_resource_governance.py`
+  reports neither the tablespace bytes nor that filesystem (issue #1290).
+- Prefer a dedicated filesystem for `ghdc` the next time root-level
+  provisioning is available on node-27. This amendment is an exception with a
+  reason, not a new rule; the 2026-07-26 separation principle still stands for
+  everything else, and `NHMS_ARCHIVE_ROOT` must still never be pointed at a
+  filesystem carrying pgdata or the object store.
+
+Operator-facing detail: `docs/runbooks/tier-node27-timeseries-storage.md`
+section "Recorded exception (2026-08-06)".
+
 ## Consequences
 
 - Steady-state DB size becomes bounded (14-day window, mostly compressed)

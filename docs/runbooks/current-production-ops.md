@@ -1011,6 +1011,27 @@ run discovery.
 readonly role from `infra/env/display.env`; cron ingest uses writer credentials
 from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 
+数据库文件自 2026-08-06 起分布在**两块设备**上。容器 `nhms-db` 由裸
+`docker run` 创建（无 compose、无 systemd unit），三个 bind mount 缺一不可：
+
+| 宿主机路径 | 容器路径 | 设备 | 内容 |
+|---|---|---|---|
+| `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` | `/dev/mapper/ubuntu--vg-home`（1.7 TB，与 object store 共卷） | 主 `pg_default` 表空间 |
+| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | `/dev/md0`（15 TB，**同时承载归档根 `/data/GHDC/nwm-archive`**） | 表空间 `ghdc`：`river_timeseries` 的 `_hyper_3_10`/`_hyper_3_14`、`forcing_station_timeseries` 的 `_hyper_1_12`/`_hyper_1_13` 及其全部索引，约 502 GB |
+| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` | 同 1.7 TB 卷 | evidence 输出 |
+
+注意第二行：DB 数据与归档层现在**共用文件系统**，这是对 2026-07-26
+"归档 FS 不得承载 pgdata" 边界的一次**有记录的例外**（成因、代价与承受条件见
+`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment (2026-08-06)"）。
+运维含义：DB 增长会挤压归档层的 refuse 阈值，可能重现 mover ↔ retention 死锁。
+
+容量核查必须**两块盘都看**：`df -h /home /data/GHDC`。治理 receipt 目前只统计
+`/home/nwm/nhms-pgdata`，看不到 `ghdc`，也不枚举 `/data/GHDC`（issue #1290）。
+
+重建 `nhms-db` 容器的流程见
+`docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿
+`infra/docker-compose.dev.yml` 当模板，那是本地 dev 栈。
+
 Secret-safe DB checks:
 
 ```bash
