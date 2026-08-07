@@ -239,9 +239,10 @@ drive the retry decision it was written to request.
   the stage evidence is the marker's own `failed_stage` detail,
   with the id's stage token (read after stripping every stacked
   `_retry_<n>` suffix) as the backstop for markers written before
-  the detail existed — AND the state-level repaired-stage evidence
-  does not name the marker's target as its original failed job
-  (exact id comparison — the staleness refusal delivered with the
+  the detail existed — AND neither the state-level repaired-stage
+  evidence (its original failed job id) nor the state-level
+  completed-stage evidence (its job id) names the marker's target
+  (exact id comparisons — the staleness refusals delivered with the
   evidence the row-absent path actually has); a surviving marker
   whose stage is NOT the repair target falls through to the
   only-failure-left arm (the same widened live-failure domain, so a
@@ -273,19 +274,23 @@ drive the retry decision it was written to request.
   terminal-stage gating never drops the marker event itself) and
   one the identity-filter event sanitizer preserves on retry
   events — so markers written from now on decide by record rather
-  than id text
+  than id text wherever their details survive to adoption (the
+  journal read path's completion-stage compaction domain keeps the
+  disclosed id-token backstop)
 - **AND** a marker whose target the state-level repaired-stage
-  evidence names as its original failed job refuses the pin with
-  the row absent exactly as the resolved-row rule refuses it with
-  the row present — the mapping-named repaired target is the one
-  staleness sub-shape with row-absent evidence, and verdict
-  identity is delivered for exactly that sub-shape
+  evidence names as its original failed job — or whose target the
+  state-level completed-stage evidence names as its completed job —
+  refuses the pin with the row absent exactly as the resolved-row
+  rule refuses it with the row present — the mapping-named repaired
+  target and the completed-stage-named target are the two staleness
+  sub-shapes with row-absent evidence, and verdict identity is
+  delivered for exactly those sub-shapes
 - **AND** with the marker's stage differing from the candidate's
   failed stage, the verdict falls through to the only-failure-left
   arm — the same arm the resolved-row rule uses on a stage
-  mismatch — and for a failed-status target carrying no
-  repaired-stage-evidence flags lands on the same verdict as the
-  resolved-row rule on the same state
+  mismatch — and for a failed-status target that is neither an
+  unsubmitted auto-retry placeholder nor repaired-flagged lands on
+  the same verdict as the resolved-row rule on the same state
 - **AND** markers with non-cycle-grammar entity ids keep the
   historical fail-open, a foreign-cycle id still never pins, and a
   stage-less marker keeps deciding through the loop-stripped id

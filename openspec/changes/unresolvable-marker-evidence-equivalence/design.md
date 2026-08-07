@@ -80,9 +80,16 @@ stage, not id-text forensics.
 ### D2. Staleness conjunction (defect 2), row-absent evidence
 
 Mirror the twin's refusal ORDER (staleness before stage). With no row, the
-staleness evidence is the state-level `repaired_stage_evidence` mapping:
-refuse the pin when the mapping's `original_failed_job_id` names the
-marker's target — **exact string comparison against the marker's entity id**
+staleness evidence is TWO state-level mappings (round-1 review added the
+second): refuse the pin when `repaired_stage_evidence.original_failed_job_id`
+names the marker's target, or when `completed_stage_evidence.job_id` does —
+the completed-stage mapping is produced by the candidate-state builder's
+completed-stage success evidence, names the exact row the identity filter
+deleted, and survives the filter; the copy-of-repaired variant of that
+mapping carries no `job_id` key, so it can never false-hit, and the guard
+only tightens (the named job's status is terminal-success, which the twin
+would refuse anyway). Both are **exact string comparisons against the
+marker's entity id**
 (the twin's staleness test is about the entity row, so the row-absent
 equivalent keys on the entity id; no `previous_job_id` priority, no
 suffix-aware stripping — suffix-stripping both sides would make a
@@ -95,10 +102,12 @@ read answers a different question — "does this marker repair the historical
 failure" — while this one asks "is this marker's own target already
 repaired".
 
-**AC-2 scope (fixture-review adjudicated, twice-narrowed)**: verdict
-identity between row-present and row-absent is delivered IN FULL only for
-repaired targets the state's `repaired_stage_evidence` names as its
-original failed job — the one staleness sub-shape with row-absent evidence.
+**AC-2 scope (fixture-review adjudicated, twice-narrowed; round-1 review
+widened back by one sub-shape)**: verdict identity between row-present and
+row-absent is delivered IN FULL for two staleness sub-shapes with row-absent
+evidence — repaired targets the state's `repaired_stage_evidence` names as
+its original failed job, and non-failed targets the state's
+`completed_stage_evidence` names as its completed job.
 The twin's repaired-target refusal fires on either of two ROW flags
 (`repair_status == "repaired"` or `active_blocker is False`,
 `_pipeline_job_is_repaired_stage_evidence`); a target carrying only those
@@ -155,7 +164,16 @@ domain applies identically on both arms.
    defect-3 case); single-strip instead of loop-strip (killed by the
    STAGE-LESS three-layer backstop case — with `failed_stage` present the
    primary evidence decides and the mutant survives, so the kill is bound
-   to the backstop fixture explicitly).
+   to the backstop fixture explicitly); drop the completed-evidence
+   conjunct (round-1 addition — killed by the stale-succeeded suffixed
+   regression test and the residue matrix's non-failed named cell).
+7. Round-1 review additions: the residue matrix test (same-stage geometry,
+   paired row-present/row-absent verdicts per staleness shape with a
+   plain-failed control — the shipped cross-stage version was proven inert
+   with zero mutation-kill power); the stale-succeeded suffixed
+   discriminator (red at the pre-fix head); a direct unit test on the
+   loop-stripper's termination contract (unparsable `_retry_` tails left
+   in place — previously prose-only).
 
 ### D5. Spec delta
 
@@ -167,19 +185,28 @@ loop-stripped id token as the stage evidence for markers written before the
 field existed) is the repair target, the exact-id repaired-evidence refusal
 applies, and a cross-stage marker falls to the only-failure-left arm instead
 of refusing outright — verdict equality with the resolved-row rule claimed
-only for failed-status targets carrying no repaired-stage-evidence flags.
-New scenario clauses pin the three defect
+only for failed-status targets that are neither unsubmitted auto-retry
+placeholders nor repaired-flagged (`submission_failed` placeholders are
+failed-status, so the status qualifier alone was falsifiable — round-1
+review). New scenario clauses pin the three defect
 shapes. Symbol anchors only for PR-touched files.
 
 ## Residues (accepted, tracked — not claimed as delivered)
 
-1. **Row-borne staleness evidence, row absent** (D2 AC-2 scope): a
-   same-stage unsubmitted-auto-retry-placeholder or non-failed target — and
-   a repaired-flagged target (`repair_status == "repaired"` or
-   `active_blocker is False`) that the state's `repaired_stage_evidence`
-   does not name — pins with the row absent where the twin refuses with it
-   present; that evidence lives on the row and does not survive its
-   absence. Tracked as a follow-up issue (see tasks.md closeout).
+1. **Row-borne staleness evidence, row absent** (D2 AC-2 scope, re-derived
+   after the round-1 completed-evidence conjunct): a same-stage
+   unsubmitted-auto-retry-placeholder target, a repaired-flagged target
+   (`repair_status == "repaired"` or `active_blocker is False`) that the
+   state's `repaired_stage_evidence` does not name, or a non-failed target
+   that the state's `completed_stage_evidence` does not name, pins with the
+   row absent where the twin refuses with it present; that evidence lives
+   on the row and does not survive its absence. The loop-strip fix also
+   ENLARGES this residue's reachable population (retry-suffixed ids that
+   base's suffix-blind endswith accidentally refused now reach the stage
+   arm) — the residue matrix test makes each cell an executable disclosure.
+   The id-token backstop can additionally infer a stage the row never had
+   (token != row stage, legacy stage-less markers only) — same D1
+   disclosure. Tracked as a follow-up issue (see tasks.md closeout).
 2. **F5′ (archived `manual-retry-marker-attribution` design.md): the
    model_id-bearing `job_cycle_*` row, row-absent ∧ cross-stage.** With the
    row present such a row is NOT cycle-scope (the cycle-scope predicate
@@ -191,9 +218,14 @@ shapes. Symbol anchors only for PR-touched files.
 
 ## Risks / Trade-offs
 
-- The arm's verdict changes on cycle-grammar unresolvable markers only; all
-  three directions (two under-pin regressions fixed, one over-pin closed)
-  move TOWARD the twin's semantics, and the twin itself is untouched.
+- The arm's verdict changes on cycle-grammar unresolvable markers only, and
+  the twin itself is untouched. The delivered surfaces (suffixed same-stage
+  pins, two mapping-named staleness refusals, arm-2 fall-through) all move
+  TOWARD the twin's semantics; the loop-strip fix simultaneously enlarges
+  Residue 1's reachable population on suffixed ids whose row-borne staleness
+  evidence has no state-level substitute (Residue 1 records this honestly —
+  the original "all three directions move toward the twin" claim was false
+  for that sub-shape and was corrected in the round-1 review).
 - The new `details.failed_stage` field is additive AND deliberately named
   to be invisible to the one consumer that does read event detail keys by
   name: the candidate-state record-stage reader consumes

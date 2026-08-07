@@ -192,6 +192,33 @@ def _state_repaired_stage_evidence_names_job(state: Mapping[str, Any], entity_id
         return False
     return str(repaired_stage.get("original_failed_job_id") or "") == str(entity_id)
 
+def _state_completed_stage_evidence_names_job(state: Mapping[str, Any], entity_id: Any) -> bool:
+    """Row-absent half of the twin's NON-FAILED-target refusal: the state-level mapping.
+
+    The twin refuses to pin a marker whose target row is no longer a failure (its
+    ``FAILED_PIPELINE_STATUSES`` test), reading the status off the ROW.  When the row is gone
+    the state's ``completed_stage_evidence`` is the surviving surface of exactly that fact:
+    ``chain_repository_state._completed_stage_success_evidence`` (:241-265) builds it only from
+    a job in ``TERMINAL_PIPELINE_SUCCESS_STATUSES`` and stamps the winning row's ``job_id`` into
+    it, and the mapping is a top-level state field the identity filter does not strip — so it
+    outlives the very row deletion that creates the need for it.
+
+    Compared by EXACT id, for the same reason the repaired-evidence sibling is: a suffix-aware
+    match would let a still-failed ``..._retry_3`` target inherit the success of its
+    ``..._retry_2`` ancestor and refuse a pin the twin grants.
+
+    The OTHER writer of this key copies the repaired mapping into it
+    (``chain_repository_state.py:856-862``), and that payload (:222-238) carries no ``job_id``
+    key at all — ``mapping.get("job_id")`` is then ``None``, the comparison is against ``""``,
+    and a marker entity id can never equal it.  So the copy path produces no false hit and this
+    guard only ever tightens.
+    """
+
+    completed_stage = state.get("completed_stage_evidence")
+    if not isinstance(completed_stage, Mapping):
+        return False
+    return str(completed_stage.get("job_id") or "") == str(entity_id)
+
 def _unresolvable_marker_stage_is_repair_target(
     event: Mapping[str, Any],
     entity_id: Any,
@@ -229,21 +256,39 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
     * a non-cycle-grammar id keeps the historical fail-open (synthetic and compacted states
       depend on it, and the SQL retry service's ``{run_id}_retry_active`` shape lands here);
     * a cycle-grammar id whose ``(source, stamp)`` is not the candidate's own never pins;
-    * staleness first: the pin is refused when the state's ``repaired_stage_evidence`` names
-      this marker's target as its ``original_failed_job_id``;
+    * staleness first, through the two row-absent surfaces of it: the pin is refused when the
+      state's ``repaired_stage_evidence`` names this marker's target as its
+      ``original_failed_job_id`` (the target was already repaired), and when the state's
+      ``completed_stage_evidence`` names it as its ``job_id`` (the target already SUCCEEDED, so
+      it is not a repair target at all);
     * then the stage evidence — ``details.failed_stage`` primary, loop-stripped id token
       backstop — pins when it names the state's ``failed_stage``;
     * anything else (stage mismatch, or a state carrying no ``failed_stage`` at all) falls
       through to ``not _state_has_candidate_scope_failed_job(state)``, the same predicate
       object and therefore the same live-failure domain the twin's arm 2 uses.
 
-    Equivalence with the twin is claimed only where the row-absent path HAS the evidence: for
-    failed-status targets carrying no repaired-stage-evidence flags, and for repaired targets
-    the state mapping names.  The twin also refuses on evidence that lives on the ROW alone —
-    an unsubmitted auto-retry placeholder, a non-failed target, or a repaired-flagged row
-    (``repair_status``/``active_blocker``) the state mapping does NOT name — and that evidence
-    does not survive its row, so those shapes still pin here where the twin refuses.  That
-    residue is disclosed, not fixed, by this rule (design.md Residue 1).
+    Equivalence with the twin is claimed for FAILED-STATUS targets that are neither unsubmitted
+    auto-retry placeholders nor repaired-flagged: on those the two arms ask the same question of
+    the same objects and answer identically.  (``cancelled`` is outside that set on purpose —
+    the twin's marker-target test keeps the bare ``FAILED_PIPELINE_STATUSES`` vocabulary, #1294.)
+
+    The twin also refuses on evidence that lives on the ROW alone, and only ONE of those shapes
+    has a state-level surface that outlives the row: a non-failed target is covered here when
+    ``completed_stage_evidence`` names it, by the conjunct above.  The rest still pin here where
+    the twin refuses, and that residue is disclosed, not fixed, by this rule (design.md
+    Residue 1):
+
+    * an unsubmitted auto-retry placeholder (``pending``/``submission_failed``, ``_retry_<n>``
+      id, no slurm id) — a submission-time row shape with no state-level projection at all;
+    * a repaired-flagged row (``repair_status``/``active_blocker``) the state's
+      ``repaired_stage_evidence`` does NOT name;
+    * a non-failed target the completed-stage evidence does NOT name — a later stage's success
+      outranked it (``_best_completed_stage_success_evidence`` keeps one winner), the projection
+      took the repaired-copy branch (that payload has no ``job_id``), or the state carries no
+      such mapping at all.
+
+    The id-token backstop's stage inference on stage-less legacy markers is disclosed with it:
+    it reads the loop-stripped id text, not a recorded field.
     """
     entity_id = event.get("entity_id")
     match = _CYCLE_SCOPE_JOB_ID_RE.fullmatch(str(entity_id)) if entity_id not in (None, "") else None
@@ -253,6 +298,8 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
     if run_match is None or run_match.groups() != match.groups():
         return False
     if _state_repaired_stage_evidence_names_job(state, entity_id):
+        return False
+    if _state_completed_stage_evidence_names_job(state, entity_id):
         return False
     failed_stage = state.get("failed_stage")
     if failed_stage not in (None, "") and _unresolvable_marker_stage_is_repair_target(

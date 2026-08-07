@@ -103,8 +103,11 @@ Evidence floor:
   (`test_db_free_slurm_storage_root_check_masks_symlink_loop_path`,
   macOS /private/tmp symlink loop; confirmed identically red on the
   pristine d567e098 tree); ruff clean; validate green
-- [x] 3.2 Production diff confined to the one function + router pass-through
-  in `scheduler_state_manual_retry.py`, the one details field in
+- [x] 3.2 Production diff confined to the rewritten gate function, its four
+  module-private helpers (loop-stripper, two staleness-evidence lookups,
+  stage-evidence reader — the "one function" of the original wording was
+  delivered decomposed; recorded implementation departure), and the router
+  pass-through in `scheduler_state_manual_retry.py`, the one details field in
   `file_orchestration_journal.record_manual_repair`, and the one whitelist
   line in `scheduler_state_identity_filter`; tests-only elsewhere
 
@@ -115,8 +118,12 @@ Evidence floor:
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Residue issue filed (design.md Residues: placeholder/non-failed
-  row-absent staleness gap + surviving F5′ under-pin shape) and its number
-  recorded here
+- [ ] 5.0 Residue issue filed (design.md Residues, full re-derived scope:
+  row-absent staleness gap for unsubmitted placeholders, repaired-flagged
+  targets the repaired mapping does not name, and non-failed targets the
+  completed mapping does not name — population enlarged on suffixed ids by
+  the loop-strip fix; id-token backstop stage-inference limit; surviving
+  F5′ under-pin shape; missing test anchor for the completion-stage
+  compaction domain note) and its number recorded here
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
 - [ ] 5.2 Merge; archive change; loop-log line + audit; close issue #1292

@@ -7126,34 +7126,75 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
 
 
 @pytest.mark.parametrize(
-    "target_overrides",
+    ("suffix", "target_overrides", "names_completed_stage_evidence", "expected_pins", "expected_attempts"),
     [
-        {
-            "status": "pending",
-            "retry_count": 2,
-            "job_id": "job_cycle_gfs_2026052106_download_cohort_ab12cd34ef56_download_retry_2",
-        },
-        {"status": "succeeded", "error_code": None},
-        {"repair_status": "repaired"},
+        (
+            "_retry_2",
+            {"status": "submission_failed", "retry_count": 2, "slurm_job_id": None},
+            False,
+            (False, True),
+            (1, 5),
+        ),
+        ("", {"repair_status": "repaired"}, False, (False, True), (1, 5)),
+        ("", {"status": "succeeded", "error_code": None}, True, (False, False), (1, 1)),
+        ("", {}, False, (True, True), (5, 5)),
     ],
-    ids=["unsubmitted_placeholder", "non_failed", "repaired_flag_not_named_by_the_state"],
+    ids=[
+        "unsubmitted_placeholder",
+        "repaired_flag_not_named_by_the_state",
+        "non_failed_named_by_completed_stage_evidence",
+        "plain_failed_control",
+    ],
 )
-def test_row_borne_staleness_shapes_still_block_the_pin_on_a_live_failure(
+def test_same_stage_marker_target_staleness_residue_matrix(
+    suffix: str,
     target_overrides: dict[str, Any],
+    names_completed_stage_evidence: bool,
+    expected_pins: tuple[bool, bool],
+    expected_attempts: tuple[int, int],
 ) -> None:
-    """Arm-2 blocking anchor for the staleness shapes whose evidence dies with the row.
+    """Executable ledger of WHICH twin refusals survive the row's deletion, and which do not.
 
-    An unsubmitted auto-retry placeholder, a non-failed target, and a repaired-flagged row the
-    state's ``repaired_stage_evidence`` does NOT name all carry their evidence on the ROW; once
-    the identity filter deletes it, the row-absent arm cannot see it (design.md Residue 1 --
-    disclosed, tracked, NOT claimed as delivered).  What this anchors is the part that does
-    hold: a cross-stage marker falls through to arm 2, and the candidate's own live failure
-    closes it.  No cross-arm verdict identity is asserted for these shapes.
+    Geometry is fixed at SAME-STAGE on purpose: the marker's target is the cycle's ``download``
+    cohort master and the state names ``download`` as its failed stage, so the row-absent arm
+    reaches its stage conjunct and PINS unless a staleness conjunct stops it first.  A
+    cross-stage geometry would instead fall through to arm 2, where the candidate's own live
+    failure answers False for every shape alike -- which is why the earlier cross-stage version
+    of this matrix could not tell the shapes apart at all.  Each row therefore reads
+    ``(row_present, row_absent)``: the twin (``_cycle_scope_marker_pins_attempt``, reached while
+    the row is still there) against the unresolvable arm (reached after the identity filter
+    deletes it).
+
+    * ``unsubmitted_placeholder`` -- (False, True): the placeholder shape is a submission-time
+      ROW fact with no state-level projection.  Residue 1, disclosed not delivered.
+    * ``repaired_flag_not_named_by_the_state`` -- (False, True): ``repair_status: repaired`` on
+      the row with no ``repaired_stage_evidence`` mapping naming it.  Residue 1.
+    * ``non_failed_named_by_completed_stage_evidence`` -- (False, False): DELIVERED.  A
+      succeeded target the state's ``completed_stage_evidence`` names by ``job_id`` is refused
+      on both arms; before that conjunct existed the row-absent half pinned 5 here.
+    * ``plain_failed_control`` -- (True, True): the equivalence case.  It is what proves the
+      three rows above are decided by their own shape and not by the geometry.
     """
 
-    cohort_job = {**_unresolvable_cohort_master_job(stage="download"), **target_overrides}
+    cohort_job = {**_unresolvable_cohort_master_job(stage="download", suffix=suffix), **target_overrides}
     cohort_job_id = cohort_job["job_id"]
     candidate = _scheduler_candidate_fixture()
+    state_overrides: dict[str, Any] = {}
+    if names_completed_stage_evidence:
+        # Production key set: ``chain_repository_state._completed_stage_success_evidence``
+        # (:254-265) stamps the winning SUCCEEDED row's ``job_id`` into the mapping.
+        state_overrides["completed_stage_evidence"] = {
+            "status": "succeeded",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "job_id": cohort_job_id,
+            "slurm_job_id": 880123,
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026052106",
+            "cycle_time": "2026-05-21T06:00:00Z",
+            "restart_stage": "convert",
+            "restart_from_stage": "convert",
+        }
     state = _decision_path_state(
         candidate,
         events=[
@@ -7165,20 +7206,178 @@ def test_row_borne_staleness_shapes_still_block_the_pin_on_a_live_failure(
             )
         ],
         jobs=[_decision_path_own_forecast_job(), cohort_job],
-        failed_stage="forecast",
+        failed_stage="download",
+        **state_overrides,
     )
 
     decision_state = _decision_path_filtered_state(candidate, state)
 
+    # Premise: one fixture, two arms.  The row-present half really routes through the twin (the
+    # target is present AND cycle scope), the row-absent half really lost the row, both halves
+    # keep the same failed stage, and the candidate's own forecast failure is live throughout.
+    assert cohort_job_id in [job["job_id"] for job in state["pipeline_jobs"]]
+    assert scheduler_state_manual_retry_module._job_is_cycle_scope_row(cohort_job) is True
     assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert state["failed_stage"] == decision_state["failed_stage"] == "download"
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(state) is True
     assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == expected_pins
     assert (
-        scheduler_state_manual_retry_module._marker_event_pins_attempt(
-            decision_state, decision_state["pipeline_events"][0]
+        scheduler_module._manual_retry_new_attempt(state, previous_attempt=0),
+        scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0),
+    ) == expected_attempts
+
+
+def test_completed_stage_named_succeeded_target_refuses_the_pin_with_and_without_its_row() -> None:
+    """A stale marker must not regain pinning power by losing the row that proves it stale.
+
+    The cycle's ``download`` cohort master SUCCEEDED on its third retry, so the projection wrote
+    ``completed_stage_evidence`` naming that job id
+    (``chain_repository_state._completed_stage_success_evidence``, :241-265) -- and the identity
+    filter then deleted the row itself as non-authoritative, while leaving the top-level mapping
+    and the marker in place.  That is the production shape: the marker's target is a resolved
+    success, the state still names ``download`` as its failed stage (a later download attempt of
+    the candidate's own is what failed), and the candidate's own live forecast failure closes
+    arm 2 so nothing else can grant the pin either.
+
+    With the row present the twin refuses (``succeeded`` is not in ``FAILED_PIPELINE_STATUSES``)
+    and the attempt falls back to 1.  With the row gone the row-absent arm has to reach the SAME
+    verdict off the surviving mapping; reading only the id text it instead saw
+    ``..._download_retry_3`` end in the failed stage token and pinned the operator's 5.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage="download", suffix="_retry_3"),
+        "status": "succeeded",
+        "error_code": None,
+        "slurm_job_id": 880123,
+    }
+    cohort_job_id = cohort_job["job_id"]
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="download",
+        completed_stage_evidence={
+            "status": "succeeded",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "job_id": cohort_job_id,
+            "slurm_job_id": 880123,
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026052106",
+            "cycle_time": "2026-05-21T06:00:00Z",
+            "restart_stage": "convert",
+            "restart_from_stage": "convert",
+        },
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the row is gone, the marker survives it STAGE-LESS (so the id-token backstop is
+    # what would decide the stage), the completed-stage mapping survives naming the deleted row,
+    # and the loop-stripped id really does end in the state's failed stage token.
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert [event["entity_id"] for event in decision_state["pipeline_events"]] == [cohort_job_id]
+    assert "failed_stage" not in decision_state["pipeline_events"][0]["details"]
+    assert decision_state["completed_stage_evidence"]["job_id"] == cohort_job_id
+    assert scheduler_state_manual_retry_module._loop_stripped_retry_identity(cohort_job_id).endswith("_download")
+    assert decision_state["failed_stage"] == "download"
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, False)
+    # Twin parity on the derived attempt: both arms fall back to previous_attempt + 1, never to
+    # the operator's 5 recorded against a job that already succeeded.
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_completed_stage_evidence_copied_from_the_repaired_mapping_never_matches_a_marker() -> None:
+    """The other writer of ``completed_stage_evidence`` must not be able to refuse a live pin.
+
+    ``chain_repository_state`` also copies the REPAIRED mapping into this key
+    (:856-862), and that payload (:222-238) carries ``original_failed_job_id`` -- never a
+    ``job_id``.  Matching on a missing key (``None``, compared as ``""``) would be a
+    fail-CLOSED bug in the opposite direction: the copy would refuse pins for markers it says
+    nothing about.  Here the copied mapping names the target through the REPAIRED key while the
+    repaired mapping itself names a different job, so only a ``job_id`` read can decide -- and
+    the live same-stage marker must still pin.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = _unresolvable_cohort_master_job(stage="download")
+    cohort_job_id = cohort_job["job_id"]
+    repaired_mapping = {
+        "status": "repaired",
+        "repair_status": "repaired",
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "original_failed_job_id": cohort_job_id,
+        "repairing_retry_job_id": f"{cohort_job_id}_retry_1",
+        "manual_retry_event_id": 41,
+        "manual_retry_marker": True,
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026052106",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "restart_stage": "convert",
+        "restart_from_stage": "convert",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="download",
+        completed_stage_evidence=dict(repaired_mapping),
+        repaired_stage_evidence={
+            **repaired_mapping,
+            "original_failed_job_id": "job_cycle_gfs_2026052106_forcing_cohort_ff00ff00ff00_forcing",
+        },
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the copied mapping has no ``job_id`` key at all, and the repaired mapping names
+    # some OTHER job, so neither staleness conjunct may fire.
+    assert "job_id" not in decision_state["completed_stage_evidence"]
+    assert decision_state["repaired_stage_evidence"]["original_failed_job_id"] != cohort_job_id
+    assert (
+        scheduler_state_manual_retry_module._state_completed_stage_evidence_names_job(
+            decision_state, cohort_job_id
         )
         is False
     )
-    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
 
 
 def test_cross_stage_cycle_marker_lands_on_the_same_arm_two_verdict_with_and_without_its_row() -> None:
@@ -7240,12 +7439,40 @@ def test_cross_stage_cycle_marker_lands_on_the_same_arm_two_verdict_with_and_wit
     ) == scheduler_module._manual_retry_new_attempt(row_absent_state, previous_attempt=0) == 5
 
 
+def test_loop_stripped_retry_identity_peels_stacked_suffixes_and_stops_on_unparsable_tails() -> None:
+    """Direct contract of the loop-stripper the id-token backstop reads through.
+
+    Three cases, one per branch of ``split_retry_job_identity``'s termination rule:
+
+    * an unparsable tail (``_retry_active``, the SQL ``RetryService`` shape) makes the first
+      call return its input, so the loop stops immediately and the id is returned untouched --
+      the stripper must never chew through a suffix it cannot parse;
+    * an EMPTY tail (``job_x_retry_``) is the same branch reached through ``int("")``;
+    * the stacked production shape (the node-27 archive's
+      ``..._state_save_qc_retry_1_retry_2_retry_3``) is peeled all the way down to the stage
+      token, which a single ``rsplit`` cannot do.
+    """
+
+    unparsable = "job_cycle_gfs_2026052106_download_cohort_ab12cd34ef56_download_retry_active"
+    stacked = "job_fcst_gfs_2026052106_model_a_state_save_qc_retry_1_retry_2_retry_3"
+
+    assert scheduler_state_manual_retry_module._loop_stripped_retry_identity(unparsable) == unparsable
+    assert scheduler_state_manual_retry_module._loop_stripped_retry_identity("job_x_retry_") == "job_x_retry_"
+    assert (
+        scheduler_state_manual_retry_module._loop_stripped_retry_identity(stacked)
+        == "job_fcst_gfs_2026052106_model_a_state_save_qc"
+    )
+
+
 def test_sql_retry_service_active_retry_marker_id_stays_fail_open() -> None:
     """Non-regression: the SQL RetryService id shape is not cycle grammar and must fail OPEN.
 
-    ``RetryService`` mints ``{run_id}_retry_active``; the id carries an unparsable ``_retry_``
-    tail, so the loop-stripper must leave it alone AND the grammar test must keep rejecting it,
-    or a DB-path manual retry would lose its operator attempt number.
+    ``RetryService`` mints ``{run_id}_retry_active``; the cycle-grammar test rejects it before
+    any stage reasoning happens, so the marker keeps the historical fail-open and a DB-path
+    manual retry does not lose its operator attempt number.  (The loop-stripper is never
+    reached on this path -- its own handling of the unparsable ``_retry_active`` tail is
+    anchored directly by
+    ``test_loop_stripped_retry_identity_peels_stacked_suffixes_and_stops_on_unparsable_tails``.)
     """
 
     candidate = _scheduler_candidate_fixture()

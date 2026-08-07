@@ -50,11 +50,16 @@ were DEFERRED out of PR #1286 on exactly that ground. They arm the moment
   before comparing the stage token.
 - **Staleness conjunction added** (defect 2): mirroring the twin's order, the
   arm refuses to pin when state-level `repaired_stage_evidence` names the
-  marker's target (exact entity-id comparison) as its original failed job.
-  Scope: the repaired shape is the one staleness class with row-absent
-  evidence and is delivered in full; placeholder/non-failed staleness lives
-  on the row's own status and remains an accepted, issue-tracked residue
-  (design.md Residues).
+  marker's target as its original failed job, or when state-level
+  `completed_stage_evidence` names it as its completed job (both exact
+  entity-id comparisons; the second conjunct was added by the round-1
+  review). Scope: those two mapping-named sub-shapes are the staleness
+  classes with row-absent evidence and are delivered in full; unsubmitted
+  placeholders, repaired-flagged targets the repaired mapping does not name,
+  and non-failed targets the completed mapping does not name live on the
+  row's own state and remain an accepted, issue-tracked residue (design.md
+  Residues — enlarged in reachable population by the loop-strip fix itself,
+  recorded there).
 - **Arm-2 fall-through added** (defect 3): stage mismatch now falls through
   to `not _state_has_candidate_scope_failed_job(state)` exactly as the twin
   does, instead of returning False.
@@ -74,7 +79,8 @@ were DEFERRED out of PR #1286 on exactly that ground. They arm the moment
   requirement modified — fourth consecutive change; one scenario's evidence
   clause rewritten, defect-shape scenarios added).
 - Affected code: `services/orchestrator/scheduler_state_manual_retry.py`
-  (one-function rewrite + router pass-through),
+  (gate rewrite delivered as the function plus four module-private helpers,
+  + router pass-through),
   `services/orchestrator/file_orchestration_journal.py` (`record_manual_repair`
   details gains `failed_stage` — additive journal event field),
   `services/orchestrator/scheduler_state_identity_filter.py` (retry-event
