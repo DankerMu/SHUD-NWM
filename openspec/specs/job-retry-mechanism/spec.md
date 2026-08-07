@@ -353,9 +353,20 @@ it. In every other case — a candidate-scoped live failure
 does not name the resolved job's stage, or a marker whose resolved
 job is no longer failed (stale) — the derived
 `new_attempt` falls back to
-the candidate's own `previous_attempt + 1`, and the fallback is
-terminal: the newest retry-count-bearing adopted marker decides;
-older markers are not consulted. The refused pin does not re-mint a
+the candidate's own `previous_attempt + 1`, and the
+attempt-derivation scan is terminal at the newest adopted marker:
+absent a state-level manual-retry attempt payload (a top-level
+`manual_retry` — or, by the same gate, `manual_retry_marker` —
+mapping's `new_attempt`/`retry_count` short-circuits ahead of the
+event scan; its semantics are outside this rule and unchanged by
+it), that marker alone decides, whether or not it
+carries a `retry_count` — a newest adopted marker whose
+`retry_count` is absent or empty makes no operator attempt claim
+and SHALL yield the same fallback instead of a walk-back to any
+older marker's `retry_count` — so older adopted markers are never
+consulted, while a newer marker-shaped event that is NOT adopted
+by the candidate neither decides nor terminates the scan. Neither a refused pin
+nor an absent attempt claim re-mints a
 consumed attempt number: whenever the fallback's attempt derivation
 resolves no canonical failed stage, it floors `previous_attempt` at
 the candidate's own stage-scoped attempt record for each stage in
@@ -540,6 +551,44 @@ drive the retry decision it was written to request.
   the row is invisible, while a foreign-cycle or cross-stage cycle
   counter still never pins the candidate's attempt; markers with
   other unresolvable entity ids keep their existing pinning behavior
+
+#### Scenario: Newest adopted marker without retry_count terminates the attempt scan
+
+- **WHEN** the candidate's events contain an older adopted
+  own-model marker carrying `retry_count` N whose pin would
+  otherwise hold, followed by a newer adopted marker whose
+  `retry_count` is absent or the empty string (a cross-stage
+  cycle-granularity marker, or a marker written without the
+  field), and the candidate's `previous_attempt` is N
+- **THEN** the derived `new_attempt` is the fallback
+  `previous_attempt + 1` — floored by the restarted-stage-family
+  rule exactly as every other fallback arm — and never the older
+  marker's consumed N
+- **AND** the manual-retry payload reports the retry as requested
+  from the newest marker and carries no `new_attempt` claim: the
+  payload scan and the attempt-derivation scan terminate at the
+  same newest adopted marker
+- **AND** a newest adopted marker that itself carries a pinning
+  `retry_count` keeps deciding with its value exactly as before,
+  and a state with no adopted marker at all keeps its existing
+  fallback semantics
+- **AND** a marker-shaped event newer than the candidate's own
+  pinning marker but NOT adopted by the candidate (for example a
+  foreign-attributed marker) neither terminates the scan nor
+  decides — the candidate's own newest adopted marker still pins
+  its `retry_count`
+- **AND** when the terminal fallback fires on the shape where no
+  canonical failed stage resolves (a cancelled own row whose job id
+  carries a consumed `_retry_<n>` suffix), the restarted-stage-family
+  floor applies exactly as on the other fallback arms — the
+  derivation returns the floored value, not a bare
+  `previous_attempt + 1` replay of a consumed identity
+- **AND** on a state carrying no state-level manual-retry attempt
+  payload (no top-level `manual_retry` or `manual_retry_marker`
+  mapping whose `new_attempt`/`retry_count` value is neither `None`
+  nor `""`), absent an adopted marker whose `retry_count` pins (an
+  operator's explicit attempt claim), the derivation never returns
+  a value at or below `previous_attempt`
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 

@@ -102,9 +102,12 @@ Evidence floor:
   workplan's verify records; had they been recorded raw, round 2 would
   repeat round 1's record-accuracy class — noted for any future
   gate-retro reading, no gate was approached)
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.2 Phase 7 final review clean on final head (NOT CLEAN @ b2158550:
+  1 P2 ledger-normalization reconciliation; fixed at 2ca9ed0d, re-adjudicated
+  CLOSED / PR CLEAN)
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
-- [ ] 5.2 Merge; archive change; loop-log line + audit; close issue #1289
+- [x] 5.1 Chinese work summary + evidence posted; CI green on final head
+  (Unit Tests pass 16m25s run 31197738498 @ 2ca9ed0d)
+- [x] 5.2 Merged d21570ea; archived; loop-log line + audit; issue #1289 closed
