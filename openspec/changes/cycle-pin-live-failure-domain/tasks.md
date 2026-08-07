@@ -125,6 +125,26 @@ F-R4-A CONFIRMED P1 + F-R4-B record 全 CONFIRMED，见 .workplans/pr-1293/revie
   限定、"warm_start"→"warm_start_chaining"。结构性 prose bar 生效：新增
   normative 断言必须逐条 file:line 对齐，不可写"实践不可达"式免责句。
 
+## 6. Round-5 close set（P2-only record-accuracy，全部随轮次关闭修复或
+路由 issue；verifier 裁定见 .workplans/pr-1293/review/verify-r5-*.md）
+
+- [x] 6.1 两个 P1 候选均降级 P2：cand-P1-A（canonical cohort-stage 计费）
+  实测 head==master==r1，pre-existing `_failed_stage` cycle-blindness →
+  DEFER #1300 + 规范收窄；cand-P1-B（合成行泄漏）两条生产读路径均由投影
+  形状闭合 → DEFER #1299 + 文案改写。无 coverage 类发现。
+- [x] 6.2 delta 收窄（orchestrator openspec-only，规范正文不带代码行引）：
+  "never charges" 双绝对句限定 canonical family stage（非 canonical 退化
+  记 #1298）；floor 语义句改"只抬升 caller 值"；pin-refusal scenario 句
+  注明 canonical cohort-stage 的 pre-existing 计费（#1300）；state-level
+  排除括注改投影形状 enforced + #1299。proposal 补"family 之外的"限定；
+  design N1 消费链指代更正（manual_retry.new_attempt 经 manifest 消费）
+  + 引用行号对齐。
+- [x] 6.3 docstring 两处（implementer，docstring-only diff 经
+  `git diff -U0` 核验）：生产谓词 docstring 改为投影形状 enforced 三段式
+  （逐句 file:line）；Test A docstring 更正 gate-deletion kill 归属
+  （stage-blind 单独不红，复合 mutant 才红）。PR body 红组账目同步
+  （round-3 组 final head 1 red，5717b180 锚定 2 red）。
+
 ## E. Evidence floor
 
 - [x] E1 `uv run pytest -q tests/test_production_scheduler.py

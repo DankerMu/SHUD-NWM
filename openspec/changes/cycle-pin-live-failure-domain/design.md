@@ -62,7 +62,7 @@ clean-reservation 不变量下 master 行重置为 0），durable `_retry_<n>` �
 分支把其他 stage 的已消耗后缀计入 forecast 预算——实测 r1-head 派生 1 的形状
 HEAD 派生 5/7/8（幅度不受 marker 值限制），且单 basin cycle 会给
 download/forcing/convert 行盖 `model_id`（`chain_runtime_utils.py:65-68`；仅
-forecast cohort stage 强制 model-less，`accepted_submit_identity.py:316-327`），
+forecast cohort stage 强制 model-less，`accepted_submit_identity.py:317-328`），
 cohort 自己的计数器经 clamp 回流。round-4 重设计为**两分支同轴**：
 
 - **gate 不变**：`_canonical_downstream_stage(_failed_stage(state))` 可解析时
@@ -93,9 +93,11 @@ cohort 自己的计数器经 clamp 回流。round-4 重设计为**两分支同�
   同一 replay 风险在该窄形状上仍在；修复需改 `_state_retry_attempt`，超出
   本 change 单文件边界。
 - 发出的 `previous_attempt` 证据字段保持未 clamp 的 stage-scoped 派生
-  （`scheduler_state_failure.py:1088`），floor 只进 `new_attempt` /
-  `retry_policy.attempt`——后者经 manifest `retry_attempt` 消费
-  （`scheduler_candidate_manifest.py:239-242`），不是"仅内部"值。
+  （`scheduler_state_failure.py:1088`），floor 只进 `new_attempt`
+  （`failure.new_attempt` / `manual_retry.new_attempt` /
+  `retry_policy.attempt` 同值）——其中 `manual_retry.new_attempt` 经
+  manifest `retry_attempt` 消费（`scheduler_candidate_manifest.py:263-279`
+  → `:239-242`），不是"仅内部"值。
 
 ## Risks / Trade-offs
 

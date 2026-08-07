@@ -220,12 +220,31 @@ def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
 
     "Live" reuses the STATUS vocabulary of this module's blocker predicates — their failure
     half, read off the predicates themselves rather than restated, so the two status sets
-    cannot drift.  The SOURCES scanned here are deliberately narrower than the blocker scan's:
-    only job rows and the candidate's own hydro run.  State-level ``pipeline_status`` and
-    pipeline events are blocker sources but are excluded here, because a top-level
-    ``pipeline_status: "failed"`` records the cycle failure this rule is being asked about, not
-    a candidate-scope one; counting it would make arm 2 unreachable (the positive guard pins
-    exactly that arm).  Within the job/hydro sources:
+    cannot drift.  The SOURCES this predicate is meant to scan are narrower than the blocker
+    scan's: only job rows and the candidate's own hydro run.  State-level ``pipeline_status``
+    and pipeline events are blocker sources, but must not be a live-failure source here: a
+    top-level ``pipeline_status: "failed"`` records the cycle failure this rule is being asked
+    about, not a candidate-scope one, and counting it would close arm 2 (the positive guard
+    pins exactly that arm).
+
+    That narrowing is enforced by the projection SHAPE on both production read paths, NOT by
+    any filter in this module.  On the journal path a ``pipeline_job`` marker survives event
+    filtering only when its ``entity_id`` is among the projected job rows
+    (``file_orchestration_journal.py:8486-8489``); on the DB path the event query returns only
+    ``pipeline_job`` events whose ``entity_id`` is selected from the same job predicate, bound
+    to the same values, that the jobs query runs (``chain_repository_state.py:548-558`` against
+    ``:510-515``).  A marker-bearing production state therefore always carries real job rows,
+    ``_state_jobs`` returns those rows, and no synthesized row participates.
+
+    On a synthetic or compacted state with no job rows at all the exclusion does NOT hold:
+    ``_state_jobs`` then synthesizes the state itself as a single job row whenever the state
+    carries any recognized job field (``scheduler_state_rows.py:400-401``), ``pipeline_status``
+    being one of them (``scheduler_state_rows.py:391``), and ``_job_status_text`` reads exactly
+    that field (``scheduler_state_manual_retry.py:184``) — so a top-level ``pipeline_status``
+    does reach this predicate there.  Hardening this by skipping the id-less synthesized row is
+    tracked by #1299.
+
+    Within the job/hydro sources:
 
     * a non-cycle-scope job row whose status blocks a manual retry without being ACTIVE —
       ``FAILED_PIPELINE_STATUSES`` plus ``cancelled``, because a cancelled job is a

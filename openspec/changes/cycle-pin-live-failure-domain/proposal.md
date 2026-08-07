@@ -31,8 +31,9 @@ model-scoped 行、也看不见失败/取消的 hydro run。同文件的 blocker
   restarted-stage-family 内的 stage-scoped 已消耗 attempt 记录为下界
   （`_restarted_stage_family` + `_fallback_previous_attempt`，复用
   `_state_retry_attempt(stage=s)` 同轴派生），防止域扩宽后新可达的回落路径
-  重铸已消耗身份（reservation 静默跳过），同时跨 stage / cohort 计数器绝不
-  计入候选预算（round-4 F-R4-A 修复）。
+  重铸已消耗身份（reservation 静默跳过），同时 family 之外的跨 stage /
+  cohort 计数器绝不计入候选预算（round-4 F-R4-A 修复；family 内的活失败行
+  按其自身 stage 的预算计）。
 
 ## Impact
 

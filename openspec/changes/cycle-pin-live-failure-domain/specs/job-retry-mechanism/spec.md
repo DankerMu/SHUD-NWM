@@ -25,10 +25,14 @@ failure of its own. The live-failure domain matches the failure
 half of the module's blocker STATUS domain, not the narrower
 failed-pipeline status set alone — read from candidate-scope job
 rows and the candidate's own hydro run only (the blocker scan's
-state-level `pipeline_status` and pipeline-event sources are
-deliberately not consulted here: a top-level failed
-`pipeline_status` records the cycle failure being repaired, and
-counting it would make the only-failure-left arm unreachable): a
+state-level `pipeline_status` and pipeline-event sources are not
+live-failure sources here: a top-level failed `pipeline_status`
+records the cycle failure being repaired, and counting it would
+make the only-failure-left arm unreachable; on the production read
+paths this exclusion is enforced by projection shape — a surviving
+marker proves real job rows exist beside it — rather than by an
+in-module filter, and hardening the module against synthesized
+job-row-less shapes is tracked as #1299): a
 candidate-scope (non-cycle-scope) job row in a failed or
 `cancelled` status counts, and so does a hydro run whose status is
 `failed`, `cancelled`, or `permanently_failed`; repaired
@@ -52,14 +56,19 @@ the restarted-stage family — the stages of the candidate's own live
 candidate-scope failures (a row the live-failure exclusions above
 exclude contributes no stage to the family) plus the canonical
 forecast stage when the hydro run is the live failure. Within a
-family stage the floor uses the same stage-scoped derivation the
+family stage that is itself a canonical downstream restart stage
+the floor uses the same stage-scoped derivation the
 resolved-stage path uses, counting id retry suffix or recorded
 retry count regardless of row status — a repaired `_retry_3` row at
 a family stage still proves attempt 3 was spent — while a consumed
 suffix at a stage outside the family (a cross-stage forcing row or
-a cohort stage counter) never charges the candidate's budget. In
-that unnameable-stage case a candidate whose visible family-stage
-row already consumed attempt N derives at least N + 1; with no live
+a cohort stage counter) never contributes to this floor (the floor
+only raises the caller's value). In that unnameable-stage case a
+candidate whose visible family-stage row already consumed attempt
+N derives at least N + 1 whenever that family stage is itself a
+canonical downstream restart stage; at a non-canonical family
+stage the derivation degenerates to the candidate's flat record
+and the floor adds nothing (tracked as #1298); with no live
 failure at all the fallback stays `previous_attempt + 1`. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
@@ -111,9 +120,13 @@ drive the retry decision it was written to request.
   attempt number
 - **AND** when the candidate's own live failure is at a different
   stage, or the marker's resolved job is no longer failed (stale),
-  the derived `new_attempt` falls back to `previous_attempt + 1` —
-  the cycle job's counter is never charged to the candidate's
-  forecast-level budget
+  the derived `new_attempt` falls back to `previous_attempt + 1`;
+  the pin refusal itself charges nothing, but when the cycle stage
+  is a canonical downstream stage the caller's `previous_attempt`
+  is already that stage's stage-scoped derivation, so a multi-basin
+  cohort row at convert/forcing/parse/state_save_qc/publish is
+  still counted there — pre-existing failed-stage cycle-blindness,
+  unchanged by this change and tracked as #1300
 - **AND** the candidate's own live failure that blocks the pin
   includes a `cancelled` model-scoped job row (a cancelled forecast
   with a cross-stage cycle-download marker of `retry_count` 5
@@ -163,7 +176,7 @@ drive the retry decision it was written to request.
   blocks this pin too) — so an operator's manual retry of the
   candidate's own cohort cycle stage stays effective even though
   the row is invisible, while a foreign-cycle or cross-stage cycle
-  counter still never charges the candidate's budget; markers with
+  counter still never pins the candidate's attempt; markers with
   other unresolvable entity ids keep their existing pinning behavior
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics

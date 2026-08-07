@@ -5757,9 +5757,11 @@ def test_consumed_cross_stage_row_never_inflates_a_resolving_stage_budget() -> N
     Discrimination: HEAD derives 1 (the forecast stage's own budget).  A stage-blind floor
     derives ``max(0, 4) + 1 = 5`` -- exactly #1287's cross-stage charging failure mode, a jump
     that reaches the manifest's ``retry_attempt`` and can vault the retry limit -- and this test
-    still fails on that mutant.  Since #1293 round 4 the floor is scoped to the restarted stage
-    family, which on THIS state is ``{"forecast"}`` alone, so deleting the gate no longer changes
-    the answer here; the gate's kill now lives in
+    fails on that mutant only when the gate is deleted with it: the gate closes on this state, so
+    a stage-blind floor ALONE leaves this test green (its kills land on the round-4 family-floor
+    group), while the compound stage-blind + gate-deleted mutant reds it.  Since #1293 round 4
+    the floor is scoped to the restarted stage family, which on THIS state is ``{"forecast"}``
+    alone, so deleting the gate no longer changes the answer here; the gate's kill now lives in
     ``test_row_derived_canonical_stage_also_keeps_the_consumed_clamp_out_of_the_budget``, whose
     family spans two stages.
     """
