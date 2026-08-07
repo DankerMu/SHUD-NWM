@@ -278,10 +278,10 @@ drive the retry decision it was written to request.
   `previous_attempt + 1` replay of a consumed identity
 - **AND** on a state carrying no state-level manual-retry attempt
   payload (no top-level `manual_retry` or `manual_retry_marker`
-  mapping carrying `new_attempt`/`retry_count`), absent an adopted
-  marker whose `retry_count` pins (an operator's explicit attempt
-  claim), the derivation never returns a value at or below
-  `previous_attempt`
+  mapping whose `new_attempt`/`retry_count` value is neither `None`
+  nor `""`), absent an adopted marker whose `retry_count` pins (an
+  operator's explicit attempt claim), the derivation never returns
+  a value at or below `previous_attempt`
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 

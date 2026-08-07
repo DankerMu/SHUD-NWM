@@ -12,6 +12,8 @@ Why:
 - Retry-attempt derivation feeds minted job identity; a wrong value silently no-ops operator retries at the reservation boundary
 - Persisted scheduler-state event ordering is the deciding input
 - The defective arm has zero test discrimination across 1442 existing tests
+  (issue #1289's measurement at its filing HEAD; the collection has since
+  grown)
 Selected risk packs:
 - Concurrency / shared state / ordering
 OpenSpec change: manual-retry-newest-marker-terminal (generated)
@@ -60,8 +62,8 @@ Evidence floor:
   marker (design.md D4.1; red output recorded in the brief)
 - [x] 2.3 Invariant test: never ≤ `previous_attempt` absent a pinning
   operator claim, domain scoped to states without a top-level
-  `manual_retry` attempt payload, with the documented pinning exemption
-  (D4.2)
+  `manual_retry`/`manual_retry_marker` attempt payload, with the
+  documented pinning exemption (D4.2)
 - [x] 2.4 Negative anchors: pinning newest marker unchanged; no-marker
   fallback unchanged; pin-refusal arm unchanged; newer UNADOPTED
   marker-shaped event does not terminate the scan — own pinning marker
@@ -77,7 +79,8 @@ Evidence floor:
 ## 3. Verification (orchestrator)
 
 - [x] 3.1 Evidence floor commands green (triage block above; 4-suite
-  1507 passed / 1 known macOS baseline failure, reproduced on unmodified
+  1509 passed / 1 known macOS baseline failure — 1507 at 7a3b1f60 plus
+  the round-1 sibling's two params — baseline reproduced on unmodified
   HEAD; ruff clean; openspec strict valid)
 - [x] 3.2 Production diff confined to `_manual_retry_new_attempt` scan loop
   + comment in `services/orchestrator/scheduler_state_manual_retry.py`;
@@ -89,7 +92,10 @@ Evidence floor:
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; findings verified before fix
+- [x] 4.1 Cross-review rounds per gate ledger; findings verified before fix
+  (round 1 not-clean: 3 CONFIRMED FIX_NOW fixed at 86171b3a; round 2
+  P2-only, verifier 3 CONFIRMED FIX_NOW routed into the close commit +
+  1 PLAUSIBLE DISCARD — recorded clean)
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout

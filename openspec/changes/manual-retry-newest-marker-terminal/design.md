@@ -80,13 +80,18 @@ Rationale:
 
 **Ruling domain**: the ruling governs the event-scan derivation only. A
 state-level manual-retry attempt payload (a top-level `manual_retry` or
-`manual_retry_marker` mapping carrying `new_attempt`/`retry_count` —
-`_manual_retry_payload` reads the two keys through one `or` gate)
-short-circuits ahead of
-the event scan with no pin or adoption check; that route's semantics are
-pre-existing, outside this ruling, and unchanged (the spec delta and the
-invariant test are scoped accordingly — hardening that route belongs to
-the #1201 writer-gap family, not here).
+`manual_retry_marker` mapping whose `new_attempt`/`retry_count` value is
+neither `None` nor `""` — `_manual_retry_payload` reads the two keys
+through one `or` gate) short-circuits ahead of the event scan with no
+pin or adoption check; that route's semantics are pre-existing, outside
+this ruling, and unchanged (the spec delta and the invariant test are
+scoped accordingly — hardening that route belongs to the #1201
+writer-gap family, not here). The exclusion is that short-circuit
+FIRING, not the key existing: a mapping carrying the key with
+`None`/`""` leaves the event scan in charge and stays inside this
+ruling — the sibling scan-loop test's shape. (A `0`/`False` value DOES
+short-circuit — `0 not in (None, "")` — which is why the domain is
+worded as this exact pair and not as "non-empty".)
 
 ### D2. The new terminal arm returns the floored fallback, not bare `previous_attempt + 1`
 
