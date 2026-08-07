@@ -57,49 +57,53 @@ Evidence floor:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 Writer: `record_manual_repair` marker event `details` gains
+- [x] 2.1 Writer: `record_manual_repair` marker event `details` gains
   `failed_stage` (failed job's stage — same value the API return namespace
   already carries as `stage`); journal test asserts the persisted field;
   consumer non-drop test asserts the marker event still enters the
   candidate state under the terminal-stage setting; identity-filter
   sanitizer retry-event whitelist gains `failed_stage` with a preservation
   test
-- [ ] 2.2 Router: `_marker_event_pins_attempt` passes the event into the
+- [x] 2.2 Router: `_marker_event_pins_attempt` passes the event into the
   unresolvable arm (private helper, single call site)
-- [ ] 2.3 Rewrite `_unresolvable_marker_entity_pins_attempt` per design.md:
+- [x] 2.3 Rewrite `_unresolvable_marker_entity_pins_attempt` per design.md:
   fail-open (non-cycle grammar) and foreign-cycle refusal unchanged;
   staleness conjunction first (state-level `repaired_stage_evidence`
   whose `original_failed_job_id` exactly matches the marker entity id);
   stage evidence = event `details.failed_stage` primary, loop-stripped id
   token backstop; same-stage → pin; mismatch → arm-2 fall-through
-- [ ] 2.4 Defect-1 regressions (red pre-change): single-suffix
+- [x] 2.4 Defect-1 regressions (red pre-change): single-suffix
   `..._<stage>_retry_1` AND three-layer `..._retry_1_retry_2_retry_3`
   stacked-suffix geometry (grammar motivated by the node-27 receipt), on
   synthesized state mappings with submission-stage cohort ids, both
   row-absence mechanisms (identity-filter cohort deletion; row-window
   truncation with a newer same-stage row)
-- [ ] 2.5 Defect-2 regression (red pre-change): mapping-named repaired
+- [x] 2.5 Defect-2 regression (red pre-change): mapping-named repaired
   target — row-present and row-absent give the SAME refusal; the fixture
   carries BOTH halves (repaired flag on the target row AND the state's
   `repaired_stage_evidence` naming that job — design D2); placeholder /
   non-failed shapes and unnamed repaired-flag variants get arm-2 blocking
   anchors only, residue tracked via task 5.0
-- [ ] 2.6 Defect-3 regression (red pre-change): model-less cohort truncation
+- [x] 2.6 Defect-3 regression (red pre-change): model-less cohort truncation
   + cross-stage failure — unresolvable arm lands on the same arm-2 verdict
   as the resolved arm
-- [ ] 2.7 Non-regression anchors: non-cycle-grammar fail-open (covers SQL
+- [x] 2.7 Non-regression anchors: non-cycle-grammar fail-open (covers SQL
   RetryService `{run_id}_retry_active` id shape); foreign cycle never pins;
   stage-less legacy marker backstop path (the stage-less three-layer case
   is the binding kill for the single-strip mutant — design D4.6); #1205
   committed anchor subset green (M6 grammar anchor, T7/T8, same-cycle
   cohort anchor, truncation anchor, T9/T10, V-E 4-cell)
-- [ ] 2.8 Red-proof protocol: new discriminating tests run against pre-change
+- [x] 2.8 Red-proof protocol: new discriminating tests run against pre-change
   source, red output recorded in the brief
 
 ## 3. Verification (orchestrator)
 
-- [ ] 3.1 Evidence floor commands green (triage block above)
-- [ ] 3.2 Production diff confined to the one function + router pass-through
+- [x] 3.1 Evidence floor commands green (triage block above) — pytest
+  1336 passed + 1 pre-existing env failure
+  (`test_db_free_slurm_storage_root_check_masks_symlink_loop_path`,
+  macOS /private/tmp symlink loop; confirmed identically red on the
+  pristine d567e098 tree); ruff clean; validate green
+- [x] 3.2 Production diff confined to the one function + router pass-through
   in `scheduler_state_manual_retry.py`, the one details field in
   `file_orchestration_journal.record_manual_repair`, and the one whitelist
   line in `scheduler_state_identity_filter`; tests-only elsewhere

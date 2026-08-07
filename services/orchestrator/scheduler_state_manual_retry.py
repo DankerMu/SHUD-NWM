@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from services.orchestrator.retry_identity import split_retry_job_identity
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_mapping_for_state,
@@ -153,31 +154,111 @@ def _event_entity_job_row(state: Mapping[str, Any], event: Mapping[str, Any]) ->
             return job
     return None
 
-def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], entity_id: Any) -> bool:
+def _loop_stripped_retry_identity(job_id: str) -> str:
+    """Strip EVERY stacked ``_retry_<n>`` suffix off a job id.
+
+    ``retry_identity.split_retry_job_identity`` strips ONE layer per call (its ``rsplit``
+    takes the last suffix, which is the authoritative attempt), but production ids stack
+    them — the node-27 archive carries ``..._state_save_qc_retry_1_retry_2_retry_3`` — so a
+    single call still leaves ``_retry_1_retry_2`` glued to the stage token.  The loop stops
+    as soon as a call returns its input unchanged, which is what the helper does for an id
+    with no parsable trailing suffix, so an unparsable tail (``..._retry_active``) is left in
+    place rather than being chewed through.
+    """
+
+    base = job_id
+    while True:
+        stripped, _attempt = split_retry_job_identity(base)
+        if stripped == base:
+            return base
+        base = stripped
+
+def _state_repaired_stage_evidence_names_job(state: Mapping[str, Any], entity_id: Any) -> bool:
+    """Row-absent half of the twin's repaired-target refusal: the state-level mapping.
+
+    The twin reads the repaired flags off the marker's target ROW; with the row gone the only
+    surviving evidence of the same shape is the state's ``repaired_stage_evidence`` mapping,
+    compared by EXACT id.  Suffix-aware comparison is deliberately NOT used: it would make a
+    still-failed ``..._retry_3`` target match its repaired ``..._retry_2`` ancestor and refuse
+    a pin the twin grants.  This also differs on purpose from
+    ``_manual_retry_marker_repairs_historical_failure``'s row-absent read, which keys on the
+    marker's ``previous_job_id`` plus a repairing-retry conjunct because it answers a different
+    question ("does this marker repair the historical failure", not "is this marker's own
+    target already repaired").
+    """
+
+    repaired_stage = state.get("repaired_stage_evidence")
+    if not isinstance(repaired_stage, Mapping):
+        return False
+    return str(repaired_stage.get("original_failed_job_id") or "") == str(entity_id)
+
+def _unresolvable_marker_stage_is_repair_target(
+    event: Mapping[str, Any],
+    entity_id: Any,
+    failed_stage: Any,
+) -> bool:
+    """Whether the marker's own recorded stage names the state's failed stage.
+
+    Primary evidence is the marker's ``details.failed_stage`` — written by
+    ``file_orchestration_journal.record_manual_repair`` and preserved through the identity
+    filter's retry-event carve-out — so the verdict no longer depends on id text at all.
+    Markers written before that field existed (legacy and synthesized states) fall back to the
+    id token, read only AFTER every stacked ``_retry_<n>`` suffix is stripped; the suffix match
+    is kept for the token comparison because stage names carry underscores of their own
+    (``state_save_qc``).
+    """
+
+    details = event.get("details")
+    recorded_stage = details.get("failed_stage") if isinstance(details, Mapping) else None
+    if recorded_stage not in (None, ""):
+        return str(recorded_stage) == str(failed_stage)
+    return _loop_stripped_retry_identity(str(entity_id)).endswith(f"_{failed_stage}")
+
+def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
     """Pin gate for markers whose entity resolves to no job row.
 
     The decision state deletes non-authoritative cohort master rows (see
     ``scheduler_state_identity_filter._candidate_state_decision_state``), and the repository
     projection truncates jobs and events independently, so a marker routinely outlives its
     target row on the path production decides on.  Row absence therefore proves nothing by
-    itself, and the id has to carry the evidence instead.
+    itself, and the MARKER has to carry the evidence instead — its own record first, its id
+    text only as the legacy backstop.
 
-    Non-cycle-grammar ids keep the historical fail-open (synthetic and compacted states depend
-    on it).  Cycle-grammar ids pin only with evidence equivalent to the resolved-row rule: the
-    id's cycle must be the candidate's own (foreign-cycle rows are unreachable through both
-    read paths, but sanitized/legacy states can still carry foreign markers), and the id's
-    stage must be the repair target (suffix match on ``failed_stage``; with no ``failed_stage``,
-    the "only failure left" arm applies, mirroring ``_cycle_scope_marker_pins_attempt``).
+    Delivered semantics, in the twin's own order (``_cycle_scope_marker_pins_attempt``):
+
+    * a non-cycle-grammar id keeps the historical fail-open (synthetic and compacted states
+      depend on it, and the SQL retry service's ``{run_id}_retry_active`` shape lands here);
+    * a cycle-grammar id whose ``(source, stamp)`` is not the candidate's own never pins;
+    * staleness first: the pin is refused when the state's ``repaired_stage_evidence`` names
+      this marker's target as its ``original_failed_job_id``;
+    * then the stage evidence — ``details.failed_stage`` primary, loop-stripped id token
+      backstop — pins when it names the state's ``failed_stage``;
+    * anything else (stage mismatch, or a state carrying no ``failed_stage`` at all) falls
+      through to ``not _state_has_candidate_scope_failed_job(state)``, the same predicate
+      object and therefore the same live-failure domain the twin's arm 2 uses.
+
+    Equivalence with the twin is claimed only where the row-absent path HAS the evidence: for
+    failed-status targets carrying no repaired-stage-evidence flags, and for repaired targets
+    the state mapping names.  The twin also refuses on evidence that lives on the ROW alone —
+    an unsubmitted auto-retry placeholder, a non-failed target, or a repaired-flagged row
+    (``repair_status``/``active_blocker``) the state mapping does NOT name — and that evidence
+    does not survive its row, so those shapes still pin here where the twin refuses.  That
+    residue is disclosed, not fixed, by this rule (design.md Residue 1).
     """
+    entity_id = event.get("entity_id")
     match = _CYCLE_SCOPE_JOB_ID_RE.fullmatch(str(entity_id)) if entity_id not in (None, "") else None
     if match is None:
         return True
     run_match = _CANDIDATE_RUN_ID_RE.match(str(state.get("run_id") or ""))
     if run_match is None or run_match.groups() != match.groups():
         return False
+    if _state_repaired_stage_evidence_names_job(state, entity_id):
+        return False
     failed_stage = state.get("failed_stage")
-    if failed_stage not in (None, ""):
-        return str(entity_id).endswith(f"_{failed_stage}")
+    if failed_stage not in (None, "") and _unresolvable_marker_stage_is_repair_target(
+        event, entity_id, failed_stage
+    ):
+        return True
     return not _state_has_candidate_scope_failed_job(state)
 
 def _job_status_text(job: Mapping[str, Any]) -> str:
@@ -310,7 +391,7 @@ def _marker_event_pins_attempt(state: Mapping[str, Any], event: Mapping[str, Any
     """Attempt-derivation gate for one adopted marker: cycle-scope rows need the pin rule."""
     job = _event_entity_job_row(state, event)
     if job is None:
-        return _unresolvable_marker_entity_pins_attempt(state, event.get("entity_id"))
+        return _unresolvable_marker_entity_pins_attempt(state, event)
     if not _job_is_cycle_scope_row(job):
         return True
     return _cycle_scope_marker_pins_attempt(state, job)
