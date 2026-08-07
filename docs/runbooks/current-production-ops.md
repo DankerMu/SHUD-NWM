@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-07-23
+最后更新：2026-08-07
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -1310,6 +1310,33 @@ This section is a live snapshot, not a permanent fact. Refresh it during handoff
   both returned `ok` after port alignment.
 - node-22 Slurm Gateway process is active; node-22 diagnostic API `/health` on
   `:8001` returned `ok`.
+
+### 7.1 2026-08-07：hhe 退出业务化，当前业务集为 17 流域
+
+`basins_hhe`（全国级网格，43799 river segments）SHUD 参数待进一步校正
+（单次 forecast 积分远超常规流域，见 #1295；gfs_2026072112 修复线在
+forecast 运行超 2 小时后由操作员决定取消），暂时退出业务化。当前生产
+业务集为 **17 流域 × gfs/ifs 双源**。
+
+退役操作记录（均有备份，可逆）：
+
+- node-22 scheduler registry：两份 `scheduler/registry/manifest-last.json`
+  （NFS + `/scratch/frd_muziyao/nhms-prod` 本地）移除 hhe 的 2 条模型
+  （`dg_edd58a2fe…`/gfs、`dg_2c13fd98…`/ifs，36→34），checksum 按
+  canonical-JSON（排除 `checksum` 键、sort_keys 紧凑序列化的 sha256）
+  重算；原件备份 `manifest-last.json.bak-hhe-retire-20260807`。
+- node-27 DB：`hydro.hydro_run` 中 23 条 published 的
+  `basins_hhe_vbasins` 行翻为 `superseded`（与 window-retirement 语义一致，
+  ingest re-scan 会无条件跳过）；行级备份
+  `/home/nwm/hhe-published-runs-backup-20260807.csv`。
+- node-27 ingest：`infra/env/node27-ingest.env` 的
+  `AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy,hhe`（备份同名 `.bak-hhe-retire-20260807`）。
+- 展示验证：display API `/api/v1/basins?has_display_product=true` 返回
+  17 个流域，不含 hhe。
+
+复活路径：恢复 manifest 备份（或重新 provision registry）＋ 27 侧
+`--force` 注册（其 register 步骤会把 `superseded` 翻回 active）＋
+移除 `AUTOPIPE_EXCLUDE_BASINS` 中的 `hhe`。
 
 ## 8. 当前已知卡点
 
