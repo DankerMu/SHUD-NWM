@@ -698,7 +698,13 @@
         1286
       ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1286,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
