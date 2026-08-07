@@ -172,13 +172,29 @@ def _job_status_text(job: Mapping[str, Any]) -> str:
     return str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
 
 def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
-    """True when any non-cycle-scope job row is still a LIVE failure.
+    """True when the candidate's own scope still carries a LIVE failure of any kind.
 
-    "Live" is this module's existing failure domain, mirrored from the blocker scan: a
-    repaired stage-evidence row and an unsubmitted auto-retry placeholder both keep a
-    literal failed status while carrying no blocking force, so neither may count here.
-    Counting one would make the cycle failure look like "not the only failure left" and
-    silently discard the operator-pinned attempt number.
+    "Live" is the FAILURE HALF of this module's blocker domain, and it is derived from the
+    blocker predicates themselves rather than restated, so the two sides cannot drift:
+
+    * a non-cycle-scope job row whose status blocks a manual retry without being ACTIVE —
+      ``FAILED_PIPELINE_STATUSES`` plus ``cancelled``, because a cancelled job is a
+      first-class manual-retry source (``retry.MANUAL_RETRY_SOURCE_STATUSES``) and therefore
+      a live repair target; and
+    * a hydro run in a blocking non-ACTIVE status (``failed`` / ``cancelled`` /
+      ``permanently_failed``), checked at state level because a hydro run is not a job row.
+
+    The ACTIVE half of both blocker domains is excluded on purpose: work still in flight is
+    not a repair target, and counting it would make every queued candidate look like it had
+    a failure of its own.
+
+    Two shapes keep a literal failure status while carrying no blocking force anywhere else
+    in this module — a repaired stage-evidence row and an unsubmitted auto-retry placeholder
+    — so neither counts here either.  (Both exclusions apply to every row regardless of
+    status; the placeholder predicate is itself gated to ``pending``/``submission_failed``,
+    exactly as the blocker scan applies it, so a cancelled row of placeholder shape blocks
+    there and counts here.)  Counting an excluded row would make the cycle failure look like
+    "not the only failure left" and silently discard the operator-pinned attempt number.
     """
     for job in _state_jobs(state):
         if _job_is_cycle_scope_row(job):
@@ -187,9 +203,11 @@ def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
             continue
         if _job_is_unsubmitted_auto_retry_placeholder(job):
             continue
-        if _job_status_text(job) in FAILED_PIPELINE_STATUSES:
+        status = _job_status_text(job)
+        if _manual_retry_blocking_pipeline_status(status) and status not in ACTIVE_PIPELINE_STATUSES:
             return True
-    return False
+    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
+    return _manual_retry_blocking_hydro_status(hydro_status) and hydro_status not in ACTIVE_HYDRO_STATUSES
 
 def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str, Any]) -> bool:
     """Whether a cycle-scope job's counter belongs to the attempt this decision derives.

@@ -1,0 +1,76 @@
+# Tasks: cycle-pin-live-failure-domain
+
+## Risk triage
+
+- Issue type: bugfix (#1287)
+- Project profile: NHMS
+- Blast radius: medium（attempt 跳号→manifest `retry_attempt`；触发形状窄）
+- Fixture level: expanded（domain trigger: `orchestrator` state machine；
+  upstream suggested level 缺省——issue-scribe 产出无该字段）
+- Repair intensity: medium（单谓词域修正；共享谓词的两个消费者都在同一文件，
+  同域是目标不变量）
+- Selected risk packs:
+  - `oracle-discrimination`（selected：issue 给出两对判别值 1↔5 / 3↔5，测试必须
+    红能力在案）
+  - `invariant-state`（selected：两消费臂同域不变量 + arm 1/回落语义保留）
+  - `spec-compliance`（selected：主 spec 两处字面 + 相邻 live-failure 子句
+    与实现同步）
+  - `integration`（not selected：下游 `scheduler_state_failure.py` 只消费返回值，
+    无接口/字段变化）
+  - `security/perf`（not selected：无此类面）
+- Evidence floor: 见 §E
+
+## 1. Implementation
+
+- [x] 1.1 `_state_has_candidate_scope_failed_job`：job 行失败判据扩为
+  `FAILED_PIPELINE_STATUSES ∪ {"cancelled"}`（与 blocker 谓词同源常量形），
+  repaired-evidence / placeholder 排除保留且对 cancelled 行同样生效。
+- [x] 1.2 同函数追加 hydro 腿：`hydro_status ∈ {failed, cancelled,
+  permanently_failed}`（blocker hydro 谓词的失败半边），字段读取口径与本模块
+  blocker 扫描一致。
+- [x] 1.3 spec 措辞同步：本 change 的 MODIFIED delta 已含主 spec 两处
+  "no failed model-scoped job row" 字面（:330、:379-380）及相邻 live-failure
+  子句的活失败域改写；本 task 在 PR 内的完成态 = delta 内容定稿 + strict 校验
+  通过（主 spec 落库发生在 merge 后 `openspec archive`，不在本 PR diff 内）。
+
+## 2. Tests（新判别测试放 tests/test_production_scheduler.py；既有护栏集在
+tests/test_file_orchestration_migration.py:576-1010 一带，两文件都必须跑）
+
+- [x] 2.1 判别对 1：own forecast=`cancelled` + 跨 stage cycle-download marker
+  `retry_count=5` → `_manual_retry_new_attempt(prev=0) == 1`（当前 red=5）。
+- [x] 2.2 判别对 2：jobs 全 succeeded + `hydro_status=failed` + 同 marker →
+  `_manual_retry_new_attempt(prev=2) == 3`（当前 red=5）。
+- [x] 2.3 hydro cancelled 变体 → 回落（与 2.2 同构，`hydro_status=cancelled`）。
+- [x] 2.4 回归护栏：own ∈ {failed, permanently_failed, submission_failed,
+  partially_failed} 仍 == 1；arm 1 同 stage 命中仍钉 marker 值；repaired stage
+  evidence / unsubmitted placeholder 仍不算活失败（钉值不回归）；cancelled 的
+  placeholder 形状行在 placeholder status 门（`{pending, submission_failed}`）
+  之外，与 blocker 扫描一致地计为活失败（判别测试断言两侧同域）。
+- [x] 2.4b arm 2 正向护栏（ACTIVE≠失败不变量）：own jobs 全 succeeded + 无
+  hydro 失败 + 跨 stage cycle-download marker `retry_count=5` → 仍钉 5
+  （`prev=0 → 5`）；且 `hydro_status` 为 ACTIVE 值（如 `running`）的变体仍钉 5
+  ——防止实现误用整只 blocker 谓词（含 ACTIVE 半边）而非其失败半边。
+- [x] 2.5 unresolvable 臂同域：无 failed_stage + own cancelled 行 +
+  `job_cycle_*` 语法 unresolvable marker → 不钉（`_marker_event_pins_attempt`
+  路径，两臂同域不变量的判别形）。
+- [x] 2.6 红证明：2.1/2.2/2.3/2.5 在 pre-change 源上 red（批量 stash 法），
+  实现后 green；输出入 implementer 报告。
+
+## E. Evidence floor
+
+- [x] E1 `uv run pytest -q tests/test_production_scheduler.py
+  tests/test_file_orchestration_migration.py`（后者承载本谓词的既有护栏集：
+  arm 1 同 stage :576、placeholder :821、repaired :856、succeeded 目标 :881、
+  arm 2 正向 :910、`fcst_...` 行 :981；CI 定向选择对 `scheduler_state_manual_retry.py`
+  不会自动带上它——`scripts/select_ci_tests.py` 的 orchestrator 规则不含该文件，
+  故本地 E1 必须显式跑）。结果 1130 passed / 1 failed——唯一失败
+  `test_db_free_slurm_storage_root_check_masks_symlink_loop_path` 为 master
+  基线既有（macOS 平台相关，PR #1286 期间已在独立 master worktree 复现，
+  与本 diff 零共享代码）。
+- [x] E2 `uv run ruff check .`
+- [x] E3 `openspec validate cycle-pin-live-failure-domain --strict
+  --no-interactive`
+- [x] E4 Surface check：生产 diff 仅
+  `services/orchestrator/scheduler_state_manual_retry.py`；spec 措辞仅经本
+  change delta。
+- [ ] E5 CI `Unit Tests` green on PR head。

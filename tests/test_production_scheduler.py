@@ -5192,20 +5192,27 @@ def _decision_path_state(
     *,
     events: list[dict[str, Any]],
     jobs: list[dict[str, Any]] | None = None,
-    failed_stage: str = "forecast",
+    failed_stage: str | None = "forecast",
+    **overrides: Any,
 ) -> dict[str, Any]:
-    return {
+    """Decision-path failure state.  ``failed_stage=None`` omits the key entirely, which is
+    the production cohort projection's shape (no explicit failed stage)."""
+
+    state: dict[str, Any] = {
         "run_id": candidate.run_id,
         "forcing_version_id": candidate.forcing_version_id,
         "candidate_id": candidate.candidate_id,
         "pipeline_status": "failed",
-        "failed_stage": failed_stage,
         "error_code": "NODE_FAILURE",
         "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         "retry_count": 0,
         "pipeline_jobs": jobs if jobs is not None else [_decision_path_own_forecast_job()],
         "pipeline_events": events,
     }
+    if failed_stage is not None:
+        state["failed_stage"] = failed_stage
+    state.update(overrides)
+    return state
 
 
 def _decision_path_filtered_state(
@@ -5460,6 +5467,299 @@ def test_retained_source_cycle_download_marker_does_not_pin_across_stages_on_the
         "job_model_a_forecast",
         "job_cycle_gfs_2026052106_download",
     ]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def _decision_path_cycle_download_job(**overrides: Any) -> dict[str, Any]:
+    """The candidate's own source-cycle download row: the cycle-scope marker target that the
+    identity filter's carve-out keeps (see the retained-download parity guard above)."""
+
+    job: dict[str, Any] = {
+        "job_id": "job_cycle_gfs_2026052106_download",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": None,
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+def _decision_path_cycle_download_marker() -> dict[str, Any]:
+    """Operator manual retry of the cycle download stage, carrying counter 5."""
+
+    return _decision_path_manual_retry_marker(
+        entity_id="job_cycle_gfs_2026052106_download",
+        retry_count=5,
+        previous_job_id="job_cycle_gfs_2026052106_download",
+        event_id=42,
+    )
+
+
+def test_cancelled_own_forecast_blocks_cross_stage_cycle_marker_pin() -> None:
+    """#1287 discriminating pair 1: a ``cancelled`` own row IS a live candidate-scope failure.
+
+    ``cancelled`` is a first-class manual-retry source (``retry.MANUAL_RETRY_SOURCE_STATUSES``)
+    and this module's blocker scan already treats it as a blocker, so a cancelled forecast is a
+    live repair target exactly like a failed one.  Reading it as "no candidate-scope failure of
+    its own" opened the pin rule's arm 2 and charged the cross-stage cycle-download counter (5)
+    to this candidate's forecast budget (``previous_attempt`` 0 -> 5), a jump that reaches the
+    manifest's ``retry_attempt`` and can vault the retry limit.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "cancelled"},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: both rows survive filtering, so the marker resolves to its cycle-scope row and
+    # only the live-failure domain can decide this state.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_cycle_gfs_2026052106_download",
+    ]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+@pytest.mark.parametrize("hydro_status", ["failed", "cancelled", "permanently_failed"])
+def test_failed_hydro_run_blocks_cycle_marker_pin_beside_succeeded_jobs(hydro_status: str) -> None:
+    """#1287 discriminating pair 2: the live-failure domain has a hydro leg.
+
+    A hydro run is not a job row, so a state whose pipeline jobs all succeeded looked
+    failure-free even while its hydro run was failed/cancelled/permanently failed -- the same
+    statuses ``_manual_retry_blocking_hydro_status`` already blocks on.  The hydro failure is
+    this candidate's repair target, so the cycle-download counter (5) must stay out of its
+    budget: ``previous_attempt`` 2 derives 3, not 5.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "succeeded", "error_code": None},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage=None,
+        hydro_status=hydro_status,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: no explicit failed stage (the production cohort projection's shape), so only
+    # arm 2 can decide, and the hydro status really is on the state the decision reads.
+    assert "failed_stage" not in decision_state
+    assert decision_state["hydro_status"] == hydro_status
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=2) == 3
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+@pytest.mark.parametrize(
+    "own_status",
+    ["failed", "permanently_failed", "submission_failed", "partially_failed"],
+)
+def test_failed_own_forecast_statuses_keep_blocking_cross_stage_cycle_marker_pin(own_status: str) -> None:
+    """Regression guard: widening the domain must not lose the statuses it already covered."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": own_status},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_same_stage_cycle_marker_still_pins_when_the_candidates_own_row_is_cancelled() -> None:
+    """Regression guard: arm 1 (explicit same-stage repair) outranks the widened arm 2.
+
+    ``failed_stage`` names the marker job's own stage, so the cycle download failure IS what
+    this decision repairs and the operator's counter must survive -- a cancelled own row at
+    another stage does not change that.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "cancelled"},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+@pytest.mark.parametrize(
+    "own_job_overrides",
+    [
+        pytest.param({"repair_status": "repaired"}, id="repaired_failed_row"),
+        pytest.param({"status": "cancelled", "repair_status": "repaired"}, id="repaired_cancelled_row"),
+        pytest.param(
+            {
+                "job_id": "job_model_a_forecast_retry_1",
+                "status": "submission_failed",
+                "retry_count": 1,
+                "slurm_job_id": None,
+                "array_task_id": None,
+            },
+            id="unsubmitted_auto_retry_placeholder",
+        ),
+    ],
+)
+def test_excluded_own_rows_still_do_not_block_the_cycle_marker_pin(own_job_overrides: dict[str, Any]) -> None:
+    """Regression guard: the two exclusions stay effective, cancelled rows included.
+
+    A repaired stage-evidence row and an unsubmitted auto-retry placeholder keep a literal
+    failure status while carrying no blocking force anywhere else in this module, so neither is
+    a live failure -- and the exclusions run before the status test, so a *cancelled* repaired
+    row is excluded too.  Counting one would silently discard the operator-pinned attempt.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), **own_job_overrides},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+def test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_the_blocker_scan() -> None:
+    """Co-domain invariant: the placeholder exclusion is status-gated, on BOTH sides.
+
+    ``_job_is_unsubmitted_auto_retry_placeholder`` only recognises ``pending`` /
+    ``submission_failed`` rows, so a cancelled row of placeholder shape is NOT excluded from
+    the blocker scan -- it is a real blocker there.  The pin rule's live-failure domain is the
+    failure half of that same blocker domain, so it must count the row here too; excluding it
+    on shape alone would re-open the exact gap #1287 closes.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cancelled_placeholder = {
+        **_decision_path_own_forecast_job(),
+        "job_id": "job_model_a_forecast_retry_1",
+        "status": "cancelled",
+        "retry_count": 1,
+        "slurm_job_id": None,
+        "array_task_id": None,
+        "updated_at": "2026-05-21T06:40:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[cancelled_placeholder, _decision_path_cycle_download_job()],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the blocker scan really does count this row (it is the newest blocker).
+    blocker = scheduler_module._latest_manual_retry_blocker(decision_state)
+    assert blocker is not None
+    assert (blocker["source"], blocker["status"]) == ("pipeline_job", "cancelled")
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+@pytest.mark.parametrize("hydro_status", [None, "running", "succeeded"])
+def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(hydro_status: str | None) -> None:
+    """Positive guard: only the FAILURE half of the blocker domains may close arm 2.
+
+    The production cohort-download shape has no explicit failed stage and no candidate-scope
+    failure at all, so the operator's cycle counter must still be pinned (0 -> 5).  An ACTIVE
+    hydro status such as ``running`` is pending work, not a repair target: an implementation
+    that used the whole ``_manual_retry_blocking_hydro_status`` predicate instead of its failure
+    half would drop the pin here and break every cohort restart with a hydro run in flight.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    overrides: dict[str, Any] = {} if hydro_status is None else {"hydro_status": hydro_status}
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "succeeded", "error_code": None},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage=None,
+        **overrides,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+def test_cancelled_own_row_also_closes_the_unresolvable_cohort_master_pin() -> None:
+    """Both consumers of the predicate share one domain -- the unresolvable arm included.
+
+    The cohort master row is gone from the decision state, so only the marker's id carries
+    evidence: same cycle as the candidate, and with no ``failed_stage`` the "only failure left"
+    arm decides.  The candidate's own row is cancelled, i.e. a live repair target, so this arm
+    must close exactly like the resolved-row arm does.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job_id = "job_cycle_gfs_2026052106_state_save_qc_cohort_ab12cd34ef56_state_save_qc"
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[{**_decision_path_own_forecast_job(), "status": "cancelled"}],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the marker survives, resolves to no row, and carries the candidate's own cycle.
+    assert [event["entity_id"] for event in decision_state["pipeline_events"]] == [cohort_job_id]
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
