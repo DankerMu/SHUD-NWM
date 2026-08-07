@@ -99,4 +99,7 @@ file-journal 读路径 `repository.candidate_state()` 端到端;fixture 入口
   docstring-only 行引更新,AST 不变——#1287 落的引用被本 diff 插行漂移,
   verifier FS-1 CONFIRMED）;共享谓词与 gate surface 函数零 diff;spec
   措辞仅经本 change delta。
-- [ ] E5 CI `Unit Tests` green on PR head。
+- [x] E5 CI `Unit Tests` green on PR head(三 head 均绿:`6bcd54da` run
+  31174964370 · `151a7d92` run 31178574657 · 终态 `3d3bfac4` run
+  31180215113。勾选随 merge 后 archive commit 落库——终推后不追加
+  docs-only push 的 CI 纪律)。

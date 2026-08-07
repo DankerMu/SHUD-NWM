@@ -380,8 +380,34 @@ failure at all the fallback stays `previous_attempt + 1`. Marker-shaped events r
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
-journal/DB read paths is unchanged — cycle-wide events stay visible in
-every candidate's raw state for diagnostics. On the identity-filtered
+journal/DB read paths is unchanged for cycle-granularity markers and
+model-less cycle-scope rows — those cycle-wide events stay visible in
+every candidate's raw state for diagnostics. Candidate-state
+membership for pipeline job rows on the journal (db-free) read path
+SHALL align with the DB read path's candidate-state predicate: a row
+whose run id is the candidate's own run id belongs to the candidate;
+a row whose run id carries the cycle-scope run grammar belongs to the
+candidate only when its `model_id` is empty (the model-less cohort
+contract — such rows stay visible to every candidate in the cycle,
+including the journal-only widening to rows whose run id extends the
+cycle run id with a suffix, which this rule leaves in place) or names
+the candidate itself; a row naming a foreign `model_id` is excluded
+from the candidate's job rows, and a `pipeline_job`-entity event
+resolving to an excluded row SHALL leave the candidate's event table
+in the same filtering step as its row — an orphaned marker whose row
+was excluded but whose event survived would re-enter the pinning
+decision through the unresolvable cycle-scope entity grammar — so a
+foreign model's manual retry marker can neither report
+`manual_retry_requested` nor pin the candidate's derived
+`new_attempt`. The exclusion applies to candidate-state membership
+only: the cycle-level duplicate-submission and completion gates (the
+active-pipeline, completed-pipeline, and active-slurm-jobs scans)
+keep their wider unconditional cycle-run visibility unchanged by this
+rule — the DB read path's active-pipeline and active-slurm-jobs gates
+deliberately share that wider visibility, while its
+completed-pipeline gate reads the candidate's own hydro run alone and
+so has no job-row counterpart to align with here. On the
+identity-filtered
 decision state, preserving the attribution predicate fields makes a
 self-declared MATCHING `model_id` a retention credential for a
 non-authoritative marker event under shared-cycle scoping (foreign
@@ -389,6 +415,35 @@ model ids stay excluded; within one source-cycle aggregate a model id
 maps to exactly one candidate), so a candidate-own marker that
 sanitization previously stripped to anonymity is now retained and can
 drive the retry decision it was written to request.
+
+#### Scenario: Foreign-model named cycle-run_id row cannot enter the candidate state or pin its attempt
+
+- **WHEN** on the journal (db-free) read path another model's
+  pipeline job row is recorded with `run_id` equal to the cycle run
+  id (`cycle_<source>_<stamp>`) and a non-empty `model_id` naming
+  that other model, carrying `retry_count` 5, a manual retry event of
+  `entity_type` `pipeline_job` targets exactly that row, and the
+  candidate's own failed forecast row carries `retry_count` 0
+- **THEN** the candidate's state contains neither the foreign model's
+  job row nor the event targeting it, `manual_retry_requested` stays
+  false from that marker, and the derived `new_attempt` is
+  `previous_attempt + 1` (1 from 0) — not the foreign marker's 5
+- **AND** a model-less row with the same cycle-scope run id, or with
+  a run id extending it by a suffix, remains visible to every
+  candidate in the cycle
+- **AND** the candidate's own row with `run_id` equal to the cycle
+  run id and the candidate's own `model_id` remains visible, and a
+  marker targeting it keeps its adoption and pinning semantics
+- **AND** the DB read path gives the same candidate-state membership
+  verdict for these rows — the foreign-model named row is excluded
+  there by the `model_id IS NULL` guard on its cycle-run clause and
+  the candidate's own named row is included by its model clause —
+  while the suffix-extended model-less row remains a journal-only
+  widening that this change leaves in place
+- **AND** with the foreign-model row and its marker in place, the
+  cycle-level duplicate-submission gates (active-pipeline,
+  completed-pipeline, active-slurm-jobs) answer exactly as before
+  the exclusion — the row stays visible to those scans
 
 #### Scenario: Unattributed cycle-granularity marker is fail-closed with an explicit escape
 
