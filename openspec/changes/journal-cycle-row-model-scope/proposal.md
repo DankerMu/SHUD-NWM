@@ -4,11 +4,11 @@
 
 Issue #1288（PR #1286 round-3 escalation,issue-scribe 端到端复现并订正机制）:
 db-free(file-journal)读路径的 `_job_matches_candidate`
-（`services/orchestrator/file_orchestration_journal.py:8443-8462`）cycle-run_id
+（`services/orchestrator/file_orchestration_journal.py`）cycle-run_id
 分支不看 `model_id`——`run_id == cycle_<source>_<stamp>` 且 `model_id`
 非空指向**他模型**的 job 行,对本候选判 True。行被收编后,其
 `entity_type=pipeline_job` manual retry marker 经成员判定
-（`:8477-8489`）随行进入候选事件表;#1205 两把刀均不拦（刀 1 只 gate
+（`_event_matches_candidate_rows`）随行进入候选事件表;#1205 两把刀均不拦（刀 1 只 gate
 `forecast_cycle`,刀 2 的 cycle-scope 判定要求 `model_id` 为空——他模型行
 `model_id` 非空,`scheduler_state_manual_retry.py:310-311` 直接钉值）。
 端到端实测:他模型行 `retry_count=5` 把自身 `retry_count=0` 的候选钉成
@@ -23,13 +23,14 @@ DB 读路径无此缺陷:`chain_repository_state.py:510-515` 的 cycle-run_id �
 
 - 读侧收窄,seam 定在 **candidate_state 投影**（fixture 复审 P1-1 裁定;
   唯一生产文件仍是 `services/orchestrator/file_orchestration_journal.py`）:
-  在 `candidate_state` 的 `pipeline_jobs=`（`:689-700`）与
-  `pipeline_events=`（`:701-708`）推导处排除"他模型具名 +
+  在 `candidate_state` 的 `pipeline_jobs=` 与
+  `pipeline_events=` 推导处排除"他模型具名 +
   cycle-run_id"行及其 `pipeline_job` 事件（可复用
-  `_is_model_less_cycle_scope_job`,`:8405-8413`）。共享谓词
+  `_is_model_less_cycle_scope_job`）。共享谓词
   `_job_matches_candidate` / `_filter_cycle_rows_for_model` **逐字不动**——
-  它同时驱动 `has_active_pipeline`（`:502`）、`has_completed_pipeline`
-  （`:531`）、`active_slurm_jobs`（`:618`）、直录读面（`:4157`）四个
+  它同时驱动 `has_active_pipeline`、`has_completed_pipeline`、
+  `active_slurm_jobs`、直录读面
+  （`_iter_direct_pipeline_job_records_for_cycle`）四个
   gate surface。其中 active-pipeline / active-slurm-jobs 两个 gate 的
   DB 谓词（`chain_repository.py:74-79`、`:177-181`）**有意保留**无条件
   cycle-run 子句;`has_completed_pipeline` 的 DB 侧

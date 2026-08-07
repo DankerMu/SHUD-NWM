@@ -32,14 +32,15 @@
 ## 1. Implementation
 
 - [x] 1.1 seam = `candidate_state` 投影（`file_orchestration_journal.py`）:
-  在 `pipeline_jobs=` 推导（`:689-700`）与 `pipeline_events=` 推导
-  （`:701-708`）处排除"他模型具名（`model_id` 非空且 ≠ 候选）+
+  在 `candidate_state` 的 `pipeline_jobs=` 推导与 `pipeline_events=`
+  推导处排除"他模型具名（`model_id` 非空且 ≠ 候选）+
   `run_id == cycle_run_id`"的行与解析到该行的 `pipeline_job` 事件——
   **行/事件同一步排除**(P1-1b)。判定复用/对齐
-  `_is_model_less_cycle_scope_job`（`:8405-8413`）的空值口径
+  `_is_model_less_cycle_scope_job` 的空值口径
   （`in (None, "")`）。共享谓词 `_job_matches_candidate`、
-  `_filter_cycle_rows_for_model` 及 4 个 gate surface（`:502`/`:531`/
-  `:618`/`:4157`）**逐字不动**。
+  `_filter_cycle_rows_for_model` 及 4 个 gate surface（`has_active_pipeline` /
+  `has_completed_pipeline` / `active_slurm_jobs` /
+  `_iter_direct_pipeline_job_records_for_cycle` 直录读面）**逐字不动**。
 - [x] 1.2 代码注释显式对齐 DB 候选态谓词口径,指向
   `chain_repository_state.py:510-515`,并注明 gate 谓词
   （`chain_repository.py:74-79`/`:177-181`）有意保持宽形(issue AC 5 +
@@ -93,7 +94,9 @@ file-journal 读路径 `repository.candidate_state()` 端到端;fixture 入口
 - [x] E2 `uv run ruff check .`
 - [x] E3 `openspec validate journal-cycle-row-model-scope --strict
   --no-interactive`
-- [x] E4 Surface check:生产 diff 仅
-  `services/orchestrator/file_orchestration_journal.py`;共享谓词与 gate
-  surface 函数零 diff;spec 措辞仅经本 change delta。
+- [x] E4 Surface check:生产 diff = `file_orchestration_journal.py`
+  （+60 插入式）+ `scheduler_state_manual_retry.py`（round-1 随修,
+  docstring-only 行引更新,AST 不变——#1287 落的引用被本 diff 插行漂移,
+  verifier FS-1 CONFIRMED）;共享谓词与 gate surface 函数零 diff;spec
+  措辞仅经本 change delta。
 - [ ] E5 CI `Unit Tests` green on PR head。

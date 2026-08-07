@@ -5,20 +5,20 @@
 三案:
 
 - **(取) candidate_state 投影过滤**:在 `file_orchestration_journal.py` 的
-  `candidate_state` 组装处——`pipeline_jobs=` 推导（`:689-700`）与
-  `pipeline_events=` 推导（`:701-708`）——排除"他模型具名 + cycle-run_id"
+  `candidate_state` 组装处——`candidate_state` 的 `pipeline_jobs=` 推导与
+  `pipeline_events=` 推导——排除"他模型具名 + cycle-run_id"
   行及其 `pipeline_job` 事件;判定可复用
-  `_is_model_less_cycle_scope_job`（`:8405-8413`）。
+  `_is_model_less_cycle_scope_job`。
 - (弃) 收窄共享谓词 `_job_matches_candidate`（issue 原推荐落点):fixture
-  复审 P1-1 实测证伪——该谓词经 `_filter_cycle_rows_for_model`（`:409`,由
-  `_cycle_rows:3569` 无条件调用）同时驱动 **4 个 gate surface**:
+  复审 P1-1 实测证伪——该谓词经 `_filter_cycle_rows_for_model`（由
+  `_cycle_rows` 无条件调用）同时驱动 **4 个 gate surface**:
 
   | 调用点 | 功能 | DB 对照 | 收窄后果(复审实测) |
   |---|---|---|---|
-  | `:502` | `has_active_pipeline` | `chain_repository.py:74-79` **有意保留**无条件 cycle-run 子句 | True→False:`active_duplicate_pipeline` 去重闸放松（`chain_forecast_trigger.py:136` 不再抛 PIPELINE_ALREADY_ACTIVE） |
-  | `:531` | `has_completed_pipeline` | **无 job 谓词可对照**——DB 侧 `chain_repository.py:97-109` 只查 `hydro.hydro_run`（`model_id` 限定） | 同向放松;且该面 journal/DB 本就分歧（既有,非本 change 引入,见 D5 注） |
-  | `:618` | `active_slurm_jobs` | `chain_repository.py:177-181` 同上 | 非空→空 |
-  | `:4157` | 直录 job 读面 | — | 随动 |
+  | `has_active_pipeline` | 去重闸 | `chain_repository.py:74-79` **有意保留**无条件 cycle-run 子句 | True→False:`active_duplicate_pipeline` 去重闸放松（`chain_forecast_trigger.py:136` 不再抛 PIPELINE_ALREADY_ACTIVE） |
+  | `has_completed_pipeline` | 完成闸 | **无 job 谓词可对照**——DB 侧 `chain_repository.py:97-109` 只查 `hydro.hydro_run`（`model_id` 限定） | 同向放松;且该面 journal/DB 本就分歧（既有,非本 change 引入,见 D5 注） |
+  | `active_slurm_jobs` | 在飞 slurm 扫描 | `chain_repository.py:177-181` 同上 | 非空→空 |
+  | `_iter_direct_pipeline_job_records_for_cycle` | 直录 job 读面 | — | 随动 |
 
   即"与 DB 对齐"的口号在 gate surface 上**反向成立**:DB 的 gate 谓词就是
   宽的,收窄共享谓词制造新的 journal/DB 分歧,且复审确认无既有测试守护。
@@ -37,7 +37,7 @@
 | 他模型具名 + `run_id == fcst_<...>_<他模型>` | 不属于(行/事件同丢,issue 实测) | 不变 | 不变 |
 
 **事件面是显式过滤,不是自动收敛**(复审 P1-1b,must-preserve 级硬约束):
-`_event_matches_candidate_rows`(`:8477-8489`)按 job map 成员判定只在
+`_event_matches_candidate_rows` 按 job map 成员判定只在
 "改共享谓词"seam 下自动随行;seam 落在投影层时,若只滤行不滤事件,落单
 marker 的 entity `job_cycle_<source>_<stamp>_<stage>` 恰好命中
 `scheduler_state_manual_retry.py:36` `_CYCLE_SCOPE_JOB_ID_RE`,经
@@ -61,14 +61,19 @@ marker 的 entity `job_cycle_<source>_<stamp>_<stage>` 恰好命中
 ## D4 must-preserve 与 seams
 
 - model-less cohort cycle-wide 可见性（#841/`22103181`,负向回归 2.3),含
-  `cycle_run_id_<suffix>` 的 journal-only 加宽（`:8460` `startswith`;DB
+  `cycle_run_id_<suffix>` 的 journal-only 加宽（`_job_matches_candidate` cycle-run 臂的 `startswith` 加宽;DB
   候选态谓词 `chain_repository_state.py:514` 是精确等值,该分歧既有且本
   change 不消除——delta scenario 如实记载,不虚称"全形状同判定"）。
 - 候选自身行:own run_id 行、own model 具名 + cycle run_id 行(负向回归
   2.4;DB 侧经 `chain_repository_state.py:512` `model_id = %s` 同样成立);
-  既有 `tests/test_file_orchestration_journal.py:214-228` `_active_job` 形
-  候选==行 model,其 `model_id` 形参唯一非默认调用在 `:5116` 走
-  `query_pipeline_jobs_by_cycle` 不经候选谓词——复审已实测不受影响,保持绿。
+  既有 `tests/test_file_orchestration_journal.py` 的 `_active_job` 夹具默认
+  `model_id="model_a"`（候选==行 model),既有用例除
+  `test_file_orchestration_journal_resource_limits_fail_closed` 里那条
+  `model_b` latest 视图外全部取默认值,而该处经
+  `query_pipeline_jobs_by_cycle` 读取、不经候选谓词——故排除逻辑对既有
+  用例无影响,保持绿。本 change 新增的 `_cycle_run_id_job` /
+  `_own_failed_forecast_job` 两个夹具以非默认 `model_id` 构造行并**故意**
+  经候选投影,那正是判别对本身,不属"既有形保持绿"的论据范围。
 - **4 个 gate surface 行为逐字不变**（负向回归 2.6):`has_active_pipeline` /
   `has_completed_pipeline` / `active_slurm_jobs` / 直录读面对他模型具名
   cycle-run 行的可见性保持现状。
