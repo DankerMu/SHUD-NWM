@@ -174,8 +174,14 @@ def _job_status_text(job: Mapping[str, Any]) -> str:
 def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
     """True when the candidate's own scope still carries a LIVE failure of any kind.
 
-    "Live" is the FAILURE HALF of this module's blocker domain, and it is derived from the
-    blocker predicates themselves rather than restated, so the two sides cannot drift:
+    "Live" reuses the STATUS vocabulary of this module's blocker predicates — their failure
+    half, read off the predicates themselves rather than restated, so the two status sets
+    cannot drift.  The SOURCES scanned here are deliberately narrower than the blocker scan's:
+    only job rows and the candidate's own hydro run.  State-level ``pipeline_status`` and
+    pipeline events are blocker sources but are excluded here, because a top-level
+    ``pipeline_status: "failed"`` records the cycle failure this rule is being asked about, not
+    a candidate-scope one; counting it would make arm 2 unreachable (the positive guard pins
+    exactly that arm).  Within the job/hydro sources:
 
     * a non-cycle-scope job row whose status blocks a manual retry without being ACTIVE —
       ``FAILED_PIPELINE_STATUSES`` plus ``cancelled``, because a cancelled job is a
@@ -219,8 +225,14 @@ def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str,
     the state (nothing else could be the repair target).  A job that is no longer a LIVE
     failure — resolved, repaired stage evidence whose failed status is historical, or an
     unsubmitted auto-retry placeholder — is a stale marker target and pins nothing, even when
-    ``failed_stage`` names its stage.  That LIVE-failure domain is exactly the one
-    ``_state_has_candidate_scope_failed_job`` applies to the other side of this rule.
+    ``failed_stage`` names its stage.
+
+    The two sides of this rule do NOT share one status domain.  This marker-target test keeps
+    the narrower bare ``FAILED_PIPELINE_STATUSES`` set on purpose: #1287 widened only the
+    candidate-scope side (``_state_has_candidate_scope_failed_job``, the failure half of the
+    blocker vocabulary, i.e. ``cancelled`` rows and failed hydro runs too), and whether a
+    ``cancelled`` cohort master row should also be a valid marker target is out of scope there
+    and tracked separately by #1294.
     """
     if (
         _pipeline_job_is_repaired_stage_evidence(job)

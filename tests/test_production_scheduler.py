@@ -5620,6 +5620,43 @@ def test_same_stage_cycle_marker_still_pins_when_the_candidates_own_row_is_cance
     assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
 
 
+def test_same_stage_cycle_marker_still_pins_when_the_candidates_hydro_run_failed() -> None:
+    """Regression guard: arm 1 outranks the widened arm 2 on its HYDRO leg too.
+
+    Twin of the cancelled-own-row guard above, on the leg #1287 added.  ``failed_stage`` names
+    the marker job's own stage, so arm 1 (explicit same-stage repair) returns before arm 2 ever
+    consults ``_state_has_candidate_scope_failed_job``: the cycle download failure IS what this
+    decision repairs, and a failed hydro run beside all-succeeded model rows does not change
+    that.  Demoting arm 1 below the widened predicate would silently discard the operator's
+    counter for every same-stage cohort repair whose hydro run also failed.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+
+    def _state(*, failed_stage: str | None) -> dict[str, Any]:
+        return _decision_path_state(
+            candidate,
+            events=[_decision_path_cycle_download_marker()],
+            jobs=[
+                {**_decision_path_own_forecast_job(), "status": "succeeded", "error_code": None},
+                _decision_path_cycle_download_job(),
+            ],
+            failed_stage=failed_stage,
+            hydro_status="failed",
+        )
+
+    # Premise: arm 2 really is closed on this state -- strip the same-stage marker and the very
+    # same rows derive ``previous_attempt + 1``.  So the pin below can only come from arm 1.
+    arm_two_only = _decision_path_filtered_state(candidate, _state(failed_stage=None))
+    assert scheduler_module._manual_retry_new_attempt(arm_two_only, previous_attempt=0) == 1
+
+    decision_state = _decision_path_filtered_state(candidate, _state(failed_stage="download"))
+
+    assert decision_state["failed_stage"] == "download"
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
 @pytest.mark.parametrize(
     "own_job_overrides",
     [
@@ -5700,15 +5737,35 @@ def test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_th
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
 
-@pytest.mark.parametrize("hydro_status", [None, "running", "succeeded"])
-def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(hydro_status: str | None) -> None:
+@pytest.mark.parametrize(
+    ("own_status", "hydro_status"),
+    [
+        pytest.param("succeeded", None, id="None"),
+        pytest.param("succeeded", "running", id="running"),
+        pytest.param("succeeded", "succeeded", id="succeeded"),
+        pytest.param("pending", None, id="own_pending"),
+        pytest.param("queued", None, id="own_queued"),
+        pytest.param("submitted", None, id="own_submitted"),
+        pytest.param("running", None, id="own_running"),
+    ],
+)
+def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(
+    own_status: str,
+    hydro_status: str | None,
+) -> None:
     """Positive guard: only the FAILURE half of the blocker domains may close arm 2.
 
     The production cohort-download shape has no explicit failed stage and no candidate-scope
-    failure at all, so the operator's cycle counter must still be pinned (0 -> 5).  An ACTIVE
-    hydro status such as ``running`` is pending work, not a repair target: an implementation
-    that used the whole ``_manual_retry_blocking_hydro_status`` predicate instead of its failure
-    half would drop the pin here and break every cohort restart with a hydro run in flight.
+    failure at all, so the operator's cycle counter must still be pinned (0 -> 5).  ACTIVE work
+    is pending work, not a repair target, and BOTH legs of the domain subtract it:
+
+    * the hydro leg -- an implementation that used the whole
+      ``_manual_retry_blocking_hydro_status`` predicate instead of its failure half would drop
+      the pin on ``running`` and break every cohort restart with a hydro run in flight; and
+    * the job-row leg -- ``_manual_retry_blocking_pipeline_status`` also spans
+      ``ACTIVE_PIPELINE_STATUSES``, so dropping ``status not in ACTIVE_PIPELINE_STATUSES`` would
+      read the candidate's own in-flight forecast row as a live failure of its own and break
+      every cohort restart whose model rows are already queued/submitted/running.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -5717,7 +5774,7 @@ def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(hydro
         candidate,
         events=[_decision_path_cycle_download_marker()],
         jobs=[
-            {**_decision_path_own_forecast_job(), "status": "succeeded", "error_code": None},
+            {**_decision_path_own_forecast_job(), "status": own_status, "error_code": None},
             _decision_path_cycle_download_job(),
         ],
         failed_stage=None,
@@ -5726,6 +5783,16 @@ def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(hydro
 
     decision_state = _decision_path_filtered_state(candidate, state)
 
+    # Premise: the own model-scoped row survives filtering as a plain FIRST-attempt row --
+    # neither repaired stage evidence nor an unsubmitted auto-retry placeholder (its id carries
+    # no ``_retry_`` and its ``retry_count`` is 0).  So nothing but the ACTIVE subtraction keeps
+    # an in-flight own row out of the live-failure domain.
+    own_row = decision_state["pipeline_jobs"][0]
+    assert own_row["job_id"] == "job_model_a_forecast"
+    assert own_row["status"] == own_status
+    assert own_row["retry_count"] == 0
+    assert scheduler_module._job_is_unsubmitted_auto_retry_placeholder(own_row) is False
+    assert scheduler_module._pipeline_job_is_repaired_stage_evidence(own_row) is False
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
     assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
 

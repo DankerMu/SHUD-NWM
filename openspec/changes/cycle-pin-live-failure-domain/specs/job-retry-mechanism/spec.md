@@ -33,7 +33,8 @@ placeholder-shaped row in a `cancelled` status is outside the
 placeholder gate and counts, exactly as the blocker scan treats
 it. In every other case — a
 candidate-scoped live pipeline failure (failed or cancelled) at a
-different stage, a candidate-scoped live hydro failure, or a marker
+different stage, a candidate-scoped live hydro failure where the
+failed stage does not name the resolved job's stage, or a marker
 whose resolved job is no longer failed (stale) — the derived
 `new_attempt` falls back to
 the candidate's own `previous_attempt + 1`, and the fallback is
@@ -98,7 +99,10 @@ drive the retry decision it was written to request.
   derives `new_attempt` 1 from `previous_attempt` 0, not 5) and a
   failed, cancelled, or permanently failed hydro run beside
   all-succeeded job rows (`previous_attempt` 2 derives 3, not 5) —
-  the same live-failure domain the module's blocker scan applies
+  the FAILURE half of the blocker scan's status domain only: an
+  ACTIVE in-flight row (`pending`/`queued`/`submitted`/`running`)
+  or an ACTIVE hydro run is not a repair target and never blocks
+  the pin
 - **AND** a repaired stage-evidence row or an unsubmitted
   auto-retry placeholder is not a live failure and does not block
   the pin, while a placeholder-shaped row in a `cancelled` status
