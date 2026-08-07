@@ -233,7 +233,7 @@ def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
     (``file_orchestration_journal._event_matches_candidate_rows``), and a row excluded from the
     candidate projection drops its ``pipeline_job`` events in the SAME step (the foreign-model
     filter pair in ``candidate_state``'s ``pipeline_jobs=``/``pipeline_events=`` derivations,
-    #1288) — dropping either half alone would leave an orphaned marker that re-enters the pin
+    #1288) — dropping the row half alone would leave an orphaned marker that re-enters the pin
     decision through ``_unresolvable_marker_entity_pins_attempt``; on the DB path the event query returns only
     ``pipeline_job`` events whose ``entity_id`` is selected from the same job predicate, bound
     to the same values, that the jobs query runs (``chain_repository_state.py:548-558`` against

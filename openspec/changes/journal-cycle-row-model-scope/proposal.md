@@ -10,7 +10,8 @@ db-free(file-journal)读路径的 `_job_matches_candidate`
 `entity_type=pipeline_job` manual retry marker 经成员判定
 （`_event_matches_candidate_rows`）随行进入候选事件表;#1205 两把刀均不拦（刀 1 只 gate
 `forecast_cycle`,刀 2 的 cycle-scope 判定要求 `model_id` 为空——他模型行
-`model_id` 非空,`scheduler_state_manual_retry.py:310-311` 直接钉值）。
+`model_id` 非空,`_marker_event_pins_attempt` 的 `_job_is_cycle_scope_row`
+未命中臂直接钉值）。
 端到端实测:他模型行 `retry_count=5` 把自身 `retry_count=0` 的候选钉成
 `new_attempt=5`。
 
