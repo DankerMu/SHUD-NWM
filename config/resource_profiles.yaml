@@ -5,7 +5,15 @@ resource_profiles:
     ntasks: 1
     cpus_per_task: 4
     memory_gb: 8
-    walltime: "06:00:00"
+    # Forecast cohorts submit as ONE array whose walltime is resolved from task 0's
+    # model only (real_backend._normalize_array_request -> resolve_resource_profile),
+    # so a per-basin override cannot protect a slow member: this default is the
+    # effective ceiling for every member. HHe's SHUD wall-clock swings with forcing
+    # intensity (7 min .. >5h50m observed) and 06:00:00 killed IFS 2026071012
+    # (job 24081_1, FAILED at 05:50:38). SHUD gains nothing from extra threads, so
+    # wall-clock is the only lever. Registry already declares walltime_minutes=720
+    # for these basins; 14h keeps margin above that.
+    walltime: "14:00:00"
     max_concurrent: 32
     shud_threads: 4
   overrides:
