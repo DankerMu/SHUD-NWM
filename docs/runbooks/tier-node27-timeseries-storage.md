@@ -1347,6 +1347,22 @@ completes but the operator wants to abandon the decompress state, force a
 compression pass with the runner's enforce flag once the chunk falls
 outside the lag window.
 
+### 6.x.1 Short-lag regime (2026-08-07, md0 outage): outage recovery MUST decompress first
+
+自 2026-08-07 起生产 lag 从 604800（7 d）降为 **172800（2 d）**（
+`infra/env/node27-timeseries-compression.env`，备份
+`*.bak-lag7d-20260807`）：md0 故障后大 chunk 无处安放，/home 独自承载
+稳态未压缩量，必须把峰值从 ~800 G（本周 + 7 d 缓冲周）压到 ~515 G
+（本周 + 2 d 缓冲周）。md0 恢复、DB 大 chunk 重新有独立设备后可回调。
+
+短 lag 的运维铁律：**任何超过 lag 时长（2 d）的 ingest 中断，恢复追赶
+之前必须先对受影响的"已关闭周" chunk 执行上文的手工 decompress 流程**
+——补算的旧 cycle 会往已压缩周写替换窗口 DELETE + INSERT，直接追会撞
+写保护 guard（或在支持 DML 的版本上触发严重膨胀）。判定受影响范围：
+补算最早 cycle 的预报时段起点落进哪些周，哪些周就要先解压。解压需要
+预留膨胀空间（历史实测 ~400 G/周,先 `df -h /home`），追平后由
+compression timer 按 lag 自动重新压缩。
+
 ## 7. Archive rebuild drill (`archive-rebuild-drill`)
 
 The drill (`scripts/node27_archive_rebuild_drill.py`, issue #854) proves that
