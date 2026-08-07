@@ -878,12 +878,22 @@ def _already_ingested_runs(
     If the object-store run was rewritten after DB parse, do not skip it. That
     is the normal recovery path after a cold-start run is replaced by a
     warm-start recompute with the same run_id.
+
+    Runs at status 'superseded' are retired: skipped unconditionally (no
+    timeseries-row or manifest-currency check), even though their object-store
+    products still exist. Reviving one requires the explicit --force path,
+    whose register step flips 'superseded' back to an active status.
     """
     if not run_ids:
         return set()
     conn = psycopg2.connect(database_url)
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_id FROM hydro.hydro_run WHERE run_id = ANY(%s) AND status = 'superseded'",
+                (run_ids,),
+            )
+            retired = {str(row[0]) for row in cur.fetchall()}
             cur.execute(
                 """
                 SELECT h.run_id,
@@ -898,7 +908,7 @@ def _already_ingested_runs(
                 """,
                 (run_ids,),
             )
-            return {
+            return retired | {
                 str(row[0])
                 for row in cur.fetchall()
                 if _ingested_run_is_current(
