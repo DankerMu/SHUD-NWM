@@ -92,6 +92,14 @@ cohort 自己的计数器经 clamp 回流。round-4 重设计为**两分支同�
   `DOWNSTREAM_RESTART_STAGES`），family floor 退化为 previous_attempt——
   同一 replay 风险在该窄形状上仍在；修复需改 `_state_retry_attempt`，超出
   本 change 单文件边界。
+- round-5 追加两笔残留（均 DEFER，非本 change 回归）：候选自身 failed stage
+  解析为 canonical downstream stage 时，同 stage 的多 basin cohort 行经
+  `previous_attempt = _state_retry_attempt(state, stage=_failed_stage(state))`
+  （`scheduler_state_failure.py:1088`）计入候选预算——`_failed_stage` 的
+  cycle-scope 盲区为 pre-existing（cross-SHA 实测 head==master），跟踪
+  #1300；`_state_jobs` 在无 job 行 state 上把 state 自身合成为 job 行、
+  顶层 `pipeline_status` 可流入本谓词——两条生产读路径由投影形状闭合
+  （见谓词 docstring 逐句引证），模块级硬化跟踪 #1299。
 - 发出的 `previous_attempt` 证据字段保持未 clamp 的 stage-scoped 派生
   （`scheduler_state_failure.py:1088`），floor 只进 `new_attempt`
   （`failure.new_attempt` / `manual_retry.new_attempt` /

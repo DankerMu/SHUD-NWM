@@ -121,10 +121,10 @@ drive the retry decision it was written to request.
 - **AND** when the candidate's own live failure is at a different
   stage, or the marker's resolved job is no longer failed (stale),
   the derived `new_attempt` falls back to `previous_attempt + 1`;
-  the pin refusal itself charges nothing, but when the cycle stage
-  is a canonical downstream stage the caller's `previous_attempt`
-  is already that stage's stage-scoped derivation, so a multi-basin
-  cohort row at convert/forcing/parse/state_save_qc/publish is
+  the pin refusal itself charges nothing, but when the candidate's
+  own failed stage resolves to a canonical downstream stage the
+  caller's `previous_attempt` is already that stage's stage-scoped
+  derivation, so a multi-basin cohort row at that same stage is
   still counted there — pre-existing failed-stage cycle-blindness,
   unchanged by this change and tracked as #1300
 - **AND** the candidate's own live failure that blocks the pin
