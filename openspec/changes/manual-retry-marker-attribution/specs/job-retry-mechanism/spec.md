@@ -29,8 +29,16 @@ terminal: the newest retry-count-bearing adopted marker decides;
 older markers are not consulted. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
-own manual retry), and event-row visibility is unchanged — cycle-wide
-events stay visible in every candidate's state for diagnostics.
+own manual retry), and candidate-state event-row visibility on the
+journal/DB read paths is unchanged — cycle-wide events stay visible in
+every candidate's raw state for diagnostics. On the identity-filtered
+decision state, preserving the attribution predicate fields makes a
+self-declared MATCHING `model_id` a retention credential for a
+non-authoritative marker event under shared-cycle scoping (foreign
+model ids stay excluded; within one source-cycle aggregate a model id
+maps to exactly one candidate), so a candidate-own marker that
+sanitization previously stripped to anonymity is now retained and can
+drive the retry decision it was written to request.
 
 #### Scenario: Unattributed cycle-granularity marker is fail-closed with an explicit escape
 
@@ -48,6 +56,12 @@ events stay visible in every candidate's state for diagnostics.
   (`entity_type`, top-level and details `model_id`) so the
   fail-closed test and its explicit escape behave identically on the
   raw and filtered state
+- **AND** the preserved `model_id` doubles as a shared-cycle
+  retention credential on the decision state: a non-authoritative
+  marker event self-declaring the candidate's own `model_id` is
+  retained (and may flip the candidate's decision from a terminal
+  guard to the requested retry), while one declaring a foreign
+  `model_id` — or none — is dropped as before
 
 #### Scenario: Cycle-scope job marker pins only when its stage is the repair target
 

@@ -112,7 +112,10 @@ state_save_qc cohort 依赖）；marker 新鲜度语义（#1201）；
 ## Impact
 
 - Affected code: `services/orchestrator/scheduler_state_manual_retry.py`
-  （唯一生产文件：刀 1 + 刀 2 + 三点接线），
+  （刀 1 + 刀 2 + 三点接线）与
+  `services/orchestrator/scheduler_state_identity_filter.py`
+  （round-3 修订经诊断定标解冻，改动限消毒白名单放行三个判据键——
+  解冻记录与"零**未经诊断定标**的 diff"规则见 tasks.md Frozen 节），
   `tests/test_file_orchestration_journal.py` 或
   `tests/test_file_orchestration_migration.py`（新增回归用例，
   按既有 fixture 风格就近放置）。注：
@@ -121,9 +124,10 @@ state_save_qc cohort 依赖）；marker 新鲜度语义（#1201）；
   修复传递生效，无需直接改动。
 - Affected specs: `job-retry-mechanism`（1 ADDED requirement：
   manual retry marker 的候选归属裁定）。
-- Frozen surfaces（零 diff）：`file_orchestration_journal.py`、
+- Frozen surfaces（零未经诊断定标的 diff；本次实际零 diff 的
+  9 个下游/读侧生产文件）：`file_orchestration_journal.py`、
   `chain_repository_state.py`、`scheduler_state_decision.py`、
   `scheduler_state_failure.py`、`scheduler_state_evidence_owner.py`、
   `scheduler_candidate_manifest.py`、`chain_runtime_utils.py`、
   `chain_forecast_control.py`、`chain_forecast_orchestrator_cycle.py`、
-  `scheduler_state_identity_filter.py`、全部既有测试用例。
+  全部既有测试用例。

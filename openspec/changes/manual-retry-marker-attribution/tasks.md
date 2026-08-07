@@ -209,8 +209,33 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   requirement 主句自相矛盾）、design.md round-4 修订节（含 F5′
   保守残留与方向 (ii) 否决记录）、identity_filter 注释假不变量
   更正、V-E 披露两方向补齐；
-- [x] 2c.4 V-D 13 形矩阵作为回归断言复跑一致 + mutant 复核
-  （helper 恒 False / fullmatch→startswith 必红）。
+- [x] 2c.4 V-D 13 形矩阵以一次性诊断脚本复跑一致（未整体落库为
+  回归断言——落库为 committed 断言的形：M6 文法锚、T7/T8、同 cycle
+  cohort 锚、截断锚、T9/T10、V-E 4 格；其余形（arm-2 双向、
+  无法判定不钉、同 cycle 交叉 stage）当时仅存在于诊断脚本，
+  round-5 复审 cand-05/06 CONFIRMED 此覆盖缺口，判别对由 2d 补齐）
+  + mutant 复核（helper 恒 False / fullmatch→startswith 必红）。
+
+## 2d. Round-5 ceiling wrap-up（用户裁定的有界收尾；测试 + 文本，零生产代码）
+
+- [x] 2d.1 cand-05 两个单属性判别对（异 cycle/同 stage 杀 MUT=A；
+  同 cycle/交叉 stage 杀 MUT=A2），经 `_candidate_state_decision_state`
+  求值，含 record-forensic 断言（`"new_attempt" not in payload`）。
+- [x] 2d.2 cand-06 三出口锚：(a) `run_id`-less（shared-cycle
+  aggregate 形）cycle 文法 unresolvable → 不钉；(b) 同 cycle +
+  failed_stage 后缀不匹配 → 不钉；(c) arm-2 同构对
+  （failed_stage 缺失 × 无/有活候选失败行 → 钉/不钉）。
+- [x] 2d.3 cand-07 resolved 规则 decision-path 负向一例
+  （T9 态 + `failed_stage="forecast"`，同杀 CYCLEROW_TRUE 与
+  CANDFAIL_FALSE）。
+- [x] 2d.4 mutant 复验记录：MUT=A / MUT=A2 / RUNNONE_PASS /
+  STAGE_MISMATCH_PINS / ARM2_TRUE / ARM2_FALSE / CYCLEROW_TRUE /
+  CANDFAIL_FALSE 各至少一红（8/8，orchestrator 抽查 MUT=A 双红 +
+  ARM2_FALSE 一红独立复现）；HEAD 全绿（除 master 基线的
+  symlink-loop 既有失败）。
+- [x] 2d.5 cand-08/09/10 fixture 文本订正（tasks.md 2c.4 改述、
+  proposal.md Impact/Frozen、spec.md 可见性子句 + Scenario 1
+  retention 子句——本节提交即是）。
 
 ## 3. Spec + validation
 

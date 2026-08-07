@@ -629,6 +629,94 @@ def test_cross_stage_cycle_marker_does_not_pin_forecast_attempt() -> None:
     assert evidence["manual_retry"]["new_attempt"] == 1
 
 
+def test_cross_stage_unresolvable_cohort_master_marker_does_not_pin_attempt() -> None:
+    """Same channel-2 harm through the UNRESOLVED-row gate: the stage suffix must still decide.
+
+    The cohort master row is gone (deleted by the identity filter or pushed out by truncation),
+    so the marker's entity resolves to nothing and only its id carries evidence.  The id's cycle
+    is the candidate's own, but its stage is ``convert`` while this decision repairs
+    ``download`` -- so the counter belongs to another budget and must not be pinned.
+    """
+
+    state = {
+        "run_id": "fcst_gfs_2026070100_model_a",
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "download",
+        "pipeline_jobs": [dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_convert_cohort_ab12cd34ef56_convert",
+                retry_count=5,
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+def test_unresolvable_cohort_master_marker_pins_when_it_is_the_only_failure_left() -> None:
+    """The unresolved-row gate's "only failure left" arm, mirroring the resolved-row rule.
+
+    Production's cohort-restart projection carries no explicit ``failed_stage``, so the stage
+    suffix cannot decide; with the candidate's own model job succeeded, nothing but the cycle
+    failure could be the repair target, and the operator-pinned attempt must survive.
+    """
+
+    state = {
+        "run_id": "fcst_gfs_2026070100_model_a",
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4},
+            {**_OWN_MODEL_JOB, "status": "succeeded"},
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_convert_cohort_ab12cd34ef56_convert",
+                retry_count=5,
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+
+
+def test_unresolvable_cohort_master_marker_does_not_pin_beside_a_live_model_failure() -> None:
+    """Negative twin of the arm above: one live candidate-scope failure closes it.
+
+    Isomorphic to ``test_unresolvable_cohort_master_marker_pins_when_it_is_the_only_failure_left``
+    except that the candidate's own forecast job is still failing, so the cycle failure is not
+    the only possible repair target and its counter must stay out of this budget.
+    """
+
+    state = {
+        "run_id": "fcst_gfs_2026070100_model_a",
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "stage": "forecast",
+        "pipeline_jobs": [
+            {**_CYCLE_SCOPE_JOB, "retry_count": 4},
+            dict(_OWN_MODEL_JOB),
+        ],
+        "pipeline_events": [
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_convert_cohort_ab12cd34ef56_convert",
+                retry_count=5,
+            )
+        ],
+    }
+
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
 def test_stale_cycle_marker_on_succeeded_job_does_not_pin() -> None:
     """A marker whose resolved cycle job already succeeded is stale: it pins nothing."""
 
