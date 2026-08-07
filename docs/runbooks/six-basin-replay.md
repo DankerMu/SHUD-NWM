@@ -166,17 +166,35 @@ Phase 1 跑完把 env 里的 `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST` 改回 `t
 -- range_start/range_end 直接以解压工具要求的 ISO-Z 文本输出:psql 默认按会话时区
 -- 打印 timestamptz(如 `2026-05-28 08:00:00+08`),而工具做的是 ISO-Z 字符串比对,
 -- 原样贴过去会被判成 range 不匹配。
-SELECT chunk_schema, chunk_name, hypertable_schema, hypertable_name,
-       to_char(range_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_start,
-       to_char(range_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_end
-FROM timescaledb_information.chunks
-WHERE hypertable_schema || '.' || hypertable_name
+SELECT c.chunk_schema, c.chunk_name, c.hypertable_schema, c.hypertable_name,
+       to_char(c.range_start AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_start,
+       to_char(c.range_end   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS range_end,
+       COALESCE(ts.spcname, 'pg_default') AS tablespace,
+       pg_size_pretty(s.before_compression_total_bytes) AS restores_to
+FROM timescaledb_information.chunks c
+JOIN pg_class cl ON cl.relname = c.chunk_name
+JOIN pg_namespace ns ON ns.oid = cl.relnamespace AND ns.nspname = c.chunk_schema
+LEFT JOIN pg_tablespace ts ON ts.oid = cl.reltablespace
+LEFT JOIN LATERAL (
+  SELECT before_compression_total_bytes
+  FROM chunk_compression_stats(format('%I.%I', c.hypertable_schema, c.hypertable_name))
+  WHERE chunk_name = c.chunk_name
+) s ON TRUE
+WHERE c.hypertable_schema || '.' || c.hypertable_name
         IN ('hydro.river_timeseries', 'met.forcing_station_timeseries')
-  AND is_compressed
-  AND range_start < TIMESTAMPTZ '2026-07-28T00:00:00Z'
-  AND range_end   > TIMESTAMPTZ '2026-07-05T00:00:00Z'
-ORDER BY hypertable_name, range_start;
+  AND c.is_compressed
+  AND c.range_start < TIMESTAMPTZ '2026-07-28T00:00:00Z'
+  AND c.range_end   > TIMESTAMPTZ '2026-07-05T00:00:00Z'
+ORDER BY c.hypertable_name, c.range_start;
 ```
+
+`tablespace` 和 `restores_to` 两列是**执行前必须看的**：解压会把
+`restores_to` 那么多字节写回该 chunk 所在表空间的设备。`pg_default` → 查
+`df -h /home`；`ghdc` → 查 `df -h /data/GHDC`。node-27 数据库自 2026-08-06
+起横跨两块设备，详见
+`docs/runbooks/tier-node27-timeseries-storage.md` §"Node-27 database storage
+is split across two devices"。空间不够时先把 chunk **及其全部索引**迁到
+`ghdc`（压缩态的 chunk 关系是空壳，迁移是瞬时的），再解压。
 
 命中行为空 → 跳过本节。非空则**逐 chunk**调用解压工具(它一次只处理一个 chunk,
 六个 target 参数全部必填,取值取自上面普查结果的同名列——`--range-start` /
@@ -199,7 +217,13 @@ uv run python -m scripts.node27_timeseries_decompression_replay \
 - receipt 里出现 `failure.mutation_state: indeterminate`:**不要重跑同一 chunk**
   ——先用普查 SQL 读该 chunk 的 `is_compressed` 真实态;已是 `false` 就记录并继续,
   仍是 `true` 才换一个新的 `--receipt-path` 重试。`failed_before_mutation` 可直接重试(换 receipt 路径)。
-- 单 chunk 手工路径与再压缩安排见 `docs/runbooks/tier-node27-timeseries-storage.md:1305-1335`。
+- **该工具有 4 分钟语句超时上限**（`scripts/node27_timeseries_decompression_replay.py`
+  `STATEMENT_TIMEOUT_MS = 240_000`）。它适用于小 chunk；`restores_to` 到几十上百 GB
+  的 chunk 必然超时。此时走 §4.3.2 手工 `decompress_chunk` 路径，后台运行
+  （`SET statement_timeout = 0`），并自行留存等价 receipt。2026-08-06 的
+  `_hyper_3_10`（119 GB）/ `_hyper_3_14`（333 GB）就是这样处理的。
+- 单 chunk 手工路径、表空间归属判定与再压缩安排见
+  `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.2 / §4.3.3。
 
 #### 2.3.2 瓦片失效
 
