@@ -680,6 +680,36 @@ class FileOrchestrationJournalRepository:
             if _is_model_less_cycle_scope_job(job, source_id=canonical_source_id, cycle_time=cycle_time)
             and str(job.get("stage") or "") in _CYCLE_SCOPE_COMPLETION_STAGES
         }
+        # Candidate-state membership mirrors the DB read path's candidate-state
+        # predicate (`chain_repository_state.py:510-515`), whose cycle-run clause
+        # carries `model_id IS NULL`: a row naming a FOREIGN model is not this
+        # candidate's row even when its run id is the cycle run id.  Without this
+        # the foreign row - and the manual retry marker riding on it - would pin
+        # this candidate's derived attempt to another model's `retry_count`
+        # (#1288).
+        #
+        # The exclusion is deliberately scoped to this projection instead of the
+        # shared row predicate `_job_matches_candidate`: that predicate also feeds
+        # the cycle-level duplicate-submission and completion gates
+        # (`has_active_pipeline`, `has_completed_pipeline`, `active_slurm_jobs`),
+        # and their DB counterparts match the cycle run id UNCONDITIONALLY
+        # (`chain_repository.py:74-79` and `:177-181`); `has_completed_pipeline`
+        # has no DB job-row counterpart at all (`chain_repository.py:97-109` reads
+        # `hydro.hydro_run` only).  Narrowing the shared predicate would therefore
+        # create a new journal/DB divergence and loosen those gates.
+        #
+        # Rows and their `pipeline_job` events must leave in the SAME step: a
+        # marker whose row is gone resolves to no job row and re-enters the attempt
+        # decision through the cycle-scope entity grammar
+        # (`scheduler_state_manual_retry._unresolvable_marker_entity_pins_attempt`).
+        foreign_model_cycle_scope_job_ids = {
+            str(job.get("job_id"))
+            for job in rows.pipeline_jobs.values()
+            if job.get("job_id") not in (None, "")
+            and _is_foreign_model_cycle_scope_job(
+                job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            )
+        }
         state = chain_repository_state.candidate_state_from_rows(
             source_id=canonical_source_id,
             cycle_time=cycle_time,
@@ -697,6 +727,9 @@ class FileOrchestrationJournalRepository:
                     else job
                 )
                 for job in rows.pipeline_jobs.values()
+                if not _is_foreign_model_cycle_scope_job(
+                    job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+                )
             ],
             pipeline_events=[
                 _public_scheduler_row(
@@ -705,6 +738,10 @@ class FileOrchestrationJournalRepository:
                     else event
                 )
                 for event in rows.pipeline_events
+                if not (
+                    str(event.get("entity_type") or "pipeline_job") == "pipeline_job"
+                    and str(event.get("entity_id") or "") in foreign_model_cycle_scope_job_ids
+                )
             ],
             forcing_version=rows.forcing_version,
             forecast_cycle=rows.forecast_cycle,
@@ -8411,6 +8448,29 @@ def _is_model_less_cycle_scope_job(
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     run_id = str(job.get("run_id") or "")
     return run_id == cycle_run_id or run_id.startswith(f"{cycle_run_id}_")
+
+
+def _is_foreign_model_cycle_scope_job(
+    job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str
+) -> bool:
+    """A row of ANOTHER model that merely carries the cycle run id.
+
+    Complement of ``_is_model_less_cycle_scope_job`` on the same run-id grammar and
+    the same null semantics (``in (None, "")``): a job whose ``model_id`` is set and
+    names a different model is that model's row, not a cohort row shared by the
+    cycle.  Only the exact ``cycle_<source>_<stamp>`` run id is tested — a foreign
+    named row carrying a suffixed cohort run id never reaches a candidate's rows in
+    the first place (``_job_matches_candidate`` restricts the suffix arm to
+    model-less rows), and a foreign row carrying the candidate's OWN ``fcst_...``
+    run id stays the candidate's row on both read paths.
+    """
+
+    job_model_id = job.get("model_id")
+    if job_model_id in (None, "") or str(job_model_id) == model_id:
+        return False
+    source_id = _normalize_file_source_id(source_id, field="source_id")
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    return str(job.get("run_id") or "") == cycle_run_id
 
 
 _CYCLE_SCOPE_COMPLETION_STAGES = frozenset({"parse", "state_save_qc", "publish"})
