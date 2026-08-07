@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_mapping_for_state,
@@ -17,6 +16,7 @@ from services.orchestrator.scheduler_state_common import (
 from services.orchestrator.scheduler_state_rows import (
     _canonical_downstream_stage,
     _job_is_unsubmitted_auto_retry_placeholder,
+    _job_stage_name,
     _pipeline_job_is_repaired_stage_evidence,
     _state_events,
     _state_has_only_unsubmitted_auto_retry_placeholders,
@@ -28,6 +28,7 @@ from services.orchestrator.scheduler_state_types import (
     ACTIVE_HYDRO_STATUSES,
     ACTIVE_PIPELINE_STATUSES,
     FAILED_PIPELINE_STATUSES,
+    NATIVE_SHUD_STAGE_ALIASES,
 )
 
 # Mirrors ``file_orchestration_journal._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE``: cycle-scope
@@ -36,6 +37,15 @@ _CYCLE_SCOPE_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
 # The candidate's own run id: ``fcst_<source>_<stamp>_<model_id>``.  Both patterns capture
 # ``(source, stamp)``, so a marker entity id's cycle can be compared with the candidate's own.
 _CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_")
+# A hydro run is the candidate's SHUD forecast leg, not a job row, so it has no ``stage`` field to
+# read.  Its stage family is the canonical normalization of the module's native-SHUD aliases
+# (``scheduler_state_types.NATIVE_SHUD_STAGE_ALIASES``) through ``_canonical_downstream_stage``
+# (``scheduler_state_rows.py:417-423``), which keeps ``forecast`` / ``run_shud_forecast`` and drops
+# the two aliases that name no downstream restart stage.  Derived rather than restated so an alias
+# table change cannot leave a stale literal here.
+_HYDRO_RUN_STAGE_FAMILY = frozenset(
+    stage for stage in map(_canonical_downstream_stage, NATIVE_SHUD_STAGE_ALIASES) if stage is not None
+)
 
 
 def _manual_retry_requested(state: Mapping[str, Any]) -> bool:
@@ -173,6 +183,38 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], entity_id
 def _job_status_text(job: Mapping[str, Any]) -> str:
     return str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
 
+def _job_is_live_candidate_scope_failure(job: Mapping[str, Any]) -> bool:
+    """Row-level half of the live-failure domain, shared by both of its consumers.
+
+    Extracted so the two questions asked of the same domain cannot drift:
+    ``_state_has_candidate_scope_failed_job`` asks "does ANY row still carry a live failure",
+    ``_restarted_stage_family`` asks the same of each row in order to read its stage.  The
+    semantics — which statuses count, why the ACTIVE half is subtracted, and why the two
+    exclusions apply to every row regardless of status — are documented once, on
+    ``_state_has_candidate_scope_failed_job`` below.
+    """
+
+    if _job_is_cycle_scope_row(job):
+        return False
+    if _pipeline_job_is_repaired_stage_evidence(job):
+        return False
+    if _job_is_unsubmitted_auto_retry_placeholder(job):
+        return False
+    status = _job_status_text(job)
+    return _manual_retry_blocking_pipeline_status(status) and status not in ACTIVE_PIPELINE_STATUSES
+
+def _state_hydro_run_is_live_failure(state: Mapping[str, Any]) -> bool:
+    """Hydro-leg half of the live-failure domain, shared by both of its consumers.
+
+    A hydro run is not a job row, so it is read at state level off the same field chain the
+    blocker scan uses (``_state_status(state, "hydro_status", "hydro_run_status")``), and the
+    ACTIVE half of ``_manual_retry_blocking_hydro_status`` is subtracted exactly as it is for job
+    rows.
+    """
+
+    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
+    return _manual_retry_blocking_hydro_status(hydro_status) and hydro_status not in ACTIVE_HYDRO_STATUSES
+
 def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
     """True when the candidate's own scope still carries a LIVE failure of any kind.
 
@@ -203,19 +245,13 @@ def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
     exactly as the blocker scan applies it, so a cancelled row of placeholder shape blocks
     there and counts here.)  Counting an excluded row would make the cycle failure look like
     "not the only failure left" and silently discard the operator-pinned attempt number.
+
+    The two halves live in ``_job_is_live_candidate_scope_failure`` and
+    ``_state_hydro_run_is_live_failure`` above, which ``_restarted_stage_family`` reuses.
     """
-    for job in _state_jobs(state):
-        if _job_is_cycle_scope_row(job):
-            continue
-        if _pipeline_job_is_repaired_stage_evidence(job):
-            continue
-        if _job_is_unsubmitted_auto_retry_placeholder(job):
-            continue
-        status = _job_status_text(job)
-        if _manual_retry_blocking_pipeline_status(status) and status not in ACTIVE_PIPELINE_STATUSES:
-            return True
-    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
-    return _manual_retry_blocking_hydro_status(hydro_status) and hydro_status not in ACTIVE_HYDRO_STATUSES
+    if any(_job_is_live_candidate_scope_failure(job) for job in _state_jobs(state)):
+        return True
+    return _state_hydro_run_is_live_failure(state)
 
 def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str, Any]) -> bool:
     """Whether a cycle-scope job's counter belongs to the attempt this decision derives.
@@ -553,58 +589,81 @@ def _manual_retry_payload(state: Mapping[str, Any]) -> dict[str, Any]:
         break
     return _evidence_safe(payload)
 
-def _candidate_scope_consumed_attempt(state: Mapping[str, Any]) -> int:
-    """Highest attempt number the candidate's OWN rows durably prove was already minted.
+def _restarted_stage_family(state: Mapping[str, Any]) -> set[str]:
+    """The stages a fallback restart of this candidate would replay: its LIVE failures' stages.
 
-    The axis here is identity consumption, not live failure: a row proves ``{base}_retry_<n>``
-    exists in the journal regardless of what its status is now, so the two live-failure
-    exclusions (repaired stage evidence, unsubmitted auto-retry placeholder) deliberately do
-    NOT apply — a repaired ``_retry_3`` row still means attempt 3 was spent, and an unsubmitted
-    placeholder still holds the reservation that a replay would collide with.  This mirrors
-    ``chain._next_retry_attempt_for_stage``, the collision-safe minting rule, which likewise
-    scans every row carrying the ``{base}_retry_`` prefix without consulting status.
+    Membership is decided row by row by ``_job_is_live_candidate_scope_failure``, the same
+    predicate ``_state_has_candidate_scope_failed_job`` applies, so a row that predicate excludes
+    — cycle scope, repaired stage evidence, unsubmitted auto-retry placeholder, ACTIVE, or a
+    status outside the blocker vocabulary — contributes no stage at all.  Stage identity comes
+    from ``_job_stage_name`` (``scheduler_state_rows.py:481-486``), i.e. the projection's
+    ``stage``/``job_type`` fields, never from job-id substrings: production ids embed several
+    stage tokens (``..._convert_model_0_forecast_retry_1_retry_2``).
 
-    Cycle-scope rows are excluded: their counters belong to the cohort's identity, never to
-    this candidate's (the same separation ``_state_retry_attempt`` keeps).  Attempt derivation
-    is suffix-aware via ``effective_retry_attempt`` because the journal's clean-reservation
-    invariant resets master-row ``retry_count`` to 0 — the id suffix is the durable record.
+    A live hydro failure is not a job row and carries no ``stage`` field, so it contributes
+    ``_HYDRO_RUN_STAGE_FAMILY`` instead.
+
+    The returned names are the raw projection values; ``_state_retry_attempt(state, stage=...)``
+    normalizes them itself (``scheduler_state_rows.py:448``), so aliases of one canonical stage
+    answer identically.  An empty set means the candidate has no live failure anywhere in its own
+    scope — the stale-marker shape, where there is no restarted stage to floor.
     """
 
-    return max(
-        (
-            effective_retry_attempt(job.get("job_id"), job.get("retry_count"))
-            for job in _state_jobs(state)
-            if not _job_is_cycle_scope_row(job)
-        ),
-        default=0,
-    )
+    family: set[str] = set()
+    for job in _state_jobs(state):
+        if not _job_is_live_candidate_scope_failure(job):
+            continue
+        stage = _job_stage_name(job)
+        if stage is not None:
+            family.add(stage)
+    if _state_hydro_run_is_live_failure(state):
+        family |= _HYDRO_RUN_STAGE_FAMILY
+    return family
 
 def _fallback_previous_attempt(state: Mapping[str, Any], previous_attempt: int) -> int:
-    """Clamp the fallback's ``previous_attempt`` from below by the durable consumed record.
+    """Floor the fallback's ``previous_attempt`` by what the RESTARTED stages already spent.
 
-    Callers derive ``previous_attempt`` as
-    ``_state_retry_attempt(state, stage=_failed_stage(state))``.  That composition is
-    suffix-aware only while ``_failed_stage`` resolves a CANONICAL downstream stage; when it
-    cannot — the live failure is a ``cancelled`` row or a hydro run, neither of which
-    ``_failed_stage`` can see, so it resolves ``None`` or a non-canonical stage such as a
-    cohort's ``download`` — ``_state_retry_attempt`` short-circuits to the flat top-level
-    ``retry_count``, which the clean-reservation invariant has reset to 0.  The candidate's own
-    ``_retry_2`` row would then derive attempt 1 again, re-minting an identity the journal
-    already holds; production reads that as a reservation conflict and silently skips the
-    submission.  In exactly that unnameable-stage case the durable record decides instead, so a
-    candidate that consumed attempt N derives at least N + 1.
+    Callers derive ``previous_attempt`` as ``_state_retry_attempt(state,
+    stage=_failed_stage(state))`` (``scheduler_state_failure.py:1088``).  That composition is
+    suffix-aware only while ``_failed_stage`` resolves a CANONICAL downstream stage: with a
+    ``None`` or non-canonical stage ``_state_retry_attempt`` never reaches its stage-scoped,
+    suffix-aware arm (``scheduler_state_rows.py:449-453``) and answers the flat top-level
+    ``retry_count`` instead — which the journal's clean-reservation invariant has reset to 0 —
+    falling back to the rows' recorded counts only on a state carrying no
+    ``retry_attempt``/``attempt``/``retry_count`` key at all (:450-452, :455-460).
+    Two live-failure shapes land there: with no ``failed_stage``/``stage``/``restart_stage`` key
+    on the state (``scheduler_state_failure.py:51-54``) the resolver walks job rows and matches
+    ``FAILED_PIPELINE_STATUSES`` only (:58-59), so it cannot name a ``cancelled`` row, and it
+    reads job rows only, so it cannot see a hydro run at all.  The candidate's own ``_retry_2``
+    row would then derive attempt 1 again, re-minting an identity the journal already holds;
+    production reads that as a reservation conflict and silently skips the submission.
 
-    When the stage IS nameable the caller's value already carries the stage's suffix record, so
-    this returns it untouched: no cross-stage row may inflate a budget that resolves correctly.
-    ``_failed_stage`` is imported lazily because ``scheduler_state_failure`` imports this
-    module; restating its resolution here is what let the two sides drift in the first place.
+    In exactly that unnameable-stage case the floor comes from ``_restarted_stage_family`` — the
+    stages this restart replays — and each stage's spent attempt is read with the SAME production
+    function the nameable case trusts, ``_state_retry_attempt(state, stage=...)``.  Within one
+    stage that function is status-blind: it takes the higher of a stage-matching row's recorded
+    ``retry_count`` and its ``_retry_<n>`` id suffix (``scheduler_state_rows.py:462-479``), so a
+    repaired or already-succeeded ``_retry_3`` row at a family stage still proves attempt 3 was
+    spent.  Stages OUTSIDE the family contribute nothing, which is the whole point: the family is
+    the scope axis, so another stage's consumed counter — a per-model forcing retry, or a
+    single-basin cycle's own ``model_id``-stamped download/convert rows — can no longer be
+    charged to this restart's budget (#1293 round 4).
+
+    An empty family is the stale-marker shape (no live failure anywhere in candidate scope);
+    there is no restarted stage to floor, so the caller's value is returned as is.
+
+    When the stage IS nameable the caller's value already carries that stage's suffix record, so
+    this returns it untouched.  ``_failed_stage`` is imported lazily because
+    ``scheduler_state_failure`` imports this module; restating its resolution here is what let
+    the two sides drift in the first place.
     """
 
     from services.orchestrator.scheduler_state_failure import _failed_stage
 
     if _canonical_downstream_stage(_failed_stage(state)) is not None:
         return previous_attempt
-    return max(previous_attempt, _candidate_scope_consumed_attempt(state))
+    family_floors = [_state_retry_attempt(state, stage=stage) for stage in _restarted_stage_family(state)]
+    return max([previous_attempt, *family_floors])
 
 def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int) -> int:
     manual = _manual_retry_payload(state)

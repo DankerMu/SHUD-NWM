@@ -26,10 +26,13 @@ model-scoped 行、也看不见失败/取消的 hydro run。同文件的 blocker
   row" 字面（:330、:379-380）及相邻 live-failure 子句为活失败域（cancelled +
   hydro）。
 - 判别对测试两条（issue 验收标准）+ 回归护栏。
-- round-2 审核修复随行（design D5）：prev+1 回落在无法解析 canonical failed
-  stage 时以候选域行的 durable 已消耗 attempt 记录为下界 clamp
-  （`_candidate_scope_consumed_attempt` + `_fallback_previous_attempt`），
-  防止域扩宽后新可达的回落路径重铸已消耗身份（reservation 静默跳过）。
+- round-2 引入、round-4 重设计的回落 floor 随行（design D5）：prev+1 回落在
+  无法解析 canonical failed stage 时，以候选自身活失败行的
+  restarted-stage-family 内的 stage-scoped 已消耗 attempt 记录为下界
+  （`_restarted_stage_family` + `_fallback_previous_attempt`，复用
+  `_state_retry_attempt(stage=s)` 同轴派生），防止域扩宽后新可达的回落路径
+  重铸已消耗身份（reservation 静默跳过），同时跨 stage / cohort 计数器绝不
+  计入候选预算（round-4 F-R4-A 修复）。
 
 ## Impact
 

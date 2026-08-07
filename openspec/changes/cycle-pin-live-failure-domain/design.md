@@ -51,29 +51,51 @@ repaired stage evidence、unsubmitted auto-retry placeholder 两项排除保留�
 live-failure 子句改为活失败域表述（cancelled + hydro 失败域，含两项排除的字面
 保留）。经由本 change 的 MODIFIED delta 落库（merge 后 archive 应用）。
 
-### D5: fallback 兜底 clamp（round-2 审核修复，cand-INT1）
+### D5: fallback 兜底 floor——restarted-stage-family 轴（round-2 引入，round-4 重设计）
 
 域扩宽把 cancelled / hydro 形状从钉值路由进 prev+1 回落，而这些形状恰好无法解析
 canonical failed stage——stage-scoped 派生短路回顶层 `retry_count`（journal
 clean-reservation 不变量下 master 行重置为 0），durable `_retry_<n>` 后缀被丢，
-`new_attempt` 重铸已消耗身份 → reservation ON CONFLICT 落败 → 静默跳过提交。
-因此回落端加兜底 clamp（`_candidate_scope_consumed_attempt` +
-`_fallback_previous_attempt`，仍仅本文件）：
+`new_attempt` 重铸已消耗身份 → reservation ON CONFLICT 落败 → 静默跳过提交
+（round-2 CONFIRMED P1，cand-INT1）。round-2 的第一版 floor 对候选域行取
+**stage-blind max**，round-4 复审证实其为 CONFIRMED P1（F-R4-A）：gate-open
+分支把其他 stage 的已消耗后缀计入 forecast 预算——实测 r1-head 派生 1 的形状
+HEAD 派生 5/7/8（幅度不受 marker 值限制），且单 basin cycle 会给
+download/forcing/convert 行盖 `model_id`（`chain_runtime_utils.py:65-68`；仅
+forecast cohort stage 强制 model-less，`accepted_submit_identity.py:316-327`），
+cohort 自己的计数器经 clamp 回流。round-4 重设计为**两分支同轴**：
 
-- **clamp 域走 identity-consumption 轴**，对候选域（非 cycle-scope）行取
-  `effective_retry_attempt`（recorded count 与 id 后缀取 max）的最大值——
-  live-failure 域的两项排除（repaired evidence / placeholder）**故意不适用**：
-  生产铸号规则 `_next_retry_attempt_for_stage` 扫 `{base}_retry_` 前缀不看
-  status，repaired `_retry_3` 行同样证明身份已消耗。floor 只会更安全（更高）。
-- **gate 在"无 canonical failed stage"上**而非无条件：无条件 clamp 会把其他
-  stage 的后缀计费进已正确派生的 forecast 预算（跨 stage 计费 + retry-limit
-  提前触顶）。gate 复用生产解析器 `_canonical_downstream_stage(_failed_stage)`
-  （函数内 deferred import 规避循环依赖，两侧不可漂移）。
-- 残留（有记录、不修）：无法命名 stage 的分支里 floor 是候选域行的
-  stage-blind max——理论上会把候选另一 stage 的后缀计入，但实践不可达
-  （parse/state_save_qc/publish 是 cohort stage，download/forcing/convert 是
-  cycle-scope，候选域 stage 实际只有 forecast）；且 clamp 只影响内部 floor，
-  发出的 `previous_attempt` 证据字段保持未 clamp 的 stage-scoped 派生。
+- **gate 不变**：`_canonical_downstream_stage(_failed_stage(state))` 可解析时
+  原样返回 previous_attempt（gate-closed 分支保持 master 的 per-stage 预算
+  语义；函数内 deferred import 规避循环依赖）。
+- **gate-open 分支改为 restarted-stage-family floor**（`_restarted_stage_family`
+  + `_fallback_previous_attempt`）：family = 候选自身活失败行的 stage 集合
+  （行级活失败判据与 `_state_has_candidate_scope_failed_job` 共享同一 helper
+  `_job_is_live_candidate_scope_failure`，两消费者不可漂移；repaired evidence /
+  placeholder 排除作用于 family **成员资格**——被排除行不贡献 stage），hydro 腿
+  是活失败时并入 canonical forecast stage（`_HYDRO_RUN_STAGE_FAMILY`，由
+  `NATIVE_SHUD_STAGE_ALIASES` 推导，非字面量）。floor =
+  `max(_state_retry_attempt(state, stage=s) for s in family)`——**复用
+  gate-closed 分支已信任的同一条生产派生**：stage 内 status-blind、
+  `max(recorded, suffix)`（`scheduler_state_rows.py:462-479`），repaired
+  `_retry_3` 行在 family stage 内仍证明身份已消耗（deviation-6 语义在
+  family 内保留）。空 family（stale-marker 回落、无活失败）不 clamp。
+- 实测（fix head，红先行）：cancelled forecast 无后缀 + forcing `_retry_7`
+  8→1；cancelled forecast `_retry_2` + forcing `_retry_7` 8→**3**（关键判别形：
+  stage-blind 世界 8、无 floor 世界 1）；hydro failed + forcing `_retry_7`
+  8→1；stale marker 无活失败 5→1；单 basin 盖章 download`_retry_4` 5→1、
+  convert`_retry_6` 7→1；repaired 行不贡献 stage 4→2。
+- 残留（有记录、未修，follow-up issue #1298 跟踪）：活失败行自身的 stage 非
+  canonical 时（例：唯一活失败是 cancelled 的 model-scoped
+  `download_retry_4` 行），`_state_retry_attempt(state, stage="download")`
+  短路回 flat count（`scheduler_state_rows.py:449-452`，`download` 不在
+  `DOWNSTREAM_RESTART_STAGES`），family floor 退化为 previous_attempt——
+  同一 replay 风险在该窄形状上仍在；修复需改 `_state_retry_attempt`，超出
+  本 change 单文件边界。
+- 发出的 `previous_attempt` 证据字段保持未 clamp 的 stage-scoped 派生
+  （`scheduler_state_failure.py:1088`），floor 只进 `new_attempt` /
+  `retry_policy.attempt`——后者经 manifest `retry_attempt` 消费
+  （`scheduler_candidate_manifest.py:239-242`），不是"仅内部"值。
 
 ## Risks / Trade-offs
 

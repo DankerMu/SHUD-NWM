@@ -104,6 +104,27 @@ verifier 全 CONFIRMED：F-R3-1/2/3/4，见 .workplans/pr-1293/review/）
   stage-blind max 残留）；proposal What Changes 补 clamp 条目；tasks 3.3
   括号注限定到 own-ACTIVE 参数。
 
+## 5. Round-4 fix set（第二次 gate 的 depth retro corrective action；
+F-R4-A CONFIRMED P1 + F-R4-B record 全 CONFIRMED，见 .workplans/pr-1293/review/verify-r4-*.md）
+
+- [x] 5.1 轴统一重设计（生产，仍仅本文件）：gate 不变；gate-open 分支弃
+  stage-blind max，改 restarted-stage-family floor——family = 活失败行 stage
+  集合（行级判据与 `_state_has_candidate_scope_failed_job` 共享 helper，
+  排除作用于成员资格）+ hydro 腿并入 canonical forecast stage；floor 复用
+  `_state_retry_attempt(state, stage=s)`（两分支同轴）。空 family 不 clamp。
+  假 mirror docstring（F-R4-B(2)）随重写移除，新 docstring 逐句带 file:line。
+- [x] 5.2 红先行测试：六参数跨 stage 形（8→1、8→3 关键判别形、8→1 hydro、
+  5→1 stale、5→1/7→1 单 basin 盖章）+ repaired 行不贡献 stage 护栏（4→2）；
+  关键判别形与 hydro 形补端到端断言（`_candidate_state_decision` →
+  retry_policy.attempt）。mutant：stage-blind 回退 7 red、floor 全删 4 red、
+  gate 删除 Test B red（Test A 的 gate kill 因轴统一消失，已记录）。
+- [x] 5.3 文本按实测值重写（orchestrator，代码落地后）：design D5 全段
+  （family 轴 + 实测表 + 非 canonical stage 残留如实记录 + follow-up issue）、
+  proposal What-Changes 条目、delta no-replay 句（family 轴 + 恢复分支限定）
+  与 scenario bullet（跨 stage 子句）；PR body 偏离 6/9 更正、"12 测试函数"
+  限定、"warm_start"→"warm_start_chaining"。结构性 prose bar 生效：新增
+  normative 断言必须逐条 file:line 对齐，不可写"实践不可达"式免责句。
+
 ## E. Evidence floor
 
 - [x] E1 `uv run pytest -q tests/test_production_scheduler.py
@@ -111,7 +132,7 @@ verifier 全 CONFIRMED：F-R3-1/2/3/4，见 .workplans/pr-1293/review/）
   arm 1 同 stage :576、placeholder :821、repaired :856、succeeded 目标 :881、
   arm 2 正向 :910、`fcst_...` 行 :981；CI 定向选择对 `scheduler_state_manual_retry.py`
   不会自动带上它——`scripts/select_ci_tests.py` 的 orchestrator 规则不含该文件，
-  故本地 E1 必须显式跑）。结果（final head 实测）1141 passed / 1 failed——唯一失败
+  故本地 E1 必须显式跑）。结果（final head 实测）1148 passed / 1 failed——唯一失败
   `test_db_free_slurm_storage_root_check_masks_symlink_loop_path` 为 master
   基线既有（macOS 平台相关，PR #1286 期间已在独立 master worktree 复现，
   与本 diff 零共享代码）。
