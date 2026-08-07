@@ -95,7 +95,13 @@ Evidence floor:
 - [x] 4.1 Cross-review rounds per gate ledger; findings verified before fix
   (round 1 not-clean: 3 CONFIRMED FIX_NOW fixed at 86171b3a; round 2
   P2-only, verifier 3 CONFIRMED FIX_NOW routed into the close commit +
-  1 PLAUSIBLE DISCARD — recorded clean)
+  1 PLAUSIBLE DISCARD — recorded clean. Ledger shows the clean round as
+  `verified 0 / classes none` because the review_gate CLI normalizes
+  clean rounds by design — the raw counts above were passed to
+  `record-round` and the per-candidate verdicts are persisted in the
+  workplan's verify records; had they been recorded raw, round 2 would
+  repeat round 1's record-accuracy class — noted for any future
+  gate-retro reading, no gate was approached)
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout
