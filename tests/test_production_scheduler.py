@@ -5144,6 +5144,767 @@ def test_non_authoritative_task_results_do_not_populate_retry_task_identity() ->
     assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is True
 
 
+def _decision_path_own_forecast_job() -> dict[str, Any]:
+    return {
+        "job_id": "job_model_a_forecast",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "stage": "forecast",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:20:00Z",
+    }
+
+
+def _decision_path_manual_retry_marker(
+    *,
+    entity_id: str,
+    retry_count: int,
+    previous_job_id: str,
+    entity_type: str = "pipeline_job",
+    event_id: int = 41,
+    details_model_id: str | None = None,
+    **top_level: Any,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "trigger": "manual",
+        "manual_retry_marker": True,
+        "retry_count": retry_count,
+        "previous_job_id": previous_job_id,
+        "created_at": "2026-05-21T06:30:00Z",
+    }
+    if details_model_id is not None:
+        details["model_id"] = details_model_id
+    return {
+        "event_id": event_id,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "event_type": "retry",
+        "created_at": "2026-05-21T06:30:00Z",
+        "details": details,
+        **top_level,
+    }
+
+
+def _decision_path_state(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    events: list[dict[str, Any]],
+    jobs: list[dict[str, Any]] | None = None,
+    failed_stage: str = "forecast",
+) -> dict[str, Any]:
+    return {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": "failed",
+        "failed_stage": failed_stage,
+        "error_code": "NODE_FAILURE",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+        "retry_count": 0,
+        "pipeline_jobs": jobs if jobs is not None else [_decision_path_own_forecast_job()],
+        "pipeline_events": events,
+    }
+
+
+def _decision_path_filtered_state(
+    candidate: scheduler_module.SchedulerCandidate,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    return scheduler_module._candidate_state_decision_state(state, evidence)
+
+
+def test_unattributed_cycle_marker_stays_unadopted_on_the_decision_path() -> None:
+    """Knife 1 must survive identity sanitization: ``entity_type`` is a decision predicate.
+
+    The non-authoritative marker names the whole forecast cycle and no model, so no model
+    candidate may adopt it.  Sanitizing ``entity_type`` away would make the knife read a
+    ``pipeline_job``-shaped event and fail OPEN on the very path production decides on.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="gfs_2026052106",
+                entity_type="forecast_cycle",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+            )
+        ],
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert decision_state["pipeline_events"][0]["entity_type"] == "forecast_cycle"
+    assert scheduler_module._manual_retry_requested(decision_state) is False
+    assert scheduler_module._manual_retry_payload(decision_state) == {}
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+
+
+@pytest.mark.parametrize("attribution", ["details", "event_top_level"])
+def test_candidate_attributed_cycle_marker_is_adopted_on_the_decision_path(attribution: str) -> None:
+    """The knife's other outcome: ``model_id`` must survive sanitization too.
+
+    Dropping the attribution key would collapse an adopted marker into an unattributed one
+    and silently discard the operator-pinned attempt number.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    marker_kwargs: dict[str, Any] = (
+        {"details_model_id": "model_a"} if attribution == "details" else {"model_id": "model_a"}
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="gfs_2026052106",
+                entity_type="forecast_cycle",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+                **marker_kwargs,
+            )
+        ],
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_requested(decision_state) is True
+    assert scheduler_module._manual_retry_payload(decision_state)["marker"] is True
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+@pytest.mark.parametrize("attribution", ["details", "event_top_level"])
+def test_foreign_model_cycle_marker_stays_unadopted_on_the_decision_path(attribution: str) -> None:
+    """A cycle marker attributed to another model must not survive sanitization as unattributed."""
+
+    candidate = _scheduler_candidate_fixture()
+    marker_kwargs: dict[str, Any] = (
+        {"details_model_id": "model_b"} if attribution == "details" else {"model_id": "model_b"}
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="gfs_2026052106",
+                entity_type="forecast_cycle",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+                **marker_kwargs,
+            )
+        ],
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_requested(decision_state) is False
+    assert scheduler_module._manual_retry_payload(decision_state) == {}
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+
+
+def test_unattributed_cycle_marker_does_not_drive_a_manual_retry_decision() -> None:
+    """End of the decision path: the unadopted marker must not become a manual retry."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="gfs_2026052106",
+                entity_type="forecast_cycle",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+            )
+        ],
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is None or decision.reason != "manual_retry_requested"
+
+
+@pytest.mark.parametrize(
+    "cohort_job_id",
+    [
+        "job_cycle_gfs_2026070100_convert_cohort_ab12cd34",
+        "job_cycle_gfs_2026070100_convert_model_b",
+    ],
+)
+def test_foreign_cohort_master_marker_does_not_pin_after_its_row_is_filtered(cohort_job_id: str) -> None:
+    """Knife 2 must fail CLOSED once the sanitizer deletes the marker's cohort master row.
+
+    The identity filter drops the non-authoritative cohort master job, so the marker's entity
+    no longer resolves to any row on the decision path.  Treating that as "unresolvable, pass"
+    would let a foreign cycle counter (5) become this candidate's attempt number.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        "job_id": cohort_job_id,
+        "run_id": cohort_job_id.removeprefix("job_"),
+        "model_id": None,
+        "stage": "convert",
+        "status": "failed",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == ["job_model_a_forecast"]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_retained_source_cycle_download_marker_still_pins_on_the_decision_path() -> None:
+    """Parity guard for knife 2: a row the carve-out KEEPS still resolves and still pins.
+
+    The candidate's own source-cycle download blocker survives the identity filter, so the
+    marker resolves, the same-stage arm holds, and the operator-pinned attempt is preserved.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    download_job = {
+        "job_id": "job_cycle_gfs_2026052106_download",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": None,
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="job_cycle_gfs_2026052106_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), download_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert "job_cycle_gfs_2026052106_download" in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+def test_retained_source_cycle_download_marker_does_not_pin_across_stages_on_the_decision_path() -> None:
+    """Negative twin of the parity guard: the RESOLVED-row rule must still close both arms.
+
+    Same retained source-cycle download row as above, but this decision repairs the forecast
+    stage and the candidate's own forecast row is a live failure.  Neither arm of
+    ``_cycle_scope_marker_pins_attempt`` holds -- the marker's stage is not the repair target
+    and the cycle failure is not the only failure left -- so the download counter must stay out
+    of the forecast budget even though its row survives the identity filter.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    download_job = {
+        "job_id": "job_cycle_gfs_2026052106_download",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": None,
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id="job_cycle_gfs_2026052106_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), download_job],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the marker still resolves to its cycle-scope row, and the candidate's own
+    # forecast row is still the live failure this decision repairs.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_cycle_gfs_2026052106_download",
+    ]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+@pytest.mark.parametrize("entity_id", ["job_retry", "job_cycle_manualretry"])
+def test_unresolvable_non_cycle_marker_entity_still_pins_on_the_decision_path(entity_id: str) -> None:
+    """Knife 2 stays fail-OPEN for ids that are not cycle-scope grammar.
+
+    ``job_retry`` never appears as a row (synthetic/compacted states do this routinely); the
+    operator's attempt number must survive that.  ``job_cycle_manualretry`` carries the
+    ``job_cycle_`` PREFIX but not the ``<source>_<10-digit stamp>_<suffix>`` grammar, so it is
+    not a cohort master id either: matching the grammar by prefix instead of in full would
+    turn this fail-open into a silent discard.
+
+    The pinned value (7) is deliberately not ``previous_attempt + 1`` (4), so a regression
+    that drops the pin is visible in the assertion.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "forecast",
+        "error_code": "INVALID_MANIFEST",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+        "retry_count": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_latest",
+                "run_id": candidate.run_id,
+                "status": "permanently_failed",
+                "stage": "forecast",
+                "retry_count": 3,
+                "error_code": "INVALID_MANIFEST",
+                "updated_at": "2026-05-21T06:20:00Z",
+            }
+        ],
+        "pipeline_events": [
+            _decision_path_manual_retry_marker(
+                entity_id=entity_id,
+                retry_count=7,
+                previous_job_id="job_latest",
+                event_id=5,
+            )
+        ],
+    }
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=3) == 7
+
+
+def test_same_cycle_cohort_master_marker_still_pins_after_its_row_is_filtered() -> None:
+    """Mirror of the foreign-cohort guard: the candidate's OWN cycle must keep pinning.
+
+    The cohort master row is minted for the candidate's own source cycle and is deleted by
+    the identity filter exactly like the foreign one, so the marker resolves to no row on the
+    decision path.  Refusing to pin on grammar alone would discard the operator's attempt
+    number for every multi-model cohort restart -- the production-normal shape.  The entity id
+    carries its own evidence: same ``(source, stamp)`` as the candidate's run id AND the stage
+    this decision repairs.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_run_id = "cycle_gfs_2026052106_state_save_qc_cohort_ab12cd34ef56"
+    cohort_job_id = f"job_{cohort_run_id}_state_save_qc"
+    cohort_job = {
+        "job_id": cohort_job_id,
+        "run_id": cohort_run_id,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "stage": "state_save_qc",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="state_save_qc",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == ["job_model_a_forecast"]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+def test_foreign_cycle_cohort_master_marker_does_not_pin_even_when_the_stage_matches() -> None:
+    """Control for the pin above: the cycle conjunct alone must decide this state.
+
+    Isomorphic to ``test_same_cycle_cohort_master_marker_still_pins_after_its_row_is_filtered``
+    in every respect but the cohort id's cycle stamp (``2026070100`` instead of the candidate's
+    ``2026052106``).  The stage suffix still names the repair target, so dropping the
+    cycle-membership conjunct would leave a FOREIGN cycle's counter (5) pinning this
+    candidate's attempt number -- exactly the harm knife 2 exists to stop.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_run_id = "cycle_gfs_2026070100_state_save_qc_cohort_ab12cd34ef56"
+    cohort_job_id = f"job_{cohort_run_id}_state_save_qc"
+    cohort_job = {
+        "job_id": cohort_job_id,
+        "run_id": cohort_run_id,
+        "cycle_id": "gfs_2026070100",
+        "model_id": None,
+        "stage": "state_save_qc",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="state_save_qc",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the row is gone but the marker itself survives, so the pin gate really runs.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == ["job_model_a_forecast"]
+    assert [event["entity_id"] for event in decision_state["pipeline_events"]] == [cohort_job_id]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_own_cycle_cohort_master_marker_does_not_pin_across_stages_after_its_row_is_filtered() -> None:
+    """Second control for the pin above: the stage conjunct alone must decide this state.
+
+    Isomorphic to ``test_same_cycle_cohort_master_marker_still_pins_after_its_row_is_filtered``
+    in every respect but ``failed_stage`` (``forecast`` instead of the cohort master's own
+    ``state_save_qc``), and the candidate's own forecast row stays the live failure this
+    decision repairs.  Cycle membership therefore holds while the repair target does not, so a
+    gate that stopped at "same cycle" would spend a state-save-QC counter on a forecast retry.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_run_id = "cycle_gfs_2026052106_state_save_qc_cohort_ab12cd34ef56"
+    cohort_job_id = f"job_{cohort_run_id}_state_save_qc"
+    cohort_job = {
+        "job_id": cohort_job_id,
+        "run_id": cohort_run_id,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "stage": "state_save_qc",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=42,
+            )
+        ],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == ["job_model_a_forecast"]
+    assert [event["entity_id"] for event in decision_state["pipeline_events"]] == [cohort_job_id]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_truncated_own_source_cycle_download_marker_still_pins() -> None:
+    """Row absence caused by TRUNCATION must not be read as "foreign cycle".
+
+    ``candidate_state_from_rows`` truncates jobs and events independently (100 each, jobs by
+    recency), so a marker can outlive its own target row.  Here the operator's manual retry
+    names the candidate's own source-cycle download job, whose row is pushed out of the job
+    window by newer cohort rows.  The entity id still proves the candidate's own
+    ``(source, stamp)`` and the repaired stage, so the pinned attempt must survive.
+    """
+
+    cycle_run_id = "cycle_gfs_2026052106"
+    target_job_id = f"job_{cycle_run_id}_download"
+    retry_job_id = f"job_{cycle_run_id}_download_retry_1"
+    target_job = {
+        "job_id": target_job_id,
+        "run_id": cycle_run_id,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "candidate_id": None,
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 4,
+        "created_at": "2026-05-21T06:05:00Z",
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+    retry_job = {
+        **target_job,
+        "job_id": retry_job_id,
+        "retry_count": 5,
+        "created_at": "2026-05-21T07:30:00Z",
+        "updated_at": "2026-05-21T07:35:00Z",
+    }
+    cohort_filler_jobs = [
+        {
+            "job_id": f"job_fcst_gfs_2026052106_model_{index:03d}_forecast",
+            "run_id": f"fcst_gfs_2026052106_model_{index:03d}",
+            "cycle_id": "gfs_2026052106",
+            "model_id": f"model_{index:03d}",
+            "candidate_id": f"cand_model_{index:03d}",
+            "stage": "forecast",
+            "job_type": "run_shud_forecast_array",
+            "status": "succeeded",
+            "retry_count": 0,
+            "created_at": "2026-05-21T07:00:00Z",
+            "updated_at": f"2026-05-21T07:{index % 60:02d}:00Z",
+        }
+        for index in range(120)
+    ]
+    candidate = _scheduler_candidate_fixture()
+
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run=None,
+        pipeline_jobs=[target_job, retry_job, *cohort_filler_jobs],
+        pipeline_events=[
+            _decision_path_manual_retry_marker(
+                entity_id=target_job_id,
+                retry_count=5,
+                previous_job_id=target_job_id,
+                event_id=42,
+            )
+        ],
+        forcing_version=None,
+        forecast_cycle=None,
+        retry_limit=3,
+    )
+
+    assert state is not None
+    # Premise: the projection really truncated the marker's target row away, while the
+    # marker event itself and the still-failing download retry row survived.
+    retained_job_ids = [job["job_id"] for job in state["pipeline_jobs"]]
+    assert state["state_truncated"] is True
+    assert len(retained_job_ids) == 100
+    assert target_job_id not in retained_job_ids
+    assert retry_job_id in retained_job_ids
+    assert state["failed_stage"] == "download"
+    assert len(state["pipeline_events"]) == 1
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+
+
+@pytest.mark.parametrize("placement", ["event_top_level", "details"])
+@pytest.mark.parametrize(
+    ("model_id", "event_retained"),
+    [("model_a", True), ("model_b", False)],
+)
+def test_sanitized_marker_model_id_decides_shared_cycle_event_retention(
+    model_id: str,
+    event_retained: bool,
+    placement: str,
+) -> None:
+    """Characterization: the sanitized ``model_id`` IS a retention credential.
+
+    ``_shared_cycle_row_is_candidate_scoped`` treats a single matching identity field as
+    candidate scope, so a self-declared ``model_id`` re-admits a non-authoritative marker into
+    the shared-cycle decision state and overrides the permanent-failure guard.  Foreign model
+    ids stay excluded, and within one source-cycle aggregate a model id maps to exactly one
+    candidate, so the re-admitted marker is candidate-own by construction.  This pins both
+    outcomes so any future widening of the sanitizer's key set is visible.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    marker_kwargs: dict[str, Any] = (
+        {"details_model_id": model_id} if placement == "details" else {"model_id": model_id}
+    )
+    state = {
+        "shared_cycle_aggregate": True,
+        "source": "gfs",
+        "cycle_id": "gfs_2026052106",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "download",
+        "error_code": "SLURM_JOB_FAILED",
+        "retry_count": 0,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "SLURM_JOB_FAILED",
+                "retry_count": 0,
+                "updated_at": "2026-05-21T06:10:00Z",
+            }
+        ],
+        "pipeline_events": [
+            _decision_path_manual_retry_marker(
+                entity_id="job_cycle_gfs_2026052106_download",
+                retry_count=7,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+                event_id=41,
+                **marker_kwargs,
+            )
+        ],
+    }
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision_state["shared_cycle_aggregate"] is True
+    assert len(decision_state.get("pipeline_events", [])) == (1 if event_retained else 0)
+    assert scheduler_module._manual_retry_requested(decision_state) is event_retained
+    assert decision is not None
+    if event_retained:
+        assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+        assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 7
+    else:
+        assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+
+
+def test_cohort_master_marker_does_not_pin_when_the_decision_state_carries_no_run_id() -> None:
+    """An unparsable/absent ``run_id`` proves nothing, so knife 2 must fail CLOSED there.
+
+    The shared-cycle aggregate carries no candidate ``run_id`` at all (the projection keys it by
+    source cycle), and its decision state keeps it that way.  With no own cycle to compare
+    against, the cohort master id's ``(source, stamp)`` is unverifiable -- the stage suffix
+    matches the repair target here precisely so that treating a missing ``run_id`` as
+    "cycle check passed" would hand this candidate a counter (5) it never earned.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job_id = "job_cycle_gfs_2026052106_download_cohort_ab12cd34ef56_download"
+    state = {
+        "shared_cycle_aggregate": True,
+        "source": "gfs",
+        "cycle_id": "gfs_2026052106",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "download",
+        "error_code": "SLURM_JOB_FAILED",
+        "retry_count": 0,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "SLURM_JOB_FAILED",
+                "retry_count": 0,
+                "updated_at": "2026-05-21T06:10:00Z",
+            }
+        ],
+        "pipeline_events": [
+            _decision_path_manual_retry_marker(
+                entity_id=cohort_job_id,
+                retry_count=5,
+                previous_job_id=cohort_job_id,
+                event_id=41,
+                model_id="model_a",
+            )
+        ],
+    }
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the marker is re-admitted by its model attribution, resolves to no row, and the
+    # decision state still carries no candidate run id.
+    assert [event["entity_id"] for event in decision_state["pipeline_events"]] == [cohort_job_id]
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert decision_state.get("run_id") is None
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_sanitized_retry_event_keeps_decision_predicates_but_not_identity_claims() -> None:
+    """Sanitization contract: attribution predicates in, identity claims out."""
+
+    event = {
+        "event_id": 51,
+        "entity_type": "forecast_cycle",
+        "entity_id": "gfs_2026052106",
+        "event_type": "retry",
+        "model_id": "model_a",
+        "run_id": "cycle_gfs_2026052106",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "status_to": "failed",
+        "created_at": "2026-05-21T06:30:00Z",
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": 5,
+            "model_id": "model_a",
+            "previous_job_id": "job_cycle_gfs_2026052106_download",
+        },
+    }
+
+    sanitized = scheduler_module._candidate_state_decision_event(
+        event,
+        authoritative=False,
+        source="pipeline_events[0]",
+        legacy_sources=set(),
+    )
+
+    assert sanitized["entity_type"] == "forecast_cycle"
+    assert sanitized["model_id"] == "model_a"
+    assert sanitized["details"]["model_id"] == "model_a"
+    assert not {"status_to", "run_id", "source", "cycle_time"} & set(sanitized)
+
+
 def test_candidate_state_evidence_preserves_repaired_stage_metadata_additively() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
