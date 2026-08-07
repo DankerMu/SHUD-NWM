@@ -162,4 +162,7 @@ F-R4-A CONFIRMED P1 + F-R4-B record 全 CONFIRMED，见 .workplans/pr-1293/revie
 - [x] E4 Surface check：生产 diff 仅
   `services/orchestrator/scheduler_state_manual_retry.py`；spec 措辞仅经本
   change delta。
-- [ ] E5 CI `Unit Tests` green on PR head。
+- [x] E5 CI `Unit Tests` green on PR head（`90e0bfaa`，run 31169043780，
+  定向 Unit Tests 16m43s SUCCESS；SQL Migration Dry Run 按 database filter
+  正确未触发。勾选随 merge 后 archive commit 落库——终推后不追加 docs-only
+  push 的 CI 纪律）。

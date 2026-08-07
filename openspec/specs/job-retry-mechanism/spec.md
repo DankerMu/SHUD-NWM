@@ -327,13 +327,56 @@ model-less row with a candidate-run `fcst_...` id is NOT
 cycle-scope) — SHALL pin the derived attempt only when that cycle
 stage's failure is the repair target: the resolved job is still in
 a failed status AND either the state's failed stage equals the
-resolved job's stage or the candidate has no failed model-scoped
-job row of its own. In every other case — a candidate-scoped
-failure of a different stage, or a marker whose resolved job is no
-longer failed (stale) — the derived `new_attempt` falls back to
+resolved job's stage or the candidate has no live candidate-scoped
+failure of its own. The live-failure domain matches the failure
+half of the module's blocker STATUS domain, not the narrower
+failed-pipeline status set alone — read from candidate-scope job
+rows and the candidate's own hydro run only (the blocker scan's
+state-level `pipeline_status` and pipeline-event sources are not
+live-failure sources here: a top-level failed `pipeline_status`
+records the cycle failure being repaired, and counting it would
+make the only-failure-left arm unreachable; on the production read
+paths this exclusion is enforced by projection shape — a surviving
+marker proves real job rows exist beside it — rather than by an
+in-module filter, and hardening the module against synthesized
+job-row-less shapes is tracked as #1299): a
+candidate-scope (non-cycle-scope) job row in a failed or
+`cancelled` status counts, and so does a hydro run whose status is
+`failed`, `cancelled`, or `permanently_failed`; repaired
+stage-evidence rows and unsubmitted auto-retry placeholders (rows
+whose status is `pending` or `submission_failed` by that
+placeholder's own definition) never count as live failures — a
+placeholder-shaped row in a `cancelled` status is outside the
+placeholder gate and counts, exactly as the blocker scan treats
+it. In every other case — a candidate-scoped live failure
+(pipeline failed or cancelled, or hydro) where the failed stage
+does not name the resolved job's stage, or a marker whose resolved
+job is no longer failed (stale) — the derived
+`new_attempt` falls back to
 the candidate's own `previous_attempt + 1`, and the fallback is
 terminal: the newest retry-count-bearing adopted marker decides;
-older markers are not consulted. Marker-shaped events remain excluded from
+older markers are not consulted. The refused pin does not re-mint a
+consumed attempt number: whenever the fallback's attempt derivation
+resolves no canonical failed stage, it floors `previous_attempt` at
+the candidate's own stage-scoped attempt record for each stage in
+the restarted-stage family — the stages of the candidate's own live
+candidate-scope failures (a row the live-failure exclusions above
+exclude contributes no stage to the family) plus the canonical
+forecast stage when the hydro run is the live failure. Within a
+family stage that is itself a canonical downstream restart stage
+the floor uses the same stage-scoped derivation the
+resolved-stage path uses, counting id retry suffix or recorded
+retry count regardless of row status — a repaired `_retry_3` row at
+a family stage still proves attempt 3 was spent — while a consumed
+suffix at a stage outside the family (a cross-stage forcing row or
+a cohort stage counter) never contributes to this floor (the floor
+only raises the caller's value). In that unnameable-stage case a
+candidate whose visible family-stage row already consumed attempt
+N derives at least N + 1 whenever that family stage is itself a
+canonical downstream restart stage; at a non-canonical family
+stage the derivation degenerates to the candidate's flat record
+and the floor adds nothing (tracked as #1298); with no live
+failure at all the fallback stays `previous_attempt + 1`. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
@@ -376,17 +419,50 @@ drive the retry decision it was written to request.
   pipeline job (`model_id` empty and `run_id` in the
   `cycle_<source>_<stamp>` grammar) and that cycle stage's failure
   is what the candidate decision repairs — the failed stage matches
-  the job's stage, or the candidate has no failed model-scoped job
-  row of its own (the production cohort-download shape)
+  the job's stage, or the candidate has no live candidate-scoped
+  failure of its own (the production cohort-download shape)
 - **THEN** the derived `new_attempt` pins the marker's
   `retry_count`, so the operator's cycle-level manual retry stays
   effective and the minted retry identity does not reuse a consumed
   attempt number
-- **AND** when the candidate's own failure is at a different stage,
-  or the marker's resolved job is no longer failed (stale), the
-  derived `new_attempt` falls back to `previous_attempt + 1` — the
-  cycle job's counter is never charged to the candidate's
-  forecast-level budget
+- **AND** when the candidate's own live failure is at a different
+  stage, or the marker's resolved job is no longer failed (stale),
+  the derived `new_attempt` falls back to `previous_attempt + 1`;
+  the pin refusal itself charges nothing, but when the candidate's
+  own failed stage resolves to a canonical downstream stage the
+  caller's `previous_attempt` is already that stage's stage-scoped
+  derivation, so a multi-basin cohort row at that same stage is
+  still counted there — pre-existing failed-stage cycle-blindness,
+  unchanged by this change and tracked as #1300
+- **AND** the candidate's own live failure that blocks the pin
+  includes a `cancelled` model-scoped job row (a cancelled forecast
+  with a cross-stage cycle-download marker of `retry_count` 5
+  derives `new_attempt` 1 from `previous_attempt` 0, not 5) and a
+  failed, cancelled, or permanently failed hydro run beside
+  all-succeeded job rows (`previous_attempt` 2 derives 3, not 5) —
+  the FAILURE half of the blocker scan's status domain only: an
+  ACTIVE in-flight row (`pending`/`queued`/`submitted`/`running`)
+  or an ACTIVE hydro run is not a repair target and never blocks
+  the pin
+- **AND** the refused pin's fallback floor comes from the durable
+  record of the restarted stage family whenever no canonical failed
+  stage resolves: a cancelled own forecast row whose job id carries
+  the consumed `_retry_2` suffix (master `retry_count` reset to 0
+  by the journal's clean-reservation invariant, no usable
+  `failed_stage`) derives `new_attempt` 3 — not 1 (a replay of a
+  consumed identity that would silently skip submission at the
+  reservation boundary) and not the marker's 5 — and a consumed
+  suffix at a stage outside the family (an own forcing `_retry_7`
+  row, or a single-basin cohort `download`/`convert` counter)
+  leaves that derivation untouched, while the emitted
+  `previous_attempt` evidence fields keep reporting the unfloored
+  stage-scoped derivation (only the derived `new_attempt` carries
+  the floor)
+- **AND** a repaired stage-evidence row or an unsubmitted
+  auto-retry placeholder is not a live failure and does not block
+  the pin, while a placeholder-shaped row in a `cancelled` status
+  falls outside the placeholder gate and blocks the pin exactly as
+  it blocks the blocker scan (same domain, same exclusions)
 - **AND** the fallback is terminal even when the candidate has an
   older own-model marker: the stale marker's `retry_count` does not
   leak into `new_attempt`
@@ -402,12 +478,13 @@ drive the retry decision it was written to request.
   candidate's attempt exactly when the id's cycle is the candidate's
   own cycle AND the id's stage is the repair target (the id ends
   with the state's failed stage, or with no failed stage the
-  candidate has no live failure of its own) — so an operator's
-  manual retry of the candidate's own cohort cycle stage stays
-  effective even though the row is invisible, while a
-  foreign-cycle or cross-stage cycle counter still never charges
-  the candidate's budget; markers with other unresolvable entity
-  ids keep their existing pinning behavior
+  candidate has no live failure of its own — the same widened
+  live-failure domain, so a cancelled own row or a failed hydro run
+  blocks this pin too) — so an operator's manual retry of the
+  candidate's own cohort cycle stage stays effective even though
+  the row is invisible, while a foreign-cycle or cross-stage cycle
+  counter still never pins the candidate's attempt; markers with
+  other unresolvable entity ids keep their existing pinning behavior
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 

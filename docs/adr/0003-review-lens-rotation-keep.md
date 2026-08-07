@@ -50,3 +50,11 @@ direction is unchanged and stronger (rotated-in lenses carry essentially
 all later-round recall), so the keep decision stands under the same
 autonomous default-keep rule. No behavior change; next revisit on the
 audit's next flag or maintainer override.
+
+## Revisit 2026-08-07 (post PR #1293 / issue #1287)
+
+Audit re-flagged DECIDABLE at the larger sample: 32 multi-round merged
+PRs, later-round catches core=2 vs rotated=78. The attribution moved
+further in the keep direction (rotated share 80% → 97.5%). Decision
+unchanged: **keep rotation**. Next revisit on maintainer override or a
+materially changed attribution ratio.
