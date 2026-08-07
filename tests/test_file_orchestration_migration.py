@@ -11,6 +11,7 @@ import pytest
 from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_migration as migration_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
 from services.orchestrator.file_orchestration_migration import (
     MIGRATION_RECEIPT_SCHEMA_VERSION,
@@ -976,6 +977,268 @@ def test_stale_own_marker_does_not_leak_attempt_when_newer_cycle_scope_marker_ex
     assert scheduler_module._manual_retry_requested(state) is True
     assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) == 4
     assert evidence["manual_retry"]["new_attempt"] == 4
+
+
+_NO_ATTEMPT_CLAIM_SHAPES = ["absent", "empty_string"]
+
+
+def _no_attempt_claim_marker_event(
+    *,
+    entity_id: str,
+    retry_count_shape: str,
+    event_id: int = 31,
+    created_at: str = "2026-07-01T02:00:00Z",
+    **extra: Any,
+) -> dict[str, Any]:
+    """An adopted marker that makes NO operator attempt claim.
+
+    The scan's terminal predicate is ``value in (None, "")``, so both empty shapes are built
+    from one place: the field missing entirely (a marker written without it) and the empty
+    string (what a writer persists for a blank operator field).  A mutant narrowing the
+    terminal arm to ``is None`` must not survive either of them.
+    """
+
+    event = _manual_retry_marker_event(entity_id=entity_id, retry_count=0, event_id=event_id, **extra)
+    event["created_at"] = created_at
+    event["details"]["created_at"] = created_at
+    if retry_count_shape == "absent":
+        del event["details"]["retry_count"]
+    else:
+        event["details"]["retry_count"] = ""
+    return event
+
+
+def _older_own_model_pinning_marker() -> dict[str, Any]:
+    """The candidate's own older marker, pinning the attempt number already consumed (3)."""
+
+    return _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=3, event_id=30)
+
+
+def _consumed_attempt_marker_state(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """The #1289 shape: ``previous_attempt`` 3 is already spent, ``failed_stage`` resolves.
+
+    ``failed_stage`` naming the canonical ``forecast`` keeps ``_fallback_previous_attempt``'s
+    restarted-stage-family floor OUT of the picture, so the fallback here is exactly
+    ``previous_attempt + 1`` and the assertions discriminate the scan's termination rule alone
+    (the floor's own discrimination lives in ``test_production_scheduler.py``).
+    """
+
+    return {
+        "pipeline_status": "failed",
+        "retry_count": 3,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_events": events,
+    }
+
+
+@pytest.mark.parametrize("retry_count_shape", _NO_ATTEMPT_CLAIM_SHAPES)
+def test_newest_adopted_marker_without_retry_count_terminates_the_attempt_scan(retry_count_shape: str) -> None:
+    """#1289: the newest adopted marker decides even when it carries no attempt claim.
+
+    The older own-model marker's pin holds, so the walk-back handed back its ``retry_count`` 3 --
+    exactly the attempt ``previous_attempt`` 3 records as already consumed, which the reservation
+    boundary reads as a duplicate and silently skips instead of submitting.  The newest adopted
+    marker makes no operator attempt claim, so the scan terminates there and the fallback (4)
+    decides; the older marker is never consulted.
+    """
+
+    candidate = types.SimpleNamespace(candidate_id="candidate_gfs", run_id="fcst_gfs_2026070100_model_a")
+    state = _consumed_attempt_marker_state(
+        [
+            _older_own_model_pinning_marker(),
+            _no_attempt_claim_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count_shape=retry_count_shape,
+            ),
+        ]
+    )
+    older, newest = state["pipeline_events"]
+
+    # Premise: the older marker really would pin (its 3 is what the walk-back returned), and the
+    # newer one really is adopted while carrying no attempt claim.
+    assert scheduler_state_manual_retry_module._marker_event_pins_attempt(state, older) is True
+    assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, newest) is True
+    assert newest["details"].get("retry_count") in (None, "")
+
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+    payload = scheduler_module._manual_retry_payload(state)
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) == 4
+    # Both scanners terminate at the SAME marker: the payload reports the retry as requested
+    # from the newest one and carries no ``new_attempt`` claim to explain a pinned value.
+    assert payload["requested"] is True
+    assert "new_attempt" not in payload
+    assert evidence["manual_retry"]["new_attempt"] == 4
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param([], id="no_markers_at_all"),
+        pytest.param(
+            [
+                _older_own_model_pinning_marker(),
+                _no_attempt_claim_marker_event(
+                    entity_id="job_cycle_gfs_2026070100_download",
+                    retry_count_shape="absent",
+                ),
+            ],
+            id="newest_marker_without_retry_count",
+        ),
+        pytest.param(
+            [
+                _older_own_model_pinning_marker(),
+                _no_attempt_claim_marker_event(
+                    entity_id="job_cycle_gfs_2026070100_download",
+                    retry_count_shape="empty_string",
+                ),
+            ],
+            id="newest_marker_with_empty_retry_count",
+        ),
+        pytest.param(
+            [
+                _older_own_model_pinning_marker(),
+                _manual_retry_marker_event(
+                    entity_id="job_cycle_gfs_2026070100_download",
+                    retry_count=5,
+                    event_id=31,
+                ),
+            ],
+            id="newest_marker_whose_retry_count_does_not_pin",
+        ),
+    ],
+)
+def test_attempt_derivation_never_returns_a_consumed_attempt_without_a_pinning_claim(
+    events: list[dict[str, Any]],
+) -> None:
+    """#1289 invariant: absent an operator pin claim, the derivation always moves forward.
+
+    Domain: states carrying no top-level ``manual_retry`` attempt payload (that route
+    short-circuits ahead of the event scan with no pin or adoption check and is out of this
+    rule's scope).  The documented exemption is a newest adopted marker whose ``retry_count``
+    pins -- an explicit operator claim may legitimately be at or below ``previous_attempt``,
+    which the negative anchors below pin unchanged.
+    """
+
+    state = _consumed_attempt_marker_state(events)
+
+    # Premise: the state-level short-circuit really is absent, so the event scan decides.
+    assert "manual_retry" not in state
+    assert "manual_retry_marker" not in state
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) > 3
+
+
+def test_newest_adopted_marker_with_pinning_retry_count_still_decides_the_attempt() -> None:
+    """Negative anchor: the terminal arm must not swallow a real operator claim.
+
+    Same two-marker sequence as the discriminating pair, except the newest marker carries a
+    ``retry_count`` of its own (7, on the candidate's own model-scoped row, so the pin holds).
+    That value is the operator's explicit claim and still decides -- terminality only changes
+    what happens when the newest marker claims nothing.
+    """
+
+    state = _consumed_attempt_marker_state(
+        [
+            _older_own_model_pinning_marker(),
+            _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=7, event_id=31),
+        ]
+    )
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) == 7
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 7
+
+
+def test_attempt_scan_falls_back_when_no_marker_is_adopted() -> None:
+    """Negative anchor: with nothing adopted, the fallback semantics are unchanged.
+
+    The only marker-shaped event names the whole forecast cycle and no model, so no candidate
+    adopts it and the scan reaches its existing end-of-loop fallback.
+    """
+
+    state = _consumed_attempt_marker_state(
+        [
+            _manual_retry_marker_event(
+                entity_id="gfs_2026070100",
+                retry_count=5,
+                entity_type="forecast_cycle",
+                event_id=31,
+            )
+        ]
+    )
+
+    assert scheduler_module._manual_retry_requested(state) is False
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) == 4
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+def test_pin_refusal_on_the_newest_marker_still_returns_the_fallback() -> None:
+    """Negative anchor: the pin-refusal arm keeps its own terminal fallback.
+
+    The newest adopted marker carries ``retry_count`` 5 but targets the cycle download stage
+    while this decision repairs ``forecast`` beside a live own failure, so neither pin arm
+    holds.  That arm was already terminal before #1289 and must stay that way.
+    """
+
+    state = _consumed_attempt_marker_state(
+        [
+            _older_own_model_pinning_marker(),
+            _manual_retry_marker_event(
+                entity_id="job_cycle_gfs_2026070100_download",
+                retry_count=5,
+                event_id=31,
+            ),
+        ]
+    )
+    newest = state["pipeline_events"][1]
+
+    # Premise: the newest marker really is adopted and its pin really is refused.
+    assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, newest) is True
+    assert scheduler_state_manual_retry_module._marker_event_pins_attempt(state, newest) is False
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=3) == 4
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+@pytest.mark.parametrize("retry_count_shape", _NO_ATTEMPT_CLAIM_SHAPES)
+def test_newer_unadopted_marker_shaped_event_does_not_terminate_the_attempt_scan(
+    retry_count_shape: str,
+) -> None:
+    """Negative anchor: terminality is scoped to ADOPTED markers.
+
+    The newer marker-shaped event is a cycle-granularity marker attributed to another model, so
+    this candidate never adopts it (PR #1286's cross-model exclusion) and it carries no attempt
+    claim either.  Widening the terminal arm past the adoption guard would hand this candidate
+    the fallback (1) instead of the 5 its own adopted marker pins.
+    """
+
+    state = {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": "forecast",
+        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_events": [
+            _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=5, event_id=30),
+            _no_attempt_claim_marker_event(
+                entity_id="gfs_2026070100",
+                retry_count_shape=retry_count_shape,
+                entity_type="forecast_cycle",
+                details_model_id="model_b",
+                event_id=31,
+            ),
+        ],
+    }
+    own_marker, foreign_marker = state["pipeline_events"]
+
+    # Premise: the foreign event really is marker-shaped, really is newer, and really is not
+    # adopted -- so only the adoption guard keeps it out of the scan's termination.
+    assert scheduler_state_manual_retry_module._manual_retry_marker_shape(foreign_marker) is True
+    assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, foreign_marker) is False
+    assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, own_marker) is True
+
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
 
 
 def test_model_less_candidate_run_job_marker_still_pins_attempt_in_cohort_shape() -> None:

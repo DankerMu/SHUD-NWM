@@ -50,31 +50,31 @@ Evidence floor:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 Replace the walk-back `continue` arm in
+- [x] 2.1 Replace the walk-back `continue` arm in
   `_manual_retry_new_attempt` with the terminal floored fallback return;
   update the in-function comment (the "keeps walking back past them"
   wording is overturned by the ruling); verify `_manual_retry_payload`
   alignment read-only (design.md D3, no edit)
-- [ ] 2.2 Discriminating pair red at pre-change source, green post-change,
+- [x] 2.2 Discriminating pair red at pre-change source, green post-change,
   parametrized over absent AND empty-string `retry_count` on the newest
   marker (design.md D4.1; red output recorded in the brief)
-- [ ] 2.3 Invariant test: never ≤ `previous_attempt` absent a pinning
+- [x] 2.3 Invariant test: never ≤ `previous_attempt` absent a pinning
   operator claim, domain scoped to states without a top-level
   `manual_retry` attempt payload, with the documented pinning exemption
   (D4.2)
-- [ ] 2.4 Negative anchors: pinning newest marker unchanged; no-marker
+- [x] 2.4 Negative anchors: pinning newest marker unchanged; no-marker
   fallback unchanged; pin-refusal arm unchanged; newer UNADOPTED
   marker-shaped event does not terminate the scan — own pinning marker
   still decides (D4.3)
-- [ ] 2.5 Floor discrimination on the new arm: no-`retry_count` newest
+- [x] 2.5 Floor discrimination on the new arm: no-`retry_count` newest
   marker on the unnameable-stage consumed-suffix shape derives the
   floored value, not bare `previous_attempt + 1` (D4.4 — D2's oracle)
-- [ ] 2.6 Inverse-mutant demonstration recorded and reverted (D4.5)
+- [x] 2.6 Inverse-mutant demonstration recorded and reverted (D4.5)
 
 ## 3. Verification (orchestrator)
 
 - [ ] 3.1 Evidence floor commands green (triage block above)
-- [ ] 3.2 Production diff confined to `_manual_retry_new_attempt` scan loop
+- [x] 3.2 Production diff confined to `_manual_retry_new_attempt` scan loop
   + comment in `services/orchestrator/scheduler_state_manual_retry.py`;
   tests-only elsewhere. (Recorded decision: the minimal one-arm edit is
   chosen deliberately; collapsing the scan loop into the payload-shaped

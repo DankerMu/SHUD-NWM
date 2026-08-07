@@ -694,18 +694,20 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         value = manual.get(key)
         if value not in (None, ""):
             return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
-    # The newest retry_count-carrying adopted marker decides.  (The payload scan breaks
-    # at the newest adopted marker regardless of retry_count; here markers without a
-    # retry_count carry no attempt claim, so the scan keeps walking back past them.)
-    # A non-pinning hit is TERMINAL: falling through to an older own-model marker would
-    # replay an attempt number already consumed.
+    # The newest ADOPTED marker decides, and the scan is terminal there -- the same
+    # termination rule ``_manual_retry_payload`` applies with its unconditional break, so the
+    # two scanners cannot report different markers for one event list (#1289).  An absent or
+    # empty retry_count is no operator attempt claim, so that marker yields the fallback.
+    # A non-pinning hit of either kind is TERMINAL: falling through to an older own-model
+    # marker would replay an attempt number already consumed.  An UNADOPTED marker-shaped
+    # event neither decides nor terminates.
     for event in reversed(_state_events(state)):
         if not _event_is_adopted_manual_retry_marker(state, event):
             continue
         details = event.get("details")
         value = details.get("retry_count")
         if value in (None, ""):
-            continue
+            return _fallback_previous_attempt(state, previous_attempt) + 1
         if not _marker_event_pins_attempt(state, event):
             return _fallback_previous_attempt(state, previous_attempt) + 1
         return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)

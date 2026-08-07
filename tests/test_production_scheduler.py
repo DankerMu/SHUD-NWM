@@ -5719,6 +5719,71 @@ def test_refused_pin_composition_is_unchanged_when_the_failed_stage_resolves() -
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
 
+def _no_attempt_claim_cycle_download_marker(*, retry_count_shape: str) -> dict[str, Any]:
+    """The cycle-download marker with its operator attempt claim removed.
+
+    Both empty shapes the scan's ``value in (None, "")`` predicate recognises: the field
+    missing entirely and the empty string a writer persists for a blank operator field.
+    """
+
+    marker = _decision_path_cycle_download_marker()
+    if retry_count_shape == "absent":
+        del marker["details"]["retry_count"]
+    else:
+        marker["details"]["retry_count"] = ""
+    return marker
+
+
+@pytest.mark.parametrize("retry_count_shape", ["absent", "empty_string"])
+def test_no_claim_marker_fallback_is_floored_on_the_unnameable_stage_shape(retry_count_shape: str) -> None:
+    """#1289 D2's oracle: the new terminal arm floors like every other fallback arm.
+
+    The newest (and only) adopted marker makes no operator attempt claim, so the scan is
+    terminal there and the fallback decides.  This is the #1287 unnameable-stage geometry: a
+    ``cancelled`` own forecast row whose ``_retry_2`` suffix is the only durable record that
+    attempt 2 was spent, and no canonical failed stage for the caller's composition to read, so
+    ``_production_previous_attempt`` composes 0.
+
+    Discrimination: a bare ``previous_attempt + 1`` on the new arm answers 1 -- a replay of the
+    consumed ``_retry_2`` identity that production reads as a reservation conflict and silently
+    skips.  Only ``_fallback_previous_attempt(state, previous_attempt) + 1`` answers 3.  (This
+    case is green before #1289's change too -- the walk-back reached the same floored return at
+    the end of the loop; it discriminates the arm's VALUE, not its terminality.)
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_no_attempt_claim_cycle_download_marker(retry_count_shape=retry_count_shape)],
+        jobs=[
+            _decision_path_consumed_own_forecast_job(status="cancelled", error_code=None),
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the claimless marker survives filtering and really is adopted, the consumed row
+    # survives too, the gate really is open, and the family floor really is 2.
+    marker = decision_state["pipeline_events"][0]
+    assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(decision_state, marker) is True
+    assert marker["details"].get("retry_count") in (None, "")
+    assert "job_model_a_forecast_retry_2" in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert (
+        scheduler_state_rows_module._canonical_downstream_stage(
+            scheduler_state_failure_module._failed_stage(decision_state)
+        )
+        is None
+    )
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"forecast"}
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="forecast") == 2
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 3
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
 def _decision_path_own_consumed_forcing_job(*, attempt: int = 4) -> dict[str, Any]:
     """The candidate's OWN forcing row, at another stage, after ``attempt`` was consumed.
 
