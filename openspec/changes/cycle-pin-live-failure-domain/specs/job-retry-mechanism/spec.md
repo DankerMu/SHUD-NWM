@@ -44,14 +44,18 @@ job is no longer failed (stale) — the derived
 `new_attempt` falls back to
 the candidate's own `previous_attempt + 1`, and the fallback is
 terminal: the newest retry-count-bearing adopted marker decides;
-older markers are not consulted. The refused pin never re-mints a
-consumed attempt number: when the candidate's own live failure is
-one the stage-scoped attempt derivation cannot name (a `cancelled`
-row or a hydro failure resolves no canonical failed stage), the
-fallback still counts the attempts recorded by the candidate's own
-rows' durable retry-suffix record, so an own row that already
-consumed attempt N derives at least N + 1 — never a replay of an
-identity the journal already holds. Marker-shaped events remain excluded from
+older markers are not consulted. The refused pin does not re-mint a
+consumed attempt number: whenever the fallback's attempt derivation
+resolves no canonical failed stage — with or without a live failure
+present — it floors `previous_attempt` at the highest attempt any of
+the candidate's own candidate-scope rows still inside the state
+projection records, by id retry suffix or recorded retry count. This
+floor counts on the identity-consumption axis, so the live-failure
+exclusions above (repaired stage-evidence rows, unsubmitted
+placeholders) deliberately do not apply to it — a repaired
+`_retry_3` row still proves attempt 3 was spent. A candidate whose
+visible row already consumed attempt N therefore derives at least
+N + 1. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
@@ -115,14 +119,16 @@ drive the retry decision it was written to request.
   ACTIVE in-flight row (`pending`/`queued`/`submitted`/`running`)
   or an ACTIVE hydro run is not a repair target and never blocks
   the pin
-- **AND** the refused pin derives `previous_attempt` from the
-  durable record even when the live failure resolves no canonical
-  failed stage: a cancelled own row whose job id carries the
-  consumed `_retry_2` suffix (master `retry_count` reset to 0 by
-  the journal's clean-reservation invariant, no usable
-  `failed_stage`) derives `new_attempt` 3 — not 1 (a replay of a
-  consumed identity that would silently skip submission at the
-  reservation boundary) and not the marker's 5
+- **AND** the refused pin's fallback floor comes from the durable
+  record whenever no canonical failed stage resolves: a cancelled
+  own row whose job id carries the consumed `_retry_2` suffix
+  (master `retry_count` reset to 0 by the journal's
+  clean-reservation invariant, no usable `failed_stage`) derives
+  `new_attempt` 3 — not 1 (a replay of a consumed identity that
+  would silently skip submission at the reservation boundary) and
+  not the marker's 5 — while the emitted `previous_attempt`
+  evidence fields keep reporting the unclamped stage-scoped
+  derivation (only the derived `new_attempt` carries the floor)
 - **AND** a repaired stage-evidence row or an unsubmitted
   auto-retry placeholder is not a live failure and does not block
   the pin, while a placeholder-shaped row in a `cancelled` status

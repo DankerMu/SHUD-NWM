@@ -51,6 +51,30 @@ repaired stage evidence、unsubmitted auto-retry placeholder 两项排除保留�
 live-failure 子句改为活失败域表述（cancelled + hydro 失败域，含两项排除的字面
 保留）。经由本 change 的 MODIFIED delta 落库（merge 后 archive 应用）。
 
+### D5: fallback 兜底 clamp（round-2 审核修复，cand-INT1）
+
+域扩宽把 cancelled / hydro 形状从钉值路由进 prev+1 回落，而这些形状恰好无法解析
+canonical failed stage——stage-scoped 派生短路回顶层 `retry_count`（journal
+clean-reservation 不变量下 master 行重置为 0），durable `_retry_<n>` 后缀被丢，
+`new_attempt` 重铸已消耗身份 → reservation ON CONFLICT 落败 → 静默跳过提交。
+因此回落端加兜底 clamp（`_candidate_scope_consumed_attempt` +
+`_fallback_previous_attempt`，仍仅本文件）：
+
+- **clamp 域走 identity-consumption 轴**，对候选域（非 cycle-scope）行取
+  `effective_retry_attempt`（recorded count 与 id 后缀取 max）的最大值——
+  live-failure 域的两项排除（repaired evidence / placeholder）**故意不适用**：
+  生产铸号规则 `_next_retry_attempt_for_stage` 扫 `{base}_retry_` 前缀不看
+  status，repaired `_retry_3` 行同样证明身份已消耗。floor 只会更安全（更高）。
+- **gate 在"无 canonical failed stage"上**而非无条件：无条件 clamp 会把其他
+  stage 的后缀计费进已正确派生的 forecast 预算（跨 stage 计费 + retry-limit
+  提前触顶）。gate 复用生产解析器 `_canonical_downstream_stage(_failed_stage)`
+  （函数内 deferred import 规避循环依赖，两侧不可漂移）。
+- 残留（有记录、不修）：无法命名 stage 的分支里 floor 是候选域行的
+  stage-blind max——理论上会把候选另一 stage 的后缀计入，但实践不可达
+  （parse/state_save_qc/publish 是 cohort stage，download/forcing/convert 是
+  cycle-scope，候选域 stage 实际只有 forecast）；且 clamp 只影响内部 floor，
+  发出的 `previous_attempt` 证据字段保持未 clamp 的 stage-scoped 派生。
+
 ## Risks / Trade-offs
 
 - 方向性风险：扩宽 arm 2 的失败域会让更多形状走 fallback（prev+1）而非钉值——

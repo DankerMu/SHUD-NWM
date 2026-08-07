@@ -705,6 +705,11 @@
           "rounds": 5
         }
       ]
+    },
+    "1287": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": []
     }
   }
 }

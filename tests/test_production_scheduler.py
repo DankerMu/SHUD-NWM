@@ -33,6 +33,7 @@ from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
+from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator import source_cycle_raw_manifest as source_cycle_raw_manifest_module
 from services.orchestrator.chain import (
@@ -5548,6 +5549,12 @@ def test_failed_hydro_run_blocks_cycle_marker_pin_beside_succeeded_jobs(hydro_st
     statuses ``_manual_retry_blocking_hydro_status`` already blocks on.  The hydro failure is
     this candidate's repair target, so the cycle-download counter (5) must stay out of its
     budget: ``previous_attempt`` 2 derives 3, not 5.
+
+    The literal 2 is issue #1287's acceptance pair and is kept as the stated contract.  It is
+    not what production composes on this shape -- ``_failed_stage`` cannot see a hydro run, so
+    ``_production_previous_attempt`` derives 0 here and the same state answers 1.  The
+    composition itself is covered by
+    ``test_refused_pin_never_replays_a_consumed_attempt_on_the_production_composition``.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -5710,6 +5717,142 @@ def test_refused_pin_composition_is_unchanged_when_the_failed_stage_resolves() -
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
 
+def _decision_path_own_consumed_forcing_job() -> dict[str, Any]:
+    """The candidate's OWN forcing row, at another stage, after attempt 4 was consumed.
+
+    Per-model forcing really is retried on its own budget (see
+    ``_cross_stage_retry_suffix_state``), so this is a production-real cross-stage
+    consumed-identity record: ``model_id`` is set, therefore it is candidate scope and
+    ``_candidate_scope_consumed_attempt`` counts it -- the stage-blind reading the fallback's
+    gate exists to keep OUT of a stage budget that resolves on its own.  It is ``succeeded``
+    because identity consumption is not live failure: the ``_retry_4`` suffix records that the
+    attempt was spent whatever the row's status is now.
+    """
+
+    return {
+        "job_id": "job_model_a_forcing_retry_4",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "stage": "forcing",
+        "job_type": "produce_forcing_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+
+
+def test_consumed_cross_stage_row_never_inflates_a_resolving_stage_budget() -> None:
+    """#1287 round-3: the fallback's clamp must stay OFF whenever the stage resolves.
+
+    The clamp's input (``_candidate_scope_consumed_attempt``) is deliberately stage-blind -- it
+    answers "which identities has this candidate spent", not "at which stage" -- so applying it
+    unconditionally would charge another stage's consumed attempts to this one.  Here the
+    candidate's own forcing row consumed attempt 4 while its forecast row is a FIRST failure
+    (no suffix, ``retry_count`` 0), and ``failed_stage`` resolves the canonical ``forecast``:
+    the caller's composition already reads the forecast suffix record itself, so the clamp must
+    return that value untouched.
+
+    Both pin arms are closed, so the fallback really is the deciding path: arm 1 fails because
+    ``failed_stage`` (``forecast``) is not the marker row's stage (``download``), and arm 2
+    fails because the own forecast row is a live candidate-scope failure.
+
+    Discrimination: HEAD derives 1 (the forecast stage's own budget).  Drop the gate and the
+    same state derives ``max(0, 4) + 1 = 5`` -- exactly #1287's cross-stage charging failure
+    mode, a jump that reaches the manifest's ``retry_attempt`` and can vault the retry limit.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            _decision_path_own_forecast_job(),
+            _decision_path_own_consumed_forcing_job(),
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: all three rows survive filtering, the cross-stage consumed record really is
+    # visible to the clamp's stage-blind input, and the stage really does resolve.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_model_a_forcing_retry_4",
+        "job_cycle_gfs_2026052106_download",
+    ]
+    assert scheduler_state_manual_retry_module._candidate_scope_consumed_attempt(decision_state) == 4
+    assert (
+        scheduler_state_rows_module._canonical_downstream_stage(
+            scheduler_state_failure_module._failed_stage(decision_state)
+        )
+        == "forecast"
+    )
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_row_derived_canonical_stage_also_keeps_the_consumed_clamp_out_of_the_budget() -> None:
+    """The gate reads the RESOLVER, not the state key: a row-derived stage closes it too.
+
+    Production's cohort projection often carries no ``failed_stage`` key at all, and
+    ``_failed_stage`` then walks the job rows.  A ``cancelled`` row is invisible to that walk
+    (``cancelled`` is not in ``FAILED_PIPELINE_STATUSES``), so the candidate's own cancelled
+    forecast row -- the very shape #1287 widened the live-failure domain for -- is skipped and
+    the last FAILED row, the own ``convert`` row, names the stage.  ``convert`` IS canonical, so
+    ``_state_retry_attempt`` is suffix-aware at that stage and the caller's value is already
+    correct: the clamp must not fire even though the state key is absent.
+
+    Both pin arms are closed again: arm 1 reads the state KEY, which is absent, and arm 2 fails
+    because the cancelled own row is a live candidate-scope failure post-#1287.
+
+    Discrimination: HEAD derives 1 (convert's own budget, untouched at 0).  Drop the gate and
+    the forecast row's durable ``_retry_2`` is charged to convert: ``max(0, 2) + 1 = 3``.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    own_convert_failure = {
+        "job_id": "job_model_a_convert",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "stage": "convert",
+        "job_type": "convert_canonical",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:25:00Z",
+    }
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        # Row ORDER is load-bearing: ``_failed_stage`` walks the rows in reverse and returns the
+        # LAST failed row's stage, so the own convert failure has to sit after the cohort's
+        # download row for the resolver to name a canonical stage at all.
+        jobs=[
+            _decision_path_consumed_own_forecast_job(status="cancelled", error_code=None),
+            _decision_path_cycle_download_job(),
+            own_convert_failure,
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: no state-level failed stage, the resolver derives ``convert`` from the rows, and
+    # the cancelled row's consumed ``_retry_2`` really is visible to the clamp's input.
+    assert "failed_stage" not in decision_state
+    assert scheduler_state_failure_module._failed_stage(decision_state) == "convert"
+    assert scheduler_state_rows_module._canonical_downstream_stage("convert") == "convert"
+    assert scheduler_state_manual_retry_module._candidate_scope_consumed_attempt(decision_state) == 2
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
 def test_consumed_own_row_does_not_disturb_the_same_stage_pin_on_the_production_composition() -> None:
     """The clamp is a FALLBACK floor only: arm 1's pin still returns the operator's counter.
 
@@ -5849,6 +5992,11 @@ def test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_th
     the blocker scan -- it is a real blocker there.  The pin rule's live-failure domain is the
     failure half of that same blocker domain, so it must count the row here too; excluding it
     on shape alone would re-open the exact gap #1287 closes.
+
+    ``previous_attempt`` is the production composition, not a literal: ``failed_stage`` resolves
+    the canonical ``forecast``, so the caller derives the row's own consumed attempt (1) and the
+    refused pin answers 2 -- the candidate's next forecast attempt, still nowhere near the
+    cohort counter (5) the pin would have charged it.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -5874,7 +6022,9 @@ def test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_th
     blocker = scheduler_module._latest_manual_retry_blocker(decision_state)
     assert blocker is not None
     assert (blocker["source"], blocker["status"]) == ("pipeline_job", "cancelled")
-    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 1
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 2
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
 

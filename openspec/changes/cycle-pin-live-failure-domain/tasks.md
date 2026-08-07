@@ -70,12 +70,39 @@ tests/test_file_orchestration_migration.py:576-1010 一带，两文件都必须�
   行）仍 3。
 - [x] 3.3 consequence-real 化（TE r2 note）：own-ACTIVE 正向护栏的 ACTIVE 行
   `updated_at` 调早于 cohort 行，使 `manual_retry_requested=True` 且
-  `retry_policy.attempt=5` 端到端成立（决策不再落 skip/active_duplicate）。
+  `retry_policy.attempt=5` 端到端成立（own-ACTIVE 四参数决策不再落
+  skip/active_duplicate；hydro-ACTIVE `running` 参数按设计仍落
+  `("skip","active_duplicate_pipeline")`——in-flight hydro run 是真 active
+  duplicate，测试以 `decision_pins=False` 编码，见 PR 偏离记录 8）。
 - [x] 3.4 红证明：3.2 两形在 clamp 前 red（值=1），clamp 后 green；mutant
   （去掉 clamp）red。
 - [x] 3.5 数字全量刷新（cand-D，终推同车）：tasks.md E1 与 PR body 的
   测试数/case 数/红证明数按最终 head 重新实测（record-accuracy 两轮重复的
   跨切闭合：终推前全量 re-derive 所有数字与规范句，不逐处补丁）。
+
+## 4. Round-3 fix set（三轮硬门 depth retro 的 corrective action；
+verifier 全 CONFIRMED：F-R3-1/2/3/4，见 .workplans/pr-1293/review/）
+
+- [x] 4.1 gate 判别测试（F-R3-3，coverage 类不可延后）：round-2 gate
+  （无 canonical failed stage 才 clamp）在生产组合下零判红——唯一 kill 是
+  literal prev=0 伪影（生产组合对同 state 派生 1，HEAD 与 mutant 同值 2）。
+  新增两形，`previous_attempt` 走 `_production_previous_attempt`：
+  跨 stage 计费方向（failed_stage=forecast + own 非 forecast `_retry_4` 行 →
+  1；gate 删除 → 5）与 C2 形（own forecast `_retry_2` cancelled + own convert
+  failed → `_failed_stage` 解析 canonical convert → 1；gate 删除 → 3）。
+  红证明：gate-deletion mutant 下两形 red（5/3），恢复后 green。
+- [x] 4.2 literal 审计（depth retro invariant closure，界于本 PR 新增测试）：
+  枚举本 PR 新增、以 literal `previous_attempt` 调 `_manual_retry_new_attempt`
+  且可达回落路径的测试；逐个手推生产组合值，一致记 harmless，偏离且非
+  issue-AC 判别值的转生产组合（如 cancelled-placeholder 护栏 literal 0 vs
+  组合 1），AC 判别对（prev=0→1 / prev=2→3）保留 literal 并记录。
+- [x] 4.3 规格/fixture 文本修正（F-R3-1/2/4，orchestrator openspec-only）：
+  delta no-replay 句按 verifier 四轴改写（gate 触发=无 canonical stage、
+  floor=可见候选域行 max(recorded,suffix)、identity-consumption 轴排除不适用、
+  投影可见性限定）+ scenario bullet 改"fallback floor"并注明发出的
+  `previous_attempt` 字段不 clamp；design 加 D5（clamp 决策 + gate 理由 +
+  stage-blind max 残留）；proposal What Changes 补 clamp 条目；tasks 3.3
+  括号注限定到 own-ACTIVE 参数。
 
 ## E. Evidence floor
 
@@ -84,7 +111,7 @@ tests/test_file_orchestration_migration.py:576-1010 一带，两文件都必须�
   arm 1 同 stage :576、placeholder :821、repaired :856、succeeded 目标 :881、
   arm 2 正向 :910、`fcst_...` 行 :981；CI 定向选择对 `scheduler_state_manual_retry.py`
   不会自动带上它——`scripts/select_ci_tests.py` 的 orchestrator 规则不含该文件，
-  故本地 E1 必须显式跑）。结果（final head 实测）1139 passed / 1 failed——唯一失败
+  故本地 E1 必须显式跑）。结果（final head 实测）1141 passed / 1 failed——唯一失败
   `test_db_free_slurm_storage_root_check_masks_symlink_loop_path` 为 master
   基线既有（macOS 平台相关，PR #1286 期间已在独立 master worktree 复现，
   与本 diff 零共享代码）。
