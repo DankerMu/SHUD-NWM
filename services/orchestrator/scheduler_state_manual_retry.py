@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_mapping_for_state,
@@ -14,6 +15,7 @@ from services.orchestrator.scheduler_state_common import (
     _first_state_int,
 )
 from services.orchestrator.scheduler_state_rows import (
+    _canonical_downstream_stage,
     _job_is_unsubmitted_auto_retry_placeholder,
     _pipeline_job_is_repaired_stage_evidence,
     _state_events,
@@ -551,12 +553,65 @@ def _manual_retry_payload(state: Mapping[str, Any]) -> dict[str, Any]:
         break
     return _evidence_safe(payload)
 
+def _candidate_scope_consumed_attempt(state: Mapping[str, Any]) -> int:
+    """Highest attempt number the candidate's OWN rows durably prove was already minted.
+
+    The axis here is identity consumption, not live failure: a row proves ``{base}_retry_<n>``
+    exists in the journal regardless of what its status is now, so the two live-failure
+    exclusions (repaired stage evidence, unsubmitted auto-retry placeholder) deliberately do
+    NOT apply — a repaired ``_retry_3`` row still means attempt 3 was spent, and an unsubmitted
+    placeholder still holds the reservation that a replay would collide with.  This mirrors
+    ``chain._next_retry_attempt_for_stage``, the collision-safe minting rule, which likewise
+    scans every row carrying the ``{base}_retry_`` prefix without consulting status.
+
+    Cycle-scope rows are excluded: their counters belong to the cohort's identity, never to
+    this candidate's (the same separation ``_state_retry_attempt`` keeps).  Attempt derivation
+    is suffix-aware via ``effective_retry_attempt`` because the journal's clean-reservation
+    invariant resets master-row ``retry_count`` to 0 — the id suffix is the durable record.
+    """
+
+    return max(
+        (
+            effective_retry_attempt(job.get("job_id"), job.get("retry_count"))
+            for job in _state_jobs(state)
+            if not _job_is_cycle_scope_row(job)
+        ),
+        default=0,
+    )
+
+def _fallback_previous_attempt(state: Mapping[str, Any], previous_attempt: int) -> int:
+    """Clamp the fallback's ``previous_attempt`` from below by the durable consumed record.
+
+    Callers derive ``previous_attempt`` as
+    ``_state_retry_attempt(state, stage=_failed_stage(state))``.  That composition is
+    suffix-aware only while ``_failed_stage`` resolves a CANONICAL downstream stage; when it
+    cannot — the live failure is a ``cancelled`` row or a hydro run, neither of which
+    ``_failed_stage`` can see, so it resolves ``None`` or a non-canonical stage such as a
+    cohort's ``download`` — ``_state_retry_attempt`` short-circuits to the flat top-level
+    ``retry_count``, which the clean-reservation invariant has reset to 0.  The candidate's own
+    ``_retry_2`` row would then derive attempt 1 again, re-minting an identity the journal
+    already holds; production reads that as a reservation conflict and silently skips the
+    submission.  In exactly that unnameable-stage case the durable record decides instead, so a
+    candidate that consumed attempt N derives at least N + 1.
+
+    When the stage IS nameable the caller's value already carries the stage's suffix record, so
+    this returns it untouched: no cross-stage row may inflate a budget that resolves correctly.
+    ``_failed_stage`` is imported lazily because ``scheduler_state_failure`` imports this
+    module; restating its resolution here is what let the two sides drift in the first place.
+    """
+
+    from services.orchestrator.scheduler_state_failure import _failed_stage
+
+    if _canonical_downstream_stage(_failed_stage(state)) is not None:
+        return previous_attempt
+    return max(previous_attempt, _candidate_scope_consumed_attempt(state))
+
 def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int) -> int:
     manual = _manual_retry_payload(state)
     for key in ("new_attempt", "retry_count"):
         value = manual.get(key)
         if value not in (None, ""):
-            return _coerce_int(value, default=previous_attempt + 1)
+            return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
     # The newest retry_count-carrying adopted marker decides.  (The payload scan breaks
     # at the newest adopted marker regardless of retry_count; here markers without a
     # retry_count carry no attempt claim, so the scan keeps walking back past them.)
@@ -570,6 +625,6 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         if value in (None, ""):
             continue
         if not _marker_event_pins_attempt(state, event):
-            return previous_attempt + 1
-        return _coerce_int(value, default=previous_attempt + 1)
-    return previous_attempt + 1
+            return _fallback_previous_attempt(state, previous_attempt) + 1
+        return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
+    return _fallback_previous_attempt(state, previous_attempt) + 1

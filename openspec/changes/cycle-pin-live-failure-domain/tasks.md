@@ -56,6 +56,27 @@ tests/test_file_orchestration_migration.py:576-1010 一带，两文件都必须�
 - [x] 2.6 红证明：2.1/2.2/2.3/2.5 在 pre-change 源上 red（批量 stash 法），
   实现后 green；输出入 implementer 报告。
 
+## 3. Round-2 fix set（cand-INT1 P1 + cand-D/E P2，verifier 全 CONFIRMED）
+
+- [x] 3.1 fallback 兜底 clamp（生产，仍仅本文件）：`_manual_retry_new_attempt`
+  的 prev+1 回落在候选自身活失败无法解析 canonical failed stage 时（cancelled
+  行 / hydro 失败），以候选域内（非 cycle-scope）行的 durable retry-suffix 记录
+  （`effective_retry_attempt` 类派生）为下界 clamp `previous_attempt`——已消耗
+  attempt N 的候选派生 ≥ N+1，绝不重铸已消耗身份。钉值路径不动。
+- [x] 3.2 组合判别测试：`previous_attempt` 不再传字面量，改走生产派生
+  `_state_retry_attempt(state, stage=_failed_stage(state))`——cancelled own
+  行带 `_retry_2` 后缀 + 顶层 `retry_count 0` + 无 failed_stage + marker 5 →
+  `new_attempt == 3`（当前 red=1）；hydro 失败同构一形；control（own failed
+  行）仍 3。
+- [x] 3.3 consequence-real 化（TE r2 note）：own-ACTIVE 正向护栏的 ACTIVE 行
+  `updated_at` 调早于 cohort 行，使 `manual_retry_requested=True` 且
+  `retry_policy.attempt=5` 端到端成立（决策不再落 skip/active_duplicate）。
+- [x] 3.4 红证明：3.2 两形在 clamp 前 red（值=1），clamp 后 green；mutant
+  （去掉 clamp）red。
+- [x] 3.5 数字全量刷新（cand-D，终推同车）：tasks.md E1 与 PR body 的
+  测试数/case 数/红证明数按最终 head 重新实测（record-accuracy 两轮重复的
+  跨切闭合：终推前全量 re-derive 所有数字与规范句，不逐处补丁）。
+
 ## E. Evidence floor
 
 - [x] E1 `uv run pytest -q tests/test_production_scheduler.py
@@ -63,7 +84,7 @@ tests/test_file_orchestration_migration.py:576-1010 一带，两文件都必须�
   arm 1 同 stage :576、placeholder :821、repaired :856、succeeded 目标 :881、
   arm 2 正向 :910、`fcst_...` 行 :981；CI 定向选择对 `scheduler_state_manual_retry.py`
   不会自动带上它——`scripts/select_ci_tests.py` 的 orchestrator 规则不含该文件，
-  故本地 E1 必须显式跑）。结果 1130 passed / 1 failed——唯一失败
+  故本地 E1 必须显式跑）。结果（final head 实测）1139 passed / 1 failed——唯一失败
   `test_db_free_slurm_storage_root_check_masks_symlink_loop_path` 为 master
   基线既有（macOS 平台相关，PR #1286 期间已在独立 master worktree 复现，
   与本 diff 零共享代码）。

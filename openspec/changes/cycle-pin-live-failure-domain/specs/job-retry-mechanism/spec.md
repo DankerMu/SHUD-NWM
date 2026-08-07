@@ -22,24 +22,36 @@ stage's failure is the repair target: the resolved job is still in
 a failed status AND either the state's failed stage equals the
 resolved job's stage or the candidate has no live candidate-scoped
 failure of its own. The live-failure domain matches the failure
-half of the module's blocker domain, not the narrower
-failed-pipeline status set alone: a model-scoped job row in a
-failed or `cancelled` status counts, and so does a hydro run whose
-status is `failed`, `cancelled`, or `permanently_failed`; repaired
+half of the module's blocker STATUS domain, not the narrower
+failed-pipeline status set alone — read from candidate-scope job
+rows and the candidate's own hydro run only (the blocker scan's
+state-level `pipeline_status` and pipeline-event sources are
+deliberately not consulted here: a top-level failed
+`pipeline_status` records the cycle failure being repaired, and
+counting it would make the only-failure-left arm unreachable): a
+candidate-scope (non-cycle-scope) job row in a failed or
+`cancelled` status counts, and so does a hydro run whose status is
+`failed`, `cancelled`, or `permanently_failed`; repaired
 stage-evidence rows and unsubmitted auto-retry placeholders (rows
 whose status is `pending` or `submission_failed` by that
 placeholder's own definition) never count as live failures — a
 placeholder-shaped row in a `cancelled` status is outside the
 placeholder gate and counts, exactly as the blocker scan treats
-it. In every other case — a
-candidate-scoped live pipeline failure (failed or cancelled) at a
-different stage, a candidate-scoped live hydro failure where the
-failed stage does not name the resolved job's stage, or a marker
-whose resolved job is no longer failed (stale) — the derived
+it. In every other case — a candidate-scoped live failure
+(pipeline failed or cancelled, or hydro) where the failed stage
+does not name the resolved job's stage, or a marker whose resolved
+job is no longer failed (stale) — the derived
 `new_attempt` falls back to
 the candidate's own `previous_attempt + 1`, and the fallback is
 terminal: the newest retry-count-bearing adopted marker decides;
-older markers are not consulted. Marker-shaped events remain excluded from
+older markers are not consulted. The refused pin never re-mints a
+consumed attempt number: when the candidate's own live failure is
+one the stage-scoped attempt derivation cannot name (a `cancelled`
+row or a hydro failure resolves no canonical failed stage), the
+fallback still counts the attempts recorded by the candidate's own
+rows' durable retry-suffix record, so an own row that already
+consumed attempt N derives at least N + 1 — never a replay of an
+identity the journal already holds. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
@@ -103,6 +115,14 @@ drive the retry decision it was written to request.
   ACTIVE in-flight row (`pending`/`queued`/`submitted`/`running`)
   or an ACTIVE hydro run is not a repair target and never blocks
   the pin
+- **AND** the refused pin derives `previous_attempt` from the
+  durable record even when the live failure resolves no canonical
+  failed stage: a cancelled own row whose job id carries the
+  consumed `_retry_2` suffix (master `retry_count` reset to 0 by
+  the journal's clean-reservation invariant, no usable
+  `failed_stage`) derives `new_attempt` 3 — not 1 (a replay of a
+  consumed identity that would silently skip submission at the
+  reservation boundary) and not the marker's 5
 - **AND** a repaired stage-evidence row or an unsubmitted
   auto-retry placeholder is not a live failure and does not block
   the pin, while a placeholder-shaped row in a `cancelled` status
