@@ -1125,6 +1125,372 @@ def test_file_journal_candidate_state_attributes_cohort_qc_to_candidates(
         assert "candidate_projections" not in job
 
 
+def _own_failed_forecast_job(cycle_time: datetime, *, model_id: str = "model_a") -> dict[str, Any]:
+    """The candidate's own failed forecast row (``retry_count`` 0, no pinned attempt)."""
+
+    cycle_stamp = format_cycle_time(cycle_time)
+    job = _active_job(cycle_time, model_id=model_id)
+    job.update(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_{model_id}_forecast",
+            "idempotency_key": f"gfs:{cycle_id_for('gfs', cycle_time)}:{model_id}:forecast",
+            "run_id": f"fcst_gfs_{cycle_stamp}_{model_id}",
+            "status": "failed",
+            "stage": "forecast",
+            "retry_count": 0,
+            "slurm_job_id": "9001",
+        }
+    )
+    return job
+
+
+def _cycle_run_id_job(
+    cycle_time: datetime,
+    *,
+    model_id: str | None,
+    stage: str = "forecast",
+    status: str = "failed",
+    retry_count: int = 5,
+    slurm_job_id: str = "9002",
+    run_id_suffix: str = "",
+) -> dict[str, Any]:
+    """A pipeline job row carrying the cycle run id instead of a candidate run id.
+
+    Production reaches the named variant when a single-basin pass names the row's
+    model (``_cycle_pipeline_job_model_id``) while the cycle context falls back to
+    the shared ``cycle_<source>_<stamp>`` run id.  The job id deliberately keeps the
+    ``job_cycle_<source>_<stamp>_...`` grammar these rows really carry: that is the
+    shape a marker degenerates into when its row is filtered out but the event is
+    not, and it is exactly the id the unresolvable-entity pin gate re-resolves.
+    """
+
+    cycle_stamp = format_cycle_time(cycle_time)
+    cycle_run_id = f"cycle_gfs_{cycle_stamp}"
+    name_segment = f"{model_id}_" if model_id not in (None, "") else ""
+    job = _active_job(cycle_time, model_id=model_id)
+    job.update(
+        {
+            "job_id": f"job_cycle_gfs_{cycle_stamp}_{name_segment}{stage}",
+            "idempotency_key": f"gfs:{cycle_id_for('gfs', cycle_time)}:{name_segment}{stage}",
+            "run_id": f"{cycle_run_id}{run_id_suffix}",
+            "model_id": model_id,
+            "stage": stage,
+            "status": status,
+            "retry_count": retry_count,
+            "slurm_job_id": slurm_job_id,
+        }
+    )
+    return job
+
+
+def _write_direct_pipeline_job(
+    journal_root: Path,
+    job: Mapping[str, Any],
+    *,
+    cycle_time: datetime,
+    source_id: str = "gfs",
+) -> dict[str, Any]:
+    """Write a row as a direct ``pipeline-jobs/<job_id>.json`` record.
+
+    A candidate reads only its OWN ``latest/<source>/<stamp>/<model>.json`` view, so
+    another model's row can never be planted there — the direct record is the entry
+    that actually reaches every candidate's row set.  The envelope ``model_id`` must
+    match the payload's or the read is blocked as ``file_journal_model_mismatch``.
+    """
+
+    _write_json(
+        journal_root / f"pipeline-jobs/{job['job_id']}.json",
+        _journal_record(
+            record_type="pipeline_job",
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=job.get("model_id"),
+            payload=job,
+        ),
+    )
+    return dict(job)
+
+
+def _write_journal_pipeline_job(
+    journal_root: Path,
+    job: Mapping[str, Any],
+    *,
+    cycle_time: datetime,
+    source_id: str = "gfs",
+    sequence: int = 1,
+) -> dict[str, Any]:
+    """Append a row to the shared cycle journal segment.
+
+    The direct-record entry cannot carry a SUFFIXED cohort run id — its cycle-wide
+    scan (``_job_matches_source_cycle``) only accepts the exact cycle run id or a
+    candidate ``fcst_...`` id — so the journal segment, which every candidate of the
+    cycle replays, is the entry for those rows.
+    """
+
+    _write_jsonl(
+        journal_root / f"journal/{source_id}/{format_cycle_time(cycle_time)}.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=job.get("model_id"),
+                sequence=sequence,
+                payload=job,
+            )
+        ],
+    )
+    return dict(job)
+
+
+def _write_manual_retry_marker(
+    journal_root: Path,
+    *,
+    cycle_time: datetime,
+    entity_id: str,
+    retry_count: int,
+    source_id: str = "gfs",
+    event_id: int = 11,
+) -> None:
+    _write_jsonl(
+        journal_root / f"pipeline-events/{source_id}/{format_cycle_time(cycle_time)}.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_event",
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=None,
+                sequence=event_id,
+                payload={
+                    "event_id": event_id,
+                    "entity_type": "pipeline_job",
+                    "entity_id": entity_id,
+                    "event_type": "retry",
+                    "created_at": "2026-06-28T00:05:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": retry_count,
+                    },
+                },
+            )
+        ],
+    )
+
+
+def _foreign_model_cycle_run_fixture(
+    journal_root: Path,
+    cycle_time: datetime,
+    *,
+    with_marker: bool = True,
+    **job_overrides: Any,
+) -> dict[str, Any]:
+    """#1288 shape: another model's named cycle-run row beside the candidate's own row."""
+
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[_own_failed_forecast_job(cycle_time)]),
+    )
+    foreign = _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(cycle_time, model_id="model_b", **job_overrides),
+        cycle_time=cycle_time,
+    )
+    if with_marker:
+        _write_manual_retry_marker(
+            journal_root,
+            cycle_time=cycle_time,
+            entity_id=foreign["job_id"],
+            retry_count=int(foreign["retry_count"]),
+        )
+    return foreign
+
+
+def test_candidate_state_excludes_foreign_model_cycle_run_row_and_its_marker(tmp_path: Path) -> None:
+    """#1288 read side: a foreign model's named cycle-run row is not this candidate's row.
+
+    Journal candidate-state membership must answer as the DB predicate does
+    (``chain_repository_state.py:510-515``, whose cycle-run clause carries
+    ``model_id IS NULL``).  The marker riding on that row has to leave in the SAME
+    step: an orphaned ``pipeline_job`` event whose row is gone re-enters the pinning
+    decision through the cycle-scope entity grammar.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    foreign = _foreign_model_cycle_run_fixture(journal_root, cycle_time)
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert state.get("file_journal") is None
+    assert [job.get("job_id") for job in state["pipeline_jobs"]] == [
+        f"job_fcst_gfs_{format_cycle_time(cycle_time)}_model_a_forecast"
+    ]
+    assert foreign["job_id"] == f"job_cycle_gfs_{format_cycle_time(cycle_time)}_model_b_forecast"
+    assert [(event.get("entity_type"), event.get("entity_id")) for event in state["pipeline_events"]] == []
+
+
+def test_foreign_model_cycle_run_marker_cannot_pin_candidate_attempt(tmp_path: Path) -> None:
+    """#1288 pin side: the foreign row's ``retry_count`` 5 must not become this candidate's attempt."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(journal_root, cycle_time)
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["failed_stage"] == "forecast"
+    assert scheduler_module._manual_retry_requested(state) is False
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(state)
+
+
+def test_model_less_cycle_scope_rows_stay_visible_to_every_candidate(tmp_path: Path) -> None:
+    """Negative regression: the cohort contract (#841) survives the #1288 exclusion.
+
+    Model-less cycle-scope rows — the exact cycle run id and the journal-only
+    suffix widening — belong to every candidate of the cycle; only the foreign
+    NAMED row leaves.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    for model_id in ("model_a", "model_b"):
+        _write_json(
+            journal_root / f"latest/gfs/{cycle_stamp}/{model_id}.json",
+            _latest_view(
+                cycle_time=cycle_time,
+                model_id=model_id,
+                jobs=[_own_failed_forecast_job(cycle_time, model_id=model_id)],
+            ),
+        )
+    cohort = _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(cycle_time, model_id=None, stage="download", status="failed"),
+        cycle_time=cycle_time,
+    )
+    suffixed_cohort = _write_journal_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id=None,
+            stage="state_save_qc",
+            status="succeeded",
+            run_id_suffix="_state_save_qc_cohort_abc123",
+        ),
+        cycle_time=cycle_time,
+    )
+    foreign = _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(cycle_time, model_id="model_b"),
+        cycle_time=cycle_time,
+    )
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    states = {
+        model_id: _candidate_state(repository, cycle_time=cycle_time, model_id=model_id)
+        for model_id in ("model_a", "model_b")
+    }
+
+    for model_id, state in states.items():
+        assert state is not None, model_id
+        job_ids = {job.get("job_id") for job in state["pipeline_jobs"]}
+        assert cohort["job_id"] in job_ids, model_id
+        assert suffixed_cohort["job_id"] in job_ids, model_id
+    # The named row is nobody's cohort row but its own model's: it stays in
+    # model_b's state (its absence from model_a's is asserted by the read-side
+    # discriminating pair above).
+    assert foreign["job_id"] in {job.get("job_id") for job in states["model_b"]["pipeline_jobs"]}
+
+
+def test_candidate_own_named_cycle_run_row_keeps_visibility_and_pinning(tmp_path: Path) -> None:
+    """Negative regression: the candidate's OWN named cycle-run row is untouched.
+
+    The DB predicate includes it through its ``model_id = %s`` clause
+    (``chain_repository_state.py:512``), so its marker keeps adopting and pinning.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    own_cycle_row = _cycle_run_id_job(cycle_time, model_id="model_a")
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[own_cycle_row]),
+    )
+    _write_manual_retry_marker(
+        journal_root,
+        cycle_time=cycle_time,
+        entity_id=own_cycle_row["job_id"],
+        retry_count=5,
+    )
+
+    state = _candidate_state(FileOrchestrationJournalRepository(journal_root), cycle_time=cycle_time)
+
+    assert state is not None
+    assert [job.get("job_id") for job in state["pipeline_jobs"]] == [own_cycle_row["job_id"]]
+    assert [event.get("entity_id") for event in state["pipeline_events"]] == [own_cycle_row["job_id"]]
+    assert scheduler_module._manual_retry_requested(state) is True
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(state)["new_attempt"] == 5
+
+
+def test_foreign_model_cycle_run_row_stays_visible_to_the_duplicate_submission_gates(
+    tmp_path: Path,
+) -> None:
+    """Negative regression: the cycle-level gates keep their wider cycle-run visibility.
+
+    Their DB counterparts match the cycle run id unconditionally
+    (``chain_repository.py:74-79`` / ``:177-181``), so narrowing the shared row
+    predicate would loosen ``active_duplicate_pipeline`` instead of aligning it.
+    Same row shape the read-side pair excludes from the candidate state — the answer
+    here must NOT move with it.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    foreign = _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        status="queued",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert [
+        job.get("job_id")
+        for job in repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    ] == [foreign["job_id"]]
+
+
+def test_foreign_model_cycle_run_row_stays_visible_to_the_completion_gate(tmp_path: Path) -> None:
+    """Negative regression for the completion gate specifically.
+
+    A queued row is a vacuous input for ``has_completed_pipeline``; only a
+    succeeded completion-stage row discriminates.  The DB side of this gate reads
+    ``hydro.hydro_run`` alone (``chain_repository.py:97-109``) and has no job-row
+    predicate to align with, so the journal side keeps its current answer.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
