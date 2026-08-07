@@ -269,6 +269,14 @@ Minimal mergeable slice: 刀 1 + 刀 2 + 判别对回归（2.1/2.2/2.3）
   `scheduler_state_identity_filter.py`，后者 round-3 修订经诊断
   定标解冻，见 Frozen 节）+ 2 测试文件 + 本 openspec change +
   review-gate 状态文件；其余 frozen 面零 diff。
-- [ ] E5 CI `Unit Tests` green on PR head。
+- [x] E5 CI `Unit Tests` green on PR head。（run 31141792301 on
+  `77eefca9`：Unit Tests pass, 16m23s；box 按 CI 纪律在 post-merge
+  archive chore 勾选。）
 - [ ] E6 node-27 read-only 真实快照 receipt（confirmatory，见
   ORACLE ROUTING：结果如实记录，缺失不阻塞）。
+  【post-merge 注记】部分回执：生产 recovery 快照实存三段叠加
+  后缀行 `job_cycle_gfs_2026070712_convert_cohort_fd6fe085f6d8_state_save_qc_retry_1_retry_2_retry_3`
+  （#1292 底物真实）；全 NFS 零 marker 事件记录（零
+  `pipeline-events`、零 `"manual_retry_marker": true`），confirmatory
+  marker 快照不存在——与写入方不可达性分析一致。box 保持不勾
+  （receipt 目标物缺失，如实记录，per ORACLE ROUTING 非阻塞）。

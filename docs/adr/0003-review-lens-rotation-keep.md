@@ -41,3 +41,12 @@ not a new policy.
   a shifted core/rotated ratio), or immediately on maintainer decision;
   cutting later means reverting follow-up rounds to the round-1 mix as
   described in the workflow's rotation criterion.
+
+## Revisit 2026-08-06 (post PR #1286)
+
+The audit re-flagged rotation attribution at the larger sample: **31
+multi-round merged PRs, later-round catches core=2 vs rotated=57**. The
+direction is unchanged and stronger (rotated-in lenses carry essentially
+all later-round recall), so the keep decision stands under the same
+autonomous default-keep rule. No behavior change; next revisit on the
+audit's next flag or maintainer override.
