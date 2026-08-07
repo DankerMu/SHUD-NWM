@@ -28,8 +28,9 @@ mutation evidence).
 
 - **Semantic ruling (issue was needs-triage; ruled here, recommended option
   adopted)**: within the event-scan derivation — a state-level top-level
-  `manual_retry` attempt payload short-circuits ahead of the scan and stays
-  outside this ruling (design.md D1 "Ruling domain") — the newest adopted
+  `manual_retry`/`manual_retry_marker` attempt payload short-circuits ahead
+  of the scan and stays outside this ruling (design.md D1 "Ruling domain")
+  — the newest adopted
   marker is the sole termination point. A newest adopted marker whose
   `retry_count` is absent or empty makes no operator attempt claim and
   yields the fallback (`_fallback_previous_attempt(state, previous_attempt)
@@ -44,7 +45,8 @@ mutation evidence).
 - Tests (design.md D4): a discriminating pair (red at pre-change HEAD,
   parametrized over absent and empty-string `retry_count`), an invariant
   test (never ≤ `previous_attempt` absent an operator pin claim, domain
-  scoped to states without a top-level `manual_retry` attempt payload),
+  scoped to states without a top-level `manual_retry`/`manual_retry_marker`
+  attempt payload),
   negative anchors (pinning newest marker, no markers, pin-refusal arm,
   newer unadopted marker-shaped event), and a floor-discrimination case on
   the new arm (D2's oracle).

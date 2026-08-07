@@ -49,9 +49,10 @@ job is no longer failed (stale) — the derived
 the candidate's own `previous_attempt + 1`, and the
 attempt-derivation scan is terminal at the newest adopted marker:
 absent a state-level manual-retry attempt payload (a top-level
-`manual_retry` mapping's `new_attempt`/`retry_count` short-circuits
-ahead of the event scan; its semantics are outside this rule and
-unchanged by it), that marker alone decides, whether or not it
+`manual_retry` — or, by the same gate, `manual_retry_marker` —
+mapping's `new_attempt`/`retry_count` short-circuits ahead of the
+event scan; its semantics are outside this rule and unchanged by
+it), that marker alone decides, whether or not it
 carries a `retry_count` — a newest adopted marker whose
 `retry_count` is absent or empty makes no operator attempt claim
 and SHALL yield the same fallback instead of a walk-back to any
@@ -275,10 +276,12 @@ drive the retry decision it was written to request.
   floor applies exactly as on the other fallback arms — the
   derivation returns the floored value, not a bare
   `previous_attempt + 1` replay of a consumed identity
-- **AND** on a state carrying no top-level `manual_retry` attempt
-  payload, absent an adopted marker whose `retry_count` pins (an
-  operator's explicit attempt claim), the derivation never returns
-  a value at or below `previous_attempt`
+- **AND** on a state carrying no state-level manual-retry attempt
+  payload (no top-level `manual_retry` or `manual_retry_marker`
+  mapping carrying `new_attempt`/`retry_count`), absent an adopted
+  marker whose `retry_count` pins (an operator's explicit attempt
+  claim), the derivation never returns a value at or below
+  `previous_attempt`
 
 #### Scenario: Own-model markers and blocker exclusion keep their semantics
 

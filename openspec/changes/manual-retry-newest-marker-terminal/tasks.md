@@ -65,7 +65,10 @@ Evidence floor:
 - [x] 2.4 Negative anchors: pinning newest marker unchanged; no-marker
   fallback unchanged; pin-refusal arm unchanged; newer UNADOPTED
   marker-shaped event does not terminate the scan — own pinning marker
-  still decides (D4.3)
+  still decides (D4.3). Round-1 addition: sibling scan-loop test whose
+  state-level `new_attempt: None` payload defeats the short-circuit, so
+  the scan loop's own adoption guard has a discriminating oracle (hoist
+  mutant: 5 → 1)
 - [x] 2.5 Floor discrimination on the new arm: no-`retry_count` newest
   marker on the unnameable-stage consumed-suffix shape derives the
   floored value, not bare `previous_attempt + 1` (D4.4 — D2's oracle)
@@ -73,7 +76,9 @@ Evidence floor:
 
 ## 3. Verification (orchestrator)
 
-- [ ] 3.1 Evidence floor commands green (triage block above)
+- [x] 3.1 Evidence floor commands green (triage block above; 4-suite
+  1507 passed / 1 known macOS baseline failure, reproduced on unmodified
+  HEAD; ruff clean; openspec strict valid)
 - [x] 3.2 Production diff confined to `_manual_retry_new_attempt` scan loop
   + comment in `services/orchestrator/scheduler_state_manual_retry.py`;
   tests-only elsewhere. (Recorded decision: the minimal one-arm edit is

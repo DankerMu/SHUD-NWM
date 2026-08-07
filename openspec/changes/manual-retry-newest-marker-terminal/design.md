@@ -79,8 +79,10 @@ Rationale:
   the reader's semantics only.
 
 **Ruling domain**: the ruling governs the event-scan derivation only. A
-state-level manual-retry attempt payload (top-level `manual_retry`
-mapping carrying `new_attempt`/`retry_count`) short-circuits ahead of
+state-level manual-retry attempt payload (a top-level `manual_retry` or
+`manual_retry_marker` mapping carrying `new_attempt`/`retry_count` —
+`_manual_retry_payload` reads the two keys through one `or` gate)
+short-circuits ahead of
 the event scan with no pin or adoption check; that route's semantics are
 pre-existing, outside this ruling, and unchanged (the spec delta and the
 invariant test are scoped accordingly — hardening that route belongs to
@@ -117,8 +119,13 @@ All in `tests/test_file_orchestration_migration.py` and/or
    adopted marker without `retry_count`], `previous_attempt=N` → derivation
    returns `N + 1` (fallback), not `N`. Parametrized over BOTH empty shapes
    of the newest marker's `retry_count` — field absent AND empty string —
-   because the changed predicate is `value in (None, "")` and a mutant
-   narrowing the terminal arm to `is None` must not survive. Red-proof
+   because the changed predicate is `value in (None, "")` and the empty
+   string is the shape a writer persists for a blank operator field.
+   (Narrowing that arm to `is None` is an EQUIVALENT mutant — `""` then
+   reaches the pin arms and both return the same floored fallback, since
+   `_coerce_int` answers its default on `int("")` — so this
+   parametrization documents the predicate's domain; the mutation guard
+   is the inverse-`continue` mutant of D4.5.) Red-proof
    protocol: implementer runs the new tests against the pre-change source
    (git stash or archive copy) and records the red output in the brief,
    exactly as done for #1287/#1288.
@@ -126,7 +133,8 @@ All in `tests/test_file_orchestration_migration.py` and/or
    pinning `retry_count` claim (no markers; newest marker without
    `retry_count`; newest marker whose `retry_count` does not pin), the
    derivation never returns ≤ `previous_attempt`. Domain scoped to states
-   carrying no top-level `manual_retry` attempt payload (see D1 ruling
+   carrying no top-level `manual_retry`/`manual_retry_marker` attempt
+   payload (see D1 ruling
    domain — the state-level short-circuit route has no pin check and is
    out of scope). The documented exemption: a newest adopted marker whose
    `retry_count` pins is an explicit operator claim and may legitimately
@@ -142,9 +150,13 @@ All in `tests/test_file_orchestration_migration.py` and/or
    returns the fallback; and a marker-shaped event NEWER than the
    candidate's own pinning marker but NOT adopted (foreign attribution)
    neither terminates the scan nor decides — the candidate's own newest
-   adopted marker still pins (guards the adoption predicate on the new
-   terminal arm; without it, widening the arm past the adoption guard
-   would break the cross-model exclusions PR #1286 landed).
+   adopted marker still pins (honest reachability: that shape returns
+   via the payload's `new_attempt` short-circuit before the scan loop
+   runs, so this anchor guards the payload scanner's adoption predicate
+   end-to-end; the scan loop's own adoption guard is anchored by the
+   sibling scan-loop test, whose state-level `new_attempt: None` payload
+   defeats the short-circuit so the scan governs — under the
+   hoist-above-adoption-guard mutant its 5 becomes 1).
 4. **Floor discrimination on the new arm (D2's oracle)**: newest adopted
    marker without `retry_count` on the unnameable-stage shape (cancelled
    own forecast row with consumed `_retry_2` suffix, no resolvable failed
