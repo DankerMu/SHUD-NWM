@@ -542,15 +542,78 @@ drive the retry decision it was written to request.
   left behind when a non-authoritative cohort master row is dropped
   from the decision state or truncated from the row window) pins the
   candidate's attempt exactly when the id's cycle is the candidate's
-  own cycle AND the id's stage is the repair target (the id ends
-  with the state's failed stage, or with no failed stage the
-  candidate has no live failure of its own — the same widened
-  live-failure domain, so a cancelled own row or a failed hydro run
-  blocks this pin too) — so an operator's manual retry of the
-  candidate's own cohort cycle stage stays effective even though
-  the row is invisible, while a foreign-cycle or cross-stage cycle
-  counter still never pins the candidate's attempt; markers with
-  other unresolvable entity ids keep their existing pinning behavior
+  own cycle AND the marker's recorded stage is the repair target —
+  the stage evidence is the marker's own `failed_stage` detail,
+  with the id's stage token (read after stripping every stacked
+  `_retry_<n>` suffix) as the backstop for markers written before
+  the detail existed — AND neither the state-level repaired-stage
+  evidence (its original failed job id) nor the state-level
+  completed-stage evidence (its job id) names the marker's target
+  (exact id comparisons — the staleness refusals delivered with the
+  evidence the row-absent path actually has); a surviving marker
+  whose stage is NOT the repair target falls through to the
+  only-failure-left arm (the same widened live-failure domain, so a
+  cancelled own row or a failed hydro run blocks this pin too)
+  instead of refusing outright — so an operator's manual retry of
+  the candidate's own cohort cycle stage stays effective even
+  though the row is invisible and even on a retry-suffixed id,
+  while a foreign-cycle counter or a stale repaired target still
+  never pins the candidate's attempt; markers with other
+  unresolvable entity ids keep their existing pinning behavior
+
+#### Scenario: Unresolvable cycle-grammar marker pins with marker-record evidence
+
+- **WHEN** a manual retry marker's entity cannot be resolved to any
+  job row, its entity id carries the cycle-scope pipeline-job
+  grammar with one or more stacked `_retry_<n>` suffixes
+  (`job_cycle_<source>_<stamp>_<stage>_retry_1`, or the three-layer
+  production shape `..._retry_1_retry_2_retry_3`), the id's cycle
+  is the candidate's own, and the state's failed stage equals
+  `<stage>`
+- **THEN** the pin holds through BOTH row-absence mechanisms
+  (identity-filter cohort deletion, and row-window truncation past
+  a newer same-stage row) — stacked suffixes do not defeat the
+  stage evidence, whether it comes from the marker's recorded
+  `failed_stage` detail or from the loop-stripped id token backstop
+- **AND** every cross-arm equivalence claim in this scenario reads
+  within the DELIVERED DOMAIN, stated once here as a literal
+  transcription of the two delivered claim families: model-less
+  (cycle-scope) targets — a model-bearing `job_cycle`-grammar row
+  short-circuits the resolved-row router to a pin, and no
+  row-absent evidence surface carries model-ness — that EITHER are
+  failed-status targets that are neither unsubmitted auto-retry
+  placeholders nor repaired-flagged, OR are targets a state mapping
+  names with an exact entity-id match (the repaired-stage
+  evidence's original failed job id, or the completed-stage
+  evidence's job id — the latter existing only for stages with a
+  successor in the forecast stage order); every shape outside this
+  domain is a disclosed residue, not a delivered identity
+- **AND** the journal marker event written by a manual repair
+  carries the failed job's stage as a `failed_stage` detail — a key
+  the candidate-state record-stage reader does not consume (so
+  terminal-stage gating never drops the marker event itself) and
+  one the identity-filter event sanitizer preserves on retry
+  events — so markers written from now on decide by record rather
+  than id text wherever their details survive to adoption (the
+  journal read path's completion-stage compaction domain keeps the
+  disclosed id-token backstop)
+- **AND** a marker whose target the state-level repaired-stage
+  evidence names as its original failed job — or whose target the
+  state-level completed-stage evidence names as its completed job —
+  refuses the pin with the row absent exactly as the resolved-row
+  rule refuses it with the row present, within the delivered
+  domain; those two mapping-named sub-shapes are the only staleness
+  classes with row-absent evidence
+- **AND** with the marker's stage differing from the candidate's
+  failed stage, the verdict falls through to the only-failure-left
+  arm — the same arm the resolved-row rule uses on a stage
+  mismatch — and, within the delivered domain, for a failed-status
+  target lands on the same verdict as the resolved-row rule on the
+  same state
+- **AND** markers with non-cycle-grammar entity ids keep the
+  historical fail-open, a foreign-cycle id still never pins, and a
+  stage-less marker keeps deciding through the loop-stripped id
+  token
 
 #### Scenario: Newest adopted marker without retry_count terminates the attempt scan
 
