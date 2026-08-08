@@ -122,12 +122,27 @@ Evidence floor:
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; findings verified before fix
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.1 Cross-review rounds per gate ledger (5 rounds, hard ceiling):
+  round 1 NOT CLEAN (9 verified: 2 P1 + coverage fixed, 2 deferred, 1
+  discarded → 93a8f45c); round 2 NOT CLEAN (3 verified P2 → 7c2e6ebb);
+  round 3 NOT CLEAN (3 P2 wording) → three-round gate → retro-1 (depth:
+  domain restated in six places) → single-sourcing corrective 2847b9bc;
+  round 4 NOT CLEAN (1 P1: spec paraphrase dropped the failed-status
+  qualifier) → post-gate budget → retro-2 (depth, split rebutted) →
+  literal transcription + mechanical parity proof 36075f80; round 5
+  (terminal) CLEAN. Code and tests finding-free since round 2; gate
+  ledger + retros persisted in the PR evidence bundle and
+  `.review-gate-issues.json`
+- [x] 4.2 Phase 7 final review CLEAN (merge-ready) on 36075f80; one
+  non-blocking Note — the gate docstring's equivalence claim was the one
+  domain statement outside the retro audits' fixture-only sweep (F1
+  without the Q1 model-less qualifier) — folded into this closeout
+  commit as a recorded local-repair-class docstring fix (no behavior
+  change), with Phase 7 re-adjudication on the final head
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Residue issue filed (design.md Residues, full re-derived scope:
+- [x] 5.0 Residue issue filed (design.md Residues, full re-derived scope:
   row-absent staleness gap for unsubmitted placeholders, repaired-flagged
   targets the repaired mapping does not name, and non-failed targets the
   completed mapping does not name — including ALL download/state_save_qc/
@@ -136,6 +151,8 @@ Evidence floor:
   id-token backstop stage-inference limit; Residue 2 both cells: surviving
   cross-stage F5′ under-pin AND the new same-stage mapping-named under-pin
   for model-bearing `job_cycle` rows; missing test anchor for the
-  completion-stage compaction domain note) and its number recorded here
+  completion-stage compaction domain note) and its number recorded here —
+  **issue #1308** (all four scope items verified against code by the
+  scribe; deduped against #1294/#1186/#1299)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
 - [ ] 5.2 Merge; archive change; loop-log line + audit; close issue #1292

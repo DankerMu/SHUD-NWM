@@ -260,17 +260,23 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
       state's ``repaired_stage_evidence`` names this marker's target as its
       ``original_failed_job_id`` (the target was already repaired), and when the state's
       ``completed_stage_evidence`` names it as its ``job_id`` (the target already SUCCEEDED, so
-      it is not a repair target at all);
+      it is not a repair target at all — that mapping exists only for stages with a
+      ``_stage_after`` successor in the forecast stage order, so it can never name
+      download/state_save_qc/publish targets);
     * then the stage evidence — ``details.failed_stage`` primary, loop-stripped id token
       backstop — pins when it names the state's ``failed_stage``;
     * anything else (stage mismatch, or a state carrying no ``failed_stage`` at all) falls
       through to ``not _state_has_candidate_scope_failed_job(state)``, the same predicate
       object and therefore the same live-failure domain the twin's arm 2 uses.
 
-    Equivalence with the twin is claimed for FAILED-STATUS targets that are neither unsubmitted
-    auto-retry placeholders nor repaired-flagged: on those the two arms ask the same question of
-    the same objects and answer identically.  (``cancelled`` is outside that set on purpose —
-    the twin's marker-target test keeps the bare ``FAILED_PIPELINE_STATUSES`` vocabulary, #1294.)
+    Equivalence with the twin is claimed for MODEL-LESS (cycle-scope) FAILED-STATUS targets that
+    are neither unsubmitted auto-retry placeholders nor repaired-flagged: on those the two arms
+    ask the same question of the same objects and answer identically.  (``cancelled`` is outside
+    that set on purpose — the twin's marker-target test keeps the bare
+    ``FAILED_PIPELINE_STATUSES`` vocabulary, #1294.)  Model-bearing ``job_cycle_*`` targets are
+    outside the claim: with the row present the router short-circuits to a pin, with the row
+    absent this arm applies cycle-scope logic, so the two verdicts can diverge (design.md
+    Residue 2, issue #1308).
 
     The twin also refuses on evidence that lives on the ROW alone, and only ONE of those shapes
     has a state-level surface that outlives the row: a non-failed target is covered here when
@@ -286,6 +292,10 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
       outranked it (``_best_completed_stage_success_evidence`` keeps one winner), the projection
       took the repaired-copy branch (that payload has no ``job_id``), or the state carries no
       such mapping at all.
+
+    The opposite direction is disclosed as well: on model-bearing ``job_cycle_*`` targets this arm
+    UNDER-pins where the row-present router pins unconditionally — cross-stage (the archived F5′
+    cell) and same-stage when a staleness mapping names the target (design.md Residue 2, #1308).
 
     The id-token backstop's stage inference on stage-less legacy markers is disclosed with it:
     it reads the loop-stripped id text, not a recorded field.
