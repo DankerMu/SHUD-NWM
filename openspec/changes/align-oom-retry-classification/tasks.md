@@ -158,12 +158,23 @@ Evidence floor:
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; findings verified before fix
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.1 Cross-review rounds per gate ledger: round 1 (949697c1)
+  not-clean — 3 lenses, 11 candidates, 4 verifier batches, 10 CONFIRMED
+  (highest P1: the row-6 sixth surface) / 1 REFUTED, fix pass delivered;
+  round 2 (553d2e6a) clean — fullscope + test-evidence CLEAN on all
+  substance, P2-only record repairs verifier-confirmed and landed
+  inline (5b54b34d)
+- [x] 4.2 Phase 7 final review CLEAN on 5b54b34d (seven gates: docs-only
+  delta, diff confinement, D2 decisive claims incl. full-ladder D3
+  completeness walk, floor 1977+1 reproduced, oracle integrity, seven
+  ACs, archive-fold simulation; this closeout-ticks commit trails it
+  docs-only, recorded)
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed and numbers recorded here: (a)
+- [x] 5.0 Follow-ups routed and numbers recorded here — **(a) → #1314;
+  (b)(c)(e) → #1313 (one root cause: pre-guard ladder channels
+  overwrite permanence); (d) → #1312** — details: (a)
   `auto_retry_skipped` pipeline_event payload (`spec.md:154,170`)
   implemented for NO non-transient code repo-wide (issue #1161 flagged
   it out-of-scope); (b) the downstream-resume channel
