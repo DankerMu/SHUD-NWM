@@ -281,10 +281,17 @@ drive the retry decision it was written to request.
   evidence names as its original failed job — or whose target the
   state-level completed-stage evidence names as its completed job —
   refuses the pin with the row absent exactly as the resolved-row
-  rule refuses it with the row present — the mapping-named repaired
-  target and the completed-stage-named target are the two staleness
-  sub-shapes with row-absent evidence, and verdict identity is
-  delivered for exactly those sub-shapes
+  rule refuses it with the row present, for model-less (cycle-scope)
+  targets — the mapping-named repaired target and the
+  completed-stage-named target are the two staleness sub-shapes
+  with row-absent evidence, and verdict identity is delivered for
+  exactly those sub-shapes on model-less targets (a model-bearing
+  `job_cycle`-grammar row short-circuits the resolved-row router to
+  a pin, and the id grammar cannot see model-ness with the row
+  absent — a disclosed residue, not a delivered identity; and
+  completed-stage evidence exists only for stages with a successor
+  in the forecast stage order, so cohort targets outside that
+  domain stay in the residue even when succeeded)
 - **AND** with the marker's stage differing from the candidate's
   failed stage, the verdict falls through to the only-failure-left
   arm — the same arm the resolved-row rule uses on a stage

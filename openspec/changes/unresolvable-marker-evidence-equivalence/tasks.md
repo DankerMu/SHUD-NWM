@@ -68,8 +68,10 @@ Evidence floor:
   unresolvable arm (private helper, single call site)
 - [x] 2.3 Rewrite `_unresolvable_marker_entity_pins_attempt` per design.md:
   fail-open (non-cycle grammar) and foreign-cycle refusal unchanged;
-  staleness conjunction first (state-level `repaired_stage_evidence`
-  whose `original_failed_job_id` exactly matches the marker entity id);
+  staleness conjunctions first (state-level `repaired_stage_evidence`
+  whose `original_failed_job_id` exactly matches the marker entity id;
+  round 1 added the sibling `completed_stage_evidence.job_id` exact-match
+  conjunct);
   stage evidence = event `details.failed_stage` primary, loop-stripped id
   token backstop; same-stage → pin; mismatch → arm-2 fall-through
 - [x] 2.4 Defect-1 regressions (red pre-change): single-suffix
@@ -78,12 +80,14 @@ Evidence floor:
   synthesized state mappings with submission-stage cohort ids, both
   row-absence mechanisms (identity-filter cohort deletion; row-window
   truncation with a newer same-stage row)
-- [x] 2.5 Defect-2 regression (red pre-change): mapping-named repaired
-  target — row-present and row-absent give the SAME refusal; the fixture
-  carries BOTH halves (repaired flag on the target row AND the state's
-  `repaired_stage_evidence` naming that job — design D2); placeholder /
-  non-failed shapes and unnamed repaired-flag variants get arm-2 blocking
-  anchors only, residue tracked via task 5.0
+- [x] 2.5 Defect-2 regression (red pre-change): mapping-named targets —
+  row-present and row-absent give the SAME refusal; each identity fixture
+  carries BOTH halves (row-borne flag/status on the target row AND the
+  state mapping naming that job — design D2); placeholder / unnamed
+  repaired-flag / unnamed non-failed shapes are covered by the same-stage
+  residue matrix as paired-verdict executable divergence disclosures
+  (round 1 replaced the inert cross-stage arm-2-anchor version), residue
+  tracked via task 5.0
 - [x] 2.6 Defect-3 regression (red pre-change): model-less cohort truncation
   + cross-stage failure — unresolvable arm lands on the same arm-2 verdict
   as the resolved arm
@@ -99,7 +103,8 @@ Evidence floor:
 ## 3. Verification (orchestrator)
 
 - [x] 3.1 Evidence floor commands green (triage block above) — pytest
-  1336 passed + 1 pre-existing env failure
+  1340 passed (1341 collected after the round-1 additions) + 1
+  pre-existing env failure
   (`test_db_free_slurm_storage_root_check_masks_symlink_loop_path`,
   macOS /private/tmp symlink loop; confirmed identically red on the
   pristine d567e098 tree); ruff clean; validate green
@@ -121,9 +126,12 @@ Evidence floor:
 - [ ] 5.0 Residue issue filed (design.md Residues, full re-derived scope:
   row-absent staleness gap for unsubmitted placeholders, repaired-flagged
   targets the repaired mapping does not name, and non-failed targets the
-  completed mapping does not name — population enlarged on suffixed ids by
-  the loop-strip fix; id-token backstop stage-inference limit; surviving
-  F5′ under-pin shape; missing test anchor for the completion-stage
-  compaction domain note) and its number recorded here
+  completed mapping does not name — including ALL download/state_save_qc/
+  publish cohort targets, which the completed-stage producer can never
+  name — population enlarged on suffixed ids by the loop-strip fix;
+  id-token backstop stage-inference limit; Residue 2 both cells: surviving
+  cross-stage F5′ under-pin AND the new same-stage mapping-named under-pin
+  for model-bearing `job_cycle` rows; missing test anchor for the
+  completion-stage compaction domain note) and its number recorded here
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
 - [ ] 5.2 Merge; archive change; loop-log line + audit; close issue #1292
