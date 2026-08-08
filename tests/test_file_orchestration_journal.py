@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import pytest
 
 from packages.common import safe_fs
+from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.chain import SlurmClientError
@@ -2876,6 +2877,99 @@ def test_file_journal_manual_repair_marker_allows_candidate_and_preserves_prior_
     assert event["details"]["requested_by"] == "operator"
     assert event["details"]["request_id"] == "manual-1"
     assert event["details"]["policy_decision"]["decision"] == "allow"
+
+
+def test_file_journal_manual_repair_marker_event_records_the_failed_stage(tmp_path: Path) -> None:
+    """#1292 D1 writer half: the marker must record WHAT IT REPAIRS, not just which job.
+
+    ``_unresolvable_marker_entity_pins_attempt`` decides the operator's pinned attempt off this
+    field whenever the target row is gone from the candidate state (identity-filter deletion or
+    row-window truncation); without it the pin gate is back to id-text forensics.  The value is
+    the failed job's stage -- the same one the returned namespace already exposes as ``stage``.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_repair_stage")
+    record["retry_count"] = 3
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_manual_repair_stage",
+        "permanently_failed",
+        error_code="INVALID_MANIFEST",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    repair = service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.stage == "forecast"
+    assert state is not None
+    event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_manual_repair_stage")
+    assert event["details"]["failed_stage"] == "forecast"
+    assert event["details"]["failed_stage"] == repair.stage
+    # The key name is load-bearing: ``details.stage`` is read by the candidate-state
+    # record-stage reader, ``details.failed_stage`` is read by no record-stage consumer.
+    assert "stage" not in event["details"]
+
+
+def test_file_journal_manual_repair_marker_event_survives_terminal_stage_gating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1292 D1 consumer non-drop anchor: the field name must stay invisible to stage gating.
+
+    ``chain_repository_state._normalized_record_stage`` reads ``details.stage`` off EVENT
+    records too, and under the production terminal-stage setting a legacy-downstream stage makes
+    the record disappear from the candidate state.  Naming the new field ``stage`` would
+    therefore delete the operator's own marker event -- the retry would stop reporting
+    ``manual_retry_requested`` at all -- for exactly the targets whose stage is being recorded.
+    """
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    # The candidate's forecast leg succeeded first, so the candidate state still has a row of
+    # its own once the legacy-downstream publish row is filtered out of it.
+    upstream = _pipeline_reservation_record(cycle_time, job_id="job_manual_repair_forecast")
+    repository.reserve_pipeline_job(upstream)
+    repository.update_pipeline_job_status(
+        "job_manual_repair_forecast",
+        "succeeded",
+        finished_at=_dt("2026-06-28T00:02:00Z"),
+    )
+    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_repair_publish")
+    record["stage"] = "publish"
+    record["job_type"] = "publish_tiles"
+    record["idempotency_key"] = "gfs:gfs_2026062800:basin_a:publish"
+    record["retry_count"] = 3
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_manual_repair_publish",
+        "permanently_failed",
+        error_code="INVALID_MANIFEST",
+        finished_at=_dt("2026-06-28T00:05:00Z"),
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    repair = service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.stage == "publish"
+    assert state is not None
+    event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_manual_repair_publish")
+    assert event["details"]["failed_stage"] == "publish"
+    assert scheduler_module._manual_retry_requested(state) is True
+    # Control: the same event with the value under the ``stage`` key IS dropped by the gate,
+    # which is the drop this key name avoids.
+    assert chain_repository_state_module._record_allowed_for_compute_state_terminal(event) is True
+    assert (
+        chain_repository_state_module._record_allowed_for_compute_state_terminal(
+            {**event, "details": {**event["details"], "stage": event["details"]["failed_stage"]}}
+        )
+        is False
+    )
 
 
 def test_file_journal_manual_repair_requires_policy_and_leaves_journal_unchanged(tmp_path: Path) -> None:

@@ -6740,6 +6740,16 @@ class FileJournalRetryService:
                 "retry_count": next_retry_count,
                 "previous_error": previous_error,
                 "previous_job_id": failed_job["job_id"],
+                # The marker's OWN record of what it repairs, read by
+                # ``scheduler_state_manual_retry._unresolvable_marker_entity_pins_attempt``
+                # when the target row is gone from the candidate state (identity-filter
+                # deletion or row-window truncation) and the id text is all that is left
+                # otherwise.  Deliberately NOT named ``stage``:
+                # ``chain_repository_state._normalized_record_stage`` reads ``details.stage``
+                # off EVENT records too, so that name would make this very event vanish from
+                # the candidate state for legacy-downstream-stage targets under the
+                # production terminal-stage setting.
+                "failed_stage": failed_job.get("stage"),
                 "slurm_job_id": None,
                 "manual_retry_marker": True,
                 "prior_failure_reason": previous_error,

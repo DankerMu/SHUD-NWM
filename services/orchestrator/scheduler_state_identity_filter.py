@@ -490,6 +490,10 @@ def _candidate_state_decision_event(
                 "model_id",
                 "trigger",
                 "manual_retry_marker",
+                # Stage evidence for the row-absent pin gate: the identity filter's own row
+                # deletion is what creates that shape, so stripping this key would strip the
+                # evidence on exactly the path it serves.
+                "failed_stage",
                 "retry_count",
                 "new_attempt",
                 "previous_job_id",
