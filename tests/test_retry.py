@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,6 +30,42 @@ from services.orchestrator.retry import (
     compute_backoff_seconds,
     is_transient_error,
 )
+from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
+
+_JOB_RETRY_SPEC_PATH = Path(__file__).resolve().parents[1] / "openspec" / "specs" / "job-retry-mechanism" / "spec.md"
+_NON_TRANSIENT_SCENARIO_HEADER = "#### Scenario: Non-transient error codes block auto-retry"
+_SPEC_BULLET_CODE_PATTERN = re.compile(r"^\s+-\s+`([^`]+)`")
+
+
+def _spec_non_transient_error_codes() -> list[str]:
+    lines = _JOB_RETRY_SPEC_PATH.read_text(encoding="utf-8").splitlines()
+    header_positions = [index for index, line in enumerate(lines) if line.strip() == _NON_TRANSIENT_SCENARIO_HEADER]
+    assert len(header_positions) == 1, (
+        f"expected exactly one {_NON_TRANSIENT_SCENARIO_HEADER!r} header in {_JOB_RETRY_SPEC_PATH}, "
+        f"found {len(header_positions)}"
+    )
+    codes: list[str] = []
+    for line in lines[header_positions[0] + 1 :]:
+        stripped = line.lstrip()
+        # Terminate on the THEN bullets (normal shape) AND on the next heading, so a
+        # reformat of the THEN bullets (e.g. into an ordered list) cannot silently
+        # extend the window into the following scenario's transient code list.
+        if stripped.startswith("- **THEN**") or stripped.startswith("#"):
+            break
+        match = _SPEC_BULLET_CODE_PATTERN.match(line)
+        if match is not None:
+            codes.append(match.group(1))
+    assert codes, f"no error-code bullets parsed under {_NON_TRANSIENT_SCENARIO_HEADER!r} in {_JOB_RETRY_SPEC_PATH}"
+    return codes
+
+
+def test_spec_and_code_classify_out_of_memory_as_non_transient() -> None:
+    spec_codes = _spec_non_transient_error_codes()
+
+    assert "OUT_OF_MEMORY" in spec_codes
+    assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" not in TRANSIENT_RETRY_REASON_CODES
 
 
 def test_transient_error_classification() -> None:
@@ -85,25 +123,27 @@ def test_should_auto_retry_max_reached() -> None:
         assert _events(store) == []
 
 
-def test_out_of_memory_auto_retries_within_retry_limit() -> None:
+def test_out_of_memory_blocks_auto_retry_within_retry_limit() -> None:
     with _store() as store:
         job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=2)
         service = RetryService(store, RetryConfig(max_retries=3))
 
         policy = service.retry_policy_for_job(job)
-        retry = service.handle_failed_job(job)
+        updated = service.handle_failed_job(job)
 
-        assert policy["classifier"] == "transient_slurm_runtime"
-        assert policy["retryable"] is True
-        assert policy["permanent"] is False
-        assert policy["auto_retry"] is True
-        assert retry.status == "pending"
-        assert retry.retry_count == 3
+        assert policy["classifier"] == "resource_configuration"
+        assert policy["retryable"] is False
+        assert policy["permanent"] is True
+        assert policy["auto_retry"] is False
+        assert updated.job_id == job.job_id
+        assert updated.status == "permanently_failed"
+        assert updated.retry_count == 2
+        assert [event.event_type for event in _events(store)] == ["permanently_failed"]
         event = _events(store)[0]
-        assert event.event_type == "retry"
-        assert event.details["previous_error"] == "OUT_OF_MEMORY"
-        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
-        assert event.details["failure"]["retryable"] is True
+        assert event.details["last_error"] == "OUT_OF_MEMORY"
+        assert event.details["failure"]["classifier"] == "resource_configuration"
+        assert event.details["failure"]["retryable"] is False
+        assert event.details["failure"]["permanent"] is True
 
 
 def test_handle_failed_job_transient() -> None:
@@ -141,20 +181,25 @@ def test_handle_failed_job_exhausted() -> None:
         assert updated.status == "permanently_failed"
 
 
-def test_out_of_memory_exhausted_retry_limit_becomes_permanent() -> None:
+def test_out_of_memory_becomes_permanent_on_the_first_attempt() -> None:
     with _store() as store:
-        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=3)
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=0)
         service = RetryService(store, RetryConfig(max_retries=3))
 
         updated = service.handle_failed_job(job)
 
         assert updated.status == "permanently_failed"
+        assert updated.retry_count == 0
+        assert _jobs(store) == ["job_1"]
         event = _events(store)[0]
         assert event.event_type == "permanently_failed"
-        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
+        assert event.details["final_retry_count"] == 0
+        assert event.details["automatic_retry_stopped"] is True
+        assert event.details["failure"]["classifier"] == "resource_configuration"
+        assert event.details["failure"]["attempt"] == 0
         assert event.details["failure"]["retryable"] is False
         assert event.details["failure"]["permanent"] is True
-        assert event.details["failure"]["limit_exhausted"] is True
+        assert event.details["failure"]["limit_exhausted"] is False
 
 
 def test_schedule_auto_retry() -> None:
@@ -2054,3 +2099,8 @@ def _clear_runtime_root_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _events(store: PipelineStore) -> list[PipelineEvent]:
     statement = select(PipelineEvent).order_by(PipelineEvent.event_id.asc())
     return list(store.session.scalars(statement))
+
+
+def _jobs(store: PipelineStore) -> list[str]:
+    statement = select(PipelineJob.job_id).order_by(PipelineJob.job_id.asc())
+    return [str(job_id) for job_id in store.session.scalars(statement)]

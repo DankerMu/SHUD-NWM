@@ -16943,7 +16943,7 @@ def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
     assert deferred["discovery_evidence"]["attempted_sources"] == attempted_sources
 
 
-@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY", "SLURM_RESERVATION_LOST"])
+@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "SLURM_RESERVATION_LOST"])
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
     error_code: str,
@@ -16980,6 +16980,171 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
     assert state["task_identity"]["array_task_id"] == 2
     assert state["reuse"]["successful_sibling_outputs_reused"] is True
     assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_candidate_state_out_of_memory_runtime_failure_requires_manual_retry(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "OUT_OF_MEMORY",
+            "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+            "retry_count": 1,
+            "retry_limit": 3,
+            "array_task_id": 2,
+            "successful_sibling_outputs_reused": True,
+            "durable_shud_output_exists": False,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["candidates"] == []
+    assert orchestrator.calls == []
+    assert [item["reason"] for item in result.evidence["blocked_candidates"]] == ["permanent_failure_guard"]
+    state = result.evidence["blocked_candidates"][0]["state_evidence"]
+    assert state["decision"] == "permanent_failure"
+    assert state["failure"]["classifier"] == "resource_configuration"
+    assert state["failure"]["retryable"] is False
+    assert state["failure"]["permanent"] is True
+    assert state["failure"]["limit_exhausted"] is False
+    assert state["retry_policy"]["automatic_retry_allowed"] is False
+    assert state["manual_retry_required"] is True
+
+
+def _out_of_memory_failure_state(*, failed_stage: str, durable_shud_output_exists: bool) -> dict[str, Any]:
+    identity = _production_identity_fixture()
+    return {
+        **identity,
+        "candidate_id": _scheduler_candidate_fixture().candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "failed",
+        "failed_stage": failed_stage,
+        "error_code": "OUT_OF_MEMORY",
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+        "durable_shud_output_exists": durable_shud_output_exists,
+        "retry_count": 0,
+        "retry_limit": 3,
+    }
+
+
+def test_out_of_memory_downstream_failure_without_forecast_output_still_recomputes_forecast() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = _out_of_memory_failure_state(failed_stage="state_save_qc", durable_shud_output_exists=False)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "recompute_forecast_after_missing_output"
+    assert decision.evidence["decision"] == "retry_missing_forecast_output"
+    assert decision.evidence["restart_stage"] == "forecast"
+    assert decision.evidence["failure"]["classifier"] == "missing_forecast_output_recompute"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+def test_out_of_memory_failure_without_missing_output_geometry_requires_manual_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = _out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def test_out_of_memory_downstream_failure_with_durable_output_blocks_downstream_resume() -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="parse", durable_shud_output_exists=True),
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["manual_retry_required"] is True
+
+
+def _changed_model_package_prior() -> dict[str, str]:
+    return {
+        "source": "run_manifest",
+        "status": "loaded",
+        "model_package_uri_sha256": hashlib.sha256(
+            b"s3://nhms/models/model_a/old-package/package/"
+        ).hexdigest(),
+    }
+
+
+def test_out_of_memory_failure_with_changed_model_package_blocks_refresh_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False),
+        "run_manifest_model_package": _changed_model_package_prior(),
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["manual_retry_required"] is True
+
+
+def test_invalid_manifest_failure_with_changed_model_package_keeps_refresh_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False),
+        "error_code": "INVALID_MANIFEST",
+        "run_manifest_model_package": _changed_model_package_prior(),
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_after_model_package_refresh"
+    assert decision.evidence["decision"] == "retry_after_model_package_refresh"
+    assert decision.evidence["model_package_refresh"]["changed_fields"] == ["model_package_uri"]
+    assert decision.evidence["retry_policy"]["override_reason"] == "model_package_refresh"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
 
 
 def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
@@ -17140,7 +17305,7 @@ def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path
         ("INVALID_MANIFEST", "permanent_failure_guard"),
         ("POLICY_BLOCKED", "policy_blocked"),
         ("SLURM_TIMEOUT", "retry_limit_exhausted"),
-        ("OUT_OF_MEMORY", "retry_limit_exhausted"),
+        ("OUT_OF_MEMORY", "permanent_failure_guard"),
         ("SLURM_RESERVATION_LOST", "retry_limit_exhausted"),
     ],
 )
