@@ -17097,6 +17097,56 @@ def test_out_of_memory_downstream_failure_with_durable_output_blocks_downstream_
     assert decision.evidence["manual_retry_required"] is True
 
 
+def _changed_model_package_prior() -> dict[str, str]:
+    return {
+        "source": "run_manifest",
+        "status": "loaded",
+        "model_package_uri_sha256": hashlib.sha256(
+            b"s3://nhms/models/model_a/old-package/package/"
+        ).hexdigest(),
+    }
+
+
+def test_out_of_memory_failure_with_changed_model_package_blocks_refresh_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False),
+        "run_manifest_model_package": _changed_model_package_prior(),
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["manual_retry_required"] is True
+
+
+def test_invalid_manifest_failure_with_changed_model_package_keeps_refresh_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False),
+        "error_code": "INVALID_MANIFEST",
+        "run_manifest_model_package": _changed_model_package_prior(),
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_after_model_package_refresh"
+    assert decision.evidence["decision"] == "retry_after_model_package_refresh"
+    assert decision.evidence["model_package_refresh"]["changed_fields"] == ["model_package_uri"]
+    assert decision.evidence["retry_policy"]["override_reason"] == "model_package_refresh"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+
+
 def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(

@@ -46,7 +46,11 @@ def _spec_non_transient_error_codes() -> list[str]:
     )
     codes: list[str] = []
     for line in lines[header_positions[0] + 1 :]:
-        if line.lstrip().startswith("- **THEN**"):
+        stripped = line.lstrip()
+        # Terminate on the THEN bullets (normal shape) AND on the next heading, so a
+        # reformat of the THEN bullets (e.g. into an ordered list) cannot silently
+        # extend the window into the following scenario's transient code list.
+        if stripped.startswith("- **THEN**") or stripped.startswith("#"):
             break
         match = _SPEC_BULLET_CODE_PATTERN.match(line)
         if match is not None:

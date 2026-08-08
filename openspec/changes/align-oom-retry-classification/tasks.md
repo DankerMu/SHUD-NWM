@@ -52,8 +52,13 @@ Evidence floor:
 4. **New classifier label `resource_configuration`** — a vocabulary
    addition beyond pure "alignment" (fixture review noted it as an
    undisclosed-deviation candidate); grounds in D2 row 2: no production
-   consumer branches on classifier strings, and letting OOM fall to
-   `unknown_failure` would misstate a spec-classified code.
+   consumer branches on `transient_slurm_runtime` specifically, and
+   letting OOM fall to `unknown_failure` would misstate a
+   spec-classified code. (Round-1 correction: the earlier generalized
+   wording "no production consumer branches on classifier strings" was
+   false — `policy_blocked` branches at `scheduler_state_failure.py:202`
+   pre-existing, and this change's own D2 rows 5-6 refusal sets consume
+   `resource_configuration`.)
 5. **Main spec gains one normative scenario** (parity anchor) the issue
    did not ask for — it is both the AC4 anti-drift lock and what gives
    this OpenSpec change a validatable delta.
@@ -62,6 +67,16 @@ Evidence floor:
    downstream-resume channel entirely; without this edit the MUST NOT
    clause stays violated in the durable-output geometry (fixture review
    P1-1).
+7. **Round-1 review adds a seventh surface and a second production
+   edit** — `_model_package_refresh_retry_evidence` gains the OOM
+   refusal (D2 row 6): the permanent-only channel became newly
+   reachable for OOM precisely BECAUSE this change made OOM permanent,
+   and the decision ladder consults it before the permanent guard
+   (round-1 finding A1, P1, verifier-confirmed end-to-end with a real
+   `run_once()` submission). The five-surface list was itself
+   incomplete; the AC2 grep sweep structurally could not see this
+   channel (no literal, classification reached via
+   `_failure_policy_payload`) — sweep lesson recorded in D2.
 
 ## 1. Fixture
 
@@ -101,6 +116,15 @@ Evidence floor:
   retry_downstream, no automatic_retry_allowed:True — red pre-change
 - [x] 2.9 Red-proof protocol: rewritten tests + parity + row-5 + row-4
   half 2 red against pre-change source, red output recorded in the brief
+- [x] 2.10 Round-1 fix pass (D2 rows 6-7, D4 additions):
+  `_model_package_refresh_retry_evidence` gains the OOM refusal pair
+  after its permanent-only gate (row 6); two-sided row-6 anchor (half 1
+  RED against pre-fix head `949697c1` — measured
+  `retry_after_model_package_refresh / auto=True`; half 2
+  INVALID_MANIFEST channel-preservation green both sides); parity-anchor
+  window additionally breaks on heading lines (C2 — mutation-proven:
+  reformat+drift fails hardened anchor, passed the un-hardened one);
+  floor 1977 passed + 1 disclosed pre-existing red
 
 ## 3. Verification (orchestrator)
 
@@ -133,7 +157,21 @@ Evidence floor:
   (`_downstream_failure_restartable`) still resumes unknown-default
   non-transient codes (e.g. `PARSE_FAILED`) against the spec's
   unknown-defaults clause — pre-existing, broader than this one-code
-  alignment (fixture review P1-1 corollary)
+  alignment (fixture review P1-1 corollary); (c) the raw-manifest
+  repair channels (`:665-718`, `:720-783`) resume ALL permanent codes
+  generically before the permanent guard — pre-existing, D2 row 7
+  keeps them with recorded tension (round-1 A2 code half); (d)
+  spec `:153` "mark permanently failed immediately" is unmet for
+  master-row OOM on the file-journal plane: the dormant branch
+  `file_orchestration_journal.py:6567-6568` AND its sole production
+  caller `chain_forecast_orchestrator_cycle.py:190-197` both return
+  without marking — labeling-only blast radius (next cycle blocks via
+  the permanent guard), OOM-newly-load-bearing (round-1 D2 + adjacent
+  point); (e) candidate-state top-level `retryable: True` bypasses the
+  rows-5/6 refusals via `_failure_policy_payload:98-100` — no
+  production writer emits the key today, but it is a
+  design-acknowledged state key (`scheduler_state_identity_filter.py:
+  181,596`) and would open all five refusal codes at once (round-1 D1)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
 - [ ] 5.2 Merge; archive change (delta folds into main spec); loop-log
   line + audit; close issue #1161

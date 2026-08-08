@@ -54,6 +54,15 @@ backoff 60+300+900s).
   the permanent check and OOM keeps auto-retrying whenever durable SHUD
   output exists (fixture review P1-1, measured; design D2 row 5).
 - `services/orchestrator/scheduler_state_failure.py`
+  `_model_package_refresh_retry_evidence` (`:902-948`): the refusal
+  added in review round 1 (finding A1) — the channel admits only
+  permanent failures, so it became newly reachable for OOM the moment
+  this change made OOM permanent, and it runs before the permanent
+  guard; without the block, OOM + a model-package republish yields
+  `automatic_retry_allowed: True` and a real resubmission under the
+  same `memory_gb` (design D2 row 6; channel stays open for permanent
+  codes where a refresh is a plausible remedy).
+- `services/orchestrator/scheduler_state_failure.py`
   `_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES` (`:266-274`): **OOM STAYS,
   with recorded justification** (AC3's "说明为何某处不需变更" branch).
   That set is not a transience classification — it already contains

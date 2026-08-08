@@ -13,15 +13,43 @@ budget compromise is new design, not alignment. The trade-off accepted
 and disclosed: a genuinely incidental OOM loses self-healing and needs a
 manual retry — the spec's stated position.
 
-## D2. Surface disposition (AC3 — all five surfaces adjudicated: the issue's four sibling copies plus the P1-1-discovered downstream-resume guard)
+## D2. Surface disposition (AC3 — seven surfaces adjudicated: the issue's four sibling copies, the fixture-review P1-1 downstream-resume guard, plus two permanence-gated override channels found in PR review round 1)
 
 | Surface | Disposition |
 |---|---|
-| `retry.py` `TRANSIENT_ERROR_CODES` (`:27`) | REMOVE `OUT_OF_MEMORY`; ADD it to `NON_TRANSIENT_ERROR_CODES` (`:37-46`) — membership there is what `is_transient_error` / `is_retryable_failure` read, and the existing set/test shape distinguishes "known non-transient" from unknown-default |
-| `retry.py` `failure_classifier` (`:163-173`) | REMOVE from the `transient_slurm_runtime` membership; add a dedicated `resource_configuration` branch (`if code == "OUT_OF_MEMORY"`) — the label is descriptive journal vocabulary only (repo grep: no production consumer branches on `transient_slurm_runtime`; only tests assert OOM's label), and letting OOM fall to `unknown_failure` would misstate a code the spec explicitly classifies |
+| `retry.py` `TRANSIENT_ERROR_CODES` (`:27`) | REMOVE `OUT_OF_MEMORY`; ADD it to `NON_TRANSIENT_ERROR_CODES` (`:37-46`). Mechanism (review-round-1 correction): `is_transient_error` / `is_retryable_failure` read ONLY the transient set, and `NON_TRANSIENT_ERROR_CODES` has zero production consumers — the behavior flip is driven solely by the REMOVE; the ADD is documentation plus test-anchor surface (the existing set/test shape distinguishes "known non-transient" from unknown-default) |
+| `retry.py` `failure_classifier` (`:163-173`) | REMOVE from the `transient_slurm_runtime` membership; add a dedicated `resource_configuration` branch (`if code == "OUT_OF_MEMORY"`) — no production consumer branches on `transient_slurm_runtime` (repo grep; only tests assert OOM's label), and letting OOM fall to `unknown_failure` would misstate a code the spec explicitly classifies. Review-round-1 correction on scope: classifier strings in general DO have production branches (`policy_blocked` at `scheduler_state_failure.py:202`, pre-existing; and this change's own rows 5-6 refusal sets consume `resource_configuration`), so the safe claim is the narrow one above — post-change the label is a refusal-set key, not purely descriptive vocabulary |
 | `scheduler_state_types.py` `TRANSIENT_RETRY_REASON_CODES` (`:57-70`) | REMOVE `OUT_OF_MEMORY`. Measured real effects, exactly two (fixture-review P2-1 correction — retryability itself comes from `retry.py` sets via `classify_failure`/`is_retryable_failure`, NOT this set): (a) `_permanent_reason` (`scheduler_state_failure.py:198-207`, membership test at `:205` runs only after `retryable is False` already holds) now labels OOM `permanent_failure_guard` instead of `retry_limit_exhausted`; (b) the `:291` recompute gate loses its transient-arm path for OOM (explicit-membership arm remains, row 4) |
 | `scheduler_state_failure.py` `_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES` (`:266-274`) | **KEEP `OUT_OF_MEMORY`** — this set is not a transience classification: it already holds explicitly non-transient members (`PARSE_TASK_FAILED`, `PUBLISH_TASK_FAILED`, `STATE_SAVE_QC_TASK_FAILED`) and gates the "durable forecast output is missing → recompute the forecast stage" remedy, i.e. output-absence remediation, not the failed job's auto-retry budget. Removing OOM here would newly block an unrelated recovery channel — scope creep beyond the spec clause being enforced. Post-change, an OOM-failed downstream job reaches this gate ONLY via explicit set membership (no longer via the `TRANSIENT_RETRY_REASON_CODES` arm at `:291`) — behavior preserved by intent, test-anchored (D4.4) |
 | `scheduler_state_failure.py` `_downstream_failure_restartable` (`:603-611`) | **BLOCK OOM** (fixture-review P1-1: without this, the downstream-resume channel overwrites the failure to `retryable=True, permanent=False` BEFORE the `:244` permanent check, and an OOM'd downstream stage with durable SHUD output present still gets `automatic_retry_allowed: True` — measured pre/post identical). The guard's refusal sets gain OOM: reason-code set gains `OUT_OF_MEMORY`, classifier set gains `resource_configuration` (mirrors the existing `malformed_input`/`policy_blocked` style). Ruling ground: this channel re-runs the SAME failed stage under the SAME memory config — the deterministic re-failure the spec's MUST NOT targets. Distinct from row 4 by remedy: row 4 recomputes a MISSING upstream artifact (restart from forecast); this row would directly re-execute the OOM-failed stage. Broader pre-existing tension — the channel also resumes unknown-default non-transient codes (e.g. `PARSE_FAILED`, existing anchor `test_production_scheduler.py:10720-10755`) against the spec's unknown-defaults clause — is OUT of scope for a one-code alignment and routed at tasks 5.0 |
+| `scheduler_state_failure.py` `_model_package_refresh_retry_evidence` (`:902-948`, permanent-only admission gate `:909-911`) | **BLOCK OOM** (review-round-1 A1, P1 verifier-confirmed end-to-end). The channel admits only `permanent=True` failures, so pre-change OOM (transient) never entered it; post-change it does, and the decision ladder consults it (`scheduler_state_decision.py:325-330`) BEFORE the permanent guard (`:332`) — measured on head: OOM + changed model-package sha → `retry_after_model_package_refresh`, `automatic_retry_allowed: True`, real submission on the db-free plane (sole producer of `run_manifest_model_package`: `file_orchestration_journal.py:754-756`). A package refresh compares only the three model-package shas (`_model_package_changed_fields`) — orthogonal to `memory_gb` — and restarts the same failed stage: the row-5 ruling ground verbatim, NOT row 4's changed-input remedy. Refusal mirrors the rows-5 pair style; the channel stays OPEN for other permanent codes (e.g. `INVALID_MANIFEST`) for which a package refresh IS a plausible changed-input remedy. Two-sided anchor in D4 |
+| `scheduler_state_failure.py` raw-manifest repair channels — `_missing_raw_manifest_repair_evidence` (`:665-718`) and `_repaired_raw_manifest_downstream_retry_evidence` (`:720-783`) | **KEEP, justification recorded** (review-round-1 A2). Both overwrite the failure to `retryable=True, permanent=False` before the permanent guard for ALL permanent codes — pre-existing and code-generic (region untouched by this diff; 8-cell probe byte-identical pre/post; `INVALID_MANIFEST` flows identically). Remedy is changed-input re-ingestion (`restart_from_stage: "download"`, full-chain fresh ingestion) — structurally row 4's output-absence class. Recorded tension: a missing raw manifest is not a plausible OOM cause, so the re-run re-executes the OOM'd stage under the same `memory_gb`; and post-change this channel is the sole remaining auto-retry source for OOM in its geometry (the ladder fallback now blocks). Not blocked here — one-code scope; the generic permanent-code family is routed at tasks 5.0(c) |
+
+Round-1 sweep lesson, recorded: the AC2 dual grep sweep structurally
+cannot see these two channels — they contain neither the
+`OUT_OF_MEMORY` literal nor a direct `classify_failure` call, reaching
+classification one level down through `_failure_policy_payload`
+(`:84-109`). Any future audit of a code's retry semantics must also
+walk the `scheduler_state_decision.py` evidence-ladder channels
+(`:288-330`) that run before the permanent guard.
+
+Row-4 distinction record (round-1 C3, REFUTED as a conflict): the
+recompute channel's retry restarts `forecast` — NOT the OOM-failed
+stage (`restart_stage`/`restart_from_stage` both `"forecast"`, asserted
+by the row-4 anchor itself); the forecast stage is absent from
+`_DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES` and the
+durable-output-present geometry exits at `:284-285`, so the channel
+cannot loop — after one successful recompute, a repeat OOM lands in the
+row-5/row-6 block. No contradiction with the row-5 ruling ground.
+
+Row-5 refusal-pair note (round-1 C1, discarded as a defect): the two
+refusal arms (classifier `resource_configuration` / reason-code
+`OUT_OF_MEMORY`) are extensionally equivalent on the reachable input
+domain — no production writer emits candidate-state classifier
+overrides — and exactly mirror the pre-existing
+`malformed_input`/`policy_blocked` pair style (whose classifier arm IS
+load-bearing for `PERMISSION_DENIED`-class codes). Deliberate
+defense-in-depth pair; no per-arm anchor, no deletion.
 
 `scheduler_state_compat.py:27` re-exports the types module symbol —
 follows automatically, no edit.
@@ -122,10 +150,30 @@ New anchors:
   unless the guard blocks OOM). Constructible from the existing
   helpers/samples around `test_production_scheduler.py:10720-10755`
   (`_candidate_state_decision` + candidate fixtures).
+- **D2-row-6 anchor (review round 1, A1)**: half 1 — OOM downstream
+  failure + changed model-package sha (no durable-output, no
+  raw-manifest geometry) → POSITIVE verdict `blocked` /
+  `permanent_failure_guard` / `manual_retry_required: True` /
+  `automatic_retry_allowed: False` — RED against the round-1 head
+  `949697c1` (measured there: `retry_after_model_package_refresh` with
+  `automatic_retry_allowed: True`); half 2 — `INVALID_MANIFEST` +
+  changed package sha keeps `retry_after_model_package_refresh`
+  (channel preservation for codes where refresh is a plausible remedy)
+  — green pre- AND post-fix.
+- **Parity-anchor hardening (review round 1, C2)**: the bullet-window
+  loop additionally terminates on heading lines (`#`-prefixed), so an
+  ordered-list rewrite of the THEN bullets cannot extend the window
+  into the next scenario's transient list (measured: reformat+drift
+  mutation flips from silent pass to fail; the benign reorderings the
+  implementer already hardened against — indentation, blank lines,
+  em-dash trims, bullet reordering — stay green). Deliberately NOT an
+  exact six-code set-equality assertion: that would go red on benign
+  list edits.
 - Red-proof protocol: rewritten tests 1-5 + parity anchor + D2-row-5
   anchor + D2-row-4 half 2 run against pre-change source and fail on
   the defect; D2-row-4 half 1 green pre- and post-change (stated in
-  brief with output).
+  brief with output). Round-1 additions: D2-row-6 half 1 red against
+  `949697c1` (the pre-fix head), half 2 green on both.
 
 Evidence floor (issue Verification):
 `uv run pytest -q tests/test_retry.py tests/test_real_slurm_gateway.py

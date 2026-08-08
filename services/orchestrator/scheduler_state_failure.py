@@ -909,6 +909,13 @@ def _model_package_refresh_retry_evidence(
     failure = _failure_policy_payload(state)
     if not failure["permanent"]:
         return None
+    # A model-package refresh compares only the package shas and restarts the same
+    # failed stage — it is not a memory-sizing remedy, so an out-of-memory failure
+    # must not borrow this override to regain automatic retry (#1161).
+    if str(failure.get("classifier") or "") == "resource_configuration":
+        return None
+    if str(failure.get("reason_code") or "").upper() == "OUT_OF_MEMORY":
+        return None
     prior = state.get("run_manifest_model_package")
     if not isinstance(prior, Mapping):
         return None
