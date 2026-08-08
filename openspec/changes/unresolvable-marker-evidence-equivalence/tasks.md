@@ -83,10 +83,14 @@ Evidence floor:
 - [x] 2.5 Defect-2 regression (red pre-change): mapping-named targets —
   row-present and row-absent give the SAME refusal; each identity fixture
   carries BOTH halves (row-borne flag/status on the target row AND the
-  state mapping naming that job — design D2); placeholder / unnamed
-  repaired-flag / unnamed non-failed shapes are covered by the same-stage
-  residue matrix as paired-verdict executable divergence disclosures
-  (round 1 replaced the inert cross-stage arm-2-anchor version), residue
+  state mapping naming that job — design D2 canonical domain); the
+  same-stage residue matrix's four cells, verbatim from its
+  parametrization: `unsubmitted_placeholder` and
+  `repaired_flag_not_named_by_the_state` (paired-verdict divergence
+  disclosures), `non_failed_named_by_completed_stage_evidence` (delivered
+  identity), `plain_failed_control` (delivered identity) — round 1
+  replaced the inert cross-stage arm-2-anchor version; unnamed non-failed
+  shapes have no matrix cell and are disclosed in Residue 1 only, residue
   tracked via task 5.0
 - [x] 2.6 Defect-3 regression (red pre-change): model-less cohort truncation
   + cross-stage failure — unresolvable arm lands on the same arm-2 verdict

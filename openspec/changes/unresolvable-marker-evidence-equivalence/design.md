@@ -107,22 +107,33 @@ read answers a different question — "does this marker repair the historical
 failure" — while this one asks "is this marker's own target already
 repaired".
 
-**AC-2 scope (fixture-review adjudicated; round-1 widened by one sub-shape;
-round-2 qualified twice)**: verdict identity between row-present and
-row-absent is delivered for two staleness sub-shapes with row-absent
-evidence — repaired targets the state's `repaired_stage_evidence` names as
-its original failed job, and non-failed targets the state's
-`completed_stage_evidence` names as its completed job — and only for
-MODEL-LESS (cycle-scope) targets: a model-bearing `job_cycle`-grammar row
-short-circuits the resolved-row router to a pin while the row-absent arm
-refuses, and no candidate-state surface carries model-ness for an absent
-row (the evidence mappings, the marker details, and the DB event projection
-all omit `model_id`; id-text forensics is D1's rejected option) — that
-same-stage under-pin cell is Residue 2's. Additionally the completed-stage
-mapping exists only for stages with a `_stage_after` successor
-(convert/forcing/forecast/parse; under the terminal-stage setting forecast
-maps to state_save_qc), so download/state_save_qc/publish cohort targets
-can never be named and stay in Residue 1 even when succeeded.
+**Delivered equivalence domain — CANONICAL DEFINITION (retro-1 corrective:
+this is the fixture's ONLY authoritative statement of the domain; the spec
+scenario states it once as the "delivered domain" clause, and every other
+site — D5, proposal, tasks — references it and never restates it)**.
+Cross-arm verdict identity (row-present twin/router verdict == row-absent
+arm verdict) is delivered for exactly two claim families, both restricted
+to (Q1) MODEL-LESS (cycle-scope) targets:
+
+- F1, live-failure family: failed-status targets that are neither
+  unsubmitted auto-retry placeholders nor repaired-flagged — same verdict
+  on stage match and on stage mismatch (both arms end at the shared
+  only-failure-left predicate).
+- F2, staleness family: targets a state mapping names with an exact
+  entity-id match — `repaired_stage_evidence.original_failed_job_id` or
+  `completed_stage_evidence.job_id` — same refusal with the row present
+  and absent; (Q4) the completed-stage mapping exists only for stages
+  with a `_stage_after` successor (convert/forcing/forecast/parse; the
+  terminal-stage setting maps forecast to state_save_qc), so
+  download/state_save_qc/publish cohort targets can never be named.
+
+Q1 rationale: a model-bearing `job_cycle`-grammar row short-circuits the
+resolved-row router to a pin while the row-absent arm applies cycle-scope
+logic, and no candidate-state surface carries model-ness for an absent row
+(the evidence mappings, marker details, and DB event projection all omit
+`model_id`; id-text forensics is D1's rejected option) — that same-stage
+under-pin cell is Residue 2(b). Everything outside F1 ∪ F2 is Residue 1
+or Residue 2, disclosed there and tracked via task 5.0.
 The twin's repaired-target refusal fires on either of two ROW flags
 (`repair_status == "repaired"` or `active_blocker is False`,
 `_pipeline_job_is_repaired_stage_evidence`); a target carrying only those
@@ -163,9 +174,14 @@ domain applies identically on both arms.
    row-present vs row-absent verdict identity on MAPPING-NAMED targets only
    — each identity fixture carries both halves (row-borne flag/status on
    the target row AND the state mapping naming it — D2); the residue
-   matrix covers placeholder/unnamed-flag/unnamed-non-failed shapes with
-   paired verdicts as executable divergence disclosures, per D4.7 (round 1
-   replaced the inert cross-stage "arm-2 blocking anchors" version).
+   matrix's four cells, verbatim from its parametrization:
+   `unsubmitted_placeholder` and `repaired_flag_not_named_by_the_state`
+   (paired-verdict divergence disclosures, Residue 1),
+   `non_failed_named_by_completed_stage_evidence` (delivered identity,
+   F2), `plain_failed_control` (delivered identity, F1) — per D4.7
+   (round 1 replaced the inert cross-stage "arm-2 blocking anchors"
+   version; unnamed non-failed shapes have NO matrix cell and are
+   disclosed in Residue 1 only).
 3. Defect-3 cross-arm parity (red pre-change): model-less cohort truncation
    + cross-stage failure — unresolvable verdict == resolved verdict.
 4. Writer tests: persisted event details carry `failed_stage`; the marker
@@ -207,11 +223,10 @@ AND the marker's recorded stage (its `failed_stage` detail, with the
 loop-stripped id token as the stage evidence for markers written before the
 field existed) is the repair target, the exact-id repaired-evidence refusal
 applies, and a cross-stage marker falls to the only-failure-left arm instead
-of refusing outright — verdict equality with the resolved-row rule claimed
-only for failed-status targets that are neither unsubmitted auto-retry
-placeholders nor repaired-flagged (`submission_failed` placeholders are
-failed-status, so the status qualifier alone was falsifiable — round-1
-review). New scenario clauses pin the three defect
+of refusing outright — every verdict-equality claim reads within the
+delivered equivalence domain (canonical definition in D2; the spec
+scenario carries it as the single "delivered domain" clause).
+New scenario clauses pin the three defect
 shapes. Symbol anchors only for PR-touched files.
 
 ## Residues (accepted, tracked — not claimed as delivered)

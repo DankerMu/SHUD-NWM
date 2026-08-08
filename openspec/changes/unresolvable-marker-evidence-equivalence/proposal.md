@@ -53,13 +53,12 @@ were DEFERRED out of PR #1286 on exactly that ground. They arm the moment
   marker's target as its original failed job, or when state-level
   `completed_stage_evidence` names it as its completed job (both exact
   entity-id comparisons; the second conjunct was added by the round-1
-  review). Scope: those two mapping-named sub-shapes are the staleness
-  classes with row-absent evidence and are delivered in full; unsubmitted
-  placeholders, repaired-flagged targets the repaired mapping does not name,
-  and non-failed targets the completed mapping does not name live on the
-  row's own state and remain an accepted, issue-tracked residue (design.md
-  Residues — enlarged in reachable population by the loop-strip fix itself,
-  recorded there).
+  review). Scope: every quantified equivalence claim reads within the
+  delivered equivalence domain defined CANONICALLY in design.md D2 (and
+  stated once in the spec scenario's "delivered domain" clause); every
+  shape outside it is the issue-tracked residue (design.md Residues —
+  enlarged in reachable population by the loop-strip fix itself, recorded
+  there).
 - **Arm-2 fall-through added** (defect 3): stage mismatch now falls through
   to `not _state_has_candidate_scope_failed_job(state)` exactly as the twin
   does, instead of returning False.
