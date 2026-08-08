@@ -20,10 +20,12 @@ Why:
   downstream-resume guard, which needs a production edit); one
   (recompute set) is ruled a non-copy — the boundary needs a two-sided
   test anchor
+  (planning-time snapshot — round-1 review expanded to SEVEN surfaces:
+  2 guard blocks, 2 justified keeps; see deviation 7 and D2)
 Selected risk packs:
 - Retry/backoff semantics (auto vs manual, permanent-failure marking)
 - Sibling-copy consistency (5 surfaces: 3 edits, 1 justified keep,
-  1 guard block)
+  1 guard block; final: 7 surfaces per D2)
 OpenSpec change: align-oom-retry-classification
 Evidence floor:
 - uv run pytest -q tests/test_retry.py tests/test_real_slurm_gateway.py tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py tests/test_production_slurm_validation.py
@@ -77,6 +79,15 @@ Evidence floor:
    incomplete; the AC2 grep sweep structurally could not see this
    channel (no literal, classification reached via
    `_failure_policy_payload`) — sweep lesson recorded in D2.
+8. **Round-1 fix commit extends `.large-file-guard.json` exclude** with
+   `services/orchestrator/scheduler_state_failure.py` and
+   `tests/test_retry.py` — a permanent commit-ratchet exemption,
+   recorded here per the guard-delta precedent
+   (`openspec/changes/tier-node27-timeseries-storage/design.md`
+   documented exceptions; `docs/review-loop-log.jsonl`
+   `large_file_guard_delta` entries). Both files exceeded the
+   1000-line threshold at merge base already (1127/2056 lines); this
+   PR's marginal edits did not cross the ratchet.
 
 ## 1. Fixture
 
@@ -128,7 +139,8 @@ Evidence floor:
 
 ## 3. Verification (orchestrator)
 
-- [x] 3.1 Evidence floor commands green — six-file pytest 1975 passed +
+- [x] 3.1 Evidence floor commands green (at head `949697c1`; post-fix
+  floor is 2.10's 1977) — six-file pytest 1975 passed +
   the 1 disclosed pre-existing macOS env failure
   (`test_db_free_slurm_storage_root_check_masks_symlink_loop_path`,
   reproduced identically on the pristine f33de396 extraction); ruff
@@ -140,8 +152,9 @@ Evidence floor:
   → D2 rows 3-5, D3 planes, or import-only
 - [x] 3.3 Production diff verified confined: `retry.py` (set move +
   classifier branch), `scheduler_state_types.py` (one deletion),
-  `scheduler_state_failure.py` (the one guard, two refusal-set
-  additions); tests-only elsewhere
+  `scheduler_state_failure.py` (row-5 guard at head `949697c1`; round-1
+  fix adds the row-6 refusal pair); elsewhere tests plus one
+  `.large-file-guard.json` exclude extension (deviation 8)
 
 ## 4. Review loop
 

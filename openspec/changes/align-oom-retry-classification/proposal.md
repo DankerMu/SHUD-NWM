@@ -48,13 +48,15 @@ backoff 60+300+900s).
   db-free scheduler's retryable-reason surface follows the same ruling
   (consumed at `scheduler_state_failure.py:205` and `:291`).
 - `services/orchestrator/scheduler_state_failure.py`
-  `_downstream_failure_restartable` (`:603-611`): the refusal sets gain
+  `_downstream_failure_restartable` (`:603-611` at merge base;
+  `:603-617` as delivered): the refusal sets gain
   `OUT_OF_MEMORY` / `resource_configuration` — without this the
   downstream-resume channel overwrites the failure to retryable BEFORE
   the permanent check and OOM keeps auto-retrying whenever durable SHUD
   output exists (fixture review P1-1, measured; design D2 row 5).
 - `services/orchestrator/scheduler_state_failure.py`
-  `_model_package_refresh_retry_evidence` (`:902-948`): the refusal
+  `_model_package_refresh_retry_evidence` (`:902-955` as delivered,
+  refusal pair `:912-918`): the refusal
   added in review round 1 (finding A1) — the channel admits only
   permanent failures, so it became newly reachable for OOM the moment
   this change made OOM permanent, and it runs before the permanent
