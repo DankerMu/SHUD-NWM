@@ -196,6 +196,5 @@ Evidence floor:
   production writer emits the key today, but it is a
   design-acknowledged state key (`scheduler_state_identity_filter.py:
   181,596`) and would open all five refusal codes at once (round-1 D1)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
-- [ ] 5.2 Merge; archive change (delta folds into main spec); loop-log
-  line + audit; close issue #1161
+- [x] 5.1 Chinese work summary + evidence posted (PR #1311 comment); CI green on final head b973534c (Unit Tests 16m38s, SQL Migration Dry Run)
+- [x] 5.2 Merged 5ff9e488; change archived as 2026-08-08-align-oom-retry-classification (delta folded — parity scenario in main spec, one target header); loop-log line appended + audit run (lens-rotation DECIDABLE discharged by ADR 0003); issue #1161 closed

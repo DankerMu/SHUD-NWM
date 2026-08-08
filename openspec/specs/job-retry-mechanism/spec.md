@@ -170,7 +170,10 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
 - **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "unknown_error_code_defaulted_non_transient", "error_code": "<code>"}`
 - **THEN** the Orchestrator SHALL log a warning: `"unknown error_code '<code>' defaulted to non-transient — add to classification list"`
 
----
+#### Scenario: Classification parity between this requirement and code is test-anchored
+
+- **WHEN** the repository test suite runs
+- **THEN** a test SHALL read this requirement's non-transient code list from the spec text and assert that `OUT_OF_MEMORY` appears there, is a member of the orchestrator's non-transient classification set, and is absent from every transient classification surface (`TRANSIENT_ERROR_CODES` and the scheduler-state transient retry-reason set), so that a reopened spec-code drift on this code fails the suite rather than surviving to review
 
 ### Requirement: Max Retries Exhausted — Permanent Failure
 
