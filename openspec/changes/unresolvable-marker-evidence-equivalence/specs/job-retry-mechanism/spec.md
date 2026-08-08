@@ -269,15 +269,18 @@ drive the retry decision it was written to request.
   stage evidence, whether it comes from the marker's recorded
   `failed_stage` detail or from the loop-stripped id token backstop
 - **AND** every cross-arm equivalence claim in this scenario reads
-  within the DELIVERED DOMAIN, stated once here: model-less
+  within the DELIVERED DOMAIN, stated once here as a literal
+  transcription of the two delivered claim families: model-less
   (cycle-scope) targets — a model-bearing `job_cycle`-grammar row
   short-circuits the resolved-row router to a pin, and no
-  row-absent evidence surface carries model-ness — that are neither
-  unsubmitted auto-retry placeholders nor repaired-flagged unless a
-  state mapping names them, with completed-stage evidence existing
-  only for stages with a successor in the forecast stage order;
-  every shape outside this domain is a disclosed residue, not a
-  delivered identity
+  row-absent evidence surface carries model-ness — that EITHER are
+  failed-status targets that are neither unsubmitted auto-retry
+  placeholders nor repaired-flagged, OR are targets a state mapping
+  names with an exact entity-id match (the repaired-stage
+  evidence's original failed job id, or the completed-stage
+  evidence's job id — the latter existing only for stages with a
+  successor in the forecast stage order); every shape outside this
+  domain is a disclosed residue, not a delivered identity
 - **AND** the journal marker event written by a manual repair
   carries the failed job's stage as a `failed_stage` detail — a key
   the candidate-state record-stage reader does not consume (so
