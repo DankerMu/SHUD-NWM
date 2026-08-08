@@ -79,39 +79,45 @@ Evidence floor:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 `retry.py`: set membership move (TRANSIENT → NON_TRANSIENT);
+- [x] 2.1 `retry.py`: set membership move (TRANSIENT → NON_TRANSIENT);
   `failure_classifier` gains `resource_configuration` branch for OOM
-- [ ] 2.2 `scheduler_state_types.py`: drop OOM from
+- [x] 2.2 `scheduler_state_types.py`: drop OOM from
   `TRANSIENT_RETRY_REASON_CODES`
-- [ ] 2.3 `scheduler_state_failure.py` `_downstream_failure_restartable`:
+- [x] 2.3 `scheduler_state_failure.py` `_downstream_failure_restartable`:
   refusal sets gain `OUT_OF_MEMORY` + `resource_configuration` (D2 row 5)
-- [ ] 2.4 Confirm-and-leave: `_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES`
+- [x] 2.4 Confirm-and-leave: `_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES`
   keeps OOM (D2 row 4); `scheduler_state_compat` re-export untouched;
   Slurm raw-state mapping surfaces untouched (non-goals list);
   `slurm_validation.py:1721` evidence flip disclosed, no edit
-- [ ] 2.5 Rewrite the 5 pinning tests to spec behavior (D4.1-D4.5;
+- [x] 2.5 Rewrite the 5 pinning tests to spec behavior (D4.1-D4.5;
   anchor the two production_scheduler targets by test NAME)
-- [ ] 2.6 New parity anchor test (spec-text ↔ code sets, bullet-token
+- [x] 2.6 New parity anchor test (spec-text ↔ code sets, bullet-token
   parsing per D4) — red pre-change
-- [ ] 2.7 New D2-row-4 boundary anchor: half 1 (recompute preserved WITH
+- [x] 2.7 New D2-row-4 boundary anchor: half 1 (recompute preserved WITH
   missing-output geometry) green pre- and post-change; half 2
   (manual_retry_required WITHOUT that geometry) RED pre-change — both
   halves' pre-change outputs stated in the brief
-- [ ] 2.8 New D2-row-5 anchor: OOM + durable output present → NOT
+- [x] 2.8 New D2-row-5 anchor: OOM + durable output present → NOT
   retry_downstream, no automatic_retry_allowed:True — red pre-change
-- [ ] 2.9 Red-proof protocol: rewritten tests + parity + row-5 + row-4
+- [x] 2.9 Red-proof protocol: rewritten tests + parity + row-5 + row-4
   half 2 red against pre-change source, red output recorded in the brief
 
 ## 3. Verification (orchestrator)
 
-- [ ] 3.1 Evidence floor commands green
-- [ ] 3.2 Dual full-repo sweep (literal OOM grep + indirect-consumer
-  grep per triage block): every hit mapped to a D2 disposition row or
-  the non-goals list (AC2's 无残余矛盾点)
-- [ ] 3.3 Production diff confined to `retry.py`,
-  `scheduler_state_types.py`, and the one
-  `_downstream_failure_restartable` guard in
-  `scheduler_state_failure.py`; tests-only elsewhere
+- [x] 3.1 Evidence floor commands green — six-file pytest 1975 passed +
+  the 1 disclosed pre-existing macOS env failure
+  (`test_db_free_slurm_storage_root_check_masks_symlink_loop_path`,
+  reproduced identically on the pristine f33de396 extraction); ruff
+  clean; validate green; orchestrator spot re-ran retry+gateway files
+  (290 passed) and the 5 new/rewritten scheduler anchors (9 passed)
+- [x] 3.2 Dual full-repo sweep done (implementer report → PR body):
+  every literal hit → D2 row / non-goals / test disposition; every
+  indirect consumer (`is_transient_error`/`classify_failure`/set names)
+  → D2 rows 3-5, D3 planes, or import-only
+- [x] 3.3 Production diff verified confined: `retry.py` (set move +
+  classifier branch), `scheduler_state_types.py` (one deletion),
+  `scheduler_state_failure.py` (the one guard, two refusal-set
+  additions); tests-only elsewhere
 
 ## 4. Review loop
 

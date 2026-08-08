@@ -603,10 +603,16 @@ def _planned_retry_policy_value(
 def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
     if failure.get("limit_exhausted") is True:
         return False
-    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked"}:
+    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked", "resource_configuration"}:
         return False
     reason_code = str(failure.get("reason_code") or "").upper()
-    if reason_code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT", "POLICY_BLOCKED"}:
+    if reason_code in {
+        "INVALID_MANIFEST",
+        "MANIFEST_SCHEMA_INVALID",
+        "MALFORMED_INPUT",
+        "OUT_OF_MEMORY",
+        "POLICY_BLOCKED",
+    }:
         return False
     return True
 
