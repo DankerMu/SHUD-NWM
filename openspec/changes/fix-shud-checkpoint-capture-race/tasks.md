@@ -8,8 +8,10 @@ Fixture level: expanded · Repair intensity: high · Project profile: NHMS
   solver deadline, new `_recover_missing_state_checkpoints` (incl. scratch-root
   fresh-scoping, per-hour exception containment, per-hour outcome recording),
   `_clear_recovery_scratch_root` (two-pass, returns a refusal reason),
+  `_log_recovery_refusal` (best-effort per-hour err-log writer),
   `_StateCheckpointTracker` (`observed_header_minutes`, `recovery_outcomes`,
-  `install_recovered`, `write_manifest` payload).
+  `install_recovered`, `write_manifest` payload), module constants
+  `MAX_RECOVERY_SCRATCH_ENTRIES` / `_RECOVERY_MIN_BUDGET_SECONDS`.
 - `tests/test_shud_runtime.py`: `_FAST_SOLVER_STUB`, `_PROJECT_FAST_SOLVER_STUB`,
   `_STUCK_HEADER_SOLVER_STUB`, `_IC_DERIVED_SOLVER_STUB`,
   `_FAILING_RECOVERY_SOLVER_STUB`, `_HANGING_RECOVERY_SOLVER_STUB`, recovery

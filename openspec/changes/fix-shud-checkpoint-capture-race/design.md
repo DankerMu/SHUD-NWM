@@ -70,9 +70,12 @@ equivalence the watcher capture asserts today.
   likewise best-effort — a diagnostics-write failure never replaces
   `STATE_CHECKPOINTS_MISSING` as the run's error code.
 - Budget: main solve + all recovery reruns share ONE `timeout_seconds`
-  monotonic deadline (pre-change `run_shud` never exceeded 1× the budget, and
-  Slurm walltime sizing assumes that); an hour with no remaining budget is
-  skipped with outcome `budget_exhausted`.
+  monotonic deadline (pre-change `run_shud` never exceeded 1× the budget; a
+  per-rerun fresh timeout would multiply the task's wall time by the number
+  of missing hours — an unbounded multiple of the configured timeout is not
+  a bound at all, and risks a Slurm SIGKILL mid-loop losing the task-outcome
+  receipt); an hour with no remaining budget is skipped with outcome
+  `budget_exhausted`.
 - Alignment precondition (pre-existing, recorded per review round 1
   cand-10): SHUD's `PrintInit` writes `cfg.ic.update` only when
   `t % Update_IC_STEP == 0` — including the final write at END. The recovery

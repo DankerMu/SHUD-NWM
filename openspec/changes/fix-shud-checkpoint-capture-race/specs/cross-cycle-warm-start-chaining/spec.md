@@ -32,9 +32,12 @@ structural-completeness gates as a watcher capture.
 - **THEN** T+6/T+12 state preservation is performed by the running forecast process and
   `state_save_qc`, not by scheduling separate short checkpoint forecast runs
 - **AND** the runtime's own in-process recovery rerun after a watcher miss is not a scheduled
-  production run: it executes inside the same runtime invocation and Slurm task, writes only to a
-  scratch directory under the run workspace, and creates no scheduler-visible run, candidate, or
-  journal entry
+  production run: it executes inside the same runtime invocation and Slurm task, confines the
+  rerun solver's output to a scratch directory under the run workspace (while additionally
+  writing per-hour recovery logs into the run log directory, temporarily rewriting and
+  byte-identically restoring the run's staged cfg, and installing an accepted checkpoint into
+  `output/state_checkpoints/`), and creates no scheduler-visible run, candidate, or journal
+  entry
 - **AND** explicit short reruns remain allowed **only** as manual repair for already completed
   historical cycles that missed checkpoint capture (the in-process recovery rerun above is the
   sole automated exception, and it is not a scheduled production run).

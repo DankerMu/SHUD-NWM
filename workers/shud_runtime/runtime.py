@@ -536,10 +536,11 @@ class SHUDRuntime:
         _ensure_directory(log_dir, containment_root=workspace)
         # #1315 resource bound: the main solve AND every post-run recovery rerun
         # share ONE `timeout_seconds` budget. Pre-change `run_shud` never
-        # exceeded 1x the budget and Slurm walltime is sized on that assumption;
-        # a per-rerun fresh timeout would let a hung engine multiply the task's
-        # wall time by the number of missing hours and get SIGKILLed mid-loop,
-        # losing the task-outcome receipt.
+        # exceeded 1x the budget; a per-rerun fresh timeout would instead let a
+        # hung engine multiply the task's wall time by the number of missing
+        # hours, and an unbounded multiple of the configured timeout is not a
+        # bound at all -- it risks a Slurm SIGKILL mid-loop that loses the
+        # task-outcome receipt.
         solver_deadline = time.monotonic() + self.config.timeout_seconds
         try:
             with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (

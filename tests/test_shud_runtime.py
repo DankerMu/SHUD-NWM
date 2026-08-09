@@ -3976,11 +3976,12 @@ def test_run_shud_recovery_reports_non_zero_exit_lane(tmp_path: Path) -> None:
 def test_run_shud_main_solve_and_recovery_share_one_timeout_budget(tmp_path: Path) -> None:
     """#1315: recovery reruns must not multiply the run's wall-time budget.
 
-    Slurm walltime is sized on `timeout_seconds` because pre-change `run_shud`
-    could never exceed 1x it. A per-rerun fresh timeout turns a hung engine into
-    (1 + missing hours) x budget and gets the task SIGKILLed mid-loop, losing
-    the outcome receipt entirely. The main solve burns most of the budget here,
-    so the hanging recovery leg may only have the remainder.
+    Pre-change `run_shud` could never exceed 1x `timeout_seconds`. A per-rerun
+    fresh timeout turns a hung engine into (1 + missing hours) x budget, and an
+    unbounded multiple of the configured timeout is not a bound at all -- it
+    risks a Slurm SIGKILL mid-loop that loses the outcome receipt entirely. The
+    main solve burns most of the budget here, so the hanging recovery leg may
+    only have the remainder.
 
     Two hours are requested so BOTH halves of the bound are pinned
     deterministically: the first missing hour still has budget and is killed at
