@@ -197,7 +197,8 @@ Deviations (recorded):
 - [x] 5.0 Follow-ups routed with numbers: (a) reconciliation-family
   evidence-plane + nested-defer widening incl. call-site
   status→terminal mapping (D6; scribe issue number → #1326)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
-  head
-- [ ] 5.2 Merge; archive change (delta folds); loop-log line + audit;
-  close issue #1322
+- [x] 5.1 Chinese work summary + evidence posted
+  (https://github.com/DankerMu/SHUD-NWM/pull/1327#issuecomment-5231393051);
+  CI green on final head 6a65926d (Unit Tests 17m33s)
+- [x] 5.2 Merged 2026-08-09T12:15:54Z (merge commit 0535e847);
+  archived; loop-log line + audit recorded; issue #1322 auto-closed

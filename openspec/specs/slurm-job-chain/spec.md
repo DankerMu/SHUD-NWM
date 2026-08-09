@@ -188,18 +188,29 @@ the pipeline success set or is the partial-success status handled by
 the partial-capture mechanics; every other stage terminal SHALL end the
 cycle with an explicit non-success cycle terminal, and a cycle whose
 work was skipped or unrecognized SHALL NOT report success on the cycle
-result or on the scheduler evidence plane.
+result or on the scheduler evidence plane. The duplicate-submission
+deferral SHALL be honored wherever a stage submission is issued —
+including nested resubmissions inside the partial-array retry helper —
+not only at the top-level stage result.
 
 #### Scenario: Duplicate-submission skip defers the cycle
 
-- **WHEN** a cycle stage returns `skipped_duplicate_submission` because
-  the reserve gate found another pass holding the in-flight reservation
+- **WHEN** a cycle stage submission returns
+  `skipped_duplicate_submission` because the reserve gate found
+  another pass holding the in-flight reservation — whether from the
+  top-level stage submission or from a nested resubmission issued by
+  the partial-array retry helper
 - **THEN** the executor SHALL NOT run any downstream stage of that
   cycle in the same pass
 - **THEN** the cycle SHALL terminate with the dedicated non-success
   terminal `skipped_duplicate_submission` — not a success status, and
   not a failure terminal that would trigger failure-retry adjudication
   or resubmission against the reservation-holding pass's active row
+- **THEN** the executor SHALL NOT rewrite pending retry tasks as
+  failed, SHALL NOT issue a further durable failed status write for
+  the deferred tasks' runs as a consequence of the deferral, and
+  SHALL NOT derive a further retry attempt (no fresh retry-suffixed
+  idempotency key) from the deferred submission
 - **THEN** the skipped stage's span counters SHALL record zero
   submissions and zero failures
 
