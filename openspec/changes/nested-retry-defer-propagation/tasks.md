@@ -177,21 +177,26 @@ Deviations (recorded):
 
 ## 3. PR
 
-- [ ] 3.1 Commit + push branch `feat/issue-1322-nested-retry-defer`;
-  PR with 变更摘要 / 偏离记录 / 测试证据 / Evidence-Floor 声明
-- [ ] 3.2 CI green (targeted Unit Tests)
+- [x] 3.1 Commit + push branch `feat/issue-1322-nested-retry-defer`;
+  PR #1327 with 变更摘要 / 偏离记录 / 测试证据 / Evidence-Floor 声明
+- [x] 3.2 CI green (targeted Unit Tests: b5c93fef 17m38s,
+  d31e2a8c 17m42s)
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
-  per-class verifier batches; findings verified before fix
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.1 Cross-review rounds per gate ledger: round 1 (b5c93fef,
+  3 lenses → 4 dedup candidates → 2 verifier batches, 5/5 CONFIRMED,
+  not-clean) → fix pass d31e2a8c → round 2 (focused, all 5 CLOSED,
+  clean); ledger `.workplans/pr-1327/review/r1-candidates.md`
+- [x] 4.2 Phase 7 final review CLEAN on final head d31e2a8c
+  (full-diff conformance, THEN-clause anchors, no oracle weakening,
+  run-2 contract acceptance, evidence-floor smoke, sanity scan)
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers: (a) reconciliation-family
-  evidence-plane + nested-defer widening (D6; scribe issue number →
-  #1326)
+- [x] 5.0 Follow-ups routed with numbers: (a) reconciliation-family
+  evidence-plane + nested-defer widening incl. call-site
+  status→terminal mapping (D6; scribe issue number → #1326)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final
   head
 - [ ] 5.2 Merge; archive change (delta folds); loop-log line + audit;
