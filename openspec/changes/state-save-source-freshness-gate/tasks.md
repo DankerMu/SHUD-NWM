@@ -210,11 +210,11 @@ Deviations (recorded):
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 Writer: remove `write_manifest` no-targets early return
+- [x] 2.1 Writer: remove `write_manifest` no-targets early return
   (`runtime.py:3090-3091`) + `provenance` block (incl.
   `requested_checkpoint_hours`) + `final_ic` entry (design D2);
   anchors A7(a-d) red-proofed / pinned
-- [ ] 2.2 Gate G1-G5 in `save_state_for_run` + typed reasons; G5
+- [x] 2.2 Gate G1-G5 in `save_state_for_run` + typed reasons; G5
   integrity judged by the gate over the RAW `checkpoints` array —
   all four loader silent drops (`state_cli.py:642-643`,
   `:646-647`, `:654-655`, `:658-659`), non-sequence `checkpoints`
@@ -228,29 +228,41 @@ Deviations (recorded):
   parameterized over the five malformed shapes) red-proofed on
   pre-change tree (`git archive` extraction protocol) / pinned per
   design D7
-- [ ] 2.3 Regressions A10: five evidence-floor suites green with
+- [x] 2.3 Regressions A10: five evidence-floor suites green with
   witness-bearing fixtures (enumerated manifest-less and
   provenance-less sites per design D7 A10); no existing assertion
   weakened
-- [ ] 2.4 Evidence floor suites + ruff green; implementer reports
+- [x] 2.4 Evidence floor suites + ruff green; implementer reports
   deviations explicitly ("no deviations" stated if none)
 
 ## 3. PR
 
-- [ ] 3.1 Commit + push branch
+- [x] 3.1 Commit + push branch
   `feat/issue-1325-state-save-freshness-gate`; PR with 变更摘要 /
   偏离记录 / 测试证据 / Evidence-Floor 声明
-- [ ] 3.2 CI green (targeted Unit Tests)
+- [x] 3.2 CI green (targeted Unit Tests)
 
 ## 4. Review loop
 
 - [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
+  - Round 1 (head 164e7b3f) NOT CLEAN: 3 lenses → 13 deduped
+    candidates → 3 verifier batches → 6 into the fix pass (P2
+    writer→gate round-trip coverage gap A11; P3 strip
+    verify/publish divergence A5(f); P3 G5 valid_time parseability
+    A2c(vi); P3 post-gate empty-list guard A2d; P3 partial
+    provenance anchors A4c; P3 D3.5 first-reason anchor A6(d)),
+    5 REFUTED/DISCARD, 2 PLAUSIBLE-DEFER routed as #1329
+    (multi-root shadow liveness) + #1330 (cross-attempt final_ic
+    residue) with D6 known-limit records + D3 rule 6 (R1) ruling.
+    Fix pass: all 6 landed with RED evidence for the three code
+    fixes; 15 new/extended tests green; no deviations.
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers (if any arise in review)
+- [x] 5.0 Follow-ups routed with numbers: #1329, #1330 (round-1
+  PLAUSIBLE-DEFER findings)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final
   head
 - [ ] 5.2 Merge; archive change (delta folds); loop-log line +

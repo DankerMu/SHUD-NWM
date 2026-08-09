@@ -2367,7 +2367,14 @@ def test_state_save_rejects_checkpoint_content_drift(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "shape",
-    ["not_a_dict", "missing_fields", "missing_checksum", "non_regular_target", "non_sequence"],
+    [
+        "not_a_dict",
+        "missing_fields",
+        "missing_checksum",
+        "non_regular_target",
+        "non_sequence",
+        "unparseable_valid_time",
+    ],
 )
 def test_state_save_rejects_malformed_manifest_checkpoint_entry(tmp_path: Path, shape: str) -> None:
     """A2c: every shape the loader silently drops is a gate violation.
@@ -2375,7 +2382,10 @@ def test_state_save_rejects_malformed_manifest_checkpoint_entry(tmp_path: Path, 
     The declared set is the RAW ``checkpoints`` array, so an entry the parser
     would filter out (non-dict, missing fields, non-regular target) or a
     ``checkpoints`` value that is not a list can never shrink the published set
-    behind the caller's back.
+    behind the caller's back. ``unparseable_valid_time`` (PR review round-1) is
+    the same class read from the other end: presence alone is not a usable
+    declaration, and letting it through leaves the loader to crash with a bare
+    ``ValueError`` instead of a typed reject.
     """
 
     from packages.common.state_manager import StateManagerError
@@ -2394,6 +2404,8 @@ def test_state_save_rejects_malformed_manifest_checkpoint_entry(tmp_path: Path, 
         (output_root / f012["relative_path"]).unlink()
         (output_root / f012["relative_path"]).mkdir()
         raw_checkpoints = [f006, f012]
+    elif shape == "unparseable_valid_time":
+        raw_checkpoints = [f006, {**f012, "valid_time": "2026-05-01 lunchtime"}]
     else:
         raw_checkpoints = {}
     _write_gate_manifest(
@@ -2667,3 +2679,148 @@ def test_state_save_durable_output_reuse_retry_publishes_then_rejects_when_tree_
 
     assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_OUTPUT_MISSING")
     assert len(manager.saved) == 2
+
+
+def test_state_save_rejects_verified_checkpoints_that_vanish_before_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2d (implementation guts): the checkpoints lane never indexes an empty list.
+
+    The gate verifies the RAW manifest array and the publish then re-reads it
+    through the loader, so a file deleted in between shrinks N verified entries
+    to zero. The only reachable trigger is that TOCTOU window, hence the loader
+    is monkeypatched; what is pinned is that the answer is the typed reason and
+    not a bare ``IndexError`` from ``saved[0]``.
+    """
+
+    from packages.common import state_cli
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+    monkeypatch.setattr(state_cli, "_load_state_checkpoint_manifest", lambda _manifest_path: [])
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["missing_requested_hours", "blank_run_id", "blank_generated_at", "requested_hours_string"],
+)
+def test_state_save_rejects_partially_populated_provenance(tmp_path: Path, defect: str) -> None:
+    """A4c: a provenance block the gate cannot act on is a G3 violation.
+
+    ``requested_checkpoint_hours`` is what discriminates the zero-hour fallback
+    lane from a total capture miss, so defaulting it away (``.get(..., [])``)
+    would silently restore the #1164 downgrade; ``run_id``/``generated_at`` are
+    the identity evidence G4 and the operator's diagnosis rest on. Each shape
+    reaches ``_usable_provenance`` through a different predicate — with
+    ``missing_requested_hours`` the key-presence check firing first and the
+    sequence check standing behind it.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    provenance = _gate_provenance(requested_hours=(6,))
+    if defect == "missing_requested_hours":
+        provenance.pop("requested_checkpoint_hours")
+    elif defect == "blank_run_id":
+        provenance["run_id"] = "   "
+    elif defect == "blank_generated_at":
+        provenance["generated_at"] = ""
+    else:
+        provenance["requested_checkpoint_hours"] = "6,12"
+    _write_gate_manifest(output_root, {"checkpoints": [f006], "provenance": provenance})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_PROVENANCE_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_publishes_the_exact_final_ic_path_the_gate_hashed(tmp_path: Path) -> None:
+    """A5(f): verification and publish must resolve to the SAME file.
+
+    A ``final_ic.relative_path`` carrying trailing whitespace next to a
+    whitespace-twin file on disk splits them: the gate checksums the stripped
+    name while a raw-string publish opens the twin, shipping bytes nothing ever
+    verified. Either the checksum-verified bytes are published, or the tree is
+    rejected — never the unverified twin.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    verified_bytes = (output_root / "demo.cfg.ic.update").read_bytes()
+    twin_bytes = _gate_ic_text(_dt(GATE_END_TIME), surface="0.9").encode("utf-8")
+    (output_root / "demo.cfg.ic.update ").write_bytes(twin_bytes)
+    final_ic["relative_path"] = "demo.cfg.ic.update "
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [], "final_ic": final_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    try:
+        _gate_save(tmp_path, manager)
+    except StateManagerError:
+        assert manager.saved == []
+        assert manager.qc_runs == []
+        return
+
+    assert len(manager.saved) == 1
+    published = manager.saved[0]["ic_file_path"].read_bytes()
+    assert published != twin_bytes
+    assert published == verified_bytes
+
+
+def test_state_save_reports_the_first_existing_roots_reason_when_every_root_fails(tmp_path: Path) -> None:
+    """A6(d): D3 rule 5 — the reported reason follows probe order, deterministically.
+
+    Two roots fail for different reasons; the operator must always be handed the
+    first existing root's reason so the same tree never diagnoses two ways.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    (workspace_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T03:00:00Z"), surface="0.6"),
+        encoding="utf-8",
+    )
+    object_root = _gate_object_output(tmp_path)
+    foreign = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {
+            "checkpoints": [foreign],
+            "provenance": _gate_provenance("fcst_gfs_2026043012_demo_model", requested_hours=(6,)),
+        },
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_MANIFEST_MISSING")
+    assert "STATE_SAVE_SOURCE_PROVENANCE_MISMATCH" not in message
+    assert manager.saved == []
+    assert manager.qc_runs == []

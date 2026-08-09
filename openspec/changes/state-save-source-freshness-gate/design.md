@@ -36,7 +36,7 @@ message STARTS with the token, machine-greppable):
 | G2 | `<root>/state_checkpoints/state_checkpoints.json` present (full path level per `state_cli.py:600-611` / `runtime.py:3092-3095`) | `STATE_SAVE_SOURCE_MANIFEST_MISSING` | silent fallback to rglob |
 | G3 | manifest carries `provenance` block with required `run_id` + `generated_at` + `requested_checkpoint_hours` (the post-gate branch keys on it — a provenance block missing it is a G3 violation, fail-closed, r3 note); `slurm_job_id`/`array_task_id` keys present (values may be null/int-null outside Slurm) | `STATE_SAVE_SOURCE_PROVENANCE_MISSING` | n/a (new schema; legacy manifests land here — D5 ruling) |
 | G4 | `provenance.run_id == context.run_id` | `STATE_SAVE_SOURCE_PROVENANCE_MISMATCH` | n/a |
-| G5 | every manifest-declared artifact (checkpoint entries; on the fallback lane also the `final_ic` entry) present (stat succeeds), CARRYING a declared `checksum` (absence is itself a violation — r2 P2-1; both writers always emit it, `runtime.py:3197`, `:3162`), AND content hash equal to it — hashing reads through the SAME `MAX_STATE_IC_BYTES` bounded-read the normalization path uses, and an oversized artifact re-raises the existing `state checkpoint IC file exceeds size limit` message unchanged (r3 P2 read-bound ruling, A8 pin); evaluated for ALL entries, offending sets named in the message | missing file or missing checksum → `STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE`; hash mismatch → `STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH` | `:652-655` silent `continue`, publishes M<N; checksums never verified |
+| G5 | every manifest-declared artifact (checkpoint entries; on the fallback lane also the `final_ic` entry) present (stat succeeds), with a PARSEABLE `valid_time` on checkpoint entries (an unparseable one is a malformed declaration — PR review round-1, closes the loader's bare-`ValueError` crash lane), CARRYING a declared `checksum` (absence is itself a violation — r2 P2-1; both writers always emit it, `runtime.py:3197`, `:3162`), AND content hash equal to it — hashing reads through the SAME `MAX_STATE_IC_BYTES` bounded-read the normalization path uses, and an oversized artifact re-raises the existing `state checkpoint IC file exceeds size limit` message unchanged (r3 P2 read-bound ruling, A8 pin); evaluated for ALL entries, offending sets named in the message | missing file or missing checksum → `STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE`; hash mismatch → `STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH` | `:652-655` silent `continue`, publishes M<N; checksums never verified |
 
 No wall-clock predicate (round-1 P1-1/P1-2). The witness statement,
 stated precisely (r2 P1 precision defect): manifest presence proves
@@ -201,6 +201,19 @@ root; the fall-through narrative below applies to the
    fall-through).
 5. If no existing root passes, reject with the FIRST existing
    root's reason (deterministic, matches probe order).
+6. Post-verification branch rejects BIND to the verified root and
+   never fall through (PR review round-1 ruling, R1): a root that
+   passes G2-G5 IS the verified root (rule 3), so
+   `CHECKPOINTS_UNCAPTURED` and `FINAL_IC_MISSING` — decisions taken
+   AFTER verification — hard-reject even when a later root exists.
+   Consequence accepted as a known limit (D6): an attempt-N+1
+   total-miss workspace tree shadows attempt-N's healthy
+   object-store tree; the failing direction is fail-closed
+   (typed reject, recovery = re-run), never a wrong publish. The
+   two pinned-message legacy hard errors (oversized declared
+   artifact, manifest entry-count overflow) are likewise hard, no
+   fall-through — they keep their pre-change message verbatim (A8
+   pin) and are not retyped.
 
 Consequence for the disagreement geometry: a workspace tree from a
 failed attempt (no manifest) falls through at G2 and the
@@ -259,6 +272,25 @@ exists).
   hand-assembled tree is unpublishable post-merge by design —
   operators repairing history must use the runtime lane (r2 note,
   recorded).
+- Multi-root shadow (D3 rule 6, PR review round-1): when attempt
+  N+1's total-miss (or final_ic-less zero-hour) workspace tree
+  shadows attempt N's healthy object-store tree, the gate
+  hard-rejects instead of publishing the sibling — a recoverable
+  liveness cost in the fail-closed direction. Routed as a follow-up
+  issue (fall-through-eligible post-gate tokens would need a D3
+  re-scope of "verified root").
+- Same-named cross-attempt residue (PR review round-1): the writer's
+  `final_ic` two-exact-paths rule proves existence, not "this
+  attempt wrote it"; the output dir is never cleared between
+  attempts. A killed attempt's `<project>.cfg.ic(.update)` residue
+  can be blessed by a later successful zero-hour attempt ONLY when
+  checkpoint config drifts between attempts (non-empty → empty
+  hours), since a zero-hour solve pairs with an `Update_IC_STEP`
+  that writes the final IC (`chain_manifests.py:483-486`, `:640-643`
+  set them together). Strictly narrower than master's rglob hole;
+  routed as a follow-up issue (candidate mitigation: clear the
+  output dir at attempt start, mirroring the recovery-scratch
+  doctrine `runtime.py:2199-2223`).
 - `_durable_shud_output_exists` (`scheduler_state_failure.py:63-75`)
   remains bookkeeping-only (issue out-of-scope); the gate is now the
   real backstop its comment assumed.
@@ -296,12 +328,13 @@ matching the test context's run_id.
   `relative_path`/`valid_time` (`:646-647`), (iii) a dict missing
   `checksum`, (iv) referencing a non-regular target/directory
   (`:658-659`), or — as a whole-manifest case — (v)
-  `checkpoints: {}` non-sequence (`:631-633`) ⇒ each rejects
-  `..._MANIFEST_INCOMPLETE` naming the entry index (case v names
-  the field); ALL five RED on master (loader silently drops the
-  entry and publishes the survivor for i/ii/iv, publishes the
+  `checkpoints: {}` non-sequence (`:631-633`), or — added in PR
+  review round 1 — (vi) an unparseable `valid_time` string ⇒ each
+  rejects `..._MANIFEST_INCOMPLETE` naming the entry index (case v
+  names the field); ALL six RED on master (loader silently drops
+  the entry and publishes the survivor for i/ii/iv, publishes the
   checksum-less entry unchecked for iii, parses-as-empty and takes
-  the fallback for v).
+  the fallback for v, crashes with a bare `ValueError` for vi).
 - **A3 failed-attempt residue** (AC-3, re-anchored per round-1
   P1-1): output dir exists with a leftover `*.cfg.ic` but NO
   manifest (the failure-lane invariant) ⇒
@@ -419,3 +452,46 @@ matching the test context's run_id.
   (`tests/test_shud_runtime.py:4067-4091`) is rewritten inverted as
   A7(a3) with its supersession rationale recorded in D2.1 (run-2 r1
   P1). All other fixture edits only gain witness facts.
+
+PR review round-1 additions (fix-pass anchors; RED against the
+round-1 head 164e7b3f unless marked):
+
+- **A2c(vi)** unparseable `valid_time` (see A2c above) — RED on
+  164e7b3f too (gate passed presence-only, loader crashed bare
+  `ValueError`).
+- **A2d TOCTOU guard** (guts pin, GREEN-by-construction): a
+  gate-verified checkpoints-lane root whose subsequent loader read
+  returns an empty list ⇒ typed `MANIFEST_INCOMPLETE`, never a bare
+  `IndexError` (`state_cli.py:226 saved[0]`); tested by
+  monkeypatching the loader (recorded as an implementation-guts
+  test — the only reachable input is a file deleted between the
+  gate's hash and the loader's read).
+- **A4c partial provenance** (parameterized): provenance block
+  present but (i) missing `requested_checkpoint_hours` key, (ii)
+  `run_id` empty/blank, (iii) `generated_at` empty/blank, (iv)
+  `requested_checkpoint_hours` a string ⇒
+  `STATE_SAVE_SOURCE_PROVENANCE_MISSING`; pins `_usable_provenance`
+  (`state_cli.py:699-717`) against the "simplify to
+  `.get(..., [])`" refactor that would silently restore the #1164
+  total-miss downgrade.
+- **A5(f) publish-path identity**: fallback lane publishes the
+  EXACT path string G5 hashed — manifest `final_ic.relative_path`
+  with trailing whitespace naming a whitespace-twin file whose
+  bytes differ from the checksummed clean file ⇒ the published
+  bytes are the checksum-verified ones (or the tree rejects), never
+  the unverified twin. RED on 164e7b3f (strip divergence:
+  `state_cli.py:768` verified stripped, `:180` published
+  unstripped).
+- **A6(d) D3.5 first-reason pin**: two existing roots both failing
+  (workspace `MANIFEST_MISSING` residue + object-store
+  `PROVENANCE_MISMATCH` foreign tree) ⇒ reported reason is the
+  FIRST existing root's (`MANIFEST_MISSING`).
+- **A11 writer→gate round-trip** (the round-1 P2): feed a REAL
+  `_StateCheckpointTracker.write_manifest()` tree (no hand-built
+  manifest) to `save_state_for_run` on BOTH lanes — (a) captured
+  checkpoints publish; (b) zero-hour `final_ic` lane run WITHOUT
+  Slurm env vars (also pins the null `slurm_job_id`/`array_task_id`
+  keys-present contract, closing the A7(b) null-branch gap).
+  GREEN-both-sides liveness pin; its value is failing on any future
+  one-sided key/shape drift between `runtime.py:3085-3148` and
+  `state_cli.py:699-811`.

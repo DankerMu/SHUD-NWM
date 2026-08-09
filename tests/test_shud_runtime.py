@@ -4301,6 +4301,172 @@ def test_run_shud_total_miss_manifest_records_requested_checkpoint_hours(tmp_pat
     assert payload["recovery_outcomes"] == {"12": "gate_rejected(header=1440)"}
 
 
+# ---------------------------------------------------------------------------
+# #1325 A11: writer -> publish-gate round-trip.
+#
+# Every other gate anchor hand-builds the manifest, so the two halves of the
+# witness contract (`_StateCheckpointTracker.write_manifest` and
+# `state_cli._admit_state_publish_source`) are pinned only against the fixture,
+# never against each other. These tests drive a REAL solve and feed the tree the
+# writer actually produced to the real publish path: a one-sided key, shape or
+# path-rooting change fails here and nowhere else.
+# ---------------------------------------------------------------------------
+
+
+class _RoundTripStateManager:
+    """`StateManager` double recording what the publish gate handed it."""
+
+    def __init__(self, object_store: LocalObjectStore) -> None:
+        self.object_store = object_store
+        self.saved: list[dict[str, Any]] = []
+        self.qc_runs: list[str] = []
+
+    def save_state_snapshot(self, **kwargs: Any) -> Any:
+        self.saved.append(kwargs)
+        state_id = f"state_{len(self.saved):03d}"
+        snapshot = SimpleNamespace(
+            state_uri=f"states/{state_id}/state.cfg.ic",
+            checksum=f"sha256:{state_id}",
+            valid_time=kwargs["valid_time"],
+            source_id=kwargs.get("source_id"),
+            cycle_id=kwargs.get("cycle_id"),
+            lead_hours=kwargs.get("lead_hours"),
+            model_package_version=kwargs.get("model_package_version"),
+            model_package_checksum=kwargs.get("model_package_checksum"),
+            original_shud_filename=kwargs.get("original_shud_filename"),
+        )
+        return SimpleNamespace(state_id=state_id, status="created", snapshot=snapshot)
+
+    def run_qc(self, state_id: str) -> bool:
+        self.qc_runs.append(state_id)
+        return True
+
+
+def _round_trip_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """`_run_shud_dirs` in the geometry the publish gate probes.
+
+    `save_state_for_run` looks for `<workspace>/runs/<run_id>/output`, so the
+    round-trip has to run the solve into exactly that directory instead of the
+    flat `workspace/output` the other runtime tests use.
+    """
+
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "runs" / _manifest()["run_id"] / "output"
+    log_dir = workspace / "logs"
+    log_dir.mkdir(parents=True)
+    cfg_path = workspace / "input" / "demo.cfg.para"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text(
+        "START_TIME = 2026-05-01T00:00:00Z\n"
+        "END_TIME = 2026-05-04T00:00:00Z\n"
+        f"OUTPUT_DIR = {output_dir}\n"
+        "MODEL_OUTPUT_INTERVAL = 1440\n"
+        "SEGMENT_COUNT = 2\n"
+        "INIT_MODE = 1\n",
+        encoding="utf-8",
+    )
+    return workspace, output_dir, log_dir, cfg_path
+
+
+def _round_trip_run_context() -> Any:
+    """The publish-side context for the run `_manifest()` describes."""
+
+    from datetime import UTC, datetime
+
+    from packages.common.state_cli import StateRunContext
+
+    manifest = _manifest()
+    return StateRunContext(
+        run_id=manifest["run_id"],
+        model_id=manifest["model"]["model_id"],
+        end_time=datetime(2026, 5, 4, tzinfo=UTC),
+        output_uri=None,
+        source_id=manifest["source_id"],
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        model_package_version=manifest["model"]["model_package_uri"],
+        model_package_checksum="package-sha-1",
+    )
+
+
+def test_writer_manifest_round_trips_through_the_publish_gate(tmp_path: Path) -> None:
+    """#1325 A11(a): a real captured checkpoint tree passes the gate and publishes."""
+
+    from packages.common.state_cli import save_state_for_run
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _round_trip_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    manager = _RoundTripStateManager(LocalObjectStore(tmp_path / "object-store", "s3://nhms"))
+    result = save_state_for_run(
+        manifest["run_id"],
+        manager=manager,
+        run_context=_round_trip_run_context(),
+        workspace_root=workspace,
+    )
+
+    from datetime import UTC, datetime
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["valid_time"] == datetime(2026, 5, 1, 12, tzinfo=UTC)
+    assert manager.saved[0]["lead_hours"] == 12
+    assert manager.saved[0]["original_shud_filename"] == "demo.f012.cfg.ic.update"
+    assert manager.qc_runs == [result["state_id"]]
+
+
+def test_zero_hour_writer_manifest_round_trips_through_the_gate_without_slurm_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1325 A11(b): the fallback lane round-trips off Slurm, null job facts and all.
+
+    Outside a Slurm allocation the writer records `slurm_job_id` and
+    `array_task_id` as null; G3 requires the KEYS, not the values, so this also
+    pins the null branch the Slurm-env provenance anchor cannot reach.
+    """
+
+    from packages.common.state_cli import save_state_for_run
+
+    for name in ("SLURM_ARRAY_JOB_ID", "SLURM_JOB_ID", "SLURM_ARRAY_TASK_ID"):
+        monkeypatch.delenv(name, raising=False)
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _round_trip_dirs(tmp_path)
+    manifest = _manifest()  # no `state_checkpoint_hours`: the analysis / short-horizon lane
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    provenance = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )["provenance"]
+    assert provenance["slurm_job_id"] is None
+    assert provenance["array_task_id"] is None
+    assert provenance["requested_checkpoint_hours"] == []
+
+    manager = _RoundTripStateManager(LocalObjectStore(tmp_path / "object-store", "s3://nhms"))
+    result = save_state_for_run(
+        manifest["run_id"],
+        manager=manager,
+        run_context=_round_trip_run_context(),
+        workspace_root=workspace,
+    )
+
+    from datetime import UTC, datetime
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["valid_time"] == datetime(2026, 5, 4, tzinfo=UTC)
+    assert manager.saved[0]["original_shud_filename"] == "demo.cfg.ic.update"
+    assert manager.qc_runs == [result["state_id"]]
+
+
 def test_run_shud_recovery_records_cfg_read_failure_for_every_missing_hour(tmp_path: Path) -> None:
     """#1315 r3-audit: an unreadable cfg aborts recovery without changing the contract.
 

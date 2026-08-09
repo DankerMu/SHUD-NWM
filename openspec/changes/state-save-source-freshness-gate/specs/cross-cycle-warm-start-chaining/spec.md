@@ -152,9 +152,9 @@ publishes.
 #### Scenario: Manifest-declared checkpoints must all be present and intact
 - **WHEN** the manifest declares N checkpoint entries and fewer than N referenced files exist,
   or a declared entry carries no `checksum`, or an entry is malformed (not a dict, missing
-  `relative_path`/`valid_time`, or referencing a non-regular file), or the `checkpoints` value
-  itself is not a list, or a referenced file's content no longer matches its declared
-  `checksum`
+  `relative_path`/`valid_time`, carrying an unparseable `valid_time`, or referencing a
+  non-regular file), or the `checkpoints` value itself is not a list, or a referenced file's
+  content no longer matches its declared `checksum`
 - **THEN** the publish is rejected with `STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE` (missing or
   malformed declarations — the declared set is the raw `checkpoints` array, never the loader's
   silently-filtered view) respectively `STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH` (content

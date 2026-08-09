@@ -176,6 +176,14 @@ def save_state_for_run(
             _checkpoint_with_header_time(checkpoint, run)
             for checkpoint in _load_state_checkpoint_manifest(source.manifest_path)
         ]
+        if not checkpoints:
+            # The gate verified a non-empty declared set, so an empty parse means
+            # the tree changed under us between the hash and this read. Answer
+            # with the typed reason rather than an IndexError off ``saved[0]``.
+            raise StateManagerError(
+                f"{STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE}: manifest {source.manifest_path} declared checkpoint "
+                "artifacts that no longer resolve at publish time."
+            )
     else:
         ic_file = source.output_root / str(source.final_ic["relative_path"])
         checkpoints = [
@@ -591,6 +599,9 @@ class _VerifiedStateSource:
     manifest_path: Path
     # Set only on the fallback lane (zero declared and zero requested
     # checkpoints); ``None`` means "publish the manifest's checkpoint entries".
+    # Its ``relative_path`` is the NORMALIZED string G5 hashed, never the raw
+    # manifest value: publish must open the byte-identical file the checksum was
+    # taken over (a whitespace twin next to it is a different file).
     final_ic: dict[str, Any] | None
 
 
@@ -684,15 +695,16 @@ def _verify_state_source_root(output_root: Path, run: StateRunContext) -> _Verif
             f"{requested_hours} but captured none."
         )
     final_ic = payload.get("final_ic")
-    if not isinstance(final_ic, Mapping) or not str(final_ic.get("relative_path") or "").strip():
+    final_ic_path = str(final_ic.get("relative_path") or "").strip() if isinstance(final_ic, Mapping) else ""
+    if not final_ic_path:
         raise StateManagerError(
             f"{STATE_SAVE_SOURCE_FINAL_IC_MISSING}: manifest {manifest_path} names no final IC to publish."
         )
-    _verify_final_ic_artifact(output_root, manifest_path, final_ic)
+    _verify_final_ic_artifact(output_root, manifest_path, final_ic, final_ic_path)
     return _VerifiedStateSource(
         output_root=output_root,
         manifest_path=manifest_path,
-        final_ic=dict(final_ic),
+        final_ic={**final_ic, "relative_path": final_ic_path},
     )
 
 
@@ -744,8 +756,15 @@ def _verify_declared_checkpoints(output_root: Path, manifest_path: Path, raw_che
             unusable.append(f"entry {index} (not an object)")
             continue
         relative_path = str(raw.get("relative_path") or "").strip()
-        if not relative_path or not raw.get("valid_time"):
+        valid_time = raw.get("valid_time")
+        if not relative_path or not valid_time:
             unusable.append(f"entry {index} (missing relative_path/valid_time)")
+            continue
+        if not _parseable_checkpoint_valid_time(valid_time):
+            # Presence is not usability: an unparseable stamp is a malformed
+            # declaration here, and letting it reach the loader turns a typed
+            # reject into a bare ``ValueError`` out of `_parse_time`.
+            unusable.append(f"entry {index} ({relative_path}, unparseable valid_time)")
             continue
         state = _declared_artifact_state(output_root, raw, relative_path)
         if state == "checksum_mismatch":
@@ -764,8 +783,29 @@ def _verify_declared_checkpoints(output_root: Path, manifest_path: Path, raw_che
         )
 
 
-def _verify_final_ic_artifact(output_root: Path, manifest_path: Path, final_ic: Mapping[str, Any]) -> None:
-    relative_path = str(final_ic["relative_path"]).strip()
+def _parseable_checkpoint_valid_time(value: Any) -> bool:
+    """Answer whether the loader could turn ``value`` into a UTC datetime.
+
+    Deliberately runs the loader's OWN conversion rather than a lookalike: the
+    gate's job is to reject exactly what would break downstream, so the two must
+    not be able to disagree.
+    """
+
+    try:
+        _ensure_utc(_parse_time(str(value)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    return True
+
+
+def _verify_final_ic_artifact(
+    output_root: Path,
+    manifest_path: Path,
+    final_ic: Mapping[str, Any],
+    relative_path: str,
+) -> None:
+    """Hash the final IC at ``relative_path`` — the same string publish will open."""
+
     state = _declared_artifact_state(output_root, final_ic, relative_path)
     if state == "checksum_mismatch":
         raise _StateSourceRejection(
@@ -887,7 +927,13 @@ def _read_limited_text_no_follow(path: Path, *, max_bytes: int, label: str) -> s
 
 
 def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStore) -> Path:
-    """Resolve ``hydro_run.output_uri`` for either a run output directory or file."""
+    """Resolve ``hydro_run.output_uri`` to its local path under the object store.
+
+    Both key shapes still resolve (the ``runs/<run_id>/output`` prefix itself and
+    a deeper object key), but the sole caller — `_state_output_roots` — keeps
+    only directories: #1325 retired the file-shaped output root from the publish
+    path, so a deeper key resolves and is then dropped rather than searched.
+    """
 
     if not run.output_uri:
         raise StateManagerError(f"hydro_run {run.run_id} has no output_uri.")

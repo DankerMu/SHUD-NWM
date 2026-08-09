@@ -2206,12 +2206,13 @@ def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_pa
     ``workers/shud_runtime`` now writes top-level ``observed_header_minutes``,
     ``recovery_outcomes``, ``provenance`` and ``final_ic`` (#1325) plus a
     per-entry ``provenance`` marker into ``state_checkpoints.json``.
-    ``_load_state_checkpoint_manifest`` is the only production reader of that
-    file, so the two shapes must parse to identical checkpoints — the
-    diagnostics payload asserted here is the FULL runtime shape, not a subset
-    of it. The loader's parse semantics also stay checksum-blind: verification
-    belongs to the admission gate, which is why these fake checksums still
-    parse.
+    ``_load_state_checkpoint_manifest`` is the reader that turns that file into
+    published checkpoints (#1325 added a second reader, the admission gate,
+    which judges the RAW array), so the two shapes must parse to identical
+    checkpoints — the diagnostics payload asserted here is the FULL runtime
+    shape, not a subset of it. The loader's parse semantics also stay
+    checksum-blind: verification belongs to the gate, which is why these fake
+    checksums still parse.
     """
 
     entries = [
