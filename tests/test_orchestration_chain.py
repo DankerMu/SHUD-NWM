@@ -12492,3 +12492,182 @@ def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path
     # No second durable row was created for the key.
     rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
     assert len(rows) == 1
+
+
+# --- #1202: fail-closed cycle-stage terminal handling -----------------------
+
+
+def _seed_other_pass_reservation(repository: FakeCycleRepository, *, stage: StageDefinition, key: str) -> None:
+    """Seed the reserve gate with ANOTHER pass's live reservation for ``key``.
+
+    Geometry note (#1202 D5.1): a reservation row that carries THIS cycle's
+    ``run_id``/``cycle_id`` is intercepted by ``_find_existing_stage_job`` (which
+    prefers non-terminal per-cycle job rows) and resumed as our own job, so the
+    reserve gate is never reached. The row below therefore collides only on the
+    ``idempotency_key`` — the state ``_reserve_cycle_stage`` consults — while
+    carrying a foreign ``run_id``/``cycle_id`` (invisible to the per-cycle job
+    query) and ``model_id=None`` (invisible to the ``PIPELINE_ALREADY_ACTIVE``
+    preflight, which probes active pipelines per basin ``model_id``). That is
+    exactly the split state a concurrent cohort pass leaves behind.
+    """
+
+    repository.jobs[f"other_pass_{stage.stage}"] = {
+        "job_id": f"other_pass_{stage.stage}",
+        "run_id": "cycle_gfs_2026050100_other_pass",
+        "cycle_id": "gfs_2026050100_other_pass",
+        "job_type": stage.job_type,
+        "model_id": None,
+        "stage": stage.stage,
+        "status": "running",
+        "slurm_job_id": "90099",
+        "idempotency_key": key,
+        "submitted_at": "2026-05-01T00:00:00Z",
+    }
+
+
+def _forecast_skip_cycle_geometry(
+    tmp_path: Path,
+) -> tuple[ForecastOrchestrator, FakeCycleRepository, FakeCycleSlurmClient, str]:
+    """#1164 shape: convert/forcing submit, then the forecast stage is skipped."""
+
+    from services.orchestrator.chain import _cycle_orchestration_run_id
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    forecast_stage = next(stage for stage in M3_STAGES if stage.stage == "forecast")
+    run_id = _cycle_orchestration_run_id("gfs", _dt("2026-05-01T00:00:00Z"), _basins(2))
+    key = f"{run_id}:{forecast_stage.stage}"
+    _seed_other_pass_reservation(repository, stage=forecast_stage, key=key)
+    return orchestrator, repository, client, key
+
+
+def test_duplicate_submission_skip_terminates_cycle_without_downstream_stages(tmp_path: Path) -> None:
+    """AC1/AC2 (#1202): a reserve-gate skip ends the cycle on its own terminal.
+
+    Pre-change the skip status matched none of the loop's break sets, so the
+    cycle advanced past the un-submitted forecast stage and closed as the
+    orchestrator's ``final_pipeline_status`` (literal ``"complete"`` under this
+    harness) — a member of ``TERMINAL_PIPELINE_SUCCESS_STATUSES``.
+    """
+
+    orchestrator, repository, client, key = _forecast_skip_cycle_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    # Positive proof the reserve gate actually fired (guards against a false red
+    # from a geometry that never reached the skip path at all).
+    assert [skip["idempotency_key"] for skip in orchestrator.duplicate_submission_skips] == [key]
+    assert [event["status_to"] for event in repository.events if event["event_type"] == "submission_skipped"] == [
+        "skipped_duplicate_submission"
+    ]
+
+    assert result.status == "skipped_duplicate_submission"
+    assert [stage.stage for stage in result.stages] == ["convert", "forcing", "forecast"]
+    assert result.stages[-1].status == "skipped_duplicate_submission"
+    # No downstream stage of this cycle ran in this pass.
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
+    # The deferring pass does not fight the reservation-holding pass for the
+    # durable cycle row: the last write is the pre-submit forecast marker, not a
+    # success or failure terminal written by the skip.
+    assert repository.cycle_statuses[-1] == "forecast_running"
+
+
+def test_duplicate_submission_skip_publishes_no_successor_state(tmp_path: Path) -> None:
+    """AC2 (#1202): the skipped pass never reaches ``state_save_qc``.
+
+    The #1164 poisoning ran ``state_save_qc`` after a fully-skipped forecast and
+    published a successor state from the other pass's stale checkpoint.
+    """
+
+    orchestrator, repository, client, _key = _forecast_skip_cycle_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "state_save_qc" not in submitted_stages
+    assert "parse" not in submitted_stages
+    assert "publish" not in submitted_stages
+    assert "state_save_qc" not in {stage.stage for stage in result.stages}
+    assert "state_save_qc" not in {job.get("stage") for job in repository.jobs.values()}
+
+
+def test_duplicate_submission_skip_records_zero_submitted_and_zero_failed_span_counters(
+    tmp_path: Path,
+) -> None:
+    """AC3 (#1202): the skipped stage span records ``0/0``, and the D3 invariant holds.
+
+    Stage counters exist ONLY when a ``SchedulerPassTiming`` collector is bound
+    to the ContextVar (``scheduler_execution.execute_candidate_cohort`` does this
+    in production), so the collector is bound explicitly here — a bare
+    ``orchestrate_cycle`` cannot observe spans at all. Pre-change the skipped
+    stage fell into the counter ``else`` arm and recorded
+    ``failed_count == basin_count`` while the cycle reported success.
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    orchestrator, _repository, _client, _key = _forecast_skip_cycle_geometry(tmp_path)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1202skipab01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    evidence = timing.finalize_evidence(status=result.status)
+    spans_by_stage = {record["stage_name"]: record for record in evidence["stages"]}
+
+    assert spans_by_stage["forecast"]["basin_count"] == 2
+    assert spans_by_stage["forecast"]["submitted_count"] == 0
+    assert spans_by_stage["forecast"]["failed_count"] == 0
+    # D3 invariant: an all-basins-failed stage span forbids a success terminal.
+    for record in evidence["stages"]:
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]:
+            assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES, (
+                f"stage {record['stage_name']} recorded every entering basin as failed while the "
+                f"cycle terminal {result.status!r} is a pipeline success status"
+            )
+
+
+def test_unrecognized_stage_terminal_fails_cycle_closed_without_advancing(tmp_path: Path) -> None:
+    """Disclosed behaviour delta 2 (#1202): a ``reserved``-unbound row fails closed.
+
+    Reconcile keeps a reserved-but-unbound row ``reserved`` inside its grace
+    window; the resume path reads that row back verbatim (``reserved`` is not a
+    terminal job status and there is no ``slurm_job_id`` to poll), so the loop
+    sees a status with no dedicated branch. Pre-change it silently advanced to
+    the next stage; now the cycle ends as ``failed`` with an explicit code.
+    ``model_id=None`` keeps the seeded row out of the ``PIPELINE_ALREADY_ACTIVE``
+    preflight, which probes active pipelines per basin ``model_id``.
+    """
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    convert_stage = M3_STAGES[0]
+    assert convert_stage.stage == "convert"
+    repository.jobs["job_cycle_gfs_2026050100_convert"] = {
+        "job_id": "job_cycle_gfs_2026050100_convert",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": convert_stage.job_type,
+        "model_id": None,
+        "stage": convert_stage.stage,
+        "status": "reserved",
+        "slurm_job_id": None,
+        "idempotency_key": "cycle_gfs_2026050100:convert",
+        "submitted_at": "2026-05-01T00:00:00Z",
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [stage.stage for stage in result.stages] == ["convert"]
+    assert result.stages[-1].status == "reserved"
+    assert result.stages[-1].error_code == "UNRECOGNIZED_STAGE_STATUS"
+    assert "reserved" in (result.stages[-1].error_message or "")
+    assert client.submissions == []

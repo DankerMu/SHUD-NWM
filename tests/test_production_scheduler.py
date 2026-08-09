@@ -23141,6 +23141,72 @@ class FakeProductionOrchestrator:
         ]
 
 
+class DuplicateSubmissionSkipOrchestrator(FakeProductionOrchestrator):
+    """Cohort cycle whose ``forecast`` stage hit the reserve gate (#1202).
+
+    Mirrors what ``_run_cycle_chain`` returns post-fix: the stages that ran
+    before the gate (each with a real ``slurm_job_id``), then a
+    ``skipped_duplicate_submission`` stage with no Slurm job, and the dedicated
+    non-success cycle terminal. ``submitted_stages=()`` models the WHOLLY-skipped
+    pass; naming earlier stages models the mixed #1164 geometry.
+    """
+
+    def __init__(
+        self,
+        *,
+        submitted_stages: tuple[str, ...] = (),
+        skipped_stage: str = "forecast",
+        candidate_outcomes: tuple[dict[str, Any], ...] = (),
+        result_status: str = "skipped_duplicate_submission",
+    ) -> None:
+        super().__init__(candidate_outcomes=candidate_outcomes, result_status=result_status)
+        self.submitted_stages = submitted_stages
+        self.skipped_stage = skipped_stage
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, Any]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        stages: list[StageRunResult] = []
+        for stage in M3_STAGES:
+            if stage.stage in self.submitted_stages:
+                stages.append(
+                    StageRunResult(
+                        stage=stage.stage,
+                        job_type=stage.job_type,
+                        pipeline_job_id=f"job_{stage.stage}",
+                        slurm_job_id=f"slurm_{stage.stage}",
+                        status="succeeded",
+                    )
+                )
+                continue
+            if stage.stage == self.skipped_stage:
+                stages.append(
+                    StageRunResult(
+                        stage=stage.stage,
+                        job_type=stage.job_type,
+                        pipeline_job_id=f"job_{stage.stage}",
+                        slurm_job_id="",
+                        status="skipped_duplicate_submission",
+                        error_message=(
+                            "Skipped duplicate submission for "
+                            f"idempotency_key=cycle:{stage.stage}; candidate already in flight."
+                        ),
+                    )
+                )
+                break
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status=self.result_status,
+            stages=tuple(stages),
+            candidate_outcomes=self.candidate_outcomes,
+        )
+
+
 class FakeForcingProducer:
     def __init__(self, *, error: Exception | None = None, forcing_version_id: str | None = None) -> None:
         self.error = error
@@ -33280,3 +33346,92 @@ def test_identity_blocked_convergence_facts_survive_bounded_evidence_and_proofs(
         }
     )
     assert summary["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+
+
+# --- #1202: duplicate-submission skip on the evidence plane -----------------
+
+
+def test_duplicate_submission_skip_candidate_evidence_is_not_final_success(tmp_path: Path) -> None:
+    """Anchor 5(a) (#1202): a skipped cohort cycle must not read as candidate success.
+
+    Pre-change the skip status matched none of
+    ``_is_non_submitted_terminal_or_unavailable_status``'s patterns, so
+    ``final_candidate_success`` read ``True``, the candidate quality flag read
+    ``ok`` and the ``candidate_not_successful`` residual blocker was suppressed —
+    the silent-success hole simply relocated from the cycle to the artifact.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    forecast_stage = next(stage for stage in M3_STAGES if stage.stage == "forecast")
+    orchestrator = DuplicateSubmissionSkipOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+        ),
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    item = result.evidence["model_run_evidence"][0]
+    assert item["status"] == "skipped_duplicate_submission"
+    assert item["final_candidate_success"] is False
+    assert item["quality_states"]["candidate"]["quality_flag"] == "blocked"
+    assert [
+        blocker["code"]
+        for blocker in item["residual_blockers"]
+        if blocker.get("quality_flag") == "candidate_not_successful"
+    ] == ["CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"]
+    # AC4: retrievable skip evidence, projected from the returned PipelineResult.
+    assert item["duplicate_submission_skips"] == [
+        {
+            "stage": "forecast",
+            "job_type": forecast_stage.job_type,
+            "pipeline_job_id": "job_forecast",
+        }
+    ]
+
+
+def test_duplicate_submission_skips_key_is_scoped_to_cycle_derived_evidence_items(
+    tmp_path: Path,
+) -> None:
+    """Anchor 5(b) (#1202): the key is present-and-empty on cycle items only.
+
+    The OUTPUT_URI_UNAVAILABLE sibling is one of the non-cycle item shapes: it
+    never had a cycle result, so it MUST omit the key rather than carry a
+    fabricated empty list.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    submitted_model = _model("model_a", "basin_a")
+    submitted_model["resource_profile"] = {
+        **submitted_model["resource_profile"],
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+    }
+    orchestrator = FakeProductionOrchestrator(expose_object_store=False)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([submitted_model, _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    cycle_item = evidence_by_model["model_a"]
+    non_cycle_item = evidence_by_model["model_b"]
+    assert cycle_item["status"] == "complete"
+    assert cycle_item["duplicate_submission_skips"] == []
+    assert non_cycle_item["error_code"] == "OUTPUT_URI_UNAVAILABLE"
+    assert "duplicate_submission_skips" not in non_cycle_item
