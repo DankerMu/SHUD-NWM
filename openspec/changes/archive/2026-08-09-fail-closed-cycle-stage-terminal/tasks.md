@@ -234,6 +234,9 @@ Evidence floor:
   #1161 literal sweep; (e) DONE during review: #1322 filed for the
   nested `_retry_partial_array_stage` skip/ambiguous collapse
   (round-1 A-P1-1, verifier-CONFIRMED P1, pre-existing)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
-- [ ] 5.2 Merge; archive change (delta folds); loop-log line + audit;
-  close issue #1202
+- [x] 5.1 Chinese work summary + evidence posted (PR #1321 comment
+  5230372929); CI green on final head e1d6edc7 (run 31300622022)
+- [x] 5.2 Merged 2026-08-09; change archived (slurm-job-chain +1
+  requirement folded); loop-log line appended + evidence_check clean +
+  loop_log_audit (DECIDABLE lens-rotation covered by ADR 0003);
+  issue #1202 closed
