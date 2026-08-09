@@ -50,7 +50,10 @@ _CANONICAL_TIMING_STAGES = frozenset(
 # (``submit_result_ambiguous`` / ``reconcile_unverified``) shares the collapse
 # defect but cannot be deferred until its ``reconciling`` terminal is
 # first-class on the evidence/readiness planes (issue #1326). Widening
-# membership there needs no extra control-flow surface here.
+# membership is NOT text-only: the call site below routes every member to the
+# hardcoded ``skipped_duplicate_submission`` terminal, while the top-level door
+# routes the reconciliation family to ``reconciling`` — so a second member also
+# needs a status -> terminal mapping at the call site (issue #1326).
 NESTED_RETRY_DEFER_STATUSES = {"skipped_duplicate_submission"}
 
 AnalysisRunContext = _chain.AnalysisRunContext
@@ -374,7 +377,10 @@ def _skip_terminal_pipeline_result(
     Single construction shared by BOTH doors a reserve-gate deferral can arrive
     through: the top-level stage result (#1202) and a nested resubmission
     deferred inside ``_retry_partial_array_stage`` (#1322). Neither door writes
-    a durable cycle status — the reservation-holding pass owns cycle progress.
+    a cycle TERMINAL status — the reservation-holding pass owns cycle progress.
+    (The non-terminal pre-submit marker ``forecast_running`` may already have
+    been written durably before the reserve gate ran; that is a different
+    write.)
     ``stage_results`` legitimately differs between the two (a nested defer
     carries the earlier real stage entries); the terminal status and the
     candidate-outcome derivation do not.

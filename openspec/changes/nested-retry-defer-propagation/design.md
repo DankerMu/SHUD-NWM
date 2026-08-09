@@ -22,10 +22,16 @@ unchanged by this fix:
 
 Defer set constant: `NESTED_RETRY_DEFER_STATUSES =
 {"skipped_duplicate_submission"}` — module level in
-`chain_forecast_execution.py`, named as a SET deliberately: the D6
-follow-up widens membership (reconciliation-pending family) with zero
-extra control-flow surface once that family is evidence-plane
-first-class. Referenced by both the helper and the call-site routing.
+`chain_forecast_execution.py`, named as a SET deliberately for the D6
+follow-up's membership widening (reconciliation-pending family) once
+that family is evidence-plane first-class. Widening the set is NOT
+free of control-flow surface: the call-site routing hardcodes the
+skip terminal (`_skip_terminal_pipeline_result`), so widening also
+requires a status→terminal mapping at the call site (the top-level
+door routes the reconciliation family to `reconciling`, not the skip
+terminal) — that mapping belongs to #1326, not this change (round-1
+verifier A-P2-1). Referenced by both the helper and the call-site
+routing.
 
 ## D2. Helper-side change (`_retry_partial_array_stage`)
 
@@ -224,8 +230,10 @@ surface)
    with key `{run_id}:forecast:retry_1_retry_2` — the
    suffix-stripping `…_retry_2` form applies only on the
    accepted-submit master-row path, r3 P2-2). RED on master.
-3. **A3 reconciliation-family pins (GREEN both sides, THREE arms —
-   r2r1 finding 1)**: guards the defer set from silent widening
+3. **A3 reconciliation-family pins (THREE arms — r2r1 finding 1;
+   arms (i)/(ii) GREEN both sides, arm (iii) RED on master since the
+   constant is introduced by this change — round-1 verifier
+   C-note)**: guards the defer set from silent widening
    ahead of the D6 follow-up, exactly as A4 guards
    `submission_failed`. Arms:
    (i) nested `submit_result_ambiguous` on the accepted-submit repo
@@ -311,7 +319,12 @@ partial recognizers + quality-predicate treatment for the
 `reconciling` terminal (the #1202 template — today `reconciling`
 appears in ZERO recognizers, so even top-level reconciling cycles
 read `final_candidate_success: True`), THEN defer-set widening via
-`NESTED_RETRY_DEFER_STATUSES`. Tracked as issue #1326 (filed during
+`NESTED_RETRY_DEFER_STATUSES` **plus a status→terminal mapping at
+the call site** — the current routing hardcodes the skip terminal,
+so membership widening alone would mint
+`skipped_duplicate_submission` for a deferred reconciliation status
+(the wrong readiness bucket; round-1 verifier A-P2-1 constructed
+exactly this misroute). Tracked as issue #1326 (filed during
 this fixture's review; scribe-verified, including the cross-plane
 inconsistency `production_status_for("reconciling") == "failed"` vs
 top-level `final_candidate_success: True` in the same evidence file).

@@ -144,7 +144,29 @@ by anchor.
    implementer-measured, strictly more conservative, no
    silent-success hole opens. The shape is identical to a top-level
    skip's artifact geometry — no new readiness surface, but a real
-   per-candidate delta on both cohort members.
+   per-candidate delta on both cohort members. Pass-level counts
+   shift too (round-1 verifier B-P2-2): the deferring pass's
+   evidence artifact reads `failed_count` 1→0 and `partial_count`
+   1→2 vs master — the failed direction is NOT conservative in
+   isolation, and diverges from the DB (which retains the
+   first-pass failed row); mitigation: master's artifact trips two
+   readiness cardinality-mismatch acceptance errors in the real
+   validators (exactly the acceptance-error class the spec forbids
+   manufacturing), the deferred artifact validates clean.
+5. Cycle-status row regression (round-1 verifier B-P2-1): when the
+   SAME pass first writes a partial terminal (e.g.
+   `forcing_ready_partial`) and then enters the nested retry, the
+   unconditional pre-submit marker
+   (`chain_forecast_orchestrator_cycle.py:599-602`, written BEFORE
+   the reserve gate) downgrades the row to non-terminal
+   `forecast_running`, and after the defer nothing rewrites it —
+   master ended `parsed_partial` on that row. On the
+   production_contract plane this maps partial→running; if the
+   reservation holder crashes, the row parks at "running" where
+   master left "partial". Same residue family as the #1202
+   top-level precedent (disclosed there); net direction still
+   preferred over master, which lets the losing pass's
+   parse/publish chain overwrite rows the reservation holder owns.
 
 ## Non-goals
 

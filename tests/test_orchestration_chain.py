@@ -13023,8 +13023,15 @@ def test_nested_retry_deferred_stage_entry_carries_raw_skip_result(tmp_path: Pat
     assert forecast_entries[0].task_results == ()
     # Candidate-outcome accounting: the defer breaks before
     # ``_apply_array_progress``, so no forecast failure signal reaches the
-    # cohort — every candidate reads ``active`` (proposal delta 4).
-    assert [outcome["status"] for outcome in result.candidate_outcomes] == ["active", "active"]
+    # cohort — every candidate reads ``active`` with NO exclusion reason
+    # (proposal delta 4). The ``reason`` half is load-bearing: it is what
+    # catches a lost ``finally`` basin-cohort restore in
+    # ``_retry_partial_array_stage`` (the shrunken cohort leaves the dropped
+    # candidate ``active`` but tagged ``forcing_task_excluded``).
+    assert [(outcome["status"], outcome["reason"]) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
+    ]
 
 
 def test_nested_retry_defer_status_set_is_skip_only(tmp_path: Path) -> None:

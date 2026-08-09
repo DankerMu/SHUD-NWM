@@ -169,8 +169,9 @@ Deviations (recorded):
   worse than master
 - [x] 2.3 Anchors A1/A2/A5 red-proofed on the pre-change tree
   (`git archive` extraction protocol) + A3 pins (three arms:
-  ambiguous, reconcile_unverified, set-membership) and A4 pin green
-  both sides + A6 existing retry regressions green
+  ambiguous and reconcile_unverified green both sides;
+  set-membership RED on master — the constant is new) and A4 pin
+  green both sides + A6 existing retry regressions green
 - [x] 2.4 Evidence floor suites + ruff green; implementer reports
   deviations explicitly ("no deviations" stated if none)
 
