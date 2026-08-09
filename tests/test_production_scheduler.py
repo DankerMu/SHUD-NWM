@@ -33435,3 +33435,98 @@ def test_duplicate_submission_skips_key_is_scoped_to_cycle_derived_evidence_item
     assert cycle_item["duplicate_submission_skips"] == []
     assert non_cycle_item["error_code"] == "OUTPUT_URI_UNAVAILABLE"
     assert "duplicate_submission_skips" not in non_cycle_item
+
+
+# --- #1322: nested-retry defer on the evidence plane ------------------------
+
+
+class ReplayedCyclePipelineOrchestrator(FakeProductionOrchestrator):
+    """Replays a PipelineResult produced by a REAL ``ForecastOrchestrator`` cycle.
+
+    The #1322 evidence anchor must be driven from a real deferred cycle: the
+    ``duplicate_submission_skips`` projection surfaces ANY skip-status stage
+    entry, so a hand-built ``PipelineResult`` is green on master and vacuous.
+    Only the transport into the scheduler is faked here.
+    """
+
+    def __init__(self, result: PipelineResult, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.replayed_result = result
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, Any]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        return self.replayed_result
+
+
+def _deferred_nested_retry_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the #1322 A1 geometry for real and return its ``PipelineResult``."""
+
+    from tests.test_orchestration_chain import (
+        _nested_retry_basins,
+        _nested_retry_skip_geometry,
+    )
+
+    cycle = "2026052106"
+    cycle_time = "2026-05-21T06:00:00Z"
+    basins = _nested_retry_basins(cycle=cycle, cycle_time=cycle_time, model_ids=("model_a", "model_b"))
+    orchestrator, _repository, _client, cohort, _retry_job_id, _retry_key = _nested_retry_skip_geometry(
+        tmp_path / "nested_retry_cycle",
+        basins=basins,
+        cycle=cycle,
+        cycle_time=cycle_time,
+    )
+    return orchestrator.orchestrate_cycle("gfs", cycle, cohort)
+
+
+def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_path: Path) -> None:
+    """A5 (#1322): the nested defer is visible per-candidate, from a REAL cycle.
+
+    Master's collapse advances the cycle on a partial terminal and reaches
+    ``_apply_array_progress``, so the genuinely-failed basin's evidence item
+    reads ``failed`` with ``reason: forecast_task_failed`` and no skip is
+    projected at all. Post-fix the deferred cycle carries the skip stage entry,
+    every cohort candidate outcome reads ``active``, and the per-candidate
+    status becomes the cycle terminal (proposal delta 4). ``final_candidate_
+    success`` is False on both sides — the delta is the loss of the
+    per-candidate failure reason, not a success/blocked flip.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    forecast_stage = next(stage for stage in M3_STAGES if stage.stage == "forecast")
+    cycle_result = _deferred_nested_retry_cycle_result(tmp_path)
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    # The replayed cycle really is the deferred one (not a partial terminal).
+    assert cycle_result.status == "skipped_duplicate_submission"
+    assert [outcome["status"] for outcome in cycle_result.candidate_outcomes] == ["active", "active"]
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    expected_skip = [
+        {
+            "stage": "forecast",
+            "job_type": forecast_stage.job_type,
+            "pipeline_job_id": "job_cycle_gfs_2026052106_forecast_retry_1",
+        }
+    ]
+    for model_id in ("model_a", "model_b"):
+        assert items[model_id]["duplicate_submission_skips"] == expected_skip
+        assert items[model_id]["status"] == "skipped_duplicate_submission"
+        assert items[model_id]["final_candidate_success"] is False
+    # The genuinely-failed basin: no per-candidate failure signal survives the
+    # defer (master read ``failed`` / ``FORECAST_TASK_FAILED`` here).
+    assert items["model_b"]["candidate_outcome"]["status"] == "active"
+    assert items["model_b"]["candidate_outcome"].get("reason") is None
+    assert items["model_b"]["error_code"] == "CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"
