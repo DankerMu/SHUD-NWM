@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -188,10 +189,13 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
 
                     if stage_results and len(stage_results) > stage_index:
                         stage_results[stage_index] = result
+                        result_slot = stage_index
                     elif stage_results and stage_results[-1].stage == result.stage:
                         stage_results[-1] = result
+                        result_slot = len(stage_results) - 1
                     else:
                         stage_results.append(result)
+                        result_slot = len(stage_results) - 1
 
                     if result.status in {"failed", "submission_failed", "reservation_lost", "permanently_failed"}:
                         retry_attempts += 1
@@ -230,6 +234,27 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         )
                         break
 
+                    if result.status == "skipped_duplicate_submission":
+                        # #1202 fail-closed: the reserve gate proved another pass
+                        # holds this candidate+stage in flight, so THIS pass did
+                        # no work for the stage. Terminate the cycle on a
+                        # dedicated non-success terminal — never a success status
+                        # (which would let downstream stages run against the other
+                        # pass's unfinished output) and never the failure terminal
+                        # (retry adjudication would mint a fresh idempotency key
+                        # and really double-submit against the live job, or
+                        # permanently fail the other pass's row). The durable
+                        # cycle status is deliberately NOT written here: the
+                        # reservation-holding pass owns the cycle's progress.
+                        pipeline_result = PipelineResult(
+                            context.run_id,
+                            context.cycle_id,
+                            "skipped_duplicate_submission",
+                            tuple(stage_results),
+                            _candidate_outcomes(context, final_status="skipped_duplicate_submission"),
+                        )
+                        break
+
                     if stage.is_array and aggregation is not None and aggregation.status == "partially_failed":
                         retried = self._retry_partial_array_stage(
                             stage,
@@ -242,6 +267,39 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         if retried is not None:
                             result, aggregation = retried
                             stage_results[-1] = result
+                            result_slot = len(stage_results) - 1
+
+                    # Fail-closed tail (#1202): advancement is an ALLOWLIST —
+                    # the pipeline success statuses plus ``partially_failed``
+                    # (whose ``had_partial`` mechanics are handled above and in
+                    # ``_after_cycle_stage_terminal``). Every other status ends
+                    # the cycle instead of silently advancing past a stage whose
+                    # submission state is unknown (e.g. a ``reserved``-unbound
+                    # row read back by the resume path inside the reconcile
+                    # grace window).
+                    if (
+                        result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES
+                        or result.status == "partially_failed"
+                    ):
+                        break
+
+                    stage_results[result_slot] = replace(
+                        result,
+                        error_code="UNRECOGNIZED_STAGE_STATUS",
+                        error_message=(
+                            f"Stage {stage.stage} returned unrecognized terminal status "
+                            f"{result.status!r}"
+                            + (f" (stage error_code={result.error_code})" if result.error_code else "")
+                            + "; the cycle failed closed instead of advancing."
+                        ),
+                    )
+                    pipeline_result = PipelineResult(
+                        context.run_id,
+                        context.cycle_id,
+                        "failed",
+                        tuple(stage_results),
+                        _candidate_outcomes(context, final_status="failed"),
+                    )
                     break
 
             # Populate stage-span counters from the final ``StageRunResult`` for
@@ -336,6 +394,11 @@ def _populate_stage_span_counters(
       the same as ``succeeded`` for ``submitted_count`` because Slurm did dispatch
       every basin (the partial failure is per-basin task outcome, tracked
       separately in ``task_results``).
+    - ``skipped_duplicate_submission`` (#1202) — the reserve gate proved another
+      pass owns this candidate+stage, so THIS pass neither dispatched nor failed
+      any basin: ``submitted_count == 0`` AND ``failed_count == 0``. Counting the
+      entering basins as failed (the pre-#1202 ``else`` behaviour) would report a
+      deferral as an all-basin failure.
     - Everything else (``failed`` / ``submission_failed`` / ``permanently_failed``
       / ``cancelled`` / etc.) — none of the entering basins reached a successful
       terminal state at this stage.
@@ -344,6 +407,9 @@ def _populate_stage_span_counters(
     span.set_basin_count(basin_count_at_entry)
     if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES or result.status == "partially_failed":
         span.set_submitted_count(basin_count_at_entry)
+        span.set_failed_count(0)
+    elif result.status == "skipped_duplicate_submission":
+        span.set_submitted_count(0)
         span.set_failed_count(0)
     else:
         span.set_submitted_count(0)

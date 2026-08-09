@@ -563,6 +563,7 @@ def _candidate_execution_evidence(
 ) -> list[dict[str, Any]]:
     stage_names = [stage.stage for stage in result.stages]
     stage_statuses = [_stage_run_evidence(stage) for stage in result.stages]
+    duplicate_submission_skips = _pipeline_result_duplicate_submission_skips(result)
     slurm_submit_called = _pipeline_result_slurm_submit_called(result)
     pipeline_status_write = _pipeline_result_pipeline_status_write(result)
     pipeline_event_write = _pipeline_result_pipeline_event_write(result)
@@ -582,8 +583,30 @@ def _candidate_execution_evidence(
             pipeline_event_write=pipeline_event_write,
             stage_names=stage_names,
             stage_statuses=stage_statuses,
+            duplicate_submission_skips=duplicate_submission_skips,
         )
         for candidate in candidates
+    ]
+
+
+def _pipeline_result_duplicate_submission_skips(result: PipelineResult) -> list[dict[str, Any]]:
+    """Project reserve-gate skips (#1202) out of the cohort's cycle result.
+
+    Derived from the RETURNED ``PipelineResult`` — never from the orchestrator's
+    in-memory ``duplicate_submission_skips`` attribute, which is shared across
+    ``ThreadPoolExecutor`` cohort workers (the #861 attribute-stash race). Scope
+    is therefore the cohort's cycle, fanned out to every candidate of the cohort
+    exactly like ``stage_statuses``.
+    """
+
+    return [
+        {
+            "stage": getattr(stage, "stage", None),
+            "job_type": getattr(stage, "job_type", None),
+            "pipeline_job_id": getattr(stage, "pipeline_job_id", None),
+        }
+        for stage in result.stages
+        if str(getattr(stage, "status", "") or "") == "skipped_duplicate_submission"
     ]
 
 
@@ -670,6 +693,7 @@ def _candidate_execution_evidence_item(
     pipeline_event_write: bool | str,
     stage_names: Sequence[str],
     stage_statuses: Sequence[Mapping[str, Any]],
+    duplicate_submission_skips: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     if outcome is None:
         status = result.status
@@ -717,6 +741,12 @@ def _candidate_execution_evidence_item(
         "mutation_occurred": mutation_occurred,
         "pipeline_run_id": result.run_id,
         "standard_chain_shape": stage_names,
+        # #1202 (AC4): retrievable reserve-gate skip evidence, cohort-scoped like
+        # ``stage_statuses``. Present (possibly empty) on every CYCLE-DERIVED
+        # item; the non-cycle item shapes (preflight/secret-manifest blocked,
+        # evidence-write blocked, forcing, output-uri) never had a cycle result
+        # and omit the key. Additive named field — no schema-version bump.
+        "duplicate_submission_skips": [dict(skip) for skip in duplicate_submission_skips],
         "qhh_script_invoked": False,
     }
     if candidate_pipeline_status_write is True:
