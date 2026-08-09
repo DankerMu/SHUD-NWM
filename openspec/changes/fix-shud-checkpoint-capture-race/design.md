@@ -42,8 +42,12 @@ equivalence the watcher capture asserts today.
   (days, tab-separated, `start_day + hour/24`); cfg mode rewrites `END_TIME`
   (`start_time + hours`, `" = "` separator). `OUTPUT_DIR` points at the
   scratch root in both modes.
-- `cfg_path` is rewritten in place and restored in `finally` — the published
-  workspace cfg is byte-identical after recovery regardless of outcome.
+- `cfg_path` is rewritten in place and restored in `finally`; the restore is
+  best-effort — on a restore-write failure the hour records
+  `cfg_restore_failed` (never masking its own outcome) and the workspace cfg
+  may retain the shortened horizon until the next `execute()` re-templates
+  it. The cfg never reaches the object store, so the exposure is
+  workspace-local.
 - Scratch root `workspace/state_checkpoint_recovery/f{hour:03d}/` is created
   with containment (`_ensure_directory(..., containment_root=workspace)`);
   copies go through `_read_staged_bytes`/`_write_staged_bytes` (no-follow,
@@ -83,8 +87,8 @@ equivalence the watcher capture asserts today.
   today is enforced only by `chain_manifests.py` setting
   `update_ic_step_minutes = min(checkpoint_hours)*60`. A misaligned
   configuration fails safe (gate discards, hard failure) both in the main run
-  and in recovery; the systemic guard is tracked as a follow-up issue, not in
-  this change.
+  and in recovery; the systemic guard is tracked as follow-up issue #1317,
+  not in this change.
 
 ## Downstream compatibility
 

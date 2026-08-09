@@ -37,7 +37,10 @@ Fixture level: expanded · Repair intensity: high · Project profile: NHMS
 - `state_cli.py` manifest consumption: `checkpoints` list shape per entry
   unchanged; extra keys ignored.
 - Published workspace cfg is byte-identical after recovery (restore in
-  `finally`).
+  `finally`; best-effort — a restore-write failure records
+  `cfg_restore_failed` for that hour instead of failing the run, leaving the
+  shortened-horizon cfg in the workspace until the next `execute()`
+  re-templates it).
 
 ## Must add/change
 

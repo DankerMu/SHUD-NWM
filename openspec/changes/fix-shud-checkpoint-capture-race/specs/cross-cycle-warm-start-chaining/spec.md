@@ -34,10 +34,11 @@ structural-completeness gates as a watcher capture.
 - **AND** the runtime's own in-process recovery rerun after a watcher miss is not a scheduled
   production run: it executes inside the same runtime invocation and Slurm task, confines the
   rerun solver's output to a scratch directory under the run workspace (while additionally
-  writing per-hour recovery logs into the run log directory, temporarily rewriting and
-  byte-identically restoring the run's staged cfg, and installing an accepted checkpoint into
-  `output/state_checkpoints/`), and creates no scheduler-visible run, candidate, or journal
-  entry
+  writing per-hour recovery logs into the run log directory, temporarily rewriting the run's
+  staged cfg and restoring it best-effort — a restore-write failure is recorded as that hour's
+  `cfg_restore_failed` outcome, never masking the hour's own result — and installing an
+  accepted checkpoint into `output/state_checkpoints/`), and creates no scheduler-visible run,
+  candidate, or journal entry
 - **AND** explicit short reruns remain allowed **only** as manual repair for already completed
   historical cycles that missed checkpoint capture (the in-process recovery rerun above is the
   sole automated exception, and it is not a scheduled production run).
@@ -54,7 +55,10 @@ structural-completeness gates as a watcher capture.
   minute matches the requested hour and its body passes structural completeness for the expected
   river count — the same gates as a watcher capture
 - **AND** the installed entry records `provenance` = `post_run_recovery`, and the run's staged
-  SHUD config is byte-identical after recovery to its pre-recovery content
+  SHUD config is byte-identical after recovery to its pre-recovery content (the restore is
+  best-effort: on a restore-write failure the run records `cfg_restore_failed` for that hour
+  instead of failing, and the workspace cfg may retain the shortened horizon until the next
+  `execute()` re-templates it)
 
 #### Scenario: A miss is a hard failure only after recovery also fails
 - **WHEN** the recovery rerun fails (non-zero exit, timeout, or a produced state that fails the
