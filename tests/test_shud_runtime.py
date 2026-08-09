@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,8 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.safe_fs import SafeFilesystemError
+from workers.shud_runtime import runtime as runtime_module
 from workers.shud_runtime.runtime import (
     DbFreeHydroRunRepository,
     SHUDRuntime,
@@ -199,14 +203,19 @@ def json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _runtime(tmp_path: Path, repository: FakeHydroRunRepository, shud_executable: Path | None = None) -> SHUDRuntime:
+def _runtime(
+    tmp_path: Path,
+    repository: FakeHydroRunRepository,
+    shud_executable: Path | None = None,
+    timeout_seconds: int = 30,
+) -> SHUDRuntime:
     config = SHUDRuntimeConfig(
         workspace_root=tmp_path / "workspace",
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
         shud_executable=str(shud_executable or Path("tests/mock_shud_omp.py").resolve()),
         output_interval_minutes=1440,
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
     )
     return SHUDRuntime(
         config=config,
@@ -2806,6 +2815,28 @@ def _run_shud_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return workspace, output_dir, log_dir, cfg_path
 
 
+def _run_shud_project_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """`_run_shud_dirs` for `command_style="shud_project"`.
+
+    Native SHUD reads a tab-separated `input/<project>/<project>.cfg.para` with
+    START/END expressed in DAYS and takes the output dir from `-o`, so the
+    recovery rerun rewrites a different key (`END`) with a different separator
+    than the cfg-style lane.
+    """
+
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "output"
+    log_dir = workspace / "logs"
+    log_dir.mkdir(parents=True)
+    cfg_path = workspace / "input" / "demo" / "demo.cfg.para"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text(
+        "START\t0\nEND\t3\nASCII_OUTPUT\t1\nSCR_INTV\t1440\nSEGMENT_COUNT\t2\n",
+        encoding="utf-8",
+    )
+    return workspace, output_dir, log_dir, cfg_path
+
+
 @pytest.mark.parametrize("stub", ["/bin/true", "/bin/false", "true", "false"])
 def test_run_shud_rejects_stub_executable_before_subprocess(
     tmp_path: Path,
@@ -2916,12 +2947,1428 @@ def test_run_shud_fails_when_requested_state_checkpoints_are_missing(tmp_path: P
     assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
     assert "f006" in exc_info.value.message
     assert "f012" in exc_info.value.message
+    # The solver writes `demo.cfg.ic` but never `demo.cfg.ic.update`, so the
+    # watcher saw no header at all: the trail must say so explicitly rather than
+    # render an empty list as a blank the reader can mistake for "not reported".
+    assert "observed cfg.ic.update header minutes: none" in exc_info.value.message
 
 
 def test_state_checkpoint_poll_seconds_defaults_to_fast_checkpoint_capture() -> None:
     manifest = _manifest()
 
     assert _state_checkpoint_poll_seconds(manifest) == pytest.approx(0.01)
+
+
+_FAST_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+# A solve so fast every intermediate in-place rewrite of cfg.ic.update is
+# invisible to the 0.01s watcher: only the FINAL header ever survives on disk.
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_STUCK_HEADER_SOLVER_STUB = '''
+import sys
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+# Broken solver: the ic.update header never reaches the requested f-hour,
+# regardless of the configured END_TIME.
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 1440.000000\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n",
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_SLOW_SOLVER_STUB = '''
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+state = output_dir / "demo.cfg.ic.update"
+# Normal-cadence solve: each in-place rewrite of cfg.ic.update stays alive for
+# 25x the 0.01s watcher poll, so the in-flight watcher samples f012 itself.
+for minute in (720.0, total_minutes):
+    state.write_text("2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % minute, encoding="utf-8")
+    time.sleep(0.25)
+print("The successful end.")
+'''
+
+
+_SILENT_RECOVERY_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+if "state_checkpoint_recovery" in output_dir.parts:
+    # Recovery rerun: exits 0 but writes NO state file (engine did not restart
+    # the integration).  Anything found in the scratch dir afterwards can only
+    # be residue from an earlier attempt.
+    print("The successful end.")
+    sys.exit(0)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_PROJECT_FAST_SOLVER_STUB = '''
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+output_dir = Path(argv[argv.index("-o") + 1])
+project = argv[-1]
+cfg = {}
+for line in (Path("input") / project / (project + ".cfg.para")).read_text(encoding="utf-8").splitlines():
+    parts = line.split("\\t")
+    if len(parts) < 2:
+        continue
+    cfg[parts[0].strip()] = parts[1].strip()
+total_minutes = (float(cfg["END"]) - float(cfg["START"])) * 1440.0
+output_dir.mkdir(parents=True, exist_ok=True)
+# Same race-losing behavior as _FAST_SOLVER_STUB, in native project mode: the
+# output dir comes from -o and the horizon from the tab-separated cfg in days.
+(output_dir / (project + ".cfg.ic.update")).write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_IC_DERIVED_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg_path = Path(sys.argv[1])
+cfg = _read_cfg(cfg_path)
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+# Integration that provably depends on the STAGED IC: the state body is carried
+# forward from demo.cfg.ic, so a rerun that ignored the staged IC (or read some
+# other file) cannot produce this body.
+ic_body = (cfg_path.parent / "demo.cfg.ic").read_text(encoding="utf-8").splitlines()[1:]
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n" % total_minutes + "\\n".join(ic_body) + "\\n",
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_FAILING_RECOVERY_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+if "state_checkpoint_recovery" in output_dir.parts:
+    sys.stderr.write("recovery leg crashed\\n")
+    sys.exit(1)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_HANGING_RECOVERY_SOLVER_STUB = '''
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+if "state_checkpoint_recovery" in output_dir.parts:
+    # Recovery leg hangs far past any sane budget.
+    time.sleep(300)
+    sys.exit(0)
+# Main solve burns most of the shared timeout budget, then leaves only the final
+# header behind (f012 missed).
+time.sleep(4.5)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_TRUNCATED_BODY_RECOVERY_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+if "state_checkpoint_recovery" in output_dir.parts:
+    # Recovery leg: rc == 0 and the header lands EXACTLY on the target minute,
+    # but the body stops one river row short (2 mesh + 1 river for a 2-river
+    # model) -- an interrupted/partially flushed write. Only the structure gate
+    # can tell this apart from a good state.
+    (output_dir / "demo.cfg.ic.update").write_text(
+        "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n" % total_minutes,
+        encoding="utf-8",
+    )
+    print("The successful end.")
+    sys.exit(0)
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_EXECUTE_FAST_SOLVER_STUB = '''
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+start = _parse(cfg["START_TIME"])
+end = _parse(cfg["END_TIME"])
+interval = int(cfg.get("MODEL_OUTPUT_INTERVAL", "1440"))
+segments = int(cfg.get("SEGMENT_COUNT", "1"))
+steps = int((end - start).total_seconds() // (interval * 60))
+# Real deliverable (verify_output reads it), same shape as tests/mock_shud_omp.py.
+rows = [",".join(["time"] + ["seg_%04d" % index for index in range(1, segments + 1)])]
+for step in range(steps):
+    stamp = (start + timedelta(minutes=step * interval)).isoformat()
+    rows.append(",".join([stamp] + ["%.3f" % (100.0 + index + step) for index in range(1, segments + 1)]))
+(output_dir / "demo.rivqdown").write_text("\\n".join(rows) + "\\n", encoding="utf-8")
+# ... plus the race-losing restart state: only the FINAL header survives.
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % ((end - start).total_seconds() / 60.0),
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+# A gate-valid f012 state (header 720, structurally complete for 2 rivers) whose
+# body is distinguishable from what the stubs produce in this run: it stands for
+# a previous attempt's leftovers in a reused run workspace.
+_STALE_SCRATCH_STATE = "2 2 720.000000\n1 0.7\n2 0.8\n1 0\n2 0\n"
+
+# A staged IC whose body values appear nowhere else in these fixtures, so a
+# recovered checkpoint carrying them can only have come from re-integrating it.
+_DISTINCTIVE_STAGED_IC = "2 2 0.000000\n1 0.4242\n2 0.8484\n1 0.1717\n2 0.3535\n"
+
+
+@pytest.mark.parametrize("command_style", ["cfg", "shud_project"])
+def test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun(
+    tmp_path: Path,
+    command_style: str,
+) -> None:
+    """#1315: a solve faster than the sampling watcher must not hard-fail.
+
+    The stub leaves only the final ic.update header on disk (the deterministic
+    limit of the race the real 1.659s xinanjiang run lost), so the in-flight
+    watcher can never capture f012. The post-run recovery rerun with END
+    shortened to 12h must derive the checkpoint deterministically.
+
+    Both command styles are exercised because they rewrite DIFFERENT cfg keys
+    with different separators and units (`END_TIME` ISO with ` = ` vs `END` in
+    days with a tab); production basins run the project style, so a cfg-only
+    test would leave the production lane unproven.
+
+    The scratch root is pre-seeded with a stale gate-valid state so this also
+    pins the positive half of fresh-scoping: a rerun that DOES produce a state
+    wins over the residue, byte for byte.
+    """
+
+    project_mode = command_style == "shud_project"
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_PROJECT_FAST_SOLVER_STUB if project_mode else _FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    dirs = _run_shud_project_dirs(tmp_path) if project_mode else _run_shud_dirs(tmp_path)
+    workspace, output_dir, log_dir, cfg_path = dirs
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    if project_mode:
+        manifest["runtime"]["command_style"] = "shud_project"
+    cfg_before = cfg_path.read_bytes()
+    stale_scratch = workspace / "state_checkpoint_recovery" / "f012"
+    stale_scratch.mkdir(parents=True)
+    (stale_scratch / "demo.cfg.ic.update").write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+    installed = checkpoint.read_text(encoding="utf-8")
+    assert installed.startswith("2 2 720.000000")
+    # Fresh rerun content, not the pre-seeded residue.
+    assert installed == "2 2 720.000000\n1 0.1\n2 0.2\n1 0\n2 0\n"
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    assert payload["checkpoints"][0]["provenance"] == "post_run_recovery"
+    # The diagnostic trail is present on the success path too, and names the lane
+    # that produced the checkpoint.
+    assert payload["observed_header_minutes"] == [4320.0]
+    assert payload["recovery_outcomes"] == {"12": "recovered"}
+    # The recovery rerun must not leak a shortened horizon into the shared cfg
+    # (byte identity, not just the key it rewrote).
+    assert cfg_path.read_bytes() == cfg_before
+    if project_mode:
+        assert "END\t3" in cfg_path.read_text(encoding="utf-8")
+    else:
+        assert "END_TIME = 2026-05-04T00:00:00Z" in cfg_path.read_text(encoding="utf-8")
+    # The in-process recovery rerun is not a scheduler-visible run: no run row,
+    # no status transition, no candidate was created for it.
+    assert repository.created == []
+    assert repository.statuses == []
+    assert repository.failures == []
+
+
+def test_run_shud_recovers_every_missing_hour_with_scoped_scratch_and_logs(tmp_path: Path) -> None:
+    """#1315: multi-hour miss recovers each hour in its own scratch dir.
+
+    Production chains request more than one checkpoint hour; a single-hour test
+    cannot show that the per-hour END rewrite, scratch scoping and log naming
+    stay independent across iterations.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    cfg_before = cfg_path.read_bytes()
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint_dir = output_dir / "state_checkpoints"
+    assert (checkpoint_dir / "demo.f006.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 360.000000")
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [6, 12]
+    assert payload["recovery_outcomes"] == {"6": "recovered", "12": "recovered"}
+    recovery_root = workspace / "state_checkpoint_recovery"
+    assert sorted(path.name for path in recovery_root.iterdir()) == ["f006", "f012"]
+    for hour in ("f006", "f012"):
+        assert (log_dir / f"state_checkpoint_recovery_{hour}.out.log").exists()
+        assert (log_dir / f"state_checkpoint_recovery_{hour}.err.log").exists()
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_recovered_checkpoint_body_derives_from_the_staged_ic(tmp_path: Path) -> None:
+    """#1315: the recovery rerun must re-integrate the SAME staged IC.
+
+    Every other stub synthesizes the state from END alone, so a rerun that
+    ignored the staged initial condition would still pass them. Here the stub's
+    output body is carried forward from `demo.cfg.ic`, whose values appear
+    nowhere else: a recovered body containing them is evidence that the rerun
+    consumed the run's own staged IC, which is what makes the recovered state
+    equivalent to the watcher-target state.
+    """
+
+    stub = tmp_path / "ic_derived_solver.py"
+    stub.write_text(_IC_DERIVED_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    (cfg_path.parent / "demo.cfg.ic").write_text(_DISTINCTIVE_STAGED_IC, encoding="utf-8")
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    installed = (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").read_text(encoding="utf-8")
+    assert installed == "2 2 720.000000\n" + "".join(_DISTINCTIVE_STAGED_IC.splitlines(keepends=True)[1:])
+
+
+def test_run_shud_recovery_repeats_deterministically(tmp_path: Path) -> None:
+    """#1315 AC1 repeat leg: 100 repeats of the race-losing solve, 0 misses.
+
+    The issue acceptance box asks for 100 consecutive recoveries because the
+    original defect was a probabilistic sampling race: a handful of green runs
+    would not distinguish "deterministic" from "lucky".
+    """
+
+    attempts = 100
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    recovered = 0
+    for attempt in range(attempts):
+        run_root = tmp_path / f"attempt{attempt}"
+        run_root.mkdir()
+        runtime = _runtime(run_root, repository, shud_executable=stub)
+        workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(run_root)
+        manifest = _manifest()
+        manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+        checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+        assert checkpoint.exists()
+        assert checkpoint.read_text(encoding="utf-8").startswith("2 2 720.000000")
+        recovered += 1
+
+    assert recovered == attempts
+
+
+def test_run_shud_checkpoint_capture_is_solve_speed_independent_slow_leg(tmp_path: Path) -> None:
+    """#1315 AC2 (slow leg): a normal-cadence solve is captured by the watcher.
+
+    Pairs with ``test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun``
+    (fast leg): both end with an f012 checkpoint on disk, which is what
+    "capture does not depend on solve speed" means. Here the intermediate
+    header state lives far longer than the poll interval, so the watcher wins
+    the sample and the recovery rerun must never be invoked at all — the
+    unchanged sibling behavior the fix must not disturb.
+    """
+
+    stub = tmp_path / "slow_solver.py"
+    stub.write_text(_SLOW_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+    assert checkpoint.read_text(encoding="utf-8").startswith("2 2 720.000000")
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    entry = payload["checkpoints"][0]
+    assert entry["lead_hours"] == 12
+    # Watcher capture: no recovery provenance, and no recovery scratch root.
+    assert "provenance" not in entry
+    assert not (workspace / "state_checkpoint_recovery").exists()
+    # The observed-header trail is DEDUPED, not one sample per poll: each header
+    # here survives 25 polls, so an append-every-sample trail would bury the two
+    # states the solver actually passed through under ~50 repeats.
+    assert payload["observed_header_minutes"] == [720.0, 4320.0]
+
+
+def test_run_shud_recovery_never_installs_stale_scratch_state(tmp_path: Path) -> None:
+    """#1315 File IO lane: a reused workspace's leftover state is not a checkpoint.
+
+    ``install_recovered`` reads a fixed filename out of the per-hour scratch
+    root, so a gate-valid ``demo.cfg.ic.update`` left there by an earlier
+    attempt is byte-indistinguishable from a fresh result. The scratch root
+    must be fresh-scoped before the rerun: here the rerun exits 0 without
+    writing any state, so the hour stays missing and the run fails hard rather
+    than publishing the stale state into the warm-start lineage.
+    """
+
+    stub = tmp_path / "silent_recovery_solver.py"
+    stub.write_text(_SILENT_RECOVERY_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    stale_scratch = workspace / "state_checkpoint_recovery" / "f012"
+    stale_scratch.mkdir(parents=True)
+    stale_state = stale_scratch / "demo.cfg.ic.update"
+    stale_state.write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+    cfg_before = cfg_path.read_bytes()
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    assert not stale_state.exists()
+    # "the rerun produced nothing" is distinguishable from every other lane.
+    assert "f012=gate_rejected(no_state)" in exc_info.value.message
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"12": "gate_rejected(no_state)"}
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_recovery_refuses_unclean_scratch_without_half_clearing_it(tmp_path: Path) -> None:
+    """#1315: refusing an unexpected scratch dir must be diagnosable, not destructive.
+
+    The scratch clear inspects a fixed filename's directory; if it meets
+    something it will not touch (a sub-directory, symlink, device node) it
+    refuses that hour. Refusing mid-iteration would already have unlinked the
+    entries it walked first — deleting exactly the evidence about what an
+    earlier attempt did, permanently, since the refusal repeats on every retry.
+    So: inspect everything first, unlink nothing, and say why in the per-hour
+    recovery log and the run's own failure message.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    # Sorted order puts a regular file on either side of the offending entry.
+    (scratch / "aaa.txt").write_text("first\n", encoding="utf-8")
+    (scratch / "leftover_subdir").mkdir()
+    (scratch / "zzz.txt").write_text("last\n", encoding="utf-8")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    # Nothing was removed: the refusal is a no-op on the directory.
+    assert (scratch / "aaa.txt").read_text(encoding="utf-8") == "first\n"
+    assert (scratch / "zzz.txt").read_text(encoding="utf-8") == "last\n"
+    assert (scratch / "leftover_subdir").is_dir()
+    assert "f012=skipped_scratch_unclean" in exc_info.value.message
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"12": "skipped_scratch_unclean"}
+    refusal_log = (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+    assert "leftover_subdir" in refusal_log
+    assert "not a regular file" in refusal_log
+
+
+def test_run_shud_recovery_refusal_log_failure_does_not_alter_the_hour_outcome(tmp_path: Path) -> None:
+    """#1315 r3-audit: writing the refusal reason is best-effort, like the manifest.
+
+    Same class as the manifest-masking lane: a diagnostics write that fails must
+    not be able to relabel (or escape from) the outcome it was only meant to
+    describe. The hour's verdict stays exactly `skipped_scratch_unclean` — not a
+    composed lane that reads as if the scratch dir failed twice.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    (scratch / "leftover_subdir").mkdir()
+
+    real_write = runtime_module._write_text_no_follow
+
+    def _fail_refusal_log_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoint_recovery_f012.err.log":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_refusal_log_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert not (log_dir / "state_checkpoint_recovery_f012.err.log").exists()
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"12": "skipped_scratch_unclean"}
+
+
+def test_run_shud_recovery_skips_only_the_hour_whose_cfg_write_fails(tmp_path: Path) -> None:
+    """#1315: an ENOSPC-class write failure on one hour must not abort the loop.
+
+    The no-follow cfg writer raises `SHUDRuntimeError`, not `OSError`, so a
+    failure here used to escape the recovery loop entirely: remaining hours were
+    never attempted, `state_checkpoints.json` was never written, and the caller
+    saw `WORKSPACE_WRITE_FAILED` instead of the stable
+    `STATE_CHECKPOINTS_MISSING` contract.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    cfg_before = cfg_path.read_bytes()
+
+    real_write = runtime_module._write_text_no_follow
+
+    def _fail_f006_cfg_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if "END_TIME = 2026-05-01T06:00:00Z" in content:
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_f006_cfg_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f006" in exc_info.value.message
+    assert "f012" not in exc_info.value.message.split("(")[0]
+    assert "f006=cfg_write_failed" in exc_info.value.message
+    checkpoint_dir = output_dir / "state_checkpoints"
+    # The other hour is still recovered, and the manifest is still written.
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
+    assert not (checkpoint_dir / "demo.f006.cfg.ic.update").exists()
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    assert payload["recovery_outcomes"] == {"6": "cfg_write_failed", "12": "recovered"}
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_recovery_contains_install_time_failure_to_that_hour(tmp_path: Path) -> None:
+    """#1315 CAND-1: an install-time IO failure must skip only its own hour.
+
+    The per-hour containment try used to end BEFORE `install_recovered`, so a
+    read/write failure inside the install step (ENOSPC, a racing unlink, an
+    unsafe path) escaped the recovery loop entirely: the remaining hours were
+    never attempted, `state_checkpoints.json` was never written, and the caller
+    saw the workspace error code instead of the stable
+    `STATE_CHECKPOINTS_MISSING` contract.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    cfg_before = cfg_path.read_bytes()
+
+    real_read = runtime_module._read_cfg_ic_header_minute
+
+    def _fail_f006_install_read(path: Path) -> float | None:
+        # Only the f006 install step reads this path; the watcher reads the
+        # solver's own output dir and every other hour is untouched.
+        if "state_checkpoint_recovery" in Path(path).parts and Path(path).parent.name == "f006":
+            raise SHUDRuntimeError("WORKSPACE_READ_FAILED", f"Failed to read staged file {path}: I/O error")
+        return real_read(path)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fail_f006_install_read)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f006=install_failed" in exc_info.value.message
+    checkpoint_dir = output_dir / "state_checkpoints"
+    # The other hour is still recovered and the manifest is still written.
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    assert payload["recovery_outcomes"] == {"6": "install_failed", "12": "recovered"}
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_recovery_contains_safe_filesystem_error_from_install(tmp_path: Path) -> None:
+    """#1315 CAND-1 (sibling class): raw safe-fs helpers raise `SafeFilesystemError`.
+
+    `install_recovered` calls `unlink_no_follow` directly on the gate-reject
+    path, and that helper raises `SafeFilesystemError` — neither an `OSError`
+    nor a `SHUDRuntimeError`. The containment tuple must catch the whole class,
+    otherwise this one lane still tears down the loop and the error code.
+    """
+
+    stub = tmp_path / "stuck_solver.py"
+    stub.write_text(_STUCK_HEADER_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    cfg_before = cfg_path.read_bytes()
+
+    real_unlink = runtime_module.unlink_no_follow
+
+    def _fail_checkpoint_unlink(path: Path, **kwargs: Any) -> None:
+        if Path(path).name.endswith(".f012.cfg.ic.update"):
+            raise SafeFilesystemError(f"Failed to unlink {path}: device busy", kind="io")
+        real_unlink(path, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "unlink_no_follow", _fail_checkpoint_unlink)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=install_failed" in exc_info.value.message
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["checkpoints"] == []
+    assert payload["recovery_outcomes"] == {"12": "install_failed"}
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_manifest_write_failure_does_not_mask_missing_checkpoints(tmp_path: Path) -> None:
+    """#1315 CAND-2: the diagnostics write must not decide the run's error code.
+
+    `state_checkpoints.json` is written right before the miss is raised. When
+    that write itself failed (full disk — exactly the condition that makes the
+    trail worth having), the workspace error escaped and the run was classified
+    as `WORKSPACE_WRITE_FAILED`, hiding the real `STATE_CHECKPOINTS_MISSING`
+    outcome from the failure classifier and every operator artifact.
+    """
+
+    stub = tmp_path / "stuck_solver.py"
+    stub.write_text(_STUCK_HEADER_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    real_write = runtime_module._write_text_no_follow
+
+    def _fail_manifest_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoints.json":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_manifest_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012" in exc_info.value.message
+    # The lost diagnostics are reported, not substituted for the outcome.
+    assert "state_checkpoints.json write failed" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "state_checkpoints.json").exists()
+
+
+def test_run_shud_manifest_write_failure_fails_the_run_when_nothing_is_missing(tmp_path: Path) -> None:
+    """#1315 r3-test-01: with nothing missing the manifest is a DELIVERABLE.
+
+    Complement of `..._does_not_mask_missing_checkpoints`: swallowing the
+    manifest-write failure is correct ONLY while a miss owns the error code.
+    When every requested hour was captured, `state_checkpoints.json` is what
+    cross-cycle warm-start chaining reads to find the checkpoint file, so the
+    write failure must still take the run down with the workspace error code —
+    a run that reports success while its checkpoint index is absent would hand
+    the next cycle a cold start with no failure receipt anywhere.
+
+    Slow-leg base (`_SLOW_SOLVER_STUB`): the watcher captures f012 itself, so
+    the miss branch is never entered and the manifest write is the only failure.
+    """
+
+    stub = tmp_path / "slow_solver.py"
+    stub.write_text(_SLOW_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    real_write = runtime_module._write_text_no_follow
+
+    def _fail_manifest_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoints.json":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_manifest_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    # The original workspace error is re-raised unchanged, not reclassified.
+    assert exc_info.value.error_code == "WORKSPACE_WRITE_FAILED"
+    assert "state_checkpoints.json" in exc_info.value.message
+    assert "STATE_CHECKPOINTS_MISSING" not in exc_info.value.message
+    # Evidence that this is the deliverable lane: the hour WAS captured by the
+    # watcher (no recovery involved), only its index write failed.
+    checkpoint_dir = output_dir / "state_checkpoints"
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
+    assert not (checkpoint_dir / "state_checkpoints.json").exists()
+    assert not (workspace / "state_checkpoint_recovery").exists()
+
+
+def test_run_shud_recovery_rejects_structurally_truncated_state(tmp_path: Path) -> None:
+    """#1315 r2-test-01: the recovery producer keeps the e13ae809 BODY gate.
+
+    The header gate alone cannot see a partially flushed state: here the rerun's
+    header lands exactly on the target minute (720) while the body is one river
+    row short. Installing it would publish a truncated restart state into the
+    warm-start lineage, which is precisely what `state_ic_structure_complete`
+    exists to stop — delete that clause from `install_recovered` and this test
+    turns green-to-red (the run would succeed with the truncated checkpoint).
+    """
+
+    stub = tmp_path / "truncated_body_solver.py"
+    stub.write_text(_TRUNCATED_BODY_RECOVERY_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012" in exc_info.value.message
+    # Partial-discard semantics: the candidate is unlinked, not left behind.
+    checkpoint_dir = output_dir / "state_checkpoints"
+    assert not (checkpoint_dir / "demo.f012.cfg.ic.update").exists()
+    assert sorted(path.name for path in checkpoint_dir.iterdir()) == ["state_checkpoints.json"]
+    # The rerun DID land on the target header: only the body gate rejected it.
+    assert "f012=gate_rejected(header=720)" in exc_info.value.message
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+    assert payload["checkpoints"] == []
+    assert payload["recovery_outcomes"] == {"12": "gate_rejected(header=720)"}
+
+
+def test_run_shud_recovery_records_cfg_restore_failure_alongside_its_own_outcome(tmp_path: Path) -> None:
+    """#1315 r2-test-04: a failed cfg restore is recorded, never masking the lane.
+
+    The restore runs in a `finally`, so it is the one write that can fail AFTER
+    the hour's real outcome is decided. It must ride along in the outcome trail
+    (the workspace is left with a shortened horizon and an operator has to know)
+    without changing what the recovery itself achieved.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    original_cfg = cfg_path.read_text(encoding="utf-8")
+
+    real_write = runtime_module._write_text_no_follow
+
+    def _fail_only_the_restore_write(path: Path, content: str, **kwargs: Any) -> Path:
+        # Content-discriminating: the shortened-horizon write and the manifest
+        # write still go through; only writing the ORIGINAL bytes back fails.
+        if content == original_cfg:
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_only_the_restore_write)
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint_dir = output_dir / "state_checkpoints"
+    # The recovery itself is unaffected: the checkpoint is installed and the run
+    # does not fail because the cfg could not be put back.
+    assert (checkpoint_dir / "demo.f012.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 720.000000")
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    # Restore runs before install, so it lands first in the composed outcome.
+    assert payload["recovery_outcomes"] == {"12": "cfg_restore_failed+recovered"}
+    # Evidence that the restore really did not happen: the workspace cfg still
+    # carries the shortened recovery horizon.
+    assert "END_TIME = 2026-05-01T12:00:00Z" in cfg_path.read_text(encoding="utf-8")
+
+
+def test_execute_with_recovered_checkpoint_creates_exactly_one_run(tmp_path: Path) -> None:
+    """#1315 r2-test-05: the recovery rerun is invisible to the run repository.
+
+    `run_shud` never touches the repository, so asserting "no rows" there is
+    tautological. `execute()` is the level where a run row, its status
+    progression and any failure are actually recorded: a recovery rerun must
+    stay an in-process implementation detail — one created run, the normal
+    status sequence, no failures — not a second scheduler-visible run.
+    """
+
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    stub = tmp_path / "execute_fast_solver.py"
+    stub.write_text(_EXECUTE_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    result = runtime.execute(manifest)
+
+    assert result.status == "succeeded"
+    assert len(repository.created) == 1
+    assert repository.created[0]["run_id"] == manifest["run_id"]
+    assert repository.statuses == ["created", "staged", "running", "succeeded"]
+    assert repository.failures == []
+    # The checkpoint really did come from the recovery lane in this run.
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    assert payload["checkpoints"][0]["provenance"] == "post_run_recovery"
+
+
+def test_run_shud_recovery_reports_non_zero_exit_lane(tmp_path: Path) -> None:
+    """#1315: an rc != 0 rerun leaves the hour missing and says so."""
+
+    stub = tmp_path / "failing_recovery_solver.py"
+    stub.write_text(_FAILING_RECOVERY_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=exit_1" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"12": "exit_1"}
+    assert "recovery leg crashed" in (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+
+
+def test_run_shud_main_solve_and_recovery_share_one_timeout_budget(tmp_path: Path) -> None:
+    """#1315: recovery reruns must not multiply the run's wall-time budget.
+
+    Pre-change `run_shud` could never exceed 1x `timeout_seconds`. A per-rerun
+    fresh timeout turns a hung engine into (1 + missing hours) x budget, and an
+    unbounded multiple of the configured timeout is not a bound at all -- it
+    risks a Slurm SIGKILL mid-loop that loses the outcome receipt entirely. The
+    main solve burns most of the budget here, so the hanging recovery leg may
+    only have the remainder.
+
+    Two hours are requested so BOTH halves of the bound are pinned
+    deterministically: the first missing hour still has budget and is killed at
+    the shared deadline (`timeout`), the second has none left and is never
+    spawned at all (`budget_exhausted`). A single-hour version could only assert
+    a disjunction, which passes even if the budget is silently per-hour.
+
+    Budget sizing (r3-corr-01): the 4.5s main solve leaves ~5.4s of the 10s
+    budget for f006, so the first hour keeps its `timeout` classification unless
+    a loaded runner overruns the main solve by more than 4.4s. A tighter budget
+    would flip f006 to `budget_exhausted` on a slow runner and turn the exact
+    outcome map into a flake. Discrimination is unaffected: a per-hour budget
+    still costs 4.5 + 10 + 10 = ~24.5s, far past the 15s bound.
+    """
+
+    budget = 10
+    stub = tmp_path / "hanging_recovery_solver.py"
+    stub.write_text(_HANGING_RECOVERY_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub, timeout_seconds=budget)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+
+    started = time.monotonic()
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+    elapsed = time.monotonic() - started
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    # Generous CI margin, still far below the pre-change 1 + 1 = 2 x budget.
+    assert elapsed < 1.5 * budget
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    # 4.5s main solve + ~5.4s remaining for f006 -> killed at the shared
+    # deadline; f012 then finds < 1s left and is skipped unspawned.
+    assert payload["recovery_outcomes"] == {"6": "timeout", "12": "budget_exhausted"}
+    assert payload["checkpoints"] == []
+    assert not (log_dir / "state_checkpoint_recovery_f012.out.log").exists()
+
+
+def test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers(tmp_path: Path) -> None:
+    """#1315: a recovery rerun whose header misses the target must be rejected
+    (e13ae809 gates preserved) and the hard failure must carry the observed
+    header trail for diagnosis."""
+
+    stub = tmp_path / "stuck_solver.py"
+    stub.write_text(_STUCK_HEADER_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    cfg_before = cfg_path.read_bytes()
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012" in exc_info.value.message
+    assert "observed cfg.ic.update header minutes: 1440" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    # Total miss: the manifest is still written, because this is exactly the run
+    # whose evidence an operator needs (production requests a single hour, so
+    # `captured` is empty here).
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["checkpoints"] == []
+    assert payload["observed_header_minutes"] == [1440.0]
+    assert payload["recovery_outcomes"] == {"12": "gate_rejected(header=1440)"}
+    # The rerun's OWN header is what makes this a solver bug report rather than
+    # "recovery never ran".
+    assert "f012=gate_rejected(header=1440)" in exc_info.value.message
+    # The manifest write SUCCEEDED here, so the failure message must carry no
+    # write-failure note: an unconditional note would send an operator chasing a
+    # disk problem that did not happen.
+    assert "state_checkpoints.json write failed" not in exc_info.value.message
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_writes_no_checkpoint_manifest_when_no_hours_are_requested(tmp_path: Path) -> None:
+    """#1315 r3-audit: the manifest guard keys on REQUESTED hours, not captured ones.
+
+    Complement of the total-miss row above. `write_manifest` was widened from
+    "nothing captured" to "no hours requested" so a total miss still leaves an
+    evidence file; the other half must not drift with it — a run that asked for
+    no checkpoints at all still publishes no `state_checkpoints/` artifact, so
+    no consumer starts seeing an empty checkpoint index where there was
+    previously no file to read.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    assert "state_checkpoint_hours" not in manifest["runtime"]
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    # The solve really ran (its restart state is on disk) — there is simply no
+    # checkpoint lane to record.
+    assert (output_dir / "demo.cfg.ic.update").exists()
+    assert not (output_dir / "state_checkpoints").exists()
+
+
+def test_run_shud_recovery_records_cfg_read_failure_for_every_missing_hour(tmp_path: Path) -> None:
+    """#1315 r3-audit: an unreadable cfg aborts recovery without changing the contract.
+
+    The recovery loop shortens the run's own cfg, so it must read it first. If
+    that read fails there is nothing to shorten for ANY hour — but the failure
+    belongs to the recovery lane, not to the caller: the run must still fail
+    with `STATE_CHECKPOINTS_MISSING`, still write the manifest, and say per hour
+    that recovery never got as far as spawning anything.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    cfg_before = cfg_path.read_bytes()
+
+    real_read = runtime_module._read_text_no_follow
+
+    def _fail_cfg_read(path: Path, **kwargs: Any) -> str:
+        if Path(path) == cfg_path:
+            raise SHUDRuntimeError("WORKSPACE_READ_FAILED", f"Failed to read staged file {path}: I/O error")
+        return real_read(path, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_text_no_follow", _fail_cfg_read)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f006=cfg_read_failed" in exc_info.value.message
+    assert "f012=cfg_read_failed" in exc_info.value.message
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"6": "cfg_read_failed", "12": "cfg_read_failed"}
+    # No hour got far enough to create a scratch dir or touch the cfg.
+    assert not (workspace / "state_checkpoint_recovery").exists()
+    assert cfg_path.read_bytes() == cfg_before
+
+
+def test_run_shud_recovery_records_install_write_failure_distinctly(tmp_path: Path) -> None:
+    """#1315 r3-audit: a failed publish of the recovered state is its own lane.
+
+    `install_recovered` writes the accepted candidate into
+    `output/state_checkpoints/`. That write is the one step that has already
+    passed the rerun, so "the engine produced nothing" and "the engine produced
+    a state we could not publish" must not collapse into the same outcome
+    string: the first is a solver bug report, the second is a workspace/disk
+    one. The hour stays missing either way.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    real_write = runtime_module._write_staged_bytes
+
+    def _fail_checkpoint_publish(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if Path(path).name == "demo.f012.cfg.ic.update":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_write_staged_bytes", _fail_checkpoint_publish)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=install_write_failed" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["checkpoints"] == []
+    assert payload["recovery_outcomes"] == {"12": "install_write_failed"}
+
+
+def test_run_shud_recovery_refuses_a_symlinked_scratch_entry_without_following_it(tmp_path: Path) -> None:
+    """#1315 r3-audit: a symlink in the scratch dir is refused, not resolved.
+
+    Sibling of the sub-directory refusal: a symlink is rejected one step
+    earlier, by the no-follow stat itself (`SafeFilesystemError`, not a
+    "not a regular file" verdict). Both the unlink pass and the rerun are
+    skipped for that hour, so a link planted in a reused workspace can neither
+    be followed to a file outside the workspace nor make that file disappear.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    outside_state = tmp_path / "outside_state.cfg.ic.update"
+    outside_state.write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    (scratch / "demo.cfg.ic.update").symlink_to(outside_state)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=skipped_scratch_unclean" in exc_info.value.message
+    # Neither followed (no checkpoint installed from the link target) nor
+    # unlinked (the link and its target both survive for diagnosis).
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    assert (scratch / "demo.cfg.ic.update").is_symlink()
+    assert outside_state.read_text(encoding="utf-8") == _STALE_SCRATCH_STATE
+    refusal_log = (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+    assert "not safely inspectable" in refusal_log
+
+
+def test_run_shud_recovery_refuses_when_a_scratch_entry_cannot_be_removed(tmp_path: Path) -> None:
+    """#1315 r3-audit: a scratch entry that survives the clear blocks the rerun.
+
+    The clear is what makes a fixed-filename install safe. If an entry cannot be
+    unlinked (busy/immutable/read-only mount) the dir is NOT proven empty, so
+    the rerun must not start — otherwise a rerun that exits 0 without writing
+    would publish the surviving stale state as this cycle's checkpoint.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    stale_state = scratch / "demo.cfg.ic.update"
+    stale_state.write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+
+    real_unlink = runtime_module.unlink_no_follow
+
+    def _fail_scratch_unlink(path: Path, **kwargs: Any) -> None:
+        if "state_checkpoint_recovery" in Path(path).parts:
+            raise SafeFilesystemError(f"Failed to unlink {path}: device busy", kind="io")
+        real_unlink(path, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "unlink_no_follow", _fail_scratch_unlink)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=skipped_scratch_unclean" in exc_info.value.message
+    assert stale_state.read_text(encoding="utf-8") == _STALE_SCRATCH_STATE
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    refusal_log = (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+    assert "could not be removed" in refusal_log
+
+
+def test_run_shud_recovery_refuses_a_scratch_dir_above_the_entry_bound(tmp_path: Path) -> None:
+    """#1315 r3-audit: an implausibly large scratch dir is refused, not walked.
+
+    A SHUD run leaves a few dozen files in an output dir. A directory holding
+    orders of magnitude more is not one this runtime produced, so the bound
+    stops it before the clear turns into an unbounded mass unlink inside the
+    workspace.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    over_bound = runtime_module.MAX_RECOVERY_SCRATCH_ENTRIES + 1
+    for index in range(over_bound):
+        (scratch / f"residue_{index:05d}.txt").write_text("x\n", encoding="utf-8")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=skipped_scratch_unclean" in exc_info.value.message
+    # Nothing was unlinked and no rerun was spawned.
+    assert len(list(scratch.iterdir())) == over_bound
+    assert not (log_dir / "state_checkpoint_recovery_f012.out.log").exists()
+    refusal_log = (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+    assert f"{over_bound} entries" in refusal_log
+    assert f"above the {runtime_module.MAX_RECOVERY_SCRATCH_ENTRIES} bound" in refusal_log
+
+
+def test_run_shud_recovery_refuses_an_unreadable_scratch_dir(tmp_path: Path) -> None:
+    """#1315 r3-audit: a scratch dir that cannot be listed is refused, not assumed empty.
+
+    If the listing fails there is no evidence about what the dir holds, and the
+    install step reads a fixed filename out of it — so treating the failure as
+    "nothing to clear" would let unknown residue become the checkpoint.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    (scratch / "demo.cfg.ic.update").write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+
+    real_listdir = os.listdir
+
+    def _unreadable_scratch_listdir(path: Any, *args: Any, **kwargs: Any) -> list[str]:
+        if Path(path) == scratch:
+            raise PermissionError(13, "Permission denied")
+        return real_listdir(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "listdir", _unreadable_scratch_listdir)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012=skipped_scratch_unclean" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+    refusal_log = (log_dir / "state_checkpoint_recovery_f012.err.log").read_text(encoding="utf-8")
+    assert "scratch dir is unreadable" in refusal_log
+
+
+def test_run_shud_recovery_tolerates_a_scratch_entry_that_vanishes_mid_scan(tmp_path: Path) -> None:
+    """#1315 r3-audit: an entry disappearing between listing and stat is not a refusal.
+
+    The scan is two-pass, so an entry can be gone by the time it is stat'ed (a
+    temp file the previous attempt's engine was still cleaning up). Refusing on
+    that race would turn a self-healed workspace into a permanent hard failure
+    for the hour; the entry is simply skipped and the rest of the clear — plus
+    the rerun — proceeds.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    scratch = workspace / "state_checkpoint_recovery" / "f012"
+    scratch.mkdir(parents=True)
+    (scratch / "demo.cfg.ic.update").write_text(_STALE_SCRATCH_STATE, encoding="utf-8")
+    vanishing = scratch / "vanishing.tmp"
+    vanishing.write_text("half-written\n", encoding="utf-8")
+
+    real_stat = runtime_module.stat_no_follow
+
+    def _vanishing_stat(path: Path, **kwargs: Any) -> Any:
+        if Path(path).name == "vanishing.tmp":
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_stat(path, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "stat_no_follow", _vanishing_stat)
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+    # Fresh rerun content: the stale sibling was still cleared and replaced.
+    assert checkpoint.read_text(encoding="utf-8") == "2 2 720.000000\n1 0.1\n2 0.2\n1 0\n2 0\n"
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"12": "recovered"}
+    # Only the entry that could be stat'ed was unlinked.
+    assert vanishing.read_text(encoding="utf-8") == "half-written\n"
 
 
 def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None:
