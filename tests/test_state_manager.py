@@ -2155,10 +2155,12 @@ def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(t
 def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_path: Path) -> None:
     """#1315 consumer tolerance: the new runtime manifest keys change nothing here.
 
-    ``workers/shud_runtime`` now writes a top-level ``observed_header_minutes``
-    trail and a per-entry ``provenance`` marker into ``state_checkpoints.json``.
-    ``_load_state_checkpoint_manifest`` is the only production reader of that
-    file, so the two shapes must parse to identical checkpoints.
+    ``workers/shud_runtime`` now writes top-level ``observed_header_minutes``
+    and ``recovery_outcomes`` trails plus a per-entry ``provenance`` marker into
+    ``state_checkpoints.json``. ``_load_state_checkpoint_manifest`` is the only
+    production reader of that file, so the two shapes must parse to identical
+    checkpoints — the diagnostics payload asserted here is the FULL runtime
+    shape, not a subset of it.
     """
 
     entries = [
@@ -2188,6 +2190,7 @@ def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_pa
         payload: dict[str, Any] = {"checkpoints": [dict(entry) for entry in entries]}
         if shape == "with_diagnostics":
             payload["observed_header_minutes"] = [720.0, 1440.0]
+            payload["recovery_outcomes"] = {"6": "gate_rejected(header=1440)", "12": "recovered"}
             for entry_payload in payload["checkpoints"]:
                 entry_payload["provenance"] = "post_run_recovery"
         manifest_path = manifest_dir / "state_checkpoints.json"

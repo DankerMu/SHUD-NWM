@@ -60,6 +60,15 @@ equivalence the watcher capture asserts today.
   `observed_header_minutes` and is written whenever checkpoint hours were
   requested — including the total-miss case; per-hour recovery outcomes are
   recorded alongside; the hard-failure message includes both.
+- Containment boundary (round-2 CAND-1/CAND-2): each hour's entire body —
+  cfg rewrite, spawn/wait, gate + install (`install_recovered`) — sits inside
+  ONE `try/except (OSError, SHUDRuntimeError, SafeFilesystemError)`; a failure
+  anywhere in the hour records that hour's outcome and continues.
+  `SafeFilesystemError` must be in the tuple explicitly: it subclasses
+  `RuntimeError` directly (sibling of `SHUDRuntimeError`), so the narrower
+  tuple misses the `unlink_no_follow` lane. The `write_manifest()` call is
+  likewise best-effort — a diagnostics-write failure never replaces
+  `STATE_CHECKPOINTS_MISSING` as the run's error code.
 - Budget: main solve + all recovery reruns share ONE `timeout_seconds`
   monotonic deadline (pre-change `run_shud` never exceeded 1× the budget, and
   Slurm walltime sizing assumes that); an hour with no remaining budget is

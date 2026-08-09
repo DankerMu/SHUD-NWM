@@ -588,7 +588,15 @@ class SHUDRuntime:
                 checkpoint_tracker,
                 deadline=solver_deadline,
             )
-        checkpoint_tracker.write_manifest()
+        # #1315: on the miss path the manifest is DIAGNOSTICS, so its write must
+        # never decide the run's error code — a full disk while writing
+        # state_checkpoints.json used to surface as WORKSPACE_WRITE_FAILED and
+        # hide the real STATE_CHECKPOINTS_MISSING outcome from the classifier.
+        manifest_error: Exception | None = None
+        try:
+            checkpoint_tracker.write_manifest()
+        except (OSError, SHUDRuntimeError, SafeFilesystemError) as error:
+            manifest_error = error
         missing_checkpoints = checkpoint_tracker.missing_hours()
         if missing_checkpoints:
             # Failure semantics (#1315): a miss is a hard failure ONLY after the
@@ -598,12 +606,18 @@ class SHUDRuntime:
             missing = ", ".join(f"f{hour:03d}" for hour in missing_checkpoints)
             observed = checkpoint_tracker.observed_header_minutes
             observed_text = ", ".join(f"{minute:g}" for minute in observed) if observed else "none"
+            manifest_note = f"; state_checkpoints.json write failed: {manifest_error}" if manifest_error else ""
             raise SHUDRuntimeError(
                 "STATE_CHECKPOINTS_MISSING",
                 f"SHUD did not emit requested restart checkpoints: {missing} "
                 f"(observed cfg.ic.update header minutes: {observed_text})"
-                f"{checkpoint_tracker.recovery_outcome_summary()}",
+                f"{checkpoint_tracker.recovery_outcome_summary()}{manifest_note}",
             )
+        if manifest_error is not None:
+            # Nothing is missing: the manifest is no longer diagnostics but the
+            # deliverable warm-start chaining reads, so its write failure stays a
+            # hard failure exactly as before.
+            raise manifest_error
         _ensure_directory(output_dir)
 
     def _wait_for_shud_process(
@@ -651,8 +665,8 @@ class SHUDRuntime:
         Every lane records a per-hour outcome on the tracker
         (``recovered`` / ``skipped_scratch_unclean`` / ``spawn_failed`` /
         ``timeout`` / ``exit_<rc>`` / ``budget_exhausted`` / ``cfg_write_failed``
-        / ``gate_rejected(...)``) so an operator can tell "never ran" from
-        "ran and was rejected" from evidence alone. Nothing escapes this method
+        / ``install_failed`` / ``gate_rejected(...)``) so an operator can tell
+        "never ran" from "ran and was rejected" from evidence alone. Nothing escapes this method
         except genuine programming errors: an ENOSPC-class failure on one hour
         must not abort the remaining hours, skip ``write_manifest``, or change
         the caller's error code away from ``STATE_CHECKPOINTS_MISSING``.
@@ -666,7 +680,7 @@ class SHUDRuntime:
         separator = "\t" if project_mode else " = "
         try:
             original_cfg = _read_text_no_follow(cfg_path, containment_root=cfg_path.parent)
-        except (OSError, SHUDRuntimeError):
+        except (OSError, SHUDRuntimeError, SafeFilesystemError):
             # No cfg to shorten: recovery is impossible for every hour, but the
             # caller still owns the failure (stable error code + manifest).
             for hour in checkpoint_tracker.missing_hours():
@@ -678,82 +692,89 @@ class SHUDRuntime:
                 checkpoint_tracker.record_recovery_outcome(hour, "budget_exhausted")
                 continue
             recovery_root = workspace / "state_checkpoint_recovery" / f"f{hour:03d}"
+            # Which lane a raise came from: the no-follow helpers raise
+            # SHUDRuntimeError (not OSError) on an unwritable/ENOSPC target and
+            # the raw safe-fs helpers raise SafeFilesystemError, so all three
+            # exception families are caught and mapped to this hour only. The
+            # containment boundary is ONE try around the WHOLE hour body,
+            # install included: an install-time IO failure that escaped it would
+            # abort the remaining hours, skip `write_manifest`, and replace the
+            # caller's STATE_CHECKPOINTS_MISSING contract with a workspace error.
+            failure_outcome = "scratch_dir_failed"
             try:
                 _ensure_directory(recovery_root, containment_root=workspace)
-            except (OSError, SHUDRuntimeError):
-                checkpoint_tracker.record_recovery_outcome(hour, "scratch_dir_failed")
-                continue
-            scratch_refusal = _clear_recovery_scratch_root(recovery_root)
-            if scratch_refusal is not None:
-                checkpoint_tracker.record_recovery_outcome(hour, "skipped_scratch_unclean")
-                self._log_recovery_refusal(log_dir, hour, scratch_refusal)
-                continue
-            content = original_cfg
-            if project_mode:
-                end_day = _shud_start_day(manifest) + hour / 24.0
-                content = _replace_or_append(content, "END", _format_float(end_day), separator=separator)
-            else:
-                end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
-                content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
-            content = _replace_or_append(content, "OUTPUT_DIR", str(recovery_root), separator=separator)
-            command = _runtime_command(
-                self.config.shud_executable,
-                cfg_path,
-                manifest=manifest,
-                output_dir=recovery_root,
-                command_style=self.config.command_style,
-                output_interval_minutes=self.config.output_interval_minutes,
-            )
-            stdout_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.out.log"
-            stderr_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.err.log"
-            # Which lane a raise came from: the no-follow helpers raise
-            # SHUDRuntimeError (not OSError) on an unwritable/ENOSPC target, so
-            # both exception families are caught and mapped to this hour only.
-            failure_outcome = "cfg_write_failed"
-            try:
-                _write_text_no_follow(cfg_path, content, containment_root=cfg_path.parent)
-                failure_outcome = "log_open_failed"
-                with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
-                    _open_log_file_no_follow(stderr_path, containment_root=log_dir)
-                ) as stderr_file:
-                    failure_outcome = "spawn_failed"
-                    process = subprocess.Popen(
-                        command,
-                        cwd=workspace,
-                        text=True,
-                        stdout=stdout_file,
-                        stderr=stderr_file,
-                    )
-                    failure_outcome = "wait_failed"
-                    try:
-                        process.wait(timeout=max(_RECOVERY_MIN_BUDGET_SECONDS, deadline - time.monotonic()))
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                scratch_refusal = _clear_recovery_scratch_root(recovery_root)
+                if scratch_refusal is not None:
+                    checkpoint_tracker.record_recovery_outcome(hour, "skipped_scratch_unclean")
+                    self._log_recovery_refusal(log_dir, hour, scratch_refusal)
+                    continue
+                content = original_cfg
+                if project_mode:
+                    end_day = _shud_start_day(manifest) + hour / 24.0
+                    content = _replace_or_append(content, "END", _format_float(end_day), separator=separator)
+                else:
+                    end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
+                    content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
+                content = _replace_or_append(content, "OUTPUT_DIR", str(recovery_root), separator=separator)
+                command = _runtime_command(
+                    self.config.shud_executable,
+                    cfg_path,
+                    manifest=manifest,
+                    output_dir=recovery_root,
+                    command_style=self.config.command_style,
+                    output_interval_minutes=self.config.output_interval_minutes,
+                )
+                stdout_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.out.log"
+                stderr_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.err.log"
+                failure_outcome = "cfg_write_failed"
+                # Inner try/finally, so the published cfg is restored BEFORE the
+                # install step runs: an install failure must not be able to skip
+                # the restore and leave a shortened horizon in the workspace.
+                try:
+                    _write_text_no_follow(cfg_path, content.rstrip() + "\n", containment_root=cfg_path.parent)
+                    failure_outcome = "log_open_failed"
+                    with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
+                        _open_log_file_no_follow(stderr_path, containment_root=log_dir)
+                    ) as stderr_file:
+                        failure_outcome = "spawn_failed"
+                        process = subprocess.Popen(
+                            command,
+                            cwd=workspace,
+                            text=True,
+                            stdout=stdout_file,
+                            stderr=stderr_file,
+                        )
+                        failure_outcome = "wait_failed"
                         try:
-                            process.wait(timeout=5)
+                            process.wait(timeout=max(_RECOVERY_MIN_BUDGET_SECONDS, deadline - time.monotonic()))
                         except subprocess.TimeoutExpired:
-                            pass
-                        checkpoint_tracker.record_recovery_outcome(hour, "timeout")
-                        continue
-            except (OSError, SHUDRuntimeError):
+                            process.kill()
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                            checkpoint_tracker.record_recovery_outcome(hour, "timeout")
+                            continue
+                finally:
+                    try:
+                        _write_text_no_follow(cfg_path, original_cfg, containment_root=cfg_path.parent)
+                    except (OSError, SHUDRuntimeError, SafeFilesystemError):
+                        # Best-effort: a failed restore must never mask the loop's
+                        # own outcome. The next execute() re-templates the cfg from
+                        # the package, so the workspace heals on the next attempt.
+                        checkpoint_tracker.record_recovery_outcome(hour, "cfg_restore_failed")
+                if process.returncode != 0:
+                    checkpoint_tracker.record_recovery_outcome(hour, f"exit_{process.returncode}")
+                    continue
+                failure_outcome = "install_failed"
+                checkpoint_tracker.install_recovered(
+                    hour,
+                    recovery_root / f"{checkpoint_tracker.project_name}.cfg.ic.update",
+                    source_root=recovery_root,
+                )
+            except (OSError, SHUDRuntimeError, SafeFilesystemError):
                 checkpoint_tracker.record_recovery_outcome(hour, failure_outcome)
                 continue
-            finally:
-                try:
-                    _write_text_no_follow(cfg_path, original_cfg, containment_root=cfg_path.parent)
-                except (OSError, SHUDRuntimeError):
-                    # Best-effort: a failed restore must never mask the loop's
-                    # own outcome. The next execute() re-templates the cfg from
-                    # the package, so the workspace heals on the next attempt.
-                    checkpoint_tracker.record_recovery_outcome(hour, "cfg_restore_failed")
-            if process.returncode != 0:
-                checkpoint_tracker.record_recovery_outcome(hour, f"exit_{process.returncode}")
-                continue
-            checkpoint_tracker.install_recovered(
-                hour,
-                recovery_root / f"{checkpoint_tracker.project_name}.cfg.ic.update",
-                source_root=recovery_root,
-            )
 
     def _log_recovery_refusal(self, log_dir: Path, hour: int, reason: str) -> None:
         """Leave the scratch-refusal reason in the per-hour recovery err log.
@@ -769,7 +790,7 @@ class SHUDRuntime:
                 f"state checkpoint recovery skipped for f{hour:03d}: {reason}\n",
                 containment_root=log_dir,
             )
-        except (OSError, SHUDRuntimeError):
+        except (OSError, SHUDRuntimeError, SafeFilesystemError):
             # Diagnostics are best-effort; the manifest outcome already carries
             # the reason class.
             return
