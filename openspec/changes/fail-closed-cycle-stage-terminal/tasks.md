@@ -175,12 +175,16 @@ Evidence floor:
 
 ## 3. Verification (orchestrator)
 
-- [ ] 3.1 Evidence floor commands green; counts recorded with head SHA
-- [ ] 3.2 Sweep table in PR body: every `skipped_duplicate_submission`
+- [x] 3.1 Evidence floor commands green; counts recorded with head SHA
+  (06cbc564: 1 known macOS red / 1794 passed / 2 skipped; post-fix
+  4a6ac0f0: readiness 342/2, chain 285, combined 627/2; ruff clean;
+  openspec valid)
+- [x] 3.2 Sweep table in PR body: every `skipped_duplicate_submission`
   hit → disposition
-- [ ] 3.3 Production diff confinement verified and recorded (four
+- [x] 3.3 Production diff confinement verified and recorded (four
   production files + the READINESS_VALIDATION_LANE_INVENTORY
-  governance rows per proposal Impact; tests + fixture elsewhere)
+  governance rows per proposal Impact; tests + fixture elsewhere;
+  fix commit 4a6ac0f0 = fixture + tests only, zero production)
 
 ## 4. Review loop
 
@@ -189,12 +193,20 @@ Evidence floor:
     4/4 CONFIRMED): A-P1-1 nested `_retry_partial_array_stage` skip
     collapse (P1, pre-existing `:511-512`, outside every hunk, retry
     machinery in NOT-changed; literal spec WHEN unviolated) → DEFER,
-    routed via issue-scribe; B-P2-1 live-proof disclosure named an
+    routed → issue #1322; B-P2-1 live-proof disclosure named an
     unreachable error code → fixture corrected
     (`missing_scheduler_evidence_binding`); C-P2-1 `:1166` recognizer
     arm zero-covered + D4.3(b) rationale mismatch → anchor 5(d) added
     + rationale corrected; C-P2-2 scenario-4 invariant vacuous →
     anchor 5(e) added. Fix pass bought by the coverage gaps.
+  - Round 2 (4a6ac0f0, focused post-fix): CLEAN — all four closures
+    probe-verified (5(d) mutation-kill re-run; 5(e) real geometry
+    forecast 2/0/2; live-proof corrected text matches code; #1322
+    consistent incl. the requirement-prose check: the deferred
+    geometry yields `partially_failed`, not a success terminal); no
+    fix-regression; diff scope exact. P2 record-hygiene items
+    (stale PR body, +3 line-cite drift, #1322 pointer, D4.2 mode
+    nuance) closed in the terminal-state commit without code changes.
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout
@@ -210,7 +222,9 @@ Evidence floor:
   filing); (d) `multibasin-state-idempotency` spec prose
   (`spec.md:45-49`) lists out-of-memory as transient-retryable,
   contradicting post-#1161 `job-retry-mechanism` — prose escaped the
-  #1161 literal sweep
+  #1161 literal sweep; (e) DONE during review: #1322 filed for the
+  nested `_retry_partial_array_stage` skip/ambiguous collapse
+  (round-1 A-P1-1, verifier-CONFIRMED P1, pre-existing)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final head
 - [ ] 5.2 Merge; archive change (delta folds); loop-log line + audit;
   close issue #1202

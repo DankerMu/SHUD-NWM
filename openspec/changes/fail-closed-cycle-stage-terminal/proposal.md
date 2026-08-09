@@ -103,7 +103,7 @@ loop inversion + evidence-plane consumer alignment**:
     pass status `submitted_partial` with `partial_count ≥ 1`;
     `submitted_partial` is a member of
     `SCHEDULER_REVIEW_BLOCKED_STATUSES`
-    (`readiness_scheduler_evidence.py:69-85`), so such passes become
+    (`readiness_scheduler_evidence.py:69-88`), so such passes become
     operator-visible instead of silently green. Intended: a pass that
     submitted real work and then deferred its terminal stage IS
     partial, and closure review should look at it. A wholly-skipped
@@ -114,21 +114,21 @@ loop inversion + evidence-plane consumer alignment**:
   - **Readiness pass-status vocabulary + partial recognizers, NOT the
     compatibility map (r2 P1-2, completed per r3 P1-1)**: the new
     terminal manufactures three readiness errors —
-    `status_not_allowed` (`readiness_scheduler_evidence.py:486-490`,
+    `status_not_allowed` (`readiness_scheduler_evidence.py:489-493`,
     new pass-level status outside both review vocabularies) and
     `partial_count_exceeds_model_run_evidence` (a CAPACITY error:
-    `:974-995` keys capacity off `SCHEDULER_REVIEW_BLOCKED_STATUSES`
+    `:977-998` keys capacity off `SCHEDULER_REVIEW_BLOCKED_STATUSES`
     membership, giving a skip-status pass capacity 0), both rooted in
     vocabulary; and `partial_count_status_cardinality_mismatch`
     (mixed geometry), rooted in the recognizers. Fix (r3
     probe-verified to clear all three): (a)
-    `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-85`) gains
+    `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-88`) gains
     `skipped_duplicate_submission` — skip-carrying passes are
     review-visible, with ripples audited in design D4.3; (b) the
-    partial recognizers (`:1158-1174`) learn the status.
-    `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:126-145`) is
+    partial recognizers (`:1161-1177`) learn the status.
+    `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:129-148`) is
     deliberately NOT touched: its derived set feeds the
-    submitted-inference at `:1070`, and adding the skip status there
+    submitted-inference at `:1073`, and adding the skip status there
     would make a bare skip row infer `submitted=True` — weakening a
     real guard (probe-verified r2, re-confirmed r3; anti-weakening
     anchor pins it).
@@ -215,7 +215,7 @@ loop inversion + evidence-plane consumer alignment**:
 - Explicitly NOT changed: reserve-gate logic, retry machinery,
   `TERMINAL_PIPELINE_SUCCESS_STATUSES` (all five copies),
   `_scheduler_pass_status_from_execution`,
-  `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (guard at `:1070`
+  `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (guard at `:1073`
   preserved), the orchestrator's `duplicate_submission_skips` list
   semantics (append-only, never cleared), the `submission_skipped`
   event write/swallow, `run_chain`/trigger paths.

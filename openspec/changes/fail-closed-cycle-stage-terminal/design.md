@@ -90,7 +90,7 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    (earlier stages submitted, forecast skipped — the #1164 shape) now
    projects `submitted_partial` with `partial_count ≥ 1`.
    `submitted_partial ∈ SCHEDULER_REVIEW_BLOCKED_STATUSES`
-   (`readiness_scheduler_evidence.py:69-85`): the pass becomes
+   (`readiness_scheduler_evidence.py:69-88`): the pass becomes
    review-visible. RULED INTENDED: it submitted real work, then
    deferred its terminal stage — that IS partial, and silently-green
    was the #1202 disease. A WHOLLY-skipped pass reports
@@ -115,40 +115,47 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    receipt bound to a skip-carrying pass can never validate — the
    remedy is a skip-free pass artifact, not re-pointing the receipt.
    The live-count channel also goes silent
-   (`readiness_scheduler_evidence.py:1031`). Both correct: a pass
+   (`readiness_scheduler_evidence.py:1031`). Mode note (review r2):
+   the exact error code is mode-conditional — in
+   `scheduler_evidence_root` mode with a PASSING sibling artifact the
+   codes become `scheduler_evidence_binding_not_found` +
+   `producer_run_id_mismatch` (`readiness_scheduler_live_proof.py:
+   218-226`); the load-bearing claims (no binding from the
+   skip-carrying pass; receipt can never validate; remedy is a
+   skip-free artifact) hold in both modes. Both correct: a pass
    that deferred to another pass's live job is not itself live-green
    evidence.
 3. **Readiness plane — pass-status VOCABULARY + partial recognizers,
    NOT the compatibility map (r2 P1-2, completed per r3 P1-1)**: the
    new terminal manufactures THREE readiness errors, with two distinct
    roots:
-   - `status_not_allowed` (`readiness_scheduler_evidence.py:486-490`):
+   - `status_not_allowed` (`readiness_scheduler_evidence.py:489-493`):
      the brand-new pass-level status is in neither
      `SCHEDULER_REVIEW_PASSED_STATUSES` (`:57-68`) nor
-     `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-85`), and this check
+     `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-88`), and this check
      has no `endswith` fallback. Root: vocabulary.
    - `partial_count_exceeds_model_run_evidence` (wholly-skipped): a
      CAPACITY error, not a recognizer error (r3 probe) —
-     `_scheduler_pass_uses_model_run_count_capacity` (`:994-995`)
+     `_scheduler_pass_uses_model_run_count_capacity` (`:997-998`)
      keys off REVIEW_BLOCKED membership / `_blocked`/`_failed`
      suffixes, so a skip-status pass gets
-     `capacity = submitted_count = 0` and `:937-938` `continue`s
+     `capacity = submitted_count = 0` and `:940-941` `continue`s
      before any recognizer runs. Root: vocabulary.
    - `partial_count_status_cardinality_mismatch` (mixed): the
      validators' recount finds zero partial rows. Root: recognizers.
    Fix, both edits (r3 probe: together they clear all three, `[]`
    from `_scheduler_count_cardinality_errors` and no
    `status_not_allowed`):
-   (a) `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-85`) gains
+   (a) `SCHEDULER_REVIEW_BLOCKED_STATUSES` (`:69-88`) gains
    `skipped_duplicate_submission` — a skip-carrying pass is
    review-visible, extending behavior delta 3 to the wholly-skipped
    shape (ripples audited: `_scheduler_pass_uses_producer_partial_
-   count` `:1012-1017` now honors producer partial counts for such
-   passes; `_scheduler_readiness_status` `:513` maps them to the
+   count` `:1015-1020` now honors producer partial counts for such
+   passes; `_scheduler_readiness_status` `:516` maps them to the
    blocked/review readiness state — both INTENDED, silently-green was
    the disease);
    (b) `_scheduler_model_run_partial_status` /
-   `_scheduler_model_run_producer_partial_status` (`:1158-1174`)
+   `_scheduler_model_run_producer_partial_status` (`:1161-1177`)
    learn the status. Rationale corrected (review r1 C-P2-1): the
    PRODUCER-partial recognizer is what keeps producer counting and
    readiness recount in agreement for both live geometries (anchors
@@ -158,10 +165,10 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    a model-run row's `stage_statuses`, harvested at `:1097-1098`) —
    the disclosed residual below — and is pinned by its own anchor
    5(d).
-   `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:126-145`) is
+   `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:129-148`) is
    deliberately NOT extended: its derived set
-   (`SCHEDULER_LIVE_COMPATIBLE…`, `:146-150`) feeds the
-   submitted-inference at `:1070`; adding the skip status would let a
+   (`SCHEDULER_LIVE_COMPATIBLE…`, `:149-153`) feeds the
+   submitted-inference at `:1073`; adding the skip status would let a
    bare skip row infer `submitted=True` — weakening a real guard
    (probe-verified r2, re-confirmed r3: the vocabulary route does not
    touch it). An anti-weakening anchor pins the guard (D5.5c-iii).
@@ -307,7 +314,7 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    vocabulary root, cleared by the `SCHEDULER_REVIEW_BLOCKED_STATUSES`
    membership, r3 probe);
    (iii) anti-weakening: a bare `skipped_duplicate_submission`
-   model-run row still infers `submitted=False` (`:1070` guard
+   model-run row still infers `submitted=False` (`:1073` guard
    intact, GREEN both sides — proves the compatibility map was not
    extended).
 5d. **Historical-artifact pin (review r1 C-P2-1)**: a synthetic
@@ -362,7 +369,7 @@ a red-proof); anchors 6/7 green.
 Reserve-gate logic; retry machinery; `TERMINAL_PIPELINE_SUCCESS_
 STATUSES` membership (five copies unchanged);
 `_scheduler_pass_status_from_execution`;
-`SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:1070`
+`SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:1073`
 submitted-inference guard preserved — r2 P1-2); any clearing or
 re-scoping of the orchestrator's in-memory
 `duplicate_submission_skips` list (r2 P2-3); the `submission_skipped`
