@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,6 +50,43 @@ def _minute_time(value: str) -> float:
 
 def _format_time_for_test(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _witness_provenance_for(run_id: str, requested_hours: list[int] | None = None) -> dict[str, Any]:
+    """#1325: the writer's provenance block, as the publish-side gate requires it."""
+
+    return {
+        "run_id": run_id,
+        "generated_at": "2026-05-02T00:00:05Z",
+        "slurm_job_id": "990011",
+        "array_task_id": 0,
+        "requested_checkpoint_hours": list(requested_hours or []),
+    }
+
+
+def _write_witness_manifest(
+    output_dir: Path,
+    *,
+    run_id: str,
+    checkpoints: list[dict[str, Any]] | None = None,
+    requested_hours: list[int] | None = None,
+    final_ic_name: str | None = None,
+) -> Path:
+    payload: dict[str, Any] = {
+        "checkpoints": list(checkpoints or []),
+        "provenance": _witness_provenance_for(run_id, requested_hours),
+    }
+    if final_ic_name is not None:
+        payload["final_ic"] = {
+            "relative_path": final_ic_name,
+            "original_shud_filename": final_ic_name,
+            "checksum": sha256_bytes((output_dir / final_ic_name).read_bytes()),
+        }
+    manifest_dir = output_dir / "state_checkpoints"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / "state_checkpoints.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    return manifest_path
 
 
 # ---------------------------------------------------------------------------
@@ -161,11 +199,13 @@ def test_saved_state_valid_time_equals_next_cycle_init(tmp_path: Path) -> None:
     run_id = "analysis_era5_2026050100_2026050200_demo_model"
 
     # Native SHUD end-of-segment restart artifact: *.cfg.ic.update with a header
-    # minute-time at T_{N+1}.
+    # minute-time at T_{N+1}, plus the solver-success witness the analysis lane's
+    # zero-checkpoint solve writes for it (#1325).
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
     ic_update = output_dir / "demo.cfg.ic.update"
     ic_update.write_text(f"2 1 {_minute_time(t_next):.6f}\n1 0.1\n2 0.2\n1 0.0\n", encoding="utf-8")
+    _write_witness_manifest(output_dir, run_id=run_id, final_ic_name="demo.cfg.ic.update")
 
     captured: dict[str, Any] = {}
 
@@ -240,6 +280,7 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
     output_dir.mkdir(parents=True)
     ic_update = output_dir / "demo.cfg.ic.update"
     ic_update.write_text(f"2 1 {_minute_time(t_next):.6f}\n1 0.1\n2 0.2\n1 0.0\n", encoding="utf-8")
+    _write_witness_manifest(output_dir, run_id=run_id, final_ic_name="demo.cfg.ic.update")
 
     captured: dict[str, Any] = {}
 
@@ -313,26 +354,26 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
     f012 = output_dir / "demo.f012.cfg.ic.update"
     f006.write_text(f"2 1 {_minute_time('2026-05-01T06:00:00Z'):.6f}\n1 0.1\n2 0.2\n1 0.0\n", encoding="utf-8")
     f012.write_text(f"2 1 {_minute_time('2026-05-01T12:00:00Z'):.6f}\n1 0.3\n2 0.4\n1 0.0\n", encoding="utf-8")
-    (output_dir / "state_checkpoints.json").write_text(
-        json.dumps(
+    _write_witness_manifest(
+        output_dir.parent,
+        run_id=run_id,
+        requested_hours=[6, 12],
+        checkpoints=[
             {
-                "checkpoints": [
-                    {
-                        "lead_hours": 6,
-                        "valid_time": _format_time_for_test(t6),
-                        "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
-                        "checkpoint_filename": "demo.f006.cfg.ic.update",
-                    },
-                    {
-                        "lead_hours": 12,
-                        "valid_time": _format_time_for_test(t12),
-                        "relative_path": "state_checkpoints/demo.f012.cfg.ic.update",
-                        "checkpoint_filename": "demo.f012.cfg.ic.update",
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
+                "lead_hours": 6,
+                "valid_time": _format_time_for_test(t6),
+                "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
+                "checkpoint_filename": "demo.f006.cfg.ic.update",
+                "checksum": sha256_bytes(f006.read_bytes()),
+            },
+            {
+                "lead_hours": 12,
+                "valid_time": _format_time_for_test(t12),
+                "relative_path": "state_checkpoints/demo.f012.cfg.ic.update",
+                "checkpoint_filename": "demo.f012.cfg.ic.update",
+                "checksum": sha256_bytes(f012.read_bytes()),
+            },
+        ],
     )
 
     captured: dict[str, Any] = {"snapshots": []}
@@ -440,20 +481,19 @@ def test_state_save_rekeys_checkpoint_when_manifest_lagged_header_minute(tmp_pat
     output_dir.mkdir(parents=True)
     f006 = output_dir / "demo.f006.cfg.ic.update"
     f006.write_text("2 1 720.000000\n1 0.3\n2 0.4\n1 0.0\n", encoding="utf-8")
-    (output_dir / "state_checkpoints.json").write_text(
-        json.dumps(
+    _write_witness_manifest(
+        output_dir.parent,
+        run_id=run_id,
+        requested_hours=[6],
+        checkpoints=[
             {
-                "checkpoints": [
-                    {
-                        "lead_hours": 6,
-                        "valid_time": "2026-05-01T06:00:00Z",
-                        "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
-                        "checkpoint_filename": "demo.f006.cfg.ic.update",
-                    }
-                ]
+                "lead_hours": 6,
+                "valid_time": "2026-05-01T06:00:00Z",
+                "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
+                "checkpoint_filename": "demo.f006.cfg.ic.update",
+                "checksum": sha256_bytes(f006.read_bytes()),
             }
-        ),
-        encoding="utf-8",
+        ],
     )
     captured: dict[str, Any] = {"snapshots": []}
 
@@ -2119,3 +2159,661 @@ def test_packaged_ic_bootstrap_without_recorded_checksum_still_bootstraps(tmp_pa
     assert runtime_manifest["runtime"]["init_mode"] == 3
     assert runtime_manifest["initial_state"]["quality"] == "packaged_calibrated_state"
     assert runtime_manifest["initial_state"]["packaged_ic_checksum"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1325: publish-side admission gate (design D1/D3, anchors A1-A6).
+#
+# The gate admits a state publish only when the source output tree carries a
+# solver-success witness (``state_checkpoints.json`` with a ``provenance``
+# block naming THIS run) and every artifact the manifest names is present and
+# checksum-matched.  Rejections lead with a typed ``STATE_SAVE_SOURCE_*``
+# token and must not touch the snapshot / QC / index seam at all.
+# ---------------------------------------------------------------------------
+
+
+GATE_RUN_ID = "fcst_gfs_2026050100_demo_model"
+GATE_CYCLE_TIME = "2026-05-01T00:00:00Z"
+GATE_END_TIME = "2026-05-01T12:00:00Z"
+
+
+class _RecordingStateManager:
+    """StateManager double that records every publish-side call it receives."""
+
+    def __init__(self, object_store: LocalObjectStore) -> None:
+        self.object_store = object_store
+        self.saved: list[dict[str, Any]] = []
+        self.qc_runs: list[str] = []
+
+    def save_state_snapshot(self, **kwargs: Any) -> Any:
+        self.saved.append(kwargs)
+        state_id = f"state_{len(self.saved):03d}"
+        snapshot = SimpleNamespace(
+            state_uri=f"states/{state_id}/state.cfg.ic",
+            checksum=f"sha256:{state_id}",
+            valid_time=kwargs["valid_time"],
+            source_id=kwargs.get("source_id"),
+            cycle_id=kwargs.get("cycle_id"),
+            lead_hours=kwargs.get("lead_hours"),
+            model_package_version=kwargs.get("model_package_version"),
+            model_package_checksum=kwargs.get("model_package_checksum"),
+            original_shud_filename=kwargs.get("original_shud_filename"),
+        )
+        return SimpleNamespace(state_id=state_id, status="created", snapshot=snapshot)
+
+    def run_qc(self, state_id: str) -> bool:
+        self.qc_runs.append(state_id)
+        return True
+
+
+def _gate_ic_text(valid_time: datetime, *, surface: str = "0.1") -> str:
+    return f"2 1 {valid_time.timestamp() / 60.0:.6f}\n1 {surface}\n2 0.2\n1 0.0\n"
+
+
+def _gate_provenance(run_id: str = GATE_RUN_ID, *, requested_hours: Any = ()) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "generated_at": "2026-05-01T12:00:03Z",
+        "slurm_job_id": "4242",
+        "array_task_id": 3,
+        "requested_checkpoint_hours": list(requested_hours),
+    }
+
+
+def _write_gate_manifest(output_root: Path, payload: dict[str, Any]) -> Path:
+    manifest_dir = output_root / "state_checkpoints"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / "state_checkpoints.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    return manifest_path
+
+
+def _write_gate_checkpoint(output_root: Path, lead_hours: int) -> dict[str, Any]:
+    valid_time = _dt(GATE_CYCLE_TIME) + timedelta(hours=lead_hours)
+    manifest_dir = output_root / "state_checkpoints"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    name = f"demo.f{lead_hours:03d}.cfg.ic.update"
+    content = _gate_ic_text(valid_time, surface=f"0.{lead_hours}")
+    (manifest_dir / name).write_text(content, encoding="utf-8")
+    return {
+        "lead_hours": lead_hours,
+        "valid_time": _format_time_for_test(valid_time),
+        "relative_path": f"state_checkpoints/{name}",
+        "checkpoint_filename": name,
+        "checksum": sha256_bytes(content.encode("utf-8")),
+    }
+
+
+def _write_gate_final_ic(output_root: Path, *, name: str = "demo.cfg.ic.update") -> dict[str, Any]:
+    output_root.mkdir(parents=True, exist_ok=True)
+    content = _gate_ic_text(_dt(GATE_END_TIME))
+    (output_root / name).write_text(content, encoding="utf-8")
+    return {
+        "relative_path": name,
+        "original_shud_filename": name,
+        "checksum": sha256_bytes(content.encode("utf-8")),
+    }
+
+
+def _gate_run_context(*, output_uri: str | None = None, run_id: str = GATE_RUN_ID) -> Any:
+    from packages.common.state_cli import StateRunContext
+
+    return StateRunContext(
+        run_id=run_id,
+        model_id="demo_model",
+        end_time=_dt(GATE_END_TIME),
+        output_uri=output_uri,
+        source_id="GFS",
+        cycle_time=_dt(GATE_CYCLE_TIME),
+        model_package_version="s3://nhms/models/demo_model/package/",
+        model_package_checksum="package-sha-1",
+    )
+
+
+def _gate_manager(tmp_path: Path) -> _RecordingStateManager:
+    return _RecordingStateManager(LocalObjectStore(tmp_path / "object-store", "s3://nhms"))
+
+
+def _gate_workspace_output(tmp_path: Path, run_id: str = GATE_RUN_ID) -> Path:
+    output_root = tmp_path / "workspace" / "runs" / run_id / "output"
+    output_root.mkdir(parents=True, exist_ok=True)
+    return output_root
+
+
+def _gate_object_output(tmp_path: Path, run_id: str = GATE_RUN_ID) -> Path:
+    output_root = tmp_path / "object-store" / "runs" / run_id / "output"
+    output_root.mkdir(parents=True, exist_ok=True)
+    return output_root
+
+
+def _gate_save(tmp_path: Path, manager: _RecordingStateManager, *, output_uri: str | None = None) -> dict[str, Any]:
+    from packages.common.state_cli import save_state_for_run
+
+    return save_state_for_run(
+        GATE_RUN_ID,
+        manager=manager,
+        run_context=_gate_run_context(output_uri=output_uri),
+        workspace_root=tmp_path / "workspace",
+    )
+
+
+def test_state_save_rejects_missing_output_root(tmp_path: Path) -> None:
+    """A1 (AC-1): no output root anywhere is a typed reject, not a tree search."""
+
+    from packages.common.state_manager import StateManagerError
+
+    (tmp_path / "workspace").mkdir()
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_OUTPUT_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_manifest_with_missing_declared_checkpoint(tmp_path: Path) -> None:
+    """A2 (AC-2): declared N, present N-1 rejects instead of publishing the subset."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    f012 = _write_gate_checkpoint(output_root, 12)
+    (output_root / f012["relative_path"]).unlink()
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [f006, f012], "provenance": _gate_provenance(requested_hours=(6, 12))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE")
+    assert f012["relative_path"] in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_checkpoint_content_drift(tmp_path: Path) -> None:
+    """A2b: a declared checkpoint whose bytes changed after capture rejects."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    (output_root / f006["relative_path"]).write_text(
+        _gate_ic_text(_dt(GATE_CYCLE_TIME) + timedelta(hours=6), surface="0.9"),
+        encoding="utf-8",
+    )
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH")
+    assert f006["relative_path"] in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "not_a_dict",
+        "missing_fields",
+        "missing_checksum",
+        "non_regular_target",
+        "non_sequence",
+        "unparseable_valid_time",
+    ],
+)
+def test_state_save_rejects_malformed_manifest_checkpoint_entry(tmp_path: Path, shape: str) -> None:
+    """A2c: every shape the loader silently drops is a gate violation.
+
+    The declared set is the RAW ``checkpoints`` array, so an entry the parser
+    would filter out (non-dict, missing fields, non-regular target) or a
+    ``checkpoints`` value that is not a list can never shrink the published set
+    behind the caller's back. ``unparseable_valid_time`` (PR review round-1) is
+    the same class read from the other end: presence alone is not a usable
+    declaration, and letting it through leaves the loader to crash with a bare
+    ``ValueError`` instead of a typed reject.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    f012 = _write_gate_checkpoint(output_root, 12)
+    raw_checkpoints: Any
+    if shape == "not_a_dict":
+        raw_checkpoints = [f006, "state_checkpoints/demo.f012.cfg.ic.update"]
+    elif shape == "missing_fields":
+        raw_checkpoints = [f006, {"checkpoint_filename": "demo.f012.cfg.ic.update", "checksum": "a" * 64}]
+    elif shape == "missing_checksum":
+        raw_checkpoints = [f006, {key: value for key, value in f012.items() if key != "checksum"}]
+    elif shape == "non_regular_target":
+        (output_root / f012["relative_path"]).unlink()
+        (output_root / f012["relative_path"]).mkdir()
+        raw_checkpoints = [f006, f012]
+    elif shape == "unparseable_valid_time":
+        raw_checkpoints = [f006, {**f012, "valid_time": "2026-05-01 lunchtime"}]
+    else:
+        raw_checkpoints = {}
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": raw_checkpoints, "provenance": _gate_provenance(requested_hours=(6, 12))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE")
+    assert ("checkpoints" if shape == "non_sequence" else "entry 1") in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_failed_attempt_residue_without_manifest(tmp_path: Path) -> None:
+    """A3 (AC-3): a killed attempt leaves ICs but no witness -> no publish."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    (output_root / "demo.cfg.ic").write_text(_gate_ic_text(_dt("2026-05-01T04:00:00Z")), encoding="utf-8")
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_MANIFEST_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_manifest_without_provenance(tmp_path: Path) -> None:
+    """A4 (AC-6): a legacy (pre-upgrade) manifest cannot prove its origin."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    _write_gate_manifest(output_root, {"checkpoints": [f006]})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_PROVENANCE_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_foreign_provenance_run_id(tmp_path: Path) -> None:
+    """A4b: another run's witnessed tree is never published under this identity."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    _write_gate_manifest(
+        output_root,
+        {
+            "checkpoints": [f006],
+            "provenance": _gate_provenance("fcst_gfs_2026043012_demo_model", requested_hours=(6,)),
+        },
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_PROVENANCE_MISMATCH")
+    assert "fcst_gfs_2026043012_demo_model" in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_publishes_manifest_named_final_ic_when_no_checkpoints_requested(tmp_path: Path) -> None:
+    """A5(a) liveness pin: the analysis / short-horizon lane stays publishable."""
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [], "final_ic": final_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    result = _gate_save(tmp_path, manager)
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["valid_time"] == _dt(GATE_END_TIME)
+    assert manager.saved[0]["original_shud_filename"] == "demo.cfg.ic.update"
+    assert result["valid_time"] == GATE_END_TIME
+    assert manager.qc_runs == [result["state_id"]]
+
+
+def test_state_save_final_ic_lane_never_selects_undeclared_residue(tmp_path: Path) -> None:
+    """A5(b): only the manifest-NAMED final IC is publishable.
+
+    The residue sorts before the named artifact and sits in the same candidate
+    class, which is exactly the selection master's ``sorted()`` rglob made.
+    """
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    (output_root / "aaa-residue.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T04:00:00Z"), surface="0.7"),
+        encoding="utf-8",
+    )
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [], "final_ic": final_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    _gate_save(tmp_path, manager)
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["original_shud_filename"] == "demo.cfg.ic.update"
+    assert manager.saved[0]["ic_file_path"].name.startswith("demo.cfg.ic.update")
+
+
+def test_state_save_rejects_final_ic_content_drift(tmp_path: Path) -> None:
+    """A5(c): a later killed attempt rewriting the final IC in place is caught."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [], "final_ic": final_ic, "provenance": _gate_provenance()},
+    )
+    (output_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T09:00:00Z"), surface="0.8"),
+        encoding="utf-8",
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH")
+    assert "demo.cfg.ic.update" in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_total_checkpoint_miss_instead_of_final_ic_downgrade(tmp_path: Path) -> None:
+    """A5(d): requested hours with nothing captured must not fall back."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    _write_gate_manifest(
+        output_root,
+        {
+            "checkpoints": [],
+            "final_ic": final_ic,
+            "provenance": _gate_provenance(requested_hours=(6, 12)),
+            "recovery_outcomes": {"6": "gate_rejected(header=1440)", "12": "exit_1"},
+        },
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_rejects_fallback_manifest_without_final_ic_entry(tmp_path: Path) -> None:
+    """A5(e): a witnessed solve that produced no final state rejects, not searches."""
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    (output_root / "demo.cfg.ic").write_text(_gate_ic_text(_dt(GATE_END_TIME)), encoding="utf-8")
+    _write_gate_manifest(output_root, {"checkpoints": [], "provenance": _gate_provenance()})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_FINAL_IC_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_publishes_object_store_root_when_workspace_tree_has_no_manifest(tmp_path: Path) -> None:
+    """A6(a) liveness pin: the failure-lane workspace tree falls through."""
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    (workspace_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T03:00:00Z"), surface="0.6"),
+        encoding="utf-8",
+    )
+    object_root = _gate_object_output(tmp_path)
+    f006 = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["valid_time"] == _dt(GATE_CYCLE_TIME) + timedelta(hours=6)
+    assert manager.saved[0]["original_shud_filename"] == "demo.f006.cfg.ic.update"
+
+
+def test_state_save_falls_through_foreign_workspace_manifest_to_witnessed_root(tmp_path: Path) -> None:
+    """A6(b): probe order never beats provenance — the witnessed root wins."""
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    foreign = _write_gate_checkpoint(workspace_root, 6)
+    _write_gate_manifest(
+        workspace_root,
+        {
+            "checkpoints": [foreign],
+            "provenance": _gate_provenance("fcst_gfs_2026043012_demo_model", requested_hours=(6,)),
+        },
+    )
+    object_root = _gate_object_output(tmp_path)
+    f012 = _write_gate_checkpoint(object_root, 12)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f012], "provenance": _gate_provenance(requested_hours=(12,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert len(manager.saved) == 1
+    assert manager.saved[0]["valid_time"] == _dt(GATE_CYCLE_TIME) + timedelta(hours=12)
+    assert manager.saved[0]["ic_file_path"].is_relative_to(object_root)
+
+
+def test_state_save_durable_output_reuse_retry_publishes_then_rejects_when_tree_removed(tmp_path: Path) -> None:
+    """A6(c): identity, not recency — a reused durable tree keeps publishing."""
+
+    import shutil
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    _gate_save(tmp_path, manager)
+    _gate_save(tmp_path, manager)
+
+    assert len(manager.saved) == 2
+
+    shutil.rmtree(tmp_path / "workspace" / "runs" / GATE_RUN_ID)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_OUTPUT_MISSING")
+    assert len(manager.saved) == 2
+
+
+def test_state_save_rejects_verified_checkpoints_that_vanish_before_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2d (implementation guts): the checkpoints lane never indexes an empty list.
+
+    The gate verifies the RAW manifest array and the publish then re-reads it
+    through the loader, so a file deleted in between shrinks N verified entries
+    to zero. The only reachable trigger is that TOCTOU window, hence the loader
+    is monkeypatched; what is pinned is that the answer is the typed reason and
+    not a bare ``IndexError`` from ``saved[0]``.
+    """
+
+    from packages.common import state_cli
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+    monkeypatch.setattr(state_cli, "_load_state_checkpoint_manifest", lambda _manifest_path: [])
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["missing_requested_hours", "blank_run_id", "blank_generated_at", "requested_hours_string"],
+)
+def test_state_save_rejects_partially_populated_provenance(tmp_path: Path, defect: str) -> None:
+    """A4c: a provenance block the gate cannot act on is a G3 violation.
+
+    ``requested_checkpoint_hours`` is what discriminates the zero-hour fallback
+    lane from a total capture miss, so defaulting it away (``.get(..., [])``)
+    would silently restore the #1164 downgrade; ``run_id``/``generated_at`` are
+    the identity evidence G4 and the operator's diagnosis rest on. Each shape
+    reaches ``_usable_provenance`` through a different predicate — with
+    ``missing_requested_hours`` the key-presence check firing first and the
+    sequence check standing behind it.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    f006 = _write_gate_checkpoint(output_root, 6)
+    provenance = _gate_provenance(requested_hours=(6,))
+    if defect == "missing_requested_hours":
+        provenance.pop("requested_checkpoint_hours")
+    elif defect == "blank_run_id":
+        provenance["run_id"] = "   "
+    elif defect == "blank_generated_at":
+        provenance["generated_at"] = ""
+    else:
+        provenance["requested_checkpoint_hours"] = "6,12"
+    _write_gate_manifest(output_root, {"checkpoints": [f006], "provenance": provenance})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_PROVENANCE_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_publishes_the_exact_final_ic_path_the_gate_hashed(tmp_path: Path) -> None:
+    """A5(f): verification and publish must resolve to the SAME file.
+
+    A ``final_ic.relative_path`` carrying trailing whitespace next to a
+    whitespace-twin file on disk splits them: the gate checksums the stripped
+    name while a raw-string publish opens the twin, shipping bytes nothing ever
+    verified. This tree is accepted, so the pin is on the live SUCCESS branch —
+    the published bytes must be the checksum-verified ones, never the twin's.
+    """
+
+    output_root = _gate_workspace_output(tmp_path)
+    final_ic = _write_gate_final_ic(output_root)
+    verified_bytes = (output_root / "demo.cfg.ic.update").read_bytes()
+    twin_bytes = _gate_ic_text(_dt(GATE_END_TIME), surface="0.9").encode("utf-8")
+    (output_root / "demo.cfg.ic.update ").write_bytes(twin_bytes)
+    final_ic["relative_path"] = "demo.cfg.ic.update "
+    _write_gate_manifest(
+        output_root,
+        {"checkpoints": [], "final_ic": final_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    _gate_save(tmp_path, manager)
+
+    assert len(manager.saved) == 1
+    published = manager.saved[0]["ic_file_path"].read_bytes()
+    assert published != twin_bytes
+    assert published == verified_bytes
+
+
+def test_state_save_reports_the_first_existing_roots_reason_when_every_root_fails(tmp_path: Path) -> None:
+    """A6(d): D3 rule 5 — the reported reason follows probe order, deterministically.
+
+    Two roots fail for different reasons; the operator must always be handed the
+    first existing root's reason so the same tree never diagnoses two ways.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    (workspace_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T03:00:00Z"), surface="0.6"),
+        encoding="utf-8",
+    )
+    object_root = _gate_object_output(tmp_path)
+    foreign = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {
+            "checkpoints": [foreign],
+            "provenance": _gate_provenance("fcst_gfs_2026043012_demo_model", requested_hours=(6,)),
+        },
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_MANIFEST_MISSING")
+    assert "STATE_SAVE_SOURCE_PROVENANCE_MISMATCH" not in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
