@@ -2760,11 +2760,9 @@ def test_state_save_publishes_the_exact_final_ic_path_the_gate_hashed(tmp_path: 
     A ``final_ic.relative_path`` carrying trailing whitespace next to a
     whitespace-twin file on disk splits them: the gate checksums the stripped
     name while a raw-string publish opens the twin, shipping bytes nothing ever
-    verified. Either the checksum-verified bytes are published, or the tree is
-    rejected — never the unverified twin.
+    verified. This tree is accepted, so the pin is on the live SUCCESS branch —
+    the published bytes must be the checksum-verified ones, never the twin's.
     """
-
-    from packages.common.state_manager import StateManagerError
 
     output_root = _gate_workspace_output(tmp_path)
     final_ic = _write_gate_final_ic(output_root)
@@ -2778,12 +2776,7 @@ def test_state_save_publishes_the_exact_final_ic_path_the_gate_hashed(tmp_path: 
     )
     manager = _gate_manager(tmp_path)
 
-    try:
-        _gate_save(tmp_path, manager)
-    except StateManagerError:
-        assert manager.saved == []
-        assert manager.qc_runs == []
-        return
+    _gate_save(tmp_path, manager)
 
     assert len(manager.saved) == 1
     published = manager.saved[0]["ic_file_path"].read_bytes()

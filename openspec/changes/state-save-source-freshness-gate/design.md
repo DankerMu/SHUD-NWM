@@ -291,6 +291,15 @@ exists).
   routed as a follow-up issue (candidate mitigation: clear the
   output dir at attempt start, mirroring the recovery-scratch
   doctrine `runtime.py:2199-2223`).
+- Verify-then-publish window (round-2 review residual): the gate
+  hashes declared artifacts once; the publish path re-reads the
+  manifest and artifact bytes without re-checksumming, so a full
+  manifest swap or in-place rewrite INSIDE that window could
+  publish unverified bytes (the A2d guard closes only the
+  shrink-to-zero case). Not routed as an issue: reaching it
+  requires a concurrent writer on the same run tree, which the
+  scheduler's one-attempt-at-a-time discipline per run_id excludes
+  (recorded one-line reason per the deferral rule).
 - `_durable_shud_output_exists` (`scheduler_state_failure.py:63-75`)
   remains bookkeeping-only (issue out-of-scope); the gate is now the
   real backstop its comment assumed.
@@ -462,7 +471,7 @@ round-1 head 164e7b3f unless marked):
 - **A2d TOCTOU guard** (guts pin, GREEN-by-construction): a
   gate-verified checkpoints-lane root whose subsequent loader read
   returns an empty list ⇒ typed `MANIFEST_INCOMPLETE`, never a bare
-  `IndexError` (`state_cli.py:226 saved[0]`); tested by
+  `IndexError` (`saved[0]`, `state_cli.py:234` post-fix); tested by
   monkeypatching the loader (recorded as an implementation-guts
   test — the only reachable input is a file deleted between the
   gate's hash and the loader's read).
@@ -471,7 +480,7 @@ round-1 head 164e7b3f unless marked):
   `run_id` empty/blank, (iii) `generated_at` empty/blank, (iv)
   `requested_checkpoint_hours` a string ⇒
   `STATE_SAVE_SOURCE_PROVENANCE_MISSING`; pins `_usable_provenance`
-  (`state_cli.py:699-717`) against the "simplify to
+  (`state_cli.py:711-733` post-fix) against the "simplify to
   `.get(..., [])`" refactor that would silently restore the #1164
   total-miss downgrade.
 - **A5(f) publish-path identity**: fallback lane publishes the

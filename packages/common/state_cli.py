@@ -931,8 +931,11 @@ def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStor
 
     Both key shapes still resolve (the ``runs/<run_id>/output`` prefix itself and
     a deeper object key), but the sole caller — `_state_output_roots` — keeps
-    only directories: #1325 retired the file-shaped output root from the publish
-    path, so a deeper key resolves and is then dropped rather than searched.
+    only directories. So the shape of what a deeper key points at decides its
+    fate: a file-shaped key resolves and is then dropped by that directory
+    filter (#1325 retired the file-shaped output root from the publish path),
+    while a directory-shaped key passes the filter and is still probed as a
+    source root.
     """
 
     if not run.output_uri:
