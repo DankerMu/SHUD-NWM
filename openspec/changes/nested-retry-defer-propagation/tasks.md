@@ -154,24 +154,24 @@ Deviations (recorded):
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 `NESTED_RETRY_DEFER_STATUSES = {"skipped_duplicate_
+- [x] 2.1 `NESTED_RETRY_DEFER_STATUSES = {"skipped_duplicate_
   submission"}` + helper-side early return in
   `_retry_partial_array_stage` (design D2): no task stamping, no
   attempt N+1, `(latest_result, None)` propagated; return annotation
   widened at BOTH declaration sites
   (`chain_forecast_execution.py:473`,
   `chain_forecast_orchestrator_cycle.py:244`)
-- [ ] 2.2 Call-site defer routing in `_run_cycle_chain` (design D3):
+- [x] 2.2 Call-site defer routing in `_run_cycle_chain` (design D3):
   overwrite `stage_results[-1]`, route the skip status to the
   dedicated skip terminal semantics. **2.1 and 2.2 land atomically**
   — 2.1 alone would send the defer status into the allowlist tail's
   `UNRECOGNIZED_STAGE_STATUS` backstop (cycle `failed`), strictly
   worse than master
-- [ ] 2.3 Anchors A1/A2/A5 red-proofed on the pre-change tree
+- [x] 2.3 Anchors A1/A2/A5 red-proofed on the pre-change tree
   (`git archive` extraction protocol) + A3 pins (three arms:
   ambiguous, reconcile_unverified, set-membership) and A4 pin green
   both sides + A6 existing retry regressions green
-- [ ] 2.4 Evidence floor suites + ruff green; implementer reports
+- [x] 2.4 Evidence floor suites + ruff green; implementer reports
   deviations explicitly ("no deviations" stated if none)
 
 ## 3. PR

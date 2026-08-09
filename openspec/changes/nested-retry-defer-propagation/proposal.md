@@ -137,10 +137,14 @@ by anchor.
    cohort candidate reads `active` and the genuinely-failed basin's
    evidence item status flips `failed` (master, with
    `reason: "forecast_task_failed"`) → `skipped_duplicate_submission`
-   (post-fix, reason absent). Both are review-blocked non-success
-   (`final_candidate_success` stays False on both sides), and the
-   shape is identical to a top-level skip's artifact geometry — no
-   new readiness surface, but a real per-candidate delta.
+   (post-fix, reason absent). For the FAILED basin
+   `final_candidate_success` is False on both sides; for the HEALTHY
+   basin it flips True (master: `parsed_partial` == cycle terminal)
+   → **False** (post-fix: skip is a non-submitted terminal) —
+   implementer-measured, strictly more conservative, no
+   silent-success hole opens. The shape is identical to a top-level
+   skip's artifact geometry — no new readiness surface, but a real
+   per-candidate delta on both cohort members.
 
 ## Non-goals
 
