@@ -102,17 +102,22 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    `SCHEDULER_LIVE_WORK_STATUSES` — it did no work; via D4.3(a) it
    joins `SCHEDULER_REVIEW_BLOCKED_STATUSES`, so it too is
    review-visible rather than vocabulary-rejected.
-   **Live-proof ripple (run-2 r1 P2-3, ruled INTENDED)**: because
-   `submitted_partial` and the skip status are both outside
-   `SCHEDULER_LIVE_WORK_STATUSES` (`readiness_scheduler_evidence.py:
-   125`), a skip-carrying pass also (a) trips
-   `scheduler_status_not_live_eligible` on the live-proof channel
-   (`readiness_scheduler_live_proof.py:236-239`; semantics already
-   pinned by `tests/test_production_readiness_validation.py:3567/
-   :3606`) and (b) silences the live-count channel
-   (`readiness_scheduler_evidence.py:1028`). Both
-   correct: a pass that deferred to another pass's live job is not
-   itself live-green evidence.
+   **Live-proof ripple (run-2 r1 P2-3, ruled INTENDED; mechanism
+   corrected review r1 B-P2-1)**: both new shapes map to readiness
+   status `blocked` (`readiness_scheduler_evidence.py:511-517`), and
+   `_scheduler_bindings` (`:418-426`) harvests bindings only from
+   `passed` items — so a skip-carrying pass contributes NO binding
+   and live proof fails with `missing_scheduler_evidence_binding`
+   (`readiness_scheduler_live_proof.py:218-241`; probe-verified on
+   real artifacts, both geometries). `scheduler_status_not_live_
+   eligible` is NOT reachable for these shapes (it requires a matched
+   binding, i.e. a passed item). Operator consequence: a live-proof
+   receipt bound to a skip-carrying pass can never validate — the
+   remedy is a skip-free pass artifact, not re-pointing the receipt.
+   The live-count channel also goes silent
+   (`readiness_scheduler_evidence.py:1031`). Both correct: a pass
+   that deferred to another pass's live job is not itself live-green
+   evidence.
 3. **Readiness plane — pass-status VOCABULARY + partial recognizers,
    NOT the compatibility map (r2 P1-2, completed per r3 P1-1)**: the
    new terminal manufactures THREE readiness errors, with two distinct
@@ -144,8 +149,15 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    the disease);
    (b) `_scheduler_model_run_partial_status` /
    `_scheduler_model_run_producer_partial_status` (`:1158-1174`)
-   learn the status, keeping producer partial-counting and readiness
-   recount in agreement for the mixed shape.
+   learn the status. Rationale corrected (review r1 C-P2-1): the
+   PRODUCER-partial recognizer is what keeps producer counting and
+   readiness recount in agreement for both live geometries (anchors
+   5(c)(i)/(ii) bind it — mutation-verified); the plain partial
+   recognizer's reachable effect is the RE-VALIDATED historical
+   artifact shape (pass `submitted` with a nested stage-level skip in
+   a model-run row's `stage_statuses`, harvested at `:1097-1098`) —
+   the disclosed residual below — and is pinned by its own anchor
+   5(d).
    `SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY` (`:126-145`) is
    deliberately NOT extended: its derived set
    (`SCHEDULER_LIVE_COMPATIBLE…`, `:146-150`) feeds the
@@ -298,6 +310,22 @@ In `_run_cycle_chain` (`chain_forecast_execution.py:120-288`):
    model-run row still infers `submitted=False` (`:1070` guard
    intact, GREEN both sides — proves the compatibility map was not
    extended).
+5d. **Historical-artifact pin (review r1 C-P2-1)**: a synthetic
+   pre-change live artifact (pass `submitted`,
+   `production_orchestration`, one model-run row whose nested
+   `stage_statuses` carries a stage-level skip entry) yields exactly
+   `['partial_count_status_cardinality_mismatch',
+   'live_status_model_run_blocked_outcome',
+   'submitted_status_model_run_status_mismatch']` — pinning the
+   disclosed residual AND the `_scheduler_model_run_partial_status`
+   arm (mutation-killing: reverting the `:1166` branch must turn
+   this red).
+5e. **Positive scenario-4 invariant geometry (review r1 C-P2-2)**:
+   an all-basins-failed stage span (bound collector, failure
+   geometry) with `failed_count == basin_count > 0` and a
+   NON-success cycle terminal — the invariant's WHEN clause must be
+   entered (test asserts ≥1 satisfying span), closing the vacuity of
+   the anchor-3 loop for the general scenario-4 requirement.
 6. **Reserve-gate single-point regression (AC5)**: existing
    `test_overlapping_pass_does_not_double_submit_real_submit_path`
    (`:12427-12494`) green untouched.

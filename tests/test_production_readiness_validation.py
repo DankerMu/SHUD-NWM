@@ -6346,3 +6346,38 @@ def test_duplicate_submission_skip_model_run_row_still_infers_not_submitted() ->
         "skipped_duplicate_submission"
         not in readiness_scheduler_evidence.SCHEDULER_LIVE_COMPATIBLE_MODEL_RUN_STATUSES
     )
+
+
+def test_historical_live_pass_with_stage_level_skip_is_no_longer_silently_accepted(
+    tmp_path: Path,
+) -> None:
+    """Anchor 5(d) (#1202): historical-artifact pin for the recount widening.
+
+    A pre-change live pass could report ``submitted`` while one stage of its
+    single model run was skipped by the duplicate-submission gate, and readiness
+    accepted it (the recount only knew ``*_partial``). Teaching
+    ``_scheduler_model_run_partial_status`` about the skip status makes the same
+    historical payload review-visible, so this pins the exact acceptance-error
+    set that the widened recognizer produces.
+    """
+
+    payload = _submitted_scheduler_payload()
+    payload["model_run_evidence"][0]["stage_statuses"] = [
+        {"stage": "forcing", "status": "succeeded"},
+        {"stage": "forecast", "status": "skipped_duplicate_submission"},
+    ]
+
+    assert payload["status"] == "submitted"
+    assert payload["execution_mode"] == "production_orchestration"
+    assert payload["counts"]["partial_count"] == 0
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert sorted(scheduler_item["details"]["acceptance_errors"]) == [
+        "live_status_model_run_blocked_outcome",
+        "partial_count_status_cardinality_mismatch",
+        "submitted_status_model_run_status_mismatch",
+    ]
+    assert live_item["status"] == "release_blocked"
+    assert summary["final_production_readiness_claimed"] is False

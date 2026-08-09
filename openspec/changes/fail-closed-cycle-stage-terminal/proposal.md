@@ -205,10 +205,13 @@ loop inversion + evidence-plane consumer alignment**:
   report `skipped_duplicate_submission`, now a
   `SCHEDULER_REVIEW_BLOCKED_STATUSES` member (readiness maps them to
   the blocked/review state rather than rejecting the vocabulary).
-  Includes the live-proof channel (design D4.2): skip-carrying passes
-  leave `SCHEDULER_LIVE_WORK_STATUSES`, so live-proof reports
-  `scheduler_status_not_live_eligible` and the live-count channel
-  goes silent for them — a deferring pass is not live-green evidence.
+  Includes the live-proof channel (design D4.2, corrected review r1
+  B-P2-1): a skip-carrying pass's scheduler item is `blocked`, so
+  `_scheduler_bindings` harvests no binding from it and live proof
+  fails with `missing_scheduler_evidence_binding` (a receipt bound to
+  such a pass can never validate — regenerate a skip-free pass); the
+  live-count channel goes silent for them. A deferring pass is not
+  live-green evidence.
 - Explicitly NOT changed: reserve-gate logic, retry machinery,
   `TERMINAL_PIPELINE_SUCCESS_STATUSES` (all five copies),
   `_scheduler_pass_status_from_execution`,

@@ -12633,6 +12633,51 @@ def test_duplicate_submission_skip_records_zero_submitted_and_zero_failed_span_c
             )
 
 
+def test_all_basins_failed_stage_span_forbids_pipeline_success_terminal(tmp_path: Path) -> None:
+    """Anchor 5(e) (#1202): the D3 invariant on a geometry that ENTERS its WHEN clause.
+
+    The anchor-3 loop above is vacuous in the skip geometry — after the fix no
+    span records ``failed_count == basin_count``, so the invariant never asserts
+    anything there. This test supplies the positive counterpart: a forecast
+    array submission that fails for every basin, whose canonical timing span
+    really does record all entering basins as failed. The invariant then has a
+    live subject, and the cycle terminal must not be a pipeline success status.
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    client.fail_next_array_submission_stage = "forecast"
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1202allfail01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    evidence = timing.finalize_evidence(status=result.status)
+    all_failed_spans = [
+        record
+        for record in evidence["stages"]
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]
+    ]
+
+    # The WHEN clause is genuinely entered — this geometry is not vacuous.
+    assert len(all_failed_spans) >= 1
+    assert [record["stage_name"] for record in all_failed_spans] == ["forecast"]
+    # D3 invariant: an all-basins-failed stage span forbids a success terminal.
+    for record in all_failed_spans:
+        assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES, (
+            f"stage {record['stage_name']} recorded every entering basin as failed while the "
+            f"cycle terminal {result.status!r} is a pipeline success status"
+        )
+
+
 def test_unrecognized_stage_terminal_fails_cycle_closed_without_advancing(tmp_path: Path) -> None:
     """Disclosed behaviour delta 2 (#1202): a ``reserved``-unbound row fails closed.
 

@@ -185,6 +185,16 @@ Evidence floor:
 ## 4. Review loop
 
 - [ ] 4.1 Cross-review rounds per gate ledger; findings verified before fix
+  - Round 1 (06cbc564, 3 lenses → 4 candidates → 2 verifier batches,
+    4/4 CONFIRMED): A-P1-1 nested `_retry_partial_array_stage` skip
+    collapse (P1, pre-existing `:511-512`, outside every hunk, retry
+    machinery in NOT-changed; literal spec WHEN unviolated) → DEFER,
+    routed via issue-scribe; B-P2-1 live-proof disclosure named an
+    unreachable error code → fixture corrected
+    (`missing_scheduler_evidence_binding`); C-P2-1 `:1166` recognizer
+    arm zero-covered + D4.3(b) rationale mismatch → anchor 5(d) added
+    + rationale corrected; C-P2-2 scenario-4 invariant vacuous →
+    anchor 5(e) added. Fix pass bought by the coverage gaps.
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout
