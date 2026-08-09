@@ -16,7 +16,10 @@ Fixture level: expanded · Repair intensity: high · Project profile: NHMS
   scenario tests (fast-miss recovery in both command styles, multi-hour,
   IC-derived body oracle, 100-repeat determinism, gate/diagnostics, slow-leg
   speed independence, stale scratch lane, unclean scratch refusal, per-hour
-  cfg-write failure, rc≠0 lane, shared timeout budget).
+  cfg-write failure, rc≠0 lane, shared timeout budget; round-3 complement
+  closures: success-path manifest deliverable, no-hours manifest guard,
+  cfg-read/install-write lanes, the four scratch-clear refusals + the
+  vanished-entry tolerance, refusal-log best-effort).
 - `tests/test_state_manager.py`: consumer-tolerance test for
   `packages/common/state_cli.py::_load_state_checkpoint_manifest` (new-shape
   manifest keys ignored).
@@ -120,7 +123,7 @@ raise site · AC5/AC6 node-22 live · AC7 diagnostic trail · AC8 pytest+ruff).
 - [x] AC3: `test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers` — `_STUCK_HEADER_SOLVER_STUB` (header stuck at 1440) → candidate rejected by gates, no checkpoint file installed.
 - [x] AC4: hard-failure-only-after-recovery semantics implemented with comment at the `run_shud` raise site (commit e1d3b611).
 - [x] AC7: same test asserts raise message contains `observed cfg.ic.update header minutes: 1440`; `state_checkpoints.json` carries `observed_header_minutes`.
-- [x] AC8: `uv run pytest -q tests/test_shud_runtime.py tests/test_state_manager.py tests/test_warm_start_chaining.py` (307 passed after the round-2 fix pass) + `uv run ruff check .` clean.
+- [x] AC8: `uv run pytest -q tests/test_shud_runtime.py tests/test_state_manager.py tests/test_warm_start_chaining.py` (317 passed after the round-3 complement-audit pass; 307 after round-2) + `uv run ruff check .` clean.
 - [x] Consumer tolerance (Schema pack): `test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys` — `_load_state_checkpoint_manifest` fed the same manifest with and without the full runtime diagnostic shape (top-level `observed_header_minutes` **and** `recovery_outcomes`, entry-level `provenance`) → identical `StateCheckpoint` list (valid_times, lead_hours, filenames, referenced bytes, output-relative paths). (Re-tick after r2-test-06 payload sync.)
 - [x] Stale scratch lane (File IO pack): `test_run_shud_recovery_never_installs_stale_scratch_state` — `state_checkpoint_recovery/f012/demo.cfg.ic.update` pre-seeded gate-valid, rerun exits 0 without writing state → stale file cleared and NOT installed, `STATE_CHECKPOINTS_MISSING` raised. Red vs pre-fix `runtime.py`: `Failed: DID NOT RAISE` (stale state was installed as the checkpoint).
 - [ ] AC5/AC6 node-22 live acceptance (rollout, tracked in #1164 watch): xinanjiang rerun (gfs 2026072500, dg_0a50ecb0…) exits 0 with `*.f012.cfg.ic.update` header 720; one full 17-basin cycle with complete f012 coverage including the fastest basin.
@@ -149,7 +152,33 @@ Round-2 verified-finding closures (Phase 5/6 fix pass, round-2 cross-review):
 - [x] r2-test-06 (P3, consumer payload): consumer-tolerance test payload includes top-level `recovery_outcomes`; docstring synced.
 - [x] Hygiene rider (from DISCARDed r2-corr-02): recovery cfg write re-terminates (`content.rstrip() + "\n"`), matching `generate_cfg_para`.
 
-Round-2 deferrals (recorded): r2-test-07 (PLAUSIBLE P3, budget-test wall-clock margin on slow CI runners — measured margin ~100× spawn overhead; hardening would trade off the discriminative bound vs the 10.54s red baseline; revisit only if the test actually flakes in CI).
+Round-3 verified-finding closures (Phase 5/6 fix pass, round-3 cross-review):
+
+- [x] r3-test-01 (CONFIRMED, success-path manifest re-raise): with every requested hour captured, `state_checkpoints.json` is the DELIVERABLE warm-start chaining reads, so its write failure stays a hard failure with the workspace error code — `test_run_shud_manifest_write_failure_fails_the_run_when_nothing_is_missing` (slow-leg watcher capture + `_write_text_no_follow` failing only for `state_checkpoints.json`) asserts `WORKSPACE_WRITE_FAILED`, the f012 file present, the index absent, no recovery scratch root. Red vs `runtime.py:616-620` deleted: `Failed: DID NOT RAISE`.
+- [x] r3-corr-01 (PLAUSIBLE, budget-test timing margin — supersedes the round-2 r2-test-07 deferral): `test_run_shud_main_solve_and_recovery_share_one_timeout_budget` budget 6 → 10s with the stub's 4.5s main solve unchanged, so f006 keeps ~5.4s of shared budget (4.4s of runner slack before it would flip to `budget_exhausted`). Exact-equality outcome map and the no-spawn assertion kept, no disjunction introduced. Discrimination re-measured against per-rerun-timeout semantics: `assert 24.56 < (1.5 * 10)` FAILED.
+
+Round-3 complement audit (closes the recurring class: a fix adds a conditional and ships one half untested). Every conditional half the PR introduces now has a named killing test, or a recorded reason. Added closures:
+
+- [x] `write_manifest` requested-hours guard, TAKEN half: `test_run_shud_writes_no_checkpoint_manifest_when_no_hours_are_requested` — a run with no `state_checkpoint_hours` still publishes no `state_checkpoints/`. Red vs `if not self.targets` removed: the directory exists.
+- [x] `capture_available` observed-header dedup: `..._solve_speed_independent_slow_leg` now asserts `observed_header_minutes == [720.0, 4320.0]`. Red vs dedup removed: 38 samples.
+- [x] Empty observed-header rendering: `test_run_shud_fails_when_requested_state_checkpoints_are_missing` now asserts `header minutes: none`. Red vs the `else "none"` half removed: `minutes: )`.
+- [x] Manifest-note rendering, complement half: `..._keeps_partial_gates_and_reports_observed_headers` now asserts the failure message carries NO `state_checkpoints.json write failed` note when that write succeeded. Red vs the ternary's `else ""` removed: `...write failed: None`.
+- [x] Recovery cfg-read failure lane: `test_run_shud_recovery_records_cfg_read_failure_for_every_missing_hour` — every hour recorded `cfg_read_failed`, no scratch dir, code stays `STATE_CHECKPOINTS_MISSING`. Red: `WORKSPACE_READ_FAILED == STATE_CHECKPOINTS_MISSING`.
+- [x] `install_recovered` publish-write lane: `test_run_shud_recovery_records_install_write_failure_distinctly` — `install_write_failed` is distinguishable from the outer `install_failed`. Red: outcome collapses to `install_failed`.
+- [x] `_clear_recovery_scratch_root` refusal halves, one test each — symlink entry (`..._refuses_a_symlinked_scratch_entry_without_following_it`, link and its outside target both survive), unlinkable entry (`..._refuses_when_a_scratch_entry_cannot_be_removed`), entry-count bound (`..._refuses_a_scratch_dir_above_the_entry_bound`), unlistable dir (`..._refuses_an_unreadable_scratch_dir`), and the fail-OPEN half — an entry that vanishes between listing and stat is skipped, not refused (`..._tolerates_a_scratch_entry_that_vanishes_mid_scan`, run still recovers). Red for the four refusals: outcome degrades to `scratch_dir_failed` with no refusal log (bound lane: `DID NOT RAISE`); red for the tolerance lane: hard failure.
+- [x] Refusal-log best-effort write (same class as CAND-2 manifest masking): `test_run_shud_recovery_refusal_log_failure_does_not_alter_the_hour_outcome` — outcome stays exactly `skipped_scratch_unclean`. Red: `skipped_scratch_unclean+scratch_dir_failed`.
+
+Round-3 audit halves left uncovered (reason recorded, no test added):
+
+- `run_shud` `if checkpoint_tracker.missing_hours():` complement — skipping the recovery call when nothing is missing is unobservable (the callee loops over an empty `missing_hours()`); full-file run stays green with the guard forced true. Redundancy, not behavior.
+- `install_recovered` `if target_info is None or hour in self.captured` — dead from the only call site (invoked strictly for hours in `missing_hours()`); full-file run green with the guard forced false. Removal is a behavior-neutral simplification, deliberately NOT taken in a test-closure pass.
+- `recovery_outcome_summary` empty-outcomes early return — unreachable through `run_shud`: every lane records an outcome for every hour it visits, so the map is non-empty at the raise site; full-file run green with the guard forced false.
+- Post-`kill()` `process.wait(timeout=5)` `TimeoutExpired: pass` — needs an unkillable (uninterruptible-sleep) child; not constructible from a Python stub.
+- `install_recovered` `captured_header_minute is None` sub-clause — needs a target readable by the writer but not by the reader in the same call; its sibling clauses (header mismatch, truncated body) already pin the reject-and-unlink behavior of the whole gate.
+- `failure_outcome` sentinel assignments (`scratch_dir_failed` / `log_open_failed` / `spawn_failed` / `wait_failed`) — straight-line label precision, not conditionals; the containment behavior they annotate is pinned by the `cfg_write_failed` and `install_failed` tests.
+- `SafeFilesystemError` member of the `write_manifest` catch tuple — unreachable in practice (`_write_text_no_follow`/`_ensure_directory` convert safe-fs failures to `SHUDRuntimeError`); kept as a defensive widening.
+
+Round-2 deferrals (recorded): r2-test-07 (PLAUSIBLE P3, budget-test wall-clock margin on slow CI runners) — **superseded by r3-corr-01 above**: the margin was widened (budget 6 → 10s) once the discriminative bound was re-measured at the larger budget, so the trade-off that motivated the deferral no longer applies.
 
 ## Non-goals
 
