@@ -85,7 +85,7 @@ Evidence floor:
    `services/orchestrator/chain_forecast_execution.py` (1135),
    `services/orchestrator/scheduler_candidate_execution_evidence.py`
    (1002), `services/production_closure/readiness_scheduler_evidence.
-   py` (1284) — added to `.large-file-guard.json` exclude; no file
+   py` (1283) — added to `.large-file-guard.json` exclude; no file
    was pushed over the limit by this change alone.
 
 ## 0. Run ledger (upstream-contract escalation and re-entry)
@@ -188,7 +188,7 @@ Evidence floor:
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; findings verified before fix
+- [x] 4.1 Cross-review rounds per gate ledger; findings verified before fix
   - Round 1 (06cbc564, 3 lenses → 4 candidates → 2 verifier batches,
     4/4 CONFIRMED): A-P1-1 nested `_retry_partial_array_stage` skip
     collapse (P1, pre-existing `:511-512`, outside every hunk, retry
@@ -207,11 +207,20 @@ Evidence floor:
     fix-regression; diff scope exact. P2 record-hygiene items
     (stale PR body, +3 line-cite drift, #1322 pointer, D4.2 mode
     nuance) closed in the terminal-state commit without code changes.
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.2 Phase 7 final review clean on final head — CLEAN merge-ready
+  on 768c7139 (CI green run 31299361442; independent status-domain
+  enumeration; 5(d) mutation-kill third independent re-run; oracle
+  zero-weakening sweep; collect-only 12180/0 errors). This closeout
+  commit is docs-only (fixture + workplan records, zero code), recorded
+  per the trailing-docs clause of the pre-merge evidence gate.
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers: (a) `production_status_for`
+- [x] 5.0 Follow-ups routed with numbers — ALL FILED: (a) → #1324,
+  (b) = #1205 (reference), (c) → #1325 (p1; publish-side guard never
+  existed — wider than briefed), (d) → #1323 (incl. re-injection copy
+  in an unarchived change), (e) = #1322 (review round 1).
+  Original routing notes: (a) `production_status_for`
   lacks a `skipped_duplicate_submission` mapping — stage evidence
   misreports `production_status: "failed"` (pre-existing,
   `production_contract.py:354-390` /

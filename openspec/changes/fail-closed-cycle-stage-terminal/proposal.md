@@ -188,9 +188,10 @@ loop inversion + evidence-plane consumer alignment**:
   status + new item output field — mandated by
   `services/production_closure/AGENTS.md:29-32`);
   tests `test_orchestration_chain.py`, `test_production_scheduler.py`,
-  `test_scheduler_timing.py`,
   `test_production_readiness_validation.py` (the readiness guard
-  suite; anchors 5(c) live there).
+  suite; anchors 5(c) live there). `test_scheduler_timing.py` is
+  evidence-floor-only (run unmodified; anchor 3 borrows its collector
+  idiom without touching the file).
 - Behavior delta 1 (the fix): a reserve-gate-skipped stage terminates
   the cycle immediately with the dedicated non-success terminal; no
   downstream stage runs; no successor state publishes from that pass;
