@@ -244,7 +244,7 @@ Deviations (recorded):
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
+- [x] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
   - Round 1 (head 164e7b3f) NOT CLEAN: 3 lenses → 13 deduped
     candidates → 3 verifier batches → 6 into the fix pass (P2
@@ -257,13 +257,24 @@ Deviations (recorded):
     residue) with D6 known-limit records + D3 rule 6 (R1) ruling.
     Fix pass: all 6 landed with RED evidence for the three code
     fixes; 15 new/extended tests green; no deviations.
-- [ ] 4.2 Phase 7 final review clean on final head
+  - Round 2 (head e4f4806e) CLEAN focused re-review: all six
+    round-1 fixes verified landed, no new defect; 4 P3 cosmetics
+    closed in d8e90de8 (A5(f) unconditional success pin, docstring
+    precision, design cites, D6 verify-then-publish residual with
+    not-routed reason).
+  - Round 3 / Phase 7 (final head d8e90de8) CLEAN: A5(f)
+    mutation-tested (reverting the strip fix turns the anchor RED),
+    8 replacement ACs anchored, token consistency grep across
+    code/spec/design/proposal/tests, oracle integrity confirmed
+    (single enumerated A7(a3) supersession).
+- [x] 4.2 Phase 7 final review clean on final head (d8e90de8)
 
 ## 5. Merge (pre-authorized) and closeout
 
 - [x] 5.0 Follow-ups routed with numbers: #1329, #1330 (round-1
   PLAUSIBLE-DEFER findings)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
-  head
-- [ ] 5.2 Merge; archive change (delta folds); loop-log line +
-  audit; close issue #1325
+- [x] 5.1 Chinese work summary + evidence posted
+  (PR #1328 comment 5232532257); CI green on both heads
+- [x] 5.2 Merged f9f41da9 (2026-08-09T16:25:37Z); issue #1325
+  auto-closed; archive + loop-log line + audit in the chores
+  commit
