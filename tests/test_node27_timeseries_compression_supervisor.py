@@ -19,13 +19,24 @@ import pytest
 
 from packages.common import compression_terminal_state as terminal_state
 from packages.common import evidence_io
+from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import (
     BoundedEvidenceError,
     assert_output_disjoint_from_closure,
     resolve_artifact_closure,
 )
+from scripts import node27_timeseries_compression_capture as compression_capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_supervisor as supervisor
+from scripts import node27_timeseries_decompression_replay as replay
+
+# The two container-dump-path escapes every mount-containment gate must refuse (#1269):
+# one leaving straight from the mount root, one leaving from a real subdirectory.  Both
+# satisfied the bare `startswith("/var/lib/postgresql/")` the gates used to spell
+# containment as, and both normalize to a file the DB container never meant to expose.
+_MOUNT_ROOT_TRAVERSAL = "/var/lib/postgresql/../../../etc/shadow"
+_SUBDIR_TRAVERSAL = "/var/lib/postgresql/evidence/../../../../etc/passwd"
+_CONTAINER_DUMP_TRAVERSALS = (_MOUNT_ROOT_TRAVERSAL, _SUBDIR_TRAVERSAL)
 
 
 @pytest.mark.parametrize(
@@ -151,14 +162,16 @@ def _plan() -> dict[str, Any]:
                 "hydro",
                 "--hypertable-name",
                 "river_timeseries",
+                # Chunk/range come from the shared six-field contract (#1242);
+                # the hypertable literals above stay pinned in the fixture.
                 "--chunk-schema",
-                "_timescaledb_internal",
+                contract.RECOVERY_TARGET_CHUNK_SCHEMA,
                 "--chunk-name",
-                "_hyper_3_7_chunk",
+                contract.RECOVERY_TARGET_CHUNK_NAME,
                 "--range-start",
-                "2026-05-28T00:00:00Z",
+                contract.RECOVERY_TARGET_RANGE_START,
                 "--range-end",
-                "2026-06-04T00:00:00Z",
+                contract.RECOVERY_TARGET_RANGE_END,
             ]
         elif kind.startswith("compression_"):
             associations = (
@@ -236,7 +249,16 @@ def _plan() -> dict[str, Any]:
         {
             "capture_id": f"capture-{kind}",
             "kind": kind,
-            "argv": [sys.executable, "-c", "print('{}')"],
+            # Producer-shaped: the supervisor binds every capture argv to the capture
+            # script suffix and its declared kind.  `_plan()` is a VALIDATE-only fixture
+            # (tests that execute a capture override the argv with a runnable stub at the
+            # anchored path), so the production script path is the honest spelling here.
+            "argv": [
+                sys.executable,
+                "/home/nwm/NWM/scripts/node27_timeseries_compression_capture.py",
+                "--kind",
+                kind,
+            ],
             "output_path": f"/tmp/{kind}.json",
         }
         for kind in supervisor.EXPECTED_CAPTURE_SEQUENCE
@@ -285,6 +307,36 @@ def _write_ref(path: Path, value: Any) -> dict[str, Any]:
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     path.write_bytes(raw)
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def _capture_stub(tmp_path: Path, body: str) -> Path:
+    """Write a capture stub at the anchored producer path and return it.
+
+    The supervisor binds capture argv[1] to the capture-script suffix, so a stub that
+    stands in for the producer has to BE a file with that name; an inline `-c` program is
+    no longer a well-formed capture argv.  The suffix (not the production path) is what
+    the executor pins, which is exactly what lets this hermetic checkout stand in.
+    """
+
+    script = tmp_path / "scripts" / "node27_timeseries_compression_capture.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(body)
+    return script
+
+
+def _capture_argv(stub: Path, kind: str, *extra: str) -> list[str]:
+    """The producer-shaped argv the supervisor's capture anchor accepts."""
+
+    return [sys.executable, str(stub), "--kind", kind, *extra]
+
+
+# One stub serves every capture kind by reading its own `--kind` binding -- the same
+# byte-for-byte `{"owner":"<kind>"}` line the inline stubs used to print.
+_OWNER_CAPTURE_STUB = (
+    "import json, sys\n"
+    'kind = sys.argv[sys.argv.index("--kind") + 1]\n'
+    'print(json.dumps({"owner": kind}, separators=(",", ":")))\n'
+)
 
 
 def test_run_plan_accepts_exact_concrete_cardinality_and_current_d3() -> None:
@@ -508,10 +560,11 @@ def test_child_refuses_preexisting_planned_output(tmp_path: Path) -> None:
 
 def test_capture_step_is_the_only_writer_and_rejects_preexisting_output(tmp_path: Path) -> None:
     output = tmp_path / "capture.json"
+    stub = _capture_stub(tmp_path, "print('{\"captured\":true}')\n")
     capture = {
         "capture_id": "capture-preflight",
         "kind": "preflight_evidence",
-        "argv": [sys.executable, "-c", "print('{\"captured\":true}')"],
+        "argv": _capture_argv(stub, "preflight_evidence"),
         "output_path": str(output),
     }
     ledger_path = tmp_path / "capture-ledger.jsonl"
@@ -558,10 +611,11 @@ def test_harmless_full_state_machine_has_no_fixture_prewrite_or_out_of_band_owne
             "-c",
             f"from pathlib import Path; {writes or 'pass'}",
         ]
+    owner_stub = _capture_stub(tmp_path, _OWNER_CAPTURE_STUB)
     for capture in plan["captures"]:
         path = tmp_path / f"capture-{capture['kind']}.json"
         capture["output_path"] = str(path)
-        capture["argv"] = [sys.executable, "-c", f"print('{{\"owner\":\"{capture['kind']}\"}}')"]
+        capture["argv"] = _capture_argv(owner_stub, str(capture["kind"]))
         expected_outputs.append(path)
     assert all(not path.exists() for path in expected_outputs)
     checkpoints: list[tuple[str, str | None]] = []
@@ -2462,11 +2516,72 @@ def test_resolve_container_pg_restore_identity_reads_real_docker_probes(
     }
 
 
-def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump() -> None:
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        pytest.param("/tmp/schema.dump", id="prefix_miss"),
+        pytest.param(_MOUNT_ROOT_TRAVERSAL, id="traversal_from_mount_root"),
+        pytest.param(_SUBDIR_TRAVERSAL, id="traversal_from_subdirectory"),
+    ],
+)
+def test_resolve_container_pg_restore_identity_rejects_out_of_mount_dump(dump_path: str) -> None:
+    """The message claims mount CONTAINMENT; before #1269 only the prefix miss honoured it.
+
+    A bare `startswith` constrains the string's opening, not containment: both traversal
+    shapes satisfied it and then got `docker exec sha256sum`-ed inside the container,
+    with the digest of whatever they resolved to recorded as `dump_sha256`.
+    """
+
     with pytest.raises(supervisor.SupervisorError, match="outside the DB container data mount"):
         supervisor.resolve_container_pg_restore_identity(
-            wall=supervisor.HardWall.start(30), dump_path="/tmp/schema.dump"
+            wall=supervisor.HardWall.start(30), dump_path=dump_path
         )
+
+
+def test_resolve_container_pg_restore_identity_refuses_a_traversal_with_zero_docker_calls(
+    probe_bin, tmp_path: Path
+) -> None:
+    """Refusal precedes every container side effect, proved by discrimination.
+
+    The docker stub is installed with an EMPTY response table, so ANY invocation the
+    resolver makes exits 97 and surfaces as `_run_capture_argv`'s label-bearing
+    "checkpoint probe failed".  Getting the containment message instead is only possible
+    if no `docker` process was ever created.  The second half is the non-vacuity control:
+    the very same stub arrangement DOES produce the probe failure for an in-mount path,
+    so the first half is not passing because the stub is inert.
+    """
+
+    probe_bin("docker", [])
+    with pytest.raises(supervisor.SupervisorError) as escaping:
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30), dump_path=_MOUNT_ROOT_TRAVERSAL
+        )
+    assert str(escaping.value) == "pg_restore dump path is outside the DB container data mount"
+
+    with pytest.raises(supervisor.SupervisorError) as contained:
+        supervisor.resolve_container_pg_restore_identity(
+            wall=supervisor.HardWall.start(30),
+            dump_path="/var/lib/postgresql/evidence/schema.dump",
+        )
+    assert str(contained.value) == "DB container image identity checkpoint probe failed"
+
+
+def test_resolve_container_pg_restore_identity_admits_an_interior_double_slash_dump(
+    probe_bin, tmp_path: Path
+) -> None:
+    """The #1268 adjudication survives at the gate: interior `//` is in-mount, not escape.
+
+    `PurePosixPath` drops empty components, so the shape the plan author is allowed to
+    emit keeps resolving identity exactly as before -- and keeps being passed to docker
+    verbatim, unnormalized (the stub matches on the spelling it is given).
+    """
+
+    dump_path = "/var/lib/postgresql//evidence/schema.dump"
+    probe_bin("docker", _docker_responses(dump_path=dump_path))
+    identity = supervisor.resolve_container_pg_restore_identity(
+        wall=supervisor.HardWall.start(30), dump_path=dump_path
+    )
+    assert identity["dump_sha256"] == "c" * 64
 
 
 @pytest.mark.parametrize(
@@ -2532,6 +2647,22 @@ def _finite_writer(total: int) -> list[str]:
     ]
 
 
+def _finite_writer_capture(tmp_path: Path, total: int, *, kind: str) -> list[str]:
+    """`_finite_writer` as a capture-PRODUCER-shaped argv.
+
+    Same finite over/at-limit writer, moved into a file at the anchored capture-script
+    path because `run_capture_step` now refuses any argv that is not the capture producer
+    invoked for its declared kind.  The child's observable behaviour is unchanged: it
+    writes exactly `total` bytes to stdout, nothing to stderr, and exits 0.
+    """
+
+    stub = _capture_stub(
+        tmp_path,
+        f"import os,sys\nb=bytes({total})\nwhile b:\n b=b[os.write(1,b):]\nsys.exit(0)\n",
+    )
+    return _capture_argv(stub, kind)
+
+
 def test_drain_child_reports_truncation_from_dropped_bytes_not_termination(tmp_path: Path) -> None:
     limit = 1024
     process = subprocess.Popen(
@@ -2595,7 +2726,7 @@ def test_capture_step_fails_closed_when_dropped_without_termination(
     capture = {
         "capture_id": "capture-dropped",
         "kind": "preflight_evidence",
-        "argv": [sys.executable, "-c", "pass"],
+        "argv": _capture_argv(_capture_stub(tmp_path, "pass\n"), "preflight_evidence"),
         "output_path": str(output),
     }
 
@@ -2627,7 +2758,7 @@ def test_capture_step_over_limit_finite_writer_fails_closed(tmp_path: Path) -> N
     capture = {
         "capture_id": "capture-overlimit",
         "kind": "preflight_evidence",
-        "argv": _finite_writer(limit + 512),
+        "argv": _finite_writer_capture(tmp_path, limit + 512, kind="preflight_evidence"),
         "output_path": str(output),
     }
     ledger_path = tmp_path / "capture-over-ledger.jsonl"
@@ -2655,7 +2786,7 @@ def test_capture_step_at_the_ceiling_publishes_untruncated_stdout(tmp_path: Path
     capture = {
         "capture_id": "capture-exact",
         "kind": "preflight_evidence",
-        "argv": _finite_writer(limit),
+        "argv": _finite_writer_capture(tmp_path, limit, kind="preflight_evidence"),
         "output_path": str(output),
     }
     ledger_path = tmp_path / "capture-exact-ledger.jsonl"
@@ -2693,6 +2824,45 @@ def test_decompress_argv_rejects_wrong_association_label_as_supervisor_error() -
         )
 
 
+# --- #1269: the mirror argv gate judges containment, not a string opening ---------
+
+
+def _pg_restore_list_argv(dump_path: str) -> list[str]:
+    return ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path]
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_pg_restore_list_argv_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Reached directly with a hand-crafted argv: this gate refuses on its own.
+
+    No upstream gate is in the picture -- a bundle whose plan was hand-written never
+    passes through plan_author, so this mirror gate has to be independently closed.
+    """
+
+    with pytest.raises(
+        supervisor.SupervisorError, match="pg_restore list argv/output ownership differs"
+    ):
+        supervisor._assert_exact_argv(
+            _pg_restore_list_argv(dump_path), kind="pg_restore_list", associations={}
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        # The #1268 adjudicated shape: interior `//` is in-mount and stays admitted.
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_pg_restore_list_argv_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity: the refusal above is about the escape, not about the gate rejecting all."""
+
+    supervisor._assert_exact_argv(
+        _pg_restore_list_argv(dump_path), kind="pg_restore_list", associations={}
+    )
+
+
 # --- F3: full producer state machine drives the real producers -------------
 
 
@@ -2715,10 +2885,11 @@ def test_full_state_machine_executes_real_producers_against_stub_binaries(
             f"Path({path!r}).write_text('{{\"owner\":\"{name}\"}}\\n')" for name, path in associations.items()
         )
         command["argv"] = [sys.executable, "-c", f"from pathlib import Path; {writes or 'pass'}"]
+    owner_stub = _capture_stub(tmp_path, _OWNER_CAPTURE_STUB)
     for capture in plan["captures"]:
         path = tmp_path / f"capture-{capture['kind']}.json"
         capture["output_path"] = str(path)
-        capture["argv"] = [sys.executable, "-c", f"print('{{\"owner\":\"{capture['kind']}\"}}')"]
+        capture["argv"] = _capture_argv(owner_stub, str(capture["kind"]))
     # The real resolver reads the dump path from the list command's argv[-1].
     # Append it as an EXTRA arg the python stub ignores (sys.argv[1:]), so the
     # child stays a runnable no-op while argv[-1] is the mount-internal path the
@@ -2770,3 +2941,517 @@ def test_full_state_machine_executes_real_producers_against_stub_binaries(
     restore_event = next(event for event in events if event.get("kind") == "pg_restore_version")
     assert restore_event["artifact_associations"]["dump_sha256"] == "c" * 64
     assert restore_event["artifact_associations"]["container_image_id"] == "sha256:" + "a" * 64
+
+
+# Frozen pre-#1087 literal of the checkpoint activity SQL (supervisor
+# :1177-1185 before the target was single-sourced).  Folded with implicit
+# concatenation only -- the bytes are unchanged.
+_FROZEN_SUPERVISOR_ACTIVITY_SQL = (
+    "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
+    "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
+    "COALESCE(has_table_privilege(usename,'hydro.river_timeseries',"
+    "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
+    "FROM pg_stat_activity "
+    "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+    "AND state<>'idle') s"
+)
+
+
+def test_default_target_activity_sql_is_byte_identical_to_the_pre_change_literal() -> None:
+    assert supervisor._build_activity_sql() == _FROZEN_SUPERVISOR_ACTIVITY_SQL
+    assert supervisor._build_activity_sql(contract.RECOVERY_TARGET) == _FROZEN_SUPERVISOR_ACTIVITY_SQL
+
+
+def test_switching_the_target_moves_the_write_privilege_probe_with_it() -> None:
+    sql = supervisor._build_activity_sql("met.forcing_station_timeseries")
+    assert "'met.forcing_station_timeseries'" in sql
+    assert "hydro.river_timeseries" not in sql
+    assert "AS has_write_privilege_on_target" in sql
+
+
+@pytest.mark.parametrize("target", ["public.evil", "hydro.river; DROP"])
+def test_probe_target_outside_the_whitelist_or_malformed_fails_before_any_sql(target: str) -> None:
+    with pytest.raises(ValueError):
+        contract.validated_probe_target(target)
+    with pytest.raises(ValueError):
+        supervisor._build_activity_sql(target)
+
+
+def test_expected_decompress_argv_binds_the_shared_recovery_target() -> None:
+    assert contract.RECOVERY_TARGET == f"{contract.RECOVERY_TARGET_SCHEMA}.{contract.RECOVERY_TARGET_TABLE}"
+    assert contract.RECOVERY_TARGET in _FROZEN_SUPERVISOR_ACTIVITY_SQL
+
+
+def test_supervised_hypertable_whitelist_matches_every_verifier_copy() -> None:
+    assert contract.SUPERVISED_HYPERTABLES == evidence.HYPERTABLE_KEYS
+    assert contract.SUPERVISED_HYPERTABLES == compression_capture.HYPERTABLE_KEYS
+
+
+def test_recovery_target_constants_match_the_live_evidence_schema_consts() -> None:
+    """Bind the schema and verifier recovery-target copies to the contract (#1242).
+
+    The schema JSON is data and the verifier owns its own acceptance oracle, so
+    neither can import the contract; this guard is what makes a one-sided change
+    to them fail instead of shipping a half-migrated target.  It covers the
+    schema ``$defs.recovery_target`` consts, the schema's
+    ``decompress_return_relation`` const, and the verifier's
+    ``RECOVERY_TARGET``/``RECOVERY_RETURN_RELATION`` module constants; the
+    supervisor's expected decompress argv and the capture producer's
+    ``RECOVERY_TARGET``/``RECOVERY_PREFLIGHT_SQL`` are bound by deriving from the
+    contract, and ``plan_author``'s argv literals transitively via the supervisor
+    gate test in tests/test_node27_timeseries_compression_capture.py.
+
+    The two copies that used to be spelled out by hand are derived as of #1244:
+    the capture producer's ``CATALOG_POST_SQL`` interpolates capture's own
+    contract-derived ``RECOVERY_TARGET`` (byte-frozen in
+    tests/test_node27_timeseries_compression_capture.py), and the verifier's
+    expected decompress argv tail is built from its own ``RECOVERY_TARGET``
+    module constant -- which this guard's evidence<->contract clause below is
+    what closes transitively: that derivation added no new contract import, and
+    the verifier still never imports the six recovery-target fields from the
+    contract (its pre-existing ``node27_container_contract`` import covers
+    unrelated constants).
+
+    As of #1245 no PRODUCTION PYTHON copy of the six-field target remains
+    outside the bound set: the replay producer's ``TARGET``/``TARGET_RELATION``
+    (scripts/node27_timeseries_decompression_replay.py) were the last one and
+    now derive from the contract, asserted below.  Those two clauses are
+    definitional against a contract-side flip (both sides move together); what
+    they catch is a replay-side reversion to an independent literal.  Runbook
+    prose and the intentional byte-freeze literals in the test suites are not
+    derivation sites and are deliberately excluded from that closure statement.
+    The e2e ``test_real_state_machine_bundle_verifies_task_4_5_pass``
+    (tests/test_node27_timeseries_compression_live_evidence.py) stays the
+    independent NON-derived oracle: its decompress argv comes from
+    ``plan_author``'s own literals through the real ``verify_bundle`` path, so an
+    evidence-side one-sided flip turns it red too.
+    """
+
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas/timeseries_compression_live_evidence.schema.json").read_text()
+    )
+    recovery_target = schema["$defs"]["recovery_target"]["properties"]
+    assert set(recovery_target) == set(contract.RECOVERY_TARGET_FIELDS)
+    assert {field: spec["const"] for field, spec in recovery_target.items()} == dict(
+        contract.RECOVERY_TARGET_FIELDS
+    )
+    relation = f"{contract.RECOVERY_TARGET_CHUNK_SCHEMA}.{contract.RECOVERY_TARGET_CHUNK_NAME}"
+    recovery = schema["properties"]["recovery"]["properties"]
+    assert recovery["decompress_return_relation"]["const"] == relation
+    # The verifier's own recovery-target oracle.
+    assert dict(evidence.RECOVERY_TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
+    assert evidence.RECOVERY_RETURN_RELATION == relation
+    # The replay producer's target and its synthetic relation (#1245).
+    assert dict(replay.TARGET) == dict(contract.RECOVERY_TARGET_FIELDS)
+    assert replay.TARGET_RELATION == relation
+
+
+# --- #1259: the executor binds every capture to the capture producer --------
+#
+# Suffix + kind, at BOTH gates: `validate_run_plan` is not the only door --
+# `run_capture_step` is callable with a capture the plan validator never saw, so
+# wiring the anchor into the validator alone would leave the spawn path open.
+
+
+def _rogue_capture_script(tmp_path: Path, marker: Path) -> Path:
+    """A runnable stub whose filename is NOT the capture producer's.
+
+    It records the fact of its own execution, so the tests below can prove the refusal
+    happened BEFORE the spawn rather than after a successful run.
+    """
+
+    script = tmp_path / "rogue_producer.py"
+    script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n")
+    return script
+
+
+def test_validate_run_plan_refuses_a_capture_argv_that_is_not_the_capture_producer() -> None:
+    plan = _plan()
+    capture = plan["captures"][0]
+    capture["argv"] = [sys.executable, "/home/nwm/NWM/scripts/rogue_producer.py", "--kind", capture["kind"]]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(supervisor.SupervisorError, match="is not the capture script"):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+def test_validate_run_plan_refuses_a_capture_argv_bound_to_another_kind() -> None:
+    plan = _plan()
+    capture = plan["captures"][0]
+    other_kind = next(kind for kind in supervisor.EXPECTED_CAPTURE_SEQUENCE if kind != capture["kind"])
+    capture["argv"] = [
+        sys.executable,
+        "/home/nwm/NWM/scripts/node27_timeseries_compression_capture.py",
+        "--kind",
+        other_kind,
+    ]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(supervisor.SupervisorError, match="kind binding"):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+def test_run_capture_step_refuses_a_non_producer_argv_before_any_spawn(tmp_path: Path) -> None:
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture.json"
+    capture = {
+        "capture_id": "capture-preflight",
+        "kind": "preflight_evidence",
+        "argv": [sys.executable, str(_rogue_capture_script(tmp_path, marker)), "--kind", "preflight_evidence"],
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "rogue-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="is not the capture script"):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_run_capture_step_refuses_a_kind_mismatched_argv_before_any_spawn(tmp_path: Path) -> None:
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture.json"
+    stub = _capture_stub(
+        tmp_path, f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n"
+    )
+    capture = {
+        "capture_id": "capture-preflight",
+        "kind": "preflight_evidence",
+        # Correct producer, wrong kind: the snapshot would be published under a label the
+        # producer was never asked to collect.
+        "argv": _capture_argv(stub, "sizes_pre"),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "kind-mismatch-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(supervisor.SupervisorError, match="kind binding"):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_supervisor_validates_and_executes_a_hermetic_checkout_capture_carrying_seams(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the executor-vs-verifier asymmetry.
+
+    The anchor is a SUFFIX and carries no seam logic, so a capture script under a
+    non-production checkout with `--self-test-*` tokens appended must still validate and
+    still run -- otherwise the hermetic e2e (and #1250's executor decision) would break.
+    """
+
+    plan = _plan()
+    stub = _capture_stub(tmp_path, _OWNER_CAPTURE_STUB)
+    for capture in plan["captures"]:
+        capture["output_path"] = str(tmp_path / f"capture-{capture['kind']}.json")
+        capture["argv"] = _capture_argv(
+            stub, str(capture["kind"]), "--self-test-free-bytes", "500000000000"
+        )
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+
+    validated = supervisor.validate_run_plan(plan, inherited_env={})
+    assert validated["captures"][0]["argv"][1] == str(stub)
+    assert not str(stub).startswith(supervisor.EXPECTED_REPO)
+
+    target = plan["captures"][0]
+    ledger_path = tmp_path / "hermetic-capture-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        event = supervisor.run_capture_step(
+            target, wall=supervisor.HardWall.start(10), ledger=ledger, artifact_dir=tmp_path
+        )
+    assert event["kind"] == target["kind"]
+    assert json.loads(Path(target["output_path"]).read_text()) == {"owner": target["kind"]}
+
+
+# --- #1259 follow-up: the executor's anchor is rebind- and abbreviation-proof ---
+#
+# capture.py parses with argparse's default `allow_abbrev=True`; `--kind` is its only
+# `--k*` flag, so `--k <other>` binds the kind, and a later binding wins.  Pinning
+# argv[2:4] alone therefore let a re-aimed producer through BOTH supervisor gates.
+
+
+def _kind_rebinding_shapes(kind: str) -> list[tuple[str, list[str], str]]:
+    """(id, extra tokens, expected refusal fragment) for every rebinding spelling."""
+
+    other = next(item for item in supervisor.EXPECTED_CAPTURE_SEQUENCE if item != kind)
+    return [
+        ("full_second_kind", ["--kind", other], "exactly once"),
+        ("k_abbreviation_pair", ["--k", other], "abbreviation of --kind"),
+        ("kin_abbreviation_inline", [f"--kin={other}"], "abbreviation of --kind"),
+        ("m_abbreviation_pair", ["--m", "b" * 40], "abbreviation of --mutation-head-sha"),
+    ]
+
+
+_REBINDING_PARAMS = [
+    pytest.param(tokens, fragment, id=name)
+    for name, tokens, fragment in _kind_rebinding_shapes("preflight_evidence")
+]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    _REBINDING_PARAMS,
+)
+def test_validate_run_plan_refuses_a_capture_argv_that_rebinds_its_anchored_identity(
+    extra: list[str], expected: str
+) -> None:
+    plan = _plan()
+    capture = next(item for item in plan["captures"] if item["kind"] == "preflight_evidence")
+    capture["argv"] = [*capture["argv"], *extra]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    _REBINDING_PARAMS,
+)
+def test_run_capture_step_refuses_a_rebinding_argv_before_any_spawn(
+    tmp_path: Path, extra: list[str], expected: str
+) -> None:
+    """The spawn gate is the load-bearing one: `run_capture_step` is callable directly."""
+
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture.json"
+    stub = _capture_stub(
+        tmp_path, f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n"
+    )
+    capture = {
+        "capture_id": "capture-preflight",
+        "kind": "preflight_evidence",
+        "argv": _capture_argv(stub, "preflight_evidence", *extra),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "rebind-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""
+
+
+def test_capture_anchor_still_accepts_the_full_production_option_set(tmp_path: Path) -> None:
+    """Non-vacuity for the abbreviation domain: the REAL producer options are not in it.
+
+    `plan_author` emits `--database/--repo/--container/--evidence-dir/--psql/--systemctl/
+    --docker/--journalctl/--git` plus the anchored pair; none of them is a proper prefix
+    of an anchored option, so a gate that rejected too broadly would redden here.
+    """
+
+    plan = _plan()
+    stub = _capture_stub(tmp_path, _OWNER_CAPTURE_STUB)
+    for capture in plan["captures"]:
+        capture["output_path"] = str(tmp_path / f"capture-{capture['kind']}.json")
+        capture["argv"] = _capture_argv(
+            stub,
+            str(capture["kind"]),
+            "--database",
+            "nhms",
+            "--mutation-head-sha",
+            "a" * 40,
+            "--repo",
+            "/home/nwm/NWM",
+            "--container",
+            "nhms-db",
+            "--evidence-dir",
+            str(tmp_path),
+            "--psql",
+            "/usr/bin/psql",
+            "--systemctl",
+            "/usr/bin/systemctl",
+            "--docker",
+            "/usr/bin/docker",
+            "--journalctl",
+            "/usr/bin/journalctl",
+            "--git",
+            "/usr/bin/git",
+        )
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    validated = supervisor.validate_run_plan(plan, inherited_env={})
+    assert validated["captures"][0]["argv"] == plan["captures"][0]["argv"]
+
+
+# --- #1269: the pre-spawn capture-argv containment gate ---------------------------
+#
+# The fifth route to the same container side effect.  A plan whose pg_restore_list
+# COMMAND tail is clean can still bind `--schema-dump-container` to an escaping value in
+# the schema_dump_list CAPTURE argv; capture.py then really runs
+# `docker exec <container> /usr/bin/pg_restore --list <value>` on it.  This gate is a
+# pure function called before every spawn (`validate_run_plan` and `run_capture_step`),
+# so reaching it directly is the whole proof of refusal-before-spawn.
+
+_IN_MOUNT_DUMP = "/var/lib/postgresql/evidence/schema-before.dump"
+
+
+def _schema_dump_list_capture_argv(*extra: str, kind: str = "schema_dump_list") -> list[str]:
+    """A producer-shaped capture argv for `kind`, plus whatever tokens the case needs."""
+
+    return [
+        "/home/nwm/NWM/.venv/bin/python",
+        f"/home/nwm/NWM{supervisor.CAPTURE_SCRIPT_SUFFIX}",
+        "--kind",
+        kind,
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        pytest.param(
+            ["--schema-dump-container", _MOUNT_ROOT_TRAVERSAL],
+            "outside the pinned container dump path prefix",
+            id="mount_root_traversal_pair_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-container={_MOUNT_ROOT_TRAVERSAL}"],
+            "outside the pinned container dump path prefix",
+            id="mount_root_traversal_inline_form",
+        ),
+        pytest.param(
+            ["--schema-dump-container", _SUBDIR_TRAVERSAL],
+            "outside the pinned container dump path prefix",
+            id="subdirectory_traversal_pair_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-container={_SUBDIR_TRAVERSAL}"],
+            "outside the pinned container dump path prefix",
+            id="subdirectory_traversal_inline_form",
+        ),
+        pytest.param(
+            [f"--schema-dump-c={_MOUNT_ROOT_TRAVERSAL}"],
+            "abbreviation of --schema-dump-container",
+            id="abbreviation_spelling",
+        ),
+        pytest.param(
+            ["--schema-dump-container"],
+            "outside the pinned container dump path prefix",
+            id="dangling_flag",
+        ),
+        pytest.param(
+            [
+                "--schema-dump-container",
+                _IN_MOUNT_DUMP,
+                "--schema-dump-container",
+                _MOUNT_ROOT_TRAVERSAL,
+            ],
+            "outside the pinned container dump path prefix",
+            id="late_second_binding_after_a_clean_first",
+        ),
+    ],
+)
+def test_capture_producer_argv_refuses_an_escaping_container_dump_binding(
+    extra: list[str], expected: str
+) -> None:
+    """Every spelling that reaches capture.py's parser is judged, not just the tidy one.
+
+    argparse binds last-wins and expands unambiguous prefixes, so the pair form, the
+    inline form, the `--schema-dump-c=` abbreviation and a late second binding are all
+    the same instruction to the producer.  The dangling flag binds no value and surfaces
+    as `_capture_option_values`' `""` sentinel, which fails the prefix conjunct -- a
+    refusal, never a silent skip.
+    """
+
+    with pytest.raises(supervisor.SupervisorError, match=re.escape(expected)):
+        supervisor._assert_capture_producer_argv(
+            _schema_dump_list_capture_argv(*extra), kind="schema_dump_list"
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param([], id="option_absent"),
+        pytest.param(["--schema-dump-container", _IN_MOUNT_DUMP], id="in_mount_pair_form"),
+        pytest.param([f"--schema-dump-container={_IN_MOUNT_DUMP}"], id="in_mount_inline_form"),
+        pytest.param(
+            ["--schema-dump-container", "/var/lib/postgresql//evidence/schema-before.dump"],
+            id="in_mount_interior_double_slash",
+        ),
+        pytest.param(
+            ["--schema-dump-host", "/home/nwm/node27-timeseries-compression/schema-before.dump"],
+            id="sibling_host_option_untouched",
+        ),
+    ],
+)
+def test_capture_producer_argv_admits_the_committed_schema_dump_list_shapes(
+    extra: list[str],
+) -> None:
+    """Non-vacuity, and the recorded absent-option semantics.
+
+    An absent option binds no value, so there is nothing for this gate to judge -- and
+    nothing is lost: `--schema-dump-container` is registered `default=None` and
+    `_capture_schema_dump_list` refuses such a run itself.  The in-mount default authors
+    today, and the interior-`//` shape #1268 adjudicated stays admitted here too.
+    """
+
+    supervisor._assert_capture_producer_argv(
+        _schema_dump_list_capture_argv(*extra), kind="schema_dump_list"
+    )
+
+
+def test_capture_producer_argv_scopes_the_containment_check_to_schema_dump_list() -> None:
+    """Recorded scope: only the kind that actually docker-execs the value is judged.
+
+    For any other kind capture.py never reads `--schema-dump-container` (it builds no
+    pg_restore argv at all), so there is no execution-safety property to enforce and this
+    gate deliberately says nothing about the value.
+    """
+
+    argv = _schema_dump_list_capture_argv(
+        "--schema-dump-container", _MOUNT_ROOT_TRAVERSAL, kind="catalog_before"
+    )
+    supervisor._assert_capture_producer_argv(argv, kind="catalog_before")
+
+
+def test_validate_run_plan_refuses_an_escaping_capture_dump_binding_before_any_spawn() -> None:
+    """The gate's production caller: a whole plan carrying the escape never validates."""
+
+    plan = _plan()
+    capture = next(item for item in plan["captures"] if item["kind"] == "schema_dump_list")
+    capture["argv"] = [*capture["argv"], "--schema-dump-container", _MOUNT_ROOT_TRAVERSAL]
+    plan["run_plan_id"] = supervisor.run_plan_id(plan)
+    with pytest.raises(
+        supervisor.SupervisorError, match="outside the pinned container dump path prefix"
+    ):
+        supervisor.validate_run_plan(plan, inherited_env={})
+
+
+def test_run_capture_step_refuses_an_escaping_capture_dump_binding_before_any_spawn(
+    tmp_path: Path,
+) -> None:
+    """The other caller, and the only one that could spawn: no process, no output, no ledger."""
+
+    marker = tmp_path / "spawned.marker"
+    output = tmp_path / "capture-schema_dump_list.json"
+    stub = _capture_stub(
+        tmp_path,
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('spawned')\nprint('{{}}')\n",
+    )
+    capture = {
+        "capture_id": "capture-schema_dump_list",
+        "kind": "schema_dump_list",
+        "argv": _capture_argv(
+            stub, "schema_dump_list", "--schema-dump-container", _SUBDIR_TRAVERSAL
+        ),
+        "output_path": str(output),
+    }
+    ledger_path = tmp_path / "container-dump-ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        with pytest.raises(
+            supervisor.SupervisorError, match="outside the pinned container dump path prefix"
+        ):
+            supervisor.run_capture_step(
+                capture, wall=supervisor.HardWall.start(5), ledger=ledger, artifact_dir=tmp_path
+            )
+    assert not marker.exists()
+    assert not output.exists()
+    assert ledger_path.read_text() == ""

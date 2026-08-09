@@ -9,6 +9,10 @@ Policy clarification: 2026-07-21 (all 7/14-day lifecycle ages are anchored to
 the latest node-27 displayable forecast cycle, not host wall time; wall time is
 used only for receipt generation and gate freshness)
 
+Layout amendment: 2026-07-26 (archive root moved off the `/home` hot
+filesystem to `/data/GHDC/nwm-archive`; see "Amendment (2026-07-26)" below,
+which supersedes Decision item 1's path wording)
+
 ## Status
 
 Accepted
@@ -51,10 +55,11 @@ it omits TimescaleDB native compression entirely.
 
 1. **Source of truth for cold data is node-22-produced cycle products**
    (forcing packages, SHUD run outputs, state snapshots) — not a DB
-   re-export. Aged products move to a rotation-exempt archive root on the
-   shared volume: `/home/ghdc/nwm/archive/` (node-22 view:
-   `/ghdc/data/nwm/archive/`), stored as per-cycle `tar.zst` + manifest with
-   sha256 checksums.
+   re-export. Aged products move to a rotation-exempt archive root: an
+   archive directory on node-27's local `/home` filesystem (original path
+   literal, and the "shared volume"/node-22-view framing around it, are
+   superseded — see "Amendment (2026-07-26)"), stored as per-cycle
+   `tar.zst` + manifest with sha256 checksums.
 2. **One-time DB-export salvage** only for windows whose upstream products
    already rotated away (verified scope; notably forcing station series
    before 2026-06-16): `COPY` to `csv.zst` with manifest, provenance-marked
@@ -97,12 +102,155 @@ it omits TimescaleDB native compression entirely.
    station history API surface (ADR 0001 owns that boundary), and
    `met.best_available_selection` (currently 0 chunks).
 
+## Amendment (2026-07-26)
+
+The Decision text above is preserved as history, with one exception: Decision
+item 1's archive path literal was replaced by a pointer to this section,
+because that literal was both wrong and stale (below). For the archive tier's
+physical location this section supersedes Decision item 1 entirely: **the
+current layout is whatever this amendment says**. The exact pre-migration path
+survives verbatim in the committed receipt JSONs, in
+`openspec/changes/tier-node27-timeseries-storage/`, and in git history.
+
+### What changed
+
+The archive root moved from the Decision item 1 location (a directory on
+node-27's local `/home` filesystem) to **`/data/GHDC/nwm-archive`**, backed by
+the node-27-local RAID
+`/dev/md0` (15 TB total, ~14 TB free at migration). 2.2 GB / 1850 files were
+rsync-verified into the new root; the old directory's contents were removed
+(an empty directory shell remains as residue — operator cleanup is optional
+and has no functional effect). The change is env-only, and no runner code or
+receipt schema changed. Deployed state (verified 2026-08-01): four of the five
+node-27 archive-lane env files set `NHMS_ARCHIVE_ROOT` to the new path, and
+the fifth (`node27-resource-governance.env`) carries the service-level
+override `NODE27_GOVERNANCE_ARCHIVE_ROOT` set to the same value. All five repo
+`.example` templates set `NHMS_ARCHIVE_ROOT`.
+
+### Premise correction (the original description was wrong from day one)
+
+Decision item 1's original "shared volume" path wording named a node-27 path
+and paired it with a claimed node-22 view of the same bytes. That was never
+true on node-27: the path it named lived on the **local `/home` filesystem**,
+not on the NFS share node-22 mounts. The claimed shared/node-22 view of the
+archive never functioned. It also never mattered: `grep -rn
+"ghdc/data/nwm/archive"` has zero hits across all code, scripts, and env files
+— node-22 has no runtime consumer of any archive path. This amendment
+therefore retires the "shared volume / node-22 view" wording entirely; the
+archive tier is node-27-local storage, and node-22 remains unaffected by the
+migration.
+
+### Anti-pattern this amendment encodes
+
+**The archive tier MUST NOT share a filesystem with the hot tier (pgdata /
+object-store) it exists to relieve.** When it does, the free-space guard that
+protects the archive lane becomes a self-lock: as the hot tier fills the shared
+filesystem, the mover refuses with `refused_free_space`, so the mover frontier
+stops advancing, so the archive-completeness receipt stays pending, so
+`scripts/node27_timeseries_retention.py` refuses to drop chunks — the one
+mechanism able to free the disk is deadlocked by the very disk it protects.
+
+That is exactly the 2026-07-26 incident: node-27 `/home` filled
+(`hydro.river_timeseries` at 816 GB, growing ~43 GB/day during July), the mover
+frontier had been stuck at 2026-06-20, PostgreSQL crashed twice, and the
+display surfaced as "Layer is not registered by the API". Moving the archive
+root to its own filesystem restored `outcome=success` on the mover and a clean
+`free_space` band. Any future relocation of `NHMS_ARCHIVE_ROOT` must preserve
+the separate-filesystem property; the env templates carry this as an inline
+warning.
+
+### Disposition of the superseded path wording
+
+`openspec/changes/tier-node27-timeseries-storage/` intentionally keeps the
+original archive path wording (`proposal.md:22`,
+`specs/timeseries-product-archive/spec.md:8-9`), and the committed
+pre-migration receipts under
+`docs/runbooks/receipts/tier-node27-timeseries-storage/product-archive/` keep
+it too. Both are point-in-time records of what was delivered and are not
+rewritten. **This ADR amendment is the authoritative source for the current
+archive layout**; the operator-facing current state lives in
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
+
+## Amendment (2026-08-06): the archive filesystem now also carries part of the DB
+
+The 2026-07-26 amendment separated the archive tier onto `/dev/md0` precisely
+so that a full `/home` could not deadlock the mover ↔ retention loop. That
+separation is now partially undone, knowingly, in the opposite direction.
+
+### What changed
+
+PostgreSQL tablespace **`ghdc`** was created at host path
+`/data/GHDC/nwm-archive/nhms-tablespace` (container
+`/home/postgres/pgdata/tablespaces/ghdc`), on the same `/dev/md0` that backs
+`/data/GHDC/nwm-archive`. Four chunks — `_hyper_3_10_chunk` and
+`_hyper_3_14_chunk` of `hydro.river_timeseries`, `_hyper_1_12_chunk` and
+`_hyper_1_13_chunk` of `met.forcing_station_timeseries` — plus all 18 of their
+indexes were moved there, roughly 502 GB decompressed. The `nhms-db` container
+was recreated to add the bind mount; `pg_default` and the object store stay on
+`/home`.
+
+### Why
+
+The six-basin production replay (#1164) had to decompress those four chunks to
+lift the compressed-chunk write guard, and `/home` had ~357 GB free against a
+~502 GB requirement. Sequencing could not avoid it: each backfilled cycle's
+forecast window spans both the 07-02…07-09 and 07-09…07-16 chunks, so both had
+to be uncompressed simultaneously. On `/data/GHDC` the only `nwm`-writable
+location is `nwm-archive/` — the rest of that mount is `root`/`ghdcadmin`
+owned and a sibling mount point needs root. The alternatives were rejected:
+`/srv` has 434 GB free (below the requirement), and dropping the replay's
+older 17 cycles would have failed the issue's "controlled replacement of the
+six basins' historical runs" requirement.
+
+### What this costs, and the terms it is accepted on
+
+This re-opens the 2026-07-26 deadlock with the operands swapped: **database**
+growth can now push the archive filesystem below the mover's refuse threshold,
+freezing the mover frontier, leaving the archive-completeness receipt pending,
+and making retention refuse to drop. Accepted because `/dev/md0` holds ~19 GB
+of archive against 15 TB, and the archive grows at single-digit GB/month —
+i.e. headroom, not a structural fix. Terms:
+
+- The tablespace's working set must be bounded (re-compress promptly, never
+  hold more uncompressed than the chunks actively being reingested). This is
+  the only lever that protects `/dev/md0`. The archive free-space band is
+  **not** such a lever: it is the mover's entry gate, it reserves nothing,
+  and PostgreSQL enforces no tablespace quota — raising it makes the mover
+  refuse at higher free space, i.e. it advances the deadlock above instead of
+  preventing it.
+- Governance visibility is partial, and distorted in both directions.
+  `scripts/node27_resource_governance.py` *does* report `/dev/md0` free/total
+  and warn/refuse recommendations through its `archive_root` block (live only
+  when both `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES` are set). But its
+  `pgdata_root` `du` covers only `/home/nwm/nhms-pgdata`, so the DB footprint
+  under-reports by the migrated bytes; and `archive_root.used_bytes` is a `du`
+  of the whole archive root, which now *contains* the tablespace — so the
+  archive's reported size absorbed ~502 GB of database and the
+  "single-digit GB/month" growth signal this exception relies on is no longer
+  readable from it. Read `df -h /home /data/GHDC` manually, and size the
+  archive alone with `du -s --exclude=nhms-tablespace`. Issue #1290.
+- `/dev/md0` is not NHMS-exclusive (`root`/`ghdcadmin` trees share it, ~1 TB
+  in use at the 2026-07-26 migration), so free space can fall without any
+  NHMS growth.
+- Prefer a dedicated filesystem for `ghdc` the next time root-level
+  provisioning is available on node-27. This amendment is an exception with a
+  reason, not a new rule; the 2026-07-26 separation principle still stands for
+  everything else. Concretely: the exception is bounded to the `ghdc`
+  tablespace directory already present under the archive root — do not point
+  `NHMS_ARCHIVE_ROOT` at the filesystem carrying `pg_default`
+  (`/home/nwm/nhms-pgdata`) or the object store, and do not place further DB
+  data on `/dev/md0`.
+
+Operator-facing detail: `docs/runbooks/tier-node27-timeseries-storage.md`
+section "Recorded exception (2026-08-06)".
+
 ## Consequences
 
 - Steady-state DB size becomes bounded (14-day window, mostly compressed)
   instead of growing ~24 GB/week at 13 basins; the archive grows by
   compressed product tarballs (estimated single-digit GB/month at current
-  scale) on a volume with 839 GB free.
+  scale) on a volume with 839 GB free (pre-migration figure; since 2026-07-26
+  the archive volume is the 15 TB RAID — see "Amendment (2026-07-26)").
 - The mid-June reset failure mode ("delete products, DB silently becomes the
   only copy") is eliminated: deletion anywhere is gated on archive receipts.
 - Rollback: compression is reversible per chunk (`decompress_chunk`);

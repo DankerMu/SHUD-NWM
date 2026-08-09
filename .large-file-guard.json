@@ -34,7 +34,9 @@
     "packages/common/state_manager.py",
     "services/orchestrator/scheduler_candidates.py",
     "services/orchestrator/scheduler_config.py",
+    "services/orchestrator/scheduler_state_failure.py",
     "tests/test_production_scheduler.py",
+    "tests/test_retry.py",
     "tests/test_scheduler_generation.py"
   ]
 }

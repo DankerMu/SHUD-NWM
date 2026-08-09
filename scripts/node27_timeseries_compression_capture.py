@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
 
 # The host contract values the verifier pins by exact equality; they are node-27
@@ -60,14 +61,10 @@ EXPECTED_UNITS = (
     "nhms-node27-timeseries-compression.service",
     "nhms-node27-timeseries-compression-replay.service",
 )
-RECOVERY_TARGET = {
-    "hypertable_schema": "hydro",
-    "hypertable_name": "river_timeseries",
-    "chunk_schema": "_timescaledb_internal",
-    "chunk_name": "_hyper_3_7_chunk",
-    "range_start": "2026-05-28T00:00:00Z",
-    "range_end": "2026-06-04T00:00:00Z",
-}
+# The six-field recovery target comes from the shared contract module (issue
+# #1242) -- note ``contract.RECOVERY_TARGET`` is the ``schema.table`` STRING the
+# probe interpolates, while this is the six-field mapping the evidence carries.
+RECOVERY_TARGET = dict(contract.RECOVERY_TARGET_FIELDS)
 CATALOG_PHASES = {
     "catalog_before": "pre-migration",
     "catalog_after_first": "after-first-apply",
@@ -118,6 +115,12 @@ class Context:
     # ``--self-test-free-bytes`` flag is passed.  ``None`` in every production
     # invocation, so production always reads the real ``os.statvfs`` headroom.
     self_test_free_bytes: int | None = None
+    # Test-only seam (see ``--self-test-docker-seam``): the explicit opt-in that
+    # allows ``docker`` to deviate from ``HOST_DOCKER_CLI`` in the hermetic
+    # self-tests, which inject a stub docker.  ``False`` in every production
+    # invocation, so production always runs the same binary the forensic
+    # ``version_argv``/``list_argv`` attest.
+    self_test_docker_seam: bool = False
 
 
 def _run(argv: list[str], *, label: str, max_bytes: int = MAX_DOCUMENT_BYTES) -> bytes:
@@ -413,18 +416,7 @@ def _capture_preflight_evidence(ctx: Context) -> dict[str, Any]:
 
 def _capture_recovery_preflight(ctx: Context) -> dict[str, Any]:
     core = _preflight_core(ctx)
-    extra = _psql_json(
-        ctx,
-        "/* capture:recovery_preflight */ SELECT json_build_object("
-        "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
-        "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
-        "'before_compressed', c.is_compressed, 'before_row_count', "
-        "(SELECT count(*) FROM _timescaledb_internal._hyper_3_7_chunk)) "
-        "FROM timescaledb_information.chunks c "
-        "WHERE c.hypertable_schema = 'hydro' AND c.hypertable_name = 'river_timeseries' "
-        "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'",
-        label="recovery preflight target",
-    )
+    extra = _psql_json(ctx, RECOVERY_PREFLIGHT_SQL, label="recovery preflight target")
     return {
         **core,
         "target": dict(RECOVERY_TARGET),
@@ -455,17 +447,7 @@ def _capture_catalog(ctx: Context, kind: str) -> dict[str, Any]:
 
 
 def _capture_catalog_post(ctx: Context) -> dict[str, Any]:
-    body = _psql_json(
-        ctx,
-        "/* capture:catalog_post */ SELECT json_build_object("
-        "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
-        "'catalog', " + _CATALOG_BODY_SQL + ","
-        "'compressed_chunk_identities', json_build_array(json_build_object("
-        "'hypertable_schema','hydro','hypertable_name','river_timeseries',"
-        "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
-        "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))",
-        label="catalog_post",
-    )
+    body = _psql_json(ctx, CATALOG_POST_SQL, label="catalog_post")
     return {
         "captured_at": str(body["captured_at"]),
         "snapshot_id": str(uuid.uuid4()),
@@ -521,6 +503,15 @@ def _free_bytes(ctx: Context) -> int:
 
 
 def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
+    # RECORD == EXEC, enforced before any subprocess runs or any bundle content
+    # is produced: this is the one capture kind that writes docker invocation
+    # argvs into the forensic bundle, so a deviating EXEC binary would attest a
+    # binary it never ran.  The deviation is legitimate only for the hermetic
+    # self-tests, which must say so explicitly (``--self-test-docker-seam``).
+    if ctx.docker != HOST_DOCKER_CLI and not ctx.self_test_docker_seam:
+        raise CaptureError(
+            "--docker deviates from HOST_DOCKER_CLI without --self-test-docker-seam: " + ctx.docker
+        )
     if not ctx.schema_dump_host or not ctx.schema_dump_container:
         raise CaptureError("schema_dump_list requires --schema-dump-host/--schema-dump-container")
     dump_bytes = Path(ctx.schema_dump_host).read_bytes()
@@ -531,8 +522,11 @@ def _capture_schema_dump_list(ctx: Context) -> dict[str, Any]:
     # ``--docker`` seam value.  This mirrors the container entrypoint already being
     # recorded as ``/usr/bin/pg_restore`` rather than its pg_wrapper realpath: the
     # ``--docker`` seam redirects EXECUTION for the dress rehearsal, while the
-    # record names the production binary the plan pins (in production the two
-    # coincide, ``ctx.docker == HOST_DOCKER_CLI``).
+    # record names the production binary the plan pins.  The split is no longer
+    # a caller-side convention: the guard at the top of this function enforces
+    # ``ctx.docker == HOST_DOCKER_CLI`` unless the hermetic self-test seam is
+    # explicitly opted in, so whenever this capture kind runs without that seam
+    # the argvs below attest the binary it actually executed.
     version_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
     list_exec_argv = [ctx.docker, "exec", ctx.container, "/usr/bin/pg_restore", "--list", ctx.schema_dump_container]
     version_argv = [HOST_DOCKER_CLI, "exec", ctx.container, "/usr/bin/pg_restore", "--version"]
@@ -617,6 +611,25 @@ def _capture_cleanup(ctx: Context) -> dict[str, Any]:
     }
 
 
+# The exact-chunk recovery preflight, interpolated from the same shared
+# contract constants the emitted ``target`` payload and the supervisor's
+# expected decompress argv derive from (issue #1242).  The rendered string is
+# byte-frozen by tests/test_node27_timeseries_compression_capture.py, including
+# the leading ``/* capture:recovery_preflight */`` marker, which must stay the
+# FIRST token: the capture test's psql stub dispatches on it.
+RECOVERY_PREFLIGHT_SQL = (
+    "/* capture:recovery_preflight */ SELECT json_build_object("
+    "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
+    "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
+    "'before_compressed', c.is_compressed, 'before_row_count', "
+    f"(SELECT count(*) FROM {RECOVERY_TARGET['chunk_schema']}.{RECOVERY_TARGET['chunk_name']})) "
+    "FROM timescaledb_information.chunks c "
+    f"WHERE c.hypertable_schema = '{RECOVERY_TARGET['hypertable_schema']}' "
+    f"AND c.hypertable_name = '{RECOVERY_TARGET['hypertable_name']}' "
+    f"AND c.chunk_schema = '{RECOVERY_TARGET['chunk_schema']}' "
+    f"AND c.chunk_name = '{RECOVERY_TARGET['chunk_name']}'"
+)
+
 _CATALOG_BODY_SQL = (
     "(SELECT json_build_object("
     "'hypertables', json_build_object("
@@ -629,6 +642,31 @@ _CATALOG_BODY_SQL = (
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
     "WHERE j.proc_name = 'policy_compression'), '[]'::json)))"
 )
+
+# The post-run catalog snapshot names the exact chunk this plane decompressed, so
+# its six identity fields are interpolated from the same derived
+# ``RECOVERY_TARGET`` mapping the emitted ``target`` payload and
+# ``RECOVERY_PREFLIGHT_SQL`` use (issue #1244); they used to be hand-written
+# literals a retarget had to remember.  Defined AFTER ``_CATALOG_BODY_SQL``
+# because it embeds it.  The rendered string is byte-frozen by
+# tests/test_node27_timeseries_compression_capture.py, marker included: the
+# capture test's psql stub dispatches on ``/* capture:catalog_post */``, so that
+# comment must appear verbatim and stay unique among the stub's responses (the
+# stub matches by substring containment; the frozen string keeps it leading).
+CATALOG_POST_SQL = (
+    "/* capture:catalog_post */ SELECT json_build_object("
+    "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
+    "'catalog', " + _CATALOG_BODY_SQL + ","
+    "'compressed_chunk_identities', json_build_array(json_build_object("
+    f"'hypertable_schema','{RECOVERY_TARGET['hypertable_schema']}',"
+    f"'hypertable_name','{RECOVERY_TARGET['hypertable_name']}',"
+    f"'chunk_schema','{RECOVERY_TARGET['chunk_schema']}',"
+    f"'chunk_name','{RECOVERY_TARGET['chunk_name']}',"
+    f"'range_start','{RECOVERY_TARGET['range_start']}',"
+    f"'range_end','{RECOVERY_TARGET['range_end']}')))"
+)
+
+
 def _selection_sql(kind: str) -> str:
     """Reproduce the runner's uncompressed terminal-chunk selection, read-only.
 
@@ -733,6 +771,11 @@ def _parser() -> argparse.ArgumentParser:
     # self-test (see ``_free_bytes``).  Production ``plan_author`` never emits it,
     # so production always measures the real ``os.statvfs`` data-volume headroom.
     parser.add_argument("--self-test-free-bytes", type=int, default=None, help=argparse.SUPPRESS)
+    # Test-only seam: the explicit opt-in that lets ``--docker`` deviate from
+    # ``HOST_DOCKER_CLI`` in the hermetic self-tests (see
+    # ``_capture_schema_dump_list``).  Production ``plan_author`` never emits it,
+    # so a production run always executes the pinned host docker CLI it records.
+    parser.add_argument("--self-test-docker-seam", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -757,6 +800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         schema_dump_host=args.schema_dump_host,
         schema_dump_container=args.schema_dump_container,
         self_test_free_bytes=args.self_test_free_bytes,
+        self_test_docker_seam=args.self_test_docker_seam,
     )
     _emit(_dispatch(ctx, args.kind))
     return 0

@@ -5,7 +5,13 @@ Operation, rollback, and cadence rationale for the node-27 archive lane
 `openspec/changes/tier-node27-timeseries-storage`.
 
 Current policy (effective 2026-07-21): product retirement and DB retention use
-a 14-day eligibility window. Compression remains earlier at 7 days. Both ages
+a spec-default 14-day eligibility window. That default is what the committed
+env templates ship (`NHMS_ARCHIVE_MIN_AGE_DAYS`,
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`); the value that actually runs is
+whatever the machine's env file holds — node-27's DB retention window was
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21` as of 2026-08-01. Read the live
+value on the box before quoting a day count anywhere (see §7.3 step 3).
+Compression remains earlier at 7 days. Both ages
 are measured from the latest forecast cycle accepted by the node-27 display
 catalog, not from the server wall clock. Historical 30/45-day receipts below
 are audit evidence only, not commands for new runs.
@@ -24,11 +30,192 @@ is `2026-07-04T12:00:00Z` and archive/raw/DB-retention cutoff is
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md` (the
   archive resolver is never imported by `apps/api/**` or `apps/frontend/**`).
 
-The mover and audit share the 1.7 TB volume that also backs
-`/home/ghdc/nwm/object-store` and `/home/ghdc/nwm/archive`. Free-space
-watermarks defend that shared volume — the mover refuses enforce before
-touching any source when free bytes fall below the configured refuse
-threshold.
+Since 2026-07-26 the archive tier lives on its own filesystem: the mover
+writes under `/data/GHDC/nwm-archive` and the inventory audit reads it
+(the audit is read-only against the archive — it verifies manifests/sha and
+publishes its receipt under `/home/nwm/node27-storage-inventory-audit-logs/`),
+backed by the node-27-local RAID `/dev/md0` mounted at `/data/GHDC`
+(15 TB, ~14 TB free at migration). The hot
+tier — pgdata (`/home/nwm/nhms-pgdata`) and the object store
+(`/home/ghdc/nwm/object-store`) — stays on `/home`. Free-space watermarks
+defend the **archive** filesystem: the mover refuses enforce before touching
+any source when free bytes there fall below the configured refuse threshold.
+
+That separation is mandatory, not cosmetic. While the archive root sat on
+`/home` alongside pgdata, a full `/home` made the mover refuse
+(`refused_free_space`), which froze the mover frontier, which left the
+archive-completeness receipt pending, which made retention refuse to drop —
+the only mechanism able to free the disk was deadlocked by the disk it
+protects (2026-07-26 incident). Never point `NHMS_ARCHIVE_ROOT` back at a
+filesystem that carries pgdata or the object store. See
+`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
+(2026-07-26)".
+
+## Recorded exception (2026-08-06): the `ghdc` tablespace shares `/dev/md0`
+
+Part of the database now lives on the archive filesystem. This is a knowing,
+recorded exception to the separation rule above — read this before touching
+either tier.
+
+| Tablespace | Host path | Container path | Device |
+|---|---|---|---|
+| `pg_default` | `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` | `/dev/mapper/ubuntu--vg-home` (1.7 TB, shared with the object store) |
+| `ghdc` | `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | `/dev/md0` (15 TB) — **also carries `/data/GHDC/nwm-archive`** |
+
+`ghdc` holds `hydro.river_timeseries` chunks `_hyper_3_10_chunk` and
+`_hyper_3_14_chunk`, `met.forcing_station_timeseries` chunks
+`_hyper_1_12_chunk` and `_hyper_1_13_chunk`, and all 18 of their indexes —
+roughly 502 GB decompressed.
+
+**Why.** The six-basin production replay (#1164) had to decompress those four
+chunks to lift the compressed-chunk write guard, and `/home` had only ~357 GB
+free against a ~502 GB requirement. No sequencing avoided it: each backfilled
+cycle's forecast window spans both the 07-02…07-09 and 07-09…07-16 chunks, so
+both must be uncompressed at once. On `/data/GHDC` the only `nwm`-writable
+location is `nwm-archive/`; everything else under that mount is `root` or
+`ghdcadmin` owned, and provisioning a sibling mount point needs root.
+
+**The risk this re-introduces.** It is the 2026-07-26 deadlock with the
+operands swapped: DB growth — not object-store growth — can now push the
+archive filesystem below the mover's refuse threshold, freezing the mover
+frontier, leaving the archive-completeness receipt pending, and making
+retention refuse to drop. Same cycle, different filler.
+
+**Required mitigations while the exception stands:**
+
+- **The free-space band cannot reserve anything — do not treat it as a
+  reservation.** `NHMS_ARCHIVE_FREE_SPACE_REFUSE_BYTES` is purely the mover's
+  entry gate: `_measure_archive_free_space` reads
+  `shutil.disk_usage(archive_root).free` and, in the `refuse` band, the mover
+  publishes a refusal receipt and returns before any candidate discovery
+  (`scripts/node27_product_archive.py`, and §"Refuse-threshold behavior"
+  below). Nothing preallocates or quotas — PostgreSQL enforces no tablespace
+  quota either. Raising the threshold makes the mover refuse at *higher* free
+  space, i.e. it advances the deadlock described above rather than preventing
+  it. Halting the mover does passively leave bytes for PostgreSQL, but the
+  price is exactly the frozen frontier this section warns about. Tune the band
+  only together with a retention/capacity plan, never as a way to "reserve"
+  space for `ghdc`.
+- **Bound the tablespace's working set instead.** That is the only lever that
+  actually protects `/dev/md0`: re-compress promptly after a decompress, never
+  hold more than the chunks you are actively reingesting in uncompressed form,
+  and treat a `warn`-band governance recommendation as a signal to
+  re-compress or relocate chunks — not to move the band.
+- **Read both devices, every time.** `df -h /home /data/GHDC`. See the
+  capacity caveat below for exactly what the governance receipt does and does
+  not tell you.
+- **Do not treat headroom as permanent.** 15 TB with ~19 GB of archive and
+  ~502 GB of tablespace is comfortable today; that is the reason the exception
+  was accepted, not a reason it is safe indefinitely. `/dev/md0` is also not
+  NHMS-exclusive — `/data/GHDC` carries `root`- and `ghdcadmin`-owned trees
+  (~1 TB was already in use at the 2026-07-26 migration), so free space can
+  fall without any NHMS growth at all. Revisit when either tier changes shape
+  or when third-party usage moves, and prefer a dedicated filesystem for
+  `ghdc` the next time root-level provisioning is available on node-27.
+
+**What the governance receipt actually shows (read this before quoting it).**
+`scripts/node27_resource_governance.py`:
+
+- **Does** report `/dev/md0`'s free/total: `collect_archive_root` runs
+  `shutil.disk_usage()` on the archive root (deployed
+  `NODE27_GOVERNANCE_ARCHIVE_ROOT=/data/GHDC/nwm-archive`) and publishes an
+  `archive_root` block with `total_bytes` / `free_bytes` / `band`, and emits
+  `ARCHIVE_FREE_BELOW_REFUSE` (critical) / `ARCHIVE_FREE_BELOW_WARN`
+  recommendations. **Caveat:** the band is live only when *both*
+  `NHMS_ARCHIVE_FREE_SPACE_WARN_BYTES` and `..._REFUSE_BYTES` are set —
+  neither set yields `band = "unconfigured"` and no recommendation ever
+  fires; exactly one set raises `ValueError` (fail-closed). Confirm both are
+  set before relying on this as the `/dev/md0` alarm.
+- **Does not** list `/data/GHDC` in the receipt's `filesystems` block —
+  `collect_filesystem()` enumerates only `/`, `/home`, the repo filesystem
+  and the object-store filesystem, and the `df -ih` inode check covers only
+  `/` and `/home`.
+- **Under-reports the DB.** `path_sizes["pgdata_root"]` is a `du` of
+  `NODE27_GOVERNANCE_PGDATA_ROOT` (`/home/nwm/nhms-pgdata`) only, so the ~502 GB
+  that moved to `ghdc` vanished from the reported DB footprint with nothing
+  deleted. Do not read that drop as retention succeeding.
+- **Over-reports the archive, which is the more dangerous distortion.**
+  `archive_root.used_bytes` is `du -s` of the whole archive root, and
+  `nhms-tablespace/` sits *inside* it — so the archive's reported size now
+  silently includes the entire tablespace, and `free_bytes` now moves with
+  database growth. The "archive grows at single-digit GB/month" signal that
+  this exception's acceptance rests on is no longer readable from that field.
+  Size the archive alone with
+  `du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive` until the collector
+  separates the two.
+
+Tracked in issue #1290.
+
+**Establishing the tablespace for the first time** (DR from scratch, or a
+brand-new tablespace). Order matters — the container must carry the mount
+*before* `CREATE TABLESPACE` runs, because the `LOCATION` is a container
+path:
+
+1. Host directory, empty, owned by the container's uid/gid:
+
+   ```bash
+   mkdir -p /data/GHDC/nwm-archive/nhms-tablespace
+   chown nwm:nwm /data/GHDC/nwm-archive/nhms-tablespace
+   chmod 0700 /data/GHDC/nwm-archive/nhms-tablespace
+   ```
+
+2. Recreate the container with the bind mount — §4.3.3 below.
+
+3. Create the tablespace (superuser; the target directory must be empty):
+
+   ```sql
+   CREATE TABLESPACE ghdc LOCATION '/home/postgres/pgdata/tablespaces/ghdc';
+   ```
+
+4. Move chunks and **their indexes** into it — see §4.3.2 step 3a for the
+   `format(%I)` + `\gexec` form.
+
+**Relocating the existing tablespace to another filesystem** (the promised
+move to a dedicated device) is a *different* procedure — the 502 GB must move
+with it, and `CREATE TABLESPACE` must NOT run (the tablespace already exists;
+PostgreSQL resolves it through the `pg_tblspc` symlink, which lands wherever
+the container mount points). Recreating the container with an empty new
+directory bound to the same container path would start a cluster whose
+`ghdc` chunks are simply gone — and PostgreSQL would happily write new files
+into the empty directory, splitting the tablespace across two host paths.
+
+1. Stop the container cleanly (`docker stop -t 300 nhms-db` — §4.3.3 step 2
+   discipline, plus the step 1 timer quiesce).
+2. Copy the old host directory to the new device, preserving everything:
+
+   ```bash
+   rsync -aHAX --numeric-ids \
+     /data/GHDC/nwm-archive/nhms-tablespace/ /new/device/nhms-tablespace/
+   diff <(cd /data/GHDC/nwm-archive/nhms-tablespace && find . -type f | sort) \
+        <(cd /new/device/nhms-tablespace && find . -type f | sort)
+   du -sb /data/GHDC/nwm-archive/nhms-tablespace /new/device/nhms-tablespace
+   ```
+
+   File list identical, byte totals equal, ownership `nwm:nwm`, mode `0700`.
+3. Recreate the container per §4.3.3 with the **new** host path bound to the
+   **same** container path `/home/postgres/pgdata/tablespaces/ghdc`.
+4. Verify with the real chunk read from §4.3.3 step 4(a). Only after that
+   passes, retire the old directory.
+
+Once a second tablespace exists, any file-level backup or restore must cover
+the `pg_tblspc` link targets as well as `PGDATA`; a `PGDATA`-only copy is no
+longer a complete backup.
+
+**Tablespace residency is per chunk and is not part of the schema.** Nothing
+under `db/` or `packages/common/migrate.py` references a tablespace; `ghdc` is
+a node-27 physical placement only. Local dev, CI and
+`infra/docker-compose.dev.yml` are unaffected and must NOT gain a `ghdc`
+mount. Resolve a chunk's residency before acting on it:
+
+```sql
+SELECT c.relname,
+       COALESCE(t.spcname, 'pg_default') AS tablespace
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
+WHERE n.nspname = '_timescaledb_internal'
+  AND c.relname = '<chunk_name>';
+```
 
 ## Install (node-27, `nwm` user)
 
@@ -91,6 +278,35 @@ system-level (root) units for this lane.
    band as well. See "Free-space watermark tuning" for band semantics
    and "Refuse-threshold behavior" for what a `refuse` band triggers.
 
+### Live-state notes (verified 2026-08-01)
+
+Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
+0600). Read them on the box before quoting any value; these are the deltas
+against the committed `.example` templates as of 2026-08-01:
+
+- **Archive root.** `node27-product-archive.env`,
+  `node27-storage-inventory-audit.env`, `node27-archive-rebuild-drill.env`,
+  and `node27-db-export-salvage.env` all carry
+  `NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive`, matching the templates.
+- **Governance uses a service-specific key.** `node27-resource-governance.env`
+  has no `NHMS_ARCHIVE_ROOT` line at all; it sets
+  `NODE27_GOVERNANCE_ARCHIVE_ROOT=/data/GHDC/nwm-archive` instead. That is a
+  supported override — `scripts/node27_resource_governance.py` resolves
+  `--archive-root`, then `NODE27_GOVERNANCE_ARCHIVE_ROOT`, then
+  `NHMS_ARCHIVE_ROOT`. The *value* is consistent with the other four env
+  files, so governance reports the same archive root the mover uses; only the
+  variable name differs from the `.example`. If you edit either, keep the
+  values equal.
+- **Old archive directory residue.** The pre-migration archive directory under
+  the node-27 `/home` filesystem still exists as an **empty** shell (contents
+  migrated and removed 2026-07-26). Nothing reads or writes it; removing the
+  empty directory is optional operator cleanup. Its exact path is recorded
+  verbatim in the committed pre-migration receipts under
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/product-archive/`.
+- **Compression per-tick bound is retuned live.** See §4 "Per-tick capacity
+  (live state 2026-08-01)".
+- **DB retention timer is not enabled.** See §8.1 "Current bringup state".
+
 ## Timer cadence order (UTC)
 
 The four related timers are staggered so each receipt is fresh when the
@@ -122,6 +338,168 @@ still capped by `NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND` (currently 8) and every
 selected object must pass archive verification, source-retirement preflight,
 and the free-space gate. Operators use the same wrapper without `--enforce`
 for an additional manual preview.
+
+### Min-age guard reads the LIVE retention window (`#1227`)
+
+Both archive-side env files carry one REQUIRED line:
+
+```
+NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
+```
+
+At every mover and audit startup, configuration validation extracts
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` from that file (read-only, single
+variable, nothing sourced) and refuses when `NHMS_ARCHIVE_MIN_AGE_DAYS` is
+below it — so the hot object-store window, which is also the ADR 0001 display
+disk window for station forcing CSVs, is never shorter than the DB hot window.
+The old compile-time 14 is gone: raising the retention window now moves the
+guard with it. Resolution rules, all fail-closed except the last:
+
+- unset, empty or relative `NODE27_TIMESERIES_RETENTION_ENV`, a missing or
+  unreadable file, or a present value that is not a positive integer → refuse,
+  never a constant fallback;
+- any non-comment line outside the `[export ]KEY=VALUE` grammar —
+  `readonly VAR=21`, `declare -i VAR=21`, a truncated or quoted edit, and every
+  shape in the enforced-format note below — or an accepted-shape line whose
+  VALUE is unsupported: an unquoted value starting with whitespace (`VAR= 21`,
+  which bash leaves UNSET), a `#`-first value (`VAR=#21`, which bash exports
+  verbatim), or a non-`\n` line break such as CRLF anywhere in the file →
+  refuse rather than mis-parse a window the runner does not use. A CONFORMING
+  line that merely embeds the window name in another assignment's key or value
+  (`OLD_VAR=99`, `X=VAR=21`) refuses as well. Refusal is judged PER LINE: a
+  file that mixes a plain `VAR=14` with a later `readonly VAR=30` refuses too,
+  because sourcing it exports 30 and reporting the earlier 14 would be
+  fail-open (`#1229` round-2);
+- a readable file that is recognizably the deployed retention env (at least
+  one other `NODE27_TIMESERIES_RETENTION_*` assignment parses) whose window
+  assignment is absent or empty → the retention runner's own default (14 d),
+  because that is the window the runner would actually run; the guard never
+  refuses a pair the runner itself considers healthy. A readable file with no
+  retention-family assignment at all (wrong path, `/dev/null`, a stale copy)
+  → refuse.
+
+Moving or renaming the deployed retention env file therefore breaks both
+guards fail-closed. It is one-way extraction, not value syncing — do not copy
+the window value into the archive env files.
+
+**Dual-pointer discipline.** The guards' `NODE27_TIMESERIES_RETENTION_ENV` and
+the retention runner wrapper's `NODE27_TIMESERIES_RETENTION_ENV_FILE`
+(`scripts/node27_timeseries_retention_once.sh:20`, default
+`$NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env`)
+MUST reference the SAME file. Repointing the runner — a systemd drop-in, an
+edited unit, or an exported `NODE27_TIMESERIES_RETENTION_ENV_FILE` — without
+updating the guard variable in both archive env files leaves the guards
+validating a stale window with NO signal: they keep passing against whatever
+the old file says while retention drops on a different window. Change the two
+pointers in the same operator step and re-read both files afterwards.
+
+Residual (design D5-d): file IDENTITY cannot be checked lexically. Two cases
+differ:
+
+- pointing `NODE27_TIMESERIES_RETENTION_ENV` at an ARCHIVE env file — its own
+  (`node27-product-archive.env`) or its sibling
+  (`node27-storage-inventory-audit.env`) — now REFUSES. Those files carry the
+  pointer variable itself, which shares the `NODE27_TIMESERIES_RETENTION_`
+  prefix; it no longer counts as retention-env recognition, and the shipped
+  templates' real bytes are pinned refused by test, so any future
+  retention-prefixed line added to them turns that test red instead of
+  re-opening a silent default to 14 (`#1229` round-2);
+- a wrong path whose target genuinely looks like a retention env — most
+  obviously the shipped `infra/env/node27-timeseries-retention.example`, which
+  carries a valid `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` — still parses
+  cleanly and the guard accepts its window. That remains lexically
+  undetectable; only the dual-pointer check above catches it.
+
+**File format is now ENFORCED, not advisory (`#1230`).** The extractor judges
+the retention env by a closed-world line grammar: every line must be blank, a
+full-line `#` comment, or a `[export ]KEY=VALUE` assignment (any variable
+name). The FIRST line outside that grammar refuses, naming the file and the
+offending line. That closes the `#1229` round-3 fail-open class — `VAR+=21`
+append, `VAR=14` followed by `VAR+=7`, `: ${VAR:=21}` default-expansion, a
+nested `source`/`.` of another file from within the env, `printf -v`, `read`,
+`eval`, plus the `readonly`/`declare` prefixes and truncated or quoted edits —
+which previously slipped past the substring-keyed detector, let the guard
+resolve the runner-equivalent default (14 d) and pass a
+`NHMS_ARCHIVE_MIN_AGE_DAYS=14` pair while the runner exported a LARGER window.
+Every one of those eight shapes now REFUSES. Operationally this means the
+deployed retention env MUST stay plain `KEY=VALUE` assignments plus `#`
+comments — no `+=`, no parameter-expansion defaults, no sourcing, no
+`printf -v`/`read`/`eval`.
+
+Scope of the enforcement, precisely: the grammar is LINE-level. It blocks every
+line that is not `KEY=VALUE` (or blank / `#` comment), which is what closes the
+eight shapes above; it does NOT inspect what a conforming line's VALUE would do
+when bash sources it. A hand edit that turns the file into shell LINES blocks
+the units loudly — a hand edit that hides shell logic inside a conforming
+value does not.
+
+Residual (`#1230` design D5): two families survive the line grammar, each with
+a still-FAIL-OPEN variant:
+
+- **multi-line quoted value** (design D5(a)) — the two variants land on
+  opposite sides:
+  - the closing line is a bare `"` (`OTHER="` … `"`): that line violates the
+    grammar and is refused — an over-strict FALSE REFUSAL, fail-closed and
+    safe;
+  - every line happens to conform (`OTHER="` … `X=y"`, with a
+    `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` line inside the string): the
+    grammar accepts, the extractor reads the INNER line as the window while
+    bash keeps it inside the outer string and exports an earlier, LARGER value
+    — still FAIL-OPEN. Closing it needs unbalanced-quote tracking, which this
+    change does not add;
+- **value-level expansion that assigns** (design D5(b)) — a fully CONFORMING
+  line whose VALUE assigns the window variable through a shell expansion, e.g.
+  `X=${NODE27_TIMESERIES_RETENTION_WINDOW_DAYS:=21}` or
+  `X=$((NODE27_TIMESERIES_RETENTION_WINDOW_DAYS+=7))`. There is no literal
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=` substring, so the line passes the
+  grammar AND the mention layer: the extractor resolves the runner-equivalent
+  default (14 d) while `set -a; . file` exports 21 — still FAIL-OPEN. Closing
+  it needs expansion-aware value scanning, which this change does not add.
+
+Both residuals are pinned by strict-xfail differential rows, so the day either
+is closed shows up as an XPASS rather than silently.
+
+Therefore: quoted values MUST NOT span lines in the deployed retention env, and
+no value may use an expansion that ASSIGNS the window variable
+(`${VAR:=...}`, `$((VAR+=...))`). Note that a conforming line's value is taken
+literally BY THE EXTRACTOR — `$VAR` or `$(cmd)` is a present non-integer for
+the window variable (refused) — but bash DOES expand it at source time, and an
+expansion whose side effect assigns the window variable is invisible to this
+guard.
+
+**Deployment consequence — read before deploying.** As of 2026-08-01 the live
+pair is `NHMS_ARCHIVE_MIN_AGE_DAYS=14` against
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21`, so the first deployment of this
+code refuses BOTH units at startup. That is the invariant working, not a
+regression, and the two refusals surface differently:
+
+- **Mover**: refusal is a journal/stderr `{"status":"failed",...}` line plus a
+  non-zero exit ONLY. Validation runs before any receipt write, so no receipt
+  is published and `/home/nwm/node27-product-archive-logs/receipt.json` keeps
+  its previous success payload. Do not point monitoring at that file for this
+  condition — watch the unit result instead. Hot-source deletion stops, which
+  is protective: the display gap stops growing.
+- **Audit**: refusal DOES publish a terminal `blocked` receipt with
+  `refusal_reason=CONFIG_INVALID` over its production receipt path
+  `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
+  That file is the `#855` retention gate's completeness input, so every audit
+  tick on a drifted pair also starves the retention gate. Still fail-closed in
+  the safe direction: retention refuses and nothing is dropped.
+
+Clearing it is an operator decision with a real capacity trade-off, and there
+are exactly two exits — no warn-only mode exists, because a warning is the
+comment-level coupling this guard replaced:
+
+1. raise `NHMS_ARCHIVE_MIN_AGE_DAYS` to >= the live window in BOTH archive env
+   files, after assessing free space on the `/home` hot-tier filesystem that
+   carries pgdata and the object store (a longer hot window means more hot
+   bytes there, not in the archive); or
+2. lower `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` back to the value the
+   archive envs already satisfy.
+
+Read the live values off the box before deciding (§7.3 step 3 shows the
+extraction). The code change ships no live env edits — the deployment step and
+the min-age-vs-capacity decision are operator actions.
 
 ### Reading receipts
 
@@ -665,6 +1043,32 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
+### Per-tick capacity (live state 2026-08-01)
+
+`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
+tick compresses. The committed template
+(`infra/env/node27-timeseries-compression.example`) ships `=5`; the deployed
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env` was verified at
+`=4` on 2026-08-01 (retuned on the box, presumably during the July catch-up).
+The template value is intentionally left alone here — which number is the
+right capacity target is an operator/capacity decision, tracked in
+issue #1237.
+
+The number that matters is a capacity relation, not a constant: the per-tick
+bound × timer frequency must compress at least as fast as ingest produces new
+terminal chunks. The compression timer fires **once daily** (`OnCalendar=*-*-*
+04:25:00 UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
+throughput is `bound × 1 tick/day` — 4 chunks/day at the live value. During
+July 2026 `hydro.river_timeseries` grew by roughly 43 GB/day (816 GB total at
+the 2026-07-26 `/home`-full incident). A per-tick bound that cannot keep up
+leaves uncompressed chunks accumulating on the hot tier, which is one of the
+two inputs to that incident (the other being the archive root sharing the hot
+filesystem — see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
+"Amendment (2026-07-26)"). As of 2026-08-01 the latest live compression
+receipt is `outcome=clean` with zero backlog, so the current bound is keeping
+up post-catch-up. When retuning, read the live value off the box first and
+record the new value with the receipt that justified it.
+
 ### 4.0 Controlled initial live run (`#1069`)
 
 The first production compression is a one-chunk controlled operation, not a
@@ -727,9 +1131,25 @@ credential in process argv.
    pre-migration catalog. This dump is forensic DDL inventory, not a data
    backup, restore drill, or compressed-storage rollback.
 
-   Before the live replay, run a read-only dry-probe of the container
-   `pg_restore` identity the supervisor binds, so a drifted image/realpath is
-   caught here rather than burning the one-shot replay window at preflight:
+   Before the live replay, run the read-only host-contract dry-probe, so a
+   drifted image/realpath/systemd/PG version is caught here rather than burning
+   the one-shot replay window at preflight. Until a timer or CI workflow is
+   installed (operator-gated, §4.4), **this step is the SOLE pre-mutation
+   interception point** for external-contract drift. Run the committed probe
+   FIRST and continue only on exit 0:
+
+   ```bash
+   set -a; . infra/env/node27-timeseries-compression-replay.env; set +a
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
+   # exit 0 -> continue.  Any non-zero exit stops the run: see §4.4 for the
+   # exit-code table (2 usage / 3 drift / 4 misalignment / 5 probe failure)
+   # and the drift-handling loop.  Never "just update the fixture" here.
+   ```
+
+   If the script is unavailable (e.g. an older checkout), fall back to the
+   manual trio it replaced — it covers the container leg only, so a systemd /
+   server-version drift stays undetected until preflight:
 
    ```bash
    docker inspect --format='{{.Image}}' nhms-db          # -> sha256:...
@@ -783,6 +1203,23 @@ credential in process argv.
      --output /home/nwm/node27-timeseries-compression-replay/run-plan.json
    # prints run_plan_id + sha256; the printed sha256 is the run-plan digest pin.
    ```
+
+   The command above uses the canonical defaults and is unaffected, but any custom
+   `--root`, `--repo` or `--schema-dump-host` must be a canonical absolute path — no
+   trailing slash, no duplicate or dot segments; the plan author refuses anything else
+   (the verifier compares recorded plan paths verbatim, so a non-canonical root or host
+   dump path would author a plan whose bundle fails verification later with an unrelated
+   message, and a `..` component aborts inside the one-shot replay window instead).
+   `--schema-dump-container` is deliberately **not** canonicality-guarded at authoring
+   time: it is a container-internal path checked only by verbatim-symmetric textual
+   comparisons — the verifier's containment/shape argv gates, a whole-argv
+   exact-equality gate, and on the supervisor side the mirror gate, the pre-spawn
+   capture-argv gate and verbatim argv-tail extraction — so it cannot produce that
+   false refusal. Those gates do judge containment in the pinned container dump path
+   prefix `/var/lib/postgresql/` (that prefix plus no `..` component, one shared
+   predicate in `packages/common/node27_container_contract.py`), so a traversal spelling
+   such as `/var/lib/postgresql/../../../etc/shadow` is refused — textually, without
+   rewriting the recorded value.
 
    Its own active state and `MainPID` are expected
    while every checkpoint still proves the recurring service/timer inactive.
@@ -1320,6 +1757,36 @@ prevent).
      AND chunk_name = '_hyper_1_1_chunk';
    ```
 
+3a. **Resolve the chunk's tablespace and size the check against the right
+   device.** Decompression restores the data into the chunk relation's own
+   tablespace, so the filesystem that needs room is the chunk's, not
+   necessarily pgdata's — see "Recorded exception (2026-08-06)" above. Use the
+   residency query there; `pg_default` → `df -h /home`, `ghdc` →
+   `df -h /data/GHDC`. The number to compare against is
+   `before_compression_total_bytes` from
+   `chunk_compression_stats(<hypertable>)`, which is exactly what
+   decompression will write back (for the four migrated chunks that ranged
+   from 20 GB to 333 GB).
+
+   If the chunk sits on a device without the room, move the chunk **and every
+   one of its indexes** to `ghdc` first. A compressed chunk's relation is a
+   near-empty shell, so both moves are instant at this point, and
+   `ALTER TABLE … SET TABLESPACE` does **not** carry indexes with it:
+
+   ```
+   ALTER TABLE _timescaledb_internal._hyper_1_1_chunk SET TABLESPACE ghdc;
+   SELECT format('ALTER INDEX %I.%I SET TABLESPACE ghdc;', schemaname, indexname)
+   FROM pg_indexes
+   WHERE schemaname = '_timescaledb_internal'
+     AND tablename = '_hyper_1_1_chunk'
+   \gexec
+   ```
+
+   TimescaleDB index names can begin with a digit
+   (`10_23_river_timeseries_pkey`), which is not a valid bare identifier — use
+   the `format(%I)` + `\gexec` form above rather than hand-writing the
+   statements.
+
 4. Decompress the chunk:
 
    ```
@@ -1341,13 +1808,39 @@ prevent).
    is inside the lag window (i.e. still "warm"), let it age; do not force
    an out-of-cadence compression.
 
+   **Before restarting that timer, check what else it will compress.** The
+   runner is not a native TimescaleDB policy — `timescaledb_information.jobs`
+   carries no compression job; it is the systemd timer, gated by
+   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (currently 604800 = 7 days) and
+   bounded to `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` chunks per tick.
+   Every chunk whose `range_end` is older than the lag is a candidate, not
+   just the one you decompressed. Because the write guard refuses **any**
+   write overlapping a compressed chunk's range — including pure inserts of
+   new rows (`packages/common/timescale_write_guard.py`, half-open overlap on
+   the incoming batch's `[valid_time_min, valid_time_max]`) — compressing a
+   chunk that a pending backlog still needs to write into blocks that backlog
+   wholesale. If a catch-up ingest is outstanding (e.g. after a scheduler
+   outage), keep the compression timer stopped until the catch-up has
+   advanced past those chunk ranges.
+
+   **Unverified as of 2026-08-06:** compressing a chunk creates a new
+   `_timescaledb_internal.compress_hyper_*_chunk` relation, and it has not
+   been confirmed on this deployment that the new relation inherits the source
+   chunk's tablespace rather than landing in `pg_default`. After the first
+   compression tick that touches a `ghdc` chunk, re-run the residency query
+   against both the chunk and its `compress_hyper_*` counterpart. If the
+   compressed relation lands in `pg_default`, move it to `ghdc` explicitly —
+   otherwise the compression tier silently refills `/home`, which is the
+   pressure this split exists to relieve. Never "restore" a `ghdc` chunk to
+   `pg_default`.
+
 Rollback: none required — `decompress_chunk` is idempotent and can be
 undone by the scheduled compression runner. If the reingest itself
 completes but the operator wants to abandon the decompress state, force a
 compression pass with the runner's enforce flag once the chunk falls
 outside the lag window.
 
-### 6.x.1 Short-lag regime (2026-08-07, md0 outage): outage recovery MUST decompress first
+#### 4.3.2.1 Short-lag regime (2026-08-07, md0 outage): outage recovery MUST decompress first
 
 自 2026-08-07 起生产 lag 从 604800（7 d）降为 **172800（2 d）**（
 `infra/env/node27-timeseries-compression.env`，备份
@@ -1362,6 +1855,311 @@ outside the lag window.
 补算最早 cycle 的预报时段起点落进哪些周，哪些周就要先解压。解压需要
 预留膨胀空间（历史实测 ~400 G/周,先 `df -h /home`），追平后由
 compression timer 按 lag 自动重新压缩。
+
+#### 4.3.3 Recreating the `nhms-db` container (mount-critical)
+
+The node-27 primary PostgreSQL runs in a container named `nhms-db` created
+with a plain `docker run` — **there is no compose file and no systemd unit for
+it anywhere in this repo**. `infra/docker-compose.dev.yml` defines a service
+that is also named `nhms-db`, but that is the *local dev* stack (named volume,
+port 5432, dev credentials); using it as a recreate template on node-27
+produces a database that cannot open production data. Do not.
+
+Since 2026-08-06 the container is mount-critical: **all three** bind mounts
+must be present, or PostgreSQL comes up unable to read the four chunks and 18
+indexes in the `ghdc` tablespace.
+
+| Host | Container |
+|---|---|
+| `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` |
+| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` |
+| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` |
+
+Never type the DB password: carry the environment over from the running
+container into a `0600` file and delete it once `docker run` has read it.
+
+**Never re-resolve the floating `pg15-latest` tag from a registry.**
+`packages/common/node27_external_contract_snapshot.json` pins two compared
+fields: `host_context.nhms_db_image_id` (a `sha256:` image id — TimescaleDB
+2.10.2 / PostgreSQL 15.2) and `host_context.nhms_db_image_ref` (the literal
+tag string `timescale/timescaledb-ha:pg15-latest`, measured from
+`.Config.Image`, i.e. from whatever argument `docker run` was given).
+`scripts/node27_external_contract_snapshot.py` compares both
+(`COMPARED_SECTIONS` includes `host_context`), exiting `3` on drift — which
+§4.4 classifies as stop-and-full-PR-loop, not a patch bump.
+
+That double pin constrains the recreate in both directions:
+
+- `docker pull` before recreating (or a cold cache resolving the tag anew)
+  can move `nhms_db_image_id` — a newer `pg15-latest` ships a TimescaleDB
+  library that may not carry `2.10.2`, and the extension fails to load
+  against the on-disk catalog, on the production primary, mid-window.
+- Passing the digest itself to `docker run` moves `nhms_db_image_ref`
+  (`.Config.Image` would become the `sha256:` string instead of the tag) —
+  a guaranteed exit-3 that §4.4 then tells you to treat as a full-loop stop.
+
+The procedure below threads both: **verify the local tag still resolves to
+the pinned image id, then run the tag.** Both compared fields stay unchanged
+and `--check` can genuinely return 0. Fall back to the digest only when the
+tag is gone/cold — and then expect and record the benign `_ref`-only drift.
+
+1. Quiesce writers — stop `nhms-node27-autopipe.timer` and any in-flight
+   `node27_autopipeline.py`, and wait for `/tmp/autopipe.cron.lock` to free.
+   Also stop the other node-27 timers for the duration
+   (`nhms-node27-timeseries-compression`, `-timeseries-retention`,
+   `-product-archive`, `-storage-inventory-audit`, `-resource-governance`);
+   they will otherwise fire against a stopped DB and litter failure receipts.
+
+2. Capture the full prior spec, stop, and **rename rather than remove** the
+   old container so it stays available as a rollback:
+
+   Run steps 2-4 in one `tmux`/`screen` session — `$TS`, `$ENVFILE`, `$IMAGE`
+   and `$IMAGE_DIGEST` are shell variables and do not survive a dropped ssh
+   session. If you must reconnect, re-derive `TS` from the file names before
+   continuing.
+
+   ```bash
+   TS=$(date -u +%Y%m%dT%H%M%SZ)
+   ENVFILE=/home/nwm/.nhms-db.env.$TS
+   umask 077
+   docker inspect nhms-db --format '{{range .Config.Env}}{{println .}}{{end}}' \
+     | grep -v '^$' > "$ENVFILE"
+   # HostConfig + a credential-free Config subset, to diff against after
+   # recreate (step 4). Do NOT save the full inspect: its .Config.Env carries
+   # the DB password and would outlive the 0600-and-delete discipline this
+   # section mandates. Healthcheck/Cmd/Entrypoint/Labels live in .Config, not
+   # .HostConfig, so both captures are needed for real coverage.
+   docker inspect nhms-db | jq -S '.[0].HostConfig' \
+     > /home/nwm/nhms-db-hostconfig-$TS.json
+   docker inspect nhms-db | jq -S 'del(.[0].Config.Env) | .[0].Config' \
+     > /home/nwm/nhms-db-config-$TS.json
+   # Pin the engine. RepoDigests is an IMAGE field — querying it on the
+   # container is a template error (verified on node-27 2026-08-06), so
+   # resolve the image id first, then ask the image for its digest.
+   IMAGE=$(docker inspect nhms-db --format '{{.Image}}')
+   IMAGE_DIGEST=$(docker image inspect "$IMAGE" \
+     --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}')
+   echo "pinned: $IMAGE / ${IMAGE_DIGEST:-<no registry digest>}"
+   # Assert the local tag still resolves to the pinned image id. This is what
+   # lets step 3 run the tag (keeping .Config.Image == the pinned
+   # nhms_db_image_ref) without risking a silently newer engine.
+   TAG_ID=$(docker image inspect timescale/timescaledb-ha:pg15-latest \
+     --format '{{.Id}}' 2>/dev/null)
+   [ "$TAG_ID" = "$IMAGE" ] \
+     && echo "tag OK: pg15-latest -> $TAG_ID" \
+     || echo "TAG MISMATCH OR ABSENT: use the \$IMAGE / \$IMAGE_DIGEST branch in step 3"
+   # If IMAGE_DIGEST is empty the image was never pulled by digest — the
+   # cold-cache fallback in step 3 does not exist. Keep the old container
+   # until a pull of the pinned digest is proven from this host.
+   # -t 300: a multi-hundred-GB instance can exceed docker's 10s default and
+   # get SIGKILLed into crash recovery.
+   docker stop -t 300 nhms-db
+   docker logs --tail 20 nhms-db   # expect "database system is shut down"
+   docker rename nhms-db nhms-db-pretbs-$TS
+   ```
+
+   Measured on node-27 (2026-08-06): `IMAGE` resolves to the exact digest the
+   contract fixture pins (`sha256:ad39c4fb…`), `.Config.Image` is
+   `timescale/timescaledb-ha:pg15-latest` (matching the pinned
+   `nhms_db_image_ref`), and the registry digest is
+   `timescale/timescaledb-ha@sha256:a8e3322e…` (non-empty, so the fallback is
+   real on this host).
+
+3. Recreate with the full mount set, from the pinned image:
+
+   ```bash
+   docker run -d \
+     --name nhms-db \
+     --restart unless-stopped \
+     --user 1005:1005 \
+     --env-file "$ENVFILE" \
+     -p 55432:5432 \
+     -v /home/nwm/nhms-pgdata:/home/postgres/pgdata/data \
+     -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
+     -v /data/GHDC/nwm-archive/nhms-tablespace:/home/postgres/pgdata/tablespaces/ghdc \
+     timescale/timescaledb-ha:pg15-latest postgres
+   rm -f "$ENVFILE"
+   ```
+
+   Running the *tag* is deliberate — but only because the assert above proved
+   it still resolves to `$IMAGE`. It keeps `.Config.Image` equal to the pinned
+   `nhms_db_image_ref`, so a clean recreate leaves **both** compared fields
+   untouched and `--check` can genuinely return 0. Two failure branches:
+
+   - Assert fails (tag now resolves elsewhere, e.g. someone pulled): run
+     `"$IMAGE"` instead, accept that `--check` will report an
+     `nhms_db_image_ref`-only drift, and record it as procedure-induced —
+     `nhms_db_image_id` must still match; if *it* differs, stop, §4.4.
+   - Cold cache (tag absent entirely): run `"$IMAGE_DIGEST"` — it is
+     pullable, whereas the bare image id would turn the cache miss into a
+     hard `docker run` failure mid-window. Same `_ref`-only drift applies.
+     If step 2 recorded `<no registry digest>`, this branch does not exist;
+     restore the renamed container instead.
+
+   A fallback `_ref` drift is **permanent** (`.Config.Image` is fixed at
+   container creation), so every later `--check` — including §4.0's
+   pre-mutation gate — exits 3 until it is closed. Never leave it standing:
+   a check operators learn to look past for one key is a check that does
+   nothing. Close it, after step 4 has fully passed, by either
+   - **returning to green locally** (preferred, registry-free on the assert
+     branch): `docker tag "$IMAGE" timescale/timescaledb-ha:pg15-latest`
+     (cold-cache branch: `docker pull "$IMAGE_DIGEST"` first), then repeat
+     steps 2-4 once more running the tag — both compared fields match
+     again; or
+   - **re-baselining via §4.4**: a full-loop PR updating
+     `nhms_db_image_ref` in the fixture, with the `--dump` attached.
+
+   `--user 1005:1005` is the host `nwm` uid/gid and must match the ownership
+   of all three host paths; the tablespace directory is `nwm:nwm` mode `0700`.
+
+4. Verify before declaring success. Two distinct environments are needed:
+   `node27-ingest.env` supplies `DATABASE_URL` for the psql checks in (a);
+   the contract check in (b) needs the §4.4 canonical setup instead — repo
+   cwd, the *replay* env (PG connection vars, not just a DSN), and
+   `XDG_RUNTIME_DIR` for the `systemctl --user` probes. Mixing them up makes
+   (b) fail with a probe error (exit 5), not a verdict.
+
+   ```bash
+   # (a) The mount is present AND actually serving data. `ls -ld` and
+   #     pg_tablespace_location() both succeed even when the third -v is
+   #     missing — docker silently creates an empty bind source and
+   #     pg_tablespace_location() just reads the pg_tblspc symlink. Only a
+   #     real read of a ghdc-resident chunk proves the mount. LIMIT 1 —
+   #     it opens the relation files without scanning the multi-hundred-GB
+   #     chunk on a cold cache.
+   set -a; . /home/nwm/NWM/infra/env/node27-ingest.env; set +a
+   docker exec nhms-db ls -ld /home/postgres/pgdata/tablespaces/ghdc
+   psql "$DATABASE_URL" -c \
+     "SELECT 1 FROM _timescaledb_internal._hyper_3_10_chunk LIMIT 1"
+   psql "$DATABASE_URL" -c \
+     "SELECT spcname, pg_tablespace_location(oid) FROM pg_tablespace ORDER BY 1"
+
+   # (b) The engine did not drift — §4.4 canonical invocation, verbatim.
+   cd /home/nwm/NWM
+   set -a; . infra/env/node27-timeseries-compression-replay.env; set +a
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
+
+   # (c) Nothing else in the container spec was silently dropped.
+   #     HostConfig covers shm-size/ulimits/network/log-opts; the Config
+   #     subset covers healthcheck/cmd/entrypoint/labels/user.
+   diff <(jq -S . /home/nwm/nhms-db-hostconfig-$TS.json) \
+        <(docker inspect nhms-db | jq -S '.[0].HostConfig')
+   diff <(jq -S . /home/nwm/nhms-db-config-$TS.json) \
+        <(docker inspect nhms-db | jq -S 'del(.[0].Config.Env) | .[0].Config')
+
+   # (d) Display is live.
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
+   ```
+
+   Expect: one row (`?column? = 1`) from the `ghdc`-resident chunk — a
+   `could not open file` error here means the mount is wrong; `ghdc` at
+   `/home/postgres/pgdata/tablespaces/ghdc`; `--check` exit `0` on the
+   tag path (on the `$IMAGE`/`$IMAGE_DIGEST` branches an
+   `nhms_db_image_ref`-only drift is the expected, recorded outcome — any
+   other drifted key: stop, §4.4); the `HostConfig` diff showing only the
+   intended third mount; and `200` from the display API. Then restart the
+   timers stopped in step 1, and delete
+   `/home/nwm/nhms-db-hostconfig-$TS.json` (it is spec-only, no credentials,
+   but there is no reason to accumulate them).
+
+Rollback: `docker stop nhms-db && docker rm nhms-db && docker rename
+nhms-db-pretbs-$TS nhms-db && docker start nhms-db`. Valid only while no chunk
+has been moved to `ghdc`; once data lives there the old container cannot serve
+it, and recovery means restoring the mount, not the container.
+
+### 4.4 host-contract snapshot 漂移处置 (`#1089`)
+
+`packages/common/node27_container_contract.py` pins three MEASURED node-27 host
+contracts — `CONTAINER_PG_RESTORE_REALPATH`, `SYSTEMD_UNSET_TIMESTAMP`,
+`CLIENT_BACKEND_TYPE`. CI cannot observe the host they were measured on, so a
+systemd / docker / PostgreSQL / TimescaleDB upgrade (or a moved `pg_wrapper`
+symlink) drifts them silently and the drift surfaces first inside an authorized
+mutation window as a G-class misjudgment. `scripts/node27_external_contract_snapshot.py`
+re-measures them live, READ-ONLY, and diffs against the committed baseline
+`packages/common/node27_external_contract_snapshot.json`.
+
+Read-only by construction: the only argvs it can spawn are `systemctl --user
+show`, `systemctl --version`, `docker --version`, `docker inspect`,
+`docker exec nhms-db /usr/bin/readlink -f ...`, `docker exec nhms-db
+/usr/bin/pg_restore --version`, and `psql -c` with SELECT/SHOW-only SQL from a
+frozen tuple. `--check` never writes a file; `--dump` writes only stdout or an
+explicit `--output`. There is no auto-update path.
+
+**Invocation (out-of-band, any time, no mutation window needed):**
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM && git status --porcelain && git pull --ff-only
+set -a; . infra/env/node27-timeseries-compression-replay.env; set +a   # PG env, never embedded in the repo
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"                    # must be /run/user/$(id -u)
+export XDG_RUNTIME_DIR=/run/user/$(id -u)                             # if unset
+uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$?"
+```
+
+`systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
+unset the probe exits non-zero with "Failed to connect to bus"
+(`scripts/node27_timeseries_compression_supervisor.py:176-183`) and the check
+reports a probe-execution failure — that is a broken probe, not a verdict about
+the host. Fix the environment and rerun.
+
+|exit|meaning|action|
+|---|---|---|
+|0|no drift, fixture aligned with the contract module|continue|
+|2|usage/input error (bad CLI, missing or malformed fixture)|fix the invocation; not a host verdict|
+|4|MISALIGNMENT: fixture `contract` section ≠ `node27_container_contract` constants (decided BEFORE any probe runs, so nothing was measured). The same exit also fires when the contract module cannot be IMPORTED at all — the section is then unverifiable, which fails closed identically|read the report line: a constant-vs-fixture mismatch is a repo-side bug (fix in a PR, never on the node); an import failure is an on-node environment fix — run from the repo root or `PYTHONPATH=/home/nwm/NWM uv run python scripts/node27_external_contract_snapshot.py --check` and rerun, no PR needed|
+|3|DRIFT: a compared value moved; the report names `section.key`, expected and observed|stop; run the loop below|
+|5|PROBE-EXECUTION FAILURE: a probe could not run, exited non-zero, exited 0 empty, or exited 0 without the property it measures. A zero-exit EMPTY result lands here too (e.g. the `timescaledb` extension row disappearing returns nothing, not a changed value), so a genuine host change can present as a probe failure|the probe is usually broken (env, daemon, container down). Never treated as drift; repair and rerun — but check the probe the report NAMES against the host first, before concluding "probe bug"|
+
+**Drift handling loop (never a silent fixture update):**
+
+1. Capture the `--check` report and a fresh `--dump` verbatim (`uv run python
+   scripts/node27_external_contract_snapshot.py --dump --output
+   ~/node27-contract-snapshot-$(date -u +%Y%m%dT%H%M%SZ).json`). Both are PR
+   evidence.
+2. Decide, in PR review, one of exactly two outcomes:
+   - **accept the new contract** — update the fixture, the
+     `node27_container_contract.py` constants, and the hermetic-lock
+     mutation-RED tests bound to them TOGETHER in one PR (the alignment guard
+     in `tests/test_node27_external_contract_snapshot.py` reds if any of them
+     moves alone), or
+   - **roll back the host change** — revert the upgrade / restore the image and
+     rerun `--check` until it exits 0.
+3. Never commit a fixture update alone to make the check green. A `contract.*`
+   drift means a value that supervisor/verifier predicates are bound to has
+   moved; the consumers must be re-reviewed in the same PR.
+
+**The patch-version-only drift class.** Ubuntu unattended security upgrades bump
+`host_context.docker_version` / `host_context.systemd_version` patch strings
+without touching any pinned behaviour. Handling: confirm no semantic change —
+the `contract` section values are unchanged, the drift report names ONLY
+`host_context.*` version strings, and the version moved by a patch component —
+then update the fixture via PR with the `--dump` attached. This exception is
+deliberately narrow: any drift naming `contract.*`, `nhms_db_image_id`,
+`nhms_db_image_ref` or a MAJOR/MINOR version component is NOT a patch bump and
+goes through the full loop above. Do not let "it's just a version bump" become
+the default answer — a check operators mindlessly re-baseline is a check that
+does nothing (the G9 lesson inverted).
+
+**Limitation (do not over-read a green check).** The unset-timestamp contract is
+witnessed through a reserved never-existing unit
+(`nhms-external-contract-snapshot-witness-does-not-exist.service`), because the
+real recurring compression unit has run this boot (daily 04:25 UTC timer) and so
+renders a real timestamp. That witnesses systemd's *rendering* contract only —
+it does NOT witness the loaded-but-never-started whole-dict shape asserted at
+`scripts/node27_timeseries_compression_supervisor.py:1282-1293` and
+`scripts/node27_timeseries_compression_live_evidence.py:834-845`. A green
+`--check` therefore does NOT imply those two checkpoints pass. The fixture's
+`informational.recurring_unit` records the real unit's live
+ActiveState/SubState/ExecMainStartTimestamp as counter-evidence; that
+pre-existing consumer defect is tracked as its own issue.
+
+**Scheduling is operator-gated.** #1089 installs no timer and no GitHub Actions
+workflow. Until an operator schedules one (a weekly `--check` on the node is the
+intended shape), §4.0 step 3 is the sole pre-mutation interception point.
+`informational` (measured_at, hostname, backend_type distribution, the real
+recurring unit's state) is dump-recorded and NEVER compared, so a scheduled
+check cannot flake on autovacuum or parallel-worker noise.
 
 ## 7. Archive rebuild drill (`archive-rebuild-drill`)
 
@@ -1421,6 +2219,22 @@ this runbook, and design.md #854 fixture block:
   `~/node27-archive-rebuild-drill-logs/drill.lock` (single-instance
   guard via `fcntl.flock`, non-blocking). Wait for the first drill to
   finish or investigate the stuck process.
+- `SALVAGE_DERIVATION_FAILED` — the receipt-derived salvage set disagrees
+  with what is on disk. `differences[].expected.reason` is one of:
+  `derived_manifest_missing_or_unreadable` (the completeness receipt
+  claims a db-export subject whose `manifest.json` is absent or
+  unparseable), `derived_manifest_window_divergence` (the manifest's
+  selector window differs from the receipt subject's window — the drill's
+  coverage tuple takes its window from the manifest, so verifying it
+  anyway would attest a window the gate never demanded), or
+  `derived_set_decompressed_bytes_exceeded` (the derived set blew the
+  aggregate decompressed-byte budget, default 32 GiB per run — see §7.3).
+  `differences[].item` is NOT uniform across the three reasons: for
+  `derived_manifest_missing_or_unreadable` and
+  `derived_manifest_window_divergence` it is the derived manifest path,
+  while for `derived_set_decompressed_bytes_exceeded` it is the selector
+  label (`forcing_version_id=<id>` / `run_id=<id>`) of the object that
+  tripped the budget. Never a PASS over the narrower set.
 
 ### 7.3 How to run
 
@@ -1432,17 +2246,95 @@ chmod 0600 /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env
 # fill in real PROD_DATABASE_URL_RO, STAGING_DATABASE_URL,
 # POSTGRES_ADMIN_URL, and NHMS_ARCHIVE_ROOT.
 
-# 2. Source + invoke against real archive + salvage manifests
+# 2. Source the env
 set -a; source /home/nwm/NWM/infra/env/node27-archive-rebuild-drill.env; set +a
+
+# 3. Compute the drop window the retention runner will ask about — the
+#    covering interval of the chunks eligible at the current cutoff
+#    (same rule as `_drop_window_from_eligible`). The day count MUST be the
+#    LIVE `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` off this machine's
+#    retention env file — read it, never type a remembered number. The spec
+#    default shipped in `infra/env/node27-timeseries-retention.example` is
+#    14 d, but the deployed value differs (node-27 ran 21 d as of
+#    2026-08-01). The query below is monotone-DECREASING in the day count:
+#    a LARGER count ⇒ an OLDER cutoff ⇒ FEWER eligible chunks ⇒ a window
+#    NARROWER than the runner's, and every retention tick then refuses with
+#    `DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) before any coverage leg
+#    runs — and a drill is quarterly-expensive to rerun. A SMALLER count
+#    errs the safe way: a WIDER superset window, at worst a more expensive
+#    drill. So the danger is an over-large count, and the realistic way to
+#    get one is a live value tuned DOWN (disk pressure drops it to, say,
+#    7 d) while the operator pastes a remembered larger number. Always read
+#    the live value.
+WINDOW_DAYS="$(grep -E '^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=' \
+  /home/nwm/NWM/infra/env/node27-timeseries-retention.env | tail -n1 | cut -d= -f2)"
+: "${WINDOW_DAYS:?live retention window unreadable — do not guess}"
+
+#    Feeding the runner's OWN window value into the query is what makes it a
+#    CONSERVATIVE SUPERSET of the runner's drop window BY CONSTRUCTION (not
+#    by numeric luck). The two sides share `window_days` but NOT the anchor:
+#    this query subtracts it from DB `now()`, while `run_retention`
+#    subtracts it from the display watermark `MAX(cycle_time)` (header
+#    above; `fetch_display_watermark`), never from the wall clock. The
+#    watermark is never in the future, so watermark ≤ now() ⇒ this query's
+#    cutoff is never OLDER than the runner's ⇒ its eligible chunk set is a
+#    SUPERSET of the runner's.
+#    `run_retention` only ever SHRINKS its side from there —
+#    it additionally intersects the eligible chunks with the completeness
+#    receipt's `coverage_bounds` via `_partition_by_completeness_bounds`
+#    (boundary-partial chunks are deferred) BEFORE calling
+#    `_drop_window_from_eligible`. A superset is the right error direction
+#    here — see §7.5, the drill window MUST contain the runner's.
+#
+#    Output is ISO-8601 with a `Z` suffix so it pastes verbatim into the
+#    §7.5 invocation below.
+psql "$PROD_DATABASE_URL_RO" -At -F' ' -c "
+  SELECT to_char(min(range_start) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+         to_char(max(range_end)   AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+  FROM timescaledb_information.chunks
+  WHERE (hypertable_schema, hypertable_name) IN
+        (('hydro','river_timeseries'), ('met','forcing_station_timeseries'))
+    AND range_end <= now() - interval '${WINDOW_DAYS} days'"
+
+# 4. Invoke. The db-export salvage set is DERIVED from the completeness
+#    receipt (every `coverage=db-export` + `verdict=complete` subject whose
+#    window overlaps the drop window) — never typed out by hand.
+#    At least one --archive-manifest is MANDATORY (see the flag table).
 uv run python scripts/node27_archive_rebuild_drill.py \
   --archive-manifest "${NHMS_ARCHIVE_ROOT}/runs/<run_id>/manifest.json" \
   --archive-manifest "${NHMS_ARCHIVE_ROOT}/forcing/gfs/<cycle>/<basin>/<model>/manifest.json" \
-  --salvage-manifest "${NHMS_ARCHIVE_ROOT}/db-export/forcing/<forcing_version_id>/manifest.json"
+  --completeness-receipt ~/node27-storage-inventory-audit-logs/completeness-receipt.json \
+  --drop-window-start 2026-06-18T00:00:00Z \
+  --drop-window-end   2026-06-25T00:00:00Z
 ```
 
+Flags and their env equivalents (the wrapper
+`scripts/node27_archive_rebuild_drill_once.sh` is a bare `exec`
+passthrough, so env vars in the env file work identically):
+
+| Flag | Env var | Meaning |
+|---|---|---|
+| `--completeness-receipt` | `NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH` | Absolute path to the archive-completeness receipt; enables derivation. DRILL-SCOPED name — deliberately NOT the db-export salvage runner's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH` (that one ships uncommented-and-mandatory in its env file, and sharing the name would let a `set -a`-sourced salvage env switch a flag-less drill into derivation mode). Both may point at the same receipt file. |
+| `--archive-manifest` | — | MANDATORY for a PASS, and mandatory whenever `--completeness-receipt` is used: a PASS receipt requires ≥1 restored product cycle, so a receipt-only invocation is refused at boot (exit 2) rather than after the expensive salvage phase. |
+| `--drop-window-start` / `--drop-window-end` | `NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_START` / `_END` | Optional ISO-8601 bounds; derivation keeps subjects overlapping this interval under the gate's CLOSED-interval convention (a subject ending exactly at the drop start stays in scope). Both or neither. |
+| — | `NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS` | Cardinality bound on the derived set (default 128). Refuses at boot. Raise it deliberately — do NOT narrow the drop window below the retention run's, which §7.5 forbids. |
+| — | `NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_BYTES` | Aggregate decompressed-byte budget for the derived set (default 32 GiB), on top of the 16 GiB per-object cap. |
+| `--salvage-manifest` | — | Still supported. Explicit paths are UNIONed with the derived set (deduped by resolved path); use it to pin an extra manifest during incident response without disabling derivation. |
+
 Exit code semantics: `0` = PASS, `1` = FAIL (per-item differences), `2` =
-configuration refusal (missing env var, DSN parity, unsafe path). The
+configuration refusal (missing env var, DSN parity, unsafe path, unreadable
+or schema-invalid completeness receipt, unsafe subject identity, a receipt
+that declares two windows for one identity, derived set over the cardinality
+bound, or `--completeness-receipt` without any `--archive-manifest`). The
 receipt path is announced to stdout on success.
+
+A derivation that yields ZERO manifests is NOT a refusal. It means the
+receipt has no `coverage=db-export` + `verdict=complete` subject overlapping
+the drop window — exactly the case where the retention gate demands no
+db-export coverage either (`_completeness_has_db_export_overlap` guards the
+gate's db-export leg). The drill runs its archive-manifest leg normally and
+records `salvage_derivation.derived_count: 0` plus the drop window used, so
+the empty set is auditable in the receipt.
 
 ### 7.4 Reading the receipt
 
@@ -1463,6 +2355,25 @@ Every receipt carries:
   `comparisons.counts[]`.
 - On FAIL: `differences[]` where each entry names the failing item, the
   wire-format code, and the expected/actual values.
+- When (and only when) `--completeness-receipt` was supplied:
+  `salvage_derivation` (`completeness_receipt_path`, the `drop_window`
+  used or `null`, `candidate_count` = db-export+complete subjects seen,
+  `derived_count` = manifests derived, `skipped[]` naming every
+  subject on a lane with no db-export salvage lane, `db_export_windows[]`
+  = the consumed snapshot's full db-export universe UNFILTERED by the drop
+  window, and `completeness_generated_at` = that snapshot's
+  `generated_at`) plus
+  `salvage_inputs[]` (with `provenance` = `derived` / `explicit` /
+  `derived+explicit`). Receipts from invocations without the flag are
+  byte-identical to pre-#1177 receipts — neither field appears.
+  - `salvage_inputs[]` is the PLANNED input set: one entry per manifest
+    the drill intended to verify, regardless of outcome. A missing,
+    unreadable, or window-diverged manifest still gets its entry. Do NOT
+    read it as "these verified". Verification results live in `coverage[]`
+    (tuples only for verified selectors) and `differences[]`.
+  - `derived_count: 0` is a legitimate outcome, not a bug: the receipt had
+    no `coverage=db-export` + `verdict=complete` subject overlapping the
+    drop window, so there was nothing for the gate to demand either.
 
 ### 7.5 How the coverage rule maps to the retention gate
 
@@ -1488,8 +2399,8 @@ tuples include, sampled within or older than that window:
 
 The drill EMIT contract is per-cycle: each verified product manifest
 contributes one 24 h coverage tuple sampled within or older than the
-drop window (see §7.4). The retention gate check is UNION-based: a 14 d
-drop window is normally covered by ~14 daily tuples whose union spans
+drop window (see §7.4). The retention gate check is UNION-based: an N-day
+drop window is normally covered by ~N daily tuples whose union spans
 it — no single tuple is expected to individually contain the drop
 window. These two shapes coexist deliberately (drill emits per-cycle
 tuples; retention union-checks them against the candidate drop window).
@@ -1506,12 +2417,161 @@ windows only) for the code emitted when the union does not cover; see
 `openspec/changes/tier-node27-timeseries-storage/design.md` #855
 fixture block H2 pin for the canonical statement.
 
-Ops consequence: the `--salvage-manifest` arguments passed to the drill
-(§7.3) MUST cover every db-export subject window appearing in the drop
-window, not just one of them — each such window is judged on its own, so
-a missing salvage manifest for any one of them makes the gate refuse
-(correctly). Re-run the drill with the full set of salvage manifests
-rather than narrowing the drop window.
+Ops consequence: the drill's db-export evidence MUST cover every
+db-export subject window appearing in the drop window, not just one of
+them — each such window is judged on its own, so a single missing
+salvage manifest makes the gate refuse (correctly). Do NOT try to guess
+that set: pass `--completeness-receipt` (plus the drop window from §7.3
+step 3) and the drill derives it from the same receipt the gate derives
+its demand from — `coverage=db-export` AND `verdict=complete` subjects
+overlapping the drop window, mapped to
+`<NHMS_ARCHIVE_ROOT>/db-export/<lane>/<identity>/manifest.json` for the
+`forcing` and `runs` lanes. Concretely:
+
+```
+uv run python scripts/node27_archive_rebuild_drill.py \
+  --archive-manifest "${NHMS_ARCHIVE_ROOT}/runs/<run_id>/manifest.json" \
+  --completeness-receipt ~/node27-storage-inventory-audit-logs/completeness-receipt.json \
+  --drop-window-start <min(range_start) from §7.3 step 3> \
+  --drop-window-end   <max(range_end) from §7.3 step 3>
+```
+
+The derived set is fail-closed end to end: a derived subject whose
+`manifest.json` is missing/unreadable, or whose selector window drifted
+from the receipt subject's window, produces a FAIL receipt naming the
+path (`SALVAGE_DERIVATION_FAILED`, §7.2) instead of a PASS over the
+narrower set — so a drill PASS is now a statement ABOUT the gate's
+demand set, not merely about whatever the operator typed. Because
+`derived_count` and the `drop_window` used are recorded in the receipt
+(§7.4), a derivation narrower than the retention window is visible
+without re-reading the completeness receipt.
+
+**Reading the refusal (#1175).** The refused receipt's `refusal_reason`
+names the shortfall: `DRILL_COVERAGE_DB_EXPORT_MISSING:<start>/<end>` is
+the first uncovered salvage-backed window CLIPPED to the drop window, and
+`DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window` means an
+overlapping db-export subject derived no window at all (see §8.2 for both
+forms). Use it to diagnose, not to narrow the next drill: check that the
+named window is one the drill actually judged (`salvage_derivation`
+§7.4), or — if its `end` precedes its `start` — that the completeness
+subject behind it is corrupt rather than the drill deficient. The remedy
+is unchanged and stays the derived one above: rerun the drill with
+`--completeness-receipt` and a drop window ⊇ the retention drop window.
+Only the FIRST shortfall is named per tick, so a second refusal naming a
+different window after a fix is expected, not a regression.
+
+**The drill's drop window MUST contain (⊇) the retention run's drop
+window.** Use the §7.3 step 3 interval verbatim, or something wider —
+never narrower, and never hand-narrowed to make an expensive drill
+cheaper. Reason: the gate's db-export check UNIONs the drill's
+`source=db-export` coverage tuples, and those tuples carry no subject
+identity. With a narrower drill window, subject A (wide window, still
+derived) contributes a tuple that can span subject B's demand window even
+though B was filtered out of the drill and its evidence was never
+verified — the gate would pass on evidence that does not exist.
+
+This containment rule is **machine-enforced by the gate** (#1207): before
+any coverage leg runs, the retention gate reads the drill receipt's
+recorded `salvage_derivation.drop_window` (§7.4) and refuses with
+`DRILL_DERIVATION_WINDOW_TOO_NARROW` (§8.2) unless that recorded window
+contains the retention drop window, closed-interval — an equal or wider
+recorded window passes. Run as instructed, the §7.3 step 3 query the
+standard invocation above pastes from is a conservative superset of the
+runner's own drop window and so never produces a narrower one: step 3
+reads the SAME live `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` the runner
+reads, but anchors it at DB `now()` while the runner anchors it at the
+display watermark `MAX(cycle_time)` — and the watermark is never in the
+future, so step 3's cutoff is never older than the runner's and its
+eligible chunk set is a superset. The runner then only narrows its own
+window further (completeness-bounds intersection). That
+guarantee comes from using the live value, not from any particular number
+— substituting a remembered day count breaks it. It also holds only at
+the moment step 3 runs; see "Windows advance" below. A
+recorded `drop_window` of `null` (the drill ran without
+`--drop-window-*`) passes; a `salvage_derivation` section that is present
+but unusable (not an object, `drop_window` key missing, unparseable
+timestamps, or `end` before `start`) refuses with the same code. The
+operator no longer has to compare the two windows by hand — but the
+remedy when the gate refuses is still yours: rerun the drill with a
+window ⊇ the retention drop window. Narrowing the manifest list by hand
+is likewise not allowed — that is the failure this whole section exists
+to remove, and it is NOT machine-enforced.
+
+**Windows advance — a drill receipt does not stay sufficient.** Within
+`NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS` the same receipt is
+reused across many retention ticks, but the retention drop window moves
+forward with the clock. The moment it advances past the recorded drill
+window, that receipt stops satisfying enforcement and every tick refuses
+with `DRILL_DERIVATION_WINDOW_TOO_NARROW` — freshness alone is not
+enough. Rerun the drill with a window ⊇ the NEW retention drop window
+(§7.3 step 3 recomputed); a receipt still inside its age budget is not
+evidence for a span it never judged.
+
+**The drill's completeness snapshot binds the gate's requirement set
+(#1220).** A derivation-mode drill also records the db-export UNIVERSE of
+the completeness receipt it consumed — every `coverage=db-export` AND
+`verdict=complete` subject window, deduped and sorted, unfiltered by any
+drop window — at `salvage_derivation.db_export_windows` (§7.4). Before any
+db-export coverage tuple is consulted, the gate requires every
+salvage-backed window it derives from the CURRENT completeness receipt to
+be an exact `{start, end}` member of that recorded set; otherwise it
+refuses with `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` (§8.2). Membership is
+judged over the drop-window-filtered TARGETS only, never over the current
+receipt's whole db-export universe — a new subject far outside the drop
+window is not a requirement of this tick and must not block it. Reason for
+the guard: the completeness receipt is rewritten in place daily (timer
+cadence above) while a drill receipt stays valid for up to
+`NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`, so a db-export subject
+added after the drill would otherwise enter the gate's requirement set
+having never been restore-verified, with an older subject's identity-less
+tuple vouching for it.
+
+Ops consequence: **a drill receipt stops binding the moment a NEW OR
+CHANGED db-export window appears in the completeness receipt.** A brand
+new backfill/rerun selector unbinds it — and so does an EXISTING subject
+whose window was merely EXTENDED by a backfill, because membership is
+exact on BOTH endpoints (`[06-01, 06-30]` → `[06-01, 07-15]` is a
+different window). Remedy: rerun the drill against the current
+completeness receipt (§7.3), exactly as for the containment rule. What
+does NOT invalidate a receipt: daily completeness regeneration with an
+unchanged db-export universe (however much newer the receipt is), and
+requirement SHRINK (a subject that disappeared since the drill — the
+recorded set may be a strict superset of the targets). Note that
+`salvage_derivation.completeness_generated_at` is **diagnostics only** —
+it records which snapshot the drill consumed and is NEVER a refusal
+input; the gate does not compare it against the loaded receipt's
+`generated_at`, because at almost every tick the loaded receipt is newer
+and such a comparison would collapse the 30 d drill budget to under a day
+(daily mandatory restore drills or a permanent retention outage).
+
+**Residual after #1207 + #1220 (what this enforcement does NOT cover).**
+The two guards block the operator-narrowing knob and snapshot drift at
+window granularity; cross-subject tuple substitution survives on:
+
+- (a) **Receipts with no `salvage_derivation` section.** Both receipts
+  predating #1206 and today's explicit-manifest drills
+  (`--salvage-manifest` without `--completeness-receipt`) never write the
+  section, and BOTH guards are skipped entirely for them; for those
+  receipts the hand-narrowed-manifest prohibition above remains
+  prose-only.
+- (b) **Receipts with the section but no `db_export_windows` field**
+  (derivation-mode receipts written between #1206 and #1220). The
+  containment guard applies to them; the binding guard is dormant, so
+  snapshot drift still substitutes there. Rerunning the drill migrates a
+  receipt out of this population.
+- (c) **Window-granularity blind spot.** Binding is judged on
+  `{start, end}` pairs, which is the gate's own requirement granularity.
+  A NEW subject whose window is byte-identical to one the drill verified
+  is indistinguishable at that granularity and passes the binding check.
+  (Receipt-snapshot unbinding — the #1220 defect formerly recorded here —
+  is otherwise CLOSED: a new or changed requirement window now refuses.)
+- (d) **Inside a contained, bound window**, substitution is harmless only
+  RELATIVE TO the completeness snapshot the drill consumed — every
+  subject overlapping the drill window was derived and restore-verified
+  from THAT snapshot. It is not an absolute guarantee; see (c).
+
+The root fix for all of these is per-subject attribution of drill coverage
+tuples (layer 2 of #1207/#1220, separately scheduled).
 
 ### 7.6 Recovery (post-fault operator playbook)
 
@@ -1540,7 +2600,8 @@ a clean environment (no-op if already recovered):
 
 ### 7.7 Live receipts (§5.2 boundary)
 
-Live PASS receipts on node-27 covering the planned 14-day drop window
+Live PASS receipts on node-27 covering the planned drop window (width =
+the live `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`, §7.3 step 3)
 are the domain of task §5.2 (follow-up commit under issue #854, not part
 of the §5.1 PR that introduced this section). Once §5.2 lands, the live
 receipts will be committed under
@@ -1551,13 +2612,16 @@ mover and audit receipt directories.
 
 The retention runner
 (`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
-strictly older than the drop window (default 14 days) from the two D3
+strictly older than the drop window from the two D3
 detail hypertables `hydro.river_timeseries` and
-`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. Enforce
+`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. The window
+width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
+21 d on node-27 as of 2026-08-01) — always read the live value off the box
+rather than assuming the default. Enforce
 mode is hard-gated on TWO archive receipts and refuses fail-closed if
 either is missing, stale, or fails to cover the drop window (spec
 `timeseries-db-retention` and design D6 / D7). Compression state is
-never a gate — compressed chunks older than 14 days are exactly the
+never a gate — compressed chunks older than the window are exactly the
 retention target (H3 divergence from #851).
 
 Related documents:
@@ -1608,6 +2672,25 @@ are prepared for the follow-up commit.
    `~/.config/systemd/user/` from the checked-in
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`.
 
+#### Current bringup state (verified 2026-08-01)
+
+The retention timer has **never been enabled** on node-27. Verified on the
+box:
+
+- `nhms-node27-timeseries-retention.timer` is `disabled` and `inactive` —
+  step 3's `enable --now` line is still commented out in reality, not just in
+  this runbook.
+- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` sets
+  `NODE27_TIMESERIES_RETENTION_ENFORCE=0` (grep the key; that file is
+  gitignored and its line numbers drift).
+
+So the deployment is still at the #1071 Step B posture: refusal tests and
+dry-runs only, with no unattended `drop_chunks`. Nothing in this runbook
+implies the timer is running; if you need retention to actually free space,
+that is an explicit operator bringup step (enable the timer *and* flip
+`ENFORCE`), gated as always on the completeness + drill receipts covering the
+window.
+
 ### 8.2 Wire-format codes
 
 The runner emits structured refusal reasons on `outcome=refused`. Codes
@@ -1632,12 +2715,38 @@ surfaces in the same commit.
 - `DRILL_RECEIPT_STALE` — drill `generated_at` older than
   `NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS`.
 - `DRILL_RECEIPT_FAIL` — drill receipt `verdict = FAIL`.
+- `DRILL_DERIVATION_WINDOW_TOO_NARROW` — the drill receipt records a
+  `salvage_derivation.drop_window` that does NOT contain (closed-interval;
+  equality passes) the retention drop window, so the drill declared a
+  narrower judgment span than this drop and its coverage tuples cannot
+  vouch for it (#1207). Also emitted when the `salvage_derivation` section
+  is present but unusable — not an object, `drop_window` key missing,
+  unparseable timestamps, or an inverted window whose `end` precedes its
+  `start` (fail-closed; nonsense evidence never counts). A receipt with NO
+  `salvage_derivation` section is not affected (see
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)); a recorded
+  `drop_window` of `null` (drill ran un-narrowed) passes. Remedy: rerun the
+  drill with a window ⊇ the retention drop window.
 - `DRILL_COVERAGE_FORCING_MISSING` — no set of `source=forcing` coverage
   tuples whose UNION covers the drop window (per-cycle 24 h tuples merge
-  into a single covering interval; a 14 d drop window is normally covered
-  by ~14 daily tuples).
+  into a single covering interval; an N-day drop window is normally covered
+  by ~N daily tuples).
 - `DRILL_COVERAGE_RUNS_MISSING` — no set of `source=runs` coverage tuples
   whose UNION covers the drop window.
+- `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` — the drill receipt records
+  `salvage_derivation.db_export_windows` (the db-export universe of the
+  completeness snapshot it consumed) and at least one salvage-backed
+  window derived from the CURRENT completeness receipt is not an exact
+  `{start, end}` member of it, so the requirement set drifted past the
+  drill's snapshot (#1220). Checked BEFORE any db-export coverage tuple is
+  consulted, and only over the drop-window-filtered targets. Also emitted
+  when the recorded set is present but unusable (not an array, an entry
+  that is not a window object, or missing/non-string endpoints;
+  fail-closed). A receipt with no `salvage_derivation` section, or with
+  the section but no `db_export_windows` field, is not affected (see
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)). Remedy:
+  rerun the drill against the current completeness receipt. NOT emitted on
+  `completeness_generated_at` drift alone — that field is diagnostics only.
 - `DRILL_COVERAGE_DB_EXPORT_MISSING` — completeness has `coverage=db-export`
   subject overlap but the UNION of the drill's `source=db-export` tuples
   fails to cover at least one salvage-backed window intersected with the
@@ -1647,6 +2756,25 @@ surfaces in the same commit.
   window at all (fail-closed), and when a salvage-backed window's
   intersection with the drop window is inverted (a corrupt subject window
   whose `end` precedes its `start`; fail-closed guard, #1162).
+  Carries a detail suffix localizing the shortfall (#1175), in one of two
+  forms — the bare code above stays the registered wire code and a strict
+  prefix of both:
+  - `:<clipped_start>/<clipped_end>` — the FIRST uncovered salvage-backed
+    window in ascending window order, CLIPPED to the drop window, each
+    endpoint rendered as UTC `Z` ISO-8601 (e.g.
+    `…_MISSING:2026-06-01T00:00:00Z/2026-06-08T00:00:00Z`). Only the first
+    shortfall is reported per tick (the leg early-returns); later ticks
+    surface the next one. An inverted clip renders its interval verbatim,
+    so an `end` preceding the `start` IS the diagnosis (corrupt subject
+    window).
+  - `:no-derivable-window` — the empty-derivation branch: an overlapping
+    db-export subject exists but no salvage-backed window is derivable, so
+    there is no interval to name.
+  The suffix is diagnostic localization, not a remedy: it says WHICH window
+  fell short (check the drill actually judged it, or that the completeness
+  subject is not corrupt). The remedy stays the one in
+  [§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate) — rerun the
+  drill with `--completeness-receipt` over a window ⊇ the drop window.
 - `RETENTION_CONFIG_INVALID` — absolute-path / positive-int / env-parse
   failure before any DB call. Emitted to stderr as a single JSON line
   `{status: "failed", code: "RETENTION_CONFIG_INVALID", reason: <detail>}`;
@@ -1656,10 +2784,25 @@ surfaces in the same commit.
   `/tmp/nhms-node27-timeseries-retention.lock` is already held. Receipt
   published, exit code 1.
 - `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised. Suffix
-  `:<hypertable_schema>.<chunk_name>: <error>`. Whole tick refuses (H5
-  fail-closed); subsequent chunks NOT attempted.
+  `:<hypertable_schema>.<chunk_name>: <error>`. The prefix through the
+  chunk name is byte-unchanged, but `<error>` is credential-redacted
+  driver text: DSN / password material and libpq `user "<name>"` /
+  `role "<name>"` echoes are replaced by `***`, while the host/port echo is
+  deliberately PRESERVED (diagnosability trade-off, #1213). Redaction is
+  total and never raises — the redaction helper imports `psycopg2` at
+  module scope, so in a driver-less window (venv rebuild, broken
+  `psycopg2` wheel) that import itself fails and the tail degrades to the
+  literal `<error text withheld: redaction unavailable (<Type>)>`, where
+  `<Type>` is the ORIGINAL exception's class name (#1216). Whole tick
+  refuses (H5 fail-closed); subsequent chunks NOT attempted.
 - `RETENTION_UNCAUGHT_ERROR` — catch-all top-level exception. Receipt
   carries `refusal_reason = "RETENTION_UNCAUGHT_ERROR:<ClassName>: <str(exc)>"`.
+  Wire code and `<ClassName>` are byte-unchanged; `<str(exc)>` crosses the
+  same redaction chokepoint as above (this is the path a psycopg2
+  DSN-parse failure takes, and that exception echoes the whole conninfo,
+  password included), so the tail is either credential-redacted driver
+  text or, in the same driver-less window, the literal
+  `<error text withheld: redaction unavailable (<Type>)>`.
   Symmetric with #854 `DRILL_UNCAUGHT_ERROR`.
 
 Refusal-code priority (highest first — the first hit wins):
@@ -1673,10 +2816,47 @@ COMPLETENESS_RECEIPT_MISSING
           -> DRILL_RECEIPT_MISSING
             -> DRILL_RECEIPT_STALE
               -> DRILL_RECEIPT_FAIL
-                -> DRILL_COVERAGE_FORCING_MISSING
-                  -> DRILL_COVERAGE_RUNS_MISSING
-                    -> DRILL_COVERAGE_DB_EXPORT_MISSING
+                -> DRILL_DERIVATION_WINDOW_TOO_NARROW
+                  -> DRILL_COVERAGE_FORCING_MISSING
+                    -> DRILL_COVERAGE_RUNS_MISSING
+                      -> DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+                        -> DRILL_COVERAGE_DB_EXPORT_MISSING
 ```
+
+One ordering subtlety inside the db-export leg: an overlapping db-export
+subject that derives NO salvage-backed window (empty requirement set)
+still surfaces `DRILL_COVERAGE_DB_EXPORT_MISSING` — that refusal precedes
+the binding check, which has nothing to bind when there are no targets.
+`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` outranks
+`DRILL_COVERAGE_DB_EXPORT_MISSING` only for the per-target coverage
+comparison that follows it.
+
+#### 8.2.1 Non-code stderr diagnostics
+
+Not every stderr line is a wire code. The runner also emits **warning**
+lines that never reach the receipt and are not members of the `WIRE_CODES`
+frozenset:
+
+- `{"chunk": "<chunk_schema>.<chunk_name>", "error": "<redacted text>",
+  "warning": "freed_bytes measurement failed; recording 0"}` — the
+  pre-drop size measurement for that ONE chunk RAISED (lock wait hitting the
+  60 s statement timeout, catalog error, connection failure, an uncoercible
+  `total_bytes` value). The runner records `freed_bytes: 0` for that chunk,
+  keeps measuring the remaining chunks on fresh connections, and **still
+  drops** — the tick is not refused and the exit code is unaffected. Grep
+  literal: `freed_bytes measurement failed`. The `error` text is
+  credential-redacted (DSN password and libpq role name are scrubbed)
+  because the wrapper captures stderr into `retention.log`. Post-#1216 it
+  crosses the SAME total chokepoint as the two refusal reasons in §8.2, so
+  in a driver-less window the `error` value is not driver text at all but
+  the literal `<error text withheld: redaction unavailable (<Type>)>` —
+  the warning line, and the best-effort `0` it explains, are emitted
+  either way.
+- NOT every best-effort `0` produces a line here. A measurement that
+  returns NO ROW, or a NULL `total_bytes`, is coerced to `0` **silently** —
+  no warning is emitted at all (design D2 coercion path). §8.6 item 5
+  depends on this asymmetry: an absent grep hit does NOT prove the `0` was
+  measured.
 
 ### 8.3 Metadata-table exemption + row-count invariant
 
@@ -1727,6 +2907,17 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 #    tuples span the drop window. The forcing-recovery union accepts verified
 #    forcing product tuples plus verified db-export tuples; db-export remains
 #    an independent required check when completeness reports an overlap.
+#  - Drill's recorded salvage_derivation.drop_window MUST contain the
+#    retention drop window (⊇), checked BEFORE any coverage leg — else
+#    refusal DRILL_DERIVATION_WINDOW_TOO_NARROW (§7.5). Receipts with no
+#    salvage_derivation section are unaffected.
+#  - Every salvage-backed window derived from the CURRENT completeness
+#    receipt MUST be an exact member of the drill's recorded
+#    salvage_derivation.db_export_windows — else refusal
+#    DRILL_COMPLETENESS_SNAPSHOT_UNBOUND (§7.5). A new or changed
+#    db-export window means the drill must be rerun; daily completeness
+#    regeneration with an unchanged db-export universe does not.
+#    Receipts without that field are unaffected.
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
 # pass --enforce on the CLI.
 uv run python scripts/node27_timeseries_retention.py --enforce
@@ -1790,8 +2981,20 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    (per-chunk drop timings printed to stderr) with the current
    `timescaledb_information.chunks` state before re-running enforce.
    Inspect the offending chunk (the refusal_reason suffix names it
-   `<hypertable_schema>.<chunk_name>`). Common causes: statement timeout
-   (14 min per chunk inside the 900 s wrapper / 940 s systemd walls), active
+   `<hypertable_schema>.<chunk_name>`). The cause text AFTER that chunk
+   name is redacted (§8.2), so read it as an intent-preserving summary,
+   not as verbatim driver output; and when it is the withheld literal
+   `<error text withheld: redaction unavailable (<Type>)>` the cause is
+   absent ENTIRELY — classify from `<Type>` plus the DB side (item 4
+   applies first in that case). Common causes: statement timeout
+   (5 min per chunk — `_DROP_TIMEOUT_MS = 300_000` in
+   `scripts/node27_timeseries_retention.py`, set as `statement_timeout`
+   around each `drop_chunks`; there is no PROCESS-level wall on this lane
+   — `node27_timeseries_retention_once.sh` wraps nothing in `timeout` and
+   the systemd unit sets `TimeoutStartSec=0`, so a tick hung outside a
+   statement is never killed for you. The only walls are statement-level:
+   this 300 s per `drop_chunks`, plus the 60 s `_QUERY_TIMEOUT_MS` on
+   catalog enumeration and per-chunk size measurement — see §8.2.1), active
    writer holding an incompatible lock, or a
    TimescaleDB catalog inconsistency. Re-run enforce after the operator
    has confirmed the DB is healthy. There is no automated retry loop —
@@ -1800,8 +3003,88 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
 3. **Config refusal (`RETENTION_CONFIG_INVALID`).** No receipt was
    written. Fix the env file per §8.4 and retry.
 4. **Uncaught error (`RETENTION_UNCAUGHT_ERROR`).** The receipt carries
-   the exception class + message. File a bug against #855 (or the
-   downstream owner if the class is from a shared helper).
+   the exception class + redacted message (§8.2). File a bug against #855
+   (or the downstream owner if the class is from a shared helper). If the
+   message is instead the literal
+   `<error text withheld: redaction unavailable (<Type>)>`, the receipt
+   carries the exception class ONLY and no message at all; that
+   fingerprint points at a node-27 LOCAL environment failure (the
+   redaction helper's `psycopg2` import failed), not at a runner defect.
+   Check driver health FIRST:
+
+   ```
+   /home/nwm/NWM/.venv/bin/python -c "import psycopg2"
+   ```
+
+   If that import fails, rebuild the venv (`uv sync --all-extras --dev`)
+   and re-run enforce; only file a bug against #855 once a healthy driver
+   still reproduces the withheld tail.
+5. **`freed_bytes: 0` in an `enforced` receipt.** A `0` is ambiguous in the
+   receipt alone: the chunk may have been genuinely empty, or its
+   measurement may have failed. Disambiguate from the wrapper log:
+
+   ```
+   grep 'freed_bytes measurement failed' /path/to/retention.log
+   ```
+
+   Scope the match to THIS tick before reading anything into it.
+   `retention.log` is cumulative — the wrapper appends every tick to the same
+   file (`>>`) — so a bare `grep` also returns warnings from earlier runs.
+   Each tick is bracketed in the log by the wrapper's own
+   `node27-timeseries-retention: start summary=<receipt path>` and
+   `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
+   lines (`scripts/node27_timeseries_retention_once.sh:143,151`), each
+   prefixed with a UTC ISO-8601 timestamp from the wrapper's `ts()`
+   (`scripts/node27_timeseries_retention_once.sh:23`). The receipt path in
+   those lines is NOT a tick key: the shipped env pins
+   `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` to one fixed file
+   (`infra/env/node27-timeseries-retention.example`), so every tick prints
+   the same path and the path ALONE cannot discriminate ticks. Correlate on
+   time instead: pick the bracket whose `start summary=` timestamp and
+   matching `done rc=` timestamp CONTAIN the receipt's `generated_at`
+   (schema-required, `format: date-time`), and read only the lines between
+   those two. Two kinds of bracket must be skipped because that tick wrote
+   no receipt at all: a `start` with no matching `done rc=` (a tick still in
+   flight, or a wrapper that died mid-tick), and a `done rc=2` tick — the
+   config refusal of item 3, where `RETENTION_CONFIG_INVALID` publishes no
+   receipt and the file at the pinned path still belongs to some earlier
+   tick. Neither is the bracket to read; do NOT fall back to "the last
+   bracket in the file". Then require the hit's `chunk` field to name a
+   chunk that appears in THIS receipt's `dropped_chunks[]`. A hit outside
+   that bracket belongs to an earlier tick and says nothing about this
+   receipt's `0`.
+
+   That second criterion does not close the refuse-then-retry window: a
+   prior tick that warned about chunk X and then refused with
+   `RETENTION_DROP_FAILED` (item 2) leaves a stale warning naming a chunk
+   that THIS tick may genuinely measure as 0 and drop, so X can sit in this
+   receipt's `dropped_chunks[]` while the only warning about it belongs to
+   the earlier tick. Within THAT window the misread direction is
+   conservative — it costs one extra reconciliation pass, never the reverse:
+   a failed measurement is never read as a real `0`.
+
+   An in-bracket hit names the chunk and the redacted cause (§8.2.1; on
+   the withheld path the cause is withheld entirely and only the
+   exception class survives) — the
+   receipt's `freed_bytes` for that chunk is a best-effort 0, not a
+   measurement. The chunk WAS dropped; only the reclaim accounting is
+   degraded. Common cause of a hit: concurrent `compress_chunk` /
+   `decompress_chunk` / manual replay holding an incompatible lock on the
+   same hypertable until the 60 s statement timeout fires.
+
+   No in-bracket hit does NOT prove the 0 was measured — it leaves two
+   possibilities:
+   (a) a real measurement of a small or empty chunk, or (b) the
+   silent-coercion path, where `chunks_detailed_size` returned no row or a
+   NULL `total_bytes` and the runner recorded 0 without emitting any
+   warning (design D2, §8.2.1). Narrowing (b): a chunk that fully vanished
+   mid-tick normally also fails the drop phase and refuses the whole tick
+   (`RETENTION_DROP_FAILED`, H5 fail-closed), so a silent 0 sitting inside
+   an `enforced` receipt points at the NULL / no-row coercion, not at a
+   disappeared chunk.
+
+   No action is required unless the receipt's reclaim total is being
+   reconciled against a `pg_database_size` delta.
 
 ### 8.7 Salvage-backed windows
 
@@ -1820,7 +3103,21 @@ the operator's full recovery scope, not the slice that was dropped this
 tick. The retention gate is scoped differently on purpose: it evaluates
 each subject window's INTERSECTION with the drop window (#1162), so the
 drill is never asked for db-export coverage outside the interval actually
-being retired.
+being retired. That intersection applies only to the db-export
+coverage-tuple check. The binding rule runs BEFORE the clipping, on the
+UNCLIPPED subject `{start, end}` windows — the same shape the drill
+records in `salvage_derivation.db_export_windows` — so membership is
+judged pair-for-pair against the recorded snapshot; see
+[§7.5](#75-how-the-coverage-rule-maps-to-the-retention-gate)
+(`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`).
+
+Cross-note for the refusal suffix (#1175): the window a refused receipt
+names in `DRILL_COVERAGE_DB_EXPORT_MISSING:<start>/<end>` is the CLIPPED
+intersection rendered by the runner's own UTC `Z` serializer, whereas
+these entries are the UNCLIPPED subject strings echoed verbatim from the
+completeness receipt — so the suffix is not expected to string-match any
+`salvage_backed_windows[]` entry (a refused receipt carries no such array
+anyway); compare the intervals by value, never by grep.
 
 ## Rollback (unit-level, not data-level)
 

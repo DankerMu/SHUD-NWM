@@ -465,7 +465,16 @@ def _candidate_state_decision_event(
     if authoritative:
         return dict(event)
     sanitized: dict[str, Any] = {}
-    for key in ("event_id", "entity_id", "created_at", "updated_at"):
+    # ``entity_type``/``model_id`` are DECISION PREDICATES, not identity claims: the
+    # cycle-granularity marker attribution knife reads them to decide whether a marker may
+    # be adopted at all.  Sanitizing them away makes that knife fail OPEN on the filtered
+    # state (a cycle-wide marker reads as a plain pipeline_job marker and gets adopted by
+    # every model).  NOTE the scope consequence: a self-declared MATCHING ``model_id`` DOES
+    # re-admit a sanitized event under shared-cycle scoping (``_shared_cycle_row_is_candidate_scoped``
+    # accepts a single matching identity field).  Foreign model ids stay excluded, and within
+    # one source-cycle aggregate a model id maps to exactly one candidate, so the re-admitted
+    # event is candidate-own by construction.
+    for key in ("event_id", "entity_id", "entity_type", "model_id", "created_at", "updated_at"):
         value = event.get(key)
         if value not in (None, ""):
             sanitized[key] = value
@@ -476,8 +485,15 @@ def _candidate_state_decision_event(
         if event.get("event_type") in {"retry", "manual_retry"} and retry_binding_id not in (None, ""):
             sanitized["event_type"] = event.get("event_type")
             for key in (
+                # Same decision-predicate carve-out as the top-level keys above: the
+                # attribution knife reads details.model_id before the event may be adopted.
+                "model_id",
                 "trigger",
                 "manual_retry_marker",
+                # Stage evidence for the row-absent pin gate: the identity filter's own row
+                # deletion is what creates that shape, so stripping this key would strip the
+                # evidence on exactly the path it serves.
+                "failed_stage",
                 "retry_count",
                 "new_attempt",
                 "previous_job_id",

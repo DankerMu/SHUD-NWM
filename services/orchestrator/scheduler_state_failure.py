@@ -603,10 +603,16 @@ def _planned_retry_policy_value(
 def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
     if failure.get("limit_exhausted") is True:
         return False
-    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked"}:
+    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked", "resource_configuration"}:
         return False
     reason_code = str(failure.get("reason_code") or "").upper()
-    if reason_code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT", "POLICY_BLOCKED"}:
+    if reason_code in {
+        "INVALID_MANIFEST",
+        "MANIFEST_SCHEMA_INVALID",
+        "MALFORMED_INPUT",
+        "OUT_OF_MEMORY",
+        "POLICY_BLOCKED",
+    }:
         return False
     return True
 
@@ -902,6 +908,13 @@ def _model_package_refresh_retry_evidence(
         return None
     failure = _failure_policy_payload(state)
     if not failure["permanent"]:
+        return None
+    # A model-package refresh compares only the package shas and restarts the same
+    # failed stage — it is not a memory-sizing remedy, so an out-of-memory failure
+    # must not borrow this override to regain automatic retry (#1161).
+    if str(failure.get("classifier") or "") == "resource_configuration":
+        return None
+    if str(failure.get("reason_code") or "").upper() == "OUT_OF_MEMORY":
         return None
     prior = state.get("run_manifest_model_package")
     if not isinstance(prior, Mapping):

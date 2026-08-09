@@ -42,7 +42,11 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
 )
-from packages.common.node27_container_contract import CLIENT_BACKEND_TYPE
+from packages.common.node27_container_contract import (
+    CLIENT_BACKEND_TYPE,
+    RECOVERY_TARGET,
+    validated_probe_target,
+)
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 from services.tiles.mvt import postgis_tile_sql
 
@@ -51,13 +55,30 @@ CURVE_SOURCE = ROOT / "packages/common/forecast_store.py"
 MVT_SOURCE = ROOT / "services/tiles/mvt.py"
 MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display.py"
 EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) "
-ACTIVITY_SQL = """
+
+
+def _build_activity_sql(target: str = RECOVERY_TARGET) -> str:
+    """Build the read-only activity SQL for one validated probe target.
+
+    The target is validated before any SQL exists, so only a supervised
+    hypertable in strict ``schema.table`` form can reach the probe.
+    """
+
+    probe_target = validated_probe_target(target)
+    # Split across source lines so no single line carries an inline probe
+    # target; the embedded continuation indent keeps the privilege list aligned
+    # under the opening paren exactly as the hand-written SQL had it.
+    privilege_probe = (
+        "has_table_privilege("
+        f"usename, '{probe_target}',\n"
+        "                             'INSERT,UPDATE,DELETE')"
+    )
+    return f"""
 SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
        backend_type,
        usename,
        COALESCE(
-         has_table_privilege(usename, 'hydro.river_timeseries',
-                             'INSERT,UPDATE,DELETE'),
+         {privilege_probe},
          false
        ) AS has_write_privilege_on_target,
        md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
@@ -67,6 +88,9 @@ WHERE datname = current_database()
   AND state = 'active'
 ORDER BY pid, backend_start
 """
+
+
+ACTIVITY_SQL = _build_activity_sql(RECOVERY_TARGET)
 STATEMENT_TIMEOUT_MS = 60_000
 LOCK_TIMEOUT_MS = 5_000
 PHASE_TIMEOUT_SECONDS = 900

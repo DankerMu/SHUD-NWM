@@ -31,8 +31,10 @@ Design references (design.md #855 fixture pins H1-H17):
   ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
   per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
-- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk relation is
-  gone; ``pg_total_relation_size`` would fail).
+- H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk is gone;
+  ``chunks_detailed_size`` would no longer report it). Sized via
+  ``chunks_detailed_size(<hypertable>).total_bytes`` filtered to the chunk so
+  a compressed chunk's compressed sibling relation counts too (#1125).
 - H5 fail-closed on per-chunk drop failure — whole tick refuses.
 - H6 wire codes byte-identical across code / runbook §8.2 / design #855.
 - H7 predicate ``range_end <= cutoff`` (non-strict; divergence from #851's
@@ -57,13 +59,14 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import jsonschema
 
@@ -74,6 +77,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     open_directory_no_follow,
 )
+from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 
 SCHEMA_VERSION = "1.0"
 TOOL_VERSION = "node27-timeseries-retention/1"
@@ -86,7 +90,10 @@ _DEFAULT_COMPLETENESS_MAX_AGE_HOURS = 26
 _DEFAULT_DRILL_MAX_AGE_DAYS = 30
 
 # H3 per-tick bound + window defaults (matches spec §Window and mechanism).
-_DEFAULT_WINDOW_DAYS = 14
+# Shared with the archive-side min-age guard (#1227): the guard reads this
+# file's window variable and must resolve a missing/empty assignment to the
+# SAME default this runner uses, so the constant has one home.
+_DEFAULT_WINDOW_DAYS = DEFAULT_RETENTION_WINDOW_DAYS
 _DEFAULT_PER_TICK_BOUND = 5
 
 # H12 statement timeouts.
@@ -117,8 +124,10 @@ CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW = "COMPLETENESS_RECEIPT_PENDING
 CODE_DRILL_RECEIPT_MISSING = "DRILL_RECEIPT_MISSING"
 CODE_DRILL_RECEIPT_STALE = "DRILL_RECEIPT_STALE"
 CODE_DRILL_RECEIPT_FAIL = "DRILL_RECEIPT_FAIL"
+CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW = "DRILL_DERIVATION_WINDOW_TOO_NARROW"
 CODE_DRILL_COVERAGE_FORCING_MISSING = "DRILL_COVERAGE_FORCING_MISSING"
 CODE_DRILL_COVERAGE_RUNS_MISSING = "DRILL_COVERAGE_RUNS_MISSING"
+CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND = "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND"
 CODE_DRILL_COVERAGE_DB_EXPORT_MISSING = "DRILL_COVERAGE_DB_EXPORT_MISSING"
 CODE_RETENTION_CONFIG_INVALID = "RETENTION_CONFIG_INVALID"
 CODE_RETENTION_CONCURRENT_INVOCATION = "RETENTION_CONCURRENT_INVOCATION"
@@ -135,8 +144,10 @@ WIRE_CODES: frozenset[str] = frozenset(
         CODE_DRILL_RECEIPT_MISSING,
         CODE_DRILL_RECEIPT_STALE,
         CODE_DRILL_RECEIPT_FAIL,
+        CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW,
         CODE_DRILL_COVERAGE_FORCING_MISSING,
         CODE_DRILL_COVERAGE_RUNS_MISSING,
+        CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND,
         CODE_DRILL_COVERAGE_DB_EXPORT_MISSING,
         CODE_RETENTION_CONFIG_INVALID,
         CODE_RETENTION_CONCURRENT_INVOCATION,
@@ -234,20 +245,6 @@ class DropWindow:
 
     start: datetime
     end: datetime
-
-
-def _mask_dsn(dsn: str) -> str:
-    """Return a DSN safe for stderr diagnostics — credentials stripped."""
-    try:
-        parts = urlsplit(dsn)
-    except Exception:
-        return "postgresql://***@***/***"
-    netloc = parts.hostname or "***"
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    if parts.username is not None or parts.password is not None:
-        netloc = f"***@{netloc}"
-    return urlunsplit((parts.scheme or "postgresql", netloc, parts.path or "", "", ""))
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
@@ -637,6 +634,133 @@ def _completeness_has_db_export_overlap(
     return False
 
 
+def _drill_derivation_window_contains(
+    receipt: Mapping[str, Any], drop_window: DropWindow
+) -> bool:
+    """#1207 layer 1: does the drill's DECLARED judgment span cover this drop?
+
+    The drill records the drop window it was invoked with at
+    ``salvage_derivation.drop_window`` (machine-readable since #1206). A
+    drill that declared a NARROWER span than what retention wants to drop
+    cannot vouch for this drop: its coverage tuples carry no subject
+    identity, so subject A's wide tuple would silently vouch for a subject
+    B that the narrowed drill never derived and never restore-verified.
+
+    Unified rule (design D2 of ``fix-retention-drill-window-guard``):
+
+    * key ``salvage_derivation`` entirely ABSENT → ``True`` (no-derivation-
+      section receipt: pre-#1206 receipts AND today's explicit-manifest
+      drills, which never write the section — behavior unchanged);
+    * key PRESENT but unusable (not a Mapping, ``drop_window`` key missing,
+      window neither Mapping nor ``null``, unparseable, or inverted) →
+      ``False``. A section that exists but cannot be judged is never
+      evidence — symmetric with the inverted-tuple defence in
+      :func:`_tuples_cover_window`;
+    * ``drop_window`` is ``null`` → ``True`` (the drill ran un-narrowed);
+    * well-formed window → closed-interval containment. Equality on either
+      endpoint PASSES: the runbook §7.5 standard invocation passes the §7.3
+      step 3 interval verbatim, and that interval is a documented
+      conservative SUPERSET of the runner's own drop window (the runner also
+      intersects the eligible chunks with the completeness
+      ``coverage_bounds``), so a live drill records a window EQUAL to or
+      WIDER than the retention one, never narrower.
+    """
+    if "salvage_derivation" not in receipt:
+        return True
+    section = receipt.get("salvage_derivation")
+    if not isinstance(section, Mapping) or "drop_window" not in section:
+        return False
+    window = section["drop_window"]
+    if window is None:
+        return True
+    if not isinstance(window, Mapping):
+        return False
+    start_raw = window.get("start")
+    end_raw = window.get("end")
+    if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+        return False
+    try:
+        start = _parse_iso(start_raw)
+        end = _parse_iso(end_raw)
+    except ValueError:
+        return False
+    # Redundant for any well-ordered drop window (containment below already
+    # refuses an inverted recorded window); kept as an explicit defence so an
+    # inverted window can never be read as evidence.
+    if end < start:
+        return False
+    return start <= drop_window.start and end >= drop_window.end
+
+
+def _drill_snapshot_binds(
+    receipt: Mapping[str, Any], targets: Sequence[Mapping[str, str]]
+) -> bool:
+    """#1220: was every gate-time requirement window in the drill's snapshot?
+
+    The gate's requirement set comes from the completeness receipt it loads
+    NOW; the drill's evidence comes from a receipt up to
+    ``drill_max_age_days`` old. The completeness receipt is rewritten in
+    place daily, so a db-export subject added AFTER the drill (backfill /
+    rerun selector) enters the requirement set without ever having been
+    restore-verified — and because coverage tuples carry no subject
+    identity, an older subject's wide tuple vouches for it.
+
+    The drill records the db-export universe of the snapshot it consumed at
+    ``salvage_derivation.db_export_windows`` (unfiltered by any drop window,
+    same normalization as :func:`derive_salvage_backed_windows`). Rule
+    (design D3 of ``fix-retention-drill-snapshot-binding``):
+
+    * key ``salvage_derivation`` entirely ABSENT → ``True`` (pre-#1206
+      receipts AND explicit-manifest drills — same population and same
+      neutral treatment as :func:`_drill_derivation_window_contains`);
+    * section present but ``db_export_windows`` key ABSENT → ``True``
+      (post-#1206 pre-binding receipts; recorded residual in runbook §7.5 —
+      the guard is simply dormant for them);
+    * key present but unusable (not a list, an entry that is not a Mapping,
+      missing / non-string endpoints) → ``False``. A record that exists but
+      cannot be judged is never evidence — symmetric with #1207's D2;
+    * else ``True`` iff EVERY target's exact ``(start, end)`` pair is a
+      member of the recorded set. The subset direction is deliberate:
+      requirement SHRINK (a subject removed since the drill) passes, only
+      ADDITIONS the drill never saw refuse. Binding the whole gate-time
+      universe instead of the drop-filtered targets would refuse whenever
+      any db-export subject appears anywhere — the daily-outage direction
+      design D1 rejects.
+
+    Binding is judged at WINDOW granularity because that is the gate's own
+    requirement granularity (``derive_salvage_backed_windows`` dedups to
+    ``{start, end}`` pairs). A new subject whose window is byte-identical to
+    a verified one is indistinguishable here and remains layer-2's job
+    (residual, runbook §7.5).
+    """
+    if "salvage_derivation" not in receipt:
+        return True
+    section = receipt.get("salvage_derivation")
+    if not isinstance(section, Mapping):
+        # Unreachable through `check_drill_gate` (#1207's guard already
+        # refused a non-Mapping section before this runs); fail-closed here
+        # so the helper is safe to call on its own.
+        return False
+    if "db_export_windows" not in section:
+        return True
+    recorded_raw = section["db_export_windows"]
+    if not isinstance(recorded_raw, list):
+        return False
+    recorded: set[tuple[str, str]] = set()
+    for entry in recorded_raw:
+        if not isinstance(entry, Mapping):
+            return False
+        start = entry.get("start")
+        end = entry.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            return False
+        recorded.add((start, end))
+    for target in targets:
+        if (target["start"], target["end"]) not in recorded:
+            return False
+    return True
+
+
 def check_drill_gate(
     receipt: Mapping[str, Any],
     completeness_receipt: Mapping[str, Any],
@@ -646,8 +770,20 @@ def check_drill_gate(
 ) -> list[str]:
     """Evaluate H2: PASS/FAIL + staleness + forcing/runs/db-export coverage.
 
-    Order: STALE → FAIL → forcing → runs → db-export (MISSING is raised by
-    the loader).
+    Order: STALE → FAIL → derivation-window → forcing → runs → db-export
+    [empty-derivation → snapshot-binding → per-target coverage]
+    (MISSING is raised by the loader).
+
+    The derivation-window guard (#1207) runs BEFORE every coverage leg: if
+    the drill recorded a ``salvage_derivation.drop_window`` that does not
+    CONTAIN this drop window, no coverage-union evidence from that run is
+    consulted at all — see :func:`_drill_derivation_window_contains`.
+
+    Inside the db-export leg the snapshot-binding guard (#1220) runs after
+    the empty-derivation refusal and BEFORE any per-target coverage tuple is
+    consulted: a requirement window the drill's completeness snapshot never
+    contained refuses with ``DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`` — see
+    :func:`_drill_snapshot_binds`.
 
     The db-export leg is salvage-window-scoped (#1162): drill ``db-export``
     coverage is required only over each salvage-backed window intersected
@@ -675,6 +811,9 @@ def check_drill_gate(
         return reasons
     if drop_window is None:
         return reasons
+    if not _drill_derivation_window_contains(receipt, drop_window):
+        reasons.append(CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW)
+        return reasons
     coverage = receipt.get("coverage") or []
     if not _drill_covers(coverage, "forcing", drop_window):
         reasons.append(CODE_DRILL_COVERAGE_FORCING_MISSING)
@@ -688,7 +827,17 @@ def check_drill_gate(
             # D2 fail-closed (#1162): the driver saw a db-export subject but
             # nothing is derivable from it (verdict != complete). An empty
             # derivation is NEVER "requirement satisfied".
-            reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
+            # #1175: dedicated payload — no window exists to name, and the
+            # lowercase-hyphen token can never collide with an ISO interval.
+            reasons.append(
+                f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}:no-derivable-window"
+            )
+            return reasons
+        if not _drill_snapshot_binds(receipt, targets):
+            # #1220: the requirement set drifted past the drill's snapshot.
+            # Judged BEFORE the tuple union below, otherwise the exact
+            # substitution this guard kills would decide first.
+            reasons.append(CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND)
             return reasons
         for target in targets:
             clipped = _clip_to_drop(target, drop_window)
@@ -699,7 +848,15 @@ def check_drill_gate(
             # to `_drill_covers`, which would vacuously "cover" it — see
             # `_clip_to_drop`.
             if clipped.end < clipped.start or not _drill_covers(coverage, "db-export", clipped):
-                reasons.append(CODE_DRILL_COVERAGE_DB_EXPORT_MISSING)
+                # #1175: localize the shortfall — the FIRST uncovered target in
+                # the ascending derivation order, rendered as the CLIPPED
+                # interval (an inverted clip renders inverted, which IS the
+                # diagnosis). Detail suffix only; the bare code stays the
+                # registered `WIRE_CODES` token and a strict prefix.
+                reasons.append(
+                    f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}"
+                    f":{_iso(clipped.start)}/{_iso(clipped.end)}"
+                )
                 return reasons
     return reasons
 
@@ -895,21 +1052,113 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         connection.close()
 
 
+def _redact_error_text(error: BaseException, dsn: str) -> str:
+    """Scrub credentials out of an error before it reaches an operator surface.
+
+    #1213: this is the module's SINGLE error-redaction chokepoint. Every
+    driver/uncaught exception text this runner persists crosses it exactly
+    once — the per-chunk measurement stderr diagnostic, the drop-phase
+    ``RETENTION_DROP_FAILED`` refusal reason, and the ``RETENTION_UNCAUGHT_ERROR``
+    fallback refusal reason. Both refusal reasons land in the receipt file AND
+    (via ``_emit_stderr_diagnostic``) in the wrapper's long-lived
+    ``retention.log``; psycopg2 echoes the full conninfo — plaintext password
+    included — on DSN parse failures, so an unredacted interpolation is a
+    password-grade leak onto two persisted surfaces.
+
+    Mirrors the salvage runner's ``_mask_dsn_in_message``
+    (``scripts/node27_db_export_salvage.py:1039-1041``): the shared policy in
+    ``packages/common/redaction.py`` strips the verbatim DSN plus its password
+    in both URL-encoded and driver-decoded forms, and the marker is rendered
+    as ``***`` for operator-facing text.
+
+    libpq additionally echoes the ROLE name back on connection failures, in
+    two shapes the DSN policy does not cover:
+
+    * ``FATAL:  password authentication failed for user "nwm_writer"``
+    * ``FATAL:  role "nwm_writer" does not exist``
+
+    Both keywords are scrubbed (every occurrence), and ONLY when the quoted
+    name matches the DSN's own username. A bare literal replace of the
+    username is deliberately NOT done: a username like ``nwm`` also occurs
+    inside unrelated substrings (``/home/nwm/...``) and replacing those would
+    mangle the diagnostic.
+
+    libpq's host/port echo (``connection to server at "10.x.x.x", port 55432``)
+    is deliberately RETAINED — a diagnosability trade-off recorded in #1213:
+    the caller keeps the wire code and exception type name, and the operator
+    keeps enough of the driver text to tell an auth failure from a timeout.
+
+    The ``redaction`` import is function-local because that module imports
+    ``psycopg2.extensions`` at module scope, and this runner keeps psycopg2
+    strictly deferred (config parsing / ``--help`` must work without the
+    driver installed).
+
+    That deferral is exactly why this chokepoint is TOTAL — it never raises.
+    On a driver-less host (e.g. a venv rebuild window) the very error being
+    reported is typically ``DisplayWatermarkError("psycopg2 is unavailable")``,
+    and re-importing ``packages.common.redaction`` to redact it would raise
+    ``ModuleNotFoundError`` straight out of ``main()``'s except handler —
+    destroying the refused receipt and dumping a raw traceback into
+    ``retention.log``. Any internal failure therefore degrades to a
+    credential-free placeholder naming the original exception type; the
+    caller's wire-code prefix and type name are unaffected, so the receipt is
+    still published and still greppable.
+    """
+    try:
+        from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
+
+        text = redact_database_dsn(str(error), dsn).replace(REDACTION_MARKER, "***")
+        try:
+            username = urlsplit(dsn).username
+        except ValueError:  # pragma: no cover — malformed DSN, nothing to scrub
+            username = None
+        if username:
+            text = re.sub(rf'\b(user|role) "{re.escape(username)}"', r'\1 "***"', text)
+        return text
+    except Exception:
+        # Fail closed on BOTH axes: withhold the unredactable text entirely
+        # (no credential can survive) while keeping the receipt publishable.
+        return f"<error text withheld: redaction unavailable ({type(error).__name__})>"
+
+
 def _default_measure_chunk_bytes(
     config: RetentionConfig, chunks: Sequence[ChunkRow]
 ) -> dict[str, int]:
-    """H4: measure ``pg_total_relation_size(...)`` BEFORE drop.
+    """H4: measure ``chunks_detailed_size(...).total_bytes`` BEFORE drop.
 
-    Per-chunk connection (mirrors compression sibling ``:292-338`` exactly):
-    a shared transaction would enter ``InFailedSqlTransaction`` state on the
+    #1125: ``pg_total_relation_size(chunk)`` sizes only the main chunk
+    relation. For a compressed chunk the data lives in the compressed
+    sibling (``_timescaledb_internal.compress_hyper_*``), which
+    ``drop_chunks`` also removes — the main relation reads ~57 kB while the
+    real reclaim is hundreds of MB. TimescaleDB's public
+    ``chunks_detailed_size(<hypertable>::regclass)`` returns
+    ``total_bytes`` inclusive of the compressed sibling and indexes;
+    filtering it to ``(chunk_schema, chunk_name)`` yields this chunk's total
+    reclaim. Deliberate divergence from the compression sibling's private-
+    catalog join (``node27_timeseries_compression.py`` ``_COMPRESSED_SIBLING_QUERY``):
+    retention needs one total-reclaim number the public function returns
+    directly (validated byte-exactly against a live ``pg_database_size``
+    delta), not a two-step computation over private catalog tables.
+
+    Per-chunk connection (mirrors compression sibling
+    ``scripts/node27_timeseries_compression.py:387-428`` — same per-chunk
+    isolation and 60 s statement timeout; the sibling additionally passes
+    ``connect_timeout``, a pre-existing divergence this change does not
+    touch): a shared transaction would enter ``InFailedSqlTransaction`` on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
     the receipt faithful when a single chunk fails to size.
 
     Per-chunk try/except records ``0`` on failure so the drop phase can
-    still proceed and report best-effort ``freed_bytes``. Each connection
-    has a 60 s ``statement_timeout``; the DROP phase opens its own
-    connection (300 s) per chunk.
+    still proceed and report best-effort ``freed_bytes``; a chunk that
+    returns no row (dropped/renamed between enumeration and measurement) or
+    a NULL ``total_bytes`` records ``0`` through the same coercion. A failure
+    additionally emits one JSON diagnostic line on stderr naming the chunk and
+    the (credential-redacted) error — the receipt's ``0`` is otherwise
+    indistinguishable from a genuinely empty chunk; the recorded value and
+    control flow are unchanged.
+    Each connection has a 60 s ``statement_timeout``; the DROP phase opens its
+    own connection (300 s) per chunk.
     """
     import psycopg2  # type: ignore[import-untyped]
 
@@ -924,17 +1173,37 @@ def _default_measure_chunk_bytes(
                     with connection.cursor() as cursor:
                         cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
                         cursor.execute(
-                            "SELECT pg_total_relation_size(%s::regclass)",
-                            (chunk.qualified_name,),
+                            "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+                            "WHERE chunk_schema = %s AND chunk_name = %s",
+                            (
+                                f"{chunk.hypertable_schema}.{chunk.hypertable_name}",
+                                chunk.chunk_schema,
+                                chunk.chunk_name,
+                            ),
                         )
                         row = cursor.fetchone()
                         result[chunk.qualified_name] = int((row[0] if row else 0) or 0)
             finally:
                 connection.close()
-        except Exception:
+        except Exception as error:
             # A per-chunk measure failure is not a whole-tick fault. Record
             # 0 so the receipt is faithful; a fresh connection for the next
             # chunk guarantees this chunk's abort does not poison the rest.
+            # The receipt cannot distinguish this 0 from a genuine 0, so the
+            # cause goes to stderr (diagnostic only — no control-flow change).
+            # The error text is credential-redacted: psycopg2 connection
+            # failures echo the DSN and the libpq role name back verbatim.
+            print(
+                json.dumps(
+                    {
+                        "warning": "freed_bytes measurement failed; recording 0",
+                        "chunk": chunk.qualified_name,
+                        "error": _redact_error_text(error, config.database_url),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
             result[chunk.qualified_name] = 0
     return result
 
@@ -1279,9 +1548,14 @@ def run_retention(
             drop_chunk(config, chunk)
         except Exception as error:
             # H5 whole-tick fail-closed: subsequent chunks NOT attempted.
+            # #1213: the driver text is credential-redacted before it reaches
+            # the receipt file and the wrapper log; the wire-code +
+            # `<hypertable_schema>.<chunk_name>` prefix is byte-unchanged so
+            # operator greps keep matching.
             reason = (
                 f"{CODE_RETENTION_DROP_FAILED}:"
-                f"{chunk.hypertable_schema}.{chunk.chunk_name}: {error}"
+                f"{chunk.hypertable_schema}.{chunk.chunk_name}: "
+                f"{_redact_error_text(error, config.database_url)}"
             )
             return _build("refused", refusal_reason=reason)
         dropped.append(
@@ -1382,8 +1656,13 @@ def main(
             # RETENTION_UNCAUGHT_ERROR — symmetric with #854
             # DRILL_UNCAUGHT_ERROR. Emit a schema-valid refused receipt
             # rather than a raw stack trace.
+            # #1213: this is the path a psycopg2 DSN-parse failure takes, and
+            # that exception echoes the whole conninfo (password included), so
+            # the text crosses the redaction chokepoint before it is persisted.
+            # Wire code + exception type name are byte-unchanged.
             reason = (
-                f"{CODE_RETENTION_UNCAUGHT_ERROR}:{type(error).__name__}: {error}"
+                f"{CODE_RETENTION_UNCAUGHT_ERROR}:{type(error).__name__}: "
+                f"{_redact_error_text(error, config.database_url)}"
             )
             receipt = build_receipt("refused", stamp, refusal_reason=reason)
             try:

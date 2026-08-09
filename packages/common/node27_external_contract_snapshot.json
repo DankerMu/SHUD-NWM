@@ -1,0 +1,106 @@
+{
+  "contract": {
+    "client_backend_type": {
+      "_provenance": {
+        "command": "psql --dbname nhms --no-psqlrc -At -c 'SELECT backend_type FROM pg_stat_activity WHERE pid = pg_backend_pid()'",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "client backend"
+    },
+    "container_pg_restore_realpath": {
+      "_provenance": {
+        "command": "docker exec nhms-db /usr/bin/readlink -f /usr/bin/pg_restore",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "/usr/share/postgresql-common/pg_wrapper"
+    },
+    "systemd_unset_timestamp": {
+      "_provenance": {
+        "command": "systemctl --user show nhms-external-contract-snapshot-witness-does-not-exist.service -p LoadState -p ExecMainStartTimestamp",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "n/a"
+    }
+  },
+  "host_context": {
+    "container_pg_restore_version": {
+      "_provenance": {
+        "command": "docker exec nhms-db /usr/bin/pg_restore --version",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "pg_restore (PostgreSQL) 15.2 (Ubuntu 15.2-1.pgdg22.04+1)"
+    },
+    "docker_version": {
+      "_provenance": {
+        "command": "docker --version",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "Docker version 28.2.2, build e6534b4"
+    },
+    "nhms_db_image_id": {
+      "_provenance": {
+        "command": "docker inspect '--format={{.Config.Image}}|{{.Image}}' nhms-db",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+    },
+    "nhms_db_image_ref": {
+      "_provenance": {
+        "command": "docker inspect '--format={{.Config.Image}}|{{.Image}}' nhms-db",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "timescale/timescaledb-ha:pg15-latest"
+    },
+    "pg_server_version": {
+      "_provenance": {
+        "command": "psql --dbname nhms --no-psqlrc -At -c 'SHOW server_version'",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "15.2 (Ubuntu 15.2-1.pgdg22.04+1)"
+    },
+    "systemd_version": {
+      "_provenance": {
+        "command": "systemctl --version",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "systemd 249 (249.11-0ubuntu3.21)"
+    },
+    "timescaledb_version": {
+      "_provenance": {
+        "command": "psql --dbname nhms --no-psqlrc -At -c 'SELECT extversion FROM pg_extension WHERE extname = '\"'\"'timescaledb'\"'\"''",
+        "date": "2026-08-02",
+        "source": "issue #1089 baseline"
+      },
+      "value": "2.10.2"
+    }
+  },
+  "informational": {
+    "backend_type_distribution": {
+      "TimescaleDB Background Worker Launcher": 1,
+      "TimescaleDB Background Worker Scheduler": 2,
+      "autovacuum launcher": 1,
+      "background writer": 1,
+      "checkpointer": 1,
+      "client backend": 14,
+      "logical replication launcher": 1,
+      "walwriter": 1
+    },
+    "hostname": "ghdc",
+    "measured_at": "2026-08-02T11:13:05.968511Z",
+    "recurring_unit": {
+      "ActiveState": "inactive",
+      "ExecMainStartTimestamp": "Sun 2026-08-02 12:25:00 CST",
+      "SubState": "dead",
+      "unit": "nhms-node27-timeseries-compression.service"
+    }
+  }
+}

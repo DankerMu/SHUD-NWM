@@ -83,6 +83,7 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 - AND `limit.candidate_lists` is `summarized`
 - AND only if the summarized payload still exceeds the bound does the existing droppable tier empty the lists, progressively in field order and stopping as soon as the payload fits, so a partial drop can leave the later lists as summaries
 - AND `limit.candidate_lists` is set to `dropped` only when that tier empties a candidate list that still held rows; emptying an already-empty candidate list drops nothing and the marker stays `summarized`
+- AND the marker is monotone: once `limit.candidate_lists` is `dropped`, a later summarize pass SHALL NOT downgrade it back to `summarized` — empty candidate lists under a `dropped` marker mean rows were cut, and the marker keeps saying so
 - AND the artifact never exceeds `max_evidence_bytes`, and a payload that cannot fit even after all degradation tiers still fails closed with the existing write error.
 
 #### Scenario: restart-reconcile incident evidence survives the fallback compactly
@@ -109,4 +110,34 @@ Scheduler evidence SHALL expose, for each reserved-unbound reconcile outcome, th
 
 - **WHEN** a pass records identity-blocked outcomes (or a release) and the evidence payload exceeds the size limit so the bounded compaction applies
 - **THEN** the compact `restart_reconcile` outcome rows still carry the consecutive-pass counter and the release action, and demoted candidates still show `blocked_strict_warm_start_init_state_mismatch` under the `decision` key
+
+### Requirement: Bounded-evidence last-line invariants MUST have regression coverage
+
+Two terminal bounded-evidence semantics SHALL be pinned by unit tests —
+the terminal limit compaction retaining `limit.reason`, and the hard
+evidence-size bound's exact boundary — exercising the real
+production functions: a payload penetrating to the terminal
+limit-compaction tier must still carry
+`limit.reason == "evidence_size_limit_exceeded"` in the emitted
+artifact, and the size-limit serializer must accept a payload of exactly
+the configured byte bound while refusing one byte more. Weakening either
+construct — dropping `reason` from the terminal keep-set, widening the
+bound by one byte, or narrowing the acceptance to strictly below the
+bound — SHALL fail the scheduler evidence test suite.
+
+#### Scenario: Terminal compaction keeps the truncation marker
+
+- **WHEN** a payload degrades past every earlier tier and the terminal
+  limit-compaction rewrites the `limit` block to its reason-only form
+- **THEN** the emitted artifact still carries
+  `limit.reason == "evidence_size_limit_exceeded"`, and a keep-nothing
+  terminal compaction fails the suite
+
+#### Scenario: Hard bound accepts exactly the bound and refuses one byte more
+
+- **WHEN** a payload serializes to exactly `max_evidence_bytes` bytes
+- **THEN** the size-limit serializer accepts it, while a payload
+  serializing to exactly one byte more is refused, so both an
+  off-by-one widening and a `>=` narrowing of the comparison fail the
+  suite
 

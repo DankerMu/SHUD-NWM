@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from apps.api.routes.hydro_display import _postgis_tile_params
+from packages.common import node27_container_contract as contract
 from scripts import node27_timeseries_compression_benchmark as benchmark
 from scripts import node27_timeseries_compression_live_evidence as live_evidence
 from services.tiles.mvt import postgis_tile_sql
@@ -640,3 +641,42 @@ def test_result_row_ceiling_fails_before_publication() -> None:
             deadline=benchmark._Deadline(),
             label="oversized result",
         )
+
+
+# Frozen pre-#1087 literal of ``ACTIVITY_SQL`` (benchmark :54-69 before the
+# target was single-sourced), copied byte for byte.
+_FROZEN_BENCHMARK_ACTIVITY_SQL = """
+SELECT pid, backend_start, xact_start, query_start, state, wait_event_type,
+       backend_type,
+       usename,
+       COALESCE(
+         has_table_privilege(usename, 'hydro.river_timeseries',
+                             'INSERT,UPDATE,DELETE'),
+         false
+       ) AS has_write_privilege_on_target,
+       md5(regexp_replace(query, '\\s+', ' ', 'g')) AS query_signature
+FROM pg_stat_activity
+WHERE datname = current_database()
+  AND pid <> pg_backend_pid()
+  AND state = 'active'
+ORDER BY pid, backend_start
+"""
+
+
+def test_default_target_activity_sql_is_byte_identical_to_the_pre_change_literal() -> None:
+    assert benchmark.ACTIVITY_SQL == _FROZEN_BENCHMARK_ACTIVITY_SQL
+    assert benchmark._build_activity_sql() == _FROZEN_BENCHMARK_ACTIVITY_SQL
+    assert benchmark._build_activity_sql(contract.RECOVERY_TARGET) == _FROZEN_BENCHMARK_ACTIVITY_SQL
+
+
+def test_switching_the_target_moves_the_write_privilege_probe_with_it() -> None:
+    sql = benchmark._build_activity_sql("met.forcing_station_timeseries")
+    assert "'met.forcing_station_timeseries'" in sql
+    assert "hydro.river_timeseries" not in sql
+    assert "AS has_write_privilege_on_target" in sql
+
+
+@pytest.mark.parametrize("target", ["public.evil", "hydro.river; DROP"])
+def test_probe_target_outside_the_whitelist_or_malformed_fails_before_any_sql(target: str) -> None:
+    with pytest.raises(ValueError):
+        benchmark._build_activity_sql(target)

@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_api.py",
@@ -31,8 +31,8 @@ ORCHESTRATOR_MANIFEST_SURFACE_TESTS: tuple[str, ...] = (
     "tests/test_orchestration_chain.py::test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts",
     "tests/test_orchestration_chain.py::test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest",
     "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
-    "tests/test_production_scheduler.py::test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate",
-    "tests/test_production_scheduler.py::test_scheduler_propagates_produced_forcing_identity_to_orchestration",
+    "tests/test_production_scheduler.py::test_scheduler_routes_ready_canonical_candidate_to_slurm_forcing_without_local_producer",
+    "tests/test_production_scheduler.py::test_scheduler_does_not_replace_candidate_identity_from_local_forcing_result",
     "tests/test_production_scheduler.py::test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count",
 )
 
@@ -316,6 +316,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_redaction.py",),
     ),
     PathTestRule(
+        "packages/common/node27_container_contract.py",
+        (
+            "tests/test_node27_external_contract_snapshot.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_capture.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_decompression_replay.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_external_contract_snapshot.json",
+        ("tests/test_node27_external_contract_snapshot.py",),
+    ),
+    PathTestRule(
         "apps/api/**",
         (
             "tests/test_api.py",
@@ -405,6 +420,11 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                 if rule.stop_on_match:
                     break
 
+        same_name_test = _same_name_script_test(path)
+        if same_name_test is not None and _test_target_exists(same_name_test, repo_root=repo_root):
+            selected.add(same_name_test)
+            matched = True
+
         if _is_backend_python_path(path) and not matched:
             unknown_backend_python = True
 
@@ -430,6 +450,19 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
 
 def _is_backend_python_path(path: str) -> bool:
     return path.endswith(".py") and path.startswith(("apps/api/", "packages/", "services/", "workers/", "scripts/"))
+
+
+def _same_name_script_test(path: str) -> str | None:
+    """Derive the same-name test file for a changed ``scripts/**/*.py`` path.
+
+    Scoped to ``scripts/`` on purpose: other backend prefixes keep their
+    explicit-rule / core-smoke-fallback behavior even when a same-name test
+    exists. Returns the candidate target only; the caller must confirm it
+    exists before treating the path as a known mapping.
+    """
+    if not (path.startswith("scripts/") and path.endswith(".py")):
+        return None
+    return f"tests/test_{PurePosixPath(path).stem}.py"
 
 
 def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:

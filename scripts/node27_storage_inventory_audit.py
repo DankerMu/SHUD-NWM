@@ -32,11 +32,13 @@ from packages.common.safe_fs import (
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import (
     DEFAULT_ARCHIVE_MIN_AGE_DAYS,
-    DEFAULT_DB_RETENTION_DAYS,
+    RETENTION_ENV_PATH_VARIABLE,
     ArchiveConfigurationError,
     ArchiveIdentity,
     archive_identity_for_state_reference,
     archive_provenance_paths,
+    read_retention_window_days,
+    validate_archive_configuration,
     validate_product_archive_manifest_binding,
 )
 from scripts import node27_product_archive as product_archive
@@ -1044,6 +1046,10 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
             args.receipt_path or os.getenv("NODE27_STORAGE_INVENTORY_RECEIPT_PATH"),
             "receipt_path",
         )
+        retention_env_path = _absolute(
+            os.getenv(RETENTION_ENV_PATH_VARIABLE),
+            RETENTION_ENV_PATH_VARIABLE,
+        )
         if not database_url:
             raise AuditConfigError("DATABASE_URL is required")
         raw_age: int | str = (
@@ -1055,11 +1061,17 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
             age = int(raw_age)
         except ValueError as error:
             raise AuditConfigError("NHMS_ARCHIVE_MIN_AGE_DAYS must be an integer") from error
-        if age < DEFAULT_DB_RETENTION_DAYS:
-            raise AuditConfigError(
-                "NHMS_ARCHIVE_MIN_AGE_DAYS must be at least DB retention "
-                f"({DEFAULT_DB_RETENTION_DAYS} days)"
-            )
+        # Single min-age comparison site (#1227): the shared validation
+        # compares the configured minimum age against the LIVE DB retention
+        # window read from the deployed retention env file. The normalized
+        # result is used for VALIDATION ONLY — `AuditConfig` keeps its own
+        # `_absolute()` values so no archive/object root can drift (#1153).
+        validate_archive_configuration(
+            archive_root=archive_root,
+            cleanup_roots={"object_store_root": object_root},
+            archive_min_age_days=age,
+            retention_days=read_retention_window_days(retention_env_path),
+        )
         return AuditConfig(
             database_url,
             object_root,
@@ -1074,6 +1086,10 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         )
     except AuditConfigError:
         raise
+    except ArchiveConfigurationError as error:
+        # Config refusals must publish blocked/CONFIG_INVALID, never
+        # indeterminate/UNEXPECTED_AUDIT_ERROR (#1227 design D3).
+        raise AuditConfigError(str(error)) from error
     except AuditBlocked as error:
         raise AuditConfigError(str(error)) from error
 

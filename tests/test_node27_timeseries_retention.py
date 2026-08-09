@@ -17,25 +17,39 @@ Covers:
 - Config parse fail-closed rows.
 - Concurrent-invocation flock path → RETENTION_CONCURRENT_INVOCATION.
 - Uncaught error path → RETENTION_UNCAUGHT_ERROR.
+- #1213 credential redaction of every persisted error surface (receipt file
+  bytes + stderr/wrapper log) on the drop-phase and uncaught-fallback paths.
 - CLI + wrapper contract.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import inspect
 import json
 import os
 import re
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import jsonschema
+import psycopg2
 import pytest
 
+# Imported eagerly (not inside a test): the runner defers this import to keep
+# psycopg2 out of module import, and these tests monkeypatch ``psycopg2`` with
+# a fake — importing ``packages.common.redaction`` (which imports
+# ``psycopg2.extensions`` at module scope) under that fake would fail. Loading
+# it here caches the real module before any fake is installed. The same reason
+# applies to the ``psycopg2`` import above: the connect-failure row needs the
+# REAL ``psycopg2.OperationalError`` class, which the fake does not carry.
+from packages.common.redaction import REDACTION_MARKER
+from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 from scripts import node27_timeseries_retention as retention
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +93,25 @@ def _args(**overrides: object) -> argparse.Namespace:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+# #1175: the db-export coverage refusal carries a DETAIL SUFFIX localizing the
+# shortfall — the FIRST uncovered salvage-backed target in ascending derivation
+# order, CLIPPED to the drop window (`<start>/<end>`), or the dedicated
+# `no-derivable-window` token for the #1162 D2 empty-derivation branch. The bare
+# code stays the registered `WIRE_CODES` member and a strict prefix of both
+# forms. These helpers spell the wire token and the separator out literally so
+# the assertions are an oracle for the format, not an echo of the emitter.
+_DB_EXPORT_MISSING_NO_DERIVABLE = "DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window"
+
+
+def _db_export_missing(start: datetime, end: datetime) -> str:
+    """Expected `refusal_reason` for a per-window db-export shortfall (#1175).
+
+    ``start`` / ``end`` are the CLIPPED bounds the caller derives from its own
+    fixture windows ∩ drop window — an inverted clip is rendered verbatim.
+    """
+    return f"DRILL_COVERAGE_DB_EXPORT_MISSING:{_iso(start)}/{_iso(end)}"
 
 
 def _completeness_receipt(
@@ -335,8 +368,10 @@ _EXPECTED_WIRE_CODES = frozenset(
         "DRILL_RECEIPT_MISSING",
         "DRILL_RECEIPT_STALE",
         "DRILL_RECEIPT_FAIL",
+        "DRILL_DERIVATION_WINDOW_TOO_NARROW",
         "DRILL_COVERAGE_FORCING_MISSING",
         "DRILL_COVERAGE_RUNS_MISSING",
+        "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND",
         "DRILL_COVERAGE_DB_EXPORT_MISSING",
         "RETENTION_CONFIG_INVALID",
         "RETENTION_CONCURRENT_INVOCATION",
@@ -349,7 +384,7 @@ _EXPECTED_WIRE_CODES = frozenset(
 def test_wire_codes_match_fixture_exactly() -> None:
     """H6: WIRE_CODES frozenset content is byte-identical with the fixture."""
     assert retention.WIRE_CODES == _EXPECTED_WIRE_CODES
-    assert len(retention.WIRE_CODES) == 15
+    assert len(retention.WIRE_CODES) == 17
 
 
 def test_wire_codes_byte_identical_across_code_runbook_design() -> None:
@@ -557,6 +592,37 @@ def test_config_defaults_lock_path_to_canonical(tmp_path: Path) -> None:
     env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_LOCK_PATH=None)
     config = retention.config_from_args(_args(), env)
     assert str(config.lock_path) == "/tmp/nhms-node27-timeseries-retention.lock"
+
+
+def test_window_default_is_drift_locked_to_the_shared_constant() -> None:
+    """#1227 row (h): the archive-side guard resolves a missing/empty window
+    assignment to the SAME default this runner uses — pinned here as VALUE
+    equality with the shared constant in `packages.common.storage`.
+
+    Honest limit (#1229 round-1 review B4): `is` cannot prove import identity
+    for 14, which CPython interns as a small int, so the identity assertion
+    below degenerates to value equality and a re-hardcoded local copy would
+    still pass. The real protection is directional: changing the shared
+    constant while this runner keeps a hardcoded literal turns this test red.
+    """
+    assert retention._DEFAULT_WINDOW_DAYS is DEFAULT_RETENTION_WINDOW_DAYS
+    assert DEFAULT_RETENTION_WINDOW_DAYS == 14
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": None}, id="missing-assignment"),
+        pytest.param({"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": ""}, id="empty-value"),
+    ],
+)
+def test_window_resolution_for_missing_or_empty_env_is_unchanged(
+    tmp_path: Path, override: dict[str, str | None]
+) -> None:
+    """#1227 row (j): moving the default constant's home changed no runner behavior."""
+    config = retention.config_from_args(_args(), _base_env(tmp_path, **override))
+
+    assert config.window_days == 14
 
 
 def test_config_enforce_env_toggles(tmp_path: Path) -> None:
@@ -888,7 +954,11 @@ def test_drill_coverage_db_export_missing_refuses(tmp_path: Path) -> None:
     receipt = retention.run_retention(
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
     )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: drop window is the eligible chunk's range [72 d, 65 d]; the sole
+    # salvage subject [70 d, 63 d] clips to [70 d, 65 d].
+    assert receipt["refusal_reason"] == _db_export_missing(
+        _NOW - timedelta(days=70), _NOW - timedelta(days=65)
+    )
 
 
 def test_drill_coverage_db_export_not_required_without_completeness_overlap(
@@ -1023,7 +1093,9 @@ def test_drill_db_export_gap_inside_salvage_window_still_refuses(tmp_path: Path)
 
     receipt = _run_dry(tmp_path, completeness, drill, chunk)
 
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: the single salvage target [74 d, 70 d] is already inside the drop
+    # window, so the suffix renders it unchanged.
+    assert receipt["refusal_reason"] == _db_export_missing(drop_start, salvage_end)
 
 
 def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
@@ -1053,7 +1125,9 @@ def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
 
     receipt = _run_dry(tmp_path, completeness, drill, chunk)
 
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING
+    # #1175: the FIRST window is covered, so the suffix names the SECOND
+    # (uncovered) target [68 d, 66 d] — not the first, not the drop window.
+    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
 
 
 def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
@@ -1089,6 +1163,51 @@ def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
 
     assert receipt.get("refusal_reason") is None
     assert receipt["outcome"] == "dry-run"
+
+
+def test_drill_db_export_refusal_names_the_kth_uncovered_salvage_window(
+    tmp_path: Path,
+) -> None:
+    """#1175 localization oracle: with THREE salvage-backed targets and the gap
+    in the MIDDLE one, the suffix names exactly that window.
+
+    The neighbouring two-window row has its gap in the LAST target, so it
+    cannot tell "first uncovered target" apart from "last target" or "last
+    uncovered target". Here the first and third targets are fully covered by
+    the drill's db-export union, so any emitter that reports targets[0],
+    targets[-1], the hull of the targets, or the drop window itself renders a
+    different interval than the asserted [70 d, 68 d].
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    first_start, first_end = drop_start, _NOW - timedelta(days=72)
+    second_start, second_end = _NOW - timedelta(days=70), _NOW - timedelta(days=68)
+    third_start, third_end = _NOW - timedelta(days=66), _NOW - timedelta(days=64)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(first_start, first_end, version="fv-salvage-a"),
+            _product_archive_subject(first_end, second_start, version="fv-product-1"),
+            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
+            _product_archive_subject(second_end, third_start, version="fv-product-2"),
+            _db_export_subject(third_start, third_end, version="fv-salvage-c"),
+            _product_archive_subject(third_end, drop_end, version="fv-product-3"),
+        ]
+    )
+    # Covers the first and third salvage windows; the second has NO db-export
+    # tuple at all.
+    drill = _drill_receipt(
+        db_export_tuples=(
+            _db_export_tuples(first_start, first_end)
+            + _db_export_tuples(third_start, third_end)
+        )
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-kth", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
 
 
 def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
@@ -1133,7 +1252,9 @@ def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
         now=_NOW,
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: no window is derivable, so the refusal carries the dedicated
+    # payload rather than an interval.
+    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
 
 
 def test_drill_db_export_salvage_window_clipped_at_drop_window_start(
@@ -1209,6 +1330,37 @@ def _drill_gate_reasons(
     )
 
 
+def test_drill_db_export_refusal_renders_clipped_not_raw_subject_bounds() -> None:
+    """#1175: a subject overrunning the drop window on BOTH sides (the live
+    shape — 7 d forcing_version windows vs. chunk boundaries) is reported by its
+    CLIPPED bounds.
+
+    The raw subject spans [80 d, 50 d]; the requirement — and therefore the
+    refusal — is only [74 d, 60 d]. An emitter echoing `target["start"]` /
+    `target["end"]` would name a window the retention tick never judged and
+    would send the operator hunting outside the drop window.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    raw_start = _NOW - timedelta(days=80)
+    raw_end = _NOW - timedelta(days=50)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(raw_start, raw_end, version="fv-salvage-overrun")]
+    )
+    # Union stops 5 d short of the clipped end → the clipped target is uncovered.
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(drop_start, _NOW - timedelta(days=65))
+    )
+
+    reasons = _drill_gate_reasons(
+        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
+    )
+
+    assert reasons == [_db_export_missing(drop_start, drop_end)]
+    assert _iso(raw_start) not in reasons[0]
+    assert _iso(raw_end) not in reasons[0]
+
+
 def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
     """#1162 right-edge oracle: a 6 h db-export shortfall at the END of each
     salvage window (∩ drop window) refuses.
@@ -1245,7 +1397,9 @@ def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: both targets fall short, and the early return surfaces the FIRST
+    # in ascending order — the inner window [72 d, 70 d].
+    assert reasons == [_db_export_missing(inner_start, inner_end)]
 
 
 def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
@@ -1282,7 +1436,9 @@ def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the first target is the overhanging subject, and the suffix carries
+    # its CLIPPED start (`drop.start`), not the raw 80 d subject start.
+    assert reasons == [_db_export_missing(drop_start, overhang_end)]
 
 
 def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None:
@@ -1309,7 +1465,8 @@ def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the zero-length clip renders as the same instant twice.
+    assert reasons == [_db_export_missing(drop_start, drop_start)]
 
 
 def test_drill_db_export_zero_length_clipped_window_covered_admits() -> None:
@@ -1372,7 +1529,10 @@ def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the inverted clip [64 d, 70 d] is rendered VERBATIM — a refusal
+    # naming an interval whose end precedes its start is the diagnosis that the
+    # completeness subject itself is corrupt.
+    assert reasons == [_db_export_missing(inverted_start, inverted_end)]
 
 
 def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> None:
@@ -1410,7 +1570,11 @@ def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> Non
         completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
     )
 
-    assert reasons == [retention.CODE_DRILL_COVERAGE_DB_EXPORT_MISSING]
+    # #1175: the first target is covered, so the suffix names the SECOND —
+    # rendered inverted, exactly as the corrupt subject clips.
+    assert reasons == [
+        _db_export_missing(_NOW - timedelta(days=64), _NOW - timedelta(days=70))
+    ]
 
 
 def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -> None:
@@ -1449,6 +1613,722 @@ def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -
     )
 
     assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# #1207 layer 1 — drill derivation-window guard. The drill records the drop
+# window it was invoked with (`salvage_derivation.drop_window`, #1206); a
+# drill that declared a NARROWER judgment span than the retention drop window
+# cannot vouch for that drop, because its coverage tuples carry no subject
+# identity (subject A's wide tuple would substitute for a never-derived,
+# never-restore-verified subject B).
+# ---------------------------------------------------------------------------
+
+
+# Exact windows from the issue #1207 read-only probe.
+_ISSUE_A_START = datetime(2026, 6, 14, tzinfo=UTC)
+_ISSUE_A_END = datetime(2026, 6, 28, tzinfo=UTC)
+_ISSUE_B_START = datetime(2026, 6, 20, tzinfo=UTC)
+_ISSUE_B_END = datetime(2026, 6, 27, tzinfo=UTC)
+_ISSUE_DRILL_START = datetime(2026, 6, 18, tzinfo=UTC)
+_ISSUE_DRILL_END = datetime(2026, 6, 19, tzinfo=UTC)
+_ISSUE_DROP_START = datetime(2026, 6, 18, tzinfo=UTC)
+_ISSUE_DROP_END = datetime(2026, 6, 25, tzinfo=UTC)
+
+
+def _salvage_derivation(window: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A schema-valid `salvage_derivation` section (#1206 drill emit shape).
+
+    ``window`` is the recorded `--drop-window-*` interval, or ``None`` for a
+    drill that ran un-narrowed (`oneOf: [window, null]` per
+    `schemas/archive_rebuild_drill_receipt.schema.json`).
+    """
+    return {
+        "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
+        "drop_window": dict(window) if window is not None else None,
+        "candidate_count": 2,
+        "derived_count": 1,
+        "skipped": [],
+    }
+
+
+def _issue_1207_receipts(
+    derivation: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rebuild the issue's A/B scenario.
+
+    Completeness carries TWO db-export/complete subjects — A `[06-14, 06-28]`
+    and B `[06-20, 06-27]` — and the drill carries ONLY A's full-window
+    db-export tuples. Both subjects clip into the `[06-18, 06-25]` drop
+    window, and A's tuples span both clipped targets, so the db-export leg is
+    satisfied by evidence that never covered B. ``derivation=None`` builds the
+    no-derivation-section receipt (the pre-guard shape).
+    """
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(_ISSUE_A_START, _ISSUE_A_END, version="fv-salvage-a"),
+            _db_export_subject(_ISSUE_B_START, _ISSUE_B_END, version="fv-salvage-b"),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(_ISSUE_A_START, _ISSUE_A_END))
+    if derivation is not None:
+        drill["salvage_derivation"] = dict(derivation)
+    return completeness, drill
+
+
+def _issue_1207_drop_window() -> retention.DropWindow:
+    return retention.DropWindow(start=_ISSUE_DROP_START, end=_ISSUE_DROP_END)
+
+
+def test_drill_derivation_window_narrower_than_drop_refuses_issue_1207_replay() -> None:
+    """#1207 (a): the issue's A/B replay flips PASS → REFUSE.
+
+    The drill declared it judged only `[06-18, 06-19]` while retention wants
+    to drop `[06-18, 06-25]`; subject B `[06-20, 06-27]` was therefore never
+    derived, never restore-verified, and only subject A's wide tuple vouches
+    for it. The guard must fire FIRST — before any coverage-union evidence
+    from that run is consulted.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_DRILL_START), "end": _iso(_ISSUE_DRILL_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons[0] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+def test_drill_no_derivation_section_keeps_pre_guard_behavior() -> None:
+    """#1207 (b) + pinned residual: the SAME A/B receipt without the
+    `salvage_derivation` section still PASSES.
+
+    Two receipt populations legitimately lack the section — receipts
+    predating #1206 and today's explicit-manifest drills (`--salvage-manifest`
+    without `--completeness-receipt`), which never write it. Their behavior is
+    unchanged by design (D2), which also pins the residual: cross-subject
+    tuple substitution survives on that path and is only closed by layer 2
+    per-subject attribution. This assertion is simultaneously the pre-fix
+    oracle — it is exactly the PASS the guard flips above.
+    """
+    completeness, drill = _issue_1207_receipts(None)
+    assert "salvage_derivation" not in drill
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_null_passes_guard() -> None:
+    """#1207 (c): `drop_window: null` = the drill ran un-narrowed → pass."""
+    completeness, drill = _issue_1207_receipts(_salvage_derivation(None))
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_strictly_containing_passes_guard() -> None:
+    """#1207 (d1): a drill window strictly wider on BOTH sides passes.
+
+    The drill judged `[06-14, 06-28]` — a superset of the `[06-18, 06-25]`
+    drop window — so both subjects were in its derivation set.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_A_START), "end": _iso(_ISSUE_A_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_exactly_equal_passes_guard() -> None:
+    """#1207 (d2) BOUNDARY: drill window EXACTLY EQUAL to the retention drop
+    window passes.
+
+    Runbook §7.5's standard invocation tells operators to paste the §7.3
+    step-3 interval verbatim into `--drop-window-start/--drop-window-end`.
+    That interval is a documented CONSERVATIVE SUPERSET of the runner's own
+    drop window (the runner additionally intersects the eligible chunks with
+    the completeness `coverage_bounds`), so the standard invocation records
+    a window that is EQUAL to or WIDER than the retention drop window, never
+    narrower — equality is the tight end of that range and must pass. A
+    strict-inequality containment test would refuse it.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_DROP_START), "end": _iso(_ISSUE_DROP_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == []
+
+
+def test_drill_derivation_window_narrowed_only_at_start_refuses() -> None:
+    """#1207 (d3) BOUNDARY: narrowing on the START side alone still refuses.
+
+    The drill judged `[06-20, 06-28]` — its END covers the `[06-18, 06-25]`
+    drop window completely, only its START is late. Subject A `[06-14,
+    06-28]` overhangs the drop start and was still derived, so its tuples
+    vouch for `[06-18, 06-20)` that this drill never judged.
+
+    This row kills the start-side conjunct: a predicate that dropped
+    `start <= drop_window.start` (checking only the end), or that compared
+    the start against the wrong endpoint (`start <= drop_window.end`), would
+    admit this receipt. The (a) replay above narrows BOTH sides and so
+    survives either mutation.
+    """
+    completeness, drill = _issue_1207_receipts(
+        _salvage_derivation({"start": _iso(_ISSUE_B_START), "end": _iso(_ISSUE_A_END)})
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+@pytest.mark.parametrize(
+    ("label", "section"),
+    [
+        ("not-a-mapping", ["not", "a", "mapping"]),
+        (
+            "drop-window-key-missing",
+            {
+                "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
+                "candidate_count": 2,
+                "derived_count": 1,
+                "skipped": [],
+            },
+        ),
+        ("window-not-a-mapping", {"drop_window": "2026-06-18T00:00:00Z/2026-06-25T00:00:00Z"}),
+        ("start-unparseable", {"drop_window": {"start": "not-a-timestamp", "end": "2026-06-25T00:00:00Z"}}),
+        ("start-not-a-string", {"drop_window": {"start": 20260618, "end": "2026-06-25T00:00:00Z"}}),
+        (
+            "inverted",
+            {"drop_window": {"start": "2026-06-25T00:00:00Z", "end": "2026-06-18T00:00:00Z"}},
+        ),
+    ],
+)
+def test_drill_derivation_section_unusable_shape_refuses(
+    label: str, section: Any
+) -> None:
+    """#1207 (e): a `salvage_derivation` section that EXISTS but cannot be
+    judged is never evidence — refuse fail-closed with the same code.
+
+    Symmetric with the inverted-tuple defence in `_tuples_cover_window`.
+    Most of these shapes are intercepted upstream by `load_drill_receipt`'s
+    jsonschema validation (→ `DRILL_RECEIPT_MISSING`), so this is
+    defence-in-depth at the pure-function seam; the INVERTED window is the
+    one shape the schema cannot express, so it is the only row here that can
+    reach the gate on the production path. It does not isolate the explicit
+    `end < start` branch — containment already refuses any inverted window
+    against a well-ordered drop window (see the branch comment in
+    `_drill_derivation_window_contains`); the row pins the OUTCOME, not the
+    branch that produces it.
+    """
+    completeness, drill = _issue_1207_receipts(None)
+    drill["salvage_derivation"] = section
+
+    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW], label
+
+
+def test_drill_derivation_window_guard_surfaces_as_refusal_reason(tmp_path: Path) -> None:
+    """#1207 (f) integration: the guard's code reaches the receipt surface.
+
+    Drives the full runner (fake chunk/measure/drop seams) with a
+    schema-valid narrowed drill receipt: the eligible chunk's range is the
+    `[74 d, 60 d]` drop window while the drill recorded a 2 d judgment span
+    inside it, so `run_retention` must publish `outcome=refused` with
+    `refusal_reason = DRILL_DERIVATION_WINDOW_TOO_NARROW`.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[_db_export_subject(drop_start, drop_end, version="fv-salvage-wide")]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _salvage_derivation(
+        {
+            "start": _iso(_NOW - timedelta(days=70)),
+            "end": _iso(_NOW - timedelta(days=68)),
+        }
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-narrow-drill", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+    assert receipt["refusal_reason"] in retention.WIRE_CODES
+    jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
+# #1220 snapshot binding — the gate's REQUIREMENT set comes from the
+# completeness receipt it loads NOW (rewritten in place daily), its EVIDENCE
+# from a drill receipt up to 30 d old. A db-export subject added after the
+# drill entered the requirement set never having been restore-verified, and
+# an older subject's identity-less tuple vouched for it. The drill now
+# records the db-export universe of the snapshot it consumed and the gate
+# binds every target window to it.
+# ---------------------------------------------------------------------------
+
+
+# Windows from the issue's in-memory v1/v2 replay.
+_SNAP_A_START = datetime(2026, 6, 1, tzinfo=UTC)
+_SNAP_A_END = datetime(2026, 6, 30, tzinfo=UTC)
+_SNAP_B_START = datetime(2026, 6, 10, tzinfo=UTC)
+_SNAP_B_END = datetime(2026, 6, 20, tzinfo=UTC)
+_SNAP_DROP_START = datetime(2026, 6, 5, tzinfo=UTC)
+_SNAP_DROP_END = datetime(2026, 6, 15, tzinfo=UTC)
+# A later db-export subject that does NOT overlap the drop window.
+_SNAP_D_START = datetime(2026, 8, 1, tzinfo=UTC)
+_SNAP_D_END = datetime(2026, 8, 10, tzinfo=UTC)
+
+_UNSET = object()
+
+
+def _win(start: datetime, end: datetime) -> dict[str, str]:
+    return {"start": _iso(start), "end": _iso(end)}
+
+
+def _bound_salvage_derivation(
+    *,
+    drop_window: Mapping[str, Any] | None = None,
+    db_export_windows: Any = _UNSET,
+    completeness_generated_at: str | None = None,
+) -> dict[str, Any]:
+    """`salvage_derivation` with the #1220 snapshot-binding fields.
+
+    Sibling of :func:`_salvage_derivation` (the #1206/#1207 shape). Passing
+    ``db_export_windows=_UNSET`` reproduces the post-#1206 pre-binding
+    population: the section exists, the recorded universe does not.
+    """
+    section = _salvage_derivation(drop_window)
+    if db_export_windows is not _UNSET:
+        section["db_export_windows"] = db_export_windows
+    if completeness_generated_at is not None:
+        section["completeness_generated_at"] = completeness_generated_at
+    return section
+
+
+def _snapshot_completeness(
+    subjects: Sequence[tuple[datetime, datetime, str]],
+    *,
+    generated_at: datetime = _NOW - timedelta(hours=1),
+) -> dict[str, Any]:
+    return _completeness_receipt(
+        generated_at=generated_at,
+        subjects=[
+            _db_export_subject(start, end, version=version)
+            for start, end, version in subjects
+        ],
+    )
+
+
+def _snapshot_drill(
+    derivation: Mapping[str, Any] | None,
+    *,
+    runs_tuples: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A PASS drill whose db-export union spans subject A's FULL window.
+
+    That union is exactly the substitution vehicle: it covers every clipped
+    target in these fixtures, so without the binding guard the db-export leg
+    returns empty reasons for a subject the drill never saw.
+    """
+    drill = _drill_receipt(
+        db_export_tuples=_db_export_tuples(_SNAP_A_START, _SNAP_A_END),
+        runs_tuples=runs_tuples,
+    )
+    if derivation is not None:
+        drill["salvage_derivation"] = dict(derivation)
+    return drill
+
+
+def _snapshot_drop_window() -> retention.DropWindow:
+    return retention.DropWindow(start=_SNAP_DROP_START, end=_SNAP_DROP_END)
+
+
+def test_snapshot_drift_with_new_subject_refuses_issue_1220_replay() -> None:
+    """#1220 (a): the issue's v1/v2 replay flips PASS → REFUSE.
+
+    The drill consumed completeness v1 (subject A `[06-01, 06-30]` only) and
+    recorded that universe; at gate time v2 additionally carries subject B
+    `[06-10, 06-20]`, added by a backfill after the drill. B was never
+    restore-verified, yet A's wide db-export tuple spans B's clipped target.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons[0] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
+
+
+def test_snapshot_drift_without_recorded_universe_keeps_pre_fix_behavior() -> None:
+    """#1220 (a) pre-fix oracle + residual pin: the SAME drift PASSES when the
+    drill receipt has a `salvage_derivation` section but no
+    `db_export_windows` field.
+
+    That is the post-#1206 / pre-#1220 receipt population: the guard is
+    dormant for them (design D5-(a)), and this empty reason list is exactly
+    the false PASS the row above flips.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(_bound_salvage_derivation())
+    assert "db_export_windows" not in drill["salvage_derivation"]
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_drift_without_derivation_section_keeps_pre_fix_behavior() -> None:
+    """#1220 (a) compat front half: the same drift with NO `salvage_derivation`
+    section at all still PASSES (pre-#1206 receipts and explicit-manifest
+    drills — the population #1207's guard also skips)."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(None)
+    assert "salvage_derivation" not in drill
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_identical_universe_passes() -> None:
+    """#1220 (b): the drill recorded exactly the gate-time universe → pass."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[
+                _win(_SNAP_A_START, _SNAP_A_END),
+                _win(_SNAP_B_START, _SNAP_B_END),
+            ],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_requirement_shrink_passes() -> None:
+    """#1220 (b): recorded `[A, B]`, gate-time only A → pass.
+
+    Membership is a SUBSET test in the target → recorded direction: a subject
+    that disappeared since the drill removes a requirement and can never make
+    the drill's evidence insufficient. An implementation that compared the
+    two sets for equality (or required recorded ⊆ targets) would refuse here.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[
+                _win(_SNAP_A_START, _SNAP_A_END),
+                _win(_SNAP_B_START, _SNAP_B_END),
+            ],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_daily_regeneration_alone_never_refuses() -> None:
+    """#1220 (c) / design D1: a NEWER completeness snapshot with the SAME
+    db-export windows passes.
+
+    The audit rewrites the completeness receipt in place every day while the
+    drill budget is 30 d, so at nearly every tick the loaded receipt is newer
+    than the drill's. Refusing on `generated_at` inequality (or a digest)
+    would refuse ~every tick after day one — `completeness_generated_at` is
+    recorded for diagnostics only and is never a refusal input.
+    """
+    completeness = _snapshot_completeness(
+        [(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")],
+        generated_at=_NOW - timedelta(minutes=5),
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+            completeness_generated_at=_iso(_NOW - timedelta(days=20)),
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+def test_snapshot_new_subject_outside_drop_window_passes() -> None:
+    """#1220 (d): binding is judged over the drop-filtered TARGETS only.
+
+    The gate-time receipt gained subject D `[08-01, 08-10]`, disjoint from
+    the `[06-05, 06-15]` drop window, so D is not a requirement of this tick.
+    Binding the whole gate-time db-export universe instead would refuse
+    whenever any db-export subject appears anywhere — the daily-outage
+    direction design D1 rejects.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_D_START, _SNAP_D_END, "fv-salvage-d"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+    assert retention.derive_salvage_backed_windows(
+        completeness, _snapshot_drop_window()
+    ) == [_win(_SNAP_A_START, _SNAP_A_END)]
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == []
+
+
+@pytest.mark.parametrize(
+    ("label", "target"),
+    [
+        # A backfill EXTENDED subject A: same start, later end.
+        ("shared-start-longer-end", (_SNAP_A_START, datetime(2026, 7, 15, tzinfo=UTC))),
+        # Same end, earlier start.
+        ("shared-end-earlier-start", (datetime(2026, 5, 20, tzinfo=UTC), _SNAP_A_END)),
+    ],
+)
+def test_snapshot_one_sided_window_change_refuses(
+    label: str, target: tuple[datetime, datetime]
+) -> None:
+    """#1220 (e): membership is exact on BOTH endpoints.
+
+    A window sharing exactly one endpoint with a recorded window covers rows
+    the drill never verified (the extension), so a start-only or end-only
+    comparison would admit it.
+    """
+    completeness = _snapshot_completeness([(target[0], target[1], "fv-salvage-a")])
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
+
+
+def test_snapshot_empty_recorded_universe_refuses() -> None:
+    """#1220 (f): `db_export_windows: []` with a non-empty requirement set
+    refuses.
+
+    An empty recorded universe has no members — the drill consumed a snapshot
+    with no db-export/complete subject at all, so every gate-time target is
+    drift. An `if not recorded: return True` short-circuit dies here.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=[]))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
+
+
+@pytest.mark.parametrize(
+    ("label", "recorded"),
+    [
+        ("not-a-list", "2026-06-01T00:00:00Z/2026-06-30T00:00:00Z"),
+        ("mapping-not-a-list", {"start": "2026-06-01T00:00:00Z", "end": "2026-06-30T00:00:00Z"}),
+        ("entry-not-a-mapping", ["2026-06-01T00:00:00Z"]),
+        ("entry-missing-end", [{"start": "2026-06-01T00:00:00Z"}]),
+        ("entry-start-not-a-string", [{"start": 20260601, "end": "2026-06-30T00:00:00Z"}]),
+    ],
+)
+def test_snapshot_unusable_recorded_universe_refuses(label: str, recorded: Any) -> None:
+    """#1220 (g): a recorded universe that exists but cannot be judged is
+    never evidence — refuse fail-closed.
+
+    Unreachable through `load_drill_receipt` now that the schema types the
+    field; this is defence-in-depth at the pure-function seam, symmetric with
+    #1207's unusable-section rows.
+    """
+    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=recorded))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
+
+
+def test_snapshot_binds_helper_refuses_non_mapping_section() -> None:
+    """Defence-in-depth: `_drill_snapshot_binds` on its own refuses a
+    `salvage_derivation` that is not an object.
+
+    Unreachable via `check_drill_gate` — #1207's guard refuses a non-Mapping
+    section with `DRILL_DERIVATION_WINDOW_TOO_NARROW` before this helper runs
+    (pinned by `test_drill_derivation_section_unusable_shape_refuses`) — so
+    the branch is asserted at the helper seam instead of the gate seam.
+    """
+    assert (
+        retention._drill_snapshot_binds(
+            {"salvage_derivation": ["not", "a", "mapping"]},
+            [_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+        is False
+    )
+
+
+def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> None:
+    """#1220 (h) precedence: the empty-derivation refusal (#1162 D2) precedes
+    the binding check.
+
+    The completeness receipt has an overlapping db-export subject whose
+    verdict is not `complete`, so the requirement set is EMPTY — there is
+    nothing to bind, and the surfaced code must stay
+    `DRILL_COVERAGE_DB_EXPORT_MISSING`.
+
+    The recorded universe is deliberately UNUSABLE (`"not-a-list"`), which
+    `_drill_snapshot_binds` refuses regardless of the target set: the binding
+    guard would surface `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` if it ran
+    first, so the code below is a real ordering pin rather than a shape both
+    legs happen to accept.
+
+    Same function-level convention as
+    `test_drill_db_export_empty_salvage_derivation_refuses_fail_closed`:
+    `db-export` + `pending-archive` is rejected by the completeness receipt
+    schema at load, so this shape is driven at the pure-function seam.
+    """
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(
+                _SNAP_A_START, _SNAP_A_END, version="fv-salvage-a", verdict="pending-archive"
+            )
+        ]
+    )
+    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows="not-a-list"))
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    # #1175: the D2 payload, not an interval — nothing was derivable to name.
+    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
+
+
+def test_snapshot_narrowed_drill_refuses_with_window_code_first() -> None:
+    """#1220 (h) precedence + design D5-(d) tripwire: #1207's containment
+    guard outranks the binding guard.
+
+    This ordering is load-bearing, not cosmetic: the recorded universe is
+    UNFILTERED, so "recorded ⇒ the drill actually derived it" only holds
+    because containment already forced retention-drop ⊆ drill-drop. If this
+    row ever starts reporting the binding code, #1207's guard was weakened or
+    reordered and the binding guard silently degraded with it.
+    """
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            drop_window=_win(_SNAP_DROP_START, datetime(2026, 6, 7, tzinfo=UTC)),
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        )
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
+
+
+def test_snapshot_missing_runs_coverage_refuses_before_binding() -> None:
+    """#1220 (h) precedence: the runs leg outranks the binding guard — the
+    binding check lives INSIDE the db-export leg, not at whole-gate level."""
+    completeness = _snapshot_completeness(
+        [
+            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
+            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
+        ]
+    )
+    drill = _snapshot_drill(
+        _bound_salvage_derivation(
+            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
+        ),
+        runs_tuples=[],
+    )
+
+    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
+
+    assert reasons == [retention.CODE_DRILL_COVERAGE_RUNS_MISSING]
+
+
+def test_snapshot_unbound_surfaces_as_refusal_reason(tmp_path: Path) -> None:
+    """#1220 (i) integration: the guard's code reaches the receipt surface.
+
+    Drives the full runner (fake chunk/measure/drop seams): the eligible
+    chunk's range is the `[74 d, 60 d]` drop window, the drill recorded only
+    subject A's window, and the gate-time completeness receipt carries a
+    second db-export/complete subject inside that drop window.
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
+            _db_export_subject(
+                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
+            ),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _bound_salvage_derivation(
+        db_export_windows=[_win(drop_start, drop_end)],
+        completeness_generated_at=_iso(_NOW - timedelta(days=2)),
+    )
+    chunk = _chunk(
+        "met", "forcing_station_timeseries", "chk-unbound-drill", delta_days=60, duration_days=14
+    )
+
+    receipt = _run_dry(tmp_path, completeness, drill, chunk)
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+    assert receipt["refusal_reason"] in retention.WIRE_CODES
+    jsonschema.validate(receipt, _load_schema())
 
 
 def test_enforced_receipt_echoes_unclipped_salvage_subject_windows(tmp_path: Path) -> None:
@@ -2090,24 +2970,336 @@ def test_uncaught_error_publishes_refused_receipt(
 
 
 # ---------------------------------------------------------------------------
-# DSN never appears in stderr
+# #1213 — DSN credentials never reach stderr OR the receipt file
+#
+# Both persisted operator surfaces are asserted: the stderr diagnostic (the
+# wrapper redirects it into a long-lived `retention.log`) and the receipt file
+# BYTES (`refusal_reason` is persisted verbatim). The injected exceptions are
+# the two real driver shapes that echo credentials back:
+#
+# * psycopg2 `ProgrammingError('invalid dsn: ... "<full conninfo>" ...')` —
+#   echoes the whole DSN including the plaintext password;
+# * libpq `password authentication failed for user "<role>"` — echoes the role.
+#
+# The pre-#1213 lock injected a DSN-free `RuntimeError("oops")`, so its
+# assertions were vacuously true against exactly the exception classes that
+# can leak.
 # ---------------------------------------------------------------------------
 
 
-def test_dsn_never_appears_in_stderr(
+def _assert_surfaces_credential_free(*surfaces: str) -> None:
+    """Every operator-facing surface is free of the probe DSN's credentials.
+
+    ``alice`` is asserted as a bare substring (not just ``user "alice"``): the
+    conninfo echo carries the username outside the libpq role-echo shape, so a
+    redaction that only handled the role echo would still leak it.
+    """
+    for surface in surfaces:
+        assert "supersekret" not in surface
+        assert "alice" not in surface
+        # Operator-facing text renders the marker as ``***``.
+        assert REDACTION_MARKER not in surface
+
+
+def test_dsn_never_appears_in_stderr_or_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    env = _base_env(tmp_path, DATABASE_URL="postgresql://alice:supersekret@127.0.0.1:55432/nhms")
+    """Uncaught path, DSN-parse shape: the full conninfo echo is scrubbed.
+
+    ``_MEASURE_PROBE_DSN`` is the shared probe secret (defined with the
+    measurement-diagnostic rows further down) so both redaction call sites
+    assert against the same password/role pair.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
     def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
-        raise RuntimeError("oops")
+        raise psycopg2.ProgrammingError(
+            f'invalid dsn: missing "=" after "{_MEASURE_PROBE_DSN}" in connection info string'
+        )
 
-    retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
     err = capsys.readouterr().err
-    assert "supersekret" not in err
-    assert "alice" not in err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    # Operator grep contract: wire code + exception type name survive redaction.
+    assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:ProgrammingError:")
+    assert "invalid dsn" in receipt["refusal_reason"]
+    assert "***" in receipt["refusal_reason"]
+    # The wrapper-log surface carries the same redacted reason, not a second
+    # (unredacted) rendering of the same error.
+    diagnostic = json.loads(err.strip().splitlines()[-1])
+    assert diagnostic["refusal_reason"] == receipt["refusal_reason"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+@pytest.mark.parametrize(
+    ("libpq_tail", "expected_echo", "retained_phrase"),
+    [
+        (
+            'FATAL:  password authentication failed for user "alice"',
+            'user "***"',
+            "password authentication failed",
+        ),
+        (
+            'FATAL:  role "alice" does not exist',
+            'role "***"',
+            "does not exist",
+        ),
+    ],
+    ids=["password-auth-failed", "missing-role"],
+)
+def test_uncaught_libpq_auth_failure_redacts_role_on_both_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    libpq_tail: str,
+    expected_echo: str,
+    retained_phrase: str,
+) -> None:
+    """Uncaught path, libpq role-echo shapes: both keywords are scrubbed.
+
+    libpq echoes the DSN role back in TWO shapes — ``... for user "alice"``
+    (auth failure) and ``role "alice" does not exist`` (role dropped/renamed
+    mid-run). Scrubbing only the first leaves the second bleeding the DSN
+    username into the receipt and the 0644 ``retention.log``.
+
+    Diagnosability trade-off pinned here: the failure phrase and the host/port
+    echo are deliberately RETAINED so the operator can still tell an auth
+    failure from a timeout.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        raise psycopg2.OperationalError(
+            f'connection to server at "127.0.0.1", port 55432 failed: {libpq_tail}'
+        )
+
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:OperationalError:")
+    assert expected_echo in receipt["refusal_reason"]
+    assert retained_phrase in receipt["refusal_reason"]
+    # Host/port echo retained by design (non-goal in the #1213 fixture).
+    assert 'connection to server at "127.0.0.1", port 55432' in receipt["refusal_reason"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_drop_failure_reason_redacts_credentials_on_both_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Drop path: the RETENTION_DROP_FAILED reason is credential-redacted.
+
+    Seam is ``main()`` rather than ``run_retention()`` because only ``main()``
+    publishes the receipt FILE — the leak surface under test. Enforce mode is
+    reached through the real env toggle so the gate evidence is genuinely
+    consumed.
+
+    H5 whole-tick fail-closed is re-asserted on this path (drop attempted
+    exactly once, second chunk untouched) so a redaction refactor cannot
+    quietly turn the fail-closed return into a continue.
+    """
+    env = _base_env(
+        tmp_path,
+        DATABASE_URL=_MEASURE_PROBE_DSN,
+        NODE27_TIMESERIES_RETENTION_ENFORCE="1",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("hydro", "river_timeseries", "chk-b", delta_days=61),
+    ]
+    drop_calls: list[str] = []
+
+    def _fetch(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        return list(chunks)
+
+    def _measure(
+        config: retention.RetentionConfig, selected: Sequence[retention.ChunkRow]
+    ) -> dict[str, int]:
+        return {chunk.qualified_name: 0 for chunk in selected}
+
+    def _drop(config: retention.RetentionConfig, chunk: retention.ChunkRow) -> None:
+        drop_calls.append(chunk.qualified_name)
+        raise psycopg2.OperationalError(
+            'connection to server at "127.0.0.1", port 55432 failed: '
+            'FATAL:  password authentication failed for user "alice" '
+            f"(tried {_MEASURE_PROBE_DSN})"
+        )
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=_fetch,
+        measure_chunk_bytes=_measure,
+        drop_chunk=_drop,
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_bytes = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    # Prefix shape unchanged: <hypertable_schema>.<chunk_name> (NOT
+    # ChunkRow.qualified_name, which is chunk_schema-qualified).
+    assert receipt["refusal_reason"].startswith("RETENTION_DROP_FAILED:hydro.chk-a: ")
+    assert 'user "***"' in receipt["refusal_reason"]
+    assert "***" in receipt["refusal_reason"]
+    # H5: the failing chunk is the only drop attempted.
+    assert drop_calls == ["_timescaledb_internal.chk-a"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_redaction_failure_still_publishes_refused_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The chokepoint is TOTAL: an unimportable redaction dep cannot eat the receipt.
+
+    Driver-less window (venv rebuild, broken wheel): psycopg2 is unimportable,
+    so the chokepoint's function-local ``packages.common.redaction`` import —
+    which pulls ``psycopg2.extensions`` at module scope — raises INSIDE
+    ``main()``'s except handler. Without totality that ``ModuleNotFoundError``
+    escapes ``main()``: no refused receipt is published at all and a raw
+    traceback (carrying whatever the driver echoed) lands in ``retention.log``.
+
+    Fail-closed on both axes: the unredactable text is withheld ENTIRELY (no
+    credential can survive), while the wire code, the original exception type
+    name and the published receipt all survive.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    # Force a real re-import of the redaction module (the test module caches
+    # it at import time) and make every psycopg2 entry unimportable — the
+    # already-cached ``psycopg2.extensions`` submodule would otherwise satisfy
+    # the redaction module's import straight out of ``sys.modules``.
+    monkeypatch.delitem(sys.modules, "packages.common.redaction", raising=False)
+    for name in [n for n in sys.modules if n == "psycopg2" or n.startswith("psycopg2.")]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+
+    def _bang(config: retention.RetentionConfig, cutoff: datetime) -> list[retention.ChunkRow]:
+        raise RuntimeError(
+            f'connect failed (tried {_MEASURE_PROBE_DSN}): FATAL:  role "alice" does not exist'
+        )
+
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+    assert receipt_path.exists(), "refused receipt MUST survive a redaction failure"
+    receipt_bytes = receipt_path.read_bytes()
+    _assert_surfaces_credential_free(err, receipt_bytes.decode("utf-8"))
+
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == (
+        "RETENTION_UNCAUGHT_ERROR:RuntimeError: "
+        "<error text withheld: redaction unavailable (RuntimeError)>"
+    )
+    jsonschema.validate(receipt, _load_schema())
+
+
+# A driver-less interpreter: psycopg2 (and every submodule) is hard-blocked at
+# the meta-path level, then the runner is imported and its argument parser is
+# exercised. Run as a subprocess so the block is total — an in-process check
+# cannot un-import what pytest already loaded.
+_DRIVERLESS_IMPORT_PROBE = '''
+import sys
+
+
+class _BlockPsycopg2:
+    def find_spec(self, name, path=None, target=None):
+        if name == "psycopg2" or name.startswith("psycopg2."):
+            raise ImportError("psycopg2 blocked by the driver-less import probe")
+        return None
+
+
+sys.meta_path.insert(0, _BlockPsycopg2())
+
+# The blocker must actually bite, else the probe is vacuous.
+try:
+    import psycopg2  # noqa: F401
+except ImportError:
+    pass
+else:
+    raise SystemExit("probe vacuous: psycopg2 imported despite the blocker")
+
+from scripts import node27_timeseries_retention as runner
+
+try:
+    runner._parser().parse_args(["--help"])
+except SystemExit as exc:
+    if exc.code not in (0, None):
+        raise SystemExit(f"--help failed with exit code {exc.code!r}")
+print("DRIVERLESS_IMPORT_OK")
+'''
+
+
+def test_redaction_and_psycopg2_imports_stay_deferred() -> None:
+    """The runner must import cleanly without psycopg2 installed.
+
+    ``packages.common.redaction`` imports ``psycopg2.extensions`` at module
+    scope, so routing two more call sites through the redaction helper is
+    exactly the kind of change that tempts a module-scope import and breaks
+    ``--help`` / config parsing on a driver-less host.
+
+    Two independent guards:
+
+    1. Static: the module's own top level carries no psycopg2 / redaction
+       import. Both the ``from packages.common.redaction import ...`` and the
+       ``from packages.common import redaction`` spellings are recorded —
+       matching only ``ImportFrom.module`` would register ``packages.common``
+       for the second spelling and wave the breaking mutant through.
+    2. Behavioral: a subprocess with psycopg2 hard-blocked imports the module
+       and runs ``--help``. The static check cannot see an import that creeps
+       in through some other module in the import graph; this one can.
+    """
+    tree = ast.parse(Path(retention.__file__).read_text(encoding="utf-8"))
+    top_level: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            top_level.add(node.module)
+            top_level.update(f"{node.module}.{alias.name}" for alias in node.names)
+
+    assert not [name for name in top_level if name == "psycopg2" or name.startswith("psycopg2.")]
+    assert "packages.common.redaction" not in top_level
+
+    helper_source = inspect.getsource(retention._redact_error_text)
+    assert "from packages.common.redaction import" in helper_source
+
+    probe = subprocess.run(
+        [sys.executable, "-c", _DRIVERLESS_IMPORT_PROBE],
+        cwd=str(_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert "DRIVERLESS_IMPORT_OK" in probe.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -2161,13 +3353,41 @@ def test_main_emits_config_invalid_wire_code_on_non_absolute_receipt_path(
 # ---------------------------------------------------------------------------
 
 
-def test_default_drop_chunk_bounds_exact_physical_interval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The SQL lower bound prevents a later selected chunk from cascading
-    through an older boundary-partial chunk that was deliberately deferred.
+class _DropProbe:
+    """Recorder for the fake psycopg2 driving the real ``_default_drop_chunk``.
+
+    ``closed`` counts ``connection.close()`` calls: ``_default_drop_chunk``
+    closes in a ``finally``, so the count must be 1 on the raising rows too.
+    Its kill surface is deletion of ``finally: connection.close()`` — the
+    connection would leak on the one path that runs after an irreversible
+    ``DROP CHUNK`` attempt. (It says nothing about *where* the guard lives:
+    a guard hoisted out of the ``try`` still leaves ``closed == 1``.)
+
+    ``conn_exit_exc`` records what the ``with connection:`` transaction
+    context observed on exit, one entry per exit. ``RuntimeError`` means the
+    H3 guard fired INSIDE the transaction, so psycopg2 rolls the unexpected
+    drop back; ``None`` means the block completed and psycopg2 commits.
     """
-    executed: list[tuple[str, tuple | None]] = []
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.closed = 0
+        self.conn_exit_exc: list[type[BaseException] | None] = []
+
+    @property
+    def drop_statement(self) -> tuple[str, tuple | None]:
+        return next((sql, params) for sql, params in self.executed if "drop_chunks" in sql)
+
+
+def _install_fake_drop_psycopg2(
+    monkeypatch: pytest.MonkeyPatch, dropped_rows: Sequence[tuple[str]]
+) -> _DropProbe:
+    """Inject a fake ``psycopg2`` driving ``_default_drop_chunk`` (no DB).
+
+    ``dropped_rows`` is what server-side ``drop_chunks`` reports back — the
+    exact input the H3 identity guard judges.
+    """
+    probe = _DropProbe()
 
     class _FakeCursor:
         def __enter__(self) -> "_FakeCursor":
@@ -2177,31 +3397,44 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
             return None
 
         def execute(self, sql: str, params: tuple | None = None) -> None:
-            executed.append((sql, params))
+            probe.executed.append((sql, params))
 
         def fetchall(self) -> list[tuple[str]]:
-            return [("_timescaledb_internal.chk-covered",)]
+            return list(dropped_rows)
 
     class _FakeConn:
         def __enter__(self) -> "_FakeConn":
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            # Real psycopg2 commits on a clean exit and ROLLS BACK when the
+            # block raises; record which one the transaction context saw.
+            probe.conn_exit_exc.append(exc_type)
             return None
 
         def cursor(self) -> _FakeCursor:
             return _FakeCursor()
 
         def close(self) -> None:
-            return None
+            probe.closed += 1
 
     import types
 
     monkeypatch.setitem(
-        __import__("sys").modules,
+        sys.modules,
         "psycopg2",
         types.SimpleNamespace(connect=lambda _url: _FakeConn()),
     )
+    return probe
+
+
+def test_default_drop_chunk_bounds_exact_physical_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SQL lower bound prevents a later selected chunk from cascading
+    through an older boundary-partial chunk that was deliberately deferred.
+    """
+    probe = _install_fake_drop_psycopg2(monkeypatch, [("_timescaledb_internal.chk-covered",)])
     config = _build_config(tmp_path, enforce=True)
     chunk = _chunk(
         "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
@@ -2209,13 +3442,104 @@ def test_default_drop_chunk_bounds_exact_physical_interval(
 
     retention._default_drop_chunk(config, chunk)
 
-    drop_sql, params = next((sql, params) for sql, params in executed if "drop_chunks" in sql)
+    drop_sql, params = probe.drop_statement
     assert "newer_than" in drop_sql
     assert params == (
         chunk.range_end,
         chunk.range_start,
         "hydro.river_timeseries",
     )
+
+
+# ---------------------------------------------------------------------------
+# #1214 — H3 identity guard: negative oracle
+#
+# `_default_drop_chunk`'s `dropped_names != [chunk.qualified_name]` check is
+# the SOLE runtime enforcement of H3 BLOCKING ("bind returned identity AND
+# cardinality"), and runbook §8.6 item 5's trichotomy depends on it. Before
+# these rows the `raise` was never executed by any test — deleting the whole
+# guard left the suite green on an irreversible DROP CHUNK path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("dropped_rows", "expected_returned_repr"),
+    [
+        ((), "[]"),
+        ((("_timescaledb_internal.chk-other",),), "['_timescaledb_internal.chk-other']"),
+        (
+            (
+                ("_timescaledb_internal.chk-covered",),
+                ("_timescaledb_internal.chk-other",),
+            ),
+            "['_timescaledb_internal.chk-covered', '_timescaledb_internal.chk-other']",
+        ),
+    ],
+    ids=[
+        "chunk-vanished-mid-tick",
+        "server-dropped-a-different-chunk",
+        "server-dropped-an-extra-chunk",
+    ],
+)
+def test_default_drop_chunk_rejects_unexpected_drop_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dropped_rows: Sequence[tuple[str]],
+    expected_returned_repr: str,
+) -> None:
+    """H3: any ``drop_chunks`` result other than the selected chunk fails closed.
+
+    Three directions, all reachable in production:
+
+    * zero rows — the chunk vanished between enumeration and drop (a
+      concurrent manual drop / retention policy), so this tick's evidence no
+      longer describes what the server did;
+    * a DIFFERENT chunk name — a surprising server-side range decision
+      succeeded on something the gate never evidenced;
+    * the selected chunk PLUS an extra — a widened server-side range took
+      collateral chunks with it. A superset containing the selected chunk is
+      NOT success: the extra drop is unevidenced and irreversible, so
+      cardinality binds as tightly as identity. Membership-only
+      (``qualified_name not in dropped_names``) or first-row-only
+      (``dropped_names[0] != qualified_name``) weakenings of the guard pass
+      the other two rows and must fail here.
+
+    Cardinality alone cannot separate the second case from success, and
+    identity alone cannot separate the third, which is why the guard binds
+    both. The expected message is written out by hand rather than recomputed
+    from ``dropped_rows``, so the assertion is an independent oracle rather
+    than a mirror of the implementation.
+    """
+    probe = _install_fake_drop_psycopg2(monkeypatch, dropped_rows)
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(
+        "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
+    )
+    expected_message = (
+        f"drop_chunks returned {expected_returned_repr} for "
+        f"{chunk.qualified_name}; expected exact selected chunk"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"{re.escape(chunk.qualified_name)}; expected exact selected chunk",
+    ) as excinfo:
+        retention._default_drop_chunk(config, chunk)
+
+    assert str(excinfo.value) == expected_message
+    # The guard fired AFTER the real drop_chunks statement was issued — not
+    # from some earlier failure that never reached the identity check.
+    drop_sql, params = probe.drop_statement
+    assert "drop_chunks" in drop_sql
+    assert params == (chunk.range_end, chunk.range_start, "hydro.river_timeseries")
+    # The RuntimeError propagated THROUGH `with connection:`, i.e. the guard
+    # raises inside the transaction, so psycopg2 rolls the unexpected drop
+    # back. A guard hoisted out of the `with` (or out of the `try`) would
+    # leave the transaction to commit before failing — same exception, same
+    # statement, same close count, but an irreversible drop.
+    assert probe.conn_exit_exc == [RuntimeError]
+    # `finally: connection.close()` still runs on the raising path.
+    assert probe.closed == 1
 
 
 def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
@@ -2255,7 +3579,7 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
                 raise RuntimeError("current transaction is aborted (InFailedSqlTransaction)")
             if "statement_timeout" in sql:
                 return
-            if "pg_total_relation_size" in sql:
+            if "chunks_detailed_size" in sql:
                 global_chunk_idx[0] += 1
                 idx = global_chunk_idx[0]
                 if idx == fail_index:
@@ -2312,6 +3636,493 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
     assert measured[chunks[2].qualified_name] == 0  # failed chunk
     assert measured[chunks[3].qualified_name] == 4_444  # NOT zeroed
     assert measured[chunks[4].qualified_name] == 5_555  # NOT zeroed
+
+
+# ---------------------------------------------------------------------------
+# #1125 — default measurement path is compression-aware
+# ---------------------------------------------------------------------------
+
+# Live node-27 probe (TimescaleDB 2.10.2, 2026-08-01, recorded in
+# openspec/changes/fix-retention-freed-bytes-compressed/design.md D1):
+# compressed chunk ``_hyper_3_14_chunk`` reads 57,344 B through
+# ``pg_total_relation_size`` (the 2026-07-25 under-report signature) but
+# 5,904,531,456 B through ``chunks_detailed_size.total_bytes``.
+_PROBE_MAIN_RELATION_BYTES = 57_344
+_PROBE_TOTAL_BYTES = 5_904_531_456
+
+# Synthetic (no live ``met`` probe is recorded in design D1). The met row
+# exists to pin the hypertable regclass parameter and the value round-trip
+# for the second retained hypertable, not to assert a live number.
+_MET_TOTAL_BYTES = 1_073_741_824
+
+# The exact statement ``_default_measure_chunk_bytes`` must issue. Pinning the
+# whole string (not substrings) is what makes a projected-column swap
+# (``total_bytes`` -> ``table_bytes``, which would resurrect the under-report
+# defect with a still-"chunks_detailed_size"-shaped query) and a predicate
+# reorder (which would silently mis-bind the two %s params) go red.
+_EXPECTED_MEASURE_SQL = (
+    "SELECT total_bytes FROM chunks_detailed_size(%s::regclass) "
+    "WHERE chunk_schema = %s AND chunk_name = %s"
+)
+
+# The operator-facing half of the same statement, byte-identical with the two
+# permanent doc surfaces (receipts README resolution note + design #855 H4).
+# Same byte-identity discipline as the wire-code and lock-path rows above.
+_DOC_MEASURE_SQL_PREFIX = "SELECT total_bytes FROM chunks_detailed_size("
+
+_RECEIPTS_README_PATH = (
+    _ROOT
+    / "docs/runbooks/receipts/tier-node27-timeseries-storage"
+    / "timeseries-retention/README.md"
+)
+
+# One JSON line on stderr per failed per-chunk measurement (design D2). It is
+# warning vocabulary, NOT a wire code: it never reaches the receipt and is not
+# a member of ``WIRE_CODES``.
+_MEASURE_WARNING = "freed_bytes measurement failed; recording 0"
+
+# A URI DSN whose password AND libpq role name both appear verbatim in the
+# error text psycopg2 raises on an auth failure. Shared by the two redaction
+# rows (query-time failure and connect-time failure) so both assert the
+# scrubbing against the same secret.
+_MEASURE_PROBE_DSN = "postgresql://alice:supersekret@127.0.0.1:55432/nhms"
+
+
+class _MeasureProbe:
+    """Recorder for the fake psycopg2 driving ``_default_measure_chunk_bytes``.
+
+    ``completions`` gets one entry per connection context-manager exit: True
+    when the ``with connection:`` block unwound cleanly (psycopg2 COMMITs),
+    False when it unwound with an exception (psycopg2 ROLLBACKs). Without it a
+    recorded ``0`` is ambiguous — the D2-mandated coercion path and the
+    best-effort except path both write 0, so a mutation that deletes the
+    coercion would still "pass" while degrading every NULL/edge measurement
+    into a swallowed exception.
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.connect_calls: list[str] = []
+        self.completions: list[bool] = []
+
+    @property
+    def measure_statements(self) -> list[tuple[str, tuple | None]]:
+        """Executed statements excluding the ``SET statement_timeout`` prelude."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" not in sql]
+
+    @property
+    def timeout_statements(self) -> list[tuple[str, tuple | None]]:
+        """The ``SET statement_timeout`` prelude of every connection."""
+        return [(sql, prm) for sql, prm in self.executed if "statement_timeout" in sql]
+
+
+# H12: every measurement connection MUST cap itself at 60 s before issuing the
+# now hypertable-wide size walk — deleting the prelude turns a lock-blocked
+# walk into an unbounded wait inside the wrapper/systemd wall.
+_EXPECTED_TIMEOUT_STATEMENT = (f"SET statement_timeout = {retention._QUERY_TIMEOUT_MS}", None)
+
+
+def _install_fake_measure_psycopg2(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Any,
+    *,
+    connect_error: BaseException | None = None,
+) -> _MeasureProbe:
+    """Inject a fake ``psycopg2`` driving ``_default_measure_chunk_bytes``.
+
+    ``responder(params)`` returns the row ``fetchone()`` yields for the
+    measurement statement (or raises to simulate a per-chunk failure).
+
+    ``connect_error``, when given, is raised by the FIRST ``psycopg2.connect``
+    call only; every later call connects normally. This is the one failure the
+    responder cannot reach — it never runs, because there is no cursor — so it
+    is the only way to exercise the connect call's placement inside the
+    per-chunk ``try``.
+    """
+    probe = _MeasureProbe()
+
+    class _FakeCursor:
+        def __init__(self) -> None:
+            self._row: tuple | None = None
+
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def execute(self, sql: str, params: tuple | None = None) -> None:
+            probe.executed.append((sql, params))
+            if "statement_timeout" in sql:
+                return
+            self._row = responder(params)
+
+        def fetchone(self) -> tuple | None:
+            return self._row
+
+    class _FakeConn:
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            # psycopg2's connection context manager COMMITs on a clean exit and
+            # ROLLBACKs on an exception; record which happened.
+            probe.completions.append(exc_type is None)
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            return None
+
+    def _fake_connect(url: str) -> _FakeConn:
+        probe.connect_calls.append(url)
+        if connect_error is not None and len(probe.connect_calls) == 1:
+            raise connect_error
+        return _FakeConn()
+
+    import types
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "psycopg2", types.SimpleNamespace(connect=_fake_connect)
+    )
+    return probe
+
+
+@pytest.mark.parametrize(
+    ("schema", "hypertable", "chunk_label", "total_bytes"),
+    [
+        ("hydro", "river_timeseries", "_hyper_3_14_chunk", _PROBE_TOTAL_BYTES),
+        ("met", "forcing_station_timeseries", "_hyper_5_21_chunk", _MET_TOTAL_BYTES),
+    ],
+    ids=["hydro-river", "met-forcing-station"],
+)
+def test_default_measure_chunk_bytes_uses_compression_aware_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    schema: str,
+    hypertable: str,
+    chunk_label: str,
+    total_bytes: int,
+) -> None:
+    """#1125: a compressed chunk's freed_bytes carries the compressed sibling.
+
+    The old ``pg_total_relation_size(chunk)`` query sized only the main chunk
+    relation (57,344 B on the live probe). The runner MUST query
+    ``chunks_detailed_size(<hypertable>::regclass)`` filtered by
+    ``(chunk_schema, chunk_name)`` and record its ``total_bytes``.
+
+    Both retained hypertables are exercised so the regclass parameter cannot be
+    hardcoded to ``hydro.river_timeseries``; the SQL is asserted whole so the
+    projected column and the predicate order are both pinned.
+    """
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: (total_bytes,))
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk(schema, hypertable, chunk_label, delta_days=60, is_compressed=True)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: total_bytes}
+    assert measured[chunk.qualified_name] != _PROBE_MAIN_RELATION_BYTES
+    assert len(probe.measure_statements) == 1
+    measure_sql, params = probe.measure_statements[0]
+    assert measure_sql == _EXPECTED_MEASURE_SQL
+    assert params == (f"{schema}.{hypertable}", "_timescaledb_internal", chunk_label)
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
+    assert probe.executed[0] == _EXPECTED_TIMEOUT_STATEMENT
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # The clean path is silent — the D2 diagnostic belongs to the failure path
+    # only, so a successful measurement must not add stderr noise to the
+    # wrapper's `retention.log`.
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("row", [None, (None,)], ids=["no-row", "null-total-bytes"])
+def test_default_measure_chunk_bytes_missing_row_records_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    row: tuple | None,
+) -> None:
+    """#1125 D2: the filtered function may return no row (chunk dropped or
+    renamed between enumeration and measurement) or a NULL ``total_bytes``;
+    both coerce to 0 rather than raising.
+
+    The 0 must come from the coercion, NOT from the best-effort except branch:
+    the measurement statement is asserted executed and the connection block
+    asserted to have unwound cleanly, so a lost coercion (``int(None)`` ->
+    TypeError -> except -> 0) is red instead of indistinguishable.
+    """
+    probe = _install_fake_measure_psycopg2(monkeypatch, lambda _params: row)
+    config = _build_config(tmp_path, enforce=True)
+    chunk = _chunk("hydro", "river_timeseries", "chk-vanished", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+    assert probe.measure_statements == [
+        (
+            _EXPECTED_MEASURE_SQL,
+            ("hydro.river_timeseries", "_timescaledb_internal", "chk-vanished"),
+        )
+    ]
+    assert len(probe.connect_calls) == 1
+    assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+    # Second, independent witness that this 0 is the coercion and not the
+    # best-effort except branch: the failure path ALWAYS emits the D2
+    # diagnostic line, so silence here proves no exception was swallowed.
+    assert capsys.readouterr().err == ""
+
+
+def test_default_measure_chunk_bytes_failure_records_zero_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: a per-chunk query failure records 0 for that chunk only; the
+    remaining chunks are still measured on their own fresh connections.
+
+    The failure ALSO emits exactly one JSON diagnostic line on stderr naming
+    the chunk and the cause — without it the receipt's ``0`` is
+    indistinguishable from a genuinely empty chunk. The whole parsed object is
+    asserted (all three keys), so dropping the line, dropping the ``chunk``
+    key, printing non-JSON, or printing to stdout are each red.
+    """
+    sizes = {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        name = f"{params[1]}.{params[2]}"
+        if name == "_timescaledb_internal.chk-b":
+            raise RuntimeError('function chunks_detailed_size(regclass) failed for "chk-b"')
+        return (sizes[name],)
+
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-a", "chk-b", "chk-c"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-a": 1_234_567,
+        "_timescaledb_internal.chk-b": 0,
+        "_timescaledb_internal.chk-c": 7_654_321,
+    }
+    assert len(probe.connect_calls) == len(chunks)
+    # Only the failing chunk's block unwound with an exception — this is the
+    # counterpart of the missing-row test: here the 0 legitimately comes from
+    # the except branch, and the neighbours still complete cleanly.
+    assert probe.completions == [True, False, True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT] * len(chunks)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        "warning": _MEASURE_WARNING,
+        "chunk": "_timescaledb_internal.chk-b",
+        "error": 'function chunks_detailed_size(regclass) failed for "chk-b"',
+    }
+
+
+def test_default_measure_chunk_bytes_uncoercible_value_records_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: the coercion is PART of the per-chunk measurement, so a value
+    that cannot be coerced is a per-chunk failure — 0 + diagnostic + continue,
+    never a whole-tick abort.
+
+    This pins the coercion's *placement*, which no other row does: only a
+    row whose `total_bytes` actually raises in `int()` distinguishes
+    "coercion inside the connection block and inside the per-chunk try" from
+    a refactor that hoists it out. Hoisted out of the `with connection:`
+    block the failing chunk would COMMIT instead of ROLLBACK
+    (`completions == [True, ...]`); hoisted out of the `try` the exception
+    would escape and take the whole tick down with it.
+    """
+    sizes: dict[str, Any] = {
+        "_timescaledb_internal.chk-bad": "18 GB",  # driver/type surprise
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+
+    def _responder(params: tuple | None) -> tuple | None:
+        assert params is not None
+        return (sizes[f"{params[1]}.{params[2]}"],)
+
+    probe = _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-bad", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    assert measured == {
+        "_timescaledb_internal.chk-bad": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.completions == [False, True]
+    lines = [line for line in capsys.readouterr().err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-bad"
+    assert "invalid literal for int()" in payload["error"]
+
+
+def test_measure_failure_diagnostic_redacts_dsn_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The D2 diagnostic must not leak the DSN password or the libpq role name.
+
+    A psycopg2 connection failure echoes both back verbatim
+    (``FATAL:  password authentication failed for user "alice"`` plus, for
+    URI DSNs, the connection string itself). The wrapper redirects stderr into
+    a world-readable-ish `retention.log`, so the diagnostic goes through the
+    shared redaction policy first. Recording semantics are unchanged: still 0,
+    still continue.
+    """
+    dsn = _MEASURE_PROBE_DSN
+    message = (
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice" '
+        f"(tried {dsn})"
+    )
+
+    def _responder(_params: tuple | None) -> tuple | None:
+        raise RuntimeError(message)
+
+    _install_fake_measure_psycopg2(monkeypatch, _responder)
+    config = _build_config(tmp_path, enforce=True, database_url=dsn)
+    chunk = _chunk("hydro", "river_timeseries", "chk-auth", delta_days=60)
+
+    measured = retention._default_measure_chunk_bytes(config, [chunk])
+
+    assert measured == {chunk.qualified_name: 0}
+
+    captured = capsys.readouterr()
+    assert "supersekret" not in captured.err
+    assert "alice" not in captured.err
+    assert REDACTION_MARKER not in captured.err  # rendered as *** for operators
+    payload = json.loads(captured.err.strip())
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == chunk.qualified_name
+    assert "password authentication failed" in payload["error"]
+
+
+def test_measure_connect_failure_records_zero_redacts_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1125 D2: a chunk whose CONNECTION cannot even be opened records 0 and
+    the next chunk is still measured on its own fresh connection.
+
+    ``psycopg2.connect`` sits inside the per-chunk ``try``; every other failure
+    row in this file needs a live cursor and therefore cannot see that
+    placement. Hoisting the connect above the loop (one shared connection) or
+    outside the ``try`` turns this per-chunk fault into a whole-tick abort —
+    chunk two would never be measured. The libpq text embeds the DSN role, so
+    the redaction is asserted on the same line.
+    """
+    error = psycopg2.OperationalError(
+        'connection to server at "127.0.0.1", port 55432 failed: '
+        'FATAL:  password authentication failed for user "alice"'
+    )
+    probe = _install_fake_measure_psycopg2(
+        monkeypatch, lambda _params: (4_242,), connect_error=error
+    )
+    config = _build_config(tmp_path, enforce=True, database_url=_MEASURE_PROBE_DSN)
+    chunks = [
+        _chunk("hydro", "river_timeseries", label, delta_days=60 + i)
+        for i, label in enumerate(("chk-noconn", "chk-ok"))
+    ]
+
+    measured = retention._default_measure_chunk_bytes(config, chunks)
+
+    # Continue semantics: the failed chunk records 0, the neighbour is measured.
+    assert measured == {
+        "_timescaledb_internal.chk-noconn": 0,
+        "_timescaledb_internal.chk-ok": 4_242,
+    }
+    assert probe.connect_calls == [_MEASURE_PROBE_DSN, _MEASURE_PROBE_DSN]
+    # Only the second chunk ever entered a connection block — the first never
+    # obtained a connection to commit or roll back.
+    assert probe.completions == [True]
+    assert probe.timeout_statements == [_EXPECTED_TIMEOUT_STATEMENT]
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [line for line in captured.err.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert set(payload) == {"warning", "chunk", "error"}
+    assert payload["warning"] == _MEASURE_WARNING
+    assert payload["chunk"] == "_timescaledb_internal.chk-noconn"
+    assert "password authentication failed" in payload["error"]
+    # The libpq role name is scrubbed before the wrapper captures stderr.
+    assert "alice" not in captured.err
+
+
+def test_measure_sql_prefix_byte_identical_with_docs() -> None:
+    """Byte-identity: the measurement statement's operator-facing prefix is
+    pinned in the two permanent doc surfaces.
+
+    Same discipline as the wire-code and lock-path rows: a future edit that
+    changes the projected column or the function (e.g. back to
+    ``pg_total_relation_size``, or to ``table_bytes``) without touching the
+    receipts README resolution note and design #855 H4 goes red here instead
+    of silently re-opening the 2026-07-25 under-report with docs that claim
+    otherwise.
+    """
+    assert _EXPECTED_MEASURE_SQL.startswith(_DOC_MEASURE_SQL_PREFIX)
+    readme_text = _RECEIPTS_README_PATH.read_text(encoding="utf-8")
+    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    assert _DOC_MEASURE_SQL_PREFIX in readme_text, (
+        "receipts README resolution note must name the measurement statement"
+    )
+    assert _DOC_MEASURE_SQL_PREFIX in design_text, "design #855 H4 must name the statement"
+
+
+# The token §8.6's disambiguation procedure greps for. It is a PREFIX of the
+# full warning literal, so a rename of the tail alone still greps.
+_MEASURE_WARNING_GREP_TOKEN = "freed_bytes measurement failed"  # §8.6 operator procedure
+
+# The §8.6 item 5 command as the operator copy-pastes it. Quoting matters: this
+# exact string occurs ONLY in §8.6's fenced block, so it pins that section
+# specifically — §8.2.1 names the same token in backticks, which does not
+# match, and an unquoted substring check would have been satisfied by §8.2.1
+# alone (making the §8.6 anchor vacuous).
+_MEASURE_WARNING_GREP_FENCE = f"grep '{_MEASURE_WARNING_GREP_TOKEN}'"
+
+
+def test_measure_warning_byte_identical_with_runbook() -> None:
+    """Byte-identity: the D2 stderr warning is anchored to the runbook.
+
+    §8.2.1 documents the literal line and §8.6 item 5 hands the operator a
+    `grep` command for its prefix. A rename of the code string that does not
+    touch the runbook would silently break that procedure — the operator would
+    grep a literal the runner no longer emits and read "no hit" as "the 0 is
+    real". The three rows are independently falsifiable: the prefix relation
+    (code side), §8.2.1's full literal, and §8.6's executable command.
+    """
+    assert _MEASURE_WARNING.startswith(_MEASURE_WARNING_GREP_TOKEN)
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _MEASURE_WARNING in runbook_text, (
+        "runbook §8.2.1 must carry the full warning literal"
+    )
+    assert _MEASURE_WARNING_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 5 must carry the operator's grep command verbatim"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2683,6 +4494,74 @@ def test_completeness_bounds_refuses_before_drill_coverage_missing(tmp_path: Pat
         config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
     )
     assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
+
+
+def test_drill_derivation_window_refuses_before_drill_coverage_missing(tmp_path: Path) -> None:
+    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COVERAGE_* per §8.2 chain (#1207).
+
+    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
+    inside the `[72 d, 65 d]` drop window) AND missing its forcing coverage
+    leg entirely. The derivation-window guard outranks every coverage leg, so
+    no coverage-union evidence from a run that never judged this span is
+    consulted — the surfaced code is the window code, not FORCING_MISSING.
+    """
+    narrowed_drill = _drill_receipt(forcing_tuples=[])
+    narrowed_drill["salvage_derivation"] = _salvage_derivation(
+        {
+            "start": _iso(_NOW - timedelta(days=70)),
+            "end": _iso(_NOW - timedelta(days=67)),
+        }
+    )
+    _write_json(tmp_path / "completeness.json", _completeness_receipt())
+    _write_json(tmp_path / "drill.json", narrowed_drill)
+    config = _build_config(tmp_path)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
+    stub = _StubRunner(chunks)
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
+
+
+def test_drill_derivation_window_refuses_before_snapshot_unbound(tmp_path: Path) -> None:
+    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
+    per §8.2 chain (#1207 before #1220), at the receipt surface.
+
+    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
+    inside the `[74 d, 60 d]` drop window) AND unbound (the gate-time
+    completeness receipt gained a db-export/complete subject the drill's
+    recorded universe never contained). The containment guard wins — and it
+    has to: the recorded universe is unfiltered, so binding only implies
+    "restore-verified" once containment holds (design D5-(d)).
+    """
+    drop_start = _NOW - timedelta(days=74)
+    drop_end = _NOW - timedelta(days=60)
+    completeness = _completeness_receipt(
+        subjects=[
+            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
+            _db_export_subject(
+                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
+            ),
+        ]
+    )
+    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
+    drill["salvage_derivation"] = _bound_salvage_derivation(
+        drop_window=_win(_NOW - timedelta(days=70), _NOW - timedelta(days=68)),
+        db_export_windows=[_win(drop_start, drop_end)],
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", drill)
+    config = _build_config(tmp_path)
+    chunks = [
+        _chunk(
+            "met", "forcing_station_timeseries", "chk-narrow-unbound", delta_days=60, duration_days=14
+        )
+    ]
+    stub = _StubRunner(chunks)
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
 
 
 # ---------------------------------------------------------------------------

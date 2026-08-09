@@ -15,7 +15,13 @@ NODE27_DISPLAY_WATERMARK_DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@12
 # Archive root shared with the inventory audit (and later the drill/salvage).
 # NODE27_PRODUCT_ARCHIVE_ARCHIVE_ROOT overrides NHMS_ARCHIVE_ROOT per the #846
 # aliasing convention; leave it commented out to reuse the shared root.
-NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+# NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot tier:
+# the free-space refuse-gate would deadlock the entire gated retention chain
+# (2026-07-26 incident). See ADR 0002 Amendment 2026-07-26.
+# Exception recorded 2026-08-06: the ghdc tablespace (~502 GB of DB chunks)
+# shares this filesystem at nwm-archive/nhms-tablespace — see ADR 0002
+# Amendment (2026-08-06). Do not extend the exception.
+NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Object-store source root the mover discovers products from.
 NODE27_PRODUCT_ARCHIVE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
@@ -26,13 +32,26 @@ OBJECT_STORE_PREFIX=s3://nhms
 NODE27_PRODUCT_ARCHIVE_RECEIPT=/home/nwm/node27-product-archive-logs/receipt.json
 NODE27_PRODUCT_ARCHIVE_LOCK_FILE=/home/nwm/node27-product-archive-logs/mover.lock
 
-# Archive minimum age (days). Must be >= the shared 14-day DB retention window.
+# Archive minimum age (days). Must be >= the LIVE DB retention window, which
+# config validation reads from NODE27_TIMESERIES_RETENTION_ENV below at every
+# startup — not from a compile-time constant. Raising the retention window
+# without raising this value refuses the mover fail-closed (#1227).
 NHMS_ARCHIVE_MIN_AGE_DAYS=14
+
+# Absolute path of the deployed retention env file (REQUIRED). Only
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS is read from it; nothing is sourced.
+# Moving or renaming that file breaks this guard fail-closed.
+# MUST name the same file the retention unit actually sources — the wrapper's
+# NODE27_TIMESERIES_RETENTION_ENV_FILE (default
+# $NODE27_TIMESERIES_RETENTION_REPO/infra/env/node27-timeseries-retention.env);
+# repointing one without the other leaves this guard on a stale window.
+NODE27_TIMESERIES_RETENTION_ENV=/home/nwm/NWM/infra/env/node27-timeseries-retention.env
 
 # Per-tick candidate processing bound (bounded work per tick).
 NODE27_PRODUCT_ARCHIVE_PER_TICK_BOUND=8
 
-# Free-space watermarks against the shared 1.7 TB volume. Strict integer
+# Free-space watermarks against the archive filesystem (since 2026-07-26 the
+# node-27-local RAID backing /data/GHDC, not the /home hot tier). Strict integer
 # bytes; empty/negative/zero/non-integer fails closed at startup with no
 # truthiness fallback. Refuse < warn is enforced by config validation.
 # Initial values from design Open Questions; tune with first receipts.

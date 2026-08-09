@@ -37,7 +37,14 @@ POSTGRES_ADMIN_URL=postgresql://REPLACE_ME_ADMIN:REPLACE_ME_PW@127.0.0.1:55432/p
 # Shared archive root — must match node27-product-archive.env and
 # node27-storage-inventory-audit.env. The drill reads product manifests +
 # `.tar.zst` files here plus salvage objects under `db-export/`.
-NHMS_ARCHIVE_ROOT=/home/ghdc/nwm/archive
+# NHMS_ARCHIVE_ROOT must NOT share a filesystem with pgdata / the hot
+# tier: the free-space refuse-gate would deadlock the entire gated
+# retention chain (2026-07-26 incident). See ADR 0002 Amendment
+# 2026-07-26.
+# Exception recorded 2026-08-06: the ghdc tablespace (~502 GB of DB chunks)
+# shares this filesystem at nwm-archive/nhms-tablespace — see ADR 0002
+# Amendment (2026-08-06). Do not extend the exception.
+NHMS_ARCHIVE_ROOT=/data/GHDC/nwm-archive
 
 # Filesystem workspace where per-cycle extract trees land. Bounded by the
 # per-file / per-tree / per-source caps that mirror the mover's guards.
@@ -58,6 +65,42 @@ NHMS_ARCHIVE_REBUILD_DRILL_INSTANCE_ID=node27-primary-pg15
 # Absolute path to the zstd binary. Refused if relative, symlinked, or
 # non-executable — mirrors the mover's fail-closed boot check.
 NHMS_ZSTD_BIN=/usr/bin/zstd
+
+# Receipt-derived salvage input (#1177). When set, the drill derives its
+# db-export salvage manifest set from this archive-completeness receipt —
+# every `coverage=db-export` + `verdict=complete` subject, mapped to
+# `<NHMS_ARCHIVE_ROOT>/db-export/<lane>/<identity>/manifest.json` — instead
+# of relying on an operator-typed `--salvage-manifest` whitelist.
+# Equivalent CLI flag: `--completeness-receipt`. Leave unset to keep the
+# pre-#1177 explicit-whitelist behavior.
+#
+# The name is DRILL-SCOPED on purpose. It is NOT the db-export salvage
+# runner's `NHMS_ARCHIVE_COMPLETENESS_RECEIPT_PATH`, which
+# `infra/env/node27-db-export-salvage.example` ships uncommented and
+# mandatory: sharing the name would let a `set -a`-sourced salvage env leak
+# into a flag-less drill invocation and silently switch it into derivation
+# mode. The two files may point at the same receipt; they must not share the
+# variable.
+#
+# Requires at least one `--archive-manifest` in the same invocation — a PASS
+# receipt requires at least one restored product cycle, so a receipt-only
+# invocation is refused at boot.
+# NHMS_ARCHIVE_REBUILD_DRILL_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
+
+# Optional drop window for the derivation above (ISO-8601, BOTH or NEITHER).
+# Subjects are kept when their window overlaps this interval under the
+# retention gate's CLOSED-interval convention, so a 228-manifest archive does
+# not force a full-set drill. Equivalent CLI flags: `--drop-window-start` /
+# `--drop-window-end`. Compute the interval per runbook §7.3 step 3.
+# NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_START=2026-06-18T00:00:00Z
+# NHMS_ARCHIVE_REBUILD_DRILL_DROP_WINDOW_END=2026-06-25T00:00:00Z
+
+# Fail-closed bounds on the DERIVED set only (the per-object 16 GiB cap
+# still applies to every salvage object). Cardinality refuses at boot;
+# the aggregate decompressed-byte budget refuses mid-run with
+# SALVAGE_DERIVATION_FAILED. Defaults: 128 manifests / 32 GiB.
+# NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_MANIFESTS=128
+# NHMS_ARCHIVE_REBUILD_DRILL_MAX_DERIVED_BYTES=34359738368
 
 # Single-instance guard lock file (fcntl.flock). Defaults to
 # ``~/node27-archive-rebuild-drill-logs/drill.lock`` — byte-identical

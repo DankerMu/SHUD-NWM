@@ -103,6 +103,45 @@ IDENTITY = {
     "range_start": "2026-05-28T00:00:00Z",
     "range_end": "2026-06-04T00:00:00Z",
 }
+# The replay entrypoint's option name for each recovery-target field, in the exact
+# order the decompress argv carries them (#1244).
+_RECOVERY_TARGET_OPTIONS = {
+    "hypertable_schema": "--hypertable-schema",
+    "hypertable_name": "--hypertable-name",
+    "chunk_schema": "--chunk-schema",
+    "chunk_name": "--chunk-name",
+    "range_start": "--range-start",
+    "range_end": "--range-end",
+}
+
+
+def _recovery_target_argv_tail(**overrides: str) -> list[str]:
+    """The six exact-chunk options, built from the verifier's own bound constant.
+
+    The bundle fixture below no longer keeps an independent literal copy of the
+    tail, so this helper is definitional against the verifier for the accepted
+    case; the oracles that stay independent are the per-field deviation
+    rejections that pass ``overrides``, the contract drift guard in
+    tests/test_node27_timeseries_compression_supervisor.py, and the plan_author
+    e2e (``test_real_state_machine_bundle_verifies_task_4_5_pass``).
+    """
+
+    values = {**evidence.RECOVERY_TARGET, **overrides}
+    return [token for field, option in _RECOVERY_TARGET_OPTIONS.items() for token in (option, values[field])]
+
+
+def _decompress_argv(receipt_path: str, **overrides: str) -> list[str]:
+    return [
+        "/home/nwm/NWM/.venv/bin/python",
+        "/home/nwm/NWM/scripts/node27_timeseries_decompression_replay.py",
+        "--database",
+        "nhms",
+        "--mutation-head-sha",
+        HEAD,
+        "--receipt-path",
+        receipt_path,
+        *_recovery_target_argv_tail(**overrides),
+    ]
 
 
 def _intent_context() -> dict[str, str]:
@@ -117,6 +156,33 @@ def _intent_context() -> dict[str, str]:
 
 def _canonical(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def _pinned_capture_options(database: str) -> list[str]:
+    """The capture-argv options this helper can bind to PRODUCTION values, all of them.
+
+    Both argv templates in this module (`_bundle`'s captures and `_producer_argv`) bind
+    these identically so a template stays a production-shaped argv and every test below
+    corrupts exactly the one field it is about.  `--database` is the only dynamic entry
+    (it tracks the plan's own database); the other seven come from the verifier's public
+    map, whose VALUES are pinned literally and against `plan_author` by the structural
+    tests at the end of this module -- so sharing the map here cannot go tautological.
+
+    `--evidence-dir` is value-pinned by the verifier too, but deliberately NOT bound here:
+    the verifier derives its expected value RELATIONALLY from each capture's own
+    `output_path`, so there is no production literal to share -- every caller binds it
+    from the tmp root its captures actually write to.
+    """
+
+    return [
+        "--database",
+        database,
+        *(
+            token
+            for option, value in evidence.EXPECTED_CAPTURE_TOOL_VALUES.items()
+            for token in (option, value)
+        ),
+    ]
 
 
 def _json_ref(tmp_path: Path, name: str, value: Any) -> dict[str, Any]:
@@ -1006,18 +1072,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
                 HEAD,
                 "--receipt-path",
                 str(tmp_path / "recovery-receipt.json"),
-                "--hypertable-schema",
-                "hydro",
-                "--hypertable-name",
-                "river_timeseries",
-                "--chunk-schema",
-                "_timescaledb_internal",
-                "--chunk-name",
-                "_hyper_3_7_chunk",
-                "--range-start",
-                "2026-05-28T00:00:00Z",
-                "--range-end",
-                "2026-06-04T00:00:00Z",
+                *_recovery_target_argv_tail(),
             ],
         ),
         (
@@ -1123,7 +1178,23 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         {
             "capture_id": f"capture-{kind}",
             "kind": kind,
-            "argv": ["/usr/bin/printf", "{}"],
+            "argv": [
+                sys.executable,
+                evidence.EXPECTED_CAPTURE_SCRIPT,
+                "--kind",
+                kind,
+                "--mutation-head-sha",
+                HEAD,
+                # Bound RELATIONALLY, exactly as the verifier derives it: every capture
+                # `output_path` in this template lives directly under `tmp_path`, so the
+                # sibling the gate computes is `tmp_path/capture-artifacts` for all twelve
+                # kinds.  Derived, never hardcoded -- without this binding every negative
+                # below would be refused for a missing `--evidence-dir` instead of the one
+                # field it corrupts.
+                "--evidence-dir",
+                str(tmp_path / "capture-artifacts"),
+                *_pinned_capture_options("nhms"),
+            ],
             "output_path": produced_refs[kind]["path"],
         }
         for kind in evidence.EXPECTED_CAPTURE_SEQUENCE
@@ -2856,6 +2927,34 @@ def test_recovery_rejects_target_drift(tmp_path: Path, artifact_name: str) -> No
     bundle["recovery"][artifact_name] = _json_ref(tmp_path, f"recovery-target-{artifact_name}.json", raw)
     with pytest.raises(evidence.EvidenceError, match="exact authorized chunk"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_decompress_argv_derived_from_the_recovery_target_is_accepted(tmp_path: Path) -> None:
+    """An argv whose tail comes from the verifier's own bound constant passes (#1244)."""
+
+    receipt_path = str(tmp_path / "recovery-receipt.json")
+    evidence._validate_exact_command_argv(
+        _decompress_argv(receipt_path),
+        kind="decompress",
+        associations={"recovery_receipt": receipt_path},
+        label="run plan command[2]",
+    )
+
+
+@pytest.mark.parametrize("field", list(_RECOVERY_TARGET_OPTIONS))
+def test_decompress_argv_rejects_any_single_recovery_target_field_deviation(tmp_path: Path, field: str) -> None:
+    """Every one of the six fields is load-bearing in the expected tail (#1244)."""
+
+    receipt_path = str(tmp_path / "recovery-receipt.json")
+    argv = _decompress_argv(receipt_path, **{field: f"{evidence.RECOVERY_TARGET[field]}-drift"})
+    assert len(argv) == 20
+    with pytest.raises(evidence.EvidenceError, match="decompress argv differs"):
+        evidence._validate_exact_command_argv(
+            argv,
+            kind="decompress",
+            associations={"recovery_receipt": receipt_path},
+            label="run plan command[2]",
+        )
 
 
 def test_recovery_rejects_row_parity_failure(tmp_path: Path) -> None:
@@ -4842,6 +4941,54 @@ def _e2e_child_argv(kind: str, association_path: str | None, dump_container: str
     raise AssertionError(f"unmapped child kind {kind!r}")
 
 
+# The five capture tool options the verifier pins by value, paired with the stub binary
+# `_e2e_capture_bin` writes for each.  The recorded plan keeps the production `/usr/bin/*`
+# values; only the EXECUTED plan variant may point at these stubs.
+_E2E_CAPTURE_TOOL_STUBS = (
+    ("--psql", "psql"),
+    ("--systemctl", "systemctl"),
+    ("--docker", "docker"),
+    ("--journalctl", "journalctl"),
+    ("--git", "git"),
+)
+
+
+def _rebind_argv_option(argv: list[str], option: str, value: str) -> list[str]:
+    """Rebind one option's value by NAME, position-independent.
+
+    `plan_author`'s `capture_common` puts the common options at a fixed offset today, but
+    that layout is not a contract (the verifier deliberately scans by name rather than by
+    position), so the exec-side divergence must not assume it either.  The exactly-once
+    assertion is the anti-no-op guard: a silently missed rebind would leave the executed
+    capture pointing at the REAL host binary.
+    """
+
+    rebound = list(argv)
+    replaced = 0
+    index = 0
+    while index < len(rebound):
+        if rebound[index] == option and index + 1 < len(rebound):
+            rebound[index + 1] = value
+            replaced += 1
+            index += 1
+        index += 1
+    assert replaced == 1, (option, argv)
+    return rebound
+
+
+def _e2e_option_values(argv: list[str], option: str) -> list[str]:
+    """Independent by-name value lookup for the exec-side fidelity pins.
+
+    Deliberately NOT `evidence._argv_option_values`: these pins are about THIS test's own
+    rewrite, so reading the argv through the very helper the gate under test uses would
+    make them circular.  Membership (`str(stub) in argv`) would be worse still -- a
+    partially no-op rewrite that left one option bound to the real host binary would
+    still satisfy it.
+    """
+
+    return [argv[index + 1] for index, token in enumerate(argv) if token == option and index + 1 < len(argv)]
+
+
 def test_real_state_machine_bundle_verifies_task_4_5_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4916,38 +5063,33 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     _e2e_capture_bin(capture_bin, starts, child)
     monkeypatch.setattr(supervisor, "SUPERVISOR_BIN_DIR", checkpoint_bin)
 
-    # plan_PROD carries the pinned PRODUCTION command argvs the verifier requires;
-    # its capture argvs run the REAL capture producer against the stubs.
+    # plan_PROD carries the pinned PRODUCTION command AND capture argvs the verifier
+    # requires: seam-free, so `run_plan_id`, the bundle's run plan and the verifier all
+    # see a production plan (the verifier refuses any `--self-test-*` token in a run
+    # plan capture argv outright).  `capture_script` is left at the production default
+    # (`/home/nwm/NWM/scripts/...capture.py`) because the verifier now pins the capture
+    # producer identity; plan_EXEC below swaps argv[1] to the in-checkout script so the
+    # state machine still executes the REAL capture producer.  The same split now covers
+    # the capture TOOLING: the verifier pins `--psql/--systemctl/--docker/--journalctl/
+    # --git/--repo/--container` to their committed production values, so plan_prod takes
+    # `plan_author`'s defaults for all of them and the stub paths / test checkout live
+    # exclusively on plan_EXEC.  `schema_dump_host/container` overrides stay -- those
+    # options are deliberately unpinned -- and `capture_python` stays because argv[0] is
+    # unpinned by design.
     plan_prod = plan_author.build_run_plan(
         mutation_head_sha=HEAD,
         root=str(tmp_path),
         schema_dump_host=schema_dump_host,
         schema_dump_container=schema_dump_container,
-        capture_repo=str(fixture_repo),
         capture_python=sys.executable,
-        capture_script=str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
-        capture_psql=str(capture_bin / "psql"),
-        capture_systemctl=str(capture_bin / "systemctl"),
-        capture_docker=str(capture_bin / "docker"),
-        capture_journalctl=str(capture_bin / "journalctl"),
-        capture_git=str(capture_bin / "git"),
     )
-    for capture in plan_prod["captures"]:
-        if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
-            capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
-        if capture["kind"] == "cleanup":
-            # `_validate_reviewed_file_ref` pins the cleanup repo-unit refs to the
-            # canonical checkout path, so the cleanup capture must read the real
-            # committed systemd units (the fixture repo suffices for the env-mode/
-            # write-guard reads the other captures perform).
-            argv = list(capture["argv"])
-            argv[argv.index("--repo") + 1] = str(ROOT)
-            capture["argv"] = argv
     plan_prod["run_plan_id"] = supervisor.run_plan_id(plan_prod)
     supervisor.validate_run_plan(plan_prod, inherited_env={})
 
-    # plan_EXEC shares captures/checkpoints but swaps the command argvs for stub
-    # producers (the production binaries cannot run hermetically).
+    # plan_EXEC shares checkpoints but swaps the command argvs for stub producers (the
+    # production binaries cannot run hermetically) and appends the hermetic capture
+    # seams.  Exactly the command-side pattern below: the state machine really executes
+    # this argv, and the ledger identities are rewritten back to plan_prod afterwards.
     plan_exec = copy.deepcopy(plan_prod)
     for command in plan_exec["commands"]:
         associations = command["artifact_associations"]
@@ -4955,6 +5097,37 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
         command["argv"] = _e2e_child_argv(
             str(command["kind"]), association_path, schema_dump_container, src_dir
         )
+    for capture in plan_exec["captures"]:
+        # The executed capture must be the real capture producer in THIS checkout; the
+        # production path plan_prod claims does not exist on a hermetic runner.  The
+        # supervisor's capture anchor is suffix-based precisely so this stays legal, and
+        # the ledger rewrite below restores the plan_prod argv the verifier pins.
+        capture["argv"] = [
+            capture["argv"][0],
+            str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
+            *capture["argv"][2:],
+        ]
+        # Same divergence, one level deeper: the production `/usr/bin/*` tools plan_prod
+        # records cannot run hermetically, so the EXECUTED argv points at the stubs.
+        # `--repo` is per kind: `cleanup` reads the committed systemd units and
+        # `_validate_reviewed_file_ref` pins those repo-unit refs to the canonical
+        # checkout path, so it must read THIS checkout; every other kind performs
+        # env-mode/write-guard reads the fixture repo satisfies.
+        argv = _rebind_argv_option(
+            capture["argv"], "--repo", str(ROOT) if capture["kind"] == "cleanup" else str(fixture_repo)
+        )
+        for option, tool in _E2E_CAPTURE_TOOL_STUBS:
+            argv = _rebind_argv_option(argv, option, str(capture_bin / tool))
+        capture["argv"] = argv
+        if capture["kind"] in ("post_dry_selection", "pre_enforce_selection"):
+            # The CI runner's real disk headroom is uncontrollable, so the executed
+            # capture gets a deterministic figure (honoured value pinned below).
+            capture["argv"] = [*capture["argv"], "--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        if capture["kind"] == "schema_dump_list":
+            # Stub-docker injection deviates from the pinned host CLI, so the executed
+            # capture must opt into the RECORD/EXEC seam explicitly (production
+            # `plan_author` never emits this flag, and the verifier now refuses it).
+            capture["argv"] = [*capture["argv"], "--self-test-docker-seam"]
 
     ledger_path = tmp_path / "supervisor-ledger.jsonl"
     checkpoints_by_phase = {(str(c["phase"]), c["command_id"]): c for c in plan_exec["checkpoints"]}
@@ -4985,16 +5158,54 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
             ),
         )
 
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+
+    # Hermetic-fidelity pin, asserted BEFORE the rewrite below so the rewrite can never
+    # be vacuous: the state machine really spawned capture.py with the seam tokens on
+    # its argv (as recorded by `run_capture_step`), AND the free-bytes seam was really
+    # HONOURED -- without the value pin a capture that silently stops consuming
+    # `--self-test-free-bytes` would still pass on any runner with >300 GiB free.
+    executed_capture_argv = {
+        str(event["capture_id"]): list(event["argv"]) for event in events if event.get("event_type") == "capture"
+    }
+    assert "--self-test-docker-seam" in executed_capture_argv["capture-schema_dump_list"]
+    for selection_kind in ("post_dry_selection", "pre_enforce_selection"):
+        executed = executed_capture_argv[f"capture-{selection_kind}"]
+        assert executed[-2:] == ["--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)]
+        snapshot_path = next(c["output_path"] for c in plan_prod["captures"] if c["kind"] == selection_kind)
+        assert json.loads(Path(snapshot_path).read_bytes())["free_bytes"] == _SELFTEST_FREE_BYTES
+
+    # Second hermetic-fidelity pin, same reason and same position (before the rewrite):
+    # the executed captures really bound the STUB tools and the per-kind test checkout,
+    # so the plan_EXEC tool divergence cannot have been a no-op.  Without this a rewrite
+    # that silently stopped rebinding would run the REAL host binaries -- /usr/bin/git,
+    # /usr/bin/systemctl and friends all exist on the runner -- and the e2e would stay
+    # green while proving nothing about the tool split.  Asserted by option-VALUE
+    # equality, not membership: a partially applied rewrite would still put the stub
+    # directory somewhere in the argv.
+    kind_by_capture_id = {str(c["capture_id"]): str(c["kind"]) for c in plan_prod["captures"]}
+    assert set(executed_capture_argv) == set(kind_by_capture_id)
+    for capture_id, executed in executed_capture_argv.items():
+        for option, tool in _E2E_CAPTURE_TOOL_STUBS:
+            assert _e2e_option_values(executed, option) == [str(capture_bin / tool)], (capture_id, option)
+        expected_repo = str(ROOT) if kind_by_capture_id[capture_id] == "cleanup" else str(fixture_repo)
+        assert _e2e_option_values(executed, "--repo") == [expected_repo], capture_id
+
     # Re-anchor the executed ledger's child argvs to the production binary
     # identities the stubs stood in for (argv[0] pins /usr/bin/pg_dump,
-    # {repo}/.venv/bin/python, ... which cannot exist on a hermetic runner).  Only
-    # the command argv identity is rewritten; every produced artifact path, sha,
-    # association and timestamp is exactly what the real state machine emitted.
+    # {repo}/.venv/bin/python, ... which cannot exist on a hermetic runner), and the
+    # executed capture argvs to their seam-free plan_prod twins (the verifier refuses
+    # any `--self-test-*` token in the run plan, and binds ledger capture argv to plan
+    # capture argv by equality).  Only the argv identity is rewritten; every produced
+    # artifact path, sha, association and timestamp is exactly what the real state
+    # machine emitted.
     prod_argv_by_command = {str(c["command_id"]): c["argv"] for c in plan_prod["commands"]}
-    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    prod_argv_by_capture = {str(c["capture_id"]): c["argv"] for c in plan_prod["captures"]}
     for event in events:
         if event.get("event_type") == "child_exit":
             event["argv"] = prod_argv_by_command[str(event["command_id"])]
+        elif event.get("event_type") == "capture":
+            event["argv"] = prod_argv_by_capture[str(event["capture_id"])]
     ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
     run_plan_path = tmp_path / "run-plan.json"
     run_plan_path.write_bytes(_canonical(plan_prod))
@@ -5013,3 +5224,1415 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     result = evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
     assert result["qualifies_task_4_5"] is True
     assert result["verdict"] == evidence.PASS_VERDICT
+
+
+# --------------------------------------------------------------------------- #
+# #1250: the verifier structurally rejects self-test seam tokens in capture argv.
+# A run plan whose capture argv carries a `--self-test-*` flag executed a
+# producer that deviates from what it recorded (stub docker) or fabricated a
+# rollback-feasibility figure (`--self-test-free-bytes`), so it is not
+# production forensics and can never reach a PASS verdict.
+# --------------------------------------------------------------------------- #
+import argparse  # noqa: E402
+
+from scripts import node27_timeseries_compression_capture as _capture  # noqa: E402
+
+# The verifier's message when ledger capture argv != plan capture argv.  The seam
+# gate must fire on its own, BEFORE this equality binding, otherwise a seam that is
+# injected consistently into both sides would sail through.
+_CAPTURE_EQUALITY_ERROR = "supervisor capture execution differs from its plan"
+
+
+def _inject_capture_seam(bundle: dict[str, Any], tmp_path: Path, *, kind: str, tokens: list[str]) -> None:
+    """Append `tokens` to one plan capture's argv AND to its equality-bound ledger event."""
+
+    def _append(plan: dict[str, Any]) -> None:
+        capture = next(item for item in plan["captures"] if item["kind"] == kind)
+        capture["argv"] = [*capture["argv"], *tokens]
+
+    _rewrite_run_plan(bundle, tmp_path, _append)
+    ledger_path = Path(bundle["execution"]["ledger"]["path"])
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    injected = 0
+    for event in events:
+        if event.get("event_type") == "capture" and event["kind"] == kind:
+            event["argv"] = [*event["argv"], *tokens]
+            injected += 1
+    # Non-vacuity: the ledger twin really received the seam, so the refusal below
+    # cannot be an artefact of an untouched or missing capture event.
+    assert injected == 1
+    ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger_path)
+
+
+def test_verifier_rejects_run_plan_capture_carrying_docker_seam(tmp_path: Path) -> None:
+    """A PASS-shaped bundle whose capture argv carries `--self-test-docker-seam` cannot verify."""
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=["--self-test-docker-seam"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-docker-seam" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_run_plan_capture_carrying_free_bytes_seam(tmp_path: Path) -> None:
+    """A fabricated disk-headroom seam is refused before the `free_bytes` gates are reached."""
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle,
+        tmp_path,
+        kind="post_dry_selection",
+        tokens=["--self-test-free-bytes", str(_SELFTEST_FREE_BYTES)],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-free-bytes" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_hidden_flags_are_all_self_test_seams() -> None:
+    """Every `--help`-suppressed capture flag carries the rejected seam prefix.
+
+    A future hidden flag outside the prefix reddens here, forcing it onto the
+    prefix before it can become a new invisible seam.  The prefix is spelled
+    literally on purpose: this is a producer-side structural check on capture.py's
+    own parser, independent of the verifier module.
+    """
+    parser = _capture._parser()
+    hidden: set[str] = set()
+    for action in parser._actions:
+        if not action.option_strings or action.help != argparse.SUPPRESS:
+            continue
+        assert all(option.startswith("--self-test-") for option in action.option_strings), action.option_strings
+        hidden.update(action.option_strings)
+    # Non-vacuity: renaming/moving the seams out of this parser must not silently
+    # turn the loop above into an empty scan.
+    assert {"--self-test-free-bytes", "--self-test-docker-seam"} <= hidden
+
+
+def test_verifier_rejects_unregistered_self_test_prefix_token(tmp_path: Path) -> None:
+    """The gate is a PREFIX rule: a never-registered `--self-test-*` token is refused too.
+
+    An enumerated two-token implementation would let the NEXT seam through the
+    verifier -- exactly the leak-by-forgetting hole this issue closes.
+    """
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=["--self-test-unregistered-probe"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--self-test-unregistered-probe" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+# --------------------------------------------------------------------------- #
+# #1259: capture argv is anchored to the COMMITTED PRODUCER, not merely to a
+# concrete shape.  Before this gate a bundle could claim production forensics
+# while its run plan recorded `/usr/bin/printf` as the producer of all twelve
+# snapshots -- shape-valid, seam-free, and PASS-shaped.
+# --------------------------------------------------------------------------- #
+
+
+def _replace_capture_argv(bundle: dict[str, Any], tmp_path: Path, *, kind: str, argv: list[str]) -> None:
+    """Rewrite one plan capture's argv AND its equality-bound ledger twin.
+
+    Both sides move together on purpose: with only the plan side rewritten, a refusal
+    could be the ledger<->plan equality binding rather than the identity anchor, so the
+    tests below could not tell a load-bearing gate from an accidental one.
+    """
+
+    def _swap(plan: dict[str, Any]) -> None:
+        capture = next(item for item in plan["captures"] if item["kind"] == kind)
+        capture["argv"] = list(argv)
+
+    _rewrite_run_plan(bundle, tmp_path, _swap)
+    ledger_path = Path(bundle["execution"]["ledger"]["path"])
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    swapped = 0
+    for event in events:
+        if event.get("event_type") == "capture" and event["kind"] == kind:
+            event["argv"] = list(argv)
+            swapped += 1
+    assert swapped == 1
+    ledger_path.write_bytes(b"".join(_canonical(event) for event in events))
+    bundle["execution"]["ledger"] = _file_ref(ledger_path)
+
+
+def _producer_argv(kind: str, *extra: str, evidence_dir: str) -> list[str]:
+    """The production-shaped capture argv, before a single field is corrupted.
+
+    Unlike `_bundle`'s template this one does NOT bake `--mutation-head-sha`: it stays
+    caller-supplied through `*extra` because the `[pair_missing]` parametrization below
+    needs a template with NO SHA binding at all.  Baking it in would turn that negative
+    into a fully valid argv (DID NOT RAISE) and silently delete the "producer invoked
+    without any SHA pair" coverage.  Everything the verifier pins by VALUE is baked in,
+    so a test that corrupts the SHA is still refused for the SHA.
+
+    `evidence_dir` is REQUIRED and caller-supplied for the opposite reason: the verifier
+    derives its expected value from the capture's own `output_path`, which is tmp-scoped,
+    so no default (module constant or otherwise) could be correct.  A missing binding
+    would re-attribute every negative below to the `--evidence-dir` gate instead of the
+    field it corrupts.
+    """
+
+    return [
+        sys.executable,
+        evidence.EXPECTED_CAPTURE_SCRIPT,
+        "--kind",
+        kind,
+        "--evidence-dir",
+        evidence_dir,
+        *_pinned_capture_options("nhms"),
+        *extra,
+    ]
+
+
+def test_verifier_rejects_capture_argv_naming_a_rogue_producer(tmp_path: Path) -> None:
+    """The pre-#1259 smoking gun: twelve `/usr/bin/printf` captures verified to PASS."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(bundle, tmp_path, kind="schema_dump_list", argv=["/usr/bin/printf", "{}"])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    # The refusal names the producer the bundle FAILED to invoke; the offending token
+    # itself is pinned by the rogue-argv[1] case below (here argv[1] is printf's `{}`).
+    assert evidence.EXPECTED_CAPTURE_SCRIPT in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_capture_argv_naming_a_rogue_binary_in_argv1(tmp_path: Path) -> None:
+    """argv[0] is unpinned, so the identity claim must live entirely in argv[1]."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=[sys.executable, "/usr/bin/docker", "--kind", "catalog_before", "--mutation-head-sha", HEAD],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "/usr/bin/docker" in message
+    assert evidence.EXPECTED_CAPTURE_SCRIPT in message
+
+
+def test_verifier_rejects_capture_argv_bound_to_a_different_kind(tmp_path: Path) -> None:
+    """A capture claiming `catalog_before` while invoking the producer for `sizes_pre`."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=_producer_argv(
+            "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "catalog_before" in message
+    assert "sizes_pre" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param([], id="pair_missing"),
+        pytest.param(["--mutation-head-sha", "f" * 40], id="value_mismatched"),
+        pytest.param(["--mutation-head-sha=" + "f" * 40], id="inline_form_mismatched"),
+        pytest.param(["--mutation-head-sha"], id="flag_without_value"),
+    ],
+)
+def test_verifier_rejects_capture_argv_without_the_plan_mutation_sha(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    """The producer must be invoked FOR THIS RUN: `--flag value` and `--flag=value` alike."""
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_producer_argv("sizes_pre", *extra, evidence_dir=str(tmp_path / "capture-artifacts")),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert HEAD in message
+    assert "--mutation-head-sha" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_accepts_the_inline_mutation_sha_form_when_it_matches(tmp_path: Path) -> None:
+    """Non-vacuity for the parametrized rejections: `=` form is a FORM, not a violation.
+
+    Without this, an implementation that rejected every inline token outright would pass
+    the mismatch cases while quietly refusing a legitimate spelling.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_producer_argv(
+            "sizes_pre", f"--mutation-head-sha={HEAD}", evidence_dir=str(tmp_path / "capture-artifacts")
+        ),
+    )
+    result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert result["verdict"] == evidence.PASS_VERDICT
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        pytest.param(["--self-t", str(_SELFTEST_FREE_BYTES)], id="abbreviated_seam_with_value"),
+        pytest.param(["--se"], id="two_letter_abbreviation_alone"),
+        pytest.param(["--s"], id="one_letter_abbreviation_alone"),
+        pytest.param([f"--self-t={_SELFTEST_FREE_BYTES}"], id="abbreviated_seam_inline_form"),
+    ],
+)
+def test_verifier_rejects_argparse_abbreviations_of_a_seam_flag(tmp_path: Path, tokens: list[str]) -> None:
+    """Facet B: capture.py runs with `allow_abbrev=True`, so prefixes ARE the seam.
+
+    Today `--self-t` is ambiguous only because two seams share that prefix -- an
+    accidental, unrecorded premise.  With one seam registered it would bind
+    `--self-test-free-bytes` while carrying no `--self-test-` prefix at all.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="post_dry_selection", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert tokens[0] in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_non_seam_flag_in_the_abbreviation_rejection_domain() -> None:
+    """No legitimate capture flag ever enters the `--se` rejection domain.
+
+    The facet-B gate refuses every base from `--s` to `--self-test-`; this pins the
+    measured zero-collision fact (`--systemctl`, `--schema-dump-*` are the only non-seam
+    `--s*` flags) so a future `--session-...` flag reddens HERE rather than becoming a
+    plan token the verifier silently refuses.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    non_seam = {option for option in options if not option.startswith(evidence.SELF_TEST_SEAM_PREFIX)}
+    assert {"--systemctl", "--schema-dump-host", "--schema-dump-container"} <= non_seam
+    for option in non_seam:
+        assert not option.startswith("--se"), option
+    # Non-vacuity: the seams themselves DO live in the domain the gate rejects.
+    assert any(option.startswith("--se") for option in options - non_seam)
+
+
+def test_expected_capture_script_is_the_production_producer_path() -> None:
+    """Anti-tautology: gate and fixture share the constant, so pin its VALUE literally.
+
+    A constant mis-derived from `REPO_ROOT` (the ambient checkout) instead of
+    `EXPECTED_REPO_PATH` passes every other test in this module -- the fixture would move
+    with it -- while silently accepting captures from any checkout the verifier runs in.
+    """
+
+    assert evidence.EXPECTED_CAPTURE_SCRIPT == "/home/nwm/NWM/scripts/node27_timeseries_compression_capture.py"
+    # The load-bearing coupling the e2e depends on: production plans really do emit it.
+    assert plan_author.DEFAULT_CAPTURE_SCRIPT == evidence.EXPECTED_CAPTURE_SCRIPT
+
+
+# --------------------------------------------------------------------------- #
+# #1259 follow-up: the anchor must be REBIND-proof and ABBREVIATION-proof.
+# capture.py parses with argparse's default `allow_abbrev=True` and both anchored
+# options bind last-wins, so pinning argv[2:4] and the full `--mutation-head-sha`
+# spelling left four PASS-shaped rebinds open: a second full `--kind`, `--k`,
+# `--kin=`, and `--m`.  Each of them re-aims the producer while every fixed-offset
+# and full-spelling check still reads the anchored values.
+# --------------------------------------------------------------------------- #
+
+_OTHER_KIND = "sizes_pre"
+_OTHER_SHA = "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        pytest.param(["--kind", _OTHER_KIND], "exactly once", id="full_second_kind"),
+        pytest.param(["--k", _OTHER_KIND], "abbreviation of --kind", id="k_abbreviation_pair"),
+        pytest.param([f"--kin={_OTHER_KIND}"], f"--kin={_OTHER_KIND}", id="kin_abbreviation_inline"),
+        pytest.param(["--m", _OTHER_SHA], "abbreviation of --mutation-head-sha", id="m_abbreviation_pair"),
+    ],
+)
+def test_verifier_rejects_argparse_rebinding_of_the_anchored_capture_options(
+    tmp_path: Path, tokens: list[str], expected: str
+) -> None:
+    """Each shape verified to PASS before this gate: argv[2:4] and `--mutation-head-sha`
+    both still read the anchored values while the producer would have collected another
+    kind, or recorded another mutation SHA."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert expected in message
+    # The refusal is the identity anchor's own, not the plan<->ledger equality binding:
+    # `_inject_capture_seam` appends to BOTH sides, so equality still holds here.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_rebinding_kind_token_placed_before_the_anchored_pair(tmp_path: Path) -> None:
+    """Prefix position too: argv[2:4] is only the anchor's FIRST binding.
+
+    With the rebinding token ahead of the pair, argv[2:4] is no longer `["--kind", kind]`
+    -- so this shape must be refused by the position check even if the exactly-once
+    check were removed, and vice versa; neither check alone covers both placements.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="catalog_before",
+        argv=[
+            sys.executable,
+            evidence.EXPECTED_CAPTURE_SCRIPT,
+            "--kind",
+            _OTHER_KIND,
+            "--kind",
+            "catalog_before",
+            "--mutation-head-sha",
+            HEAD,
+        ],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "catalog_before" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_second_mutation_sha_binding(tmp_path: Path) -> None:
+    """Last-wins on the SHA side too: a full second `--mutation-head-sha` rebinds it."""
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="sizes_pre", tokens=["--mutation-head-sha", _OTHER_SHA]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--mutation-head-sha" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_flag_abbreviating_an_anchored_option() -> None:
+    """The zero-collision fact the abbreviation rejection stands on.
+
+    Rejecting every proper prefix of `--kind` / `--mutation-head-sha` /
+    `--schema-dump-container` is only safe while those are the sole `--k*` / `--m*` /
+    `--schema-dump-c*` flags in the capture CLI.  A future `--keep-going`, `--max-rows`
+    or `--schema-dump-cache` would make `--k` / `--m` / `--schema-dump-c` a legitimate
+    spelling the verifier silently refuses -- it reddens HERE instead, before it can
+    reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {option for option in options if option.startswith("--k")} == {"--kind"}
+    assert {option for option in options if option.startswith("--m")} == {"--mutation-head-sha"}
+    assert {option for option in options if option.startswith("--schema-dump-c")} == {
+        "--schema-dump-container"
+    }
+    for anchored in evidence.ANCHORED_CAPTURE_OPTIONS:
+        assert anchored in options, anchored
+        for option in options - {anchored}:
+            assert not (len(option) >= 3 and anchored.startswith(option)), (option, anchored)
+    # Both gates reject the same domain; drift between them would reopen the rebind on
+    # whichever side lagged.
+    assert supervisor.ANCHORED_CAPTURE_OPTIONS == evidence.ANCHORED_CAPTURE_OPTIONS
+
+
+# --------------------------------------------------------------------------- #
+# #1261: the anchor pins WHO runs; this pins WITH WHAT.  Before this gate a plan
+# could keep a perfectly anchored argv[0:4] -- committed producer, right kind,
+# right mutation SHA, no seam token -- while binding `--psql/--systemctl/
+# --docker/--journalctl/--git/--repo/--container` to stub binaries under /tmp and
+# fabricating all twelve snapshots.  The command side has had literal
+# `expected_executable` pins since the G-series; the capture side had none.
+# --------------------------------------------------------------------------- #
+import inspect  # noqa: E402
+
+# The substitute tooling a hostile plan would point the committed producer at.
+_STUB_TOOL_PATH = "/tmp/stub-tool"
+_PINNED_TOOL_OPTIONS = tuple(sorted(evidence.EXPECTED_CAPTURE_TOOL_VALUES))
+
+
+def _corrupt_pinned_binding(argv: list[str], option: str, mode: str) -> list[str]:
+    """One production-shaped capture argv with exactly ONE pinned binding broken.
+
+    The four modes are the four shapes a single equality-per-option check has to refuse
+    at once: a wrong value, no value at all, and a last-wins second binding in either
+    argparse spelling (`--flag value` and `--flag=value` are the same binding to the
+    producer's parser, so a gate that scanned only the pair form would let the `=`
+    spelling through).
+    """
+
+    if mode == "mismatched":
+        return _rebind_argv_option(argv, option, _STUB_TOOL_PATH)
+    if mode == "absent":
+        index = argv.index(option)
+        return [*argv[:index], *argv[index + 2 :]]
+    if mode == "duplicated_pair":
+        return [*argv, option, _STUB_TOOL_PATH]
+    if mode == "duplicated_inline":
+        return [*argv, f"{option}={_STUB_TOOL_PATH}"]
+    raise AssertionError(f"unknown corruption mode {mode!r}")
+
+
+@pytest.mark.parametrize("option", _PINNED_TOOL_OPTIONS)
+@pytest.mark.parametrize(
+    "mode", ["mismatched", "absent", "duplicated_pair", "duplicated_inline"]
+)
+def test_verifier_rejects_a_capture_argv_that_misbinds_a_pinned_tool_option(
+    tmp_path: Path, option: str, mode: str
+) -> None:
+    """Every pinned option, every misbinding shape: no PASS verdict.
+
+    `mismatched` is the smoking gun the issue names (an identity-anchored argv aimed at
+    stub tooling); `absent` closes the omission variant (an unbound option is not a
+    production invocation); the two `duplicated` shapes close the last-wins rebind that
+    an exactly-once-free presence check would wave through.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_corrupt_pinned_binding(
+            _producer_argv(
+                "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+            ),
+            option,
+            mode,
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert option in message
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES[option] in message
+    # The refusal is the tool-value gate's own, not the plan<->ledger equality binding:
+    # `_replace_capture_argv` rewrites BOTH sides, so equality still holds here.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_capture_argv_bound_to_a_foreign_database(tmp_path: Path) -> None:
+    """`--database` is pinned DYNAMICALLY, to the plan database the verifier validated.
+
+    A capture that snapshots another database is not evidence about this run, however
+    production-shaped every other binding is.
+    """
+
+    bundle = _bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_pre",
+        argv=_rebind_argv_option(
+            _producer_argv(
+                "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+            ),
+            "--database",
+            "postgres",
+        ),
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--database" in message
+    assert "postgres" in message
+    assert "nhms" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    ("tokens", "option"),
+    [
+        pytest.param(["--ps", _STUB_TOOL_PATH], "--psql", id="ps_abbreviation_pair"),
+        pytest.param(["--do", _STUB_TOOL_PATH], "--docker", id="do_abbreviation_pair"),
+        pytest.param([f"--rep={_STUB_TOOL_PATH}"], "--repo", id="rep_abbreviation_inline"),
+    ],
+)
+def test_verifier_rejects_argparse_rebinding_of_a_pinned_capture_option(
+    tmp_path: Path, tokens: list[str], option: str
+) -> None:
+    """The bypass class an exactly-once check alone cannot see.
+
+    capture.py parses with argparse's default `allow_abbrev=True`, so a trailing
+    `--ps /tmp/stub-tool` reaches `--psql` last-wins while the full-name equality above
+    still reads `/usr/bin/psql` -- the argv passes every value check and the producer
+    still runs the stub.  Closed here the same way #1259 closed it for the identity
+    anchor: the base is a proper prefix of a pinned option, so the token is refused.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=tokens)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert tokens[0] in message
+    assert option in message
+    # `_inject_capture_seam` appends to BOTH sides, so the plan<->ledger equality holds.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option() -> None:
+    """The zero-collision fact the pinned-option abbreviation rejection stands on.
+
+    Refusing every proper prefix of `--psql`/`--docker`/`--repo`/... is only safe while no
+    OTHER registered capture flag is such a prefix.  A future `--do-not-fsync` or `--rep`
+    would make a legitimate spelling something the verifier silently refuses -- it reddens
+    HERE instead, before it can ever reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert len(evidence.PINNED_CAPTURE_VALUE_OPTIONS) == 9
+    for pinned in evidence.PINNED_CAPTURE_VALUE_OPTIONS:
+        assert pinned in options, pinned
+        for option in options - {pinned}:
+            assert not (len(option) >= 3 and pinned.startswith(option)), (option, pinned)
+    # Non-vacuity: the rejection domain really is non-empty -- these bases are exactly the
+    # `len >= 3` proper prefixes the rebinding test above exercises, and none of them is a
+    # registered flag.
+    for base, pinned in (("--ps", "--psql"), ("--do", "--docker"), ("--rep", "--repo")):
+        assert base not in options
+        assert len(base) >= 3 and pinned.startswith(base) and base != pinned
+    # #1263: `--evidence-dir` joined the tuple on the same premise -- it is the ONLY
+    # registered `--e*` flag, so refusing `--e`/`--ev`/`--evi`/... collides with nothing.
+    # A future `--exclude-...` would redden here before it could reach a plan.
+    assert {option for option in options if option.startswith("--e")} == {"--evidence-dir"}
+
+
+def test_expected_capture_tool_values_match_the_plan_author_defaults() -> None:
+    """Drift guard: the verifier RESTATES the production values, it does not import them.
+
+    The restatement keeps the verifier a non-derived oracle (a plan_author edit cannot
+    move the expectation with it), so something has to notice when the two really do
+    diverge -- that is this test.  The five tool values are FUNCTION SIGNATURE defaults,
+    not module constants, so they are read off the signature.
+    """
+
+    signature = inspect.signature(plan_author.build_run_plan)
+    for option, parameter in (
+        ("--psql", "capture_psql"),
+        ("--systemctl", "capture_systemctl"),
+        ("--docker", "capture_docker"),
+        ("--journalctl", "capture_journalctl"),
+        ("--git", "capture_git"),
+    ):
+        assert evidence.EXPECTED_CAPTURE_TOOL_VALUES[option] == signature.parameters[parameter].default, option
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES["--repo"] == plan_author.DEFAULT_REPO
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES["--container"] == plan_author.DEFAULT_CONTAINER
+    # `--database` is pinned dynamically rather than literally, so its production value is
+    # bound through the plan itself; the plan-level check already pins THAT to the bundle.
+    assert plan_author.DEFAULT_DATABASE == "nhms"
+
+
+def test_expected_capture_tool_values_are_the_committed_production_literals() -> None:
+    """Anti-tautology: gate and fixtures share the map, so pin the WHOLE map literally.
+
+    The parametrized suites above iterate `EXPECTED_CAPTURE_TOOL_VALUES`, and the argv
+    templates build from it -- so a map that lost five entries, or whose `--repo` was
+    mis-derived from the ambient `REPO_ROOT` instead of `EXPECTED_REPO_PATH`, would pass
+    every one of them vacuously.  Whole-dict comparison, not key-by-key.
+    """
+
+    assert evidence.EXPECTED_CAPTURE_TOOL_VALUES == {
+        "--psql": "/usr/bin/psql",
+        "--systemctl": "/usr/bin/systemctl",
+        "--docker": "/usr/bin/docker",
+        "--journalctl": "/usr/bin/journalctl",
+        "--git": "/usr/bin/git",
+        "--repo": "/home/nwm/NWM",
+        "--container": "nhms-db",
+    }
+
+
+def test_default_plan_author_capture_argvs_pass_the_whole_capture_gate_stack(tmp_path: Path) -> None:
+    """Positive control: what production actually authors verifies.
+
+    The runbook invocation passes only `--mutation-head-sha`/`--output`, so every pinned
+    value in a real plan is exactly a `plan_author` default.  Swapping ALL TWELVE capture
+    argvs for the real authored ones (not just one) proves the gate stack admits the
+    production shape end to end -- a gate that were accidentally unsatisfiable, or a map
+    entry with no counterpart in the authored argv, reddens here rather than only ever
+    being exercised by rejections.
+    """
+
+    bundle = _bundle(tmp_path)
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path))
+    assert len(plan["captures"]) == len(evidence.EXPECTED_CAPTURE_SEQUENCE)
+    for capture in plan["captures"]:
+        _replace_capture_argv(bundle, tmp_path, kind=str(capture["kind"]), argv=list(capture["argv"]))
+    result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert result["verdict"] == evidence.PASS_VERDICT
+
+
+# --------------------------------------------------------------------------- #
+# #1263: the three residual argv shapes the anchor series left verifying PASS.
+# (1) A help early-exit token -- `-h`, `--help`, `--help=x` or an unambiguous
+# abbreviation -- makes the recorded producer leave inside argparse before it
+# collects anything, so the argv provably did NOT produce the snapshot it is
+# recorded against.  (2) `--evidence-dir` is the `os.statvfs` measurement input
+# behind the MIN_FREE_BYTES hard gates, so it is now bound RELATIONALLY to the
+# capture's own output directory.  argv[0] stays unpinned by design (its residual
+# trust root is recorded in the verifier, closure is producer-side).
+# --------------------------------------------------------------------------- #
+
+# The distinguishing substring of the relational evidence-dir gate's message: used to
+# assert the OTHER refusal classes are not it (and vice versa).
+_EVIDENCE_DIR_GATE_WORDING = "own output directory"
+# The seam and abbreviation refusal wordings, for the same attribution discipline.
+_SEAM_TOKEN_WORDING = "self-test seam token"
+_ABBREVIATION_WORDING = "an argparse abbreviation"
+_HELP_EARLY_EXIT_TOKENS = (
+    "-h",
+    "--help",
+    "--help=x",
+    "--h",
+    "--he",
+    "--hel",
+    # Single-dash CLUSTERS: argparse reads `-hx` as the short options `-h` + `-x`, so the
+    # auto help action fires exactly as it does for a bare `-h`.  An equality check on
+    # `-h` alone left this whole family verifying PASS.
+    "-hx",
+    "-hh",
+    "-help",
+    "-hs",
+)
+
+
+@pytest.mark.parametrize("token", _HELP_EARLY_EXIT_TOKENS)
+def test_verifier_rejects_a_capture_argv_carrying_a_help_early_exit_token(
+    tmp_path: Path, token: str
+) -> None:
+    """Every spelling of the help family, appended to an OTHERWISE VALID argv.
+
+    Measured (issue #1263): capture.py's parser keeps argparse's default
+    `add_help=True` and `main` calls `parse_args` first, so `-h`/`--help`/`--h`/`--he`/
+    `--hel` print the help text and `SystemExit(0)` while `--help=x` is a usage error
+    exiting 2 -- no capture runs in any of those cases.  Before this branch each one
+    verified PASS: identity-anchored, value-pinned, seam-free, and forensically false.
+
+    The single-dash CLUSTERS (`-hx`, `-hh`, `-help`, `-hs`) are the PR #1264 review's
+    bypass: argparse expands a single-dash token into short options, so each of them
+    reaches the very same auto help action, printing help and exiting 0 with zero
+    captures -- while an equality-on-`-h` gate saw nothing to refuse.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=[token])
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert token in message
+    # A refusal class of its own: not the seam branch, not either abbreviation branch,
+    # not the relational evidence-dir gate, and not the plan<->ledger equality binding
+    # (`_inject_capture_seam` appends to BOTH sides, so that equality still holds).
+    assert _SEAM_TOKEN_WORDING not in message
+    assert _ABBREVIATION_WORDING not in message
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_verifier_rejects_a_help_token_placed_between_the_pinned_bindings(tmp_path: Path) -> None:
+    """Position independence: the scan is per token, so a mid-argv `--help` is the same.
+
+    A trailing-token-only rejection would be trivially dodged by an author who put the
+    early-exit token anywhere else -- argparse does not care where it sits either.
+    """
+
+    bundle = _bundle(tmp_path)
+    argv = _producer_argv(
+        "sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=str(tmp_path / "capture-artifacts")
+    )
+    index = argv.index("--psql")
+    _replace_capture_argv(
+        bundle, tmp_path, kind="sizes_pre", argv=[*argv[:index], "--help", *argv[index:]]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--help" in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain() -> None:
+    """The zero-collision fact the help-token rejection stands on.
+
+    The gate refuses two DOMAINS: the whole single-dash `-h*` prefix (argparse expands
+    single-dash tokens into short-option clusters, so `-hx` reaches help exactly as `-h`
+    does) and every `len >= 3` prefix of `--help`.  Both are only safe while the capture
+    CLI registers no `--h*` business flag and no single-dash flag at all beyond
+    argparse's auto `-h`.  A future `--hosts` or `-v` would make a legitimate spelling
+    something the verifier silently refuses (or leave a single-dash flag outside the
+    rejection) -- it reddens HERE instead, before it can ever reach a plan.
+    """
+
+    parser = _capture._parser()
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {option for option in options if option.startswith("--h")} == {"--help"}
+    assert {option for option in options if not option.startswith("--")} == {"-h"}
+    # Non-vacuity: the abbreviations the gate refuses really are unregistered prefixes of
+    # the auto help flag -- argparse's `allow_abbrev=True` is what makes them reach it.
+    for base in ("--h", "--he", "--hel"):
+        assert base not in options
+        assert len(base) >= 3 and "--help".startswith(base)
+    # Same non-vacuity for the single-dash domain: `-h` is the only registered token the
+    # `-h*` prefix rejection swallows, so the cluster spellings it also refuses cost the
+    # capture CLI nothing.  (`"--help".startswith("-h")` is False, so the two arms of the
+    # gate address disjoint domains.)
+    assert not "--help".startswith("-h")
+    for cluster in ("-hx", "-hh", "-help", "-hs"):
+        assert cluster not in options
+        assert cluster.startswith("-h")
+
+
+@pytest.mark.parametrize(
+    "mode", ["mismatched", "absent", "duplicated_pair", "dangling_inline"]
+)
+def test_verifier_rejects_a_capture_argv_that_misbinds_the_evidence_dir(
+    tmp_path: Path, mode: str
+) -> None:
+    """The four shapes one relational equality has to refuse at once.
+
+    `mismatched` is the issue's smoking gun (an EXISTING, roomier sibling directory: the
+    statvfs headroom the snapshot records would be about that filesystem, not the one the
+    capture outputs claim); `absent` closes the omission; `duplicated_pair` and
+    `dangling_inline` close the last-wins rebind an exactly-once-free check waves through.
+    """
+
+    bundle = _bundle(tmp_path)
+    expected = str(tmp_path / "capture-artifacts")
+    other = tmp_path / "elsewhere-artifacts"
+    other.mkdir()
+    argv = _producer_argv("sizes_pre", "--mutation-head-sha", HEAD, evidence_dir=expected)
+    if mode == "mismatched":
+        argv = _rebind_argv_option(argv, "--evidence-dir", str(other))
+    elif mode == "absent":
+        index = argv.index("--evidence-dir")
+        argv = [*argv[:index], *argv[index + 2 :]]
+    elif mode == "duplicated_pair":
+        argv = [*argv, "--evidence-dir", str(other)]
+    else:
+        argv = [*argv, "--evidence-dir="]
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_pre", argv=argv)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--evidence-dir" in message
+    # The DERIVED expectation is printed, so the refusal shows what the relation demanded.
+    assert expected in message
+    assert _EVIDENCE_DIR_GATE_WORDING in message
+    # `_replace_capture_argv` rewrites BOTH sides, so this is the gate, not the equality.
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+@pytest.mark.parametrize(
+    "base", ["--ev", "--e"], ids=["ev_abbreviation_pair", "e_abbreviation_pair"]
+)
+def test_verifier_rejects_argparse_rebinding_of_the_evidence_dir_option(
+    tmp_path: Path, base: str
+) -> None:
+    """Abbreviation closure for the newly pinned option, in the SAME change.
+
+    The relational equality matches the full spelling only, so a trailing `--ev /roomy`
+    (or `--e`, which is length 3 and so reaches the mechanism) would rebind the measured
+    directory last-wins while the equality still read the derived value.  This is the
+    existing pinned-prefix branch doing its job on a widened tuple -- so the wording is
+    that branch's, and the relational gate itself never fires on such a token.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="catalog_before", tokens=[base, str(tmp_path / "elsewhere-artifacts")]
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert base in message
+    assert "--evidence-dir" in message
+    assert "pinned capture tooling value" in message
+    # The two refusals stay distinct: this is the abbreviation branch, not the equality
+    # gate (which the argv still satisfies), and not the plan<->ledger binding.
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+def _relocated_sizes_post_bundle(tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    """A bundle whose `sizes_post` capture writes into a tmp SUBDIRECTORY.
+
+    The relation the gate enforces is `output_path`-relative, so moving one capture's
+    output moves its expected `--evidence-dir` with it -- that is what the two tests
+    below pin from opposite sides.
+    """
+
+    bundle = _bundle(tmp_path)
+    nested = tmp_path / "nested-capture-root"
+    nested.mkdir()
+    ref = _json_ref(nested, "sizes-post.json", _sizes(post=True))
+    bundle["sizes"]["post"] = ref
+    _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
+    return bundle, nested
+
+
+def test_verifier_accepts_an_evidence_dir_bound_to_a_relocated_capture_output(
+    tmp_path: Path,
+) -> None:
+    """Relational, NOT absolute: the gate follows `output_path`, it does not pin a root.
+
+    A gate hardcoded to the plan's top-level root would refuse this bundle even though
+    its `--evidence-dir` is exactly the sibling of the capture's own output -- and would
+    equally refuse a production plan authored with any other `--root`.
+    """
+
+    bundle, nested = _relocated_sizes_post_bundle(tmp_path)
+    _replace_capture_argv(
+        bundle,
+        tmp_path,
+        kind="sizes_post",
+        argv=_producer_argv(
+            "sizes_post", "--mutation-head-sha", HEAD, evidence_dir=str(nested / "capture-artifacts")
+        ),
+    )
+    try:
+        result = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    except evidence.EvidenceError as error:  # pragma: no cover - defensive attribution
+        assert _EVIDENCE_DIR_GATE_WORDING not in str(error), str(error)
+    else:
+        assert result["verdict"] == evidence.PASS_VERDICT
+
+
+def test_evidence_dir_gate_accepts_a_plan_authored_with_a_trailing_slash_root(
+    tmp_path: Path,
+) -> None:
+    """The derivation is TEXTUAL (`rsplit`), and this is why that is load-bearing.
+
+    The double-slash spelling is SYNTHESIZED here by hand, and since #1265 that is the
+    only honest way to obtain it: `plan_author` now refuses a non-canonical `--root` at
+    authoring time (`test_plan_author_rejects_non_canonical_repo_and_root`), so the
+    production author can no longer emit `{root}//capture-artifacts` AND
+    `{root}//capture-<kind>.json`.  What this pin guards is therefore no longer a claim
+    about the producer but the VERIFIER's own verbatim textual posture: `--evidence-dir`
+    is derived from this capture's `output_path` by plain string `rsplit`, so whatever
+    spelling the two fields share round-trips exactly, while a `Path(...).parent` /
+    `os.path.dirname` "cleanup" would normalize the double slash away, derive
+    `{tmp_path}/capture-artifacts`, and refuse this bundle at the evidence-dir gate.  The
+    dirname-swap redness proof still holds; only the construction changed.
+
+    The bundle cannot reach PASS in this spelling for a reason that predates #1263 and is
+    NOT this gate's: `_artifact_bytes` returns `str(Path(ref["path"]))`, so the ledger
+    side of the capture output binding arrives normalized while the plan's `output_path`
+    stays raw, and the pre-existing equality at the ledger<->plan capture binding refuses
+    the pair.  That refusal is precisely the assertion: reaching it proves execution ran
+    PAST the relational evidence-dir gate, which is many checks earlier -- so the gate
+    accepted the double-slash round-trip.  Under a normalizing derivation the refusal
+    would instead be the evidence-dir gate's own, and this test reddens.
+    """
+
+    bundle = _bundle(tmp_path)
+    output_path = f"{tmp_path}//capture-sizes_post.json"
+    capture = next(
+        item for item in _read_ref(bundle["execution"]["run_plan"])["captures"] if item["kind"] == "sizes_post"
+    )
+    argv = list(capture["argv"])
+    # Rewritten BY OPTION NAME, not by offset: only this one value moves to the
+    # double-slash sibling, whatever shape the template argv happens to have.
+    argv[argv.index("--evidence-dir") + 1] = f"{tmp_path}//capture-artifacts"
+    # The two synthesized fields must satisfy the gate's textual relation BEFORE
+    # verification runs -- otherwise they could drift apart and the test would stop
+    # reaching (and therefore stop pinning) the gate at all.
+    assert argv[argv.index("--evidence-dir") + 1] == output_path.rsplit("/", 1)[0] + "/capture-artifacts"
+    raw = Path(bundle["sizes"]["post"]["path"]).read_bytes()
+    Path(output_path).write_bytes(raw)
+    ref = {"path": output_path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    bundle["sizes"]["post"] = ref
+    _replace_produced_artifact(bundle, "compression_enforce", "sizes_post", ref, tmp_path)
+    _replace_capture_argv(bundle, tmp_path, kind="sizes_post", argv=argv)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert message == "supervisor capture output path differs"
+    assert _EVIDENCE_DIR_GATE_WORDING not in message
+
+
+def test_verifier_rejects_an_evidence_dir_stranded_by_a_relocated_capture_output(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same relation: the template value is no longer the sibling.
+
+    Same relocation as the positive above, with `--evidence-dir` left at the top-level
+    `tmp_path/capture-artifacts` -- proving the derived expectation really tracks THIS
+    capture's `output_path` rather than any fixed root the fixture happens to use.
+    """
+
+    bundle, nested = _relocated_sizes_post_bundle(tmp_path)
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "--evidence-dir" in message
+    assert str(nested / "capture-artifacts") in message
+    assert str(tmp_path / "capture-artifacts") in message
+    assert _CAPTURE_EQUALITY_ERROR not in message
+
+
+# --------------------------------------------------------------------------- #
+# #1265: path canonicality is a PRODUCER-side precondition.  The verifier renders
+# ledger-side artifact refs through `str(Path(...))` but compares the plan side
+# VERBATIM, so a non-canonical `--root`/`--repo` used to author a perfectly
+# shape-valid plan whose bundle then deterministically FAILED the forensic gate
+# with "supervisor capture output path differs" -- a message about nothing the
+# operator actually did.  `plan_author` now refuses such input at the entrance;
+# the verifier's verbatim posture is untouched (that is the point of the route).
+# --------------------------------------------------------------------------- #
+
+# The forensic refusal a non-canonical root used to end up at, minutes later and with
+# an unrelated message.  Asserted ABSENT from the authoring refusals below: the guard
+# must be non-vacuously the new failure mode, not a rename of the old one.
+_CAPTURE_OUTPUT_PATH_ERROR = "supervisor capture output path differs"
+_NON_CANONICAL_PATHS = {
+    "trailing_slash": "/x/y/",
+    "duplicate_slash": "/x//y",
+    "dot_segment": "/x/./y",
+    # The two normalization-stable-yet-slash-terminated strings the guard's second
+    # conjunct exists for (`str(Path("//")) == "//"`): a `root="//"` would emit
+    # `///capture-<kind>.json`, which BOTH verifier-side normalizations collapse to
+    # `/capture-<kind>.json` -- recreating exactly the false refusal this guard kills.
+    "bare_slash_root": "/",
+    "double_slash_root": "//",
+    # The third conjunct's own red.  `..` IS normalization-stable and symmetric on both
+    # verifier sides, so neither of the first two conjuncts sees it -- but the no-follow
+    # walkers (`safe_fs._absolute_parts`) refuse any `..` component, on the supervisor's
+    # first capture write AND on the verifier's artifact reads, while prearm normalizes
+    # first and passes.  Unguarded, such a root authors fine, prearms green, and aborts
+    # INSIDE the one-shot replay window with "Unsafe path component: '..'".
+    "dot_dot_segment": "/x/../y",
+}
+
+
+@pytest.mark.parametrize("label", ["root", "repo", "schema_dump_host"])
+@pytest.mark.parametrize("shape", sorted(_NON_CANONICAL_PATHS))
+def test_plan_author_rejects_non_canonical_repo_and_root(label: str, shape: str) -> None:
+    """All three labels, all six shapes: refused at authoring with an ACCURATE message.
+
+    `repo` matters as much as `root`: it f-strings the command argv paths the verifier
+    pins against `expected_executable` literals, so a trailing-slash repo poisons the
+    command side exactly the way a trailing-slash root poisons the capture side.  The
+    message must name the label, the offending value and its canonical rendering --
+    an operator who mistypes a slash should learn that from the author, not from a
+    forensic verdict about capture output paths half an hour later.
+
+    `schema_dump_host` (#1268) is the same disease one field over: the value goes
+    verbatim into the pg_dump argv and into that command's `artifact_associations`, while
+    the verifier renders the ledger-side artifact ref through `str(Path(...))` and
+    compares the plan side VERBATIM in `_validate_supervisor_execution` -- so a `//`-bearing
+    host dump path authored a plan whose bundle could only ever fail with "supervisor
+    observed artifact path differs from run plan output".  A `..` component takes a
+    different route to the same class: prearm passes it (`is_absolute` only), and the
+    supervisor's produced-artifact no-follow inspect aborts the moment pg_dump exits,
+    inside the one-shot replay window.
+    """
+
+    value = _NON_CANONICAL_PATHS[shape]
+    with pytest.raises(plan_author.PlanAuthorError) as excinfo:
+        plan_author.build_run_plan(mutation_head_sha=HEAD, **{label: value})
+    message = str(excinfo.value)
+    assert label in message
+    assert value in message
+    assert str(Path(value)) in message
+    assert _CAPTURE_OUTPUT_PATH_ERROR not in message
+
+
+def test_plan_author_accepts_a_canonical_root(tmp_path: Path) -> None:
+    """Positive: a canonical root still authors, and every path it records is canonical.
+
+    The end-to-end control is
+    `test_default_plan_author_capture_argvs_pass_the_whole_capture_gate_stack`, which
+    authors with `root=str(tmp_path)` and verifies all twelve capture argvs to PASS.
+    This one adds the attribution that control cannot give on its own: authoring raises
+    nothing, and each recorded `output_path` is Path-normalization-stable -- the exact
+    property the verifier's verbatim plan-side comparisons depend on.
+    """
+
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=str(tmp_path))
+    assert len(plan["captures"]) == len(evidence.EXPECTED_CAPTURE_SEQUENCE)
+    for capture in plan["captures"]:
+        output_path = str(capture["output_path"])
+        assert output_path == str(Path(output_path)), output_path
+
+
+def test_plan_author_accepts_a_canonical_custom_schema_dump_host(tmp_path: Path) -> None:
+    """Positive for the #1268 label: a canonical host dump path authors, VERBATIM.
+
+    The guard's job is to refuse, never to rewrite: the value the operator passed must
+    land byte-identical in the pg_dump argv and in that command's
+    `artifact_associations["schema_dump"]`, because the verifier compares exactly those
+    recorded bytes against the Path-normalized ledger ref (the association comparison in
+    `_validate_supervisor_execution`).  A guard that silently canonicalized instead of
+    refusing would make the plan's recorded bytes differ from what the operator reviewed
+    -- a different, quieter defect.
+    """
+
+    dump = str(tmp_path / "schema-before.dump")
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, schema_dump_host=dump)
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_dump")
+    assert command["artifact_associations"]["schema_dump"] == dump
+    assert command["argv"][-1] == dump
+
+
+def test_plan_author_accepts_the_boundary_double_slash_schema_dump_host() -> None:
+    """The `//x` boundary, extended to the third guarded label (#1268).
+
+    `test_plan_author_accepts_the_recorded_boundary_root` pins the LEADING double slash
+    for `root`; the guard is one shared loop, so the carve-out is transitive in the code
+    but only executable for one label.  This makes it executable for `schema_dump_host`
+    as well: POSIX (and pathlib) preserve exactly two leading slashes, so
+    `//x/schema-before.dump` is normalization-stable, and both sides that compare this
+    value -- the verifier's verbatim plan-side association read and the `str(Path(...))`
+    ledger-side rendering -- land on the same bytes.  Asserts the recording is VERBATIM
+    on both the pg_dump argv slot and the association, the same posture the canonical
+    positive above pins.
+    """
+
+    dump = "//x/schema-before.dump"
+    assert str(Path(dump)) == dump
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, schema_dump_host=dump)
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_dump")
+    assert command["artifact_associations"]["schema_dump"] == dump
+    assert command["argv"][-1] == dump
+
+
+def test_plan_author_module_defaults_are_canonical() -> None:
+    """Structural: the guard can never refuse the module's own defaults.
+
+    The runbook's authorized command passes neither `--root` nor `--repo` -- and no
+    `--schema-dump-host` either -- so all three defaults go straight through the clause
+    on every production authoring.  The negatives above prove the clause really does
+    refuse; without this pin a stray trailing slash in any of the literals would ship
+    an author that cannot author at all.
+    """
+
+    for name in ("DEFAULT_ROOT", "DEFAULT_REPO", "DEFAULT_SCHEMA_DUMP_HOST"):
+        value = getattr(plan_author, name)
+        assert value == str(Path(value)), name
+        assert not value.endswith("/"), name
+
+
+def test_plan_author_accepts_the_recorded_boundary_root() -> None:
+    """The one boundary the guard comment records as DELIBERATELY still accepted.
+
+    A LEADING double slash: POSIX (and pathlib) preserve exactly two leading slashes,
+    so `//x` is normalization-stable and its f-string expansions stay symmetric on
+    both verifier sides -- unlike the bare `//` root, whose `///…` expansion collapses
+    (that asymmetry is why `//` is in the negatives above and `//x` is here).  The
+    third conjunct leaves it alone too: `PurePosixPath("//x").parts` is `("//", "x")`,
+    and the no-follow walkers filter the anchor out before looking for `..`.  Asserts
+    the probe property the guard buys: for every accepted root R,
+    `str(Path(f"{R}/x")) == f"{R}/x"`.  (A `..` root was recorded as a second accepted
+    boundary until fix round 1 of #1265 showed it aborts mid-replay-window on the
+    no-follow walkers; it is now one of the negatives above.)
+    """
+
+    root = "//x"
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD, root=root)
+    capture = next(item for item in plan["captures"] if item["kind"] == "sizes_post")
+    assert capture["output_path"] == f"{root}/capture-sizes_post.json"
+    assert str(Path(capture["output_path"])) == capture["output_path"]
+
+
+def test_plan_author_leaves_the_container_dump_path_unguarded_by_adjudication() -> None:
+    """The recorded adjudication (#1268), in executable form: container path NOT guarded.
+
+    `--schema-dump-container` names a path inside the DB container, and the ruling that
+    it stays outside the canonicality guard rests on SYMMETRY ALONE -- not on any "no
+    verifier checks it" claim, which is false: the supervisor extracts it and
+    `sha256sum`s it in the container.  The complete consumer set is (a) plan_author's
+    pg_restore `--list` command block, whose command records NO artifact associations, so
+    the verbatim-vs-normalized association comparison in `_validate_supervisor_execution`
+    never sees it; (b) the verifier's containment+shape argv gate
+    (`_validate_exact_command_argv`, `pg_restore_list` branch) and the same containment
+    check on the captured listing (`_validate_dump_listing`); (c) the supervisor's mirror
+    gates -- `_assert_exact_argv` and `resolve_container_pg_restore_identity` (invoked
+    from `execute_producer_state_machine`), which takes
+    `argv[-1]` verbatim, asserts the same mount containment and hashes that exact string;
+    and (d) the CAPTURE argv route -- plan_author's `schema_dump_list` capture argv
+    carries `--schema-dump-container` too, the supervisor's pre-spawn capture gate
+    (`_assert_capture_producer_argv`) asserts the same containment on that bound value,
+    capture.py :531/:533 then executes `docker exec pg_restore --list` on it and records
+    `list_argv` into the forensic bundle, and the capture-argv equality inside
+    `_validate_supervisor_execution` compares the WHOLE capture argv by EXACT equality.
+    (Cross-file sites are named by SYMBOL, not by line number: #1269 shifted both gate
+    modules and staled every number this docstring used to carry.)  Since #1269 all five
+    of those gates ask the shared
+    `container_dump_path_within_mount` predicate (mount prefix AND no `..` component),
+    which JUDGES and never rewrites -- so every one of them stays textual with zero
+    `Path()` normalization on either side, and the false-refusal disease this guard
+    exists for still cannot reach this field.  This test is the "no third silent state"
+    pin: an interior `//` container path (which the predicate admits, `PurePosixPath`
+    dropping the empty component) AUTHORS, and lands verbatim as the pg_restore list
+    argv's last element.  If a future change decides to guard the container path AT
+    AUTHORING TIME, THIS is the test that must be flipped consciously -- the ruling
+    cannot erode by accident.
+    """
+
+    container_dump = "/var/lib/postgresql//evidence/schema-before.dump"
+    plan = plan_author.build_run_plan(
+        mutation_head_sha=HEAD, schema_dump_container=container_dump
+    )
+    command = next(item for item in plan["commands"] if item["kind"] == "pg_restore_list")
+    assert command["argv"][-1] == container_dump
+    assert command["artifact_associations"] == {}
+
+
+@pytest.mark.parametrize("label", ["root", "repo", "schema_dump_host"])
+def test_plan_author_rejects_relative_paths_for_every_guarded_label(label: str) -> None:
+    """The fifth shape: a RELATIVE value, refused by the pre-existing absolute branch.
+
+    That branch (`{label} must be an absolute path`) runs first inside the same loop, so
+    extending the loop's domain extended it to `schema_dump_host` for free.  Its message
+    posture is deliberately WEAKER than the canonicality branch's: it names the label but
+    NOT the offending value and NOT a canonical rendering -- there is no meaningful
+    canonical rendering for a relative path, and this test records that difference rather
+    than claiming the two messages are equivalent.  Pinning the branch per label means a
+    future refactor that moves the `is_absolute` check out of the loop cannot silently
+    drop the refusal for one of them.
+    """
+
+    value = "relative/schema.dump"
+    with pytest.raises(plan_author.PlanAuthorError) as excinfo:
+        plan_author.build_run_plan(mutation_head_sha=HEAD, **{label: value})
+    message = str(excinfo.value)
+    assert label in message
+    assert "must be an absolute path" in message
+
+
+# --------------------------------------------------------------------------- #
+# #1269: the container dump path gates judge CONTAINMENT, not a string opening.
+# FOUR of today's five gates used to spell "inside the DB container data mount"
+# as a bare `startswith("/var/lib/postgresql/")`; the fifth -- the supervisor's
+# pre-spawn capture-argv gate -- did not judge the path at all until this change
+# gave it a check.  So `/var/lib/postgresql/../../../etc/shadow` passed every
+# route and then got `docker exec sha256sum`-ed (its digest recorded as
+# `dump_sha256`) and `docker exec pg_restore --list`-ed inside the container.  Of
+# the four inline copies only `resolve_container_pg_restore_identity`'s refusal
+# claimed containment ("pg_restore dump path is outside the DB container data
+# mount"); the other three say only "argv differs" / "argv/output ownership
+# differs" / "not verifiable".  One shared predicate now answers the question for
+# all five, and it JUDGES ONLY -- no normalization enters the lane, so the
+# verbatim posture and the #1268 authoring adjudication are both untouched.
+# --------------------------------------------------------------------------- #
+
+# The predicate is exercised through the verifier module's by-name binding rather than
+# through a direct `node27_container_contract` import: this suite is the pinned
+# TRANSITIVE-ONLY member of the contract's CI dependent closure
+# (tests/test_select_ci_tests.py's anti-vacuity floor), so a direct import line here
+# would quietly demote that floor to a grep-findable one.  The binding is the same
+# function object either way, and the drift guard below asserts both gate planes hold
+# exactly that object.
+
+# One leaves straight from the mount root, the other from a real subdirectory.
+_MOUNT_ROOT_TRAVERSAL = "/var/lib/postgresql/../../../etc/shadow"
+_SUBDIR_TRAVERSAL = "/var/lib/postgresql/evidence/../../../../etc/passwd"
+_CONTAINER_DUMP_TRAVERSALS = (_MOUNT_ROOT_TRAVERSAL, _SUBDIR_TRAVERSAL)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("/var/lib/postgresql/evidence/schema-before.dump", id="plan_author_default"),
+        # #1268's adjudicated shape: `PurePosixPath` drops the empty component, so the
+        # gates see no `..` and admit it exactly as the bare prefix did.
+        pytest.param("/var/lib/postgresql//evidence/schema.dump", id="interior_double_slash"),
+        # `parts` drops the trailing empty component too -- today's gate behaviour,
+        # and normalization leaves this row admitted as well, so it discriminates
+        # nothing between implementations.
+        pytest.param("/var/lib/postgresql/evidence/", id="trailing_slash"),
+        # THE discriminating accept row: a `resolve()`/`normpath`-based
+        # implementation turns this into `/var/lib/postgresql`, which no longer
+        # carries the trailing-slash prefix, so this is the one accept row such an
+        # implementation would silently flip to a refusal.
+        pytest.param("/var/lib/postgresql/", id="bare_mount_root"),
+        # `..` is a whole-COMPONENT test, not a substring one: a filename may contain it.
+        pytest.param("/var/lib/postgresql/evidence/a..b.dump", id="dots_inside_a_filename"),
+    ],
+)
+def test_container_dump_path_within_mount_accepts_in_mount_values(value: str) -> None:
+    assert evidence.container_dump_path_within_mount(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_MOUNT_ROOT_TRAVERSAL, id="traversal_from_mount_root"),
+        pytest.param(_SUBDIR_TRAVERSAL, id="traversal_from_subdirectory"),
+        pytest.param("/var/lib/postgresql/..", id="bare_parent_of_the_mount"),
+        # The shortest escape that still looks like it descends first.
+        pytest.param("/var/lib/postgresql/x/..", id="escape_after_one_real_segment"),
+        # The dangling-flag sentinel gate 5 hands over; it fails the prefix conjunct.
+        pytest.param("", id="empty_string_sentinel"),
+        pytest.param("/tmp/schema.dump", id="prefix_miss"),
+    ],
+)
+def test_container_dump_path_within_mount_rejects_escaping_values(value: str) -> None:
+    assert evidence.container_dump_path_within_mount(value) is False
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_verifier_pg_restore_list_argv_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Gate 1, reached directly: the plan-side argv gate refuses on its own.
+
+    Hand-crafted argv, no upstream gate involved -- a bundle whose plan never passed
+    through `plan_author` is exactly the case these gates exist for.
+    """
+
+    with pytest.raises(evidence.EvidenceError, match="pg_restore list argv differs"):
+        evidence._validate_exact_command_argv(
+            ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path],
+            kind="pg_restore_list",
+            associations={},
+            label="run plan command[2]",
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_verifier_pg_restore_list_argv_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity for the gate-1 refusal, including the #1268 interior-`//` shape."""
+
+    evidence._validate_exact_command_argv(
+        ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list", dump_path],
+        kind="pg_restore_list",
+        associations={},
+        label="run plan command[2]",
+    )
+
+
+def _dump_listing(dump_path: str) -> dict[str, Any]:
+    """A schema-dump-list document whose only variable is the container dump path."""
+
+    listing = {
+        "captured_at": "2026-07-15T11:20:00Z",
+        "snapshot_id": "schema-dump-list",
+        "mutation_head_sha": HEAD,
+        **_pg_restore_record("3" * 64),
+    }
+    listing["list_argv"][-1] = dump_path
+    return listing
+
+
+@pytest.mark.parametrize("dump_path", _CONTAINER_DUMP_TRAVERSALS)
+def test_captured_listing_gate_refuses_a_traversal_dump_path(dump_path: str) -> None:
+    """Gate 2, reached directly with a hand-crafted listing document.
+
+    This is the gate that judges what the capture producer ALREADY ran, so it has to
+    refuse independently of whether the plan-side gate above ever saw the same value.
+    """
+
+    with pytest.raises(
+        evidence.EvidenceError, match="schema forensic dump/list identity is not verifiable"
+    ):
+        evidence._validate_dump_listing(
+            _dump_listing(dump_path),
+            dump_ref={"sha256": "3" * 64},
+            mutation_head_sha=HEAD,
+        )
+
+
+@pytest.mark.parametrize(
+    "dump_path",
+    [
+        "/var/lib/postgresql/evidence/schema.dump",
+        "/var/lib/postgresql//evidence/schema.dump",
+    ],
+)
+def test_captured_listing_gate_admits_in_mount_dump_paths(dump_path: str) -> None:
+    """Non-vacuity for gate 2, and the verbatim posture: the value comes back unrewritten."""
+
+    validated = evidence._validate_dump_listing(
+        _dump_listing(dump_path),
+        dump_ref={"sha256": "3" * 64},
+        mutation_head_sha=HEAD,
+    )
+    assert validated["list_argv"][-1] == dump_path
+
+
+def test_verifier_plan_capture_gate_refuses_a_container_dump_abbreviation(tmp_path: Path) -> None:
+    """The mirrored anchored tuple's own behaviour change, on the verifier plane.
+
+    `--schema-dump-container` joined `ANCHORED_CAPTURE_OPTIONS` so an abbreviation cannot
+    smuggle the binding past the supervisor's exact-base value scan; because the tuples
+    are pinned equal cross-plane, the verifier's plan-capture gate newly refuses the same
+    spelling.  No committed producer emits abbreviations, so nothing legitimate moves.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle,
+        tmp_path,
+        kind="schema_dump_list",
+        tokens=[f"--schema-dump-c={_MOUNT_ROOT_TRAVERSAL}"],
+    )
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(excinfo.value)
+    assert "abbreviation of --schema-dump-container" in message
+
+
+def test_no_gate_module_retains_an_inline_container_mount_prefix_check() -> None:
+    """Single-source drift guard: the predicate has exactly one home.
+
+    A future edit that "just adds the prefix check back" at one gate would reopen the
+    hole at that gate alone.  This guard is a SPELLING scan, so state exactly what it
+    buys: it catches the three spellings such an edit would plausibly reach for -- the
+    double-quoted literal the four old gates used, its single-quoted twin (ruff selects
+    only E,F,I here, so no rule forces one quote style), and a `startswith` of the now
+    exported `CONTAINER_DB_MOUNT_PREFIX`.  It cannot catch every possible re-spelling
+    (`value[: len(prefix)] == prefix`, a locally re-declared literal, ...); the real
+    backstop against a reopened hole is the per-gate behavioural traversal refusals --
+    the verifier gates above, the supervisor gates in
+    `test_node27_timeseries_compression_supervisor.py` -- which judge what each gate
+    DOES rather than how it is written.
+    Scoped to the two GATE modules: `plan_author`'s DEFAULT container path is a value
+    literal, not a containment check, and stays deliberately out of scope.
+    """
+
+    inline_checks = (
+        'startswith("/var/lib/postgresql/")',
+        "startswith('/var/lib/postgresql/')",
+        "startswith(CONTAINER_DB_MOUNT_PREFIX)",
+    )
+    for name in (
+        "scripts/node27_timeseries_compression_live_evidence.py",
+        "scripts/node27_timeseries_compression_supervisor.py",
+    ):
+        source = (ROOT / name).read_text(encoding="utf-8")
+        for inline_check in inline_checks:
+            assert source.count(inline_check) == 0, (name, inline_check)
+        assert "container_dump_path_within_mount" in source, name
+    # Single SOURCE, not merely a single spelling: both planes hold the one function
+    # object the contract module exports, so there is no second copy to drift.
+    assert supervisor.container_dump_path_within_mount is evidence.container_dump_path_within_mount

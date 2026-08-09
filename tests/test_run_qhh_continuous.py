@@ -264,7 +264,7 @@ def test_slurm_wait_timeout_while_job_active_returns_nonterminal_status(
         return subprocess.CompletedProcess(command, 0, stdout="RUNNING\n", stderr="")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
-    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_values, float("inf")))
     monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
 
     status = runner._wait_for_slurm_job("5743", wait_timeout_seconds=1, accounting_timeout_seconds=1)

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
@@ -21,15 +22,14 @@ LOCK_TIMEOUT_MS = 5_000
 EXPECTED_DATABASE = "nhms"
 EXPECTED_NODE = "node-27"
 EXPECTED_INSTANCE = "node27-primary-pg15"
-TARGET = {
-    "hypertable_schema": "hydro",
-    "hypertable_name": "river_timeseries",
-    "chunk_schema": "_timescaledb_internal",
-    "chunk_name": "_hyper_3_7_chunk",
-    "range_start": "2026-05-28T00:00:00Z",
-    "range_end": "2026-06-04T00:00:00Z",
-}
-TARGET_RELATION = "_timescaledb_internal._hyper_3_7_chunk"
+# Derived from the six-field recovery-target contract instead of copied (issue
+# #1245): this was the last production Python copy outside the bound set.  The
+# KEY SET is the CLI contract -- ``_parser`` generates one required flag per key
+# and ``main`` reassembles the dict from them -- so a key rename here renames the
+# flags; key ORDER only affects usage/help text (receipt JSON is emitted with
+# ``sort_keys=True``).
+TARGET = dict(contract.RECOVERY_TARGET_FIELDS)
+TARGET_RELATION = f"{contract.RECOVERY_TARGET_CHUNK_SCHEMA}.{contract.RECOVERY_TARGET_CHUNK_NAME}"
 CATALOG_SQL = """
 SELECT is_compressed, range_start, range_end
 FROM timescaledb_information.chunks

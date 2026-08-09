@@ -4,7 +4,9 @@ import json
 import os
 import shlex
 import subprocess
-from datetime import UTC, datetime
+import time
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1027,8 +1029,8 @@ def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> N
 def test_slurm_error_codes_align_with_retry_sets() -> None:
     assert "SLURM_TIMEOUT" in TRANSIENT_ERROR_CODES
     assert "NODE_FAILURE" in TRANSIENT_ERROR_CODES
-    assert "OUT_OF_MEMORY" in TRANSIENT_ERROR_CODES
-    assert "OUT_OF_MEMORY" not in NON_TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
+    assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
 
@@ -3283,6 +3285,61 @@ def test_parse_slurm_datetime_rejects_garbage(tmp_path):
 
     with pytest.raises(SlurmParseError):
         gateway._parse_slurm_datetime("definitely-not-a-time")
+
+
+@contextmanager
+def _pinned_local_timezone(tz_name: str):
+    """Pin the process (libc) local timezone, restoring both TZ and tzset state."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = tz_name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_parse_slurm_datetime_converts_bare_local_timestamp_to_utc(tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("Asia/Shanghai"):
+        parsed = gateway._parse_slurm_datetime("2026-07-12T08:00:00")
+
+    assert parsed == datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_parse_slurm_datetime_passes_through_offset_aware_timestamp(tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("Asia/Shanghai"):
+        parsed = gateway._parse_slurm_datetime("2026-07-12T08:00:00Z")
+
+    assert parsed == datetime(2026, 7, 12, 8, 0, tzinfo=UTC)
+
+
+def test_sacct_record_timestamps_are_timezone_aware_utc(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        stdout = "12345|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    record = gateway.get_job_status("12345")
+
+    assert record.status == SlurmJobStatus.SUCCEEDED
+    for timestamp in (record.finished_at, record.started_at, record.submitted_at):
+        assert timestamp is not None
+        assert timestamp.tzinfo is not None
+        assert timestamp.utcoffset() == timedelta(0)
 
 
 def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):

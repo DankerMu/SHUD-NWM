@@ -106,9 +106,112 @@ def build_run_plan(
 
     if re.fullmatch(r"[0-9a-f]{40}", mutation_head_sha) is None:
         raise PlanAuthorError("mutation head sha must be 40 lowercase hex characters")
-    for label, value in (("repo", repo), ("root", root)):
+    for label, value in (("repo", repo), ("root", root), ("schema_dump_host", schema_dump_host)):
         if not Path(value).is_absolute():
             raise PlanAuthorError(f"{label} must be an absolute path")
+        # Canonicality is a PRODUCER-side precondition, deliberately not a verifier
+        # concern: the verifier renders ledger-side artifact refs through
+        # ``str(Path(...))`` (live_evidence's ``_artifact_bytes`` and
+        # ``_artifact_ref_from_raw``, each on both the incoming ``ref["path"]`` and the
+        # returned ref) while comparing the plan side VERBATIM at two equality sites in
+        # ``_validate_supervisor_execution`` -- capture ``output_path`` (refusal
+        # "supervisor capture output path differs") and command
+        # ``artifact_associations`` (refusal "supervisor observed artifact path differs
+        # from run plan output").  A non-canonical repo/root therefore
+        # authors a plan that looks fine and whose bundle deterministically false-refuses
+        # minutes later with a message ("supervisor capture output path differs") that
+        # says nothing about the operator's actual mistake -- an extra slash.  The
+        # verifier judges the recorded bytes and invents no normalization, so the closure
+        # belongs here, at the entrance.
+        #
+        # ALL THREE conjuncts are load-bearing.  Normalization-stability refuses trailing
+        # slashes (``/x/y/``), interior duplicate slashes (``/x//y``) and ``/./``
+        # segments; ``endswith("/")`` refuses ``/`` and ``//``, the ONLY
+        # normalization-stable strings that end in a slash (POSIX preserves exactly two
+        # leading slashes, so ``str(Path("//")) == "//"``).  Without it a ``root="//"``
+        # would emit ``///capture-<kind>.json``, which BOTH verifier-side normalizations
+        # collapse to ``/capture-<kind>.json`` -- exactly the false-refusal middle state
+        # this guard exists to eliminate.  Together those two give the probe property:
+        # for every accepted root R, ``str(Path(f"{R}/x")) == f"{R}/x"``.
+        #
+        # The ``..``-parts conjunct closes a DIFFERENT failure mode, and NOT a
+        # normalization one: ``..`` is normalization-stable (pathlib preserves it) and
+        # round-trips symmetrically on both verifier sides, yet
+        # ``safe_fs._absolute_parts`` (packages/common/safe_fs.py) raises
+        # ``Unsafe path component`` for any ``.``/``..`` component, and the no-follow
+        # walkers built on it are used by BOTH the supervisor's first capture write
+        # (supervisor's ``_artifact_ref`` -> ``atomic_write_bytes_no_follow``)
+        # and the verifier's artifact reads (live_evidence's ``_artifact_bytes`` ->
+        # ``read_bounded_bytes_with_identity_no_follow``).
+        # Prearm normalizes before it checks, so it PASSES a ``..`` root: the plan authors
+        # fine, prearm goes green, and the run then aborts INSIDE the one-shot replay
+        # window with ``SafeFilesystemError: Unsafe path component: '..'`` -- an
+        # authored-but-aborts-mid-window state, the same disease class as the false
+        # refusal above.
+        #
+        # ``schema_dump_host`` (#1268) is the SAME disease one field over, so it joined
+        # this loop rather than growing a second rule: it is recorded verbatim into the
+        # pg-dump command block below (its argv ``--file`` slot and that command's
+        # ``artifact_associations``), and all three conjuncts carry for it.  (ALL anchors
+        # here are named, never numbered -- into THIS file because an edit to this comment
+        # shifts its own line numbers, and CROSS-FILE because those files move too: #1269
+        # shifted both gate modules and staled every number this comment carried.  A
+        # number survives only where no symbol names the site, and is verified against the
+        # target file at that commit.)  An interior ``//`` false-refuses at the
+        # verbatim-vs-normalized association comparison in live_evidence's
+        # ``_validate_supervisor_execution`` ("supervisor observed artifact path differs
+        # from run plan output"), because the ledger-side ref arrives
+        # ``str(Path(...))``-rendered.  A ``..`` component gets past prearm (its
+        # ``plan_owned_paths`` checks only ``is_absolute``), but the SUPERVISOR's
+        # produced-artifact no-follow inspect (the ``inspect_bounded_file_no_follow``
+        # walk over ``artifact_associations`` in ``run_child``) refuses it the moment
+        # pg_dump exits -- before any ledger ref exists -- and the VERIFIER's own
+        # no-follow artifact read would refuse it identically.  The slash-roots degenerate
+        # exactly as for ``root``.
+        #
+        # Deliberately still ACCEPTED, recorded: a LEADING double slash (``//x``) --
+        # normalization-stable, its f-string expansions are symmetric on both verifier
+        # sides, and its ``//`` anchor is filtered out before the parts walk, so the
+        # no-follow primitives take it too.  Left unvalidated on purpose:
+        # ``capture_repo`` (hermetic-only test kwarg; the verifier value-pins ``--repo``
+        # anyway) and ``schema_dump_container`` -- the latter on SYMMETRY grounds ALONE,
+        # never on a "no verifier checks it" claim (the supervisor does check it, and
+        # ``sha256sum``s it inside the container).  It never enters artifact associations
+        # (the pg-restore-list command block below records none, so the association
+        # comparison in ``_validate_supervisor_execution`` never sees it), and its ENTIRE
+        # consumer set -- all five chains -- compares it textually with zero
+        # normalization on either side: the verifier's containment+shape argv gate
+        # (live_evidence's ``_validate_exact_command_argv``, ``pg_restore_list`` branch)
+        # and the same containment check on the captured listing
+        # (``_validate_dump_listing``), the supervisor's mirror gates -- the identical
+        # containment+shape check in ``_assert_exact_argv`` and
+        # ``resolve_container_pg_restore_identity`` (invoked from
+        # ``execute_producer_state_machine``), which
+        # takes ``argv[-1]`` verbatim, asserts the same mount containment and
+        # ``docker exec sha256sum``s that exact string -- and, fifth, the CAPTURE argv
+        # route: the schema-dump-list capture argv built below also carries
+        # ``--schema-dump-container``, the supervisor's pre-spawn capture gate
+        # (``_assert_capture_producer_argv``) asserts the same containment on that bound
+        # value, capture.py :531/:533 then runs ``docker exec pg_restore --list`` on it
+        # and records ``list_argv`` into the forensic bundle, and live_evidence's
+        # ``_validate_supervisor_execution`` compares the WHOLE capture argv by EXACT
+        # equality -- again verbatim, zero normalization (the
+        # ``EXPECTED_CAPTURE_TOOL_VALUES`` header comment there records both
+        # ``--schema-dump-*`` options as deliberately not value-pinned).  Since #1269
+        # those five gates spell containment through the shared
+        # ``node27_container_contract.container_dump_path_within_mount`` predicate --
+        # mount prefix AND no ``..`` component -- which JUDGES and never rewrites, so
+        # they stay textual and this symmetry argument is untouched (an interior ``//``
+        # still passes every one of them; the predicate refuses only escapes).  The
+        # verbatim-vs-normalized false refusal therefore cannot occur for it; an
+        # adjudication test pins that ruling so a future change guarding it AT AUTHORING
+        # TIME must flip the test consciously.
+        if value != str(Path(value)) or value.endswith("/") or ".." in Path(value).parts:
+            raise PlanAuthorError(
+                f"{label} must be a canonical absolute path (no trailing slash, "
+                f"duplicate slashes or dot segments): {value!r} is not canonical "
+                f"(canonical rendering: {str(Path(value))!r})"
+            )
 
     python = f"{repo}/.venv/bin/python"
     wrapper = f"{repo}/scripts/node27_timeseries_compression_once.sh"

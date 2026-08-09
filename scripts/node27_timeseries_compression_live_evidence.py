@@ -50,6 +50,7 @@ from packages.common.node27_container_contract import (
     CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
     SYSTEMD_UNSET_TIMESTAMP,
+    container_dump_path_within_mount,
 )
 
 SCHEMA_VERSION = "3.0"
@@ -73,7 +74,98 @@ MAX_GIT_BLOB_BYTES = 8 * 1024**2
 MAX_SUBPROCESS_OUTPUT_BYTES = 16 * 1024**2
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 QUALIFYING_SCHEMA_VERSION = "3.0"
+# Every `argparse.SUPPRESS`-hidden capture-CLI flag carries this prefix: those flags
+# are hermetic self-test seams that change what the producer executes or what it
+# records (`--self-test-docker-seam`, `--self-test-free-bytes`).  Production
+# `plan_author` never emits one, so a run plan carrying such a token is not
+# production forensics and must never reach a PASS verdict.  Frozen as a PREFIX, not
+# an enumerated list, so every future `--self-test-*` flag is rejected by
+# construction rather than by remembering to register it here.
+SELF_TEST_SEAM_PREFIX = "--self-test-"
 EXPECTED_REPO_PATH = "/home/nwm/NWM"
+# The committed capture producer, pinned absolutely -- same posture as the command-side
+# `expected_executable` map.  A bundle claims PRODUCTION forensics, so its run-plan
+# capture argv must name the reviewed checkout's capture script and nothing else; shape
+# alone (`_concrete_argv`) would happily accept `/usr/bin/printf`.
+EXPECTED_CAPTURE_SCRIPT = f"{EXPECTED_REPO_PATH}/scripts/node27_timeseries_compression_capture.py"
+# The capture-CLI options the identity anchor binds.  capture.py's parser runs with
+# argparse's default `allow_abbrev=True` and all three options bind last-wins, so
+# anchoring the FIRST occurrence is not enough: a later `--k <other>`, `--kin=<other>`
+# or `--m <sha>` token would silently rebind what the producer was actually asked to do.
+# `--schema-dump-container` joined the domain with #1269: the supervisor's pre-spawn
+# capture gate now judges that option's VALUE for DB-container mount containment, and an
+# abbreviation is a rebinding technique that would smuggle a traversal value past any
+# exact-base scan.  This tuple is mirrored in the supervisor and their equality is
+# pinned, so the abbreviation domain cannot drift between the planes -- which is why the
+# entry lands here too even though the verifier keeps leaving the VALUE unpinned.
+# Measured zero-collision fact this relies on: `--kind` is the only `--k*` flag,
+# `--mutation-head-sha` the only `--m*` flag and `--schema-dump-container` the only
+# `--schema-dump-c*` flag in the capture CLI, so rejecting their proper prefixes cannot
+# collide with a legitimate flag (pinned structurally by
+# `test_capture_cli_has_no_flag_abbreviating_an_anchored_option`).
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha", "--schema-dump-container")
+# WHO runs is only half the forensic claim; this map pins WITH WHAT.  The anchored
+# options above cannot stop a plan from keeping a perfect argv[0:4] while aiming the
+# committed producer at stub binaries under /tmp, fabricating all twelve snapshots
+# without a single seam token -- the command side has had literal `expected_executable`
+# pins since the G-series, the capture side had none.
+#
+# Restated LITERALS on purpose, NOT imported from `plan_author`/`supervisor`: the
+# verifier keeps its independent, non-derived-oracle posture (the same reason the
+# `"nhms-db"`/`"nhms"` literals elsewhere in this module are inline), so a plan_author
+# edit can never silently move the verifier's expectation with it.  The two modules are
+# bound by a drift-guard test instead
+# (`test_expected_capture_tool_values_match_the_plan_author_defaults`), which reddens on
+# divergence rather than following it.
+#
+# `--evidence-dir` used to sit in this deliberately-absent list as "run-scoped, varies
+# per run even in production".  That under-recorded its identity: it is a MEASUREMENT
+# INPUT, not a cosmetic run-scoped path.  capture.py's `_free_bytes` (:490-502) runs
+# `os.statvfs(ctx.evidence_dir)` (:501) and the resulting snapshot `free_bytes` (:472)
+# feeds this module's `MIN_FREE_BYTES` hard gates, so pointing `--evidence-dir` at any
+# roomy filesystem makes the recorded headroom a fact about THAT volume rather than the
+# one the capture outputs claim.  #1250 closed the
+# `--self-test-free-bytes` SEAM route to fabricated headroom; this directory-identity
+# route stayed open until the sixth capture gate below closed it -- RELATIONALLY, against
+# the capture's own verifier-bound `output_path`, so nothing run-varying is pinned here.
+#
+# Still deliberately absent, recorded: `--schema-dump-host`/`--schema-dump-container`
+# (legitimately parameterized data-file paths whose consuming pg_dump/docker COMMAND
+# identities are already exact-pinned on the command side).  The gate iterates this map;
+# it does not assert parser-viability of the whole argv, so unpinned options stay
+# unconstrained and unrequired.
+EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
+    "--psql": "/usr/bin/psql",
+    "--systemctl": "/usr/bin/systemctl",
+    "--docker": "/usr/bin/docker",
+    "--journalctl": "/usr/bin/journalctl",
+    "--git": "/usr/bin/git",
+    "--repo": EXPECTED_REPO_PATH,
+    "--container": "nhms-db",
+}
+# The value-pinned options, `--database` included: it is pinned dynamically (to the run
+# plan's own validated database) rather than to a literal, so it lives here but not in
+# the map above.  This tuple is the abbreviation-rejection domain's second half: an
+# exactly-once full-name equality without abbreviation closure is bypassed by a trailing
+# `--ps /tmp/stub`, which rebinds `--psql` last-wins while every full-spelling check
+# still reads the pinned value.
+#
+# Measured zero-collision facts this rejection stands on (pinned structurally by
+# `test_capture_cli_has_no_flag_abbreviating_a_pinned_capture_option`): no registered
+# capture flag is a proper prefix of a pinned option, no pinned option is a proper prefix
+# of another, and `plan_author` emits full flags only.  Ambiguous bases (`--d` for
+# --database/--docker, `--c` for --container) are rejected the same way -- argparse would
+# refuse them as ambiguous anyway, so rejecting is strictly safe.  `--s` still hits the
+# seam branch first, so the #1250 message tests are unaffected.
+#
+# `--evidence-dir` joins the same domain for the same reason: it too is pinned
+# dynamically (relationally, to the capture's own output directory) rather than to a
+# literal, and its equality gate matches the full spelling only, so a trailing
+# `--ev /elsewhere` -- or `--e`, which is length 3 and so reaches the `len >= 3`
+# mechanism -- would rebind the measured directory last-wins while the relational
+# equality still read the derived value.  Measured zero-collision fact (pinned by the
+# same structural test): `--evidence-dir` is the only registered `--e*` capture flag.
+PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database", "--evidence-dir")
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -586,136 +678,6 @@ def _parse_utc(value: Any, label: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _validate_invocation_record(
-    raw: Any,
-    *,
-    label: str,
-    kind: str,
-    mutation_head_sha: str,
-    expected_binding: Mapping[str, Any],
-) -> dict[str, Any]:
-    record = _require_mapping(raw, label)
-    _require_exact_keys(
-        record,
-        {
-            "kind",
-            "argv",
-            "timeout_seconds",
-            "started_at",
-            "finished_at",
-            "exit_code",
-            "mutation_head_sha",
-            "reviewed_remote_ref",
-            "artifact_bindings",
-            "resolved_repo_path",
-            "resolved_interpreter",
-            "resolved_script",
-            "resolved_wrapper",
-            "resolved_env_file",
-            "launcher_argv",
-        },
-        label,
-    )
-    _reject_secrets(record, label)
-    if (
-        record["kind"] != kind
-        or record["argv"] != INVOCATION_ARGV[kind]
-        or record["timeout_seconds"] != EXPECTED_TIMEOUT_SECONDS
-        or record["mutation_head_sha"] != mutation_head_sha
-    ):
-        raise EvidenceError(f"{label} command identity, timeout, or mutation SHA differs")
-    expected_execution = _invocation_execution_identity(kind)
-    if any(record[key] != value for key, value in expected_execution.items()):
-        raise EvidenceError(f"{label} resolved launcher provenance differs")
-    started = _parse_utc(record["started_at"], f"{label}.started_at")
-    finished = _parse_utc(record["finished_at"], f"{label}.finished_at")
-    if (
-        not started < finished
-        or (finished - started).total_seconds() > EXPECTED_TIMEOUT_SECONDS
-        or record["exit_code"] != 0
-    ):
-        raise EvidenceError(f"{label} timing/exit does not prove bounded success")
-    bindings = _require_mapping(record["artifact_bindings"], f"{label}.artifact_bindings")
-    if dict(bindings) != dict(expected_binding):
-        raise EvidenceError(f"{label} artifact association differs")
-    return {
-        **dict(record),
-        "started_at_dt": started,
-        "finished_at_dt": finished,
-    }
-
-
-def _validate_execution_audit(
-    raw: Any,
-    *,
-    expected_invocation_refs: list[Mapping[str, Any]],
-    mutation_head_sha: str,
-) -> dict[str, Any]:
-    audit = _require_mapping(raw, "execution.audit document")
-    _require_exact_keys(
-        audit,
-        {
-            "captured_at",
-            "window_started_at",
-            "window_finished_at",
-            "mutation_head_sha",
-            "audit_source",
-            "complete",
-            "namespace_counts",
-            "invocation_refs",
-            "direct_db_mutation_statements",
-            "journal",
-        },
-        "execution.audit document",
-    )
-    started = _parse_utc(audit["window_started_at"], "execution audit start")
-    finished = _parse_utc(audit["window_finished_at"], "execution audit finish")
-    captured = _parse_utc(audit["captured_at"], "execution audit captured")
-    expected_counts = {
-        "migration_apply": 2,
-        "recovery_decompress": 1,
-        "compression_dry_run": 1,
-        "compression_enforce": 1,
-    }
-    refs = _require_list(audit["invocation_refs"], "execution invocation refs")
-    expected_refs = [dict(value) for value in expected_invocation_refs]
-    if (
-        audit["mutation_head_sha"] != mutation_head_sha
-        or audit["audit_source"] != "pgaudit+systemd-journal"
-        or audit["complete"] is not True
-        or audit["namespace_counts"] != expected_counts
-        or refs != expected_refs
-        or audit["direct_db_mutation_statements"] != []
-        or not started < finished < captured
-    ):
-        raise EvidenceError("execution audit namespace or direct-DB boundary differs")
-    journal_ref, journal = _text_artifact(audit["journal"], "execution.audit.journal")
-    expected_lines = [
-        f"kind={kind} invocation_sha256={ref['sha256']}"
-        for kind, ref in zip(
-            [
-                "migration_apply",
-                "migration_apply",
-                "recovery_decompress",
-                "compression_dry_run",
-                "compression_enforce",
-            ],
-            expected_refs,
-            strict=True,
-        )
-    ]
-    observed_lines = [line.strip() for line in journal.splitlines() if line.strip()]
-    if observed_lines != [*expected_lines, "direct_db_mutation_statements=0"]:
-        raise EvidenceError("execution audit journal cardinality/commands differ")
-    return {
-        "artifact_window_started_at": started,
-        "artifact_window_finished_at": finished,
-        "captured_at": captured,
-        "journal": journal_ref,
-        "namespace_counts": expected_counts,
-    }
-
-
 def _concrete_argv(value: Any, label: str) -> list[str]:
     argv = _require_list(value, label)
     if not argv or not all(isinstance(item, str) and item for item in argv):
@@ -726,6 +688,33 @@ def _concrete_argv(value: Any, label: str) -> list[str]:
     if not Path(argv[0]).is_absolute():
         raise EvidenceError(f"{label} executable is not absolute")
     return list(argv)
+
+
+def _argv_option_values(argv: list[str], option: str) -> list[str]:
+    """Every value bound to `option`, position-independent, both argparse forms.
+
+    `--opt value` and `--opt=value` are the same binding to the producer's parser, so
+    they must be the same binding to the verifier: scanning only the pair form would let
+    the `=` spelling dodge the equality check.  Positions are not pinned -- the producer
+    puts its common options at a fixed offset today, but that layout is not a contract.
+    """
+
+    values: list[str] = []
+    index = 0
+    while index < len(argv):
+        base, separator, inline = argv[index].partition("=")
+        if base == option:
+            if separator:
+                values.append(inline)
+            elif index + 1 < len(argv):
+                values.append(argv[index + 1])
+                index += 1
+            else:
+                # A dangling flag binds no value; recorded as an unbindable sentinel so
+                # the caller's equality test refuses it instead of silently ignoring it.
+                values.append("")
+        index += 1
+    return values
 
 
 def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Mapping[str, Any], label: str) -> None:
@@ -763,7 +752,7 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
     if kind == "pg_restore_list" and (
         argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
         or len(argv) != 6
-        or not argv[-1].startswith("/var/lib/postgresql/")
+        or not container_dump_path_within_mount(argv[-1])
     ):
         raise EvidenceError("pg_restore list argv differs")
     migration_argv = [
@@ -778,6 +767,29 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
     ]
     if kind == "migration_apply" and argv != migration_argv:
         raise EvidenceError("migration argv differs")
+    # The exact-chunk tail is interpolated from this module's own
+    # ``RECOVERY_TARGET`` constant instead of being spelled out a second time
+    # (issue #1244).  That constant is asserted field-by-field equal to the shared
+    # repo contract by the drift guard in
+    # tests/test_node27_timeseries_compression_supervisor.py, so the expected argv
+    # is bound to the contract transitively -- the verifier keeps owning its own
+    # acceptance oracle and imports nothing new.
+    decompress_tail = [
+        "--receipt-path",
+        str(associations.get("recovery_receipt", "")),
+        "--hypertable-schema",
+        RECOVERY_TARGET["hypertable_schema"],
+        "--hypertable-name",
+        RECOVERY_TARGET["hypertable_name"],
+        "--chunk-schema",
+        RECOVERY_TARGET["chunk_schema"],
+        "--chunk-name",
+        RECOVERY_TARGET["chunk_name"],
+        "--range-start",
+        RECOVERY_TARGET["range_start"],
+        "--range-end",
+        RECOVERY_TARGET["range_end"],
+    ]
     if kind == "decompress" and (
         len(argv) != 20
         or argv[:5]
@@ -789,23 +801,7 @@ def _validate_exact_command_argv(argv: list[str], *, kind: str, associations: Ma
             "--mutation-head-sha",
         ]
         or re.fullmatch(r"[0-9a-f]{40}", argv[5]) is None
-        or argv[6:]
-        != [
-            "--receipt-path",
-            str(associations.get("recovery_receipt", "")),
-            "--hypertable-schema",
-            "hydro",
-            "--hypertable-name",
-            "river_timeseries",
-            "--chunk-schema",
-            "_timescaledb_internal",
-            "--chunk-name",
-            "_hyper_3_7_chunk",
-            "--range-start",
-            "2026-05-28T00:00:00Z",
-            "--range-end",
-            "2026-06-04T00:00:00Z",
-        ]
+        or argv[6:] != decompress_tail
     ):
         raise EvidenceError("decompress argv differs")
     if kind.startswith("compression_"):
@@ -1121,7 +1117,165 @@ def _validate_supervisor_execution(
             or not Path(output_path).is_absolute()
         ):
             raise EvidenceError("run plan capture identity/output differs")
-        _concrete_argv(capture["argv"], f"run plan capture[{index}].argv")
+        capture_argv = _concrete_argv(capture["argv"], f"run plan capture[{index}].argv")
+        # Producer IDENTITY, not merely shape: argv[1] is the committed capture script,
+        # argv[2:4] binds the invocation to the kind this capture claims to be, and the
+        # `--mutation-head-sha` binding ties it to this plan's reviewed mutation SHA.
+        # argv[0] is deliberately NOT pinned: production `plan_author` records
+        # `sys.executable` resolved at authoring time -- an environment fact, not a
+        # committed identity.
+        # Capability consequence, recorded rather than gated: argv[0] (the interpreter)
+        # together with the repo checkout the pinned argv[1] path is loaded from remain
+        # the residual TRUST ROOTS of this forensic claim.  A plan may record any
+        # interpreter there, and that interpreter -- plus whatever checkout supplies the
+        # script at the committed path -- decides what the pinned argv[1] actually does,
+        # so the identity gate proves the argv NAMES the committed producer, not that the
+        # committed producer's reviewed code ran.  Closing that is producer-side hardening
+        # (#1261 alternative 2: the producer attests its own interpreter/checkout), NOT a
+        # verifier gate: pinning argv[0] here would pin an environment fact the verifier
+        # cannot know without inventing a production interpreter path.
+        if len(capture_argv) < 4 or capture_argv[1] != EXPECTED_CAPTURE_SCRIPT:
+            named = capture_argv[1] if len(capture_argv) > 1 else "<absent>"
+            raise EvidenceError(
+                f"run plan capture[{index}] producer {named} is not the committed capture producer "
+                f"{EXPECTED_CAPTURE_SCRIPT}"
+            )
+        if capture_argv[2:4] != ["--kind", kind]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv kind binding {capture_argv[2:4]} differs from its "
+                f"declared kind {kind}"
+            )
+        # Position AND uniqueness: `--kind` binds last-wins in the producer's parser, so
+        # the fixed-offset check above only pins the FIRST binding.  A second full
+        # `--kind <other>` appended anywhere would leave argv[2:4] intact while the
+        # producer collected a different snapshot entirely.
+        if _argv_option_values(capture_argv, "--kind") != [kind]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv must bind --kind exactly once to its declared "
+                f"kind {kind}"
+            )
+        if _argv_option_values(capture_argv, "--mutation-head-sha") != [mutation_head_sha]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv must bind --mutation-head-sha exactly once to the "
+                f"plan mutation head SHA {mutation_head_sha}"
+            )
+        # WITH WHAT, not merely WHO: the anchor above proves the committed producer was
+        # named and aimed at this kind and this mutation SHA, but says nothing about the
+        # tooling it was pointed at.  One equality per pinned option refuses all four
+        # failure shapes at once -- absent (`[]`), duplicated (two entries), dangling
+        # (`[""]`) and mismatched (the wrong value) -- and the message prints the observed
+        # binding list so the refusal shows WHICH shape it was.  `--database` is the sole
+        # dynamic entry: pinned to the plan database the check at the top of this function
+        # already validated against the bundle, not re-derived here.  The pinned set
+        # applies to every capture kind uniformly; no per-kind exemption exists.
+        for option, expected_value in (*EXPECTED_CAPTURE_TOOL_VALUES.items(), ("--database", database)):
+            observed_values = _argv_option_values(capture_argv, option)
+            if observed_values != [expected_value]:
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv must bind {option} exactly once to the "
+                    f"committed value {expected_value}, not {observed_values}"
+                )
+        # WHERE the disk-headroom measurement was taken, on top of who ran and with what:
+        # capture.py's `_free_bytes` runs `os.statvfs(--evidence-dir)` and the snapshot
+        # `free_bytes` it records feeds this module's MIN_FREE_BYTES hard gates, so an
+        # argv pointing that option at some other, roomier filesystem measures a volume
+        # this plan never claims anything about.  Pinned RELATIONALLY, to the capture's
+        # own `output_path` (already validated absolute above): plain string `rsplit`, NO
+        # `Path` normalization, because this is the exact textual inverse of
+        # `plan_author`'s two same-`root` f-strings -- `--evidence-dir` is
+        # f"{root}/capture-artifacts" (:219) and `output_path` is
+        # f"{root}/capture-{kind}.json" (:239).  Textual inversion is what makes the
+        # relation total: even a trailing-slash `root` round-trips consistently through
+        # both f-strings, so no plan_author-authored plan is ever refused, while a
+        # normalizing comparison would start accepting spellings the producer never
+        # emitted.  One equality refuses all four shapes at once (absent, duplicated,
+        # dangling, mismatched), and no run-varying literal enters this module.
+        expected_evidence_dir = output_path.rsplit("/", 1)[0] + "/capture-artifacts"
+        observed_evidence_dirs = _argv_option_values(capture_argv, "--evidence-dir")
+        if observed_evidence_dirs != [expected_evidence_dir]:
+            raise EvidenceError(
+                f"run plan capture[{index}] argv must bind --evidence-dir exactly once to this "
+                f"capture's own output directory {expected_evidence_dir}, not "
+                f"{observed_evidence_dirs}"
+            )
+        # Plan side only, no ledger-side twin needed: the ledger<->plan binding below
+        # (`event["argv"] != capture["argv"]`) is pure equality, so a ledger capture argv
+        # can only carry a seam if its plan twin carries the same one -- which this check
+        # already refuses.
+        #
+        # Abbreviation-proof: capture.py's parser runs with argparse's default
+        # `allow_abbrev=True`, so any unambiguous prefix of a registered seam reaches the
+        # seam behaviour.  Measured collision facts: the only non-seam capture flags
+        # starting with `--s` are `--systemctl` and `--schema-dump-{host,container}` --
+        # none of them reaches `--se`, so the rejection domain overlaps no legitimate
+        # flag; and rejecting the `--s`/`--se` bases outright keeps the gate free of any
+        # premise about those flags staying registered to keep `--s` ambiguous.
+        # `plan_author` emits full flags only, so no legitimate plan token is ever `--s`.
+        #
+        # The same abbreviation technique is turned on the anchor's OWN options: the
+        # equality checks above match the full spelling only, so `--k <other>` or
+        # `--kin=<other>` would rebind the kind (and `--m <sha>` the mutation SHA) while
+        # every full-spelling check still saw the anchored values.  A base equal to the
+        # option itself is excluded -- `--mutation-head-sha=SHA` is a legitimate spelling
+        # already covered by the exactly-once value checks.
+        #
+        # The same closure covers every VALUE-pinned option (`PINNED_CAPTURE_VALUE_OPTIONS`,
+        # whose zero-collision premise is recorded and structurally pinned there): without
+        # it a trailing `--ps /tmp/stub` rebinds `--psql` last-wins while the exactly-once
+        # full-name equality above still reads `/usr/bin/psql`.  The two option families
+        # get distinct messages: rebinding the identity anchor and repointing the producer
+        # at substitute tooling are different claims about what the bundle is lying about.
+        for token in capture_argv:
+            base = token.split("=", 1)[0]
+            if base.startswith(SELF_TEST_SEAM_PREFIX) or (
+                len(base) >= 3 and SELF_TEST_SEAM_PREFIX.startswith(base)
+            ):
+                raise EvidenceError(f"run plan capture argv carries a self-test seam token: {token}")
+            # Same early-exit family as the seam branch, one step earlier in the producer:
+            # capture.py builds its parser with argparse's default `add_help=True` and
+            # `main` calls `parse_args` FIRST, so any help token makes the recorded
+            # producer leave inside argparse before a single capture runs.  The refusal
+            # covers the whole family, including the FULL `--help` spelling -- unlike the
+            # anchored/pinned options below, where the full spelling is the legitimate
+            # binding, no member of this family is ever production.  Wording stays
+            # spelling-safe on purpose: the bare spellings print the help text and exit 0
+            # while `--help=x` is an argparse usage error exiting 2 with no help printed,
+            # so the message claims only what holds for every spelling -- an exit inside
+            # argparse, before anything is collected.  The single-dash arm is a PREFIX, not
+            # an equality: argparse parses a single-dash token as a CLUSTER of short
+            # options, so `-hx`, `-hh`, `-help` and `-hs` all reach the same auto help
+            # action that `-h` does (`-h` consumes no value, so whatever follows in the
+            # cluster is argparse's problem, not the producer's -- help is printed and the
+            # process exits either way).  An equality on `-h` alone would leave that whole
+            # cluster family PASS-shaped.  Rejecting the entire `-h*` single-dash domain is
+            # safe on the measured premise (pinned by
+            # `test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain`):
+            # the capture CLI registers no `--h*` business flag and NO single-dash flag at
+            # all beyond argparse's auto `-h`, so nothing legitimate is spelled `-h...`.
+            # The two arms do not overlap (`"--help".startswith("-h")` is False) and
+            # `-h=x` normalizes to base `-h`, so the prefix covers it too.  Clusters that
+            # merely CONTAIN `h` without leading with it (`-xh`) exit 2 inside argparse
+            # before any help action runs; they are a whole-argv parser-viability question,
+            # which this module deliberately does not answer (see the tool-value map's
+            # recorded boundary), so they stay outside this gate's declared scope.
+            if base.startswith("-h") or (len(base) >= 3 and "--help".startswith(base)):
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv carries {token}, an argparse help "
+                    f"early-exit token: the recorded producer would exit inside argparse "
+                    f"without collecting the snapshot this capture claims"
+                )
+            for option in ANCHORED_CAPTURE_OPTIONS:
+                if len(base) >= 3 and base != option and option.startswith(base):
+                    raise EvidenceError(
+                        f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
+                        f"of {option} that would rebind the anchored capture identity"
+                    )
+            for option in PINNED_CAPTURE_VALUE_OPTIONS:
+                if len(base) >= 3 and base != option and option.startswith(base):
+                    raise EvidenceError(
+                        f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
+                        f"of {option} that would rebind the pinned capture tooling value"
+                    )
         if kind in planned_output_owners:
             raise EvidenceError("run plan output label has duplicate producers")
         planned_output_owners[kind] = (f"capture:{kind}", 0)
@@ -1743,7 +1897,7 @@ def _validate_dump_listing(
         or version_argv != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--version"]
         or list_argv[:5] != ["/usr/bin/docker", "exec", "nhms-db", "/usr/bin/pg_restore", "--list"]
         or len(list_argv) != 6
-        or not list_argv[-1].startswith("/var/lib/postgresql/")
+        or not container_dump_path_within_mount(list_argv[-1])
         or not isinstance(listing["container_image_id"], str)
         or not listing["container_image_id"].startswith("sha256:")
         or listing["binary_realpath"] != CONTAINER_PG_RESTORE_REALPATH
@@ -2911,24 +3065,6 @@ def _assert_global_chronology(events: list[tuple[str, datetime]]) -> None:
     for (left_label, left), (right_label, right) in zip(events, events[1:]):
         if left >= right:
             raise EvidenceError(f"global chronology is not strict: {left_label} is not before {right_label}")
-
-
-def _artifact_refs_in(value: Any) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    stack = [value]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, Mapping):
-            if set(current) == {"path", "sha256", "bytes"}:
-                path = Path(str(current["path"]))
-                if path.is_absolute():
-                    refs.append(dict(current))
-            else:
-                stack.extend(current.values())
-        elif isinstance(current, list):
-            stack.extend(current)
-    unique = {(str(ref["path"]), str(ref["sha256"]), int(ref["bytes"])): ref for ref in refs}
-    return [unique[key] for key in sorted(unique)]
 
 
 def _reverify_retained_identities() -> None:

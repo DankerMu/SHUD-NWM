@@ -43,7 +43,16 @@ from packages.common.evidence_io import (
 from packages.common.node27_container_contract import (
     CLIENT_BACKEND_TYPE,
     CONTAINER_PG_RESTORE_REALPATH,
+    RECOVERY_TARGET,
+    RECOVERY_TARGET_CHUNK_NAME,
+    RECOVERY_TARGET_CHUNK_SCHEMA,
+    RECOVERY_TARGET_RANGE_END,
+    RECOVERY_TARGET_RANGE_START,
+    RECOVERY_TARGET_SCHEMA,
+    RECOVERY_TARGET_TABLE,
     SYSTEMD_UNSET_TIMESTAMP,
+    container_dump_path_within_mount,
+    validated_probe_target,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
@@ -59,6 +68,15 @@ RUN_ID_PATTERN = r"[0-9A-Za-z._-]{1,64}"
 EXPECTED_REPO = "/home/nwm/NWM"
 EXPECTED_DATABASE = "nhms"
 EXPECTED_CONTAINER = "nhms-db"
+CAPTURE_SCRIPT_SUFFIX = "/scripts/node27_timeseries_compression_capture.py"
+# Options whose binding the capture anchor protects from argparse abbreviation rebinding.
+# capture.py parses with the default `allow_abbrev=True` and binds last-wins, so a later
+# `--k <other>` / `--kin=<other>` / `--m <sha>` / `--schema-dump-c=<escape>` token would
+# re-aim the producer past the full-spelling checks below.  `--kind` is the only `--k*`,
+# `--mutation-head-sha` the only `--m*` and `--schema-dump-container` the only
+# `--schema-dump-c*` flag in that CLI, so rejecting their proper prefixes collides with
+# nothing.  The verifier mirrors this tuple and a test pins the two equal (#1269).
+ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha", "--schema-dump-container")
 # The container pg_restore entrypoint realpath is the single-source-of-truth
 # external contract shared with the verifier; see node27_container_contract.
 # Bind the wrapper and fail closed on any drift.
@@ -344,7 +362,7 @@ def _assert_exact_argv(argv: list[str], *, kind: str, associations: Mapping[str,
                 "--list",
             ]
             or len(argv) != 6
-            or not argv[-1].startswith("/var/lib/postgresql/")
+            or not container_dump_path_within_mount(argv[-1])
         ):
             raise SupervisorError("pg_restore list argv/output ownership differs")
     elif kind == "migration_apply":
@@ -373,17 +391,17 @@ def _assert_exact_argv(argv: list[str], *, kind: str, associations: Mapping[str,
             "--receipt-path",
             str(associations["recovery_receipt"]),
             "--hypertable-schema",
-            "hydro",
+            RECOVERY_TARGET_SCHEMA,
             "--hypertable-name",
-            "river_timeseries",
+            RECOVERY_TARGET_TABLE,
             "--chunk-schema",
-            "_timescaledb_internal",
+            RECOVERY_TARGET_CHUNK_SCHEMA,
             "--chunk-name",
-            "_hyper_3_7_chunk",
+            RECOVERY_TARGET_CHUNK_NAME,
             "--range-start",
-            "2026-05-28T00:00:00Z",
+            RECOVERY_TARGET_RANGE_START,
             "--range-end",
-            "2026-06-04T00:00:00Z",
+            RECOVERY_TARGET_RANGE_END,
         ]
         if (
             set(associations) != {"recovery_receipt"}
@@ -474,6 +492,91 @@ def _assert_concrete_argv(
     if exact:
         _assert_exact_argv(normalized, kind=kind, associations=associations or {})
     return normalized
+
+
+def _capture_option_values(argv: list[str], option: str) -> list[str]:
+    """Every value bound to `option`, position-independent, both argparse forms.
+
+    Deliberately a local scan rather than an import of the verifier's twin: the executor
+    trusts nothing from the forensic layer and must stay runnable on its own.
+    """
+
+    values: list[str] = []
+    index = 0
+    while index < len(argv):
+        base, separator, inline = argv[index].partition("=")
+        if base == option:
+            if separator:
+                values.append(inline)
+            elif index + 1 < len(argv):
+                values.append(argv[index + 1])
+                index += 1
+            else:
+                # A dangling flag binds no value; recorded as an unbindable sentinel so
+                # the caller's equality test refuses it instead of silently ignoring it.
+                values.append("")
+        index += 1
+    return values
+
+
+def _assert_capture_producer_argv(argv: list[str], *, kind: str) -> None:
+    """Bind a capture argv to the committed capture producer and its declared kind.
+
+    Suffix, not `EXPECTED_REPO`: recorded executor-vs-verifier asymmetry.  This process
+    EXECUTES plans, and a hermetic plan legitimately runs the capture script out of a
+    test checkout, so the production-path claim belongs to the forensic verifier alone;
+    what the supervisor can insist on is that the thing it spawns for a capture step is
+    the capture producer, invoked for the kind the plan says it is.  No seam check here
+    either -- the executor must be able to run seam-carrying hermetic plans (#1250).
+
+    The `--mutation-head-sha` VALUE is likewise not checked here -- the plan's mutation
+    SHA is a forensic claim the verifier owns -- but its abbreviations ARE rejected,
+    because an abbreviation is a rebinding technique, not a claim about the SHA.
+
+    `--schema-dump-container` is the one PATH value this gate adjudicates (#1269) --
+    and the only value it judges against an INTRINSIC predicate rather than against
+    the plan's own declared kind, which is how `--kind` is judged below.  The
+    asymmetry with the SHA is the whole point: prefix containment is an
+    EXECUTION-SAFETY property of what the spawned capture will actually do -- for a
+    `schema_dump_list` kind, capture.py runs `docker exec <container>
+    /usr/bin/pg_restore --list <value>` on exactly this string -- so refusing an
+    escaping value belongs to the process that is about to spawn that producer, before
+    it exists.  The SHA, by contrast, claims nothing about what runs.  The judgment is
+    textual and rewrites nothing: an admitted value stays the plan's original string
+    everywhere downstream.
+    """
+
+    if len(argv) < 4 or not argv[1].endswith(CAPTURE_SCRIPT_SUFFIX):
+        named = argv[1] if len(argv) > 1 else "<absent>"
+        raise SupervisorError(f"capture {kind} argv producer {named} is not the capture script")
+    if argv[2:4] != ["--kind", kind]:
+        raise SupervisorError(f"capture {kind} argv kind binding {argv[2:4]} differs from its declared kind")
+    # Position alone pins only the FIRST binding; `--kind` binds last-wins, so a second
+    # full `--kind <other>` appended anywhere would re-aim the spawned producer while
+    # argv[2:4] still read correctly.
+    if _capture_option_values(argv, "--kind") != [kind]:
+        raise SupervisorError(f"capture {kind} argv must bind --kind exactly once to its declared kind")
+    for token in argv:
+        base = token.split("=", 1)[0]
+        for option in ANCHORED_CAPTURE_OPTIONS:
+            if len(base) >= 3 and base != option and option.startswith(base):
+                raise SupervisorError(
+                    f"capture {kind} argv carries {token}, an argparse abbreviation of {option} "
+                    f"that would rebind the anchored capture identity"
+                )
+    if kind == "schema_dump_list":
+        # An ABSENT option binds no value, so there is nothing to judge here -- and such
+        # a run cannot fabricate anything either: the option is registered
+        # `default=None` and `_capture_schema_dump_list` refuses the capture outright.
+        # A DANGLING flag yields the `""` sentinel, which the predicate refuses on the
+        # prefix conjunct, and a late second binding is judged like the first, so
+        # last-wins smuggling is refused too.
+        for value in _capture_option_values(argv, "--schema-dump-container"):
+            if not container_dump_path_within_mount(value):
+                raise SupervisorError(
+                    f"capture {kind} argv binds --schema-dump-container to {value!r}, which is "
+                    f"outside the pinned container dump path prefix"
+                )
 
 
 def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[str, Any]:
@@ -583,6 +686,7 @@ def validate_run_plan(plan: Any, *, inherited_env: Mapping[str, str]) -> dict[st
         ):
             raise SupervisorError("run plan capture identity/output differs")
         argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+        _assert_capture_producer_argv(argv, kind=str(kind))
         capture_ids.add(capture_id)
         normalized_captures.append({**dict(capture), "argv": argv})
     if tuple(item["kind"] for item in normalized_captures) != EXPECTED_CAPTURE_SEQUENCE:
@@ -882,6 +986,10 @@ def run_capture_step(
     kind = str(capture["kind"])
     output_path = Path(str(capture["output_path"]))
     argv = _assert_concrete_argv(capture["argv"], kind=f"capture {kind}")
+    # Refused before any spawn: the executing gate is not merely a restatement of the
+    # plan gate -- `run_capture_step` is callable directly with a capture the plan
+    # validator never saw.
+    _assert_capture_producer_argv(argv, kind=kind)
     try:
         os.lstat(output_path)
     except FileNotFoundError:
@@ -975,7 +1083,7 @@ def _run_capture_argv(argv: list[str], *, wall: HardWall, label: str, max_bytes:
 def resolve_container_pg_restore_identity(*, wall: HardWall, dump_path: str) -> dict[str, str]:
     """Resolve the actual container image, binary and mounted dump identities."""
 
-    if not dump_path.startswith("/var/lib/postgresql/"):
+    if not container_dump_path_within_mount(dump_path):
         raise SupervisorError("pg_restore dump path is outside the DB container data mount")
     image_id = (
         _run_capture_argv(
@@ -1153,6 +1261,28 @@ def _assert_no_client_backend_session(activity: Any) -> None:
             raise SupervisorError("checkpoint observed a conflicting database session")
 
 
+def _build_activity_sql(target: str = RECOVERY_TARGET) -> str:
+    """Build the G14 checkpoint activity SQL for one validated probe target.
+
+    The target is validated before any SQL exists, so a target that is not a
+    supervised hypertable (or is not a strict ``schema.table`` identifier) can
+    never reach the probe.  The default is the pinned recovery target, which
+    the expected decompress argv binds from the same constants.
+    """
+
+    probe_target = validated_probe_target(target)
+    return (
+        "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
+        "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
+        "COALESCE(has_table_privilege("
+        f"usename,'{probe_target}',"
+        "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
+        "FROM pg_stat_activity "
+        "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+        "AND state<>'idle') s"
+    )
+
+
 def capture_checkpoint(
     checkpoint: Mapping[str, Any],
     *,
@@ -1174,15 +1304,7 @@ def capture_checkpoint(
     # the fact that does.  Every session is still captured for forensics --
     # only the judgment narrows.  ``COALESCE(..., false)`` fails closed for
     # background workers where ``usename`` is NULL.
-    activity_sql = (
-        "SELECT json_build_object('sessions',COALESCE(json_agg(s ORDER BY pid),'[]'::json)) "
-        "FROM (SELECT pid,state,wait_event_type,backend_type,usename,"
-        "COALESCE(has_table_privilege(usename,'hydro.river_timeseries',"
-        "'INSERT,UPDATE,DELETE'),false) AS has_write_privilege_on_target "
-        "FROM pg_stat_activity "
-        "WHERE datname=current_database() AND pid<>pg_backend_pid() "
-        "AND state<>'idle') s"
-    )
+    activity_sql = _build_activity_sql()
     lock_sql = (
         "SELECT json_build_object('conflicts',COALESCE(json_agg(l ORDER BY pid),'[]'::json)) "
         "FROM (SELECT pid,locktype,mode,granted FROM pg_locks WHERE NOT granted) l"

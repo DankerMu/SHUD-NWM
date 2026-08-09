@@ -2,17 +2,38 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
 
 from apps.api import display_cache
-from apps.api.display_cache import clear_display_catalog_cache, display_catalog_cached
+from apps.api.display_cache import (
+    clear_display_catalog_cache,
+    display_catalog_cached,
+    start_display_catalog_warmer,
+    stop_display_catalog_warmer,
+)
+
+WARMER_THREAD_NAME = "display-catalog-warmer"
 
 
 def _request(display_readonly: bool) -> SimpleNamespace:
     config = SimpleNamespace(display_readonly=display_readonly)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_config=config)))
+
+
+def _warmer_threads() -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == WARMER_THREAD_NAME]
+
+
+def _seed_hot_path() -> None:
+    # 时间戳取“此刻”：陈旧的 0.0 落在 DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS
+    # 活跃窗口之外，预热线程会直接跳过，回放永远不发生。
+    display_cache._hot_paths["warm-guard"] = ("/api/v1/runs", time.monotonic())
 
 
 @pytest.fixture(autouse=True)
@@ -95,3 +116,126 @@ def test_loader_errors_are_not_cached() -> None:
         display_catalog_cached(request, "k", _boom)
     assert display_catalog_cached(request, "k", lambda: "recovered") == "recovered"
     assert calls == [1]
+
+
+def test_warmer_starts_stops_and_restarts_without_leaking_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 预热线程必须可停可 join：停不掉就会带着进程全局 time.monotonic 活到后续用例里。
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    app = FastAPI()
+
+    first = start_display_catalog_warmer(app)
+    assert first is not None
+    assert first.name == WARMER_THREAD_NAME
+    assert _warmer_threads() == [first]
+
+    assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []
+    assert display_cache._warmer_started is False
+    assert display_cache._warmer_thread is None
+
+    second = start_display_catalog_warmer(app)
+    assert second is not None
+    assert second is not first
+    assert _warmer_threads() == [second]
+
+    assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []
+
+
+def test_start_warmer_rolls_back_state_when_thread_start_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 起线程失败（OS 起不来）不能留下“已登记但从未启动”的句柄：那之后每一次 stop 都会在
+    # join 处炸 cannot join thread before it is started，重置代码根本走不到，级联不可自愈。
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    app = FastAPI()
+
+    def _failing_start(self: threading.Thread) -> None:
+        del self
+        raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(threading.Thread, "start", _failing_start)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            start_display_catalog_warmer(app)
+
+    # 真实 OS 错误只抛一次；模块状态必须自洽，后续 stop 是干净的 no-op。
+    assert display_cache._warmer_started is False
+    assert display_cache._warmer_thread is None
+    assert _warmer_threads() == []
+    assert stop_display_catalog_warmer() is True
+
+    # 撤销补丁后仍能真的起一遍并停掉，证明失败路径没有毒化模块状态。
+    thread = start_display_catalog_warmer(app)
+    assert thread is not None
+    try:
+        assert _warmer_threads() == [thread]
+    finally:
+        assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []
+    assert display_cache._warmer_started is False
+    assert display_cache._warmer_thread is None
+
+
+def test_stop_warmer_when_never_started_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    assert display_cache._warmer_started is False
+
+    assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []
+    assert display_cache._warmer_started is False
+    assert display_cache._stop_event.is_set() is False
+
+
+def test_warm_loop_replays_hot_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 循环体的活性 oracle：只证明线程还活着不够，回放必须真的被调用。
+    called = threading.Event()
+    replayed: list[list[str]] = []
+
+    async def fake_replay(app: Any, targets: list[str]) -> None:
+        del app
+        replayed.append(list(targets))
+        called.set()
+
+    monkeypatch.setattr(display_cache, "_replay_targets", fake_replay)
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    _seed_hot_path()
+
+    thread = start_display_catalog_warmer(FastAPI())
+    assert thread is not None
+    try:
+        assert called.wait(2.0) is True
+    finally:
+        assert stop_display_catalog_warmer() is True
+    assert replayed[0] == ["/api/v1/runs"]
+
+
+def test_stop_warmer_reports_join_timeout_without_resetting_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 卡在回放里的线程必须响：stop 返回 False 且不重置状态，避免静默放行第二个线程。
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def blocking_replay(app: Any, targets: list[str]) -> None:
+        del app, targets
+        entered.set()
+        # 必须无限等：带超时的自释放会重开一个窗口——主线程被调度器抢下去时线程已跑完
+        # 回放回到 `_stop_event.wait`，stop(timeout=0.05) 就成功了，断言 `is False` 变 flaky。
+        # 下面的 finally 无条件 set（断言失败时也走到），且线程是 daemon，无泄漏路径。
+        release.wait()
+
+    monkeypatch.setattr(display_cache, "_replay_targets", blocking_replay)
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    _seed_hot_path()
+
+    thread = start_display_catalog_warmer(FastAPI())
+    assert thread is not None
+    try:
+        # stop 必须落在“线程正卡在回放里”的窗口内，否则第一个 wait 就吸收了停止信号。
+        assert entered.wait(2.0) is True
+        assert stop_display_catalog_warmer(timeout=0.05) is False
+        assert display_cache._warmer_started is True
+        assert display_cache._warmer_thread is thread
+        assert display_cache._stop_event.is_set() is True
+    finally:
+        # 必须治好模块状态，否则 conftest 的 autouse teardown 会把这个用例判红。
+        release.set()
+        assert stop_display_catalog_warmer() is True
+    assert _warmer_threads() == []

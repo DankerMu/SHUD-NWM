@@ -24,7 +24,6 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
     "NODE_FAILURE",
-    "OUT_OF_MEMORY",
     "PREEMPTED",
     "STORAGE_WRITE_FAILED",
     "SBATCH_SUBMISSION_FAILED",
@@ -40,6 +39,7 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
     "POLICY_BLOCKED",
     "PERMISSION_DENIED",
     "OUTPUT_INCOMPLETE",
+    "OUT_OF_MEMORY",
     "TEMPLATE_NOT_ALLOWED",
     "MANIFEST_SCHEMA_INVALID",
     "WARM_START_CHECKPOINT_RETRY",
@@ -164,7 +164,6 @@ def failure_classifier(error_code: str | None) -> str:
         "SLURM_TIMEOUT",
         "SLURM_JOB_TIMEOUT",
         "NODE_FAILURE",
-        "OUT_OF_MEMORY",
         "PREEMPTED",
         "SLURM_UNAVAILABLE",
         "SLURM_RESERVATION_LOST",
@@ -176,6 +175,8 @@ def failure_classifier(error_code: str | None) -> str:
         return "shud_runtime_failure"
     if code == "WARM_START_CHECKPOINT_RETRY":
         return "warm_start_checkpoint_repair"
+    if code == "OUT_OF_MEMORY":
+        return "resource_configuration"
     if code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT"}:
         return "malformed_input"
     if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:

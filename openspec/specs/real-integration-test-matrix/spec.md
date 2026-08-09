@@ -52,3 +52,117 @@ The repository SHALL document and/or encode separate validation commands for fas
 
 - **WHEN** a developer or CI runner needs to validate the project
 - **THEN** it can run a documented fast command without external services, an explicit opt-in integration command with PostgreSQL/PostGIS/TimescaleDB service variables, frontend unit/build commands, and targeted E2E commands without guessing which services are required
+
+### Requirement: Hermetic test oracles express their intent platform-portably
+
+Hermetic tests SHALL express the same oracle on every platform the
+suite supports (Linux CI and macOS development machines) — this
+binds tests that execute embedded shell snippets, construct
+filesystem fixtures, or trigger interpreter-version-sensitive
+behavior: an embedded
+snippet using a tool dialect unavailable on the running platform is
+executed through a probed, pinned dialect substitution of exactly the
+affected tool invocations — never by skipping the test and never by
+weakening what the guard's control flow judges — while any
+doc-equality assertion keeps comparing the canonical published
+snippet text; a fixture path SHALL NOT depend on platform path
+topology (such as a symlinked system tempdir) to reach the gate it
+asserts, and where two refusal gates could answer, each gate gets its
+own fixture row; a test that needs an interpreter-triggered failure
+(such as `RecursionError`) SHALL pin inputs measured to trigger it
+deterministically on every supported interpreter version rather than
+on one version's internal limits. Green-for-the-wrong-reason is
+treated as red: assertions name the specific refusal branch they
+exercise, so a platform that diverts the control flow into a
+different branch fails loudly instead of passing vacuously.
+
+#### Scenario: A GNU-only snippet runs on a BSD-userland machine
+
+- **WHEN** a hermetic test executes a guard snippet that invokes
+  `stat -c` and the running platform's stat lacks `-c`
+- **THEN** the test executes a copy with the pinned BSD-equivalent
+  invocations substituted, the guard's control flow is otherwise
+  byte-identical, the named refusal branch is still the one
+  exercised, and the canonical GNU text remains what doc-equality
+  assertions compare
+
+#### Scenario: Each refusal gate has its own fixture row
+
+- **WHEN** a fixture path could be refused by more than one gate
+  (symlink-component refusal versus approved-root refusal)
+- **THEN** the suite carries one row per gate — a resolved
+  symlink-free path outside the approved root asserting the
+  root-approval refusal, and an explicit symlink-bearing path
+  asserting the symlink refusal — and neither row's outcome depends
+  on the platform's tempdir topology
+
+#### Scenario: Interpreter-version-sensitive triggers are pinned deterministically
+
+- **WHEN** a test needs `RecursionError` from JSON parsing to
+  exercise a never-raises error branch
+- **THEN** the input depth is one measured to raise on every
+  supported CPython version, the payload stays within the production
+  size limit asserted in-test, and the adjacent non-recursive
+  malformed shape (such as a top-level list) is pinned by its own
+  independent case
+
+#### Scenario: Wrong-branch passes are impossible
+
+- **WHEN** a guard test's platform diverts execution into a
+  different refusal branch than the one the test names
+- **THEN** the test fails — its assertions bind the specific
+  refusal message or error code of the named branch, not a generic
+  refusal shape
+
+### Requirement: Background daemons started by app factories are stoppable and test-session-hygienic
+
+Background daemon threads SHALL be stoppable — a thread started as a
+side effect of building an application (such as the display-catalog
+warmer) exposes a stop hook that signals a stop event, joins within a
+bounded timeout, and resets the module's started-state only after a
+successful join, returning a truthy result the caller can assert; a
+join timeout returns falsy WITHOUT resetting state so a stuck thread
+fails loudly rather than permitting a silent second thread. The test
+suite SHALL invoke the stop hook between tests (autouse teardown) so
+no such thread outlives the test that caused it, and a guard test
+SHALL pin liveness, stop, absence after stop, restartability by
+name against `threading.enumerate()`, loop-body replay liveness (a
+faked replay target is really invoked), and the loud join-timeout
+path. A test that replaces a process-global clock with an
+exhaustible iterator SHALL consume it with an explicit default
+chosen so every deadline comparison in reach stays decidable (for
+monotonic clocks: `float("inf")`), so consumption by a concurrent
+thread degrades to a pinned clock instead of `StopIteration` or an
+unreachable timeout branch.
+Production lifecycle is unaffected: in the live process the daemon
+runs until process exit; the stop hook exists for callers that own
+the lifecycle, and the stop event doubles as the loop's interval
+sleep so stopping needs no waiting-out of the full interval.
+
+#### Scenario: Stop hook joins and resets, loudly on timeout
+
+- **WHEN** the stop hook is called while the warm thread is running
+- **THEN** the stop event ends the thread's current wait, the thread
+  is joined within the bounded timeout, started-state and handle are
+  reset, and the hook returns truthy; and **WHEN** the join times
+  out **THEN** the hook returns falsy, started-state is NOT reset,
+  and the event remains set so the stuck thread still exits at its
+  next wait
+
+#### Scenario: No daemon outlives its test
+
+- **WHEN** any test builds a display-readonly application (starting
+  the warmer as a side effect) and finishes
+- **THEN** the autouse teardown stops the thread and asserts
+  success, and a session-level probe of `threading.enumerate()`
+  after such suites finds no `display-catalog-warmer` thread
+
+#### Scenario: Exhaustible patched clocks degrade instead of raising
+
+- **WHEN** a test patches the process-global `time.monotonic` with a
+  finite iterator and a concurrent thread consumes extra elements
+- **THEN** the test's clock reads continue at the explicit default
+  (`float("inf")`) — `StopIteration` is impossible at the patched
+  sites and every `monotonic() >= deadline` timeout branch remains
+  reachable rather than degrading into an unbounded spin
+

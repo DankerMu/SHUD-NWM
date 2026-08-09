@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import contextlib
 import json
 import os
 import re
@@ -3763,17 +3765,21 @@ def test_static_report_explicit_evidence_run_id_overrides_scratch_path_inference
     repo_root = tmp_path
     report_path = Path("/scratch/frd_muziyao/nwm-test/run-static-explicit/docker-security/static.json")
     result = docker_runtime.StaticCheckResult(status="PASS", findings=())
+    written_path: Path | None = None
 
-    written_path = docker_runtime.write_static_report(
-        result,
-        report_path,
-        repo_root,
-        evidence_run_id="run-static-explicit",
-    )
+    try:
+        written_path = docker_runtime.write_static_report(
+            result,
+            report_path,
+            repo_root,
+            evidence_run_id="run-static-explicit",
+        )
 
-    payload = json.loads(written_path.read_text(encoding="utf-8"))
-    assert payload["evidence_run_id"] == "run-static-explicit"
-    written_path.unlink()
+        payload = json.loads(written_path.read_text(encoding="utf-8"))
+        assert payload["evidence_run_id"] == "run-static-explicit"
+    finally:
+        with contextlib.suppress(OSError):
+            (written_path or report_path).unlink(missing_ok=True)
 
 
 def test_preflight_defaults_tmpdir_to_repo_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4420,24 +4426,30 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(
     not os.access("/scratch/frd_muziyao", os.W_OK),
     reason="requires writable /scratch/frd_muziyao (node-22 host contract)",
 )
-def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:
+def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp"))
     evidence_root = Path("/scratch/frd_muziyao/nwm-test/run-smoke-explicit/docker-security")
 
-    result = docker_runtime.run_docker_smoke(
-        evidence_root=evidence_root,
-        repo_root=tmp_path,
-        evidence_run_id="run-smoke-explicit",
-        min_free_bytes=100,
-        command_runner=_docker_smoke_success_runner,
-        disk_usage_provider=_high_space,
-    )
+    try:
+        result = docker_runtime.run_docker_smoke(
+            evidence_root=evidence_root,
+            repo_root=tmp_path,
+            evidence_run_id="run-smoke-explicit",
+            min_free_bytes=100,
+            command_runner=_docker_smoke_success_runner,
+            disk_usage_provider=_high_space,
+        )
 
-    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
-    preflight = json.loads((evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8"))
-    assert result.status == "PASS"
-    assert payload["evidence_run_id"] == "run-smoke-explicit"
-    assert preflight["evidence_run_id"] == "run-smoke-explicit"
-    shutil.rmtree(evidence_root.parent)
+        payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+        preflight = json.loads((evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8"))
+        assert result.status == "PASS"
+        assert payload["evidence_run_id"] == "run-smoke-explicit"
+        assert preflight["evidence_run_id"] == "run-smoke-explicit"
+    finally:
+        shutil.rmtree(evidence_root.parent)
 
 
 @pytest.mark.parametrize(
@@ -4519,6 +4531,85 @@ def test_docker_smoke_display_startup_cleanup_failure_never_passes(
     assert payload["commands"]["display_startup_start"]["returncode"] == 0
     assert payload["commands"]["display_startup_probe"]["returncode"] == 0
     assert "DISPLAY_STARTUP_CLEANUP_FAILED" in {blocker["code"] for blocker in payload["blockers"]}
+
+
+def test_every_run_docker_smoke_call_site_normalizes_tmpdir() -> None:
+    """Static in-file meta-guard (#1211) for the file-wide TMPDIR invariant.
+
+    Every test in this file that invokes the docker smoke entrypoint MUST
+    normalize the process ``TMPDIR`` into the approved evidence root in its
+    OWN body (``monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" /
+    "tmp"))``). A missed site does not red honestly: CI never exports
+    ``TMPDIR`` so the production fallback greens it, macOS skips the Class C
+    case, and only node-22 reds — with the misleading ``BLOCKED != PASS``
+    diagnostic. #1126 shipped 7/8 and the miss was caught by a human
+    side-sweep (#1128 → PR #1210), not by automation.
+
+    Detection grammar: parse this file's own source, walk sync AND async
+    function definitions (``asyncio_mode = "auto"`` would collect a future
+    ``async def test_...``), treat a function as a call site when any call in
+    its body has a callee NAMED the smoke entrypoint (bare or attribute
+    form), and require an in-body ``.setenv`` call whose first positional
+    argument is the constant ``"TMPDIR"`` and whose second argument's source
+    text carries the approved-root shape. The shape conjunct is load-bearing:
+    the file deliberately contains the unapproved counter-idiom
+    ``monkeypatch.setenv("TMPDIR", "/tmp")`` in a preflight test, and a smoke
+    test copying it must red here. Tests that deliberately UNSET ``TMPDIR``
+    to verify the production fallback stay outside the invariant — the guard
+    keys strictly on smoke-entrypoint call sites.
+
+    The entrypoint name appears here only as a string literal, so the guard
+    can never match itself. Pure static analysis: no skipif, no host or
+    filesystem dependency beyond reading this file's own source, so the
+    verdict is identical on macOS, CI, and node-22.
+    """
+    smoke_entrypoint = "run_docker_smoke"
+    approved_root_needles = ("artifacts", "tmp")
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+
+    call_sites: list[str] = []
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        calls_smoke = False
+        normalizes_tmpdir = False
+        for descendant in ast.walk(node):
+            if not isinstance(descendant, ast.Call):
+                continue
+            callee = descendant.func
+            if isinstance(callee, ast.Name) and callee.id == smoke_entrypoint:
+                calls_smoke = True
+            if isinstance(callee, ast.Attribute) and callee.attr == smoke_entrypoint:
+                calls_smoke = True
+            if (
+                isinstance(callee, ast.Attribute)
+                and callee.attr == "setenv"
+                and len(descendant.args) >= 2
+                and isinstance(descendant.args[0], ast.Constant)
+                and descendant.args[0].value == "TMPDIR"
+            ):
+                target = ast.unparse(descendant.args[1])
+                if all(needle in target for needle in approved_root_needles):
+                    normalizes_tmpdir = True
+        if not calls_smoke:
+            continue
+        call_sites.append(node.name)
+        if not normalizes_tmpdir:
+            offenders.append(node.name)
+
+    assert not offenders, (
+        "Test(s) invoking the docker smoke entrypoint do NOT normalize TMPDIR into the "
+        "approved evidence root in their own body:\n"
+        + "\n".join(f"  - {name}" for name in sorted(offenders))
+        + '\nAdd monkeypatch.setenv("TMPDIR", str(tmp_path / "artifacts" / "tmp")) to each; '
+        'the unapproved "/tmp" shape does not satisfy this invariant.'
+    )
+    assert call_sites, (
+        "The TMPDIR meta-guard collected ZERO docker-smoke call sites — its AST matching "
+        "is broken or every smoke test was renamed/removed. Fix the guard (or delete it "
+        "deliberately); it must never pass vacuously."
+    )
 
 
 def test_docker_smoke_required_probe_missing_never_passes() -> None:

@@ -20,14 +20,19 @@ turns this suite RED -- the exact class caught live five times.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from packages.common import node27_container_contract as contract
 from scripts import node27_timeseries_compression_bundle_author as bundle_author
+from scripts import node27_timeseries_compression_capture as capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
@@ -36,6 +41,49 @@ from tests import test_node27_timeseries_compression_supervisor as sup
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "904d488538d3c5c8459525c19daf4dbb769b9df3"
 CATALOG_KINDS = ("catalog_before", "catalog_after_first", "catalog_after_second")
+
+# Verbatim copy of the recovery-preflight SQL literal as it stood before #1242
+# replaced it with an interpolation of the shared contract constants.  This SQL
+# executes on the node-27 primary during the live capture, so "the rendered
+# string did not move a single byte" is the zero-change oracle -- the marker
+# comment included, since it must stay the first token (the psql stub below
+# dispatches on it, and the matcher is prefix-sensitive).
+_FROZEN_RECOVERY_PREFLIGHT_SQL = (
+    "/* capture:recovery_preflight */ SELECT json_build_object("
+    "'free_bytes', (pg_catalog.pg_tablespace_size('pg_default'))::bigint * 0 + "
+    "(SELECT bytes FROM (SELECT 500000000000::bigint AS bytes) s),"
+    "'before_compressed', c.is_compressed, 'before_row_count', "
+    "(SELECT count(*) FROM _timescaledb_internal._hyper_3_7_chunk)) "
+    "FROM timescaledb_information.chunks c "
+    "WHERE c.hypertable_schema = 'hydro' AND c.hypertable_name = 'river_timeseries' "
+    "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'"
+)
+
+# Verbatim copy of the catalog_post SQL as it stood before #1244 replaced its six
+# hand-written chunk-identity literals with an interpolation of the derived
+# ``RECOVERY_TARGET`` mapping, extracted from the pre-change module by AST and
+# pinned together with its digest so this oracle never re-derives what it checks.
+# Same zero-change standard as the recovery-preflight freeze above: this SQL runs
+# on the node-27 primary during the live capture.
+_FROZEN_CATALOG_POST_SQL = (
+    "/* capture:catalog_post */ SELECT json_build_object("
+    "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
+    "'catalog', (SELECT json_build_object("
+    "'hypertables', json_build_object("
+    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
+    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
+    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
+    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
+    "timescaledb_information.compression_settings s), '[]'::json),"
+    "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
+    "WHERE j.proc_name = 'policy_compression'), '[]'::json))),"
+    "'compressed_chunk_identities', json_build_array(json_build_object("
+    "'hypertable_schema','hydro','hypertable_name','river_timeseries',"
+    "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
+    "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))"
+)
+_FROZEN_CATALOG_POST_SQL_SHA256 = "c68db1f99df431bf3f5baeb3d6f73eae03d63d440abae2f0c08729535f43567e"
 
 _DB_IDENTITY = {
     "dbname": "nhms",
@@ -240,8 +288,23 @@ def _capture_stub_dir(bindir: Path, *, schema_dump_container: str) -> None:
 
 
 def _run_capture(
-    kind: str, *, repo: Path, capture_bin: Path, evidence_dir: Path, extra: list[str] | None = None
-) -> dict[str, Any]:
+    kind: str,
+    *,
+    repo: Path,
+    capture_bin: Path,
+    evidence_dir: Path,
+    extra: list[str] | None = None,
+    docker: str | None = None,
+    expect_failure: bool = False,
+) -> Any:
+    """Run the real capture producer as its own process.
+
+    ``docker`` overrides the injected docker CLI (the RECORD/EXEC guard test
+    points it at a deviating stub); ``expect_failure`` returns the raw
+    ``CompletedProcess`` instead of a parsed document, so the caller can assert
+    on exit code/stdout/stderr rather than tripping ``check=True``.
+    """
+
     argv = [
         sys.executable,
         str(ROOT / "scripts/node27_timeseries_compression_capture.py"),
@@ -262,16 +325,16 @@ def _run_capture(
         "--systemctl",
         str(capture_bin / "systemctl"),
         "--docker",
-        str(capture_bin / "docker"),
+        docker if docker is not None else str(capture_bin / "docker"),
         "--journalctl",
         str(capture_bin / "journalctl"),
         "--git",
         str(capture_bin / "git"),
         *(extra or []),
     ]
-    import subprocess
-
-    completed = subprocess.run(argv, capture_output=True, check=True)
+    completed = subprocess.run(argv, capture_output=True, check=not expect_failure)
+    if expect_failure:
+        return completed
     assert completed.stderr == b"", completed.stderr.decode()
     return json.loads(completed.stdout)
 
@@ -296,6 +359,44 @@ def test_plan_author_binds_the_mutation_head_into_the_decompress_command() -> No
     assert decompress["argv"][5] == HEAD
     list_command = next(c for c in plan["commands"] if c["kind"] == "pg_restore_list")
     assert list_command["argv"][-1].startswith("/var/lib/postgresql/")
+
+
+# --------------------------------------------------------------------------- #
+# Recovery-target contract (#1242)
+# --------------------------------------------------------------------------- #
+def test_capture_recovery_target_keeps_the_schema_mandated_six_key_shape() -> None:
+    schema = json.loads((ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text())
+    # The emitted target is validated with `additionalProperties: false` plus the
+    # verifier's `_require_exact_keys`, so the key SET is the binding shape (key
+    # order is irrelevant -- emission sorts keys).
+    assert set(capture.RECOVERY_TARGET) == set(schema["$defs"]["recovery_target"]["required"])
+    # Definitional now that the dict derives from the shared source; asserted
+    # once for completeness -- the load-bearing binding is the key set above and
+    # the schema<->contract equality in the supervisor-side drift guard.
+    assert capture.RECOVERY_TARGET == dict(contract.RECOVERY_TARGET_FIELDS)
+
+
+def test_capture_recovery_preflight_sql_is_byte_identical_to_the_frozen_literal() -> None:
+    assert capture.RECOVERY_PREFLIGHT_SQL == _FROZEN_RECOVERY_PREFLIGHT_SQL
+    assert capture.RECOVERY_PREFLIGHT_SQL.startswith("/* capture:recovery_preflight */ ")
+
+
+def test_capture_catalog_post_sql_is_byte_identical_to_the_frozen_literal() -> None:
+    """The derived catalog_post SQL did not move a byte (#1244).
+
+    Honest scope of the marker assertions: the test psql stub matches by
+    substring containment over the joined argv (see the supervisor suite's stub
+    semantics, ``all(token in argv)``), NOT by prefix -- so the hard constraint
+    the capture dress rehearsal depends on is that ``/* capture:catalog_post */``
+    appears verbatim and stays unique among the stub's responses.  The
+    ``startswith`` assertion below is a byte-freeze detail, kept because the
+    rendered statement is what executes on the node-27 primary.
+    """
+
+    assert hashlib.sha256(_FROZEN_CATALOG_POST_SQL.encode()).hexdigest() == _FROZEN_CATALOG_POST_SQL_SHA256
+    assert capture.CATALOG_POST_SQL == _FROZEN_CATALOG_POST_SQL
+    assert capture.CATALOG_POST_SQL.count("/* capture:catalog_post */") == 1
+    assert capture.CATALOG_POST_SQL.startswith("/* capture:catalog_post */ ")
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +441,158 @@ def test_capture_catalog_post_document_binds_the_compressed_chunk(tmp_path: Path
     }
     evidence._validate_d3_catalog(document["catalog"], "catalog.post.catalog")
     assert {"chunk_name": "_hyper_3_7_chunk"}.items() <= document["compressed_chunk_identities"][0].items()
+
+
+# --------------------------------------------------------------------------- #
+# RECORD/EXEC docker split guard (#1090)
+# --------------------------------------------------------------------------- #
+def _write_marker_docker_stub(bindir: Path, *, responses_source: Path, marker: Path) -> str:
+    """A RUNNABLE docker stub that records each invocation before answering.
+
+    It reuses the measured responses of the capture stub dir, so with the
+    RECORD/EXEC guard removed this stub really does satisfy the entire
+    ``schema_dump_list`` probe sequence and the producer emits a bundle
+    attesting ``/usr/bin/docker`` -- the false attestation the guard closes.
+    That is also what makes the "marker absent" assertion bite: a nonexistent
+    binary would die inside ``_run`` for an unrelated reason.
+    """
+
+    bindir.mkdir(parents=True, exist_ok=True)
+    body = sup._STUB_TEMPLATE.replace("{python}", sys.executable)
+    anchor = '_argv = " ".join(sys.argv[1:])'
+    assert body.count(anchor) == 1
+    record = (
+        f"with open({str(marker)!r}, 'a', encoding='utf-8') as _marker:\n"
+        f"    _marker.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    )
+    script = bindir / "docker"
+    script.write_text(body.replace(anchor, record + anchor), encoding="utf-8")
+    script.chmod(0o755)
+    (bindir / "docker.responses.json").write_bytes(responses_source.read_bytes())
+    return str(script)
+
+
+def test_schema_dump_list_refuses_a_deviating_docker_without_the_self_test_seam(tmp_path: Path) -> None:
+    """The one capture kind that attests docker argvs must run what it records.
+
+    ``version_argv``/``list_argv`` are recorded as ``HOST_DOCKER_CLI`` while the
+    probes execute ``ctx.docker``; without this guard a caller passing another
+    binary would ship a bundle attesting ``/usr/bin/docker`` for work it never
+    did, and the verifier's literal pin would accept it.
+    """
+
+    repo = _fixture_repo(tmp_path)
+    capture_bin = tmp_path / "capture-bin"
+    schema_dump_container = "/var/lib/postgresql/evidence/schema.dump"
+    _capture_stub_dir(capture_bin, schema_dump_container=schema_dump_container)
+    schema_dump_host = tmp_path / "schema-before.dump"
+    schema_dump_host.write_bytes(b"PGDMP\x00forensic schema\n")
+
+    marker = tmp_path / "deviating-docker.invoked"
+    deviating_docker = _write_marker_docker_stub(
+        tmp_path / "deviating-bin",
+        responses_source=capture_bin / "docker.responses.json",
+        marker=marker,
+    )
+    assert deviating_docker != capture.HOST_DOCKER_CLI
+    assert os.access(deviating_docker, os.X_OK)
+
+    evidence_dir = tmp_path / "ev"
+    completed = _run_capture(
+        "schema_dump_list",
+        repo=repo,
+        capture_bin=capture_bin,
+        evidence_dir=evidence_dir,
+        docker=deviating_docker,
+        expect_failure=True,
+        extra=[
+            "--schema-dump-host",
+            str(schema_dump_host),
+            "--schema-dump-container",
+            schema_dump_container,
+        ],
+    )
+
+    assert completed.returncode != 0
+    stderr = completed.stderr.decode()
+    assert "--self-test-docker-seam" in stderr
+    assert deviating_docker in stderr
+    # No forensic document reached stdout (documents are emitted there, never
+    # written as files) and the evidence dir main() created stayed empty.
+    assert completed.stdout == b""
+    assert evidence_dir.is_dir()
+    assert list(evidence_dir.iterdir()) == []
+    # Fail-closed BEFORE any subprocess: the runnable stub was never invoked.
+    assert not marker.exists()
+
+
+def test_plan_author_never_emits_the_docker_self_test_seam(tmp_path: Path) -> None:
+    """The seam stays test-only: production plans pin the real host docker CLI.
+
+    Load-bearing -- if ``plan_author`` ever auto-emitted the flag (for example
+    whenever ``capture_docker`` deviates), the guard above would be nullified
+    for exactly the future production caller it exists to stop.  The default
+    plan alone cannot see that regression (its ``capture_docker`` never
+    deviates), so the deviating-caller case below is what actually bites: a
+    plan author that "helpfully" pairs a non-pinned docker with the seam flag
+    is exactly the superficially-DRY route the proposal forbids.
+    """
+
+    plan = plan_author.build_run_plan(mutation_head_sha=HEAD)
+    for authored_capture in plan["captures"]:
+        assert "--self-test-docker-seam" not in authored_capture["argv"], authored_capture["kind"]
+    listing = next(c for c in plan["captures"] if c["kind"] == "schema_dump_list")
+    argv = list(listing["argv"])
+    assert argv[argv.index("--docker") + 1] == capture.HOST_DOCKER_CLI == "/usr/bin/docker"
+
+    deviating_docker = str(tmp_path / "stub-bin" / "docker")
+    assert deviating_docker != capture.HOST_DOCKER_CLI
+    deviating_plan = plan_author.build_run_plan(
+        mutation_head_sha=HEAD, capture_docker=deviating_docker
+    )
+    for authored_capture in deviating_plan["captures"]:
+        assert "--self-test-docker-seam" not in authored_capture["argv"], authored_capture["kind"]
+    deviating_listing = next(
+        c for c in deviating_plan["captures"] if c["kind"] == "schema_dump_list"
+    )
+    deviating_argv = list(deviating_listing["argv"])
+    assert deviating_argv[deviating_argv.index("--docker") + 1] == deviating_docker
+
+
+def test_the_pinned_host_docker_without_the_seam_passes_the_guard_untouched(tmp_path: Path) -> None:
+    """Spec scenario 3: the production default path is unaffected by the guard.
+
+    Pass-through is not observable as "no error" -- the production probes need a
+    real docker.  It IS observable in WHICH error comes out: with the pinned
+    host CLI and no seam, control must fall through to the pre-existing
+    ``--schema-dump-host``/``--schema-dump-container`` check (capture.py:516),
+    so the message is that one and never mentions the seam.  An over-broad
+    guard (dropping the ``ctx.docker != HOST_DOCKER_CLI`` term) would raise the
+    seam error here instead, and no docker binary is involved either way.
+    """
+
+    ctx = capture.Context(
+        database="nhms",
+        mutation_head_sha=HEAD,
+        repo=str(tmp_path / "repo"),
+        container="nhms-db",
+        evidence_dir=tmp_path / "ev",
+        psql="/usr/bin/psql",
+        systemctl="/usr/bin/systemctl",
+        docker=capture.HOST_DOCKER_CLI,
+        journalctl="/usr/bin/journalctl",
+        git="/usr/bin/git",
+        schema_dump_host=None,
+        schema_dump_container=None,
+    )
+    assert ctx.self_test_docker_seam is False
+
+    with pytest.raises(capture.CaptureError) as raised:
+        capture._capture_schema_dump_list(ctx)
+
+    message = str(raised.value)
+    assert "schema_dump_list requires --schema-dump-host/--schema-dump-container" in message
+    assert "--self-test-docker-seam" not in message
 
 
 # --------------------------------------------------------------------------- #
@@ -401,6 +654,14 @@ def test_authored_plan_survives_the_real_state_machine_and_verifier_validators(
         capture_journalctl=str(capture_bin / "journalctl"),
         capture_git=str(capture_bin / "git"),
     )
+    # This rehearsal injects a stub docker, so the schema_dump_list capture must
+    # opt into the RECORD/EXEC deviation explicitly (the producer fails closed
+    # otherwise).  Patched post-hoc, exactly like `--self-test-free-bytes`:
+    # `plan_author` must never learn to emit this flag, or a future production
+    # caller would silently re-open the false-attestation hole.
+    for authored_capture in plan["captures"]:
+        if authored_capture["kind"] == "schema_dump_list":
+            authored_capture["argv"] = [*authored_capture["argv"], "--self-test-docker-seam"]
     # The real gate accepts the authored plan before any execution.
     supervisor.validate_run_plan(plan, inherited_env={})
     _stub_command_writers(plan, schema_dump_host)

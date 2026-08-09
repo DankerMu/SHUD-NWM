@@ -1,5 +1,18 @@
 version: "3.9"
 
+# LOCAL DEV STACK ONLY. This is NOT the node-27 production database.
+#
+# The `db` service below shares the container name `nhms-db` with node-27's
+# production primary, but nothing else: production uses host bind mounts (not a
+# named volume), port 55432, uid 1005:1005, real credentials, and a third bind
+# mount for the `ghdc` tablespace that holds four detail-hypertable chunks.
+# Recreating the node-27 container from this file yields a PostgreSQL that
+# cannot open production data. The real procedure is
+# docs/runbooks/tier-node27-timeseries-storage.md section 4.3.3.
+#
+# Do NOT add a `ghdc` mount here — /data/GHDC does not exist off node-27, and
+# no migration under db/ references a tablespace, so dev needs none.
+
 services:
   db:
     image: timescale/timescaledb-ha:pg15-latest
