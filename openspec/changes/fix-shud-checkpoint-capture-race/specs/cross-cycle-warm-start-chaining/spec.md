@@ -45,7 +45,8 @@ structural-completeness gates as a watcher capture.
   for less than the poll interval)
 - **THEN** the runtime re-runs SHUD from the same staged IC and forcing with the end time
   shortened to exactly the missed hour, into a scratch output directory that contains no content
-  from any earlier attempt, bounded by the configured runtime timeout
+  from any earlier attempt, with the main solve and all recovery reruns together bounded by ONE
+  shared runtime-timeout budget (an hour with no remaining budget is skipped and recorded)
 - **AND** the rerun's final `*.cfg.ic.update` is installed as the checkpoint only if its header
   minute matches the requested hour and its body passes structural completeness for the expected
   river count — the same gates as a watcher capture
@@ -58,13 +59,16 @@ structural-completeness gates as a watcher capture.
 - **THEN** the gate-failing candidate is discarded (not installed, no file left under
   `state_checkpoints/`), and the run fails with the stable error code
   `STATE_CHECKPOINTS_MISSING`
-- **AND** the failure message and the `state_checkpoints.json` manifest include the trail of
-  distinct `*.cfg.ic.update` header minutes the watcher observed, so the miss is locatable from
-  evidence alone
+- **AND** the `state_checkpoints.json` manifest is written whenever checkpoint hours were
+  requested — including when nothing was captured — and both the failure message and the
+  manifest include the trail of distinct `*.cfg.ic.update` header minutes the watcher observed
+  plus a per-hour recovery-outcome trail (`recovery_outcomes`) naming how each missing hour's
+  recovery ended, so the miss is locatable from evidence alone
 
 #### Scenario: Checkpoint manifest consumers tolerate the diagnostic fields
 - **WHEN** an existing consumer reads `state_checkpoints.json` (state save/QC via
   `_load_state_checkpoint_manifest`)
 - **THEN** checkpoint entries parse exactly as before: the added top-level
-  `observed_header_minutes` key and per-entry `provenance` key are ignored by consumers that do
-  not use them, and no entry field consumed today changes shape or meaning
+  `observed_header_minutes` and `recovery_outcomes` keys and the per-entry `provenance` key are
+  ignored by consumers that do not use them, and no entry field consumed today changes shape or
+  meaning

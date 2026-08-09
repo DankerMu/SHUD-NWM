@@ -57,7 +57,22 @@ equivalence the watcher capture asserts today.
   e13ae809 partial-discard semantics are preserved.
 - Diagnostics: tracker appends every distinct observed header minute;
   `write_manifest` emits it as a sibling top-level key
-  `observed_header_minutes`; the hard-failure message includes the trail.
+  `observed_header_minutes` and is written whenever checkpoint hours were
+  requested — including the total-miss case; per-hour recovery outcomes are
+  recorded alongside; the hard-failure message includes both.
+- Budget: main solve + all recovery reruns share ONE `timeout_seconds`
+  monotonic deadline (pre-change `run_shud` never exceeded 1× the budget, and
+  Slurm walltime sizing assumes that); an hour with no remaining budget is
+  skipped with outcome `budget_exhausted`.
+- Alignment precondition (pre-existing, recorded per review round 1
+  cand-10): SHUD's `PrintInit` writes `cfg.ic.update` only when
+  `t % Update_IC_STEP == 0` — including the final write at END. The recovery
+  guarantee therefore requires `hour*60 % update_ic_step_minutes == 0`, which
+  today is enforced only by `chain_manifests.py` setting
+  `update_ic_step_minutes = min(checkpoint_hours)*60`. A misaligned
+  configuration fails safe (gate discards, hard failure) both in the main run
+  and in recovery; the systemic guard is tracked as a follow-up issue, not in
+  this change.
 
 ## Downstream compatibility
 

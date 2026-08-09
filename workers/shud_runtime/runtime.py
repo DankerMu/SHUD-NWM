@@ -73,6 +73,11 @@ MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
 # run writes a few dozen output files there; anything far beyond that is not a
 # scratch dir this runtime produced, so refuse to iterate it.
 MAX_RECOVERY_SCRATCH_ENTRIES = 1024
+# Floor of the shared solver budget (#1315): with less than this left there is
+# no point spawning another recovery rerun, so the hour is skipped with a
+# `budget_exhausted` outcome instead of starting a process that can only be
+# killed. Also the minimum wait handed to a rerun that does get spawned.
+_RECOVERY_MIN_BUDGET_SECONDS = 1.0
 
 _SHUD_SOLVER_PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "ABSTOL": (1.0e-12, 1.0),
@@ -529,6 +534,13 @@ class SHUDRuntime:
         stdout_path = log_dir / "shud_stdout.log"
         stderr_path = log_dir / "shud_stderr.log"
         _ensure_directory(log_dir, containment_root=workspace)
+        # #1315 resource bound: the main solve AND every post-run recovery rerun
+        # share ONE `timeout_seconds` budget. Pre-change `run_shud` never
+        # exceeded 1x the budget and Slurm walltime is sized on that assumption;
+        # a per-rerun fresh timeout would let a hung engine multiply the task's
+        # wall time by the number of missing hours and get SIGKILLed mid-loop,
+        # losing the task-outcome receipt.
+        solver_deadline = time.monotonic() + self.config.timeout_seconds
         try:
             with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
                 _open_log_file_no_follow(stderr_path, containment_root=log_dir)
@@ -540,7 +552,7 @@ class SHUDRuntime:
                     stdout=stdout_file,
                     stderr=stderr_file,
                 )
-                self._wait_for_shud_process(process, manifest, checkpoint_tracker)
+                self._wait_for_shud_process(process, manifest, checkpoint_tracker, deadline=solver_deadline)
         except OSError as error:
             raise SHUDRuntimeError("SHUD_EXECUTION_FAILED", f"Failed to start SHUD executable: {error}") from error
         except subprocess.TimeoutExpired as error:
@@ -568,7 +580,13 @@ class SHUDRuntime:
             # to the missing f-hour, whose FINAL cfg.ic.update is the wanted
             # checkpoint regardless of solve speed.
             self._recover_missing_state_checkpoints(
-                manifest, cfg_path, workspace, output_dir, log_dir, checkpoint_tracker
+                manifest,
+                cfg_path,
+                workspace,
+                output_dir,
+                log_dir,
+                checkpoint_tracker,
+                deadline=solver_deadline,
             )
         checkpoint_tracker.write_manifest()
         missing_checkpoints = checkpoint_tracker.missing_hours()
@@ -583,7 +601,8 @@ class SHUDRuntime:
             raise SHUDRuntimeError(
                 "STATE_CHECKPOINTS_MISSING",
                 f"SHUD did not emit requested restart checkpoints: {missing} "
-                f"(observed cfg.ic.update header minutes: {observed_text})",
+                f"(observed cfg.ic.update header minutes: {observed_text})"
+                f"{checkpoint_tracker.recovery_outcome_summary()}",
             )
         _ensure_directory(output_dir)
 
@@ -592,8 +611,9 @@ class SHUDRuntime:
         process: subprocess.Popen[str],
         manifest: dict[str, Any],
         checkpoint_tracker: "_StateCheckpointTracker",
+        *,
+        deadline: float,
     ) -> None:
-        deadline = time.monotonic() + self.config.timeout_seconds
         while process.poll() is None:
             checkpoint_tracker.capture_available()
             if time.monotonic() >= deadline:
@@ -609,6 +629,8 @@ class SHUDRuntime:
         output_dir: Path,
         log_dir: Path,
         checkpoint_tracker: "_StateCheckpointTracker",
+        *,
+        deadline: float,
     ) -> None:
         """Deterministically derive restart checkpoints the watcher failed to sample.
 
@@ -625,15 +647,46 @@ class SHUDRuntime:
         from a fixed filename, so a stale file from an earlier attempt in a
         reused run workspace must never be installable without a successful
         same-invocation rerun.
+
+        Every lane records a per-hour outcome on the tracker
+        (``recovered`` / ``skipped_scratch_unclean`` / ``spawn_failed`` /
+        ``timeout`` / ``exit_<rc>`` / ``budget_exhausted`` / ``cfg_write_failed``
+        / ``gate_rejected(...)``) so an operator can tell "never ran" from
+        "ran and was rejected" from evidence alone. Nothing escapes this method
+        except genuine programming errors: an ENOSPC-class failure on one hour
+        must not abort the remaining hours, skip ``write_manifest``, or change
+        the caller's error code away from ``STATE_CHECKPOINTS_MISSING``.
+
+        ``deadline`` is the SHARED monotonic solver deadline (main solve + all
+        reruns), so the whole of :meth:`run_shud` stays inside one
+        ``timeout_seconds`` budget.
         """
 
         project_mode = _is_shud_project_mode(manifest, self.config.command_style)
         separator = "\t" if project_mode else " = "
-        original_cfg = _read_text_no_follow(cfg_path, containment_root=cfg_path.parent)
+        try:
+            original_cfg = _read_text_no_follow(cfg_path, containment_root=cfg_path.parent)
+        except (OSError, SHUDRuntimeError):
+            # No cfg to shorten: recovery is impossible for every hour, but the
+            # caller still owns the failure (stable error code + manifest).
+            for hour in checkpoint_tracker.missing_hours():
+                checkpoint_tracker.record_recovery_outcome(hour, "cfg_read_failed")
+            return
         for hour in checkpoint_tracker.missing_hours():
+            remaining = deadline - time.monotonic()
+            if remaining <= _RECOVERY_MIN_BUDGET_SECONDS:
+                checkpoint_tracker.record_recovery_outcome(hour, "budget_exhausted")
+                continue
             recovery_root = workspace / "state_checkpoint_recovery" / f"f{hour:03d}"
-            _ensure_directory(recovery_root, containment_root=workspace)
-            if not _clear_recovery_scratch_root(recovery_root):
+            try:
+                _ensure_directory(recovery_root, containment_root=workspace)
+            except (OSError, SHUDRuntimeError):
+                checkpoint_tracker.record_recovery_outcome(hour, "scratch_dir_failed")
+                continue
+            scratch_refusal = _clear_recovery_scratch_root(recovery_root)
+            if scratch_refusal is not None:
+                checkpoint_tracker.record_recovery_outcome(hour, "skipped_scratch_unclean")
+                self._log_recovery_refusal(log_dir, hour, scratch_refusal)
                 continue
             content = original_cfg
             if project_mode:
@@ -653,11 +706,17 @@ class SHUDRuntime:
             )
             stdout_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.out.log"
             stderr_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.err.log"
+            # Which lane a raise came from: the no-follow helpers raise
+            # SHUDRuntimeError (not OSError) on an unwritable/ENOSPC target, so
+            # both exception families are caught and mapped to this hour only.
+            failure_outcome = "cfg_write_failed"
             try:
                 _write_text_no_follow(cfg_path, content, containment_root=cfg_path.parent)
+                failure_outcome = "log_open_failed"
                 with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
                     _open_log_file_no_follow(stderr_path, containment_root=log_dir)
                 ) as stderr_file:
+                    failure_outcome = "spawn_failed"
                     process = subprocess.Popen(
                         command,
                         cwd=workspace,
@@ -665,26 +724,55 @@ class SHUDRuntime:
                         stdout=stdout_file,
                         stderr=stderr_file,
                     )
+                    failure_outcome = "wait_failed"
                     try:
-                        process.wait(timeout=self.config.timeout_seconds)
+                        process.wait(timeout=max(_RECOVERY_MIN_BUDGET_SECONDS, deadline - time.monotonic()))
                     except subprocess.TimeoutExpired:
                         process.kill()
                         try:
                             process.wait(timeout=5)
                         except subprocess.TimeoutExpired:
                             pass
+                        checkpoint_tracker.record_recovery_outcome(hour, "timeout")
                         continue
-            except OSError:
+            except (OSError, SHUDRuntimeError):
+                checkpoint_tracker.record_recovery_outcome(hour, failure_outcome)
                 continue
             finally:
-                _write_text_no_follow(cfg_path, original_cfg, containment_root=cfg_path.parent)
+                try:
+                    _write_text_no_follow(cfg_path, original_cfg, containment_root=cfg_path.parent)
+                except (OSError, SHUDRuntimeError):
+                    # Best-effort: a failed restore must never mask the loop's
+                    # own outcome. The next execute() re-templates the cfg from
+                    # the package, so the workspace heals on the next attempt.
+                    checkpoint_tracker.record_recovery_outcome(hour, "cfg_restore_failed")
             if process.returncode != 0:
+                checkpoint_tracker.record_recovery_outcome(hour, f"exit_{process.returncode}")
                 continue
             checkpoint_tracker.install_recovered(
                 hour,
                 recovery_root / f"{checkpoint_tracker.project_name}.cfg.ic.update",
                 source_root=recovery_root,
             )
+
+    def _log_recovery_refusal(self, log_dir: Path, hour: int, reason: str) -> None:
+        """Leave the scratch-refusal reason in the per-hour recovery err log.
+
+        Without this the refusal lane is the only silent one: the run fails with
+        ``STATE_CHECKPOINTS_MISSING`` and every artifact points at the solver,
+        while the actual cause is unexpected residue in the scratch dir.
+        """
+
+        try:
+            _write_text_no_follow(
+                log_dir / f"state_checkpoint_recovery_f{hour:03d}.err.log",
+                f"state checkpoint recovery skipped for f{hour:03d}: {reason}\n",
+                containment_root=log_dir,
+            )
+        except (OSError, SHUDRuntimeError):
+            # Diagnostics are best-effort; the manifest outcome already carries
+            # the reason class.
+            return
 
     def _preflight_shud_executable(self) -> None:
         """Reject stub/missing SHUD executables before invoking the solver.
@@ -2086,7 +2174,7 @@ def _find_regular_files(
     return sorted(matches)
 
 
-def _clear_recovery_scratch_root(recovery_root: Path) -> bool:
+def _clear_recovery_scratch_root(recovery_root: Path) -> str | None:
     """Empty a per-hour checkpoint-recovery scratch dir before its rerun (#1315).
 
     ``_StateCheckpointTracker.install_recovered`` reads a FIXED filename
@@ -2098,35 +2186,45 @@ def _clear_recovery_scratch_root(recovery_root: Path) -> bool:
     The scratch root is therefore fresh-scoped per invocation: every regular file
     is unlinked no-follow under containment.
 
-    Returns ``False`` when the directory cannot be proven to be a flat set of
-    regular files (unreadable, above the entry bound, or holding a symlink,
-    sub-directory or device node).  The caller then skips that hour's recovery
-    instead of following or traversing unexpected content: the hour stays
-    missing and the run fails hard with ``STATE_CHECKPOINTS_MISSING``, which is
-    the safe direction.
+    Returns ``None`` when the directory is now empty, or a human-readable
+    refusal reason when it cannot be proven to be a flat set of regular files
+    (unreadable, above the entry bound, or holding a symlink, sub-directory or
+    device node).  The caller then skips that hour's recovery instead of
+    following or traversing unexpected content: the hour stays missing and the
+    run fails hard with ``STATE_CHECKPOINTS_MISSING``, which is the safe
+    direction.
+
+    The scan is deliberately TWO passes: everything is stat'ed before anything
+    is unlinked.  A single-pass clear that refuses mid-iteration would leave the
+    dir half-cleared — destroying evidence about what an earlier attempt wrote
+    while still refusing to run — and a refusal on non-regular residue is
+    permanent across retries, so the surviving content is all the operator has.
     """
 
     try:
         entries = sorted(os.listdir(recovery_root))
-    except OSError:
-        return False
+    except OSError as error:
+        return f"scratch dir is unreadable: {error}"
     if len(entries) > MAX_RECOVERY_SCRATCH_ENTRIES:
-        return False
+        return f"scratch dir holds {len(entries)} entries, above the {MAX_RECOVERY_SCRATCH_ENTRIES} bound"
+    removable: list[Path] = []
     for name in entries:
         path = recovery_root / name
         try:
             entry_stat = stat_no_follow(path, containment_root=recovery_root)
         except FileNotFoundError:
             continue
-        except SafeFilesystemError:
-            return False
+        except SafeFilesystemError as error:
+            return f"scratch entry {name} is not safely inspectable: {error}"
         if not stat_module.S_ISREG(entry_stat.st_mode):
-            return False
+            return f"scratch entry {name} is not a regular file"
+        removable.append(path)
+    for path in removable:
         try:
             unlink_no_follow(path, containment_root=recovery_root, missing_ok=True)
-        except SafeFilesystemError:
-            return False
-    return True
+        except SafeFilesystemError as error:
+            return f"scratch entry {path.name} could not be removed: {error}"
+    return None
 
 
 def _iter_regular_descendant_files_no_follow(directory: Path, *, containment_root: Path) -> list[Path]:
@@ -2916,6 +3014,10 @@ class _StateCheckpointTracker:
         # #1315 diagnostics: every distinct header minute the watcher observed,
         # so a missed capture can be located instead of inferred.
         self.observed_header_minutes: list[float] = []
+        # #1315 diagnostics: what the post-run recovery did per missing hour.
+        # Without it every abort lane (never ran / spawn failed / timed out /
+        # rc != 0 / gate-rejected) looks identical from the outside.
+        self.recovery_outcomes: dict[int, str] = {}
 
     def capture_available(self) -> None:
         if not self.targets:
@@ -2940,8 +3042,30 @@ class _StateCheckpointTracker:
     def capture_final(self) -> None:
         self.capture_available()
 
+    def record_recovery_outcome(self, hour: int, outcome: str) -> None:
+        """Append a recovery outcome for ``hour`` (lanes can contribute twice).
+
+        A cfg-restore failure rides along with whatever the rerun itself did, so
+        outcomes accumulate as ``a+b`` rather than overwriting each other.
+        """
+
+        previous = self.recovery_outcomes.get(hour)
+        self.recovery_outcomes[hour] = f"{previous}+{outcome}" if previous else outcome
+
+    def recovery_outcome_summary(self) -> str:
+        """Compact ``; recovery outcomes: f012=...`` suffix for the failure message."""
+
+        if not self.recovery_outcomes:
+            return ""
+        rendered = ", ".join(f"f{hour:03d}={self.recovery_outcomes[hour]}" for hour in sorted(self.recovery_outcomes))
+        return f"; recovery outcomes: {rendered}"
+
     def write_manifest(self) -> None:
-        if not self.captured:
+        # Written whenever checkpoint hours were REQUESTED, including the total
+        # miss: with a single-hour production config an empty `captured` used to
+        # suppress the manifest entirely, so the one run that needs the
+        # diagnostic trail most produced no evidence file at all (#1315).
+        if not self.targets:
             return
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
         checkpoints = [self.captured[hour] for hour in sorted(self.captured)]
@@ -2951,6 +3075,9 @@ class _StateCheckpointTracker:
                 {
                     "checkpoints": checkpoints,
                     "observed_header_minutes": self.observed_header_minutes,
+                    "recovery_outcomes": {
+                        str(hour): self.recovery_outcomes[hour] for hour in sorted(self.recovery_outcomes)
+                    },
                 },
                 indent=2,
                 sort_keys=True,
@@ -2972,6 +3099,9 @@ class _StateCheckpointTracker:
             return hour in self.captured
         source_header = _read_cfg_ic_header_minute(source_path)
         if source_header is None:
+            # rc == 0 but the rerun left no readable state behind: distinct from
+            # "produced a state that the gates rejected".
+            self.record_recovery_outcome(hour, "gate_rejected(no_state)")
             return False
         valid_time = target_info["valid_time"]
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
@@ -2979,6 +3109,7 @@ class _StateCheckpointTracker:
         try:
             _write_staged_bytes(target, _read_staged_bytes(source_path, root=source_root), root=self.output_dir)
         except (OSError, SHUDRuntimeError):
+            self.record_recovery_outcome(hour, "install_write_failed")
             return False
         captured_header_minute = _read_cfg_ic_header_minute(target)
         if (
@@ -2994,6 +3125,10 @@ class _StateCheckpointTracker:
             )
         ):
             unlink_no_follow(target, containment_root=self.output_dir, missing_ok=True)
+            # Carry the rerun's OWN header minute: "the engine ran and landed at
+            # 1440 instead of 720" is a different bug report from "the engine
+            # never produced a state".
+            self.record_recovery_outcome(hour, f"gate_rejected(header={source_header:g})")
             return False
         self.captured[hour] = {
             "lead_hours": hour,
@@ -3005,6 +3140,7 @@ class _StateCheckpointTracker:
             "checksum": sha256_bytes(_read_staged_bytes(target, root=self.output_dir)),
             "provenance": "post_run_recovery",
         }
+        self.record_recovery_outcome(hour, "recovered")
         return True
 
     def _capture(self, hour: int, valid_time: datetime) -> None:

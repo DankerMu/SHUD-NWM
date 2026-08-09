@@ -4,13 +4,19 @@ Fixture level: expanded · Repair intensity: high · Project profile: NHMS
 
 ## Change surface
 
-- `workers/shud_runtime/runtime.py`: `run_shud` miss-handling branch, new
-  `_recover_missing_state_checkpoints` (incl. scratch-root fresh-scoping),
-  `_StateCheckpointTracker` (`observed_header_minutes`, `install_recovered`,
-  `write_manifest` payload).
-- `tests/test_shud_runtime.py`: `_FAST_SOLVER_STUB`, `_STUCK_HEADER_SOLVER_STUB`,
-  recovery scenario tests (fast-miss recovery, 100-repeat determinism,
-  gate/diagnostics, slow-leg speed independence, stale scratch lane).
+- `workers/shud_runtime/runtime.py`: `run_shud` miss-handling branch + shared
+  solver deadline, new `_recover_missing_state_checkpoints` (incl. scratch-root
+  fresh-scoping, per-hour exception containment, per-hour outcome recording),
+  `_clear_recovery_scratch_root` (two-pass, returns a refusal reason),
+  `_StateCheckpointTracker` (`observed_header_minutes`, `recovery_outcomes`,
+  `install_recovered`, `write_manifest` payload).
+- `tests/test_shud_runtime.py`: `_FAST_SOLVER_STUB`, `_PROJECT_FAST_SOLVER_STUB`,
+  `_STUCK_HEADER_SOLVER_STUB`, `_IC_DERIVED_SOLVER_STUB`,
+  `_FAILING_RECOVERY_SOLVER_STUB`, `_HANGING_RECOVERY_SOLVER_STUB`, recovery
+  scenario tests (fast-miss recovery in both command styles, multi-hour,
+  IC-derived body oracle, 100-repeat determinism, gate/diagnostics, slow-leg
+  speed independence, stale scratch lane, unclean scratch refusal, per-hour
+  cfg-write failure, rc≠0 lane, shared timeout budget).
 - `tests/test_state_manager.py`: consumer-tolerance test for
   `packages/common/state_cli.py::_load_state_checkpoint_manifest` (new-shape
   manifest keys ignored).
@@ -88,15 +94,18 @@ Surfaces:
 - Storage/cache/query: `write_manifest` → `state_checkpoints.json` (containment-rooted writes).
 - Public routes/entrypoints: `run_shud` (only caller-visible surface; raises `STATE_CHECKPOINTS_MISSING` on residual miss).
 - Frontend/downstream consumers: `packages/common/state_cli.py::_load_state_checkpoint_manifest` (tolerant reader, unchanged).
-- Failure paths/rollback/stale state: recovery timeout → kill+continue; gate failure → unlink candidate; cfg restored in `finally` on every path; OSError on cfg write → skip hour; scratch root `state_checkpoint_recovery/f{hour:03d}/` must be fresh-scoped — a stale `<proj>.cfg.ic.update` left by an earlier attempt (reused run workspace) must never be installable without a successful same-invocation rerun.
-- Evidence/audit/readiness: `observed_header_minutes` in manifest + error message; per-hour recovery logs in `log_dir`.
+- Failure paths/rollback/stale state: recovery timeout → kill+continue; gate failure → unlink candidate; cfg restored in `finally` on every path (restore failure recorded, never masks the original error); a per-hour cfg-write/log-open failure (`OSError` **or** `SHUDRuntimeError` from the no-follow helpers) skips that hour only — remaining hours still attempted, `write_manifest` still runs, error code stays `STATE_CHECKPOINTS_MISSING`; scratch root `state_checkpoint_recovery/f{hour:03d}/` must be fresh-scoped — a stale `<proj>.cfg.ic.update` left by an earlier attempt (reused run workspace) must never be installable without a successful same-invocation rerun, and a refusal to clear it is recorded as that hour's outcome, never half-clears the dir.
+- Evidence/audit/readiness: `observed_header_minutes` in manifest + error message — the manifest is written whenever checkpoint hours were requested, including the total-miss case; per-hour recovery outcomes (`recovered` / `skipped_scratch_unclean` / `spawn_failed` / `timeout` / `exit_<rc>` / `gate_rejected` with the rerun's header minute / `budget_exhausted` / `cfg_write_failed`) recorded in manifest + failure message; per-hour recovery logs in `log_dir`.
+- Resource bound: total solver wall time of `run_shud` (main solve + all recovery reruns) is bounded by ONE `timeout_seconds` budget via a shared monotonic deadline; recovery hours with no remaining budget are skipped with outcome `budget_exhausted`.
 
 Regression rows:
 - Fast solve, watcher misses f012, recovery rerun succeeds → checkpoint installed with header at target minute, `provenance=post_run_recovery`, run exits 0.
 - Recovery rerun produces wrong-header/incomplete state (stuck stub) → candidate unlinked, `STATE_CHECKPOINTS_MISSING` raised with observed-header trail, no checkpoint file left behind.
 - Normal-speed run, watcher captures all hours → recovery never invoked; entries identical to pre-change (unchanged sibling behavior).
 - `state_cli` reads a manifest with `observed_header_minutes` + `provenance` → checkpoints parsed exactly as before (consumer compatibility).
-- Scratch root pre-seeded with a stale gate-valid `<proj>.cfg.ic.update` and the recovery rerun fails (rc≠0/timeout) → stale candidate is NOT installed, hour stays missing, hard failure raised.
+- Scratch root pre-seeded with a stale gate-valid `<proj>.cfg.ic.update` and the recovery rerun exits 0 without writing a state (or fails rc≠0/timeout) → stale candidate is NOT installed, hour stays missing, hard failure raised.
+- Total miss (nothing captured, recovery fails) → `state_checkpoints.json` still written with empty `checkpoints`, the `observed_header_minutes` trail, and per-hour recovery outcomes.
+- Recovery rerun whose output provably depends on the staged IC content → recovered checkpoint body reflects the staged IC (deterministic-derivation oracle, not header-only).
 
 ## Required evidence
 
@@ -110,10 +119,23 @@ raise site · AC5/AC6 node-22 live · AC7 diagnostic trail · AC8 pytest+ruff).
 - [x] AC3: `test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers` — `_STUCK_HEADER_SOLVER_STUB` (header stuck at 1440) → candidate rejected by gates, no checkpoint file installed.
 - [x] AC4: hard-failure-only-after-recovery semantics implemented with comment at the `run_shud` raise site (commit e1d3b611).
 - [x] AC7: same test asserts raise message contains `observed cfg.ic.update header minutes: 1440`; `state_checkpoints.json` carries `observed_header_minutes`.
-- [x] AC8: `uv run pytest -q tests/test_shud_runtime.py tests/test_state_manager.py tests/test_warm_start_chaining.py` (294 passed) + `uv run ruff check .` clean.
+- [x] AC8: `uv run pytest -q tests/test_shud_runtime.py tests/test_state_manager.py tests/test_warm_start_chaining.py` (301 passed after the round-1 fix pass) + `uv run ruff check .` clean.
 - [x] Consumer tolerance (Schema pack): `test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys` — `_load_state_checkpoint_manifest` fed the same manifest with and without top-level `observed_header_minutes` / entry-level `provenance` → identical `StateCheckpoint` list (valid_times, lead_hours, filenames, referenced bytes, output-relative paths).
 - [x] Stale scratch lane (File IO pack): `test_run_shud_recovery_never_installs_stale_scratch_state` — `state_checkpoint_recovery/f012/demo.cfg.ic.update` pre-seeded gate-valid, rerun exits 0 without writing state → stale file cleared and NOT installed, `STATE_CHECKPOINTS_MISSING` raised. Red vs pre-fix `runtime.py`: `Failed: DID NOT RAISE` (stale state was installed as the checkpoint).
 - [ ] AC5/AC6 node-22 live acceptance (rollout, tracked in #1164 watch): xinanjiang rerun (gfs 2026072500, dg_0a50ecb0…) exits 0 with `*.f012.cfg.ic.update` header 720; one full 17-basin cycle with complete f012 coverage including the fastest basin.
+
+Round-1 verified-finding closures (Phase 5/6 fix pass):
+
+- [x] cand-01: total-miss run → `state_checkpoints.json` exists with `checkpoints: []` + `observed_header_minutes` — asserted in `test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers`. Red vs pre-fix `runtime.py`: `FileNotFoundError: .../state_checkpoints/state_checkpoints.json`.
+- [x] cand-07: per-hour recovery outcome trail (`recovery_outcomes` in manifest + `; recovery outcomes: f012=…` in the failure message), incl. the rerun's own header minute on gate rejection — `test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers` (`gate_rejected(header=1440)`), `test_run_shud_recovery_never_installs_stale_scratch_state` (`gate_rejected(no_state)`), `test_run_shud_recovery_reports_non_zero_exit_lane` (`exit_1`). Scratch-refusal lane additionally writes its reason into `log_dir/state_checkpoint_recovery_f{hour:03d}.err.log`.
+- [x] cand-05: forced cfg-write `SHUDRuntimeError` on one hour of `[6,12]` → that hour skipped, other hour still recovered, `STATE_CHECKPOINTS_MISSING` raised, manifest written, cfg restored — `test_run_shud_recovery_skips_only_the_hour_whose_cfg_write_fails`. Red vs pre-fix: `assert 'WORKSPACE_WRITE_FAILED' == 'STATE_CHECKPOINTS_MISSING'`.
+- [x] cand-06: scratch root with a non-regular entry → hour skipped with recorded outcome `skipped_scratch_unclean`, dir NOT half-cleared (two-pass stat-then-unlink), reason in the per-hour err log — `test_run_shud_recovery_refuses_unclean_scratch_without_half_clearing_it`. Red vs pre-fix: `FileNotFoundError: .../state_checkpoint_recovery/f012/aaa.txt` (the pre-fix single pass had already unlinked it before refusing).
+- [x] cand-04: main solve consuming most of a small `timeout_seconds` + hanging recovery stub → total `run_shud` wall time bounded by one shared monotonic deadline; hour with no budget left is skipped with `budget_exhausted` — `test_run_shud_main_solve_and_recovery_share_one_timeout_budget`. Red vs pre-fix: `assert 10.54 < (1.5 * 6)`.
+- [x] cand-02/cand-13: `test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun[cfg|shud_project]` (project leg rewrites tab-separated `END` in days, cfg byte-identical after) and `test_run_shud_recovers_every_missing_hour_with_scoped_scratch_and_logs` (`[6,12]` → headers 360/720, scratch dirs `f006`/`f012`, both log pairs, ordered `checkpoints`).
+- [x] cand-11: `test_run_shud_recovery_reports_non_zero_exit_lane` (rc≠0 → outcome `exit_1`, no checkpoint file, solver stderr preserved) and `test_run_shud_main_solve_and_recovery_share_one_timeout_budget` (sleeping recovery leg → bounded wall time, outcome `timeout`/`budget_exhausted`).
+- [x] cand-12: `cfg_path.read_bytes()` equality before/after `run_shud` in the fast (both command styles), multi-hour, cfg-write-failure, stuck-header, and stale-scratch tests.
+- [x] cand-08 (oracle half): `test_run_shud_recovered_checkpoint_body_derives_from_the_staged_ic` — stub carries the staged `demo.cfg.ic` body forward, recovered f012 body equals it (green pre-fix by design: this strengthens the oracle, it does not change runtime behavior); runtime input-checksum guard deferred to AC5/AC6 rollout receipt.
+- [x] cand-14 (ride-along): `test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun` asserts `FakeHydroRunRepository.created`/`statuses`/`failures` all stay empty across a recovery `run_shud`.
 
 ## Non-goals
 
