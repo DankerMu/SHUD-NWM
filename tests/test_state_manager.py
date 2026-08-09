@@ -2152,6 +2152,68 @@ def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(t
     assert run_state_variable_qc(normalized_path).passed is True
 
 
+def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_path: Path) -> None:
+    """#1315 consumer tolerance: the new runtime manifest keys change nothing here.
+
+    ``workers/shud_runtime`` now writes a top-level ``observed_header_minutes``
+    trail and a per-entry ``provenance`` marker into ``state_checkpoints.json``.
+    ``_load_state_checkpoint_manifest`` is the only production reader of that
+    file, so the two shapes must parse to identical checkpoints.
+    """
+
+    entries = [
+        {
+            "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
+            "valid_time": "2026-05-21T12:00:00Z",
+            "checkpoint_filename": "demo.f006.cfg.ic.update",
+            "checksum": "b" * 64,
+            "lead_hours": 6,
+        },
+        {
+            "relative_path": "state_checkpoints/demo.f012.cfg.ic.update",
+            "valid_time": "2026-05-21T18:00:00Z",
+            "checkpoint_filename": "demo.f012.cfg.ic.update",
+            "checksum": "c" * 64,
+            "lead_hours": 12,
+        },
+    ]
+    parsed: dict[str, list[state_cli.StateCheckpoint]] = {}
+    for shape in ("legacy", "with_diagnostics"):
+        manifest_dir = tmp_path / shape / "output" / "state_checkpoints"
+        manifest_dir.mkdir(parents=True)
+        for entry in entries:
+            (manifest_dir / str(entry["checkpoint_filename"])).write_bytes(
+                _valid_ic_bytes(str(entry["checksum"]).encode("utf-8"))
+            )
+        payload: dict[str, Any] = {"checkpoints": [dict(entry) for entry in entries]}
+        if shape == "with_diagnostics":
+            payload["observed_header_minutes"] = [720.0, 1440.0]
+            for entry_payload in payload["checkpoints"]:
+                entry_payload["provenance"] = "post_run_recovery"
+        manifest_path = manifest_dir / "state_checkpoints.json"
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        parsed[shape] = state_cli._load_state_checkpoint_manifest(manifest_path)
+
+    assert [item.lead_hours for item in parsed["legacy"]] == [6, 12]
+    assert [item.valid_time for item in parsed["legacy"]] == [
+        item.valid_time for item in parsed["with_diagnostics"]
+    ]
+    assert [item.original_shud_filename for item in parsed["legacy"]] == [
+        item.original_shud_filename for item in parsed["with_diagnostics"]
+    ]
+    assert [item.lead_hours for item in parsed["legacy"]] == [
+        item.lead_hours for item in parsed["with_diagnostics"]
+    ]
+    # Paths differ only by the per-shape manifest root; the bytes they name are
+    # identical, which is the identity the consumer actually carries forward.
+    assert [item.ic_file.read_bytes() for item in parsed["legacy"]] == [
+        item.ic_file.read_bytes() for item in parsed["with_diagnostics"]
+    ]
+    assert [item.ic_file.relative_to(tmp_path / "legacy") for item in parsed["legacy"]] == [
+        item.ic_file.relative_to(tmp_path / "with_diagnostics") for item in parsed["with_diagnostics"]
+    ]
+
+
 def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
     tmp_path: Path,
     manager: StateManager,

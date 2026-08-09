@@ -69,6 +69,10 @@ MAX_DIRECT_GRID_TSD_FORC_LINES = 250_000
 MAX_DIRECT_GRID_FORCING_CSV_LINES = 250_000
 MAX_DIRECT_GRID_SP_ATT_LINES = 2_000_000
 MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
+# Bound on the per-hour checkpoint-recovery scratch dir clear (#1315).  A SHUD
+# run writes a few dozen output files there; anything far beyond that is not a
+# scratch dir this runtime produced, so refuse to iterate it.
+MAX_RECOVERY_SCRATCH_ENTRIES = 1024
 
 _SHUD_SOLVER_PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "ABSTOL": (1.0e-12, 1.0),
@@ -615,6 +619,12 @@ class SHUDRuntime:
         must pass the SAME header/body gates as a watcher capture
         (``e13ae809`` partial-checkpoint semantics are preserved); a rerun that
         fails any gate simply leaves the hour missing for the caller to raise.
+
+        The scratch dir is fresh-scoped per invocation
+        (:func:`_clear_recovery_scratch_root`): the installed candidate is read
+        from a fixed filename, so a stale file from an earlier attempt in a
+        reused run workspace must never be installable without a successful
+        same-invocation rerun.
         """
 
         project_mode = _is_shud_project_mode(manifest, self.config.command_style)
@@ -623,6 +633,8 @@ class SHUDRuntime:
         for hour in checkpoint_tracker.missing_hours():
             recovery_root = workspace / "state_checkpoint_recovery" / f"f{hour:03d}"
             _ensure_directory(recovery_root, containment_root=workspace)
+            if not _clear_recovery_scratch_root(recovery_root):
+                continue
             content = original_cfg
             if project_mode:
                 end_day = _shud_start_day(manifest) + hour / 24.0
@@ -2072,6 +2084,49 @@ def _find_regular_files(
             continue
         matches.append(path)
     return sorted(matches)
+
+
+def _clear_recovery_scratch_root(recovery_root: Path) -> bool:
+    """Empty a per-hour checkpoint-recovery scratch dir before its rerun (#1315).
+
+    ``_StateCheckpointTracker.install_recovered`` reads a FIXED filename
+    (``<project_name>.cfg.ic.update``) out of this directory after an ``rc == 0``
+    rerun.  Anything an earlier attempt left there (reused run workspace, or an
+    engine that exits 0 without writing state) is byte-indistinguishable from a
+    fresh result and would sail through the header/body gates and be installed
+    as the checkpoint — a stale state silently poisoning the warm-start lineage.
+    The scratch root is therefore fresh-scoped per invocation: every regular file
+    is unlinked no-follow under containment.
+
+    Returns ``False`` when the directory cannot be proven to be a flat set of
+    regular files (unreadable, above the entry bound, or holding a symlink,
+    sub-directory or device node).  The caller then skips that hour's recovery
+    instead of following or traversing unexpected content: the hour stays
+    missing and the run fails hard with ``STATE_CHECKPOINTS_MISSING``, which is
+    the safe direction.
+    """
+
+    try:
+        entries = sorted(os.listdir(recovery_root))
+    except OSError:
+        return False
+    if len(entries) > MAX_RECOVERY_SCRATCH_ENTRIES:
+        return False
+    for name in entries:
+        path = recovery_root / name
+        try:
+            entry_stat = stat_no_follow(path, containment_root=recovery_root)
+        except FileNotFoundError:
+            continue
+        except SafeFilesystemError:
+            return False
+        if not stat_module.S_ISREG(entry_stat.st_mode):
+            return False
+        try:
+            unlink_no_follow(path, containment_root=recovery_root, missing_ok=True)
+        except SafeFilesystemError:
+            return False
+    return True
 
 
 def _iter_regular_descendant_files_no_follow(directory: Path, *, containment_root: Path) -> list[Path]:
