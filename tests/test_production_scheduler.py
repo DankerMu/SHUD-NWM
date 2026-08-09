@@ -31683,6 +31683,8 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         encoding="utf-8",
     )
     checkpoint_manifest_path = checkpoint_dir / "state_checkpoints.json"
+    # Witness-bearing (#1325): the publish side admits only a tree whose manifest
+    # proves this run's solve produced it and checksums what it names.
     checkpoint_manifest_path.write_text(
         json.dumps(
             {
@@ -31692,8 +31694,16 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
                         "valid_time": checkpoint_valid_time.isoformat().replace("+00:00", "Z"),
                         "relative_path": f"state_checkpoints/{checkpoint_name}",
                         "checkpoint_filename": checkpoint_name,
+                        "checksum": sha256_bytes(checkpoint_path.read_bytes()),
                     }
-                ]
+                ],
+                "provenance": {
+                    "run_id": success_run_id,
+                    "generated_at": "2026-05-21T18:00:11Z",
+                    "slurm_job_id": "660022",
+                    "array_task_id": 0,
+                    "requested_checkpoint_hours": [checkpoint_lead],
+                },
             }
         ),
         encoding="utf-8",

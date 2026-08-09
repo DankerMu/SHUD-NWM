@@ -3083,30 +3083,65 @@ class _StateCheckpointTracker:
         return f"; recovery outcomes: {rendered}"
 
     def write_manifest(self) -> None:
-        # Written whenever checkpoint hours were REQUESTED, including the total
-        # miss: with a single-hour production config an empty `captured` used to
-        # suppress the manifest entirely, so the one run that needs the
-        # diagnostic trail most produced no evidence file at all (#1315).
-        if not self.targets:
-            return
+        # Written after EVERY successful solve, hours requested or not (#1325):
+        # the caller sits past the spawn/timeout/exit raises, so manifest
+        # presence is the publish side's proof that an attempt of this run
+        # completed its solve in this tree. A zero-hour run therefore records an
+        # empty `checkpoints` list instead of no file at all, and the total miss
+        # keeps the diagnostic trail it gained in #1315.
+        _ensure_directory(self.output_dir)  # a solve that wrote nothing must not fail on the witness write
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
         checkpoints = [self.captured[hour] for hour in sorted(self.captured)]
+        payload: dict[str, Any] = {
+            "checkpoints": checkpoints,
+            "observed_header_minutes": self.observed_header_minutes,
+            "provenance": self._manifest_provenance(),
+            "recovery_outcomes": {
+                str(hour): self.recovery_outcomes[hour] for hour in sorted(self.recovery_outcomes)
+            },
+        }
+        final_ic = self._final_ic_entry()
+        if final_ic is not None:
+            payload["final_ic"] = final_ic
         _write_text_no_follow(
             self.checkpoint_dir / "state_checkpoints.json",
-            json.dumps(
-                {
-                    "checkpoints": checkpoints,
-                    "observed_header_minutes": self.observed_header_minutes,
-                    "recovery_outcomes": {
-                        str(hour): self.recovery_outcomes[hour] for hour in sorted(self.recovery_outcomes)
-                    },
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
             containment_root=self.output_dir,
         )
+
+    def _manifest_provenance(self) -> dict[str, Any]:
+        slurm_job_id, array_task_id = _task_outcome_attempt_identity()
+        return {
+            "run_id": str(self.manifest["run_id"]),
+            "generated_at": _format_time(datetime.now(UTC)),
+            "slurm_job_id": slurm_job_id,
+            "array_task_id": array_task_id,
+            "requested_checkpoint_hours": sorted(self.targets),
+        }
+
+    def _final_ic_entry(self) -> dict[str, Any] | None:
+        """Name+checksum the solve's final state, from EXACTLY two candidates.
+
+        No recursive search and no other filename: a residue file the solve did
+        not write must never be blessed by the writer, which is where the
+        publish-side hole would otherwise relocate to. A read failure records no
+        entry — the manifest write must not turn a successful run into a failed
+        one.
+        """
+
+        for candidate in (self.source_path, self.output_dir / f"{self.project_name}.cfg.ic"):
+            try:
+                if not _regular_file_exists(candidate, containment_root=self.output_dir):
+                    continue
+                content = _read_staged_bytes(candidate, root=self.output_dir)
+            except (OSError, SHUDRuntimeError, SafeFilesystemError):
+                return None
+            return {
+                "relative_path": str(candidate.relative_to(self.output_dir)),
+                "original_shud_filename": candidate.name,
+                "checksum": sha256_bytes(content),
+            }
+        return None
 
     def install_recovered(self, hour: int, source_path: Path, *, source_root: Path) -> bool:
         """Install a checkpoint derived by a post-run recovery rerun (#1315).
