@@ -555,13 +555,31 @@ class SHUDRuntime:
                 f"SHUD executable exited with code {process.returncode}: {detail}",
             )
         checkpoint_tracker.capture_final()
+        if checkpoint_tracker.missing_hours():
+            # #1315: the in-flight watcher is sampling-based and loses the race
+            # against fast solves (SHUD rewrites cfg.ic.update in place every
+            # update_ic_step_minutes; a ~1.7s 7-day run leaves each header
+            # state alive for ~0.1s). Recover deterministically before failing:
+            # re-integrate from the same staged IC/forcing with END shortened
+            # to the missing f-hour, whose FINAL cfg.ic.update is the wanted
+            # checkpoint regardless of solve speed.
+            self._recover_missing_state_checkpoints(
+                manifest, cfg_path, workspace, output_dir, log_dir, checkpoint_tracker
+            )
         checkpoint_tracker.write_manifest()
         missing_checkpoints = checkpoint_tracker.missing_hours()
         if missing_checkpoints:
+            # Failure semantics (#1315): a miss is a hard failure ONLY after the
+            # deterministic recovery rerun above also failed to produce a
+            # header/body-valid checkpoint — never because the watcher merely
+            # lost the sampling race.
             missing = ", ".join(f"f{hour:03d}" for hour in missing_checkpoints)
+            observed = checkpoint_tracker.observed_header_minutes
+            observed_text = ", ".join(f"{minute:g}" for minute in observed) if observed else "none"
             raise SHUDRuntimeError(
                 "STATE_CHECKPOINTS_MISSING",
-                f"SHUD did not emit requested restart checkpoints: {missing}",
+                f"SHUD did not emit requested restart checkpoints: {missing} "
+                f"(observed cfg.ic.update header minutes: {observed_text})",
             )
         _ensure_directory(output_dir)
 
@@ -578,6 +596,83 @@ class SHUDRuntime:
                 raise subprocess.TimeoutExpired(process.args, self.config.timeout_seconds)
             time.sleep(_state_checkpoint_poll_seconds(manifest))
         checkpoint_tracker.capture_available()
+
+    def _recover_missing_state_checkpoints(
+        self,
+        manifest: dict[str, Any],
+        cfg_path: Path,
+        workspace: Path,
+        output_dir: Path,
+        log_dir: Path,
+        checkpoint_tracker: "_StateCheckpointTracker",
+    ) -> None:
+        """Deterministically derive restart checkpoints the watcher failed to sample.
+
+        For each missing f-hour, re-run SHUD from the SAME staged IC/forcing with
+        END shortened to that hour into a scratch output dir under the workspace.
+        The rerun's final ``cfg.ic.update`` header lands exactly on the target
+        minute, so the result is independent of solve speed. The recovered file
+        must pass the SAME header/body gates as a watcher capture
+        (``e13ae809`` partial-checkpoint semantics are preserved); a rerun that
+        fails any gate simply leaves the hour missing for the caller to raise.
+        """
+
+        project_mode = _is_shud_project_mode(manifest, self.config.command_style)
+        separator = "\t" if project_mode else " = "
+        original_cfg = _read_text_no_follow(cfg_path, containment_root=cfg_path.parent)
+        for hour in checkpoint_tracker.missing_hours():
+            recovery_root = workspace / "state_checkpoint_recovery" / f"f{hour:03d}"
+            _ensure_directory(recovery_root, containment_root=workspace)
+            content = original_cfg
+            if project_mode:
+                end_day = _shud_start_day(manifest) + hour / 24.0
+                content = _replace_or_append(content, "END", _format_float(end_day), separator=separator)
+            else:
+                end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
+                content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
+            content = _replace_or_append(content, "OUTPUT_DIR", str(recovery_root), separator=separator)
+            command = _runtime_command(
+                self.config.shud_executable,
+                cfg_path,
+                manifest=manifest,
+                output_dir=recovery_root,
+                command_style=self.config.command_style,
+                output_interval_minutes=self.config.output_interval_minutes,
+            )
+            stdout_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.out.log"
+            stderr_path = log_dir / f"state_checkpoint_recovery_f{hour:03d}.err.log"
+            try:
+                _write_text_no_follow(cfg_path, content, containment_root=cfg_path.parent)
+                with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
+                    _open_log_file_no_follow(stderr_path, containment_root=log_dir)
+                ) as stderr_file:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=workspace,
+                        text=True,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                    )
+                    try:
+                        process.wait(timeout=self.config.timeout_seconds)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        continue
+            except OSError:
+                continue
+            finally:
+                _write_text_no_follow(cfg_path, original_cfg, containment_root=cfg_path.parent)
+            if process.returncode != 0:
+                continue
+            checkpoint_tracker.install_recovered(
+                hour,
+                recovery_root / f"{checkpoint_tracker.project_name}.cfg.ic.update",
+                source_root=recovery_root,
+            )
 
     def _preflight_shud_executable(self) -> None:
         """Reject stub/missing SHUD executables before invoking the solver.
@@ -2763,6 +2858,9 @@ class _StateCheckpointTracker:
             for hour in _state_checkpoint_hours(manifest)
         }
         self.captured: dict[int, dict[str, Any]] = {}
+        # #1315 diagnostics: every distinct header minute the watcher observed,
+        # so a missed capture can be located instead of inferred.
+        self.observed_header_minutes: list[float] = []
 
     def capture_available(self) -> None:
         if not self.targets:
@@ -2770,6 +2868,8 @@ class _StateCheckpointTracker:
         header_minute = _read_cfg_ic_header_minute(self.source_path)
         if header_minute is None:
             return
+        if not self.observed_header_minutes or self.observed_header_minutes[-1] != header_minute:
+            self.observed_header_minutes.append(header_minute)
         for hour, target in self.targets.items():
             if hour in self.captured:
                 continue
@@ -2792,9 +2892,65 @@ class _StateCheckpointTracker:
         checkpoints = [self.captured[hour] for hour in sorted(self.captured)]
         _write_text_no_follow(
             self.checkpoint_dir / "state_checkpoints.json",
-            json.dumps({"checkpoints": checkpoints}, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "checkpoints": checkpoints,
+                    "observed_header_minutes": self.observed_header_minutes,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             containment_root=self.output_dir,
         )
+
+    def install_recovered(self, hour: int, source_path: Path, *, source_root: Path) -> bool:
+        """Install a checkpoint derived by a post-run recovery rerun (#1315).
+
+        Applies the SAME acceptance gates as a watcher capture: the header must
+        land on the target minute (relative or epoch form) and the body must be
+        structurally complete. Returns whether the hour is now captured.
+        """
+
+        target_info = self.targets.get(hour)
+        if target_info is None or hour in self.captured:
+            return hour in self.captured
+        source_header = _read_cfg_ic_header_minute(source_path)
+        if source_header is None:
+            return False
+        valid_time = target_info["valid_time"]
+        _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
+        target = self.checkpoint_dir / f"{self.project_name}.f{hour:03d}.cfg.ic.update"
+        try:
+            _write_staged_bytes(target, _read_staged_bytes(source_path, root=source_root), root=self.output_dir)
+        except (OSError, SHUDRuntimeError):
+            return False
+        captured_header_minute = _read_cfg_ic_header_minute(target)
+        if (
+            captured_header_minute is None
+            or not _header_minute_matches_checkpoint(
+                captured_header_minute,
+                valid_time=valid_time,
+                relative_minute=target_info["relative_minute"],
+            )
+            or not state_ic_structure_complete(
+                target,
+                expected_river_count=self.expected_river_count,
+            )
+        ):
+            unlink_no_follow(target, containment_root=self.output_dir, missing_ok=True)
+            return False
+        self.captured[hour] = {
+            "lead_hours": hour,
+            "valid_time": _format_time(valid_time),
+            "path": str(target),
+            "relative_path": str(target.relative_to(self.output_dir)),
+            "original_shud_filename": source_path.name,
+            "checkpoint_filename": target.name,
+            "checksum": sha256_bytes(_read_staged_bytes(target, root=self.output_dir)),
+            "provenance": "post_run_recovery",
+        }
+        return True
 
     def _capture(self, hour: int, valid_time: datetime) -> None:
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)

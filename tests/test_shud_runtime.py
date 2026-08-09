@@ -2924,6 +2924,134 @@ def test_state_checkpoint_poll_seconds_defaults_to_fast_checkpoint_capture() -> 
     assert _state_checkpoint_poll_seconds(manifest) == pytest.approx(0.01)
 
 
+_FAST_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+# A solve so fast every intermediate in-place rewrite of cfg.ic.update is
+# invisible to the 0.01s watcher: only the FINAL header ever survives on disk.
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+_STUCK_HEADER_SOLVER_STUB = '''
+import sys
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+# Broken solver: the ic.update header never reaches the requested f-hour,
+# regardless of the configured END_TIME.
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 1440.000000\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n",
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+def test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun(tmp_path: Path) -> None:
+    """#1315: a solve faster than the sampling watcher must not hard-fail.
+
+    The stub leaves only the final ic.update header on disk (the deterministic
+    limit of the race the real 1.659s xinanjiang run lost), so the in-flight
+    watcher can never capture f012. The post-run recovery rerun with END
+    shortened to 12h must derive the checkpoint deterministically.
+    """
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    checkpoint = output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update"
+    assert checkpoint.read_text(encoding="utf-8").startswith("2 2 720.000000")
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [12]
+    assert payload["checkpoints"][0]["provenance"] == "post_run_recovery"
+    # The recovery rerun must not leak a shortened END_TIME into the shared cfg.
+    assert "END_TIME = 2026-05-04T00:00:00Z" in cfg_path.read_text(encoding="utf-8")
+
+
+def test_run_shud_recovery_repeats_deterministically(tmp_path: Path) -> None:
+    """#1315 acceptance: capture outcome is independent of solve speed/timing."""
+
+    stub = tmp_path / "fast_solver.py"
+    stub.write_text(_FAST_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    for attempt in range(5):
+        run_root = tmp_path / f"attempt{attempt}"
+        run_root.mkdir()
+        runtime = _runtime(run_root, repository, shud_executable=stub)
+        workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(run_root)
+        manifest = _manifest()
+        manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+        assert (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+
+
+def test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers(tmp_path: Path) -> None:
+    """#1315: a recovery rerun whose header misses the target must be rejected
+    (e13ae809 gates preserved) and the hard failure must carry the observed
+    header trail for diagnosis."""
+
+    stub = tmp_path / "stuck_solver.py"
+    stub.write_text(_STUCK_HEADER_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert "f012" in exc_info.value.message
+    assert "observed cfg.ic.update header minutes: 1440" in exc_info.value.message
+    assert not (output_dir / "state_checkpoints" / "demo.f012.cfg.ic.update").exists()
+
+
 def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
