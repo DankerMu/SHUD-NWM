@@ -15,6 +15,7 @@ from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.safe_fs import SafeFilesystemError
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_state_index_copyback_replay as replay
+from tests.test_state_manager import _LockReleaseSeam
 
 PREFIX = "s3://nhms"
 AUTHORITATIVE_RUN = "fcst_gfs_2026072000_model_a"
@@ -501,10 +502,13 @@ def test_replay_untyped_merge_exception_is_commit_uncertain(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The provider lock teardown runs after the destination compare-and-swap and
-    # raises unclassified OSErrors (provider_atomic.py:244-257).  With a typed-only
-    # handler those escaped the entire triage: rc 1 bare traceback, no receipt, no
-    # stdout summary and no superset guard -- with the index already committed.
+    # Any unclassified exception raised after the destination compare-and-swap
+    # escaped the entire triage under a typed-only handler: rc 1 bare traceback,
+    # no receipt, no stdout summary and no superset guard -- with the index
+    # already committed.  The provider lock teardown used to be exactly that
+    # case; #1193 made it typed (`provider_lock_release_failed`, pinned by
+    # test_replay_lock_release_failure_after_commit_is_commit_uncertain), so this
+    # case now stands for every remaining bare exception.
     _apply_env(monkeypatch, fixture)
     real_merge = replay.merge_state_snapshot_index_copyback
 
@@ -544,6 +548,91 @@ def test_replay_untyped_merge_exception_is_commit_uncertain(
     # The mutation really is on disk, which is why a refusal would lie here.
     published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
     assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+
+
+def test_replay_lock_release_failure_after_commit_is_commit_uncertain(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # #1193: the provider lock releases after the destination compare-and-swap,
+    # so `provider_lock_release_failed` is deliberately kept off the pre-commit
+    # allowlist and must ride the existing commit-uncertain channel -- with the
+    # real reason now, instead of a synthetic `merge_unexpected_exception:*`.
+    _apply_env(monkeypatch, fixture)
+    assert "provider_lock_release_failed" not in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    seam = _LockReleaseSeam(fixture.destination_index)
+    monkeypatch.setattr(provider_atomic, "fcntl", seam)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    # The forbidden shapes: rc 1 with a bare traceback, an empty stdout, or a
+    # refusal that would claim the shared index is untouched.
+    assert exit_code == 3
+    assert exit_code != 1
+    assert captured.out.strip()
+    assert seam.failed_releases == 1
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert error["status"] == "merge_committed_incomplete"
+    assert error["status"] != "refused"
+    assert error["reason"] == "merge_commit_uncertain"
+    assert error["error_reason"] == "provider_lock_release_failed"
+    assert error["resolved_run_ids"] == [AUTHORITATIVE_RUN]
+    assert summary["merge_commit_state"] == "uncertain"
+    assert summary["merge_error_reason"] == "provider_lock_release_failed"
+    assert summary["merge"] is None
+    assert summary["destination_entry_count_after"] == 2
+    assert summary["destination_entries_lost_count"] == 0
+    receipt = json.loads((fixture.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["merge_commit_state"] == "uncertain"
+    assert receipt["merge_error_reason"] == "provider_lock_release_failed"
+    assert receipt["merge"] is None
+    assert receipt["destination_entry_count_after"] == 2
+    # The commit really happened, which is why a refusal would lie here.
+    published = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert fixture.new_shared_object.read_bytes() == fixture.fresh_content
+
+
+def test_replay_double_fault_keeps_the_pre_commit_refusal(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Double fault: the merge refuses before the compare-and-swap *and* the lock
+    # release fails while that refusal unwinds.  Before #1193 the bare release
+    # OSError masked the body error and the run was reported commit-uncertain
+    # (rc 3); now the audited pre-commit refusal survives, so this is a
+    # deliberate uncertain -> refused reclassification.  It is the correct
+    # direction -- the shared index really is untouched -- and rc 2 is the only
+    # exit code that says so.
+    _apply_env(monkeypatch, fixture)
+    index_before = fixture.destination_index.read_bytes()
+    real_replace = state_manager.atomic_replace_provider_bytes
+
+    def refuse_replace(path: Path, content: bytes, **kwargs: Any) -> Any:
+        if Path(path) == fixture.destination_index:
+            raise ProviderAtomicError("provider_preimage_changed", phase="precommit")
+        return real_replace(path, content, **kwargs)
+
+    monkeypatch.setattr(state_manager, "atomic_replace_provider_bytes", refuse_replace)
+    seam = _LockReleaseSeam(fixture.destination_index)
+    monkeypatch.setattr(provider_atomic, "fcntl", seam)
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert error["status"] == "refused"
+    assert error["reason"] == "merge_failed"
+    assert error["error_reason"] == "provider_preimage_changed"
+    # The release really did fail and really was suppressed.
+    assert seam.failed_releases == 1
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not (fixture.receipt_root / "latest.json").exists()
 
 
 def test_replay_pre_commit_allowlisted_merge_failure_still_refuses(

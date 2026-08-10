@@ -243,18 +243,83 @@ def _provider_destination_file_lock(
         raise ProviderAtomicError("provider_lock_unavailable", phase="precommit") from error
     try:
         yield
-    finally:
-        if lock_fd is not None and acquired:
+    except BaseException:
+        # The body's exception is the one the caller must see: a lock-release
+        # failure while it unwinds is swallowed, never allowed to replace it.
+        # Release classification therefore only ever appears on a clean body
+        # exit, so "release_uncertain" cannot be read as "the body succeeded"
+        # by accident (#1193).
+        _close_release_fds_quietly(lock_fd, acquired=acquired, parent_fd=parent_fd)
+        raise
+    else:
+        release_error: OSError | None = None
+        # Closing both descriptors is an unconditional obligation, so the
+        # classification is raised only after every close has been attempted.
+        # A leaked lock_fd keeps LOCK_EX alive with its open file description
+        # until the process exits, which would make every later acquisition on
+        # the same path in a long-lived orchestrator hang or refuse with
+        # provider_already_running.  The first error is kept as the cause.
+        try:
+            if lock_fd is not None and acquired:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError as error:
+                    release_error = error
+                finally:
+                    try:
+                        os.close(lock_fd)
+                    except OSError as error:
+                        release_error = release_error or error
+            elif lock_fd is not None:
+                # Effectively unreachable: the acquisition section closes the
+                # descriptor on every failure path before re-raising.  Kept so
+                # an unacquired descriptor is still closed, and its close
+                # failure still classified the same way, if that ever changes.
+                try:
+                    os.close(lock_fd)
+                except OSError as error:
+                    release_error = release_error or error
+        finally:
+            if parent_fd is not None:
+                try:
+                    os.close(parent_fd)
+                except OSError as error:
+                    release_error = release_error or error
+        if release_error is not None:
+            # Everything written inside the lock scope is already done -- for
+            # the state-index copyback that includes the destination
+            # compare-and-swap -- so callers must treat this as
+            # committed-or-uncertain, never as a provable refusal.  flock and
+            # close failures share one reason: the operator handling is the
+            # same and the original errno survives as __cause__.
+            raise ProviderAtomicError(
+                "provider_lock_release_failed", phase="release_uncertain"
+            ) from release_error
+
+
+def _close_release_fds_quietly(lock_fd: int | None, *, acquired: bool, parent_fd: int | None) -> None:
+    """Release the lock descriptors without surfacing any release error.
+
+    Used while an exception raised by the lock body is already unwinding: the
+    descriptors must still be freed, but no failure here may mask the body's
+    exception.
+    """
+
+    if lock_fd is not None:
+        if acquired:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(lock_fd)
-                lock_fd = None
-        elif lock_fd is not None:
+            except OSError:
+                pass
+        try:
             os.close(lock_fd)
-            lock_fd = None
-        if parent_fd is not None:
+        except OSError:
+            pass
+    if parent_fd is not None:
+        try:
             os.close(parent_fd)
+        except OSError:
+            pass
 
 
 @contextmanager

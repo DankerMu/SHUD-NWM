@@ -104,6 +104,23 @@ def copyback_run_trees(
                     authoritative_run_ids=unique_run_ids,
                 )
             except (ProviderAtomicError, StateManagerError) as error:
+                if isinstance(error, ProviderAtomicError) and error.phase == "release_uncertain":
+                    # The provider lock releases only after the destination
+                    # compare-and-swap, so this failure says "the shared index
+                    # may already hold the merged entries".  Reporting it as
+                    # the fail-closed code would push a possible commit back
+                    # into the "nothing happened" bucket and send the operator
+                    # bisection the wrong way (#1193); the phase, not the
+                    # reason, is the discriminator so future release-period
+                    # reasons land in the same bucket.
+                    raise RunTreeCopybackError(
+                        "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
+                        (
+                            "State-index copyback merge may have committed; provider lock "
+                            "release failed after the compare-and-swap."
+                        ),
+                        {"object_key": object_key, "error": str(error), "error_reason": error.reason},
+                    ) from error
                 raise RunTreeCopybackError(
                     "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
                     "State-index copyback merge failed closed.",
