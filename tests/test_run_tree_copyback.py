@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import provider_atomic as provider_atomic_module
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import (
@@ -16,6 +17,7 @@ from packages.common.state_manager import (
     publish_state_snapshot_index,
 )
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
+from tests.test_state_manager import _LockReleaseSeam
 
 
 def _write_run(root: Path, run_id: str, *, output_text: str = "q\n") -> None:
@@ -596,6 +598,71 @@ def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert destination_index.read_bytes() == before
     assert not (copyback_root / "states/gfs/model_a/private/state.cfg.ic").exists()
+
+
+def test_state_index_copyback_lock_release_failure_reports_commit_uncertain_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1193: the provider lock releases only after the destination
+    # compare-and-swap, so the natural copyback path must not label this failure
+    # with the fail-closed code -- that would push a shared index that really is
+    # committed back into the "nothing happened" bucket and reverse the
+    # operator's bisection.  The distinct code is what carries the difference
+    # into the pipeline event.
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud")
+    store = LocalObjectStore(object_root, "s3://nhms")
+    private_content = _valid_state_bytes(b"private")
+    shared_content = _valid_state_bytes(b"shared")
+    private_uri = store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+    shared_uri = store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/shared/state.cfg.ic", shared_content
+    )
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    publish_state_snapshot_index(
+        [
+            {
+                **_state_entry("private-state", private_uri, private_content, "2026-06-27T01:00:00Z"),
+                "run_id": "fcst_gfs_2026062700_basins_heihe_shud",
+            }
+        ],
+        source_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    publish_state_snapshot_index(
+        [_state_entry("shared-state", shared_uri, shared_content, "2026-06-27T00:00:00Z")],
+        destination_index,
+        object_store_root=copyback_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+    )
+    seam = _LockReleaseSeam(destination_index)
+    monkeypatch.setattr(provider_atomic_module, "fcntl", seam)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=["fcst_gfs_2026062700_basins_heihe_shud"],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert error_info.value.code != "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert error_info.value.details["error_reason"] == "provider_lock_release_failed"
+    assert error_info.value.details["object_key"] == "scheduler/state-index/index-last.json"
+    assert seam.failed_releases == 1
+    # The merge did commit: the shared index holds both entries and the winning
+    # checkpoint object landed.
+    published = json.loads(destination_index.read_text(encoding="utf-8"))["entries"]
+    assert {entry["state_id"] for entry in published} == {"private-state", "shared-state"}
+    assert (copyback_root / "states/gfs/model_a/private/state.cfg.ic").read_bytes() == private_content
 
 
 def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index(tmp_path: Path) -> None:

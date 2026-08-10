@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import inspect
 import json
 import os
@@ -17,9 +19,16 @@ from httpx import ASGITransport, AsyncClient
 
 from apps.api.main import app
 from apps.api.routes.state_snapshots import get_state_manager
+from packages.common import provider_atomic as provider_atomic_module
 from packages.common import state_cli
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.provider_atomic import (
+    ProviderAtomicError,
+    atomic_replace_provider_bytes,
+    provider_destination_lock,
+    provider_lock_path,
+)
 from packages.common.state_manager import (
     FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
     FileStateSnapshotIndexRepository,
@@ -3130,6 +3139,149 @@ def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_in
     assert not (shared_root / "states/gfs/model_a/fresh/state.cfg.ic").exists()
 
 
+def test_state_index_copyback_lock_release_failure_after_commit_is_release_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1193: the destination provider lock is released *after* the
+    # compare-and-swap has published the merged index, and both `flock(LOCK_UN)`
+    # and `close` can fail with EIO/ESTALE on NFS.  The failure must arrive
+    # classified as release-uncertain, and the committed bytes -- not the
+    # exception type -- are what proves the merge really landed.
+    roots = _CopybackRoots(tmp_path)
+    seam = _LockReleaseSeam(roots.destination_index)
+    monkeypatch.setattr(provider_atomic_module, "fcntl", seam)
+
+    with pytest.raises(ProviderAtomicError) as error_info:
+        roots.merge()
+
+    assert error_info.value.reason == "provider_lock_release_failed"
+    assert error_info.value.phase == "release_uncertain"
+    # The first release error survives as the cause, so the errno stays legible.
+    assert isinstance(error_info.value.__cause__, OSError)
+    assert error_info.value.__cause__.errno == errno.EIO
+    assert seam.failed_releases == 1
+    # The commit is asserted as a fact: the shared index holds the merged set
+    # and the winning entry's checkpoint object was copied.
+    published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert roots.shared_fresh_object.read_bytes() == roots.fresh_content
+
+
+def test_provider_lock_release_failure_does_not_leak_the_lock_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1193 must-preserve: closing the descriptors is unconditional.  A leaked
+    # lock_fd would keep LOCK_EX alive with its open file description for the
+    # rest of the process, so the next acquisition on the same path in a
+    # long-lived orchestrator would refuse with provider_already_running.
+    roots = _CopybackRoots(tmp_path)
+    seam = _LockReleaseSeam(roots.destination_index)
+    monkeypatch.setattr(provider_atomic_module, "fcntl", seam)
+
+    with pytest.raises(ProviderAtomicError):
+        roots.merge()
+
+    seam.enabled = False
+    with provider_destination_lock(
+        roots.destination_index,
+        containment_root=roots.shared_root,
+        blocking=False,
+    ):
+        pass
+    with provider_destination_lock(
+        roots.source_index,
+        containment_root=roots.private_root,
+        blocking=False,
+    ):
+        pass
+
+
+def test_state_index_copyback_lock_fd_close_failure_is_release_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The unlock succeeds and only `os.close` fails -- the other half of the
+    # release period.  It carries the same reason and phase: the operator
+    # handling is identical and the errno survives as the cause.
+    roots = _CopybackRoots(tmp_path)
+    lock_path = provider_lock_path(roots.destination_index)
+    real_close = os.close
+    closed_targets: list[int] = []
+
+    def failing_close(fd: int) -> None:
+        try:
+            opened = os.fstat(fd)
+            expected = os.stat(lock_path)
+            is_target = (opened.st_dev, opened.st_ino) == (expected.st_dev, expected.st_ino)
+        except OSError:
+            is_target = False
+        # The fake closes the descriptor for real before raising: the seam must
+        # not be the thing that leaks the fd it is testing.
+        real_close(fd)
+        if is_target:
+            closed_targets.append(fd)
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "close", failing_close)
+
+    with pytest.raises(ProviderAtomicError) as error_info:
+        roots.merge()
+
+    monkeypatch.setattr(os, "close", real_close)
+    assert error_info.value.reason == "provider_lock_release_failed"
+    assert error_info.value.phase == "release_uncertain"
+    assert isinstance(error_info.value.__cause__, OSError)
+    assert error_info.value.__cause__.errno == errno.EIO
+    assert len(closed_targets) == 1
+    published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+
+
+def test_provider_lock_release_failure_never_masks_the_body_precommit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1193 must-preserve: a release failure while the body is already unwinding
+    # is swallowed.  Masking would flip a provable pre-commit refusal into
+    # "may have committed" -- the exact direction reversal the classification
+    # exists to prevent.  The body error here is genuine: the preimage handed to
+    # the compare-and-swap is stale, and the self-lock branch of
+    # atomic_replace_provider_bytes is the lock under test.
+    destination = tmp_path / "provider" / "manifest.json"
+    destination.parent.mkdir(parents=True)
+    stale_preimage = atomic_replace_provider_bytes(
+        destination,
+        b"generation-1\n",
+        containment_root=tmp_path,
+        max_bytes=4096,
+    )
+    atomic_replace_provider_bytes(
+        destination,
+        b"generation-2\n",
+        containment_root=tmp_path,
+        max_bytes=4096,
+    )
+    seam = _LockReleaseSeam(destination)
+    monkeypatch.setattr(provider_atomic_module, "fcntl", seam)
+
+    with pytest.raises(ProviderAtomicError) as error_info:
+        atomic_replace_provider_bytes(
+            destination,
+            b"generation-3\n",
+            containment_root=tmp_path,
+            max_bytes=4096,
+            expected_preimage=stale_preimage,
+        )
+
+    assert error_info.value.reason == "provider_preimage_changed"
+    assert error_info.value.phase == "precommit"
+    # The release really did fail; it was suppressed, not skipped.
+    assert seam.failed_releases == 1
+    assert destination.read_bytes() == b"generation-2\n"
+
+
 def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path: Path) -> None:
     # must-preserve: the copyback merge narrows its own publish call site only.
     # The renewal publisher and the provider-refresh state lane both rely on
@@ -3171,6 +3323,105 @@ def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path
 
     assert error_info.value.reason == "state_snapshot_index_object_missing"
     assert not index_path.exists()
+
+
+class _LockReleaseSeam:
+    """Stand-in for ``provider_atomic``'s ``fcntl`` that fails only the unlock.
+
+    Acquisition (``LOCK_EX``) goes through the real ``fcntl``, so the code under
+    test really takes the lock and really commits inside it; only
+    ``LOCK_UN`` on the targeted lock file raises the EIO an NFS mount produces.
+    The descriptor is still closed by the release section afterwards, which is
+    what actually drops the kernel lock, so a failed unlock cannot wedge the
+    test process.
+    """
+
+    LOCK_EX = fcntl.LOCK_EX
+    LOCK_NB = fcntl.LOCK_NB
+    LOCK_UN = fcntl.LOCK_UN
+
+    def __init__(self, target: Path) -> None:
+        self._lock_path = provider_lock_path(target)
+        self.enabled = True
+        self.failed_releases = 0
+
+    def flock(self, fd: int, operation: int) -> None:
+        if self.enabled and operation == fcntl.LOCK_UN and self._is_target(fd):
+            self.failed_releases += 1
+            raise OSError(errno.EIO, "Input/output error")
+        fcntl.flock(fd, operation)
+
+    def _is_target(self, fd: int) -> bool:
+        try:
+            opened = os.fstat(fd)
+            expected = os.stat(self._lock_path)
+        except OSError:
+            return False
+        return (opened.st_dev, opened.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+class _CopybackRoots:
+    """Real two-root copyback fixture: one archived entry shared, one new."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.private_root = tmp_path / "object-store"
+        self.shared_root = tmp_path / "shared-object-store"
+        private_store = LocalObjectStore(self.private_root, "s3://nhms")
+        self.archived_content = _valid_ic_bytes(b"archived")
+        self.fresh_content = _valid_ic_bytes(b"fresh")
+        archived_uri = private_store.write_bytes_atomic(
+            "states/gfs/model_a/archived/state.cfg.ic", self.archived_content
+        )
+        fresh_uri = private_store.write_bytes_atomic(
+            "states/gfs/model_a/fresh/state.cfg.ic", self.fresh_content
+        )
+        self.archived_entry = _copyback_index_entry(
+            state_id="archived-state",
+            run_id="fcst_gfs_2026070500_model_a",
+            state_uri=archived_uri,
+            content=self.archived_content,
+            valid_time="2026-07-05T12:00:00Z",
+            created_at="2026-07-05T13:00:00Z",
+            cycle_id="gfs_2026070500",
+        )
+        self.fresh_entry = _copyback_index_entry(
+            state_id="fresh-state",
+            run_id="fcst_gfs_2026072000_model_a",
+            state_uri=fresh_uri,
+            content=self.fresh_content,
+            valid_time="2026-07-20T12:00:00Z",
+            created_at="2026-07-27T01:00:00Z",
+            cycle_id="gfs_2026072000",
+        )
+        self.source_index = self.private_root / "scheduler/state-index/index-last.json"
+        self.destination_index = self.shared_root / "scheduler/state-index/index-last.json"
+        publish_state_snapshot_index(
+            [self.archived_entry, self.fresh_entry],
+            self.source_index,
+            object_store_root=self.private_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+        )
+        publish_state_snapshot_index(
+            [self.archived_entry],
+            self.destination_index,
+            object_store_root=self.shared_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+            verify_objects=False,
+        )
+        self.shared_fresh_object = self.shared_root / "states/gfs/model_a/fresh/state.cfg.ic"
+
+    def merge(self) -> dict[str, Any]:
+        return merge_state_snapshot_index_copyback(
+            source_path=self.source_index,
+            destination_path=self.destination_index,
+            reference_object_store_root=self.private_root,
+            object_store_prefix="s3://nhms",
+            source_containment_root=self.private_root,
+            destination_containment_root=self.shared_root,
+            authoritative_run_ids=["fcst_gfs_2026072000_model_a"],
+        )
 
 
 def _copyback_index_entry(

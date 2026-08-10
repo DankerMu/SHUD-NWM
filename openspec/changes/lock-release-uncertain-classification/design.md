@@ -107,8 +107,8 @@ release 失败 typed 化后各点落桶（实现后逐点验证并记录于 PR b
 | 使用点 | 现有 except | 新归类落点（复审后具体化：outcome/reason/phase/副作用） |
 |---|---|---|
 | `scheduler_file_provider_refresh.py:639`（refresh 主锁） | `except ProviderAtomicError`（`:1026`；`provider_lock_release_failed` ∉ refresh `REASONS` 集） | `outcome="failed"`、`reason="provider_invalid"`、receipt `phase="release_uncertain"`（**新 phase token**，schema `:93` 自由字符串合法）+ `rollback_receipt_if_needed()` **回滚已发布 provider**。与现状 `except Exception`（`:1104`）路径等价（同 rollback、同 reason），仅 phase token 新——**非回归但有两个新事实**：novel phase token 进 receipt;release-uncertain **有意不**映射 refresh 的 `replace_uncertain` outcome 家族（那是另一语义轴,超本 issue 范围） |
-| `:1320`（postcommit unlink 分支） | 同上 | 同上；phase=release_uncertain 语义与"unlink 已完成"事实一致 |
-| `:1512`（receipt publication 锁） | 同上 | 同上 |
+| `:1320`（postcommit unlink 分支） | **实现期核实修正**：`_restore_provider_path` 自身 `:1334` except 元组已含 `OSError` 与 `ProviderAtomicError` | **零变化行**——typed 前后同落 `RefreshError("provider_replace_uncertain", outcome="replace_uncertain", phase="postcommit")`，无 novel token |
+| `:1512`（receipt publication 锁） | **实现期核实修正**：调用方 `:1126` except 元组已含两类 | **零变化行**（emergency-slot finalize 路径不变）；pre-existing 残余：第二调用方 `reconstruct_primary_receipt:1189` 无 handler，release 失败 typed 前后都以 rc 1 逃逸（超范围，登记） |
 | `source_cycle_raw_manifest.py:432→:495` | `except ProviderAtomicError` → `NfsRawManifestStagingError("raw_stage_lock_failed:<reason>")`（`:431` try 确实包住 `:432` with） | 变为 `raw_stage_lock_failed:provider_lock_release_failed`（原裸 OSError 穿透至上层）——staging 已完成后的释放失败被结构化标注 |
 | `atomic_replace_provider_bytes` 自持锁分支（`provider_atomic.py:292`） | 调用方各自 except `ProviderAtomicError` | replace 已成功后的释放失败 → `release_uncertain`，与 `replace_uncertain` 家族同向 |
 

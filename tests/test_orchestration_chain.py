@@ -2921,6 +2921,50 @@ def test_parse_success_copybacks_active_run_trees(
     assert event["details"]["run_ids"] == ["run_0", "run_1"]
 
 
+def test_copyback_commit_uncertain_failure_reaches_the_pipeline_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1193: the commit-uncertain copyback code must arrive in the
+    # `object_store_copyback` event, because that event is the operator's only
+    # entry point for "the shared state index may already hold these entries".
+    # The real fcntl injection cannot reach here -- this harness stubs
+    # `copyback_run_trees` itself -- so the raise is stubbed and the real
+    # classification chain is pinned by test_run_tree_copyback.
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.run_tree_copyback import RunTreeCopybackError
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    copyback_root = tmp_path / "shared-object-store"
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+
+    def uncertain_copyback_run_trees(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
+            "State-index copyback merge may have committed; provider lock release failed "
+            "after the compare-and-swap.",
+            {
+                "object_key": "scheduler/state-index/index-last.json",
+                "error": "provider_lock_release_failed",
+                "error_reason": "provider_lock_release_failed",
+            },
+        )
+
+    monkeypatch.setattr(chain_forecast_execution, "copyback_run_trees", uncertain_copyback_run_trees)
+
+    with pytest.raises(OrchestratorError) as error_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
+    assert event["status_to"] == "failed"
+    assert event["details"]["error_code"] == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert event["details"]["details"]["error_reason"] == "provider_lock_release_failed"
+
+
 def test_forecast_state_save_qc_terminal_success_copybacks_active_run_trees(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

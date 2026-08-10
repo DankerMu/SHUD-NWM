@@ -1601,14 +1601,16 @@ uses GIS segment ids directly, some segments can appear to have no flow.
 ### 8.8 state-index copyback fail-closed 与 replay 补账
 
 判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
-调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带
-`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`，`details.error` 是具体的 state-manager reason：
+调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带两个
+`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（fail-closed，index 未改）
+或 `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193，index 可能已提交）——
+`details.error` 是具体的 state-manager reason：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
 cd /scratch/frd_muziyao/NWM
 JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
-grep -rl OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED "$JOURNAL" | tail -20
+grep -rlE 'OBJECT_STORE_COPYBACK_STATE_INDEX_(FAILED|COMMIT_UNCERTAIN)' "$JOURNAL" | tail -20
 # 两份 index 的 entry 数（shared 是调度器实际读的那份）
 uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
   /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
@@ -1618,6 +1620,14 @@ uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entrie
 
 判读口径：
 
+- `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（事件里嵌套的
+  `details.details.error_reason` 一般是 `provider_lock_release_failed`）—— **shared index
+  可能已经提交**：CAS 之后 provider 锁释放才失败，锁范围内的写已经做完。**不得**按
+  "未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已包含本批 entry、
+  以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再幂等重跑 stage
+  或走下面的 replay 补账；出现收缩就按下面 exit 3 的
+  `destination_entries_lost_after_merge` 分支停手。`..._FAILED` 才是"index 未改"的
+  fail-closed 形态。
 - `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
   **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
   `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
@@ -1710,9 +1720,12 @@ exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命
   **按"已提交"对待**：工具照样跑完提交后证据链（读回 + 超集守卫 + receipt），只是
   merge 返回值不存在，所以 receipt 的 `merge` 与 `checkpoint_*_count` 为 `null`，
   `merge_commit_state` 为 `uncertain`、`merge_error_reason` 记原始 reason。
-  merge 抛出的是**未分类异常**（不带 reason 的裸异常，如 CAS 之后 provider 锁释放段的
-  `OSError`）时同样归到本 reason，此时 `merge_error_reason` 是合成标识
-  `merge_unexpected_exception:<异常类型>`（如 `merge_unexpected_exception:OSError`），
+  `provider_lock_release_failed`（CAS 之后 provider 锁释放失败：`flock(LOCK_UN)` 或
+  `os.close` 在 NFS 上 EIO/ESTALE；锁范围内的写已经做完，receipt/stdout 的
+  `merge_error_reason` 就记这个 reason）也是本 reason 的具名例子之一。
+  merge 抛出的是**未分类异常**（不带 reason 的裸异常）时同样归到本 reason，此时
+  `merge_error_reason` 是合成标识 `merge_unexpected_exception:<异常类型>`
+  （如 `merge_unexpected_exception:OSError`），
   异常原文在 stderr 的 `error` 字段（receipt 只记 `merge_error_reason`，无 `error` 键）。处置：
   先看 stdout 摘要/receipt 的 `destination_entry_count_after` 与
   `destination_entries_lost_count` —— **`destination_entries_lost_count` 非 0 就转下面的

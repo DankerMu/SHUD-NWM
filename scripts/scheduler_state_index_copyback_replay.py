@@ -386,14 +386,19 @@ def replay_state_index_copyback(
                 authoritative_run_ids=sorted(resolved_run_ids),
             )
         except Exception as error:
-            # Deliberately broad: the merge also raises exceptions it does not
-            # classify -- e.g. a bare OSError from provider lock teardown, which
-            # runs *after* the destination compare-and-swap
-            # (`provider_atomic._provider_destination_file_lock:244-257`).  A narrow
-            # typed-only handler let those escape the whole triage (rc 1 traceback,
-            # no receipt, no stdout summary, superset guard never run) while the
-            # index was already committed (#1189 r4 E1).  `Exception`, not
-            # `BaseException`: KeyboardInterrupt/SystemExit still propagate.
+            # Deliberately broad: the merge can still raise exceptions it does
+            # not classify, and a narrow typed-only handler let those escape the
+            # whole triage (rc 1 traceback, no receipt, no stdout summary,
+            # superset guard never run) while the index was already committed
+            # (#1189 r4 E1).  The original example -- a bare OSError from the
+            # provider lock teardown, which runs *after* the destination
+            # compare-and-swap -- is typed now: #1193 classifies it as
+            # `provider_lock_release_failed` at `phase="release_uncertain"`
+            # (`provider_atomic._provider_destination_file_lock`), so it reaches
+            # the commit-uncertain branch below with a real reason instead of a
+            # synthetic one.  This handler stays broad for every other bare
+            # exception.  `Exception`, not `BaseException`:
+            # KeyboardInterrupt/SystemExit still propagate.
             typed = isinstance(error, StateManagerError | ProviderAtomicError)
             error_reason = str(getattr(error, "reason", "") or "") if typed else ""
             if typed and error_reason in MERGE_PRE_COMMIT_REFUSAL_REASONS:
