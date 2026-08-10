@@ -190,19 +190,23 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 | 节点 | 地址 | 角色 | DB |
 |------|------|------|----|
 | Node-22 | 210.77.77.22:32099 | 纯计算（Slurm/SHUD/forcing） | **不连任何活 DB**（本机 :55433 PG 已 archived/stopped，仅作显式 rollback archive） |
-| Node-27 | 210.77.77.27:32099 | active primary PG + ingest + display API + 前端 | **本机 PG :55432**（自写自读），数据文件横跨两块盘（见下） |
+| Node-27 | 210.77.77.27:32099 | active primary PG + ingest + display API + 前端 | **本机 PG :55432**（自写自读），数据文件全部在 `/home`（见下） |
 | 本地 Mac | localhost | 开发编辑 | 不连远端 DB |
 
-node-27 DB 存储自 2026-08-06 起分布在两个表空间：`pg_default` 在
-`/home/nwm/nhms-pgdata`（1.7 TB 卷，与 object store 共用），`ghdc` 在
-`/data/GHDC/nwm-archive/nhms-tablespace`（`/dev/md0`，15 TB，**与归档层共用文件
-系统** —— 对 2026-07-26 边界的有记录例外，见 ADR 0002），后者承载
-`river_timeseries` / `forcing_station_timeseries` 的四个大 chunk 及其索引。
+node-27 DB 数据文件**全部**位于 `pg_default`，即 `/home/nwm/nhms-pgdata`
+（1.7 TB 卷，与 object store 共用；2026-08-10 实测 389 GB）。曾承载
+`river_timeseries` / `forcing_station_timeseries` 大 chunk 的 `ghdc` 表空间
+（`/data/GHDC/nwm-archive/nhms-tablespace`，`/dev/md0`，与归档层共用文件系统 ——
+该例外见 ADR 0002）**已退役**：集群 `pg_tablespace` 只剩 `pg_default` / `pg_global`，
+容器第三个 bind mount `/home/nwm/nhms-tablespace-ghdc-stub -> …/tablespaces/ghdc`
+只是 `/home` 上的空壳，`/data/GHDC` 不再挂进容器（退役时间与原因仓库无记录；
+以上为 2026-08-10 实测现状）。**推论：活库不受 `/dev/md0` 健康度影响**，md0 只
+关系归档层。
 容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit），三个 bind
 mount 缺一不可；重建流程见
-`docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3。容量核查要
-`df -h /home /data/GHDC` 两块都看：治理 receipt 的 `archive_root` 块报 `/dev/md0`
-余量，但 DB 体量少报迁走的字节、归档体量多报了整个表空间（issue #1290）。
+`docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3。DB 容量核查以
+`df -h /home` 为准；`df -h /data/GHDC` 只反映归档层（治理 receipt 的
+`archive_root` 块报 `/dev/md0` 余量，口径偏差见 issue #1290）。
 
 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
 
