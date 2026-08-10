@@ -41,9 +41,17 @@ WHEN Slurm execution is enabled and workspace, object-store, runtime dependency,
 THEN the scheduler rejects submission before creating Slurm jobs
 AND records a storage preflight blocker.
 
+#### Scenario: unresolvable allowed storage root
+
+WHEN Slurm execution is enabled and a configured allowed storage root cannot be canonically resolved for a reason other than absence (for example a path whose ancestor is a regular file or an untraversable directory), as detected by errno from strict resolution
+THEN on database-backed runtimes the scheduler excludes that root from the effective allowed roots, records a storage preflight blocker, and rejects submission before creating Slurm jobs, with identical behavior across supported CPython versions for roots that survive configuration-layer canonicalization
+AND on db-free runtimes the root keeps the existing lexical-fallback tolerance without a blocker
+AND an allowed root that is merely missing (ENOENT) is never treated as unsafe and never escapes preflight as an unhandled exception on any runtime.
+
 #### Scenario: safe template and environment export
 
 WHEN the scheduler submits through the real or mock Slurm gateway
 THEN the submitted job uses only an allowlisted sbatch template for the requested stage
 AND exported environment/config values are shell-safe, bounded, and redacted from evidence when sensitive
 AND secret leakage, shell metacharacter injection, and unrecognized template names are rejected before submission.
+

@@ -6,7 +6,7 @@
 
 - **禁用 `Path.resolve(strict=True)`**:≤3.12 对环抛无 errno 的 `RuntimeError`,errno 分流失效。
 - **禁用非 strict `Path.resolve()`(包括任何回退车道)**:≤3.12 对 `<missing>/../<loop>` 形状在词法折叠撞环时同样抛 RuntimeError(#1344 PR round-1 P1 实锤)。ENOENT 回退**必须**用非 strict `os.path.realpath`——3.11-3.14 全版本永不抛。
-- errno 读取用 `getattr(error, "errno", None)`,与 `_storage_root_check`(scheduler_preflight.py:562-585)一致。
+- errno 读取用 `getattr(error, "errno", None)`,与 `_storage_root_check`(scheduler_preflight.py:594-617,errno 读取在 :597)一致。
 
 ## D2 — 逐根车道(核心处方)
 
@@ -46,7 +46,7 @@ def _preflight_allowed_roots(config) -> tuple[tuple[Path, ...], list[dict[str, A
 要点:
 
 - blocker dict 形状与 `_storage_root_check` 的 `{code, field, path, message}` 完全同构;code 沿用既有动态词汇 `SLURM_PREFLIGHT_{FIELD}_UNSAFE_PATH`(FIELD=ALLOWED_STORAGE_ROOTS)。
-- `path` 用 `str(expanded)`(展开后路径),与 `_storage_root_check` 同类 blocker(:568/:577 用展开后 `str(path)`)口径一致——`~/foo` 形态不得以原始波浪线形式进证据面。
+- `path` 用 `str(expanded)`(展开后路径),与 `_storage_root_check` 同类 blocker(:600/:609 用展开后 `str(path)`)口径一致——`~/foo` 形态不得以原始波浪线形式进证据面。
 - `path` 不掩码:blocker 只在非 db-free 臂产出,而 `checks["allowed_roots"]` 恰在非 db-free 时展示真实路径——掩码规则不变(Non-Goal)。
 - 去重 `if candidate not in resolved` 原样保留;空配置回退 `or [workspace_root]` 原样保留。
 
