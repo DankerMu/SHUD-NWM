@@ -24,8 +24,11 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    list_directory_no_follow,
     read_bytes_limited_no_follow,
     read_bytes_no_follow,
+    remove_tree_allow_symlinks,
+    rename_entry_no_follow,
     stat_no_follow,
     unlink_no_follow,
 )
@@ -73,6 +76,16 @@ MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
 # run writes a few dozen output files there; anything far beyond that is not a
 # scratch dir this runtime produced, so refuse to iterate it.
 MAX_RECOVERY_SCRATCH_ENTRIES = 1024
+# Attempt-start output hygiene (#1330).  A retried attempt reuses the run's
+# deterministic workspace, so a killed attempt's ``output`` tree would otherwise
+# still be there when the witness manifest is written — and its
+# ``<project>.cfg.ic.update`` would be blessed with THIS attempt's provenance.
+# The pre-existing tree is therefore renamed aside as an opaque unit into this
+# sibling directory, keeping exactly one residue tree under the literal name
+# below (the residue's own manifest provenance, not the directory name, is the
+# attribution record for the attempt that produced it).
+OUTPUT_RESIDUE_DIRNAME = "output_residue"
+OUTPUT_RESIDUE_ENTRY_NAME = "previous"
 # Floor of the shared solver budget (#1315): with less than this left there is
 # no point spawning another recovery rerun, so the hour is skipped with a
 # `budget_exhausted` outcome instead of starting a process that can only be
@@ -389,7 +402,12 @@ class SHUDRuntime:
         output_dir = workspace / "output"
         log_dir = workspace / "logs"
         ensure_directory_no_follow(Path(self.config.workspace_root))
-        for directory in (input_dir, output_dir, log_dir):
+        # ``output`` is deliberately NOT created here (#1330): it is owned by the
+        # attempt-start hygiene hook, which runs INSIDE the ``try`` below so a
+        # hygiene failure still produces the failure log, the task-outcome
+        # receipt and ``mark_failed``.  ``input``/``logs`` must exist first —
+        # the receipt and log writers need ``log_dir``.
+        for directory in (input_dir, log_dir):
             _ensure_directory(directory, containment_root=Path(self.config.workspace_root))
         _write_text_no_follow(
             input_dir / "manifest.json",
@@ -398,6 +416,7 @@ class SHUDRuntime:
         )
 
         try:
+            self._prepare_attempt_output_dir(workspace, output_dir)
             self.prepare_workspace(manifest, input_dir)
             self._persist_manifest(manifest, input_dir)
             cfg_path = self.generate_cfg_para(manifest, input_dir, output_dir)
@@ -431,6 +450,75 @@ class SHUDRuntime:
                 log_uri=log_uri,
             )
             raise runtime_error from error
+
+    def _prepare_attempt_output_dir(self, workspace: Path, output_dir: Path) -> None:
+        """Give this attempt an output tree that holds no prior attempt's bytes (#1330).
+
+        The witness manifest's ``final_ic`` entry proves EXISTENCE at one of two
+        exact paths; only a tree that starts empty makes it prove AUTHORSHIP.  A
+        pre-existing NON-EMPTY ``output`` is therefore renamed aside — as an
+        opaque unit, without following or enumerating it, so a killed solver's
+        symlinks, sub-directories and device nodes move wholesale and no
+        half-cleaned window can exist — to
+        ``runs/<run_id>/output_residue/previous``, retaining exactly one residue
+        tree for the operator debugging the current retry.  A pre-existing EMPTY
+        ``output`` is reused as-is: an early-failing retry (e.g. a staging
+        failure) must not evict the only real residue and retain an empty husk.
+
+        Every failure raised here is typed BY SHAPE, never left untyped: a
+        filesystem-safety refusal (``output`` or the quarantine sibling not being
+        a plain directory, an unsafe path component, a containment violation, or
+        an indeterminate result) is tampered geometry that no retry can fix and
+        raises the permanent ``WORKSPACE_PATH_UNSAFE``; a plain ``OSError`` or a
+        ``kind="io"`` refusal anywhere in the hook — the probe and the emptiness
+        listing included — is an NFS/disk glitch and raises
+        ``STORAGE_WRITE_FAILED``, which is in ``TRANSIENT_ERROR_CODES`` and so
+        keeps automatic retry.
+        """
+
+        workspace_root = Path(self.config.workspace_root)
+        residue_dir = workspace / OUTPUT_RESIDUE_DIRNAME
+        try:
+            try:
+                existing = stat_no_follow(output_dir, containment_root=workspace_root)
+            except FileNotFoundError:
+                # Absent: nothing to quarantine, but the hook is the only
+                # creator of ``output`` now, so fall through to the recreate.
+                # ``FileNotFoundError`` is an ``OSError`` and safe_fs re-raises
+                # it BARE, so it MUST be resolved here — the wrapper below would
+                # otherwise turn every fresh first attempt into a spurious
+                # ``STORAGE_WRITE_FAILED``.
+                existing = None
+            if existing is not None:
+                if not stat_module.S_ISDIR(existing.st_mode):
+                    raise SHUDRuntimeError(
+                        "WORKSPACE_PATH_UNSAFE",
+                        f"Run output path is not a directory, refusing to quarantine or solve into it: {output_dir}",
+                    )
+                if list_directory_no_follow(output_dir, containment_root=workspace_root):
+                    ensure_directory_no_follow(residue_dir, containment_root=workspace_root)
+                    remove_tree_allow_symlinks(
+                        residue_dir,
+                        OUTPUT_RESIDUE_ENTRY_NAME,
+                        containment_root=workspace_root,
+                        missing_ok=True,
+                    )
+                    rename_entry_no_follow(
+                        workspace,
+                        output_dir.name,
+                        residue_dir,
+                        OUTPUT_RESIDUE_ENTRY_NAME,
+                        containment_root=workspace_root,
+                    )
+                else:
+                    return
+            # Raw primitive on purpose: ``_ensure_directory`` pre-types EVERY
+            # ``SafeFilesystemError`` — including ``kind="io"`` mkdir failures —
+            # as ``WORKSPACE_PATH_UNSAFE``, and being a sibling ``RuntimeError``
+            # subclass it could not be re-classified here.
+            ensure_directory_no_follow(output_dir, containment_root=workspace_root)
+        except (OSError, SafeFilesystemError) as error:
+            raise _output_hygiene_error(output_dir, error) from error
 
     def prepare_workspace(self, manifest: dict[str, Any], input_dir: Path) -> None:
         _ensure_directory(input_dir)
@@ -2001,6 +2089,29 @@ def _ensure_directory(path: Path, *, containment_root: Path | None = None) -> Pa
         return ensure_directory_no_follow(path, containment_root=containment_root)
     except SafeFilesystemError as error:
         raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace directory {path}: {error}") from error
+
+
+def _output_hygiene_error(output_dir: Path, error: OSError | SafeFilesystemError) -> SHUDRuntimeError:
+    """Type an attempt-start output-hygiene failure by its SHAPE (#1330).
+
+    The dispatch is binary on ``kind == "io"`` and fail-closed: a bare
+    ``OSError`` (no ``kind``; reachable as a post-probe race) rides the same
+    transient I/O lane, while EVERY other kind — ``"unsafe"``,
+    ``"indeterminate"`` and any kind added later — is treated as tampered or
+    unproven geometry and made permanent.  Nothing may fall through to the
+    generic ``RUNTIME_ERROR`` of ``_as_runtime_error``, which is a SILENT
+    permanent that would strip a transient NFS glitch of its retry.
+    """
+
+    if isinstance(error, SafeFilesystemError) and error.kind != "io":
+        return SHUDRuntimeError(
+            "WORKSPACE_PATH_UNSAFE",
+            f"Unsafe run output tree at attempt start {output_dir}: {error}",
+        )
+    return SHUDRuntimeError(
+        "STORAGE_WRITE_FAILED",
+        f"Failed to prepare a fresh run output tree at {output_dir}: {error}",
+    )
 
 
 def _write_text_no_follow(path: Path, content: str, *, containment_root: Path) -> Path:
