@@ -113,7 +113,8 @@ Issue: #1332 (S code / compact fixture). Branch:
     A4(c) cite `:1477` to `BASINS_PACKAGE_PATH_UNRESOLVABLE`;
     preflight 2 failed (A4(b) OUT_OF_ROOT pin + cited
     `:15052-15057` NOT_VISIBLE case). All three sites naive at once:
-    56 failed in the package file.
+    56 failed across the two floor files (48 in the package file +
+    8 in discovery; round-1 C1 attribution fix).
   - Collateral sweep (beyond the floor): full 3.14
     `uv run pytest -q -m "not e2e and not grib and not integration"`
     → `12152 passed, 19 skipped, 131 deselected, 2 xfailed`.
@@ -133,6 +134,32 @@ Issue: #1332 (S code / compact fixture). Branch:
 
 - [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
+  - Round 1 NOT CLEAN (d11edfe1; 1 P1 + 1 P2 + 3 P3, all CONFIRMED
+    by two independent verifier batches): P1-1 the ENOENT-lane
+    fallback `path.resolve()` raises errno-less RuntimeError on
+    ≤3.12 for `<missing>/../<loop>` inputs (strict walk aborts at
+    the first missing component and proves nothing about the
+    remainder) — an unhandled crash on BOTH production
+    interpreters at all three sites, reproduced end-to-end on
+    3.11.14/3.12.12 vs base's classified rejection → fix: fallback
+    becomes NON-STRICT `os.path.realpath` (never raises on any
+    version, verifier-adjudicated over the try/except-RuntimeError
+    alternative which would re-split verdicts), + a
+    `<missing>/../<loop>` anchor with a py3.11 crash red-proof.
+    P2-1 the 3.13+ side of the same lane (loop path returned
+    unclassified) verified PRE-EXISTING and ratified by the new
+    ENOENT scenario → DEFER dissolved into P1's uniform fix; D4
+    corrected ("zero behavior change on nodes" → zero except this
+    input class converging to uniform nonexistence semantics). C1
+    naive-differential number mis-scoped (56 = both files, 48
+    package + 8 discovery) → ledger fixed. C2 discovery ENOENT
+    lane's containment obligation unpinned (return-early mutation
+    stays 90-green while outside-root dangling flips fail-open) →
+    new outside-root dangling anchor. C3 A6 payload identity
+    fields unasserted (dropping model_id/version kwargs at :637
+    stays green) → two assert lines. Follow-up routed: #1345
+    (`_preflight_allowed_roots`, producer-side sibling, out of
+    scope by D4).
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout

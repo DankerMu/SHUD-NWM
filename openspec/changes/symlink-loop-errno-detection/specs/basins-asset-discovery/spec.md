@@ -39,5 +39,5 @@ The system SHALL discover real SHUD model assets only from an explicit Basins ro
 
 #### Scenario: Nonexistent descendant is not misclassified as unsafe
 
-- **WHEN** a descendant path merely does not exist (dangling symlink or missing target, kernel `ENOENT`)
-- **THEN** discovery does not emit `BASINS_SYMLINK_UNRESOLVABLE` for it and importability of an otherwise-valid inventory is unaffected — nonexistence keeps its pre-existing silent-skip semantics and is never escalated to an unsafe-path verdict.
+- **WHEN** a descendant path merely does not exist (dangling symlink or missing target, kernel `ENOENT` — including paths whose strict walk aborts at a missing component even when the lexical remainder would meet a symlink loop)
+- **THEN** discovery does not emit `BASINS_SYMLINK_UNRESOLVABLE` for it and importability of an otherwise-valid inventory is unaffected — nonexistence keeps its silent-skip semantics uniformly across supported CPython versions, is never escalated to an unsafe-path verdict, and never surfaces as an unhandled exception.

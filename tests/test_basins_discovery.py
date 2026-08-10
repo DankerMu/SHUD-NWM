@@ -231,6 +231,57 @@ def test_dangling_forcing_symlink_inside_root_is_not_reported_unresolvable(tmp_p
     assert model["forcing_csv_count"] == 0
 
 
+def test_symlink_loop_behind_missing_component_is_treated_as_nonexistence(tmp_path: Path) -> None:
+    # The strict walk aborts with ENOENT on the missing `gone` component, while
+    # the non-strict fallback collapses `..` and lands on a real symlink loop.
+    # That combination must classify as nonexistence (silent skip) on every
+    # supported CPython, never as an exception and never as UNRESOLVABLE.
+    root = tmp_path / "basins"
+    model_dir = root / "loop-behind-missing"
+    make_valid_model(model_dir, "loop-behind-missing")
+    loop_dir = model_dir / "loopdir"
+    forcing = model_dir / "forcing"
+    try:
+        loop_dir.symlink_to(loop_dir)
+        forcing.symlink_to(Path("gone") / ".." / "loopdir", target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert [warning["code"] for warning in inventory["warnings"]] == []
+    assert inventory["importable"] is True
+    assert model["status"] == "valid"
+    assert model["default_import_eligible"] is True
+    assert model["forcing_dir"] is None
+    assert model["forcing_csv_count"] == 0
+
+
+def test_dangling_forcing_symlink_outside_root_is_reported_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "dangling-escape"
+    make_valid_model(model_dir, "dangling-escape")
+    outside_missing = tmp_path / "outside" / "missing-forcing-target"
+    dangling = model_dir / "forcing"
+    try:
+        dangling.symlink_to(outside_missing, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert inventory["warnings"][0]["path"] == str(dangling)
+    assert inventory["importable"] is False
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+    assert model["forcing_dir"] is None
+    assert model["forcing_csv_count"] == 0
+
+
 def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     model_dir = root / "forcing-escape"

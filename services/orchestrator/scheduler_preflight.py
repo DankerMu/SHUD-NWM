@@ -578,7 +578,11 @@ def _storage_root_check(
                     "message": f"Slurm {field_name} must be a safe compute-node visible directory.",
                 },
             )
-        resolved = path.resolve()
+        # Non-strict os.path.realpath() never raises on 3.11-3.14;
+        # Path.resolve() would raise an errno-less RuntimeError on <=3.12 when
+        # the `..`-collapsed tail meets a symlink loop behind the missing
+        # component (e.g. `gone/../loopdir`).
+        resolved = Path(os.path.realpath(path))
     visible = path.exists() and path.is_dir()
     contained = _path_is_under_any(resolved, allowed_roots)
     check = {

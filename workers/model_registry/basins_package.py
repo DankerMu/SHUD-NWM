@@ -2761,7 +2761,11 @@ def _resolve_package_path(path: Path, *, model_id: str | None = None, version: s
         return Path(os.path.realpath(path, strict=True))
     except OSError as error:
         if getattr(error, "errno", None) == ENOENT:
-            return path.resolve()
+            # Non-strict os.path.realpath() never raises on 3.11-3.14;
+            # Path.resolve() would raise an errno-less RuntimeError on <=3.12
+            # when the `..`-collapsed tail meets a symlink loop behind the
+            # missing component (e.g. `gone/../loopdir`).
+            return Path(os.path.realpath(path))
         raise BasinsPackageError(
             "BASINS_PACKAGE_PATH_UNRESOLVABLE",
             "Basins package source path cannot be resolved.",

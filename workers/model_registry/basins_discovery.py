@@ -531,7 +531,11 @@ def _safe_resolve_under_root(
         # The strict walk proved the failure is a missing component, not a
         # loop; keep the pre-change nonexistence semantics (containment is
         # still checked, and the caller's is_dir() filter skips it silently).
-        resolved = path.resolve()
+        # os.path.realpath() non-strict never raises on 3.11-3.14;
+        # Path.resolve() must not be used here because on <=3.12 it raises an
+        # errno-less RuntimeError when the `..`-collapsed tail meets a symlink
+        # loop behind the missing component (e.g. `gone/../loopdir`).
+        resolved = Path(os.path.realpath(path))
     try:
         resolved.relative_to(resolved_root)
     except ValueError:

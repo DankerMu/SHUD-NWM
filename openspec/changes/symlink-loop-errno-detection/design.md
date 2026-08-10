@@ -27,7 +27,14 @@ raises `OSError(errno=ELOOP)` uniformly, probed on
 - `ENOENT` (and only it) → the path does not exist; each site
   keeps its pre-change nonexistence semantics (below). Non-strict
   resolution never raised for missing paths, so this lane is what
-  prevents the port from inventing a new false positive.
+  prevents the port from inventing a new false positive. The
+  ENOENT lane's fallback resolution is ALWAYS non-strict
+  `os.path.realpath(path)` — NEVER pathlib (PR round-1 P1-1:
+  non-strict `Path.resolve()` still raises errno-less
+  RuntimeError on ≤3.12 when the `..`-collapse of a
+  `<missing>/../<loop>` path meets a kernel loop; non-strict
+  realpath returns the path unraised on all of 3.11-3.14,
+  probed on real interpreters).
 - any other `OSError` (`ELOOP`, `ENOTDIR`, `EACCES`, ...) → that
   site's unsafe/unresolvable classification. Rationale for
   fail-closed breadth: the old ≤3.12 arm also caught every
@@ -46,12 +53,21 @@ decorative (round-1 P1 hardening).
 
 1. `workers/model_registry/basins_discovery.py`
    `_safe_resolve_under_root` (def at `:506`): strict realpath;
-   `ENOENT` → `resolved = path.resolve()` (non-strict; safe — the
-   strict walk already proved the failure is a missing component,
-   not a loop) and continue to the `relative_to` containment
-   check, after which the existing `is_dir()` filter skips
-   nonexistent/dangling entries silently, exactly as today on
-   3.11; other `OSError` → append `BASINS_SYMLINK_UNRESOLVABLE`
+   `ENOENT` → `resolved = Path(os.path.realpath(path))`
+   (NON-STRICT realpath — PR round-1 P1-1 correction: the fallback
+   must never raise; the earlier `path.resolve()` prescription was
+   built on the false claim that "the strict walk already proved
+   the failure is a missing component, not a loop" — strict
+   realpath aborts at the FIRST missing component and proves
+   nothing about the remainder, so a `<missing>/../<loop>` path
+   lands in the ENOENT lane and non-strict `Path.resolve()` then
+   raises errno-less RuntimeError on ≤3.12, an unhandled crash on
+   the production interpreters; non-strict `os.path.realpath`
+   never raises on 3.11-3.14, probed) and continue to the
+   `relative_to` containment check, after which the existing
+   `is_dir()` filter skips nonexistent/dangling entries silently,
+   uniformly on every version; other `OSError` → append
+   `BASINS_SYMLINK_UNRESOLVABLE`
    (existing `_append_warning_once` call, message/code unchanged)
    and return None. Blocking semantics need no edit:
    the code is already in `BLOCKING_WARNING_CODES` (`:43`), so the
@@ -189,9 +205,26 @@ records this differential by temporarily removing the split).
   (`tests/test_basins_package_publication.py:1477`) rides the
   ENOENT lane and is unaffected. No sub-classification beyond the
   ENOENT split.
+- `<missing>/../<loop>` inputs (strict walk aborts ENOENT at the
+  missing component; the non-strict collapse would meet a loop)
+  classify as NONEXISTENCE on every version (PR round-1 P1-1 fix,
+  disclosure folded per P2-1 DEFER): on ≤3.12 this is a behavior
+  change — pre-change code raised and classified them
+  UNRESOLVABLE/UNSAFE; on 3.13+ it is byte-identical to current
+  behavior (silent skip / downstream nonexistence codes). The
+  kernel itself reports ENOENT for these paths on stat, the
+  ratified ENOENT scenario covers them, and nothing unsafe is
+  admitted (dangling entries fail `is_dir()`/existence checks
+  downstream). The earlier D4 claim "node interpreters see zero
+  behavior change" is corrected to: zero change EXCEPT this
+  input class, which converges from hard-classified to uniform
+  nonexistence semantics.
 - The dozens of defensive `except (OSError, RuntimeError)` blocks
   elsewhere do not use raise-on-loop as a predicate and are out of
-  scope (issue boundary).
+  scope (issue boundary). `_preflight_allowed_roots`
+  (scheduler_preflight.py:516-530) DOES use the old predicate on
+  the producer side of the same ladder — routed as follow-up
+  issue #1345 (PR round-1 note), not expanded here.
 - Node interpreters (27=3.11.15, 22=3.12.7) see zero behavior
   change; no remote receipt is required — the oracle is the
   cross-version test matrix (local 3.14 + CI/venv 3.11), per the
