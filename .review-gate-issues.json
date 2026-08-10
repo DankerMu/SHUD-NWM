@@ -848,6 +848,17 @@
           "rounds": 2
         }
       ]
+    },
+    "1347": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1349,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
     }
   }
 }
