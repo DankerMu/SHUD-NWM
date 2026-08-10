@@ -29839,6 +29839,54 @@ def test_db_free_slurm_storage_root_check_masks_symlink_loop_path(tmp_path: Path
     assert str(loop) not in rendered
 
 
+def test_db_free_slurm_storage_root_check_keeps_out_of_root_for_missing_outside_path(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    missing_outside = tmp_path / "outside" / "missing-object-store"
+
+    check, blocker = scheduler_module._storage_root_check(
+        "object_store_root",
+        missing_outside,
+        (allowed_root,),
+    )
+
+    assert check["configured"] is True
+    assert check["path"] == str(missing_outside)
+    assert check["contained"] is False
+    assert check["compute_node_visible"] is False
+    assert blocker is not None
+    assert blocker["code"] == "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT"
+    assert blocker["path"] == str(missing_outside)
+
+
+def test_db_free_slurm_storage_root_check_treats_symlink_loop_behind_missing_as_not_visible(
+    tmp_path: Path,
+) -> None:
+    # ENOENT lane: the strict walk aborts on the missing `gone` component while
+    # the non-strict fallback collapses `..` onto a real symlink loop. The
+    # verdict must stay nonexistence (NOT_VISIBLE) on every supported CPython,
+    # never an errno-less RuntimeError and never UNSAFE_PATH.
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    loop = allowed_root / "loopdir"
+    loop.symlink_to(loop)
+    loop_behind_missing = allowed_root / "gone" / ".." / "loopdir"
+
+    check, blocker = scheduler_module._storage_root_check(
+        "object_store_root",
+        loop_behind_missing,
+        (allowed_root,),
+    )
+
+    assert check["configured"] is True
+    assert check["path"] == str(loop)
+    assert check["contained"] is True
+    assert check["compute_node_visible"] is False
+    assert blocker is not None
+    assert blocker["code"] == "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_NOT_VISIBLE"
+    assert blocker["path"] == str(loop)
+
+
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
     monkeypatch: Any,
     tmp_path: Path,

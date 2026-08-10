@@ -2561,6 +2561,97 @@ def test_basins_migration_report_rejects_unresolvable_symlink_descendant_as_json
     assert not output.exists()
 
 
+def test_publish_basins_reports_symlink_loop_inventory_root_as_unresolvable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    loop = tmp_path / "loop-basins-root"
+    try:
+        loop.symlink_to(loop)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["resolved_root"] = str(loop)
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-loop-inventory-root",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_PACKAGE_PATH_UNRESOLVABLE"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-loop-inventory-root"
+    assert error["path"] == str(loop)
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-loop-inventory-root" / "manifest.json").exists()
+
+
+def test_publish_basins_reports_loop_behind_missing_inventory_root_as_source_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # ENOENT lane: the strict walk aborts on the missing `gone` component while
+    # the non-strict fallback collapses `..` onto a real symlink loop. That must
+    # stay nonexistence (SOURCE_NOT_FOUND), never an uncaught RuntimeError.
+    inventory_path, model_id = _write_valid_inventory(tmp_path)
+    object_root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "manifest.json"
+    loop = tmp_path / "loopdir"
+    try:
+        loop.symlink_to(loop)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+    loop_behind_missing = tmp_path / "gone" / ".." / "loopdir"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["resolved_root"] = str(loop_behind_missing)
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "publish-basins",
+            "--inventory",
+            str(inventory_path),
+            "--model-id",
+            model_id,
+            "--version",
+            "vbasins-loop-behind-missing-root",
+            "--output",
+            str(output),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err)
+    assert exit_code == 1
+    assert captured.out == ""
+    assert error["error_code"] == "BASINS_SOURCE_NOT_FOUND"
+    assert error["model_id"] == model_id
+    assert error["version"] == "vbasins-loop-behind-missing-root"
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not (object_root / "models" / model_id / "vbasins-loop-behind-missing-root" / "manifest.json").exists()
+
+
 def test_basins_migration_report_rejects_symlink_descendant_as_json(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

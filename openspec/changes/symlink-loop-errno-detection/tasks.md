@@ -1,0 +1,189 @@
+# Tasks: symlink-loop-errno-detection (#1332)
+
+Issue: #1332 (S code / compact fixture). Branch:
+`feat/issue-1332-symlink-loop-errno`, base master 9f8433bf.
+
+## Evidence Floor
+
+- `uv run pytest -q tests/test_basins_discovery.py
+  tests/test_basins_package_publication.py`
+- `uv run pytest -q tests/test_production_scheduler.py -k
+  symlink_loop`
+- `uv run ruff check .`
+- `openspec validate symlink-loop-errno-detection --strict
+  --no-interactive`
+- Cross-version proof: the three A1-A3 tests green on BOTH local
+  CPython 3.14.2 and a py3.11 interpreter (hand-built venv from
+  the #1330 run, or CI py3.11 as the second leg).
+
+## Deviations (recorded up front)
+
+1. Issue line numbers are from `bccf92f5`-era heads; the three
+   files have zero diff since, so cites remain valid on 9f8433bf
+   (re-verified by reading the sites).
+
+## 1. Fixture
+
+- [x] 1.1 proposal/design/tasks + spec delta authored (this commit)
+- [x] 1.2 Reviewer fixture review (read-only) until clean
+  (two-iteration repair bound per workflow contract)
+  - Round 3 CLEAN — approved for implementation (both round-2 P2
+    repairs verified propagated; four notes verified self-
+    consistent; reviewer additionally proved the D2.1
+    prescription via monkeypatch: 88 passed, A3 restored by site
+    1 alone, ENOTDIR tightening breaks nothing). One note closed
+    same-round: D4/risk-triage "nil delta via earlier
+    interceptor" had the call order backwards (`:159` resolve
+    precedes `:162` interceptor) — rewritten as the
+    hard-error→blocking-warning convergence the new spec scenario
+    ratifies; A2 cite corrected to def `:29822`. Reminder kept:
+    A4(b) OUT_OF_ROOT-priority pin is the P2-3 regression
+    backstop and MUST land in implementation.
+  - Round 1 NOT CLEAN (1 P1, 2 P2, 1 P3) — repaired (iteration
+    1/2; reviewer probed 3.11/3.12/3.13/3.14 empirically): P1
+    `Path.resolve(strict=True)` raises errno-less RuntimeError on
+    ≤3.12 — a literal port crashes the production interpreters →
+    predicate mandated to `os.path.realpath(strict=True)` only,
+    RuntimeError-arm hardening rule added. P2-2 package-site
+    attribution false (A3 is restored by the discovery fix alone,
+    proven by monkeypatch; `BASINS_DIRECTORY_UNREADABLE` comes
+    from basins_discovery.py:546) → trace duty removed, site 2
+    rewritten to its real degradation (loop → SOURCE_NOT_FOUND vs
+    py3.11 UNRESOLVABLE), own code preserved (never `_UNSAFE`),
+    new anchor A6. P2-3 preflight ENOENT early-return would drop
+    OUT_OF_ROOT priority (`:581` before `:591`) → continue-ladder
+    semantics + new OUT_OF_ROOT pin in A4(b); code name corrected
+    to `SLURM_PREFLIGHT_{FIELD}_NOT_VISIBLE`. P3 "≤3.12
+    byte-identical" false for EACCES/ENOTDIR lanes + phantom
+    "preflight spec" cite → must-preserve narrowed to loop+ENOENT
+    lanes, cite corrected to slurm-array-runner-integration:38-42
+    (blocker-level, no code granularity; "no delta needed"
+    conclusion stands).
+  - Round 2 NOT CLEAN (0 P1, 2 P2, 4 notes) — repaired (iteration
+    2/2, the bound; all four round-1 repairs verified sound with
+    fresh four-interpreter probes, A6 RED direction empirically
+    confirmed at basins_package.py:639): P2-1 proposal Why item 2
+    still carried the refuted round-1 attribution
+    (DIRECTORY_UNREADABLE at site 2) → rewritten to site 2's real
+    degradation (loop → SOURCE_NOT_FOUND :636-644 vs py3.11
+    UNRESOLVABLE), A3's observed delta moved under site 1's
+    downstream reach. P2-2 tasks 2.1 still ordered the deleted
+    trace duty → replaced with the settled site-2 constraint.
+    Notes folded same-round: no-delta rationale for site 2
+    re-based on version parity (code unspecced, A6 first pin); D4
+    records the package-site ENOTDIR drift (file/sub →
+    UNRESOLVABLE on all versions, :1477 pin is ENOENT-lane-safe);
+    A4(a) target-inside-root placement clause; evidence mapping
+    made exact (A1→AC1/4, A2→AC3, A3→AC2, A4→AC5, AC6=floor,
+    A5/A6 unmapped by design).
+- [x] 1.3 `openspec validate symlink-loop-errno-detection --strict
+  --no-interactive` green (re-run after every repair round)
+
+## 2. Implementation (implementer subagent)
+
+- [x] 2.1 Three call-site edits per design D2 (strict
+  `os.path.realpath(strict=True)` + ENOENT split; package site:
+  non-ENOENT raises the helper's OWN
+  `BASINS_PACKAGE_PATH_UNRESOLVABLE`, never re-coded to
+  `_UNSAFE` — its py3.11 classification point is settled at
+  `basins_package.py:2825-2830`, untouched; preflight: ENOENT
+  continues the contained→visible ladder, non-ENOENT →
+  `SLURM_PREFLIGHT_{FIELD}_UNSAFE_PATH`). Nothing else.
+- [x] 2.2 Anchors per design D3: A1-A3 existing tests go RED(3.14
+  current)→GREEN with zero test edits; A4 ENOENT anchors per site
+  (cite-or-add rule; A4(a) dangling entry at a resolved path like
+  `forcing`; A4(b) adds the missing OUT_OF_ROOT-priority pin),
+  RED-provable against a naive port without the ENOENT split
+  (differential recorded); A5 publish-path test untouched and
+  green; A6 package-source loop → `BASINS_PACKAGE_PATH_UNRESOLVABLE`
+  (RED on current 3.14).
+- [x] 2.3 Evidence floor + ruff green on 3.14; py3.11 leg recorded;
+  deviations reported explicitly ("no deviations" stated if none)
+  - 3.14 RED (pre-fix): discovery+package `2 failed, 86 passed, 2
+    skipped`; `-k symlink_loop` `1 failed, 4 passed`; A6 RED with
+    the design-predicted `BASINS_SOURCE_NOT_FOUND`.
+  - 3.14 GREEN (post-fix): discovery+package `90 passed, 2
+    skipped`; `-k symlink_loop` `5 passed`; full
+    `tests/test_production_scheduler.py` `1143 passed`.
+  - py3.11 leg (hand-built CPython 3.11.14 venv): same three files
+    `90 passed, 2 skipped` + `1143 passed`; pre-fix py3.11 baseline
+    also green, confirming the new A6/A4 anchors are 3.14-only RED.
+  - A4 naive-port differential (ENOENT split removed, per site):
+    discovery 8 failed (incl. A4(a)); package site alone flips the
+    A4(c) cite `:1477` to `BASINS_PACKAGE_PATH_UNRESOLVABLE`;
+    preflight 2 failed (A4(b) OUT_OF_ROOT pin + cited
+    `:15052-15057` NOT_VISIBLE case). All three sites naive at once:
+    56 failed across the two floor files (48 in the package file +
+    8 in discovery; round-1 C1 attribution fix).
+  - Collateral sweep (beyond the floor): full 3.14
+    `uv run pytest -q -m "not e2e and not grib and not integration"`
+    → `12152 passed, 19 skipped, 131 deselected, 2 xfailed`.
+  - The counts above are AS OF the implementation head d11edfe1
+    (round-2 R2-2 labeling). Post round-1-fix head 08024018: both
+    basins files `93 passed, 2 skipped` on BOTH 3.14.2 and
+    3.11.14; `tests/test_production_scheduler.py` full `1144
+    passed` (3.14 and py3.11); `-k "symlink_loop or loop_behind"`
+    `10 passed` on both interpreters (three loop-behind-missing
+    anchors + outside-root dangling pin added by the fix pass).
+  - `uv run ruff check .` clean;
+    `openspec validate symlink-loop-errno-detection --strict
+    --no-interactive` valid.
+  - No deviations from design D1/D2/D3.
+
+## 3. PR
+
+- [ ] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
+  Evidence-Floor 声明
+- [ ] 3.2 CI green (targeted Unit Tests, py3.11 — the second
+  matrix leg)
+
+## 4. Review loop
+
+- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
+  per-class verifier batches; findings verified before fix
+  - Round 2 focused (08024018, scope = round-1 fix commit):
+    production code CLEAN — three one-liners verified correct on
+    dual interpreters, no reachable pathlib resolve remains in any
+    error lane (containment steps proved purely lexical), all four
+    new tests red-proof-verified independently, oracle integrity
+    pure addition (51/49/28 insertions, 0 deletions). 2 P3 closed
+    same-round: R2-1 D4 still carried the superseded
+    "zero behavior change" bullet verbatim alongside its
+    correction → subordinated to the disclosure; R2-2 evidence
+    counts stale after the fix pass's 4 new tests → counts labeled
+    per-head (d11edfe1 vs 08024018).
+  - Round 1 NOT CLEAN (d11edfe1; 1 P1 + 1 P2 + 3 P3, all CONFIRMED
+    by two independent verifier batches): P1-1 the ENOENT-lane
+    fallback `path.resolve()` raises errno-less RuntimeError on
+    ≤3.12 for `<missing>/../<loop>` inputs (strict walk aborts at
+    the first missing component and proves nothing about the
+    remainder) — an unhandled crash on BOTH production
+    interpreters at all three sites, reproduced end-to-end on
+    3.11.14/3.12.12 vs base's classified rejection → fix: fallback
+    becomes NON-STRICT `os.path.realpath` (never raises on any
+    version, verifier-adjudicated over the try/except-RuntimeError
+    alternative which would re-split verdicts), + a
+    `<missing>/../<loop>` anchor with a py3.11 crash red-proof.
+    P2-1 the 3.13+ side of the same lane (loop path returned
+    unclassified) verified PRE-EXISTING and ratified by the new
+    ENOENT scenario → DEFER dissolved into P1's uniform fix; D4
+    corrected ("zero behavior change on nodes" → zero except this
+    input class converging to uniform nonexistence semantics). C1
+    naive-differential number mis-scoped (56 = both files, 48
+    package + 8 discovery) → ledger fixed. C2 discovery ENOENT
+    lane's containment obligation unpinned (return-early mutation
+    stays 90-green while outside-root dangling flips fail-open) →
+    new outside-root dangling anchor. C3 A6 payload identity
+    fields unasserted (dropping model_id/version kwargs at :637
+    stays green) → two assert lines. Follow-up routed: #1345
+    (`_preflight_allowed_roots`, producer-side sibling, out of
+    scope by D4).
+- [ ] 4.2 Phase 7 final review clean on final head
+
+## 5. Merge (pre-authorized) and closeout
+
+- [ ] 5.0 Follow-ups routed with numbers (if any arise in review)
+- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
+  head
+- [ ] 5.2 Merge; archive change; loop-log line + audit; close issue
+  #1332

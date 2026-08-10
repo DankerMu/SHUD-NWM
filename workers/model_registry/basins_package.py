@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from errno import ENOENT
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
@@ -2752,9 +2753,19 @@ def _ensure_under_root(
 
 
 def _resolve_package_path(path: Path, *, model_id: str | None = None, version: str | None = None) -> Path:
+    # Strict resolution + errno split: non-strict resolution stopped raising
+    # on symlink loops in CPython 3.13+, so the loop verdict must come from
+    # the kernel errno. ENOENT keeps pre-change parity (missing paths resolve
+    # non-strictly and are classified by the callers downstream).
     try:
-        return path.resolve()
-    except (OSError, RuntimeError) as error:
+        return Path(os.path.realpath(path, strict=True))
+    except OSError as error:
+        if getattr(error, "errno", None) == ENOENT:
+            # Non-strict os.path.realpath() never raises on 3.11-3.14;
+            # Path.resolve() would raise an errno-less RuntimeError on <=3.12
+            # when the `..`-collapsed tail meets a symlink loop behind the
+            # missing component (e.g. `gone/../loopdir`).
+            return Path(os.path.realpath(path))
         raise BasinsPackageError(
             "BASINS_PACKAGE_PATH_UNRESOLVABLE",
             "Basins package source path cannot be resolved.",
