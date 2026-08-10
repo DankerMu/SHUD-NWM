@@ -8,12 +8,14 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from scripts.select_ci_tests import (
+    CHANGED_TEST_FILE_RULES,
     CORE_SMOKE_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+    PATH_TEST_RULES,
     main,
     select_tests,
 )
@@ -525,6 +527,72 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
 
 
+# Each input below sits inside ci.yml's `backend` paths-filter (so the "Unit
+# Tests" gate opens) yet maps to no test file, leaving the job in its
+# collect-only, zero-assertion branch. These assertions PIN that route-C
+# contract — empty selection is allowed, but ci.yml now labels it loudly
+# (warning annotation + step summary) instead of reporting an informationless
+# green. They are pins, NOT endorsements: the `scripts/**/*.sh` class is
+# #1138's to flip, the remaining classes belong to a future route-A/B
+# (selector-widening or empty-selection-fails) decision. Flipping any of them
+# must change a visible assertion here.
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        pytest.param("schemas/x.schema.json", id="schemas"),
+        pytest.param("infra/nginx/site.conf", id="unmapped-infra"),
+        pytest.param("openspec/tools/x.py", id="py-outside-backend-prefixes"),
+        pytest.param("apps/frontend/scripts/gen.py", id="py-under-apps-frontend"),
+        pytest.param("packages/common/sql/x.sql", id="non-py-under-backend-prefix"),
+        pytest.param("tests/fixtures/sample.json", id="non-py-under-tests"),
+        pytest.param("scripts/run_x.sh", id="shell-script"),
+    ],
+)
+def test_select_tests_pins_known_empty_selection_classes(changed_path: str) -> None:
+    assert select_tests([changed_path], repo_root=Path(".")) == []
+
+
+def test_select_tests_warns_when_a_rule_target_no_longer_exists(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `db/**` maps to tests/test_migrations.py, which is absent from this tmp
+    # root — the same shape a test-file rename leaves behind. The target is
+    # still dropped (return semantics unchanged), but no longer in silence.
+    assert not (tmp_path / "tests" / "test_migrations.py").exists()
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert select_tests(["db/README.md"], repo_root=tmp_path) == []
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "tests/test_migrations.py" in captured.err
+    # Local command-substitution usage (`pytest -q $(select_ci_tests.py ...)`)
+    # reads stdout: the annotation must not leak into it off-runner.
+    assert "::warning" not in captured.out
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert select_tests(["db/README.md"], repo_root=tmp_path) == []
+
+    captured = capsys.readouterr()
+    assert "::warning" in captured.out
+    assert "tests/test_migrations.py" in captured.out
+    assert "WARNING" in captured.err
+
+
+def test_select_tests_emits_no_stale_target_warning_when_every_target_exists(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Noise regression guard: the warning must fire on real drops only, or
+    # every CI run grows an annotation nobody reads.
+    assert select_tests(["db/README.md"], repo_root=Path(".")) == ["tests/test_migrations.py"]
+
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.err
+    assert "::warning" not in captured.out
+
+
 def test_main_writes_json_github_output(tmp_path: Path) -> None:
     changed_file = tmp_path / "changed.txt"
     output_file = tmp_path / "github-output.txt"
@@ -553,3 +621,21 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
         if f"def {test_name}(" not in Path(test_file).read_text(encoding="utf-8"):
             stale.append(node_id)
     assert not stale, f"selector pins node ids that no longer exist: {stale}"
+
+    # File-level targets get the same gate. A rule target whose file is gone is
+    # dropped at selection time (with a warning since #1182), which can shrink a
+    # PR's suite — or empty it — without anyone noticing; the rule set itself
+    # must not carry dead targets. Read from the live rule objects, not the
+    # source text, so a target added anywhere in the rule set is covered.
+    file_targets = sorted(
+        {
+            target
+            for rule in (*PATH_TEST_RULES, *CHANGED_TEST_FILE_RULES)
+            for target in rule.tests
+            if "::" not in target
+        }
+        | {target for target in CORE_SMOKE_TESTS if "::" not in target}
+    )
+    assert file_targets, "expected file-level test targets in the selector rule set"
+    stale_files = [target for target in file_targets if not Path(target).is_file()]
+    assert not stale_files, f"selector rules point at test files that no longer exist: {stale_files}"

@@ -250,7 +250,22 @@ jobs:
             python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
           else
             echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"
-            pytest tests/ -q --collect-only >/dev/null
+            echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"
+            {
+              echo "## Unit Tests: collect-only smoke (0 assertions executed)"
+              echo ""
+              echo "select_ci_tests.py selected no backend test files for this PR diff."
+              echo "The suite was only collected (import/syntax check); no test assertions ran."
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Redirect, never pipe: `bash -e` runs without pipefail, so piping
+            # pytest into tail would report the tail's exit code and turn a
+            # collection failure green. Collection output is ~12k lines.
+            if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+              tail -n 5 collect-only.log
+            else
+              cat collect-only.log
+              exit 1
+            fi
           fi
 
   frontend-build:
