@@ -29899,10 +29899,8 @@ def _allowed_roots_config(
 ) -> Any:
     """Stand-in exposing only the three attributes the seam reads.
 
-    ``ProductionSchedulerConfig`` canonicalises allowed roots with a non-strict
-    ``Path.resolve()`` of its own at construction time, a separate <=3.12 crash
-    site; this stub keeps the errno lanes of the preflight seam hermetic and
-    version-stable. The end-to-end anchor below still runs the real config.
+    Keeps the errno lanes of the preflight seam hermetic and version-stable.
+    The end-to-end anchors below still run the real config.
     """
 
     from types import SimpleNamespace
@@ -30028,21 +30026,18 @@ def test_slurm_preflight_symlink_loop_allowed_root_blocks_with_root_cause_first(
     # `WORKSPACE_ROOT_OUT_OF_ROOT` buries the root cause.
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
     config = _gateway_config(
         roots["workspace_root"],
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path / "allowed-loop",),
+        allowed_storage_roots=(loop,),
         slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
     )
-    # The loop is materialised after construction on purpose: the config layer
-    # still canonicalises allowed roots with a non-strict `Path.resolve()`
-    # (scheduler_runtime_roots.py:505), which raises RuntimeError on <=3.12 for
-    # an already-looping root. That site is out of scope here.
     configured_loop = config.allowed_storage_roots[0]
-    configured_loop.symlink_to(configured_loop)
 
     preflight = scheduler_module._slurm_preflight(config)
 
@@ -30062,12 +30057,12 @@ def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A1b-e2e: the ENOTDIR shape survives the config layer's own non-strict
-    # canonicalisation verbatim on every supported interpreter, so this pins the
-    # only tightening lane reachable through a REAL `ProductionSchedulerConfig`
-    # on the production interpreters -- the ELOOP lane is shadowed on <=3.12 by
-    # the config-layer `Path.resolve()` crash site (tracked by #1347), which is
-    # why the loop anchor above has to materialise its symlink post-construction.
+    # A1b-e2e: with an already-normalised ancestor the ENOTDIR root comes out of
+    # the real `ProductionSchedulerConfig` byte-identical on every supported
+    # interpreter, so this anchor pins "value unchanged" through the config
+    # layer. It cannot tell lexical pass-through from a realpath fallback,
+    # because for this shape the two agree; the discriminating material is a
+    # symlink ancestor, pinned by the B2 anchor in the #1347 section below.
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
     regular_file = tmp_path / "file.txt"
@@ -30091,6 +30086,335 @@ def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config
     assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
     assert preflight["blockers"][0]["path"] == str(not_a_dir_root)
     assert preflight["checks"]["allowed_roots"] == []
+
+
+# --- Issue #1347: the config layer stops adjudicating allowed storage roots ---
+
+
+def test_slurm_preflight_blocks_preexisting_loop_allowed_root_built_by_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: production ordering -- the loop exists BEFORE the config is built.
+
+    The config layer no longer adjudicates -- every strict-resolution failure
+    is handed down as the non-strict realpath product, so construction survives
+    on every supported CPython and `_preflight_allowed_roots` owns the verdict.
+    For a self-loop directly under a canonical `tmp_path` that product equals
+    the configured value, so the equality assertion below is shape-coincidental
+    and proves nothing about which lane ran; lane discrimination is owned by
+    the B2 anchor.
+
+    Scope is the `_slurm_preflight` seam, NOT the run_once pass. The pass-level
+    <=3.12 residual (`_scheduler_allowed_roots`, issue #1348) is pinned
+    separately by the tripwire at the end of this section.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(loop,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (loop,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
+    assert preflight["blockers"][0]["path"] == str(loop)
+    assert preflight["checks"]["allowed_roots"] == []
+
+
+def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_realpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2: the one shape that tells the two candidate fallback lanes apart.
+
+    `link -> realdir` plus a regular `realdir/file.txt` makes the ENOTDIR root
+    `link/file.txt/sub` observably different under lexical pass-through
+    (`.../link/file.txt/sub`) and under the non-strict realpath fallback
+    (`.../realdir/file.txt/sub`). The config layer must produce the latter:
+    one fallback for every strict failure, canonicalising instead of
+    adjudicating. The value stays unresolvable, so the storage preflight still
+    owns the verdict and still drops the root.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    (realdir / "file.txt").write_text("not a directory", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(realdir)
+    lexical_root = link / "file.txt" / "sub"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(lexical_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (canonical_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
+    assert preflight["blockers"][0]["path"] == str(canonical_root)
+    assert preflight["checks"]["allowed_roots"] == []
+
+
+def test_slurm_preflight_admits_missing_allowed_root_built_by_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3 (database-backed arm): ENOENT keeps the historical canonicalisation.
+
+    The non-strict `os.path.realpath` fallback reproduces the product of the
+    old non-strict `Path.resolve()` verbatim, and a merely missing root is
+    never an allowed-roots blocker.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    missing = tmp_path / "not-created-yet"
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(missing,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (Path(os.path.realpath(missing)),)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == [str(Path(os.path.realpath(missing)))]
+
+
+def test_db_free_config_canonicalises_missing_allowed_root_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3 (db-free arm): the ENOENT product is identical on the untouched arm."""
+
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    missing = tmp_path / "not-created-yet"
+
+    config = ProductionSchedulerConfig(allowed_storage_roots=(missing,))
+
+    assert config.db_free_required is True
+    assert config.allowed_storage_roots == (Path(os.path.realpath(missing)),)
+
+
+def test_slurm_preflight_blocks_loop_behind_missing_allowed_root_built_by_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4: the `<missing>/../<loop>` shape that used to abort construction.
+
+    Strict resolution stops at ENOENT on the missing `gone` component, so the
+    config layer takes the non-strict realpath fallback, which collapses `..`
+    onto the loop itself -- `Path.resolve()` would raise an errno-less
+    RuntimeError there on <=3.12. Downstream the collapsed value is a real
+    loop, so the storage preflight reads ELOOP and drops it with a blocker;
+    that is the CPython 3.13+ behaviour of today, not a new rejection.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = tmp_path / "loopdir"
+    loop.symlink_to(loop)
+    loop_behind_missing = tmp_path / "gone" / ".." / "loopdir"
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(loop_behind_missing,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (Path(os.path.realpath(loop_behind_missing)),)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
+    assert preflight["blockers"][0]["path"] == str(loop)
+    assert preflight["checks"]["allowed_roots"] == []
+
+
+def test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B5: the db-free arm is a declared non-goal and must not drift.
+
+    `_optional_config_path_for_mode` never reaches `_optional_config_path` on
+    this arm, so the PR #831 lexical tolerance keeps producing the root itself.
+    """
+
+    _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+
+    config = ProductionSchedulerConfig(allowed_storage_roots=(loop,))
+
+    assert config.db_free_required is True
+    assert config.allowed_storage_roots == (loop,)
+
+
+def test_slurm_preflight_admits_file_dotdot_directory_allowed_root_on_every_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9: `<regular file>/../<existing dir>` stays admitted, on every CPython.
+
+    The 3.13+ delta is narrow: only the 3.13+ strict walk adds an ENOTDIR check
+    on an EXISTING non-directory intermediate component even when a later `..`
+    erases it. A MISSING intermediate component still raises ENOENT strictly on
+    every supported version -- that is what the B4 anchor relies on. So this
+    shape takes the strict lane on <=3.12 and the fallback lane on 3.13+.
+    Both land on the same canonical directory -- the value master produced on
+    every interpreter -- so the assertions below are byte-identical on the two
+    legs. That parity is the point: the config layer canonicalises, it does not
+    tighten, and a resolvable root is never turned into a blocker.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    plainfile = tmp_path / "plainfile"
+    plainfile.write_text("not a directory", encoding="utf-8")
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    folded_root = tmp_path / "plainfile" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(folded_root))
+    # Guard the material: the fold must really reach the existing directory.
+    assert canonical_root == Path(os.path.realpath(realdir))
+
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(folded_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (canonical_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
+
+
+def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9 counter-arm: lexical `..` folding would fabricate an unapproved root.
+
+    `linkdir` points into a sibling subtree, so POSIX resolution (symlinks
+    first, `..` afterwards) reads `linkdir/../realname` as `other/realname` --
+    the directory the operator actually approved. Folding `..` lexically
+    instead would hand `<tmp>/realname` to the preflight: a root nobody
+    declared, admitted as a containment base because it merely looks missing.
+    The link target is deliberately never created, so the strict walk fails
+    with ENOENT on both legs and the fallback lane is the one under test.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    other = tmp_path / "other"
+    (other / "realname").mkdir(parents=True)
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(other / "deep")
+    redirected_root = tmp_path / "linkdir" / ".." / "realname"
+    canonical_root = Path(os.path.realpath(redirected_root))
+    fabricated_root = tmp_path / "realname"
+    # Guard the discriminator: the two candidate products must really differ.
+    assert canonical_root == other / "realname"
+    assert Path(os.path.normpath(redirected_root)) == fabricated_root
+    assert not fabricated_root.exists()
+
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(redirected_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (canonical_root,)
+    assert config.allowed_storage_roots != (fabricated_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason="the pass-level crash needs a non-strict Path.resolve() that raises, i.e. CPython <=3.12",
+)
+def test_scheduler_root_preflight_still_raises_on_preexisting_loop_allowed_root(
+    tmp_path: Path,
+) -> None:
+    """B8 tripwire: pins the #1348 residual this change deliberately leaves open.
+
+    The `_slurm_preflight` seam is now version-consistent, but the run_once
+    pass is not: `scheduler_runtime.py:606-609` calls
+    `_scheduler_lock_evidence_root_preflight` before `_slurm_preflight`, and
+    its not-required early-exit payload itself calls `_scheduler_allowed_roots`
+    (`scheduler_runtime_roots.py:168` -> `:448-462`), which still canonicalises
+    with a non-strict `Path.resolve()`. On <=3.12 operators therefore still get
+    a bare errno-less RuntimeError at pass level.
+
+    This pin asserts the CURRENT BROKEN BEHAVIOUR on purpose. When #1348 lands
+    this test MUST go red; flipping it to the fixed structured assertion is
+    part of that change, not a reason to relax the pin here.
+    """
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _gateway_config(tmp_path, allowed_storage_roots=(loop,))
+
+    assert config.allowed_storage_roots == (loop,)
+    assert config.require_runtime_roots is False
+
+    with pytest.raises(RuntimeError, match="Symlink loop"):
+        scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
 
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(

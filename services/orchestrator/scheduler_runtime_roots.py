@@ -502,7 +502,25 @@ def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None
 def _optional_config_path(value: Path | str | None) -> Path | None:
     if value in (None, ""):
         return None
-    return Path(value).expanduser().resolve()
+    expanded = Path(value).expanduser()
+    try:
+        return Path(os.path.realpath(expanded, strict=True))
+    except OSError:
+        # Classification belongs to the storage preflight, not to config
+        # construction: hand the canonicalised value down so
+        # _preflight_allowed_roots drops an unresolvable root and reports
+        # SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH on every supported
+        # CPython, instead of aborting the whole process on <=3.12.
+        #
+        # A single non-strict os.path.realpath() covers every strict failure:
+        # it never raises on 3.11-3.14 and reproduces the product of the old
+        # non-strict Path.resolve() verbatim -- POSIX order, symlinks first and
+        # `..` afterwards. Splitting on errno would buy nothing, because both
+        # would-be lanes converge on this same product; a lexical pass-through
+        # instead re-opens a 3.13+ vs <=3.12 divergence on `<file>/../<dir>`
+        # shapes, and normpath folding would erase symlink redirection and
+        # fabricate a root the operator never approved (design D2).
+        return Path(os.path.realpath(expanded))
 
 
 def _config_path_preserve_final_component(value: Path | str) -> Path:
