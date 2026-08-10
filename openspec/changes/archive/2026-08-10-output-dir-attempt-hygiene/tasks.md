@@ -233,20 +233,20 @@ Issue: #1330 (S). Branch:
 
 ## 3. PR
 
-- [ ] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
+- [x] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
   Evidence-Floor 声明
-- [ ] 3.2 CI green (targeted Unit Tests)
+- [x] 3.2 CI green (targeted Unit Tests)
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
+- [x] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers (if any arise in review)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
+- [x] 5.0 Follow-ups routed with numbers (if any arise in review)
+- [x] 5.1 Chinese work summary + evidence posted; CI green on final
   head
-- [ ] 5.2 Merge; archive change; loop-log line + audit; close issue
+- [x] 5.2 Merge; archive change; loop-log line + audit; close issue
   #1330
