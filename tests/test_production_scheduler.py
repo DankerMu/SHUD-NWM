@@ -30097,9 +30097,13 @@ def test_slurm_preflight_blocks_preexisting_loop_allowed_root_built_by_real_conf
 ) -> None:
     """B1: production ordering -- the loop exists BEFORE the config is built.
 
-    The config layer no longer adjudicates: a non-ENOENT errno is handed down
-    as the lexical absolute value, so construction survives on every supported
-    CPython and `_preflight_allowed_roots` owns the verdict.
+    The config layer no longer adjudicates -- every strict-resolution failure
+    is handed down as the non-strict realpath product, so construction survives
+    on every supported CPython and `_preflight_allowed_roots` owns the verdict.
+    For a self-loop directly under a canonical `tmp_path` that product equals
+    the configured value, so the equality assertion below is shape-coincidental
+    and proves nothing about which lane ran; lane discrimination is owned by
+    the B2 anchor.
 
     Scope is the `_slurm_preflight` seam, NOT the run_once pass. The pass-level
     <=3.12 residual (`_scheduler_allowed_roots`, issue #1348) is pinned
@@ -30292,8 +30296,11 @@ def test_slurm_preflight_admits_file_dotdot_directory_allowed_root_on_every_inte
 ) -> None:
     """B9: `<regular file>/../<existing dir>` stays admitted, on every CPython.
 
-    Only the 3.13+ strict walk rejects a component that a later `..` erases, so
-    this shape takes the strict lane on <=3.12 and the fallback lane on 3.13+.
+    The 3.13+ delta is narrow: only the 3.13+ strict walk adds an ENOTDIR check
+    on an EXISTING non-directory intermediate component even when a later `..`
+    erases it. A MISSING intermediate component still raises ENOENT strictly on
+    every supported version -- that is what the B4 anchor relies on. So this
+    shape takes the strict lane on <=3.12 and the fallback lane on 3.13+.
     Both land on the same canonical directory -- the value master produced on
     every interpreter -- so the assertions below are byte-identical on the two
     legs. That parity is the point: the config layer canonicalises, it does not

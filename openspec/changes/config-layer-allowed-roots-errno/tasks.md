@@ -7,12 +7,12 @@ Must-preserve:成功车道规范化产物、ENOENT 规范化语义、db-free 臂
 
 ## 1. 实现
 
-- [x] 1.1 `scheduler_runtime_roots._optional_config_path` 按 design D2 重写;errno import 行补 `ENOENT`;`Path.resolve` 任何形态不得出现于该函数(D1)。
+- [x] 1.1 `scheduler_runtime_roots._optional_config_path` 按 design D2 重写(round-1 C-X1 后为统一非 strict realpath 回退,不读 errno;`from errno import` 行的 `ENOENT` 随 lane 合并移除);`Path.resolve` 任何形态不得出现于该函数(D1)。
 - [x] 1.2 消费方封闭性双重 grep 复核并留输出:(a) `_optional_config_path` 调用方——生产调用链仅 scheduler_config.py:945←:412(allowed_storage_roots 非 db-free),facade forwarder(scheduler_candidate_runtime.py:549)签名不变零改动;(b) **字段级** `grep -rn "allowed_storage_roots" services workers apps packages`——4 个读点逐一裁定(scheduler_preflight.py:529 剔根+blocker / scheduler_runtime_roots.py:450 #1348 残余 / :431 只取布尔无害 / scheduler_config.py:1060 db-free 车道不可达),与 design D4 表逐行对上。
 
 ## 2. 测试锚点(tests/test_production_scheduler.py)
 
-- [x] 2.1 **B1(RED 主锚,preflight seam,生产时序)** 构造**前**已存在的自环 symlink 根 + 非 db-free 真 `ProductionSchedulerConfig`:构造成功(不抛任何异常)、`allowed_storage_roots` 含该根的词法绝对值;**preflight seam**(直接调 `_slurm_preflight(config)`):`status=="blocked"`、`blockers[0]["code"]=="SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"`、`checks["allowed_roots"]==[]`(config 须安全远端 database_url,防 DATABASE_URL_* 占 index 0)。**命名与断言不得声称 pass 级**(pass 级残余见 B8/D4)。RED 证:py3.11 现行代码构造抛 `RuntimeError`(`pytest.raises` 读数);3.14 腿为绿钉(自环词法值 == resolve 值,红腿在 py3.11,与 issue 影响面一致)。
+- [x] 2.1 **B1(RED 主锚,preflight seam,生产时序)** 构造**前**已存在的自环 symlink 根 + 非 db-free 真 `ProductionSchedulerConfig`:构造成功(不抛任何异常)、`allowed_storage_roots` 含该根的非 strict realpath 产物(自环形状下 == 配置原值,形状巧合;车道判别归 B2);**preflight seam**(直接调 `_slurm_preflight(config)`):`status=="blocked"`、`blockers[0]["code"]=="SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"`、`checks["allowed_roots"]==[]`(config 须安全远端 database_url,防 DATABASE_URL_* 占 index 0)。**命名与断言不得声称 pass 级**(pass 级残余见 B8/D4)。RED 证:py3.11 现行代码构造抛 `RuntimeError`(`pytest.raises` 读数);3.14 腿为绿钉(自环词法值 == resolve 值,红腿在 py3.11,与 issue 影响面一致)。
 - [x] 2.2 **B2(回退车道判别钉,symlink 祖先 ENOTDIR 形状;round-1 C-X1 后翻转断言方向)** 素材不变:`link -> realdir`、`realdir/file.txt` 普通文件、根 = `link/file.txt/sub`(自守断言 `realpath(素材) != 素材` 保留)。断言改为 `config.allowed_storage_roots == (Path(os.path.realpath(<link 形状>)),)` 即 **realpath 产物(`realdir` 形状)**——判别"非 ENOENT 走统一 realpath 回退"而非词法下放;端到端仍落 UNSAFE_PATH blocker(产物仍不可解析)。
 - [x] 2.3 **B3(ENOENT 钉)** 缺失根构造:规范化纳入(产物与旧非 strict resolve 一致)、端到端无 allowed-roots blocker、两臂(db-free 用既有 env fixture 或 SimpleNamespace 对照)不回归。
 - [x] 2.4 **B4(崩溃车道钉)** `<missing>/../<loop>` 形状根 + 非 db-free 构造:构造永不裸抛、配置层产物 == `Path(os.path.realpath(<该形状>))`(非 strict 折叠为环本身,D3 类 3);端到端 preflight 判 ELOOP → **落 UNSAFE_PATH blocker 车道**(不是纳入——与今日 3.13+ 行为同,非回归)。py3.11 腿为现行代码构造崩溃的红证(#1344 P1 教训第三次押注)。
@@ -39,7 +39,7 @@ Must-preserve:成功车道规范化产物、ENOENT 规范化语义、db-free 臂
 
 ## Evidence Floor
 
-- RED→GREEN:B1/B4 py3.11 构造崩溃红证 → 修后双腿绿;B2/B3/B5/B8 钉证;N1-N5 击杀证。
+- RED→GREEN:B1/B4 py3.11 构造崩溃红证 → 修后双腿绿;B2/B3/B5/B8/B9 钉证;N1-N6 击杀证。
 - 双腿:3.14 `uv run pytest -q tests/test_production_scheduler.py -k "preflight or allowed_root"`;py3.11 前缀 `UV_PROJECT_ENVIRONMENT=/private/tmp/claude-501/-Users-danker-Desktop-Hydro-SHUD-NWM--claude-worktrees-pr-1286-subagent-workflow-7fb9ee/03b2c0ce-847d-47b7-8b0f-8af56993ac52/scratchpad/py311 uv run --python 3.11 pytest -q ...`(严禁裸 `uv run --python 3.11`;venv 缺失时 `uv venv --python 3.11 <等价路径>` 重建)。
 - **node-27 receipt(AC 硬要求,以 issue `Verification:` 字段为准)**:PR 分支临时浅 clone 至 node-27 `~/tmp/nwm-1347-receipt`(不动 `/home/nwm/NWM` ff-only 树),用 `/home/nwm/NWM/.venv/bin/python`(3.11.15):
   1. **主命令(issue Verification 指定选择器)**:`cd <clone> && PYTHONPATH=<clone> /home/nwm/NWM/.venv/bin/python -m pytest -q tests/test_production_scheduler.py -k "preflight or allowed_root"` 全绿;
