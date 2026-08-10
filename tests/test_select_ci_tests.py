@@ -527,15 +527,18 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
 
 
-# Each input below sits inside ci.yml's `backend` paths-filter (so the "Unit
-# Tests" gate opens) yet maps to no test file, leaving the job in its
-# collect-only, zero-assertion branch. These assertions PIN that route-C
-# contract — empty selection is allowed, but ci.yml now labels it loudly
-# (warning annotation + step summary) instead of reporting an informationless
-# green. They are pins, NOT endorsements: the `scripts/**/*.sh` class is
-# #1138's to flip, the remaining classes belong to a future route-A/B
-# (selector-widening or empty-selection-fails) decision. Flipping any of them
-# must change a visible assertion here.
+# The first six inputs below sit inside ci.yml's `backend` paths-filter (so the
+# "Unit Tests" gate opens) yet map to no test file, leaving the job in its
+# collect-only, zero-assertion branch. Those six PIN that route-C contract —
+# empty selection is allowed, but ci.yml now labels it loudly (warning
+# annotation + step summary) instead of reporting an informationless green.
+# The seventh, `scripts/run_x.sh`, matches NO `backend` pattern, so the Unit
+# Tests job never starts for it at all; that param pins selector emptiness
+# only and says nothing about the collect-only branch. All seven are pins, NOT
+# endorsements: the `scripts/**/*.sh` class is #1138's layer to flip, the
+# remaining classes belong to a future route-A/B (selector-widening or
+# empty-selection-fails) decision. Flipping any of them must change a visible
+# assertion here.
 @pytest.mark.parametrize(
     "changed_path",
     [

@@ -432,18 +432,27 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
         selected.update(CORE_SMOKE_TESTS)
 
     selected_paths = sorted(selected)
-    # A rule target pointing at a deleted/renamed test file used to vanish here
-    # in silence, so the selection could shrink (even to empty) with no trace.
-    # Dropping stays the behavior; the drop is now announced.
+    # A selected target pointing at a deleted/renamed test file used to vanish
+    # here in silence, so the selection could shrink (even to empty) with no
+    # trace. Dropping stays the behavior; the drop is now announced. The target
+    # can come from a rule OR from a changed test file that self-selects (a
+    # routine deletion), so the wording stays provenance-neutral.
     missing = [path for path in selected_paths if not _test_target_exists(path, repo_root=repo_root)]
+    # Several `::`-qualified node ids can pin the same missing file; announce
+    # once per file. Return-list filtering below stays per-target.
+    warned: set[str] = set()
     for path in missing:
-        message = f"selected test target does not exist and was dropped: {path}"
+        test_file = path.split("::", 1)[0]
+        if test_file in warned:
+            continue
+        warned.add(test_file)
+        message = f"selected test target does not exist and was dropped: {test_file}"
         print(f"select_ci_tests: WARNING: {message}", file=sys.stderr)
         # stdout carries the selected test list (consumed by `pytest -q $(...)`
         # command substitution locally), so the annotation is emitted only under
         # a real Actions runner, where ci.yml passes data via --github-output.
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            print(f"::warning title=Stale CI test-rule target::{message}")
+            print(f"::warning title=Dropped CI test target::{message}")
     dropped = set(missing)
     return [path for path in selected_paths if path not in dropped]
 

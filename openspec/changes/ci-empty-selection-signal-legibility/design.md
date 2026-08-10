@@ -41,13 +41,21 @@ fi
 ```python
 selected_paths = sorted(selected)
 missing = [p for p in selected_paths if not _test_target_exists(p, repo_root=repo_root)]
+warned: set[str] = set()
 for path in missing:
-    message = f"selected test target does not exist and was dropped: {path}"
+    test_file = path.split("::", 1)[0]
+    if test_file in warned:
+        continue
+    warned.add(test_file)
+    message = f"selected test target does not exist and was dropped: {test_file}"
     print(f"select_ci_tests: WARNING: {message}", file=sys.stderr)
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::warning title=Stale CI test-rule target::{message}")
-return [p for p in selected_paths if p not in set(missing)]
+        print(f"::warning title=Dropped CI test target::{message}")
+dropped = set(missing)
+return [p for p in selected_paths if p not in dropped]
 ```
+
+（review round-1 收口形态：title 取 provenance 中性 `Dropped CI test target`——缺失目标可能来自规则，也可能来自 diff 中被删除/改名的 `tests/**.py` 自选路径，不得指控规则集；注解按唯一文件 base 去重，返回值过滤仍逐 target。）
 
 - stderr 恒发（本地/CI 都有人读面）；`::warning` 注解走 stdout 且**仅当 `GITHUB_ACTIONS=true`**。
 - **stdout 污染核查（修正）**：`main()` **会**向 stdout 打印选中的 test 列表（`:500-501` `for test in tests: print(test)`），且仓库有文档化的命令替换用法 `pytest -q $(python scripts/select_ci_tests.py --base-ref master)`（本地/远端手工跑）。`GITHUB_ACTIONS=true` 门保证：命令替换场景（本地，env 不设）stdout 永不混入 warning 行；CI 场景 ci.yml `:244` 用 `--github-output` 传数据、不捕获 stdout，warning 行只被 runner 解析为注解。模块需补 `import os`。
