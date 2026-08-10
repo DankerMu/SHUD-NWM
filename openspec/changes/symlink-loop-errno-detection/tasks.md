@@ -81,7 +81,7 @@ Issue: #1332 (S code / compact fixture). Branch:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 Three call-site edits per design D2 (strict
+- [x] 2.1 Three call-site edits per design D2 (strict
   `os.path.realpath(strict=True)` + ENOENT split; package site:
   non-ENOENT raises the helper's OWN
   `BASINS_PACKAGE_PATH_UNRESOLVABLE`, never re-coded to
@@ -89,7 +89,7 @@ Issue: #1332 (S code / compact fixture). Branch:
   `basins_package.py:2825-2830`, untouched; preflight: ENOENT
   continues the contained→visible ladder, non-ENOENT →
   `SLURM_PREFLIGHT_{FIELD}_UNSAFE_PATH`). Nothing else.
-- [ ] 2.2 Anchors per design D3: A1-A3 existing tests go RED(3.14
+- [x] 2.2 Anchors per design D3: A1-A3 existing tests go RED(3.14
   current)→GREEN with zero test edits; A4 ENOENT anchors per site
   (cite-or-add rule; A4(a) dangling entry at a resolved path like
   `forcing`; A4(b) adds the missing OUT_OF_ROOT-priority pin),
@@ -97,8 +97,30 @@ Issue: #1332 (S code / compact fixture). Branch:
   (differential recorded); A5 publish-path test untouched and
   green; A6 package-source loop → `BASINS_PACKAGE_PATH_UNRESOLVABLE`
   (RED on current 3.14).
-- [ ] 2.3 Evidence floor + ruff green on 3.14; py3.11 leg recorded;
+- [x] 2.3 Evidence floor + ruff green on 3.14; py3.11 leg recorded;
   deviations reported explicitly ("no deviations" stated if none)
+  - 3.14 RED (pre-fix): discovery+package `2 failed, 86 passed, 2
+    skipped`; `-k symlink_loop` `1 failed, 4 passed`; A6 RED with
+    the design-predicted `BASINS_SOURCE_NOT_FOUND`.
+  - 3.14 GREEN (post-fix): discovery+package `90 passed, 2
+    skipped`; `-k symlink_loop` `5 passed`; full
+    `tests/test_production_scheduler.py` `1143 passed`.
+  - py3.11 leg (hand-built CPython 3.11.14 venv): same three files
+    `90 passed, 2 skipped` + `1143 passed`; pre-fix py3.11 baseline
+    also green, confirming the new A6/A4 anchors are 3.14-only RED.
+  - A4 naive-port differential (ENOENT split removed, per site):
+    discovery 8 failed (incl. A4(a)); package site alone flips the
+    A4(c) cite `:1477` to `BASINS_PACKAGE_PATH_UNRESOLVABLE`;
+    preflight 2 failed (A4(b) OUT_OF_ROOT pin + cited
+    `:15052-15057` NOT_VISIBLE case). All three sites naive at once:
+    56 failed in the package file.
+  - Collateral sweep (beyond the floor): full 3.14
+    `uv run pytest -q -m "not e2e and not grib and not integration"`
+    → `12152 passed, 19 skipped, 131 deselected, 2 xfailed`.
+  - `uv run ruff check .` clean;
+    `openspec validate symlink-loop-errno-detection --strict
+    --no-interactive` valid.
+  - No deviations from design D1/D2/D3.
 
 ## 3. PR
 

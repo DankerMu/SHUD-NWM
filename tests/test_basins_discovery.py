@@ -210,6 +210,27 @@ def test_symlink_loop_descendant_is_skipped_with_stable_warning(tmp_path: Path) 
     assert inventory["warnings"][0]["path"] == str(loop)
 
 
+def test_dangling_forcing_symlink_inside_root_is_not_reported_unresolvable(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "dangling"
+    make_valid_model(model_dir, "dangling")
+    dangling = model_dir / "forcing"
+    try:
+        dangling.symlink_to(root / "missing-forcing-target", target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert [warning["code"] for warning in inventory["warnings"]] == []
+    assert inventory["importable"] is True
+    assert model["status"] == "valid"
+    assert model["default_import_eligible"] is True
+    assert model["forcing_dir"] is None
+    assert model["forcing_csv_count"] == 0
+
+
 def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     model_dir = root / "forcing-escape"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
+from errno import ENOENT
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from typing import Any
@@ -552,24 +553,32 @@ def _storage_root_check(
             },
         )
     path = Path(value).expanduser()
+    # Strict resolution + errno split: a symlink loop no longer raises from
+    # non-strict resolution on CPython 3.13+, so the unsafe verdict comes
+    # from the kernel errno. ENOENT is NOT unsafe - a merely missing root
+    # keeps its resolved value and continues through the
+    # contained -> visible ladder below, so OUT_OF_ROOT keeps priority
+    # over NOT_VISIBLE.
     try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        check = {
-            "configured": True,
-            "path": evidence_path or str(path),
-            "contained": False,
-            "compute_node_visible": False,
-        }
-        return (
-            check,
-            {
-                "code": f"SLURM_PREFLIGHT_{field_name.upper()}_UNSAFE_PATH",
-                "field": field_name,
+        resolved = Path(os.path.realpath(path, strict=True))
+    except OSError as error:
+        if getattr(error, "errno", None) != ENOENT:
+            check = {
+                "configured": True,
                 "path": evidence_path or str(path),
-                "message": f"Slurm {field_name} must be a safe compute-node visible directory.",
-            },
-        )
+                "contained": False,
+                "compute_node_visible": False,
+            }
+            return (
+                check,
+                {
+                    "code": f"SLURM_PREFLIGHT_{field_name.upper()}_UNSAFE_PATH",
+                    "field": field_name,
+                    "path": evidence_path or str(path),
+                    "message": f"Slurm {field_name} must be a safe compute-node visible directory.",
+                },
+            )
+        resolved = path.resolve()
     visible = path.exists() and path.is_dir()
     contained = _path_is_under_any(resolved, allowed_roots)
     check = {

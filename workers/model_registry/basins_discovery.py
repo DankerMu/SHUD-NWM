@@ -7,6 +7,7 @@ import re
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
+from errno import ENOENT
 from pathlib import Path
 from typing import Any
 
@@ -508,18 +509,29 @@ def _safe_resolve_under_root(
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
 ) -> Path | None:
+    # Resolve strictly and classify by errno instead of relying on
+    # "non-strict resolution raises on a symlink loop": CPython 3.13+
+    # delegates Path.resolve() to os.path.realpath(), which returns loops
+    # unraised. os.path.realpath(strict=True) raises OSError(ELOOP)
+    # uniformly on 3.11-3.14 (Path.resolve(strict=True) must not be used
+    # here: on <=3.12 it raises an errno-less RuntimeError for loops).
     try:
+        resolved = Path(os.path.realpath(path, strict=True))
+    except OSError as error:
+        if getattr(error, "errno", None) != ENOENT:
+            _append_warning_once(
+                warnings,
+                DiscoveryWarning(
+                    "BASINS_SYMLINK_UNRESOLVABLE",
+                    "Basins descendant cannot be resolved and was skipped.",
+                    path=str(path),
+                ),
+            )
+            return None
+        # The strict walk proved the failure is a missing component, not a
+        # loop; keep the pre-change nonexistence semantics (containment is
+        # still checked, and the caller's is_dir() filter skips it silently).
         resolved = path.resolve()
-    except (OSError, RuntimeError):
-        _append_warning_once(
-            warnings,
-            DiscoveryWarning(
-                "BASINS_SYMLINK_UNRESOLVABLE",
-                "Basins descendant cannot be resolved and was skipped.",
-                path=str(path),
-            ),
-        )
-        return None
     try:
         resolved.relative_to(resolved_root)
     except ValueError:

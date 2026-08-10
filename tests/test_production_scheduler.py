@@ -29839,6 +29839,26 @@ def test_db_free_slurm_storage_root_check_masks_symlink_loop_path(tmp_path: Path
     assert str(loop) not in rendered
 
 
+def test_db_free_slurm_storage_root_check_keeps_out_of_root_for_missing_outside_path(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    missing_outside = tmp_path / "outside" / "missing-object-store"
+
+    check, blocker = scheduler_module._storage_root_check(
+        "object_store_root",
+        missing_outside,
+        (allowed_root,),
+    )
+
+    assert check["configured"] is True
+    assert check["path"] == str(missing_outside)
+    assert check["contained"] is False
+    assert check["compute_node_visible"] is False
+    assert blocker is not None
+    assert blocker["code"] == "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT"
+    assert blocker["path"] == str(missing_outside)
+
+
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
     monkeypatch: Any,
     tmp_path: Path,
