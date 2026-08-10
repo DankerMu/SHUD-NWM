@@ -50,9 +50,14 @@ changes from master's later-root hard token to the first root's
 reason — rule-5 uniformity now applies to every non-hard failure.
 A later root's HARD error is NOT subject to rule 5: it escapes the
 loop and supersedes an earlier root's fall-through reason
-(proposal delta 4 third sub-case — these messages also change vs
-master, which hard-rejected at the first root without opening the
-sibling; pinned A5(d)).
+(proposal delta 4 third sub-case). The message changes vs master
+ONLY when the earlier fall-through is a re-scoped publishable-set
+verdict (master hard-rejected at the first root without opening
+the sibling); after a pre-existing fall-through reason
+(`MANIFEST_MISSING`, provenance rejects, `MANIFEST_INCOMPLETE`,
+checksum mismatch) master already fell through and reported the
+same later-root hard message — unchanged (round-2 R2-1 scoping).
+Pinned A5(d).
 
 CROSS-ROOT DOWNGRADE GUARD (second ruling, proposal; single
 canonical trigger — round-2 P2-1): a later root's final-IC
@@ -187,7 +192,10 @@ RED on master 99cfc47d unless marked)
 
 - **A7 FINAL_IC_MISSING full-string pin** (PR-review round-1 C2 —
   mutation dropping the manifest path from the detail survived all
-  394 floor tests): NEW single-root anchor asserting the COMPLETE
+  394 floor tests; GREEN-both-sides — master's inline f-string
+  produced the identical message and the anchor is single-root, so
+  its teeth are the detail-gutting mutation, not a master
+  differential): NEW single-root anchor asserting the COMPLETE
   message via a `_gate_final_ic_missing_message(manifest_path)`
   helper that rebuilds the expected text from the contract wording
   (mirror of `_gate_uncaptured_message`, not a read-back of the

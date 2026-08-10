@@ -102,7 +102,8 @@ Issue: #1329 (S code / M contract). Branch:
   is ineligible, reject with the earlier root's reason;
   checkpoint-lane sources unaffected; loop docstring refreshed to
   the re-scoped definition. Nothing else.
-- [x] 2.2 Anchors A1-A6 per design D3 (A1/A2/A3(b) RED on master
+- [x] 2.2 Anchors A1-A7 per design D3 (A5(d)/A7 added in PR-review
+  round 1; A1/A2/A3(b) RED on master
   99cfc47d; A3(a) GREEN-both-sides message pin with
   wrong-implementation teeth; A4 existing tests verbatim — zero
   edits; A5(b)/(c) new no-fall-through pins for entry-count
@@ -122,6 +123,19 @@ Issue: #1329 (S code / M contract). Branch:
 
 - [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
+  - Round 2 focused (577ea1dd, scope = round-1 fix commit): 0 P1,
+    0 P2, 4 P3 — both round-1 closures verified with independent
+    mutation probes (each mutation killed by exactly 1 test, the
+    new anchor); oracle integrity clean (+69/-0). P3s closed
+    same-round (#1325 precedent): R2-1 hard-supersede disclosure
+    scoped to publishable-set fall-throughs in spec scenario +
+    design D1 (pre-existing fall-through reasons: message
+    unchanged vs master, which also probed the sibling); R2-2 A7
+    marked GREEN-both-sides (mutation-teeth pin, not a master
+    differential); R2-3 task 2.2 A1-A7 + task 5.0 ticked with
+    #1334; R2-4 A5(d) geometry self-verification pin (workspace
+    manifest exists + path-identity discrimination both
+    directions) — tests-only implementer edit.
   - Round 1 NOT CLEAN (54abaf39; 2 P2 + 1 P3, all CONFIRMED by two
     independent verifier batches): C1 [P2, spec-disclosure] the
     forward soft-first/hard-later geometry reports the LATER
@@ -144,7 +158,9 @@ Issue: #1329 (S code / M contract). Branch:
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers (if any arise in review)
+- [x] 5.0 Follow-ups routed with numbers: #1334 (round-1 C3 DEFER —
+  unsafe-path / oversized-artifact hard raises unanchored in
+  sibling geometry; `state_cli.py:856` zero coverage anywhere)
 - [ ] 5.1 Chinese work summary + evidence posted; CI green on final
   head
 - [ ] 5.2 Merge; archive change; loop-log line + audit; close issue

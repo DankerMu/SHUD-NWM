@@ -116,9 +116,11 @@ publishes.
   entry-count overflow) still terminate immediately with their messages verbatim, never
   yielding to a sibling root — including when raised by a LATER root after an earlier root
   fell through: the later root's hard message is reported, superseding the earlier root's
-  fall-through reason (the pre-change gate hard-rejected at the first root without ever
-  opening the sibling, so these messages change; fail-closed and the nonzero exit are
-  preserved).
+  fall-through reason (when the earlier fall-through is one of the two re-scoped
+  publishable-set verdicts these messages change — the pre-change gate hard-rejected at the
+  first root without ever opening the sibling; after a pre-existing fall-through reason the
+  pre-change gate also probed the sibling and reported the same later-root hard message —
+  unchanged; fail-closed and the nonzero exit are preserved either way).
 
 #### Scenario: Durable-output-reuse retries keep publishing
 - **WHEN** a retry restarts a candidate at the state-save stage reusing the durable output of

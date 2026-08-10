@@ -3090,12 +3090,13 @@ def test_state_save_later_root_hard_error_supersedes_earlier_fall_through_reason
     from packages.common.state_manager import StateManagerError
 
     workspace_root = _gate_workspace_output(tmp_path)
-    _gate_total_miss_manifest(workspace_root)
+    workspace_manifest = _gate_total_miss_manifest(workspace_root)
     object_root = _gate_object_output(tmp_path)
     object_manifest_dir = object_root / "state_checkpoints"
     object_manifest_dir.mkdir(parents=True, exist_ok=True)
     object_manifest = object_manifest_dir / "state_checkpoints.json"
     object_manifest.write_text('{"checkpoints": [', encoding="utf-8")
+    assert workspace_manifest.exists()
     manager = _gate_manager(tmp_path)
 
     with pytest.raises(StateManagerError) as exc_info:
@@ -3104,6 +3105,7 @@ def test_state_save_later_root_hard_error_supersedes_earlier_fall_through_reason
     message = str(exc_info.value)
     assert message.startswith("Invalid state checkpoint manifest ")
     assert str(object_manifest) in message
+    assert str(workspace_manifest) not in message
     assert not message.startswith("STATE_SAVE_SOURCE_")
     assert "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED" not in message
     assert manager.saved == []
