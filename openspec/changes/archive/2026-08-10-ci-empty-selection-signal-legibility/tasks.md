@@ -19,5 +19,5 @@
 - [x] 3.1 `uv run pytest -q tests/test_select_ci_tests.py` 全绿
 - [x] 3.2 `uv run ruff check .` 通过
 - [x] 3.3 `openspec validate ci-empty-selection-signal-legibility --strict --no-interactive` 通过
-- [ ] 3.4 PR body 声明路线 C 与理由（AC-1）、AC-3 N/A、AC-6 条件款 N/A 记录
-- [ ] 3.5 **merge 前实机证据（AC-5）**：从 feature 分支切 probe 分支加一行 `schemas/**` 改动开试探 PR（跑新 workflow 定义），采 Actions run 链接显示 warning 注解 + step summary + tail 统计，关闭不合并；证据入 PR body 并贴 #1182
+- [x] 3.4 PR body 声明路线 C 与理由（AC-1）、AC-3 N/A、AC-6 条件款 N/A 记录
+- [x] 3.5 **merge 前实机证据（AC-5）**：从 feature 分支切 probe 分支加一行 `schemas/**` 改动开试探 PR（跑新 workflow 定义），采 Actions run 链接显示 warning 注解 + step summary + tail 统计，关闭不合并；证据入 PR body 并贴 #1182
