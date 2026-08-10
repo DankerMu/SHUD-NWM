@@ -6015,9 +6015,16 @@ def test_execute_refuses_a_plain_file_at_the_output_path(tmp_path: Path) -> None
 
     The symlink anchor is refused inside `stat_no_follow` (its own symlink
     check), so the hook's `S_ISDIR` guard is never the deciding branch there.
-    A plain file passes the probe and is judged only by that guard: without it
-    the run would rename a file to `output_residue/previous` and then solve into
-    a freshly created `output`, laundering tampered geometry into a green run.
+    A plain file passes the probe and reaches that guard first — but the guard
+    is DEFENCE IN DEPTH, not the only thing standing between a file and a green
+    run: delete it and the very next call, `list_directory_no_follow`, refuses
+    the same file with the same permanent `WORKSPACE_PATH_UNSAFE` before any
+    rename or mkdir, so the no-mutation outcome below is over-determined.  What
+    the guard buys is a dedicated, self-explanatory message that names the run
+    output path instead of a generic `Path component is not a directory`
+    surfaced from a listing, and independence from whatever `kind` safe_fs
+    happens to classify a non-directory open as.  This test pins THAT branch:
+    the message assertion is what makes it fail if the guard is removed.
     """
 
     from services.orchestrator.retry import is_retryable_failure
@@ -6038,6 +6045,10 @@ def test_execute_refuses_a_plain_file_at_the_output_path(tmp_path: Path) -> None
 
     assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
     assert is_retryable_failure("WORKSPACE_PATH_UNSAFE") is False
+    # Discriminates the guard from the safe_fs fallback, whose message would be
+    # "Unsafe run output tree at attempt start ...: Path component is not a
+    # directory: ..." — disjoint from this substring.
+    assert "Run output path is not a directory" in exc_info.value.message
     # Refused BEFORE any mutation: the bytes are untouched and nothing moved.
     assert (workspace / "output").is_file()
     assert (workspace / "output").read_text(encoding="utf-8") == "not a directory\n"
