@@ -37,6 +37,11 @@
     "services/orchestrator/scheduler_state_failure.py",
     "tests/test_production_scheduler.py",
     "tests/test_retry.py",
-    "tests/test_scheduler_generation.py"
+    "tests/test_scheduler_generation.py",
+    "tests/test_orchestration_chain.py",
+    "tests/test_production_readiness_validation.py",
+    "services/orchestrator/chain_forecast_execution.py",
+    "services/orchestrator/scheduler_candidate_execution_evidence.py",
+    "services/production_closure/readiness_scheduler_evidence.py"
   ]
 }

@@ -35,6 +35,7 @@ from services.production_closure.readiness_validation import (
     validate_readiness_item,
 )
 from tests.test_production_scheduler import (
+    DuplicateSubmissionSkipOrchestrator,
     FakeAdapter,
     FakeProductionOrchestrator,
     FakeRegistry,
@@ -6204,3 +6205,179 @@ def test_deep_dependency_summary_json_is_stable_blocked_evidence(tmp_path: Path)
     artifacts = "\n".join(path.read_text(encoding="utf-8") for path in (root / "m19" / "readiness").iterdir())
     assert "Traceback" not in artifacts
     assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+# --- #1202: readiness recognises the duplicate-submission skip terminal ------
+
+
+def _duplicate_submission_skip_artifact(
+    tmp_path: Path,
+    *,
+    submitted_stages: tuple[str, ...],
+    workspace: str,
+) -> Path:
+    """Produce a REAL scheduler pass artifact whose cohort cycle hit the reserve gate."""
+
+    orchestrator = DuplicateSubmissionSkipOrchestrator(
+        submitted_stages=submitted_stages,
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+        ),
+    )
+    scheduler = ProductionScheduler(
+        _scheduler_config(tmp_path / workspace, now=_scheduler_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.artifact_path is not None
+    return Path(result.artifact_path)
+
+
+def _validate_produced_scheduler_artifact(tmp_path: Path, scheduler_path: Path) -> dict[str, object]:
+    root = tmp_path / "artifacts"
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    receipt = _scheduler_proof_bound_to_evidence(
+        scheduler_path,
+        producer_artifact_ref=f"scheduler:{scheduler_path.name}",
+        producer_run_id=str(payload["pass_id"]),
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    return next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+
+
+def test_scheduler_mixed_duplicate_submission_skip_pass_has_no_partial_cardinality_mismatch(
+    tmp_path: Path,
+) -> None:
+    """Anchor 5(c)(i) (#1202): mixed geometry — submitted work then a skipped stage.
+
+    The producer now counts such a candidate as partial (behaviour delta 3), so
+    the readiness recount must recognise the same row. Pre-fix the recount found
+    zero partial rows and manufactured
+    ``partial_count_status_cardinality_mismatch``.
+    """
+
+    scheduler_path = _duplicate_submission_skip_artifact(
+        tmp_path,
+        submitted_stages=("convert", "forcing"),
+        workspace="scheduler-workspace-mixed-skip",
+    )
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+
+    assert payload["status"] == "submitted_partial"
+    assert payload["counts"]["partial_count"] == 1
+    assert payload["model_run_evidence"][0]["status"] == "skipped_duplicate_submission"
+
+    scheduler_item = _validate_produced_scheduler_artifact(tmp_path, scheduler_path)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert "partial_count_status_cardinality_mismatch" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["partial_count"] == 1
+
+
+def test_scheduler_wholly_skipped_pass_status_is_review_visible_not_rejected(
+    tmp_path: Path,
+) -> None:
+    """Anchor 5(c)(ii) (#1202): the wholly-skipped pass status is in the vocabulary.
+
+    Pre-fix the brand-new pass-level status was in neither review vocabulary
+    (``status_not_allowed``) and, being outside
+    ``SCHEDULER_REVIEW_BLOCKED_STATUSES``, got model-run count capacity
+    ``submitted_count == 0`` — so its ``partial_count`` of 1 also tripped
+    ``partial_count_exceeds_model_run_evidence``.
+    """
+
+    scheduler_path = _duplicate_submission_skip_artifact(
+        tmp_path,
+        submitted_stages=(),
+        workspace="scheduler-workspace-wholly-skipped",
+    )
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+
+    assert payload["status"] == "skipped_duplicate_submission"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["counts"]["partial_count"] == 1
+
+    scheduler_item = _validate_produced_scheduler_artifact(tmp_path, scheduler_path)
+
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert "status_not_allowed" not in errors
+    assert "partial_count_exceeds_model_run_evidence" not in errors
+    assert errors == []
+    # Review-visible, not silently green.
+    assert scheduler_item["status"] == "blocked"
+
+
+def test_duplicate_submission_skip_model_run_row_still_infers_not_submitted() -> None:
+    """Anchor 5(c)(iii) (#1202): anti-weakening — GREEN before AND after the fix.
+
+    Teaching readiness the skip status must NOT reach
+    ``SCHEDULER_LIVE_MODEL_RUN_STATUS_COMPATIBILITY``: its derived set feeds the
+    submitted-inference, so a bare skip row would start claiming
+    ``submitted=True``. This anchor pins that guard.
+    """
+
+    outcome = readiness_scheduler_evidence._scheduler_model_run_outcome(
+        {"status": "skipped_duplicate_submission"}
+    )
+
+    assert outcome.submitted is False
+    assert (
+        "skipped_duplicate_submission"
+        not in readiness_scheduler_evidence.SCHEDULER_LIVE_COMPATIBLE_MODEL_RUN_STATUSES
+    )
+
+
+def test_historical_live_pass_with_stage_level_skip_is_no_longer_silently_accepted(
+    tmp_path: Path,
+) -> None:
+    """Anchor 5(d) (#1202): historical-artifact pin for the recount widening.
+
+    A pre-change live pass could report ``submitted`` while one stage of its
+    single model run was skipped by the duplicate-submission gate, and readiness
+    accepted it (the recount only knew ``*_partial``). Teaching
+    ``_scheduler_model_run_partial_status`` about the skip status makes the same
+    historical payload review-visible, so this pins the exact acceptance-error
+    set that the widened recognizer produces.
+    """
+
+    payload = _submitted_scheduler_payload()
+    payload["model_run_evidence"][0]["stage_statuses"] = [
+        {"stage": "forcing", "status": "succeeded"},
+        {"stage": "forecast", "status": "skipped_duplicate_submission"},
+    ]
+
+    assert payload["status"] == "submitted"
+    assert payload["execution_mode"] == "production_orchestration"
+    assert payload["counts"]["partial_count"] == 0
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert sorted(scheduler_item["details"]["acceptance_errors"]) == [
+        "live_status_model_run_blocked_outcome",
+        "partial_count_status_cardinality_mismatch",
+        "submitted_status_model_run_status_mismatch",
+    ]
+    assert live_item["status"] == "release_blocked"
+    assert summary["final_production_readiness_claimed"] is False

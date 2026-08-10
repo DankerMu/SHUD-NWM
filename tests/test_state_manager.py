@@ -1710,6 +1710,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
         _valid_ic_bytes(b"state-index-save").decode("utf-8"),
         encoding="utf-8",
     )
+    _write_witness_state_manifest(output_dir, run_id=run_id, final_ic_name="model_a.cfg.ic.update")
     manifest_index = tmp_path / "manifest-index.json"
     manifest_index.write_text(
         json.dumps(
@@ -1786,6 +1787,7 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
         _valid_ic_bytes(b"state-index-env-save").decode("utf-8"),
         encoding="utf-8",
     )
+    _write_witness_state_manifest(output_dir, run_id=run_id, final_ic_name="model_a.cfg.ic.update")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
@@ -1820,6 +1822,49 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     assert snapshot.lead_hours == 12
     assert snapshot.model_package_version == "s3://nhms/models/model_a/package/"
     assert snapshot.model_package_checksum == "package-sha"
+
+
+def test_state_save_cli_exits_nonzero_with_typed_source_reason(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1325 A9: the gate's typed reason is what the Slurm task's stderr carries.
+
+    The CLI is DB-free on the compute node, so the token on stderr plus the
+    nonzero exit is the whole evidence plane the orchestrator classifies.
+    """
+
+    workspace = tmp_path / "workspace"
+    object_root = tmp_path / "objects"
+    index_path = object_root / "scheduler" / "state-index.json"
+    index_path.parent.mkdir(parents=True)
+    run_id = "fcst_gfs_2026052106_model_a"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    # Residue of a killed attempt: an IC on disk, no solver-success witness.
+    (output_dir / "model_a.cfg.ic.update").write_bytes(_valid_ic_bytes(b"killed-attempt-residue"))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", os.pathsep.join((str(workspace), str(object_root))))
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX_BACKEND", "file")
+    monkeypatch.setenv("NHMS_SCHEDULER_STATE_INDEX", str(index_path))
+    monkeypatch.setenv("NHMS_MODEL_ID", "model_a")
+    monkeypatch.setenv("NHMS_SOURCE_ID", "gfs")
+    monkeypatch.setenv("NHMS_CYCLE_TIME", "2026-05-21T06:00:00Z")
+    monkeypatch.setenv("NHMS_END_TIME", "2026-05-21T18:00:00Z")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_URI", "s3://nhms/models/model_a/package/")
+    monkeypatch.setenv("NHMS_MODEL_PACKAGE_CHECKSUM", "package-sha")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    result_code = _state_cli_exit_code(["save", "--run-id", run_id])
+    stderr = capsys.readouterr().err
+
+    assert result_code == 1
+    assert "STATE_SAVE_SOURCE_MANIFEST_MISSING" in stderr
+    assert not (object_root / "states").exists()
 
 
 @pytest.mark.parametrize("selector_value", [None, "", "postgres", "psycopg"])
@@ -2103,12 +2148,15 @@ def test_state_save_checkpoint_ic_read_is_bounded_before_normalization(
     manager: StateManager,
     repository: FakeStateSnapshotRepository,
 ) -> None:
-    monkeypatch.setattr(state_cli, "MAX_STATE_IC_BYTES", 8)
     run_id = "fcst_gfs_2026052106_model_a"
     workspace = tmp_path / "workspace"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
     (output_dir / "model_a.cfg.ic.update").write_bytes(b"123456789")
+    _write_witness_state_manifest(output_dir, run_id=run_id, final_ic_name="model_a.cfg.ic.update")
+    # Patched AFTER the fixture's own checksum read: the bound under test is the
+    # publish path's, not the fixture builder's.
+    monkeypatch.setattr(state_cli, "MAX_STATE_IC_BYTES", 8)
     run = state_cli.StateRunContext(
         run_id=run_id,
         model_id="model_a",
@@ -2155,12 +2203,16 @@ def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(t
 def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_path: Path) -> None:
     """#1315 consumer tolerance: the new runtime manifest keys change nothing here.
 
-    ``workers/shud_runtime`` now writes top-level ``observed_header_minutes``
-    and ``recovery_outcomes`` trails plus a per-entry ``provenance`` marker into
-    ``state_checkpoints.json``. ``_load_state_checkpoint_manifest`` is the only
-    production reader of that file, so the two shapes must parse to identical
+    ``workers/shud_runtime`` now writes top-level ``observed_header_minutes``,
+    ``recovery_outcomes``, ``provenance`` and ``final_ic`` (#1325) plus a
+    per-entry ``provenance`` marker into ``state_checkpoints.json``.
+    ``_load_state_checkpoint_manifest`` is the reader that turns that file into
+    published checkpoints (#1325 added a second reader, the admission gate,
+    which judges the RAW array), so the two shapes must parse to identical
     checkpoints — the diagnostics payload asserted here is the FULL runtime
-    shape, not a subset of it.
+    shape, not a subset of it. The loader's parse semantics also stay
+    checksum-blind: verification belongs to the gate, which is why these fake
+    checksums still parse.
     """
 
     entries = [
@@ -2191,6 +2243,18 @@ def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_pa
         if shape == "with_diagnostics":
             payload["observed_header_minutes"] = [720.0, 1440.0]
             payload["recovery_outcomes"] = {"6": "gate_rejected(header=1440)", "12": "recovered"}
+            payload["provenance"] = {
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "generated_at": "2026-05-21T18:00:07Z",
+                "slurm_job_id": "775533",
+                "array_task_id": 0,
+                "requested_checkpoint_hours": [6, 12],
+            }
+            payload["final_ic"] = {
+                "relative_path": "demo.cfg.ic.update",
+                "original_shud_filename": "demo.cfg.ic.update",
+                "checksum": "d" * 64,
+            }
             for entry_payload in payload["checkpoints"]:
                 entry_payload["provenance"] = "post_run_recovery"
         manifest_path = manifest_dir / "state_checkpoints.json"
@@ -2231,20 +2295,21 @@ def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
     target.write_bytes(_valid_ic_bytes(b"manifest-symlink-target"))
     symlink = manifest_dir / "linked.cfg.ic.update"
     symlink.symlink_to(target)
-    (manifest_dir / "state_checkpoints.json").write_text(
-        json.dumps(
+    # Witness-bearing, but the declared entry is a symlink AND carries no
+    # checksum: the unsafe-path error must still win over the gate's
+    # checksum-presence check (#1325 G5 ordering).
+    _write_witness_state_manifest(
+        output_dir,
+        run_id=run_id,
+        requested_hours=[12],
+        checkpoints=[
             {
-                "checkpoints": [
-                    {
-                        "relative_path": "state_checkpoints/linked.cfg.ic.update",
-                        "valid_time": "2026-05-21T18:00:00Z",
-                        "checkpoint_filename": "linked.cfg.ic.update",
-                        "lead_hours": 12,
-                    }
-                ]
+                "relative_path": "state_checkpoints/linked.cfg.ic.update",
+                "valid_time": "2026-05-21T18:00:00Z",
+                "checkpoint_filename": "linked.cfg.ic.update",
+                "lead_hours": 12,
             }
-        ),
-        encoding="utf-8",
+        ],
     )
     run = state_cli.StateRunContext(
         run_id=run_id,
@@ -2258,6 +2323,58 @@ def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
     with pytest.raises(StateManagerError, match="State checkpoint path is unsafe"):
         state_cli.save_state_for_run(run_id, manager=manager, run_context=run, workspace_root=workspace)
 
+    assert repository.snapshots == {}
+
+
+def test_state_checkpoint_manifest_rejects_escaping_declared_path(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    """A declared ``..`` path is a hard reject, pinned on the VERBATIM message.
+
+    Sibling of the symlink case above and the other half of the containment
+    guard in ``state_cli._declared_artifact_state``: the symlink branch had a
+    pin, the escape branch had none anywhere in the repo, so a mutation that
+    downgraded it (to a typed fall-through reason, or to a "missing" verdict)
+    passed the whole floor. Single root (``output_uri=None``) keeps this pin on
+    the message itself; the two-root fall-through geometry is pinned in
+    ``tests/test_warm_start_chaining.py``.
+    """
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    escape_bytes = _valid_ic_bytes(b"manifest-escape-target")
+    (output_dir.parent / "escape.cfg.ic.update").write_bytes(escape_bytes)
+    _write_witness_state_manifest(
+        output_dir,
+        run_id=run_id,
+        requested_hours=[12],
+        checkpoints=[
+            {
+                "relative_path": "../escape.cfg.ic.update",
+                "valid_time": "2026-05-21T18:00:00Z",
+                "checkpoint_filename": "escape.cfg.ic.update",
+                "checksum": sha256_bytes(escape_bytes),
+                "lead_hours": 12,
+            }
+        ],
+    )
+    run = state_cli.StateRunContext(
+        run_id=run_id,
+        model_id="model_a",
+        end_time=_dt("2026-05-21T18:00:00Z"),
+        output_uri=None,
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+    )
+
+    with pytest.raises(StateManagerError) as exc_info:
+        state_cli.save_state_for_run(run_id, manager=manager, run_context=run, workspace_root=workspace)
+
+    assert str(exc_info.value) == "State checkpoint path escapes output directory: ../escape.cfg.ic.update"
     assert repository.snapshots == {}
 
 
@@ -3080,6 +3197,39 @@ def _copyback_index_entry(
         "cycle_id": cycle_id,
         "lead_hours": lead_hours,
     }
+
+
+def _write_witness_state_manifest(
+    output_dir: Path,
+    *,
+    run_id: str,
+    checkpoints: list[dict[str, Any]] | None = None,
+    requested_hours: list[int] | None = None,
+    final_ic_name: str | None = None,
+) -> Path:
+    """#1325: the solver-success witness `workers/shud_runtime` now writes."""
+
+    payload: dict[str, Any] = {
+        "checkpoints": list(checkpoints or []),
+        "provenance": {
+            "run_id": run_id,
+            "generated_at": "2026-05-21T18:00:07Z",
+            "slurm_job_id": "775533",
+            "array_task_id": 0,
+            "requested_checkpoint_hours": list(requested_hours or []),
+        },
+    }
+    if final_ic_name is not None:
+        payload["final_ic"] = {
+            "relative_path": final_ic_name,
+            "original_shud_filename": final_ic_name,
+            "checksum": sha256_bytes((output_dir / final_ic_name).read_bytes()),
+        }
+    manifest_dir = output_dir / "state_checkpoints"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / "state_checkpoints.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    return manifest_path
 
 
 def _valid_ic_bytes(content: bytes) -> bytes:

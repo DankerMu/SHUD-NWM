@@ -29,7 +29,19 @@ when the sampling watcher misses a requested hour on a run the solver completed 
 runtime SHALL deterministically recover that checkpoint in-process — by re-running SHUD from the
 same staged IC/forcing with the end time shortened to the missed hour into a scratch directory —
 before the run is allowed to fail, and a recovered checkpoint SHALL pass the same header-time and
-structural-completeness gates as a watcher capture.
+structural-completeness gates as a watcher capture. The `state_checkpoints.json` manifest SHALL be
+written after every successful solve — checkpoint hours requested or not (a zero-checkpoint-hour
+run writes an empty `checkpoints` list rather than omitting the file) — and SHALL carry a
+top-level `provenance` block (`run_id`, `generated_at` UTC wall-clock at manifest write,
+`slurm_job_id`, `array_task_id`, and `requested_checkpoint_hours` — the hour list the run was
+asked to capture) identifying the execution that produced it, plus a top-level `final_ic` entry
+(relative path, original SHUD filename, and content checksum). The final IC is identified by
+exactly two candidate paths — the tracker's watched `output_dir/<project_name>.cfg.ic.update`,
+else `output_dir/<project_name>.cfg.ic` — with no recursive search and no other filename ever
+recorded; when neither exists, no `final_ic` entry is written. The solver failure lanes
+(spawn failure, timeout, nonzero exit) SHALL NOT write the manifest: manifest presence is a
+witness that an attempt of this run completed its solve successfully in this output tree, and
+every artifact the manifest names is integrity-pinned by its checksum.
 
 #### Scenario: Restart cadence lands on the next cycle init time
 - **WHEN** the forecast long run starts at `T_N`
@@ -85,19 +97,29 @@ structural-completeness gates as a watcher capture.
 - **THEN** the gate-failing candidate is discarded (not installed, no file left under
   `state_checkpoints/`), and the run fails with the stable error code
   `STATE_CHECKPOINTS_MISSING`
-- **AND** the `state_checkpoints.json` manifest is written whenever checkpoint hours were
-  requested — including when nothing was captured — and both the failure message and the
-  manifest include the trail of distinct `*.cfg.ic.update` header minutes the watcher observed
-  plus a per-hour recovery-outcome trail (`recovery_outcomes`) naming how each missing hour's
-  recovery ended, so the miss is locatable from evidence alone
+- **AND** the `state_checkpoints.json` manifest is written (this lane sits after a successful
+  solve, so the manifest-presence witness holds) — including when nothing was captured — and
+  both the failure message and the manifest include the trail of distinct `*.cfg.ic.update`
+  header minutes the watcher observed plus a per-hour recovery-outcome trail
+  (`recovery_outcomes`) naming how each missing hour's recovery ended, so the miss is locatable
+  from evidence alone
 
 #### Scenario: Checkpoint manifest consumers tolerate the diagnostic fields
 - **WHEN** an existing consumer reads `state_checkpoints.json` (state save/QC via
   `_load_state_checkpoint_manifest`)
 - **THEN** checkpoint entries parse exactly as before: the added top-level
-  `observed_header_minutes` and `recovery_outcomes` keys and the per-entry `provenance` key are
-  ignored by consumers that do not use them, and no entry field consumed today changes shape or
-  meaning
+  `observed_header_minutes`, `recovery_outcomes`, `provenance`, and `final_ic` keys and the
+  per-entry `provenance` key are ignored by consumers that do not use them, and no entry field
+  consumed today changes shape or meaning
+
+#### Scenario: Manifest presence is a solver-success witness
+- **WHEN** a run's solver fails to spawn, times out, or exits nonzero
+- **THEN** no `state_checkpoints.json` is written for that attempt, so a later state-save
+  admission check can treat manifest presence in an output tree as evidence that an attempt of
+  this run completed its solve successfully there
+- **AND** a successful solve with zero requested checkpoint hours writes the manifest with an
+  empty `checkpoints` list, `provenance.requested_checkpoint_hours: []`, and a `final_ic` entry
+  naming and checksumming the solve's final state, rather than omitting the file.
 
 ### Requirement: Next cycle consumes the prior cycle's saved state
 A production forecast cycle SHALL initialize SHUD from the snapshot valid at its init time when one
@@ -185,4 +207,200 @@ When a cycle's candidate reaches a terminal-success decision, its successor stat
 
 - **WHEN** a cycle's terminal rows are legacy per-basin rows carrying `init_state_id` that matches the strict resolution
 - **THEN** the verdict is `complete` exactly as before this change
+
+### Requirement: Publish-side state admission is fail-closed
+`save_state_for_run` SHALL verify, before selecting any state artifact, that the source output
+tree was produced by a successful solve of the run named in the caller's context, and SHALL
+publish only artifacts the manifest names and checksums: an output root must exist; a
+`state_checkpoints.json` manifest must be present at
+`<root>/state_checkpoints/state_checkpoints.json` with a `provenance` block whose `run_id`
+matches the context; and every manifest-declared artifact (checkpoint entries and, on the
+fallback lane, the `final_ic` entry) must be present, carry a declared checksum, and match it —
+a declared entry without a checksum is itself a violation. Each violation SHALL reject the
+publish with a typed reason (`STATE_SAVE_SOURCE_OUTPUT_MISSING`,
+`STATE_SAVE_SOURCE_MANIFEST_MISSING`, `STATE_SAVE_SOURCE_PROVENANCE_MISSING`,
+`STATE_SAVE_SOURCE_PROVENANCE_MISMATCH`, `STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE`,
+`STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH`, `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`,
+`STATE_SAVE_SOURCE_FINAL_IC_MISSING`)
+surfaced through a `StateManagerError` and a nonzero CLI exit, with no snapshot write, no QC
+record, and no state index mutation. When multiple output roots exist, the VERIFIED root is the
+first root that passes the full check AND yields a publishable artifact set (non-empty verified
+checkpoints, or the gated final-IC fallback with a verified `final_ic` entry); a root failing
+either half falls through to the next — including a witnessed root whose manifest records
+requested checkpoint hours but zero captured checkpoints
+(`STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`) and a fallback-lane root whose manifest names no
+final IC (`STATE_SAVE_SOURCE_FINAL_IC_MISSING`) — except a present-but-unparseable manifest or
+an unsafe declared path, which keep the existing `Invalid state checkpoint manifest` /
+`State checkpoint path is unsafe` / `State checkpoint path escapes output directory` hard
+errors unchanged, and the legacy oversized-artifact and manifest-entry-count-overflow hard
+errors, which likewise never fall through and keep their messages verbatim; a hard error
+raised by ANY probed root — first or later — terminates the probe immediately and is the
+reported message, superseding an earlier root's fall-through rejection. When no root publishes
+and no probed root raised a hard error, the reported reason SHALL be the first existing root's
+rejection, byte-identical in the single-root case to the pre-change message. The final-IC fallback
+SHALL be reachable only when a verified manifest declares zero checkpoints AND
+`provenance.requested_checkpoint_hours` is empty AND no earlier existing root fell through
+with `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED` (the cross-root extension of the no-downgrade
+invariant: a root whose rejection PROVED the run requested checkpoint states blocks fallback
+publication by every later root; an earlier root that fails before its requested hours are
+read — missing manifest, incomplete declarations, checksum drift — does not arm the guard,
+matching pre-change fall-through behavior), and SHALL publish only the file the
+manifest's `final_ic` entry names, checksum-verified — an undeclared file is never selected,
+and a fallback-lane manifest without a `final_ic` entry rejects with
+`STATE_SAVE_SOURCE_FINAL_IC_MISSING` when no later root publishes. A
+verified manifest with requested hours but zero captured checkpoints rejects with
+`STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED` when no later root publishes. The admission contract
+is identity plus
+solver-success witness plus named-artifact integrity — deliberately not wall-clock recency, so
+a retry that legitimately reuses durable output from the original successful solve still
+publishes.
+
+#### Scenario: Missing output tree rejects the publish
+- **WHEN** `save_state_for_run` runs for a run whose output root exists in no probed location
+  (workspace or `output_uri`)
+- **THEN** the publish is rejected with `STATE_SAVE_SOURCE_OUTPUT_MISSING` and no
+  `save_state_snapshot`, QC, or index call is made.
+
+#### Scenario: Failed-attempt residue rejects the publish
+- **WHEN** the output root exists and contains `*.cfg.ic`/`*.cfg.ic.update` files but no
+  `state_checkpoints.json` (the residue of a killed or failed solve, or a pre-upgrade tree)
+- **THEN** the publish is rejected with `STATE_SAVE_SOURCE_MANIFEST_MISSING` — no rglob
+  fallback runs and nothing is stamped `valid_time = run.end_time`
+- **AND** the recovery path is re-running the forecast, which regenerates a witness-bearing
+  tree.
+
+#### Scenario: Manifest-declared checkpoints must all be present and intact
+- **WHEN** the manifest declares N checkpoint entries and fewer than N referenced files exist,
+  or a declared entry carries no `checksum`, or an entry is malformed (not a dict, missing
+  `relative_path`/`valid_time`, carrying an unparseable `valid_time`, or referencing a
+  non-regular file), or the `checkpoints` value itself is not a list, or a referenced file's
+  content no longer matches its declared `checksum`
+- **THEN** the publish is rejected with `STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE` (missing or
+  malformed declarations — the declared set is the raw `checkpoints` array, never the loader's
+  silently-filtered view) respectively `STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH` (content
+  drift) naming the offending entries, instead of silently publishing the surviving subset.
+
+#### Scenario: Foreign or provenance-less manifest rejects the publish
+- **WHEN** the manifest lacks a `provenance` block, or its `provenance.run_id` names a
+  different run than the caller's context
+- **THEN** the publish is rejected with `STATE_SAVE_SOURCE_PROVENANCE_MISSING` (respectively
+  `STATE_SAVE_SOURCE_PROVENANCE_MISMATCH`).
+
+#### Scenario: Zero-checkpoint runs stay publishable through the gated fallback
+- **WHEN** a verified manifest declares an empty `checkpoints` list with
+  `provenance.requested_checkpoint_hours: []` and its `final_ic` entry's file is present and
+  checksum-matched in the verified root
+- **THEN** the publish proceeds via the final-IC fallback with `valid_time == run.end_time`,
+  publishing exactly the manifest-named file — a stale or foreign IC lying in the tree is never
+  selected because it is not the named, checksummed artifact
+- **AND** the same manifest without a `final_ic` entry rejects with
+  `STATE_SAVE_SOURCE_FINAL_IC_MISSING` when no later root publishes, instead of searching the
+  tree.
+
+#### Scenario: A total checkpoint miss cannot downgrade to the fallback
+- **WHEN** a verified manifest records non-empty `provenance.requested_checkpoint_hours` but an
+  empty `checkpoints` list (the `STATE_CHECKPOINTS_MISSING` tree retried into state save)
+- **THEN** that root never publishes its final IC in place of the requested checkpoint states —
+  it yields only to a later CHECKPOINT-publishing root; a later fallback-lane root is likewise
+  ineligible (cross-root no-downgrade), and when no eligible root exists the publish is
+  rejected with `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`.
+
+#### Scenario: A total-miss workspace tree does not shadow a healthy sibling root
+- **WHEN** the workspace root holds attempt N+1's witnessed total-miss tree (requested hours
+  non-empty, zero captured checkpoints — or, on the fallback lane, a zero-hours manifest naming
+  no final IC) and the `output_uri` root holds attempt N's healthy verified tree
+- **THEN** the publish succeeds from the object-store root's manifest-named artifacts — the
+  unpublishable root yields instead of hard-rejecting — except that a root which fell through
+  with `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED` blocks any LATER root from publishing via the
+  final-IC fallback lane (checkpoint-lane siblings remain eligible)
+- **AND** when BOTH roots are unpublishable and neither raised a hard error, the reported
+  reason is the first existing root's rejection, byte-identical to the single-root message (in
+  the reversed geometry — first root failing an always-fall-through reason, later root failing
+  on publishable-set — this reports the first root's reason where the pre-change gate surfaced
+  the later root's hard token)
+- **AND** the hard exceptions (unparseable manifest, unsafe declared path, oversized artifact,
+  entry-count overflow) still terminate immediately with their messages verbatim, never
+  yielding to a sibling root — including when raised by a LATER root after an earlier root
+  fell through: the later root's hard message is reported, superseding the earlier root's
+  fall-through reason (when the earlier fall-through is one of the two re-scoped
+  publishable-set verdicts these messages change — the pre-change gate hard-rejected at the
+  first root without ever opening the sibling; after a pre-existing fall-through reason the
+  pre-change gate also probed the sibling and reported the same later-root hard message —
+  unchanged; fail-closed and the nonzero exit are preserved either way).
+
+#### Scenario: Durable-output-reuse retries keep publishing
+- **WHEN** a retry restarts a candidate at the state-save stage reusing the durable output of
+  the original successful solve (`durable_shud_output_reused`), and the witness-bearing tree is
+  intact
+- **THEN** the publish succeeds — the admission contract imposes no wall-clock recency
+  predicate that would reject artifacts older than the retry submission
+- **AND** if that tree has since been removed, the publish rejects with the applicable typed
+  reason instead of downgrading to a weaker source.
+
+#### Scenario: Rejection surfaces a typed reason through the CLI exit
+- **WHEN** any admission predicate rejects
+- **THEN** the typed reason token leads the `StateManagerError` message, the CLI exits nonzero
+  with the token on stderr, and the orchestrator's existing stage classification records the
+  failed `state_save_qc` stage — the reject is never a silent downgrade to a weaker source.
+
+### Requirement: Run output tree is attempt-fresh at solve start
+
+Every `SHUDRuntime.execute()` attempt SHALL begin with an output tree
+containing no bytes from any prior attempt of the same run: a
+pre-existing NON-EMPTY `runs/<run_id>/output` is quarantined aside
+(renamed, never followed, never partially cleared) to
+`runs/<run_id>/output_residue/previous` before the solve starts,
+retaining exactly one residue tree (the most recent non-empty one);
+a pre-existing EMPTY `output` directory is reused as-is, with no
+quarantine and no eviction of retained residue. The quarantine
+sibling SHALL be invisible to the publish admission gate and to
+result upload. Hygiene failures split by FAILURE SHAPE: a
+tamper-shaped failure — any filesystem-safety refusal, including
+the `output` path or quarantine sibling not being a plain
+directory, an unsafe or symlinked path component, a containment
+violation, or a refusal whose safety is indeterminate — SHALL
+terminate the attempt with the permanent typed workspace error
+before any solve spawn; an I/O-shaped failure anywhere in the
+hygiene steps (the probe and emptiness listing included, not only
+clear/rename/recreate) SHALL terminate the attempt with a TRANSIENT
+typed storage error (automatic retry preserved), in both cases with
+full failure accounting; no hygiene failure may escape as an
+untyped generic error. In consequence, the witness manifest's
+`final_ic` entry names a file written by the attempt that produced
+the manifest.
+
+#### Scenario: Stale final-IC residue is never blessed by a later attempt
+
+- **WHEN** a killed attempt left `<project>.cfg.ic.update` (and any
+  other residue) in the run's output tree and a later attempt of the
+  same `run_id` runs with zero requested checkpoint hours and a solve
+  that writes no final IC
+- **THEN** the later attempt's witness manifest contains no
+  `final_ic` entry naming the stale file
+- **AND** the stale tree is locatable, complete, at the quarantine
+  sibling rather than deleted silently.
+
+#### Scenario: Quarantine never follows links and fails closed
+
+- **WHEN** the pre-existing `output` path is itself a symlink, or the
+  quarantine rename/clear fails
+- **THEN** the attempt terminates before the solve spawns with a
+  typed error whose retry classification matches the failure shape —
+  permanent for tamper-shaped failures (any filesystem-safety
+  refusal: non-directory `output`, a tampered quarantine sibling,
+  an unsafe path component), transient for I/O-shaped failures
+  anywhere in the hygiene steps — the link
+  target is untouched, no partially-cleared tree remains, and the
+  failure log, task-outcome receipt, and failed-run transition are
+  all recorded.
+
+#### Scenario: Hygiene is invisible outside the attempt
+
+- **WHEN** an attempt quarantines residue and completes successfully
+- **THEN** result upload covers exactly the fresh `output` tree, the
+  quarantine sibling is never a candidate root for the publish
+  admission gate (whose root set — workspace `runs/<run_id>/output`
+  plus the `output_uri` root — is unchanged), and lanes that restart
+  downstream stages without re-entering `execute()` (durable output
+  reuse) observe no change.
 

@@ -380,6 +380,10 @@ def _is_non_submitted_terminal_or_unavailable_status(status: str) -> bool:
             "blocked",
             "cancelled",
             "preflight_blocked",
+            # #1202: a cycle deferred to the reservation-holding pass submitted
+            # nothing for this candidate — it must never read as a successful
+            # final candidate on the evidence plane.
+            "skipped_duplicate_submission",
             "unavailable",
         }
         or normalized.endswith(("_blocked", "_cancelled", "_unavailable"))

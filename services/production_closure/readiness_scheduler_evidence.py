@@ -77,6 +77,9 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "slurm_cancellation_blocked",
         "slurm_partially_cancelled",
         "slurm_status_sync_failed",
+        # #1202: a pass whose cycle deferred to another pass's in-flight
+        # reservation is review-visible, not vocabulary-rejected.
+        "skipped_duplicate_submission",
         "submission_failed",
         "submitted_partial",
         "partial",
@@ -1156,7 +1159,13 @@ def _scheduler_model_run_failed_status(status: str) -> bool:
 
 
 def _scheduler_model_run_partial_status(status: str) -> bool:
-    return status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES or status.endswith("_partial")
+    # #1202: a duplicate-submission skip makes the producer count the candidate
+    # as partial, so the readiness recount must recognise the same row.
+    return (
+        status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES
+        or status == "skipped_duplicate_submission"
+        or status.endswith("_partial")
+    )
 
 
 def _scheduler_model_run_blocked_status(status: str) -> bool:
@@ -1170,6 +1179,9 @@ def _scheduler_model_run_producer_partial_status(status: str) -> bool:
         status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES
         or status in SCHEDULER_FAILED_MODEL_RUN_STATUSES
         or status in SCHEDULER_BLOCKED_MODEL_RUN_STATUSES
+        # #1202: keep producer partial-counting and readiness recount in
+        # agreement for skip-carrying passes.
+        or status == "skipped_duplicate_submission"
         or status.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
     )
 

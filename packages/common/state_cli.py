@@ -21,7 +21,7 @@ from packages.common.manifest_index import (
     resolve_task_id,
     validate_manifest_index_entry_count,
 )
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -64,6 +64,26 @@ class StateCheckpoint:
 
 MAX_STATE_CHECKPOINT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES = 10_000
+
+# #1325 publish-side admission reasons. Each leads the ``StateManagerError``
+# message so the Slurm task's stderr is machine-greppable: the compute-node CLI
+# is DB-free, so the token plus the nonzero exit IS the evidence plane.
+STATE_SAVE_SOURCE_OUTPUT_MISSING = "STATE_SAVE_SOURCE_OUTPUT_MISSING"
+STATE_SAVE_SOURCE_MANIFEST_MISSING = "STATE_SAVE_SOURCE_MANIFEST_MISSING"
+STATE_SAVE_SOURCE_PROVENANCE_MISSING = "STATE_SAVE_SOURCE_PROVENANCE_MISSING"
+STATE_SAVE_SOURCE_PROVENANCE_MISMATCH = "STATE_SAVE_SOURCE_PROVENANCE_MISMATCH"
+STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE = "STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE"
+STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH = "STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH"
+STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED = "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED"
+STATE_SAVE_SOURCE_FINAL_IC_MISSING = "STATE_SAVE_SOURCE_FINAL_IC_MISSING"
+
+_REQUIRED_PROVENANCE_KEYS = (
+    "run_id",
+    "generated_at",
+    "slurm_job_id",
+    "array_task_id",
+    "requested_checkpoint_hours",
+)
 
 
 class StateRunRepository:
@@ -146,17 +166,31 @@ def save_state_for_run(
     else:
         run_repository = repository or _state_run_repository_from_env_for_save()
         run = run_repository.load_run_context(run_id)
-    checkpoints = [
-        _checkpoint_with_header_time(checkpoint, run)
-        for checkpoint in _find_state_checkpoints(run, workspace, state_manager.object_store)
-    ]
-    if not checkpoints:
-        ic_file = _find_ic_file(run, workspace, state_manager.object_store)
+    # #1325: admission runs BEFORE any artifact selection. Nothing below may
+    # search the tree — only artifacts the verified manifest names and
+    # checksums are publishable, so a killed/cleaned run can no longer mint a
+    # successor state that looks healthy downstream.
+    source = _admit_state_publish_source(run, workspace, state_manager.object_store)
+    if source.final_ic is None:
+        checkpoints = [
+            _checkpoint_with_header_time(checkpoint, run)
+            for checkpoint in _load_state_checkpoint_manifest(source.manifest_path)
+        ]
+        if not checkpoints:
+            # The gate verified a non-empty declared set, so an empty parse means
+            # the tree changed under us between the hash and this read. Answer
+            # with the typed reason rather than an IndexError off ``saved[0]``.
+            raise StateManagerError(
+                f"{STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE}: manifest {source.manifest_path} declared checkpoint "
+                "artifacts that no longer resolve at publish time."
+            )
+    else:
+        ic_file = source.output_root / str(source.final_ic["relative_path"])
         checkpoints = [
             StateCheckpoint(
                 valid_time=run.end_time,
                 ic_file=ic_file,
-                original_shud_filename=ic_file.name,
+                original_shud_filename=str(source.final_ic.get("original_shud_filename") or ic_file.name),
                 lead_hours=_lead_hours_from_run_valid_time(run, run.end_time),
             )
         ]
@@ -557,69 +591,292 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: LocalObjectStore) -> Path:
-    # Prefer the native SHUD end-of-segment restart artifact ``*.cfg.ic.update`` (the
-    # interim T_{N+1} state written by the restart cadence); fall back to ``*.cfg.ic``.
-    update_candidates: list[Path] = []
-    ic_candidates: list[Path] = []
+@dataclass(frozen=True)
+class _VerifiedStateSource:
+    """An output root whose solver-success witness passed G1-G5."""
 
-    def _collect(root: Path) -> None:
-        update_candidates.extend(sorted(p for p in root.rglob("*.cfg.ic.update") if p.is_file()))
-        ic_candidates.extend(
-            sorted(p for p in root.rglob("*.cfg.ic") if p.is_file() and not p.name.endswith(".cfg.ic.update"))
-        )
-
-    workspace_output = workspace_root / "runs" / run.run_id / "output"
-    if workspace_output.exists():
-        _collect(workspace_output)
-
-    if run.output_uri:
-        output_path = _resolve_run_output_path(run, object_store)
-        if output_path.is_file():
-            if output_path.name.endswith(".cfg.ic.update"):
-                update_candidates.append(output_path)
-            elif output_path.name.endswith(".cfg.ic"):
-                ic_candidates.append(output_path)
-        elif output_path.is_dir():
-            _collect(output_path)
-
-    if update_candidates:
-        return update_candidates[0]
-    if ic_candidates:
-        return ic_candidates[0]
-    raise StateManagerError(f"No .cfg.ic / .cfg.ic.update state file found for run {run.run_id}.")
+    output_root: Path
+    manifest_path: Path
+    # Set only on the fallback lane (zero declared and zero requested
+    # checkpoints); ``None`` means "publish the manifest's checkpoint entries".
+    # Its ``relative_path`` is the NORMALIZED string G5 hashed, never the raw
+    # manifest value: publish must open the byte-identical file the checksum was
+    # taken over (a whitespace twin next to it is a different file).
+    final_ic: dict[str, Any] | None
 
 
-def _find_state_checkpoints(
+class _StateSourceRejection(Exception):
+    """A per-root admission failure; later roots may still verify (design D3)."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        # Kept as a named attribute so cross-root policy (the #1329 downgrade
+        # guard) can key on the typed reason instead of re-parsing the message.
+        self.reason = reason
+
+
+def _admit_state_publish_source(
     run: StateRunContext,
     workspace_root: Path,
     object_store: LocalObjectStore,
-) -> list[StateCheckpoint]:
-    manifests: list[Path] = []
+) -> _VerifiedStateSource:
+    """Verify the source tree before anything is selected for publish (#1325).
 
-    workspace_manifest = (
-        workspace_root / "runs" / run.run_id / "output" / "state_checkpoints" / "state_checkpoints.json"
-    )
-    if workspace_manifest.exists():
-        manifests.append(workspace_manifest)
+    Roots are evaluated in the existing probe order and the FIRST one that both
+    passes G2-G5 AND yields a publishable artifact set wins (#1329 re-scope of
+    "verified root"): a workspace tree left by a failed attempt legitimately
+    coexists with the object-store tree of the successful solve, so a root that
+    proves its identity but has nothing publishable yields to the next root
+    instead of hard-rejecting. One cross-root exception preserves the
+    no-downgrade invariant: once a root has fallen through with
+    ``STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`` — the proof that this run's
+    configuration requested checkpoint states — no LATER root may publish via
+    the final-IC fallback lane; checkpoint-lane roots stay eligible. If no root
+    publishes, the first existing root's reason is reported so the outcome is
+    deterministic.
+    """
 
+    roots = _state_output_roots(run, workspace_root, object_store)
+    if not roots:
+        raise StateManagerError(
+            f"{STATE_SAVE_SOURCE_OUTPUT_MISSING}: no output root exists for run {run.run_id}."
+        )
+    first_rejection: _StateSourceRejection | None = None
+    uncaptured_rejection: _StateSourceRejection | None = None
+    for output_root in roots:
+        try:
+            source = _verify_state_source_root(output_root, run)
+        except _StateSourceRejection as rejection:
+            if first_rejection is None:
+                first_rejection = rejection
+            if uncaptured_rejection is None and rejection.reason == STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED:
+                uncaptured_rejection = rejection
+            continue
+        if source.final_ic is not None and uncaptured_rejection is not None:
+            # Cross-root no-downgrade: an earlier root PROVED the run requested
+            # checkpoint states, so a sibling's single end-time IC is not an
+            # acceptable substitute. Answer with that earlier root's reason.
+            raise StateManagerError(str(uncaptured_rejection))
+        return source
+    raise StateManagerError(str(first_rejection))
+
+
+def _state_output_roots(
+    run: StateRunContext,
+    workspace_root: Path,
+    object_store: LocalObjectStore,
+) -> list[Path]:
+    roots: list[Path] = []
+    workspace_output = workspace_root / "runs" / run.run_id / "output"
+    if workspace_output.is_dir():
+        roots.append(workspace_output)
     if run.output_uri:
         output_path = _resolve_run_output_path(run, object_store)
-        if output_path.is_dir():
-            object_manifest = output_path / "state_checkpoints" / "state_checkpoints.json"
-            if object_manifest.exists() and object_manifest not in manifests:
-                manifests.append(object_manifest)
-
-    for manifest_path in manifests:
-        checkpoints = _load_state_checkpoint_manifest(manifest_path)
-        if checkpoints:
-            return checkpoints
-    return []
+        # Only DIRECTORY roots are publishable sources: a file-shaped
+        # ``output_uri`` names no witness tree and is no longer searched.
+        if output_path.is_dir() and not any(_same_directory(output_path, root) for root in roots):
+            roots.append(output_path)
+    return roots
 
 
-def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint]:
+def _same_directory(left: Path, right: Path) -> bool:
+    return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def _verify_state_source_root(output_root: Path, run: StateRunContext) -> _VerifiedStateSource:
+    manifest_path = output_root / "state_checkpoints" / "state_checkpoints.json"
+    if not manifest_path.exists():
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_MANIFEST_MISSING,
+            f"no solver-success witness at {manifest_path}",
+        )
+    payload = _read_state_checkpoint_manifest_payload(manifest_path)
+    provenance = _usable_provenance(payload)
+    if provenance is None:
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_PROVENANCE_MISSING,
+            f"manifest {manifest_path} carries no usable provenance block",
+        )
+    manifest_run_id = str(provenance["run_id"])
+    if manifest_run_id != run.run_id:
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_PROVENANCE_MISMATCH,
+            f"manifest {manifest_path} was written by run {manifest_run_id}, not {run.run_id}",
+        )
+    raw_checkpoints = payload.get("checkpoints")
+    _verify_declared_checkpoints(output_root, manifest_path, raw_checkpoints)
+    if raw_checkpoints:
+        return _VerifiedStateSource(output_root=output_root, manifest_path=manifest_path, final_ic=None)
+    requested_hours = list(provenance["requested_checkpoint_hours"])
+    if requested_hours:
+        # A tree that failed its own capture contract must not quietly downgrade
+        # to publishing the final IC in place of the requested checkpoints. It
+        # yields to a later CHECKPOINT-publishing root (#1329) but never to a
+        # later fallback-lane one — the loop's cross-root downgrade guard.
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED,
+            f"manifest {manifest_path} requested checkpoint hours {requested_hours} but captured none.",
+        )
+    final_ic = payload.get("final_ic")
+    final_ic_path = str(final_ic.get("relative_path") or "").strip() if isinstance(final_ic, Mapping) else ""
+    if not final_ic_path:
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_FINAL_IC_MISSING,
+            f"manifest {manifest_path} names no final IC to publish.",
+        )
+    _verify_final_ic_artifact(output_root, manifest_path, final_ic, final_ic_path)
+    return _VerifiedStateSource(
+        output_root=output_root,
+        manifest_path=manifest_path,
+        final_ic={**final_ic, "relative_path": final_ic_path},
+    )
+
+
+def _usable_provenance(payload: Any) -> Mapping[str, Any] | None:
+    """Return the provenance block only when it can carry the gate's decisions.
+
+    ``requested_checkpoint_hours`` is load-bearing (it discriminates the
+    zero-hour fallback lane from a total capture miss), so a provenance block
+    without a usable one is a G3 violation rather than a defaulted empty list.
+    """
+
+    provenance = payload.get("provenance") if isinstance(payload, Mapping) else None
+    if not isinstance(provenance, Mapping):
+        return None
+    if any(key not in provenance for key in _REQUIRED_PROVENANCE_KEYS):
+        return None
+    if not str(provenance.get("run_id") or "").strip():
+        return None
+    if not str(provenance.get("generated_at") or "").strip():
+        return None
+    requested = provenance.get("requested_checkpoint_hours")
+    if not isinstance(requested, Sequence) or isinstance(requested, str | bytes):
+        return None
+    return provenance
+
+
+def _verify_declared_checkpoints(output_root: Path, manifest_path: Path, raw_checkpoints: Any) -> None:
+    """Judge integrity over the RAW ``checkpoints`` array.
+
+    Every shape the loader silently drops is a violation here: a filtered view
+    would let the publish shrink from N declared states to M<N without anyone
+    downstream being able to tell.
+    """
+
+    if not isinstance(raw_checkpoints, Sequence) or isinstance(raw_checkpoints, str | bytes):
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE,
+            f"manifest {manifest_path} field 'checkpoints' is not a list",
+        )
+    if len(raw_checkpoints) > MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES:
+        raise StateManagerError(
+            "State checkpoint manifest exceeds maximum entry count: "
+            f"{len(raw_checkpoints)} > {MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES}"
+        )
+    unusable: list[str] = []
+    drifted: list[str] = []
+    for index, raw in enumerate(raw_checkpoints):
+        if not isinstance(raw, Mapping):
+            unusable.append(f"entry {index} (not an object)")
+            continue
+        relative_path = str(raw.get("relative_path") or "").strip()
+        valid_time = raw.get("valid_time")
+        if not relative_path or not valid_time:
+            unusable.append(f"entry {index} (missing relative_path/valid_time)")
+            continue
+        if not _parseable_checkpoint_valid_time(valid_time):
+            # Presence is not usability: an unparseable stamp is a malformed
+            # declaration here, and letting it reach the loader turns a typed
+            # reject into a bare ``ValueError`` out of `_parse_time`.
+            unusable.append(f"entry {index} ({relative_path}, unparseable valid_time)")
+            continue
+        state = _declared_artifact_state(output_root, raw, relative_path)
+        if state == "checksum_mismatch":
+            drifted.append(f"entry {index} ({relative_path})")
+        elif state != "present":
+            unusable.append(f"entry {index} ({relative_path}, {state})")
+    if unusable:
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE,
+            f"manifest {manifest_path} declares unusable checkpoint artifacts: {', '.join(unusable)}",
+        )
+    if drifted:
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH,
+            f"manifest {manifest_path} declares checkpoint artifacts whose content changed: {', '.join(drifted)}",
+        )
+
+
+def _parseable_checkpoint_valid_time(value: Any) -> bool:
+    """Answer whether the loader could turn ``value`` into a UTC datetime.
+
+    Deliberately runs the loader's OWN conversion rather than a lookalike: the
+    gate's job is to reject exactly what would break downstream, so the two must
+    not be able to disagree.
+    """
+
     try:
-        payload = json.loads(
+        _ensure_utc(_parse_time(str(value)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    return True
+
+
+def _verify_final_ic_artifact(
+    output_root: Path,
+    manifest_path: Path,
+    final_ic: Mapping[str, Any],
+    relative_path: str,
+) -> None:
+    """Hash the final IC at ``relative_path`` — the same string publish will open."""
+
+    state = _declared_artifact_state(output_root, final_ic, relative_path)
+    if state == "checksum_mismatch":
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH,
+            f"manifest {manifest_path} final_ic ({relative_path}) content no longer matches its declared checksum",
+        )
+    if state != "present":
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE,
+            f"manifest {manifest_path} declares an unusable final_ic ({relative_path}, {state})",
+        )
+
+
+def _declared_artifact_state(output_root: Path, entry: Mapping[str, Any], relative_path: str) -> str:
+    """Return ``present`` / ``missing`` / ``checksum_absent`` / ``checksum_mismatch``.
+
+    Path safety is judged BEFORE checksum presence and keeps its own hard
+    errors: an unsafe declared path is a suspect manifest, not an incomplete
+    one, and must never be folded into a fall-through reason.
+    """
+
+    relative_candidate = Path(relative_path)
+    if relative_candidate.is_absolute() or ".." in relative_candidate.parts:
+        raise StateManagerError(f"State checkpoint path escapes output directory: {relative_path}")
+    path = output_root / relative_candidate
+    try:
+        entry_stat = stat_no_follow(path, containment_root=output_root)
+    except FileNotFoundError:
+        return "missing"
+    except SafeFilesystemError as error:
+        raise StateManagerError(f"State checkpoint path is unsafe: {relative_path}") from error
+    if not stat.S_ISREG(entry_stat.st_mode):
+        return "missing"
+    declared_checksum = str(entry.get("checksum") or "").strip()
+    if not declared_checksum:
+        return "checksum_absent"
+    content = _read_limited_bytes_no_follow(
+        path,
+        max_bytes=MAX_STATE_IC_BYTES,
+        label="state checkpoint IC file",
+    )
+    return "present" if sha256_bytes(content) == declared_checksum else "checksum_mismatch"
+
+
+def _read_state_checkpoint_manifest_payload(manifest_path: Path) -> Any:
+    try:
+        return json.loads(
             _read_limited_text_no_follow(
                 manifest_path,
                 max_bytes=MAX_STATE_CHECKPOINT_MANIFEST_BYTES,
@@ -628,6 +885,10 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
         )
     except (OSError, json.JSONDecodeError, StateManagerError) as error:
         raise StateManagerError(f"Invalid state checkpoint manifest {manifest_path}: {error}") from error
+
+
+def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint]:
+    payload = _read_state_checkpoint_manifest_payload(manifest_path)
     raw_checkpoints = payload.get("checkpoints") if isinstance(payload, dict) else None
     if not isinstance(raw_checkpoints, Sequence) or isinstance(raw_checkpoints, str | bytes):
         return []
@@ -669,20 +930,37 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
     return checkpoints
 
 
-def _read_limited_text_no_follow(path: Path, *, max_bytes: int, label: str) -> str:
+def _read_limited_bytes_no_follow(path: Path, *, max_bytes: int, label: str) -> bytes:
     try:
         raw = read_bytes_limited_no_follow(path, max_bytes=max_bytes)
         if len(raw) > max_bytes:
             raise StateManagerError(f"{label} exceeds size limit of {max_bytes} bytes: {path}")
-        return raw.decode("utf-8")
+        return raw
     except StateManagerError:
         raise
-    except (OSError, SafeFilesystemError, UnicodeDecodeError) as error:
+    except (OSError, SafeFilesystemError) as error:
+        raise StateManagerError(f"Unable to safely read {label} {path}: {error}") from error
+
+
+def _read_limited_text_no_follow(path: Path, *, max_bytes: int, label: str) -> str:
+    raw = _read_limited_bytes_no_follow(path, max_bytes=max_bytes, label=label)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
         raise StateManagerError(f"Unable to safely read {label} {path}: {error}") from error
 
 
 def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStore) -> Path:
-    """Resolve ``hydro_run.output_uri`` for either a run output directory or file."""
+    """Resolve ``hydro_run.output_uri`` to its local path under the object store.
+
+    Both key shapes still resolve (the ``runs/<run_id>/output`` prefix itself and
+    a deeper object key), but the sole caller — `_state_output_roots` — keeps
+    only directories. So the shape of what a deeper key points at decides its
+    fate: a file-shaped key resolves and is then dropped by that directory
+    filter (#1325 retired the file-shaped output root from the publish path),
+    while a directory-shaped key passes the filter and is still probed as a
+    source root.
+    """
 
     if not run.output_uri:
         raise StateManagerError(f"hydro_run {run.run_id} has no output_uri.")

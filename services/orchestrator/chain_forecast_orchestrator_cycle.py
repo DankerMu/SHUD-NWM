@@ -250,7 +250,7 @@ class ForecastOrchestratorCycleMixin:
         aggregation: _chain.ArrayAggregation,
         had_partial_before_stage: bool,
         last_partial_before_stage: str | None,
-    ) -> tuple[_chain.StageRunResult, _chain.ArrayAggregation] | None:
+    ) -> tuple[_chain.StageRunResult, _chain.ArrayAggregation | None] | None:
         from services.orchestrator import chain_forecast_execution
 
         return chain_forecast_execution._retry_partial_array_stage(

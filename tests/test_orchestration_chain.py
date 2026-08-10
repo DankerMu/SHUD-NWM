@@ -12492,3 +12492,822 @@ def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path
     # No second durable row was created for the key.
     rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
     assert len(rows) == 1
+
+
+# --- #1202: fail-closed cycle-stage terminal handling -----------------------
+
+
+def _seed_other_pass_reservation(repository: FakeCycleRepository, *, stage: StageDefinition, key: str) -> None:
+    """Seed the reserve gate with ANOTHER pass's live reservation for ``key``.
+
+    Geometry note (#1202 D5.1): a reservation row that carries THIS cycle's
+    ``run_id``/``cycle_id`` is intercepted by ``_find_existing_stage_job`` (which
+    prefers non-terminal per-cycle job rows) and resumed as our own job, so the
+    reserve gate is never reached. The row below therefore collides only on the
+    ``idempotency_key`` — the state ``_reserve_cycle_stage`` consults — while
+    carrying a foreign ``run_id``/``cycle_id`` (invisible to the per-cycle job
+    query) and ``model_id=None`` (invisible to the ``PIPELINE_ALREADY_ACTIVE``
+    preflight, which probes active pipelines per basin ``model_id``). That is
+    exactly the split state a concurrent cohort pass leaves behind.
+    """
+
+    repository.jobs[f"other_pass_{stage.stage}"] = {
+        "job_id": f"other_pass_{stage.stage}",
+        "run_id": "cycle_gfs_2026050100_other_pass",
+        "cycle_id": "gfs_2026050100_other_pass",
+        "job_type": stage.job_type,
+        "model_id": None,
+        "stage": stage.stage,
+        "status": "running",
+        "slurm_job_id": "90099",
+        "idempotency_key": key,
+        "submitted_at": "2026-05-01T00:00:00Z",
+    }
+
+
+def _forecast_skip_cycle_geometry(
+    tmp_path: Path,
+) -> tuple[ForecastOrchestrator, FakeCycleRepository, FakeCycleSlurmClient, str]:
+    """#1164 shape: convert/forcing submit, then the forecast stage is skipped."""
+
+    from services.orchestrator.chain import _cycle_orchestration_run_id
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    forecast_stage = next(stage for stage in M3_STAGES if stage.stage == "forecast")
+    run_id = _cycle_orchestration_run_id("gfs", _dt("2026-05-01T00:00:00Z"), _basins(2))
+    key = f"{run_id}:{forecast_stage.stage}"
+    _seed_other_pass_reservation(repository, stage=forecast_stage, key=key)
+    return orchestrator, repository, client, key
+
+
+def test_duplicate_submission_skip_terminates_cycle_without_downstream_stages(tmp_path: Path) -> None:
+    """AC1/AC2 (#1202): a reserve-gate skip ends the cycle on its own terminal.
+
+    Pre-change the skip status matched none of the loop's break sets, so the
+    cycle advanced past the un-submitted forecast stage and closed as the
+    orchestrator's ``final_pipeline_status`` (literal ``"complete"`` under this
+    harness) — a member of ``TERMINAL_PIPELINE_SUCCESS_STATUSES``.
+    """
+
+    orchestrator, repository, client, key = _forecast_skip_cycle_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    # Positive proof the reserve gate actually fired (guards against a false red
+    # from a geometry that never reached the skip path at all).
+    assert [skip["idempotency_key"] for skip in orchestrator.duplicate_submission_skips] == [key]
+    assert [event["status_to"] for event in repository.events if event["event_type"] == "submission_skipped"] == [
+        "skipped_duplicate_submission"
+    ]
+
+    assert result.status == "skipped_duplicate_submission"
+    assert [stage.stage for stage in result.stages] == ["convert", "forcing", "forecast"]
+    assert result.stages[-1].status == "skipped_duplicate_submission"
+    # No downstream stage of this cycle ran in this pass.
+    assert [submission["stage"] for submission in client.submissions] == ["convert", "forcing"]
+    # The deferring pass does not fight the reservation-holding pass for the
+    # durable cycle row: the last write is the pre-submit forecast marker, not a
+    # success or failure terminal written by the skip.
+    assert repository.cycle_statuses[-1] == "forecast_running"
+
+
+def test_duplicate_submission_skip_publishes_no_successor_state(tmp_path: Path) -> None:
+    """AC2 (#1202): the skipped pass never reaches ``state_save_qc``.
+
+    The #1164 poisoning ran ``state_save_qc`` after a fully-skipped forecast and
+    published a successor state from the other pass's stale checkpoint.
+    """
+
+    orchestrator, repository, client, _key = _forecast_skip_cycle_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    submitted_stages = {submission["stage"] for submission in client.submissions}
+    assert "state_save_qc" not in submitted_stages
+    assert "parse" not in submitted_stages
+    assert "publish" not in submitted_stages
+    assert "state_save_qc" not in {stage.stage for stage in result.stages}
+    assert "state_save_qc" not in {job.get("stage") for job in repository.jobs.values()}
+
+
+def test_duplicate_submission_skip_records_zero_submitted_and_zero_failed_span_counters(
+    tmp_path: Path,
+) -> None:
+    """AC3 (#1202): the skipped stage span records ``0/0``, and the D3 invariant holds.
+
+    Stage counters exist ONLY when a ``SchedulerPassTiming`` collector is bound
+    to the ContextVar (``scheduler_execution.execute_candidate_cohort`` does this
+    in production), so the collector is bound explicitly here — a bare
+    ``orchestrate_cycle`` cannot observe spans at all. Pre-change the skipped
+    stage fell into the counter ``else`` arm and recorded
+    ``failed_count == basin_count`` while the cycle reported success.
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    orchestrator, _repository, _client, _key = _forecast_skip_cycle_geometry(tmp_path)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1202skipab01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    evidence = timing.finalize_evidence(status=result.status)
+    spans_by_stage = {record["stage_name"]: record for record in evidence["stages"]}
+
+    assert spans_by_stage["forecast"]["basin_count"] == 2
+    assert spans_by_stage["forecast"]["submitted_count"] == 0
+    assert spans_by_stage["forecast"]["failed_count"] == 0
+    # D3 invariant: an all-basins-failed stage span forbids a success terminal.
+    for record in evidence["stages"]:
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]:
+            assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES, (
+                f"stage {record['stage_name']} recorded every entering basin as failed while the "
+                f"cycle terminal {result.status!r} is a pipeline success status"
+            )
+
+
+def test_all_basins_failed_stage_span_forbids_pipeline_success_terminal(tmp_path: Path) -> None:
+    """Anchor 5(e) (#1202): the D3 invariant on a geometry that ENTERS its WHEN clause.
+
+    The anchor-3 loop above is vacuous in the skip geometry — after the fix no
+    span records ``failed_count == basin_count``, so the invariant never asserts
+    anything there. This test supplies the positive counterpart: a forecast
+    array submission that fails for every basin, whose canonical timing span
+    really does record all entering basins as failed. The invariant then has a
+    live subject, and the cycle terminal must not be a pipeline success status.
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    client.fail_next_array_submission_stage = "forecast"
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1202allfail01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    evidence = timing.finalize_evidence(status=result.status)
+    all_failed_spans = [
+        record
+        for record in evidence["stages"]
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]
+    ]
+
+    # The WHEN clause is genuinely entered — this geometry is not vacuous.
+    assert len(all_failed_spans) >= 1
+    assert [record["stage_name"] for record in all_failed_spans] == ["forecast"]
+    # D3 invariant: an all-basins-failed stage span forbids a success terminal.
+    for record in all_failed_spans:
+        assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES, (
+            f"stage {record['stage_name']} recorded every entering basin as failed while the "
+            f"cycle terminal {result.status!r} is a pipeline success status"
+        )
+
+
+def test_unrecognized_stage_terminal_fails_cycle_closed_without_advancing(tmp_path: Path) -> None:
+    """Disclosed behaviour delta 2 (#1202): a ``reserved``-unbound row fails closed.
+
+    Reconcile keeps a reserved-but-unbound row ``reserved`` inside its grace
+    window; the resume path reads that row back verbatim (``reserved`` is not a
+    terminal job status and there is no ``slurm_job_id`` to poll), so the loop
+    sees a status with no dedicated branch. Pre-change it silently advanced to
+    the next stage; now the cycle ends as ``failed`` with an explicit code.
+    ``model_id=None`` keeps the seeded row out of the ``PIPELINE_ALREADY_ACTIVE``
+    preflight, which probes active pipelines per basin ``model_id``.
+    """
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    convert_stage = M3_STAGES[0]
+    assert convert_stage.stage == "convert"
+    repository.jobs["job_cycle_gfs_2026050100_convert"] = {
+        "job_id": "job_cycle_gfs_2026050100_convert",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": convert_stage.job_type,
+        "model_id": None,
+        "stage": convert_stage.stage,
+        "status": "reserved",
+        "slurm_job_id": None,
+        "idempotency_key": "cycle_gfs_2026050100:convert",
+        "submitted_at": "2026-05-01T00:00:00Z",
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [stage.stage for stage in result.stages] == ["convert"]
+    assert result.stages[-1].status == "reserved"
+    assert result.stages[-1].error_code == "UNRECOGNIZED_STAGE_STATUS"
+    assert "reserved" in (result.stages[-1].error_message or "")
+    assert client.submissions == []
+
+
+# --- #1322: nested-retry duplicate-submission defer -------------------------
+
+
+class HydroWriteRecordingCycleRepository(FakeCycleRepository):
+    """``FakeCycleRepository`` that records every ``update_hydro_run_status`` call.
+
+    The base fake only mutates ``self.hydro_runs``, so a DUPLICATE write of the
+    same ``(run_id, status)`` pair — exactly what #1322 removes — is invisible in
+    final state. Recording the call sequence is the only way to observe it. No
+    reserve-gate geometry is touched.
+    """
+
+    def __init__(self, *, active: bool = False) -> None:
+        super().__init__(active=active)
+        self.hydro_status_calls: list[tuple[str, str, str | None]] = []
+
+    def update_hydro_run_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        slurm_job_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        self.hydro_status_calls.append((run_id, status, error_code))
+        return super().update_hydro_run_status(
+            run_id,
+            status,
+            slurm_job_id=slurm_job_id,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+
+class RetryEntryProbeOrchestrator(ForecastOrchestrator):
+    """Snapshots the durable hydro-write count when the retry helper is entered.
+
+    #1322's durable-write acceptance is "no ADDITIONAL failed write as a
+    consequence of the deferral": the FIRST-pass stage terminal legitimately
+    wrote ``failed`` for the genuinely-failed task BEFORE the helper ran — on
+    master and after the fix alike — so the write list has to be snapshotted at
+    helper entry instead of asserted empty. Observation only; the override
+    delegates unchanged.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.hydro_writes_at_retry_entry: list[int] = []
+
+    def _retry_partial_array_stage(self, *args: Any, **kwargs: Any) -> Any:
+        self.hydro_writes_at_retry_entry.append(len(self.repository.hydro_status_calls))
+        return super()._retry_partial_array_stage(*args, **kwargs)
+
+
+def _nested_retry_basins(
+    *,
+    cycle: str = "2026050100",
+    cycle_time: str = "2026-05-01T00:00:00Z",
+    model_ids: Sequence[str] = ("model_0", "model_1"),
+) -> list[dict[str, Any]]:
+    """Two-basin cohort carrying ``candidate_id`` (needed by A5's projection)."""
+
+    return [
+        {
+            "model_id": model_id,
+            "basin_id": f"basin_{model_id}",
+            "basin_version_id": f"basin_v_{model_id}",
+            "river_network_version_id": f"river_v_{model_id}",
+            "run_id": f"fcst_gfs_{cycle}_{model_id}",
+            "candidate_id": f"gfs:{cycle_time}:{model_id}:forecast_gfs_deterministic",
+            "model_package_uri": f"s3://nhms/models/{model_id}.tar",
+            "model_package_checksum": f"sha256:{model_id}",
+        }
+        for model_id in model_ids
+    ]
+
+
+def _nested_retry_skip_geometry(
+    tmp_path: Path,
+    *,
+    basins: list[dict[str, Any]] | None = None,
+    cycle: str = "2026050100",
+    cycle_time: str = "2026-05-01T00:00:00Z",
+) -> tuple[
+    RetryEntryProbeOrchestrator,
+    HydroWriteRecordingCycleRepository,
+    FakeCycleSlurmClient,
+    list[dict[str, Any]],
+    str,
+    str,
+]:
+    """#1322 geometry: the NESTED partial-array resubmission hits the reserve gate.
+
+    First pass: the forecast array comes back ``partially_failed`` (task 1
+    failed), so ``_retry_partial_array_stage`` derives the DETERMINISTIC retry
+    identity ``job_{run_id}_forecast_retry_1`` / ``{run_id}:forecast:retry_1``.
+    Run ids are deterministic across passes, so a competing cohort pass that
+    also landed ``partially_failed`` genuinely holds a live reservation under
+    that exact key — seeded here with a foreign ``cycle_id`` (invisible to
+    ``query_pipeline_jobs_by_cycle``, so ``_find_existing_stage_job`` cannot
+    resume it as ours) and ``model_id=None`` (invisible to the
+    ``PIPELINE_ALREADY_ACTIVE`` preflight). The seed carries the retry JOB ID
+    too, because that is what lets master's next loop iteration find a record
+    via ``_retry_job_for_stage_result`` and grant attempt N+1.
+
+    The escape submission (master only) is pinned NON-succeeding
+    (``array_results_by_stage`` second attempt → ``["failed"]``) so master's
+    duplicate durable write is a ``failed`` write, not a ``succeeded`` one.
+
+    ``FakeRetryService(max_retries=2)`` is required for master's resubmission
+    arm to be red at all: quota must admit a second nested attempt, and the
+    service must be permissive — the production ``RetryService`` classifies the
+    skip's ``error_code=None`` as a non-transient ``UNKNOWN_FAILURE`` and never
+    grants it.
+    """
+
+    from services.orchestrator.chain import _cycle_orchestration_run_id
+
+    cohort = basins if basins is not None else _nested_retry_basins(cycle=cycle, cycle_time=cycle_time)
+    repository = HydroWriteRecordingCycleRepository()
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={"forecast": [["succeeded", "failed"], ["failed"]]}
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=FakeRetryService(max_retries=2),
+        orchestrator_cls=RetryEntryProbeOrchestrator,
+    )
+    forecast_stage = next(stage for stage in M3_STAGES if stage.stage == "forecast")
+    run_id = _cycle_orchestration_run_id("gfs", _dt(cycle_time), cohort)
+    retry_job_id = f"job_{run_id}_{forecast_stage.stage}_retry_1"
+    retry_key = f"{run_id}:{forecast_stage.stage}:retry_1"
+    repository.jobs[retry_job_id] = {
+        "job_id": retry_job_id,
+        "run_id": f"{run_id}_other_pass",
+        "cycle_id": f"gfs_{cycle}_other_pass",
+        "job_type": forecast_stage.job_type,
+        "model_id": None,
+        "stage": forecast_stage.stage,
+        "status": "running",
+        "slurm_job_id": "90099",
+        "idempotency_key": retry_key,
+        "submitted_at": "2026-05-01T00:00:00Z",
+    }
+    return orchestrator, repository, client, cohort, retry_job_id, retry_key
+
+
+def test_nested_retry_duplicate_submission_skip_defers_the_cycle(tmp_path: Path) -> None:
+    """A1 (#1322): a reserve-gate skip on the NESTED resubmission defers the cycle.
+
+    Pre-change ``_retry_partial_array_stage`` collapsed the skip into per-task
+    ``failed``: it stamped the pending tasks, re-wrote their durable run
+    statuses over rows the reservation-holding pass owns, derived attempt N+1
+    and really resubmitted, and handed the loop a ``partially_failed`` the
+    #1202 advance allowlist admits — so downstream stages ran on output this
+    pass never produced.
+    """
+
+    orchestrator, repository, client, basins, _retry_job_id, retry_key = _nested_retry_skip_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    # Positive proof the geometry really reached the nested reserve gate (guards
+    # against a false green from a cycle that never entered the retry helper).
+    assert orchestrator.hydro_writes_at_retry_entry, "the partial-array retry helper was never entered"
+    assert [skip["idempotency_key"] for skip in orchestrator.duplicate_submission_skips] == [retry_key]
+
+    forecast_submissions = [row for row in client.submissions if row["stage"] == "forecast"]
+    # (a) The pending task ids were never resubmitted: exactly ONE forecast
+    # array submission (the first pass), carrying the full cohort.
+    assert len(forecast_submissions) == 1
+    assert [task["model_id"] for task in forecast_submissions[0]["tasks"]] == ["model_0", "model_1"]
+    # (b) The cycle lands the dedicated skip terminal.
+    assert result.status == "skipped_duplicate_submission"
+    assert result.stages[-1].stage == "forecast"
+    assert result.stages[-1].status == "skipped_duplicate_submission"
+    # (c) No downstream stage of this cycle ran in this pass.
+    assert [row["stage"] for row in client.submissions] == ["convert", "forcing", "forecast"]
+    assert [stage.stage for stage in result.stages] == ["convert", "forcing", "forecast"]
+    # (d) No ADDITIONAL durable failed write after the helper was entered. The
+    # first-pass terminal's write for the genuinely-failed basin precedes the
+    # snapshot and is legitimate on both sides.
+    entry_snapshot = orchestrator.hydro_writes_at_retry_entry[0]
+    assert ("fcst_gfs_2026050100_model_1", "failed") in [
+        (run_id, status) for run_id, status, _error_code in repository.hydro_status_calls[:entry_snapshot]
+    ]
+    assert repository.hydro_status_calls[entry_snapshot:] == []
+    # The deferring pass does not fight the reservation-holding pass for the
+    # durable cycle row: the last write is the deferred attempt's pre-submit
+    # marker, never a terminal written by the defer.
+    assert repository.cycle_statuses[-1] == "forecast_running"
+
+
+def test_nested_retry_duplicate_submission_skip_matches_top_level_skip_terminal(tmp_path: Path) -> None:
+    """A1 (#1322), D3 equivalence: both defer doors build the SAME terminal.
+
+    The nested door legitimately carries the earlier real stage entries a
+    top-level-skip cycle would not, so ``stages`` content is excluded — status,
+    identity and the absence of a durable cycle-progress terminal are not.
+    """
+
+    orchestrator, repository, _client, basins, _retry_job_id, _retry_key = _nested_retry_skip_geometry(tmp_path)
+    nested = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    top_orchestrator, top_repository, _top_client, _top_key = _forecast_skip_cycle_geometry(tmp_path / "top_level")
+    top_level = top_orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert nested.status == top_level.status == "skipped_duplicate_submission"
+    assert nested.stages[-1].status == top_level.stages[-1].status
+    assert nested.stages[-1].error_code is top_level.stages[-1].error_code is None
+    assert nested.stages[-1].slurm_job_id == top_level.stages[-1].slurm_job_id == ""
+    # Neither door writes a cycle-progress terminal; both stop on the forecast
+    # stage's pre-submit marker.
+    assert repository.cycle_statuses[-1] == top_repository.cycle_statuses[-1] == "forecast_running"
+
+
+def test_nested_retry_deferred_stage_records_zero_submitted_and_zero_failed_span_counters(
+    tmp_path: Path,
+) -> None:
+    """#1322 spec clause: a nested defer attributes ``0/0`` to the stage span.
+
+    The propagated skip status reaches ``_populate_stage_span_counters`` as the
+    stage's final result, so the #1202 skip arm applies to the nested door too —
+    a deferred cycle attributes zero submissions to the stage regardless of the
+    pre-retry dispatch (whose accounting lives in the first pass's durable
+    events). Master reported the post-collapse ``partially_failed`` shape
+    (``submitted=basin_count``).
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    orchestrator, _repository, _client, basins, _retry_job_id, _retry_key = _nested_retry_skip_geometry(tmp_path)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1322nested01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    evidence = timing.finalize_evidence(status=result.status)
+    forecast_span = next(record for record in evidence["stages"] if record["stage_name"] == "forecast")
+
+    assert result.status == "skipped_duplicate_submission"
+    assert forecast_span["basin_count"] == 2
+    assert forecast_span["submitted_count"] == 0
+    assert forecast_span["failed_count"] == 0
+    # D3 invariant (#1202): an all-basins-failed span forbids a success terminal.
+    for record in evidence["stages"]:
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]:
+            assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES
+
+
+def test_nested_retry_duplicate_submission_skip_derives_no_further_attempt(tmp_path: Path) -> None:
+    """A2 (#1322): no attempt N+1 job/reservation is derived from a deferred submit.
+
+    Shape assertion, deliberately NOT a literal escape id: on this legacy path
+    ``FakeRetryService.handle_failed_job`` APPENDS the suffix, so master's
+    escape row is ``…_forecast_retry_1_retry_2`` (key
+    ``…:forecast:retry_1_retry_2``), not the suffix-stripped ``…_retry_2`` form
+    that only the accepted-submit master-row path produces.
+    """
+
+    orchestrator, repository, _client, basins, retry_job_id, retry_key = _nested_retry_skip_geometry(tmp_path)
+    first_pass_job_ids = {
+        f"job_cycle_gfs_2026050100_{stage}" for stage in ("convert", "forcing", "forecast")
+    }
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    assert set(repository.jobs) == first_pass_job_ids | {retry_job_id}
+    assert {str(job.get("idempotency_key")) for job in repository.jobs.values() if job.get("idempotency_key")} == {
+        "cycle_gfs_2026050100:convert",
+        "cycle_gfs_2026050100:forcing",
+        "cycle_gfs_2026050100:forecast",
+        retry_key,
+    }
+    # No row anywhere carries a second retry generation.
+    assert [job_id for job_id in repository.jobs if job_id.count("_retry_") > 1] == []
+
+
+def test_nested_retry_deferred_stage_entry_carries_raw_skip_result(tmp_path: Path) -> None:
+    """A5 (#1322), chain half: the overwritten forecast entry is the RAW skip result.
+
+    Master's collapse republishes the entry with fabricated per-task
+    ``task_results`` for the pending basins; the deferred entry carries the skip
+    result's empty tuple. Presence-vs-absence is the robust differential (the
+    payload of the fabricated entries is re-overwritten by later attempts).
+    """
+
+    orchestrator, _repository, _client, basins, _retry_job_id, _retry_key = _nested_retry_skip_geometry(tmp_path)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    forecast_entries = [stage for stage in result.stages if stage.stage == "forecast"]
+    assert len(forecast_entries) == 1  # overwrite, never append (D3)
+    assert forecast_entries[0].status == "skipped_duplicate_submission"
+    assert forecast_entries[0].task_results == ()
+    # Candidate-outcome accounting: the defer breaks before
+    # ``_apply_array_progress``, so no forecast failure signal reaches the
+    # cohort — every candidate reads ``active`` with NO exclusion reason
+    # (proposal delta 4). The ``reason`` half is load-bearing: it is what
+    # catches a lost ``finally`` basin-cohort restore in
+    # ``_retry_partial_array_stage`` (the shrunken cohort leaves the dropped
+    # candidate ``active`` but tagged ``forcing_task_excluded``).
+    assert [(outcome["status"], outcome["reason"]) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
+    ]
+
+
+def test_nested_retry_defer_status_set_is_skip_only(tmp_path: Path) -> None:
+    """A3 (iii) (#1322): the defer set stays skip-only until issue #1326 lands.
+
+    The reconciliation-pending family shares the collapse defect but cannot be
+    deferred before its ``reconciling`` terminal is first-class on the
+    evidence/readiness planes. A silent widening lands red here even if the
+    behavioural arms below rot.
+    """
+
+    del tmp_path
+    from services.orchestrator import chain_forecast_execution
+
+    assert chain_forecast_execution.NESTED_RETRY_DEFER_STATUSES == {"skipped_duplicate_submission"}
+
+
+class AttemptScopedArraySubmitFailureClient(FakeCycleSlurmClient):
+    """Raise inside ``submit_job_array`` on ONE chosen per-stage submit attempt.
+
+    The stock ``fail_next_array_submission_stage`` knob matches EVERY submission
+    of a stage and would kill the first pass too; the #1322 pins need the first
+    pass to survive so the NESTED resubmission is the one that fails. Attempts
+    are counted per CALL: a raise creates no job row, so a job-count index would
+    stall on the failing attempt.
+    """
+
+    def __init__(self, *, submit_fail_stage: str, submit_fail_attempt: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.submit_fail_stage = submit_fail_stage
+        self.submit_fail_attempt = submit_fail_attempt
+        self.array_submit_attempts: list[str] = []
+
+    def submit_job_array(
+        self,
+        job_type: str,
+        *,
+        cycle_id: str,
+        stage_name: str,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        attempt = self.array_submit_attempts.count(stage_name)
+        self.array_submit_attempts.append(stage_name)
+        if stage_name == self.submit_fail_stage and attempt == self.submit_fail_attempt:
+            raise RuntimeError(f"{stage_name} submission failed")
+        return super().submit_job_array(
+            job_type,
+            cycle_id=cycle_id,
+            stage_name=stage_name,
+            tasks=tasks,
+            manifest=manifest,
+        )
+
+
+class AttemptScopedNeverTerminalClient(FakeCycleSlurmClient):
+    """Hang polling for ONE chosen per-stage submission (poll-timeout knob).
+
+    Same reason as the submit-failure variant: the stock ``never_terminal_stage``
+    knob is stage-scoped and would hang the first pass as well.
+    """
+
+    def __init__(self, *, hang_stage: str, hang_stage_attempt: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.hang_stage = hang_stage
+        self.hang_stage_attempt = hang_stage_attempt
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs[job_id]
+        previous = self.never_terminal_stage
+        if (job["stage"], job["stage_attempt"]) == (self.hang_stage, self.hang_stage_attempt):
+            self.never_terminal_stage = job["stage"]
+        try:
+            return super().get_job_status(job_id)
+        finally:
+            self.never_terminal_stage = previous
+
+
+class HangingPollClock:
+    """``time.monotonic`` stand-in that expires the deadline of ONE poll session.
+
+    ``poll_cycle_stage_until_terminal`` anchors its deadline with a single
+    ``monotonic()`` call, so the first read once the hung submission exists must
+    still return the anchor value; every later read jumps past the timeout. The
+    clock then stays constant, which leaves subsequent poll sessions unaffected
+    (their anchor moves with it).
+    """
+
+    def __init__(self, client: FakeCycleSlurmClient, *, stage: str, attempt: int) -> None:
+        self.client = client
+        self.stage = stage
+        self.attempt = attempt
+        self.anchored = False
+
+    def __call__(self) -> float:
+        submitted = sum(1 for row in self.client.submissions if row["stage"] == self.stage)
+        if submitted <= self.attempt:
+            return 0.0
+        if not self.anchored:
+            self.anchored = True
+            return 0.0
+        return 10_000.0
+
+
+def _accepted_submit_forecast_basins() -> list[dict[str, Any]]:
+    """Forecast-cohort basins for the accepted-submit repository class."""
+
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    return basins
+
+
+def test_nested_retry_submit_result_ambiguous_keeps_collapse_semantics(tmp_path: Path) -> None:
+    """A3 (i) (#1322): nested ``submit_result_ambiguous`` is NOT deferred.
+
+    The reconciliation-pending family shares the collapse defect but cannot be
+    deferred before its ``reconciling`` terminal is first-class on the
+    evidence/readiness planes (issue #1326): ``reconciling`` appears in ZERO
+    recognizers today, so a defer would flip cohort rows from
+    partial-recognized to nothing-recognized. Green on both sides — this pins
+    the retained behaviour so a silent widening of the defer set lands red.
+
+    Producer: a raise inside ``submit_job_array`` AFTER the gateway boundary,
+    classified ambiguous by ``_submit_error_is_ambiguous`` under the
+    accepted-submit forecast-cohort gate. Quota is one nested attempt
+    (``max_retries=1``).
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    # The nested resubmission really happened and really came back ambiguous.
+    assert client.array_submit_attempts.count("forecast") == 2
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    task_states = {task["task_id"]: (task["status"], task["error_code"]) for task in forecast.task_results}
+    assert task_states[1] == ("failed", "SBATCH_SUBMIT_RESULT_AMBIGUOUS")
+    # Collapse retained: the stage entry stays ``partially_failed`` and the cycle
+    # advances downstream — no dedicated ``reconciling`` terminal, no defer.
+    assert forecast.status == "partially_failed"
+    assert result.status not in {"reconciling", "skipped_duplicate_submission"}
+    assert [row["stage"] for row in client.submissions] == ["forecast", "parse", "state_save_qc", "publish"]
+
+
+def test_nested_retry_reconcile_unverified_keeps_collapse_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3 (ii) (#1322): nested ``reconcile_unverified`` is NOT deferred either.
+
+    Behaviourally distinct from arm (i) and needs its own pin: the collapse
+    additionally DEFEATS ``_after_cycle_stage_terminal``'s deliberate no-op for
+    ``reconcile_unverified`` (``chain_forecast_execution.py:598``) by re-entering
+    the hook with ``partially_failed``, which writes the partial cycle status.
+    That second partial write is the observable this arm holds still.
+
+    Quota is pinned to ONE nested attempt: on the accepted-submit class
+    ``SLURM_JOB_TIMEOUT`` is transient, so a second nested submission would be
+    granted and trip the stock client's previous-stage-not-terminal guard. The
+    chain is configured to end at ``forecast`` for the same reason — the
+    abandoned, still-"running" master would otherwise fail the next stage's
+    submission and bury the arm's subject.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    class RecordingJournalRepository(FileOrchestrationJournalRepository):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.cycle_status_writes: list[str] = []
+
+        def update_forecast_cycle_status(self, **kwargs: Any) -> Any:
+            self.cycle_status_writes.append(str(kwargs["status"]))
+            return super().update_forecast_cycle_status(**kwargs)
+
+    repository = RecordingJournalRepository(tmp_path / "journal")
+    client = AttemptScopedNeverTerminalClient(
+        hang_stage="forecast",
+        hang_stage_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain.time.monotonic",
+        HangingPollClock(client, stage="forecast", attempt=1),
+    )
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(
+        tmp_path, repository, client, retry_service=retry_service, terminal_stage="forecast"
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    events = repository._cycle_rows(
+        source_id="gfs", cycle_time=_dt("2026-05-01T00:00:00Z"), model_id=None
+    ).pipeline_events
+    # The nested resubmission really timed out into ``reconcile_unverified``.
+    assert [row["stage"] for row in client.submissions] == ["forecast", "forecast"]
+    assert any(event["event_type"] == "reconcile_unverified" for event in events)
+    # Collapse retained: pending task stamped failed, stage entry partial.
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    task_states = {task["task_id"]: (task["status"], task["error_code"]) for task in forecast.task_results}
+    assert task_states[1] == ("failed", "SLURM_JOB_TIMEOUT")
+    assert forecast.status == "partially_failed"
+    assert result.status not in {"reconciling", "skipped_duplicate_submission"}
+    # The `:598` no-op defeat: a SECOND partial cycle-status write lands after
+    # the nested reconcile_unverified, from the helper's own terminal call.
+    assert repository.cycle_status_writes == [
+        "forecast_running",
+        "forcing_ready_partial",
+        "forecast_running",
+        "forcing_ready_partial",
+    ]
+
+
+def test_nested_retry_submission_failed_keeps_collapse_and_retry_semantics(tmp_path: Path) -> None:
+    """A4 (#1322): nested ``submission_failed`` keeps today's semantics.
+
+    Source-issue boundary — stamp the pending tasks failed, keep looping under
+    the retry quota, and leave the durable ``_mark_staged_hydro_runs_failed``
+    write the nested call already fired in place. Green on both sides; red if
+    ``submission_failed`` is ever added to the defer set.
+    """
+
+    repository = HydroWriteRecordingCycleRepository()
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"], ["succeeded"]]},
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=FakeRetryService(max_retries=2),
+        orchestrator_cls=RetryEntryProbeOrchestrator,
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _nested_retry_basins())
+
+    assert orchestrator.hydro_writes_at_retry_entry, "the partial-array retry helper was never entered"
+    entry_snapshot = orchestrator.hydro_writes_at_retry_entry[0]
+    # The nested submission failed and the retry loop CONTINUED under quota:
+    # a third array submit attempt was made and succeeded.
+    assert client.array_submit_attempts.count("forecast") == 3
+    # Durable ``_mark_staged_hydro_runs_failed`` fired inside the failed nested
+    # call — a write the defer path would have prevented.
+    assert ("fcst_gfs_2026050100_model_1", "failed", "SBATCH_SUBMISSION_FAILED") in (
+        repository.hydro_status_calls[entry_snapshot:]
+    )
+    # No defer: the cycle ran to its normal terminal.
+    assert result.status == "complete"
+    assert next(stage for stage in result.stages if stage.stage == "forecast").status == "succeeded"
