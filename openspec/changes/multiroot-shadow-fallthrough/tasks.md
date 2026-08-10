@@ -90,7 +90,7 @@ Issue: #1329 (S code / M contract). Branch:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 `packages/common/state_cli.py`, THREE edit sites (design
+- [x] 2.1 `packages/common/state_cli.py`, THREE edit sites (design
   D2): (a) `_verify_state_source_root` — the two publishable-set
   verdicts change raise class `StateManagerError` →
   `_StateSourceRejection` (same token constant, same detail text);
@@ -102,14 +102,14 @@ Issue: #1329 (S code / M contract). Branch:
   is ineligible, reject with the earlier root's reason;
   checkpoint-lane sources unaffected; loop docstring refreshed to
   the re-scoped definition. Nothing else.
-- [ ] 2.2 Anchors A1-A6 per design D3 (A1/A2/A3(b) RED on master
+- [x] 2.2 Anchors A1-A6 per design D3 (A1/A2/A3(b) RED on master
   99cfc47d; A3(a) GREEN-both-sides message pin with
   wrong-implementation teeth; A4 existing tests verbatim — zero
   edits; A5(b)/(c) new no-fall-through pins for entry-count
   overflow and unparseable manifest with a healthy sibling; A6
   cross-root downgrade guard — naive fall-through implementation
   must fail it, plus A2 companion liveness pin)
-- [ ] 2.3 Evidence floor + ruff green; deviations reported
+- [x] 2.3 Evidence floor + ruff green; deviations reported
   explicitly ("no deviations" stated if none)
 
 ## 3. PR

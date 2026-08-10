@@ -610,6 +610,9 @@ class _StateSourceRejection(Exception):
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}")
+        # Kept as a named attribute so cross-root policy (the #1329 downgrade
+        # guard) can key on the typed reason instead of re-parsing the message.
+        self.reason = reason
 
 
 def _admit_state_publish_source(
@@ -619,10 +622,18 @@ def _admit_state_publish_source(
 ) -> _VerifiedStateSource:
     """Verify the source tree before anything is selected for publish (#1325).
 
-    Roots are evaluated in the existing probe order and the FIRST one passing
-    G2-G5 wins: a workspace tree left by a failed attempt legitimately coexists
-    with the object-store tree of the successful solve. If no root verifies, the
-    first existing root's reason is reported so the outcome is deterministic.
+    Roots are evaluated in the existing probe order and the FIRST one that both
+    passes G2-G5 AND yields a publishable artifact set wins (#1329 re-scope of
+    "verified root"): a workspace tree left by a failed attempt legitimately
+    coexists with the object-store tree of the successful solve, so a root that
+    proves its identity but has nothing publishable yields to the next root
+    instead of hard-rejecting. One cross-root exception preserves the
+    no-downgrade invariant: once a root has fallen through with
+    ``STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`` — the proof that this run's
+    configuration requested checkpoint states — no LATER root may publish via
+    the final-IC fallback lane; checkpoint-lane roots stay eligible. If no root
+    publishes, the first existing root's reason is reported so the outcome is
+    deterministic.
     """
 
     roots = _state_output_roots(run, workspace_root, object_store)
@@ -631,12 +642,22 @@ def _admit_state_publish_source(
             f"{STATE_SAVE_SOURCE_OUTPUT_MISSING}: no output root exists for run {run.run_id}."
         )
     first_rejection: _StateSourceRejection | None = None
+    uncaptured_rejection: _StateSourceRejection | None = None
     for output_root in roots:
         try:
-            return _verify_state_source_root(output_root, run)
+            source = _verify_state_source_root(output_root, run)
         except _StateSourceRejection as rejection:
             if first_rejection is None:
                 first_rejection = rejection
+            if uncaptured_rejection is None and rejection.reason == STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED:
+                uncaptured_rejection = rejection
+            continue
+        if source.final_ic is not None and uncaptured_rejection is not None:
+            # Cross-root no-downgrade: an earlier root PROVED the run requested
+            # checkpoint states, so a sibling's single end-time IC is not an
+            # acceptable substitute. Answer with that earlier root's reason.
+            raise StateManagerError(str(uncaptured_rejection))
+        return source
     raise StateManagerError(str(first_rejection))
 
 
@@ -689,16 +710,19 @@ def _verify_state_source_root(output_root: Path, run: StateRunContext) -> _Verif
     requested_hours = list(provenance["requested_checkpoint_hours"])
     if requested_hours:
         # A tree that failed its own capture contract must not quietly downgrade
-        # to publishing the final IC in place of the requested checkpoints.
-        raise StateManagerError(
-            f"{STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED}: manifest {manifest_path} requested checkpoint hours "
-            f"{requested_hours} but captured none."
+        # to publishing the final IC in place of the requested checkpoints. It
+        # yields to a later CHECKPOINT-publishing root (#1329) but never to a
+        # later fallback-lane one — the loop's cross-root downgrade guard.
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED,
+            f"manifest {manifest_path} requested checkpoint hours {requested_hours} but captured none.",
         )
     final_ic = payload.get("final_ic")
     final_ic_path = str(final_ic.get("relative_path") or "").strip() if isinstance(final_ic, Mapping) else ""
     if not final_ic_path:
-        raise StateManagerError(
-            f"{STATE_SAVE_SOURCE_FINAL_IC_MISSING}: manifest {manifest_path} names no final IC to publish."
+        raise _StateSourceRejection(
+            STATE_SAVE_SOURCE_FINAL_IC_MISSING,
+            f"manifest {manifest_path} names no final IC to publish.",
         )
     _verify_final_ic_artifact(output_root, manifest_path, final_ic, final_ic_path)
     return _VerifiedStateSource(
