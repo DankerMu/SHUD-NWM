@@ -49,8 +49,8 @@ SHUD_FORCING_ROLE = "shud_forcing"
    - **canonical 与 legacy 并存**(两个不同成员名各≥1 条)→ **新错误码 `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`**,fail-closed,错误文本列出命中的成员路径集合;
    - **同名重复条目** → 现有 `FORCING_CHECKSUM_INVALID` **原样保留**(fixture-r1 C5::1833-1842 的 duplicate 检查覆盖索引 + 全部站点 CSV,不得并入新码——并入会静默改写站点 CSV duplicate 的错误码;鉴于该码现无测试钉住,本 change 补 pin 测试 B4b)。`required_relative_paths`(:1830)改为"命中的那一个"。
    - 限长读门与 `_direct_grid_sensitive_member_limit`(:1953/:3748):对两名等价生效(`in SHUD_FORCING_INDEX_MEMBERS`),同一 `MAX_DIRECT_GRID_TSD_FORC_BYTES`/`DIRECT_GRID_TSD_FORC_TOO_LARGE` 语义。
-2. **staging 文件系统探测**(`_stage_standard_shud_forcing`,:974):按序探测 canonical → legacy;**两个都存在** → `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`(磁盘层独立裁决,不信任"manifest 已查过"——防解包外带文件);恰一 → 用之;零 → 返回 None(direct-grid 模式由 :941-946 现有 `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING` fail-closed,非 direct-grid 的 legacy internal-forcing 回退现状保留,**不扩大也不收窄**)。
-3. **identity/checksum 一致性**:manifest 命中成员与磁盘命中成员必须同名——staged 校验循环(:1926-1970)现有"逐 manifest 条目验 staged 文件 checksum"机制天然覆盖(manifest 声明 A 而磁盘只有 B → A 缺文件报错);歧义翼由 1/2 双层独立把守。
+2. **staging 文件系统探测**(`_stage_standard_shud_forcing`,:974;**round-1 A1/A2 修正**):双名探测;**歧义 raise 仅限 direct-grid**(`DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`,磁盘层独立裁决——DG staging 本是 manifest 白名单制,双文件意味着更深的污染)。**非 direct-grid 是全前缀递归拷贝**(:1679-1693 无白名单),producer 前缀确定且从不清理(:1970,零 delete 调用),原地再生产会留下孤儿 legacy 成员——双文件在非 DG 属**合法稳态**,按 **manifest 锚定选择**:取 manifest checksum entries 中声明的索引成员;manifest 未恰一命名时 canonical 优先兜底(manifest 与 canonical 同笔写入 :2100-2105,manifest-current == 最后一次 produce,legacy-current manifest 不可能伴随新写 canonical;manifest 锚定同时关闭 producer 降级回滚留下 stale canonical 的残洞——盲目 canonical 优先关不掉)。恰一 → 用之;零 → 返回 None(direct-grid 由 :941-946 现有 `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING` fail-closed,非 direct-grid 的 legacy internal-forcing 回退现状保留)。`_prepare_shud_project_forcing`(:927-940)需把 manifest 声明成员(或 checksum entries)传入 staging 调用。
+3. **identity/checksum 一致性**(**round-1 B2 修正**——原"staged 校验循环 :1926-1970 天然覆盖"声称有误,该循环在此场景不可达):实际裁决层是 `_direct_grid_runtime_checksum_entries` 的对象读取(:1837,先于 staging);manifest 声明 A 而对象树只有 B 时,现状 blanket `except Exception`(:1836-1842)把缺失误报为 `DIRECT_GRID_TSD_FORC_TOO_LARGE`。修复:读取前对声明成员做存在性探针(`object_store.exists`),缺失 → `FORCING_CHECKSUM_READ_FAILED`(与非敏感成员路径 :2014-2021 同码),报错文本点名声明成员;except 子句本体保留(合法超限路径仍经它,6 处既有 TOO_LARGE 断言不动;ObjectStoreError 分型方案因 139 处引用爆炸半径被否决)。station CSV 侧同型 except(:2023-2030)不改——identity-mismatch 类对内容派生名不适用,留注说明。歧义翼由 1/2 双层把守。
 - `:944` fail-closed 报错文本更新:列 canonical 为主、legacy 为兼容名。
 - 新错误码为 `SHUDRuntimeError` 自由字符串码(与既有码同机制);实现时 grep 确认无错误码闭集枚举/schema 约束(receipt/事件面若存在码白名单则登记并补入,发现即在 PR 偏离记录报告)。
 
@@ -82,6 +82,15 @@ SHUD_FORCING_ROLE = "shud_forcing"
 - B8 限长读门对两名等价:canonical 超限 → `DIRECT_GRID_TSD_FORC_TOO_LARGE`(legacy 面既有测试保留即可)。
 - B9 豁免面回归:`tests/test_qhh_production_bootstrap.py` **零改动**全绿;`tests/test_qhh_scripts_static.py` 仅含 C1 授权扩展、其余断言零改动全绿。
 - B10 QHH 诊断链恰一迁移钉(C1):`create_qhh_shud_manifest.py` 成员判定接受 canonical 或 legacy 恰一、双存拒绝、缺失报错文本双名(静态锚或单元级,沿该测试文件既有形态)。
+
+**Round-1 修复新锚(A1/A2/B2/V3-1)**:
+
+- B11 identity-mismatch 双向钉(B2):manifest 声明 canonical/对象树只有 legacy、及反向,均 → `FORCING_CHECKSUM_READ_FAILED` 且消息点名声明成员(参数化一测)。
+- B12 非 DG 双成员 manifest-canonical 钉(A1 回归锚):`shud_project` 无 DG 元数据、双文件 staged、manifest 声明 canonical → 走 `prepare_workspace` 全路径成功,`{project}.tsd.forc` 内容源自 canonical 行。
+- B13 非 DG 双成员 manifest-legacy 钉(降级残洞面):历史 legacy manifest + 孤儿 canonical → 按 manifest 锚定 stage legacy,成功。
+- B14 非 DG 单成员钉:canonical-only 与 legacy-only 各自成功(既有参数化覆盖为 DG lineage,需非 DG 变体)。
+- B15 DG 双文件 raise 保持:既有 B5 锚零改动继续绿。
+- B16 诊断脚本 header 消息插值钉(V3-1):header 失败消息含 resolved member basename(`test_qhh_scripts_static.py` 既有 `match="station header"` 断言零削弱)。
 
 ## D8 突变击杀集(shasum 还原校验)
 

@@ -254,6 +254,34 @@ def test_qhh_manifest_missing_station_index_member_names_both_identities(tmp_pat
     assert LEGACY_SHUD_FORCING_INDEX_MEMBER in str(exc_info.value)
 
 
+def test_qhh_manifest_header_failure_names_the_resolved_member(tmp_path: Path) -> None:
+    """B16 (#1176 round-1 V3-1): header failures name the member actually resolved.
+
+    A canonical package must not be reported under the legacy basename — two of
+    the four header-failure wings carry no URI, so the member name is their only
+    identity signal.
+    """
+    store = LocalObjectStore(tmp_path)
+    tsd_uri = f"forcing/gfs/2026050700/basin_v1/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}"
+    manifest = _station_index_manifest(CANONICAL_SHUD_FORCING_INDEX_MEMBER, tsd_uri)
+
+    store.write_bytes_atomic(tsd_uri, b"2 20260507\nshud\n")
+    with pytest.raises(RuntimeError, match="station header") as count_mismatch:
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 1)
+    assert str(count_mismatch.value).startswith(f"{CANONICAL_SHUD_FORCING_INDEX_BASENAME} station header")
+    assert LEGACY_SHUD_FORCING_INDEX_BASENAME not in str(count_mismatch.value)
+
+    store.write_bytes_atomic(tsd_uri, b"not-a-count 20260507\nshud\n")
+    with pytest.raises(RuntimeError, match="station header count is invalid") as invalid_count:
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 1)
+    assert str(invalid_count.value).startswith(f"{CANONICAL_SHUD_FORCING_INDEX_BASENAME} station header")
+
+    store.write_bytes_atomic(tsd_uri, b"\xef\xbb\xbf")
+    with pytest.raises(RuntimeError, match="station header is empty") as empty_header:
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 1)
+    assert str(empty_header.value).startswith(f"{CANONICAL_SHUD_FORCING_INDEX_BASENAME} station header")
+
+
 def test_run_qhh_cycle_validates_model_output_interval_before_shud_runtime() -> None:
     script = Path("scripts/run_qhh_cycle.sh").read_text(encoding="utf-8")
 

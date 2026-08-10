@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -936,7 +936,19 @@ class SHUDRuntime:
             if forcing_context is not None
             else self._forcing_declares_direct_grid(manifest)
         )
-        staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir, is_direct_grid=is_direct_grid)
+        # The staging probe needs the manifest anchor to resolve a non-direct-grid
+        # tree that legitimately carries a residual second station-index member.
+        checksum_entries = (
+            list(forcing_context.checksum_entries)
+            if forcing_context is not None
+            else _forcing_checksum_entries(manifest)
+        )
+        staged_ids = self._stage_standard_shud_forcing(
+            manifest,
+            model_input_dir,
+            is_direct_grid=is_direct_grid,
+            checksum_entries=checksum_entries,
+        )
         if staged_ids is not None:
             if is_direct_grid:
                 _validate_direct_grid_sp_att_forcing_ids(
@@ -977,22 +989,40 @@ class SHUDRuntime:
         model_input_dir: Path,
         *,
         is_direct_grid: bool,
+        checksum_entries: Sequence[Mapping[str, Any]] | None = None,
     ) -> set[int] | None:
         shud_dir = model_input_dir / "shud"
-        # Filesystem-level exactly-one decision over the accepted station-index
-        # identities. Independent of the manifest gate on purpose: an unpacked
-        # tree can carry a stray extra member the manifest never declared.
+        # Filesystem-level decision over the accepted station-index identities,
+        # independent of the manifest gate on purpose: an unpacked tree can carry
+        # a member the manifest never declared.
+        #
+        # Two members means different things per staging mode:
+        #  - direct-grid staging is manifest-whitelisted, so a second file is
+        #    contamination -> fail closed (independent of the manifest gate).
+        #  - non-direct-grid staging copies the whole package prefix and the
+        #    producer never deletes, so an in-place re-produce over a
+        #    pre-migration prefix leaves an orphan legacy member behind. That is
+        #    a legitimate steady state: resolve it by the manifest-declared
+        #    member, with canonical-first as the fallback when the manifest does
+        #    not name exactly one accepted member.
         staged_members = [
             member
             for member in SHUD_FORCING_INDEX_MEMBERS
             if _regular_file_exists(shud_dir / PurePosixPath(member).name, containment_root=model_input_dir)
         ]
         if len(staged_members) > 1:
-            raise SHUDRuntimeError(
-                "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS",
-                "Staged SHUD forcing package contains more than one station-index member: "
-                f"{', '.join(staged_members)}; refusing to guess which one is authoritative.",
-            )
+            if is_direct_grid:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS",
+                    "Staged SHUD forcing package contains more than one station-index member: "
+                    f"{', '.join(staged_members)}; refusing to guess which one is authoritative.",
+                )
+            declared_member = _manifest_declared_shud_forcing_index_member(checksum_entries)
+            staged_members = [
+                declared_member
+                if declared_member in staged_members
+                else next(member for member in SHUD_FORCING_INDEX_MEMBERS if member in staged_members)
+            ]
         if not staged_members:
             return None
         source_tsd = shud_dir / PurePosixPath(staged_members[0]).name
@@ -1833,6 +1863,21 @@ class SHUDRuntime:
         limit = _direct_grid_sensitive_member_limit(tsd_relative_path)
         if limit is None:
             return [tsd_entry]
+        # Identity probe before the capped read. The blanket ``except`` below
+        # cannot tell "absent" from "over the cap", so a manifest that declares
+        # one accepted identity while the object tree carries only the other
+        # would otherwise surface as a bogus size-limit failure. A probe that
+        # itself errors is left to the read path's existing classification.
+        try:
+            declared_member_present = self.object_store.exists(tsd_uri)
+        except Exception:
+            declared_member_present = True
+        if not declared_member_present:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_READ_FAILED",
+                f"Manifest-declared SHUD station-index member {tsd_relative_path} is absent "
+                f"from the forcing object tree: {tsd_uri}",
+            )
         try:
             content = self.object_store.read_bytes_limited(tsd_uri, max_bytes=limit.max_bytes)
         except Exception as error:
@@ -2021,6 +2066,9 @@ class SHUDRuntime:
             ) from error
 
     def _object_checksum_limited(self, uri_or_key: str, *, limit: _DirectGridSensitiveMemberLimit) -> str:
+        # No identity probe here (unlike the station-index read): station CSV
+        # names are derived from the index content, so a manifest/object-tree
+        # identity mismatch cannot arise for them.
         try:
             return self.object_store.checksum_limited(uri_or_key, max_bytes=limit.max_bytes)
         except Exception as error:
@@ -3664,6 +3712,25 @@ def normalize_staged_ic_negative_residuals(
             temp_suffix="part",
         )
         manifest.setdefault("runtime", {})["initial_state_normalization"] = normalization.evidence()
+
+
+def _manifest_declared_shud_forcing_index_member(
+    checksum_entries: Sequence[Mapping[str, Any]] | None,
+) -> str | None:
+    """Return the station-index member the package manifest names, if exactly one.
+
+    Used as the staging anchor for non-direct-grid trees that carry both accepted
+    identities: the manifest and the canonical member are written in the same
+    produce, so manifest-current == last produce. Returns ``None`` when the
+    manifest names zero or both identities, which leaves the caller on its
+    canonical-first fallback.
+    """
+
+    declared = {str(entry.get("relative_path") or "").strip() for entry in checksum_entries or ()}
+    matched = declared & set(SHUD_FORCING_INDEX_MEMBERS)
+    if len(matched) == 1:
+        return next(iter(matched))
+    return None
 
 
 def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:

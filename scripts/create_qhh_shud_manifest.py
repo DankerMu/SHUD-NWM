@@ -347,21 +347,25 @@ def _validate_shud_forcing_header(
     member, tsd_uri = next(iter(uri_by_member.items()))
     if not tsd_uri:
         raise RuntimeError(f"forcing package manifest entry for {member} is missing uri.")
+    # Name the member that was actually resolved: hardcoding the legacy basename
+    # would misreport a canonical package (and the count-mismatch wings carry no
+    # URI, so the member name is their only identity signal).
+    member_name = PurePosixPath(member).name
     lines = object_store.read_bytes(tsd_uri).decode("utf-8-sig").splitlines()
     if not lines or not lines[0].strip():
-        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+        raise RuntimeError(f"{member_name} station header is empty: {tsd_uri}.")
     fields = lines[0].split()
     if not fields:
-        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+        raise RuntimeError(f"{member_name} station header is empty: {tsd_uri}.")
     try:
         header_count = int(fields[0])
     except ValueError as error:
-        raise RuntimeError(f"qhh.tsd.forc station header count is invalid: {fields[0]!r}.") from error
+        raise RuntimeError(f"{member_name} station header count is invalid: {fields[0]!r}.") from error
     if header_count != station_count:
         raise RuntimeError(
-            f"qhh.tsd.forc station header {header_count} does not match forcing manifest {station_count}."
+            f"{member_name} station header {header_count} does not match forcing manifest {station_count}."
         )
-    return PurePosixPath(member).name
+    return member_name
 
 
 def _directory_uri(object_store: LocalObjectStore, key: str) -> str:

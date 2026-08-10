@@ -69,10 +69,15 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
 
 - **canonical**：`shud/stations.tsd.forc`（manifest `role = shud_forcing`）。producer 只产此名，所有流域一致。
 - **legacy**：`shud/qhh.tsd.forc`。历史 object-store package 不重写，runtime/消费方**只读接受**。
-- **恰一决断（fail-closed 两翼）**：消费方在 package manifest 与解包后的文件系统两层各自要求
+- **恰一决断（fail-closed 两翼）**：direct-grid 消费方在 package manifest 与解包后的文件系统两层各自要求
   `{canonical, legacy}` 中**恰好一个**成员。两者并存 → `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`；
-  零个（direct-grid）→ `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`，报错文本列出两个可接受身份。
+  零个（direct-grid）→ `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`，报错文本列出两个可接受身份；
+  manifest 声明的成员在对象树中缺席 → `FORCING_CHECKSUM_READ_FAILED` 点名声明成员（不是 size-limit 码）。
   单一事实源为 `packages/common/shud_forcing_contract.py`。
+- **非 direct-grid staging 的残余成员**：该路径是全前缀递归拷贝且 producer 从不清理，原地在
+  pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按
+  package manifest checksum entries 声明的成员解析（manifest 未恰一命名时 canonical 兜底），
+  全缺维持既有内部 forcing 回退。
 - **staged 目的地不变**：runtime 读取成员后仍写出 `{project}.tsd.forc` 到模型输入目录，
   SHUD 模型侧命名（含 QHH 项目真资产 `data/Basins/qhh/input/qhh/qhh.tsd.forc`）不受影响。
 - **legacy 分支截止条件**：当 object store 中不再存在缺少 canonical 成员的 direct-grid package
