@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
-from errno import EACCES, ELOOP, ENOTDIR, EPERM
+from errno import EACCES, ELOOP, ENOENT, ENOTDIR, EPERM
 from pathlib import Path
 from typing import Any
 
@@ -502,7 +502,25 @@ def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None
 def _optional_config_path(value: Path | str | None) -> Path | None:
     if value in (None, ""):
         return None
-    return Path(value).expanduser().resolve()
+    expanded = Path(value).expanduser()
+    try:
+        return Path(os.path.realpath(expanded, strict=True))
+    except OSError as error:
+        if getattr(error, "errno", None) == ENOENT:
+            # Non-strict os.path.realpath() never raises on 3.11-3.14 and
+            # reproduces the canonicalisation product of the old non-strict
+            # Path.resolve() verbatim for a merely missing path; Path.resolve()
+            # would raise an errno-less RuntimeError on <=3.12 once the
+            # `..`-collapsed tail lands on a symlink loop (`gone/../loopdir`).
+            return Path(os.path.realpath(expanded))
+        # Classification belongs to the storage preflight, not to config
+        # construction: hand the lexical absolute value down so
+        # _preflight_allowed_roots drops the root and reports
+        # SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH on every supported
+        # CPython, instead of aborting the whole process on <=3.12.
+        if not expanded.is_absolute():
+            return Path.cwd() / expanded
+        return expanded
 
 
 def _config_path_preserve_final_component(value: Path | str) -> Path:
