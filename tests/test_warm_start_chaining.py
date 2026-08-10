@@ -2817,3 +2817,326 @@ def test_state_save_reports_the_first_existing_roots_reason_when_every_root_fail
     assert "STATE_SAVE_SOURCE_PROVENANCE_MISMATCH" not in message
     assert manager.saved == []
     assert manager.qc_runs == []
+
+
+# --- #1329 multi-root shadow fall-through (verified-root re-scope) -----------
+#
+# The failure lane uploads nothing, so "newer-but-unpublishable workspace tree /
+# older-but-healthy object-store tree" is the ROUTINE retry shape. Before the
+# re-scope the two post-verification verdicts hard-rejected at the first root
+# and the healthy sibling was never probed.
+
+
+def _gate_total_miss_manifest(output_root: Path, *, requested_hours: tuple[int, ...] = (6, 12)) -> Path:
+    """Write attempt N+1's witnessed TOTAL-MISS tree: hours requested, none captured."""
+
+    final_ic = _write_gate_final_ic(output_root)
+    return _write_gate_manifest(
+        output_root,
+        {
+            "checkpoints": [],
+            "final_ic": final_ic,
+            "provenance": _gate_provenance(requested_hours=requested_hours),
+        },
+    )
+
+
+def _gate_uncaptured_message(manifest_path: Path, requested_hours: list[int]) -> str:
+    """Rebuild the pre-change CHECKPOINTS_UNCAPTURED text from the contract, not the code.
+
+    Independent oracle for the byte-identity pins: the token leads, then the
+    manifest path and the requested hours the tree failed to capture.
+    """
+
+    return (
+        f"STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED: manifest {manifest_path} "
+        f"requested checkpoint hours {requested_hours} but captured none."
+    )
+
+
+def _gate_final_ic_missing_message(manifest_path: Path) -> str:
+    """Rebuild the FINAL_IC_MISSING text from the contract, not the code (A7).
+
+    Independent oracle mirroring ``_gate_uncaptured_message``: the token leads,
+    then the manifest path the operator must open to diagnose it. Written as a
+    literal on purpose — importing the code's constant/f-string would make the
+    pin agree with any mutation of the detail (e.g. dropping the path).
+    """
+
+    return f"STATE_SAVE_SOURCE_FINAL_IC_MISSING: manifest {manifest_path} names no final IC to publish."
+
+
+def test_state_save_total_miss_workspace_does_not_shadow_healthy_checkpoint_sibling(tmp_path: Path) -> None:
+    """A1 (AC-2): attempt N+1's total-miss tree yields to attempt N's checkpoints.
+
+    Pre-change the workspace root hard-rejected with
+    ``STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED`` and the healthy object-store
+    root was never probed. The published artifact must be the OBJECT-STORE
+    root's checkpoint — asserted by content, not merely by "it succeeded".
+    """
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    _gate_total_miss_manifest(workspace_root)
+    object_root = _gate_object_output(tmp_path)
+    f012 = _write_gate_checkpoint(object_root, 12)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f012], "provenance": _gate_provenance(requested_hours=(12,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    result = _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert len(manager.saved) == 1
+    published = manager.saved[0]["ic_file_path"]
+    assert published.is_relative_to(object_root)
+    assert not published.is_relative_to(workspace_root)
+    assert published.read_bytes() == (object_root / f012["relative_path"]).read_bytes()
+    assert manager.saved[0]["valid_time"] == _dt(GATE_CYCLE_TIME) + timedelta(hours=12)
+    assert manager.saved[0]["original_shud_filename"] == "demo.f012.cfg.ic.update"
+    assert manager.qc_runs == [result["state_id"]]
+
+
+def test_state_save_final_ic_missing_workspace_does_not_shadow_healthy_fallback_sibling(tmp_path: Path) -> None:
+    """A2 (AC-3): a zero-hours workspace tree naming no final IC yields to the sibling.
+
+    Also the cross-root downgrade guard's companion LIVENESS pin: the guard is
+    armed by a ``CHECKPOINTS_UNCAPTURED`` fall-through only, so this
+    all-fallback-lane geometry must still publish.
+    """
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    workspace_manifest = _write_gate_manifest(
+        workspace_root,
+        {"checkpoints": [], "provenance": _gate_provenance()},
+    )
+    object_root = _gate_object_output(tmp_path)
+    sibling_ic = _write_gate_final_ic(object_root, name="sibling.cfg.ic.update")
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [], "final_ic": sibling_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    result = _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert workspace_manifest.exists()
+    assert len(manager.saved) == 1
+    published = manager.saved[0]["ic_file_path"]
+    assert published.is_relative_to(object_root)
+    assert published.read_bytes() == (object_root / sibling_ic["relative_path"]).read_bytes()
+    assert manager.saved[0]["original_shud_filename"] == "sibling.cfg.ic.update"
+    assert manager.saved[0]["valid_time"] == _dt(GATE_END_TIME)
+    assert result["valid_time"] == GATE_END_TIME
+    assert manager.qc_runs == [result["state_id"]]
+
+
+def test_state_save_reports_the_first_roots_total_miss_when_the_sibling_has_no_manifest(tmp_path: Path) -> None:
+    """A3(a) (AC-4, rule 5): both roots unpublishable — forward geometry.
+
+    Message pin, GREEN on both sides of the re-scope: the reported text stays
+    the FIRST existing root's ``CHECKPOINTS_UNCAPTURED``, byte-identical to the
+    pre-change hard raise. Teeth against an implementation that reports the LAST
+    root's reason or a generic "no root verified" exhaustion message.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    workspace_manifest = _gate_total_miss_manifest(workspace_root)
+    object_root = _gate_object_output(tmp_path)
+    (object_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T03:00:00Z"), surface="0.6"),
+        encoding="utf-8",
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value) == _gate_uncaptured_message(workspace_manifest, [6, 12])
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_reports_the_first_roots_missing_manifest_over_a_later_total_miss(tmp_path: Path) -> None:
+    """A3(b) (AC-4, rule 5): both roots unpublishable — REVERSED geometry.
+
+    The one both-fail shape whose reported token changes: pre-change the later
+    root's hard ``CHECKPOINTS_UNCAPTURED`` escaped the loop and won; rule 5 now
+    applies uniformly, so the FIRST existing root's reason is reported.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    (workspace_root / "demo.cfg.ic.update").write_text(
+        _gate_ic_text(_dt("2026-05-01T03:00:00Z"), surface="0.6"),
+        encoding="utf-8",
+    )
+    object_root = _gate_object_output(tmp_path)
+    _gate_total_miss_manifest(object_root, requested_hours=(6,))
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    message = str(exc_info.value)
+    assert message.startswith("STATE_SAVE_SOURCE_MANIFEST_MISSING")
+    assert "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED" not in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_final_ic_missing_message_names_the_manifest_verbatim(tmp_path: Path) -> None:
+    """A7: FULL-STRING pin on the FINAL_IC_MISSING text (single root, no ``output_uri``).
+
+    The existing anchors only assert the leading token, so a mutation dropping
+    the manifest path from the detail leaves the operator with an
+    undiagnosable message and still passes the whole floor. Byte-identity
+    against a contract-rebuilt oracle is what bites.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    manifest_path = _write_gate_manifest(output_root, {"checkpoints": [], "provenance": _gate_provenance()})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value) == _gate_final_ic_missing_message(manifest_path)
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_manifest_entry_overflow_never_yields_to_a_healthy_sibling(tmp_path: Path) -> None:
+    """A5(b) (AC-5): the entry-count overflow stays a HARD error next to a healthy root.
+
+    Previously untested geometry. The re-scope widens fall-through to exactly
+    two verdicts; an over-eager implementation that made every rejection
+    fall through would publish the sibling here.
+    """
+
+    from packages.common.state_cli import MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES
+    from packages.common.state_manager import StateManagerError
+
+    overflow = MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES + 1
+    workspace_root = _gate_workspace_output(tmp_path)
+    _write_gate_manifest(
+        workspace_root,
+        {"checkpoints": [{} for _ in range(overflow)], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    object_root = _gate_object_output(tmp_path)
+    f006 = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value) == (
+        f"State checkpoint manifest exceeds maximum entry count: {overflow} > "
+        f"{MAX_STATE_CHECKPOINT_MANIFEST_ENTRIES}"
+    )
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_unparseable_manifest_never_yields_to_a_healthy_sibling(tmp_path: Path) -> None:
+    """A5(c) (AC-5): a present-but-unparseable manifest stays a hard error.
+
+    A suspect manifest is not an absent one: it must terminate the publish
+    rather than let the next root paper over it.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    manifest_dir = workspace_root / "state_checkpoints"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "state_checkpoints.json").write_text('{"checkpoints": [', encoding="utf-8")
+    object_root = _gate_object_output(tmp_path)
+    f006 = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value).startswith("Invalid state checkpoint manifest")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_later_root_hard_error_supersedes_earlier_fall_through_reason(tmp_path: Path) -> None:
+    """A5(d) (AC-5): a LATER root's hard error is not subject to rule 5.
+
+    Geometry: workspace total-miss (falls through with
+    ``CHECKPOINTS_UNCAPTURED``) then an object-store manifest that is present
+    but unparseable. The hard error escapes the loop, so the operator is handed
+    the SECOND root's suspect-manifest text — naming the file they must open —
+    rather than the first root's soft reason. Teeth against an implementation
+    that swallows later-root hard errors into the ``first_rejection`` report.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    workspace_manifest = _gate_total_miss_manifest(workspace_root)
+    object_root = _gate_object_output(tmp_path)
+    object_manifest_dir = object_root / "state_checkpoints"
+    object_manifest_dir.mkdir(parents=True, exist_ok=True)
+    object_manifest = object_manifest_dir / "state_checkpoints.json"
+    object_manifest.write_text('{"checkpoints": [', encoding="utf-8")
+    assert workspace_manifest.exists()
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    message = str(exc_info.value)
+    assert message.startswith("Invalid state checkpoint manifest ")
+    assert str(object_manifest) in message
+    assert str(workspace_manifest) not in message
+    assert not message.startswith("STATE_SAVE_SOURCE_")
+    assert "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED" not in message
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_total_miss_root_blocks_a_later_roots_final_ic_fallback(tmp_path: Path) -> None:
+    """A6: cross-root downgrade guard — the no-downgrade invariant holds ACROSS roots.
+
+    The workspace rejection PROVES this run's configuration requested checkpoint
+    states, so a sibling attempt's single end-time IC (config drift between
+    attempts) must not silently satisfy it. A naive fall-through implementation
+    — one that simply lets the two re-scoped verdicts yield — publishes the
+    sibling's IC here and fails this anchor.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    workspace_manifest = _gate_total_miss_manifest(workspace_root)
+    object_root = _gate_object_output(tmp_path)
+    sibling_ic = _write_gate_final_ic(object_root, name="sibling.cfg.ic.update")
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [], "final_ic": sibling_ic, "provenance": _gate_provenance()},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value) == _gate_uncaptured_message(workspace_manifest, [6, 12])
+    assert manager.saved == []
+    assert manager.qc_runs == []
