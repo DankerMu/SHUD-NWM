@@ -44,7 +44,11 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
         "log_root": config.log_root,
         "runtime_root": config.runtime_root,
     }
-    allowed_roots = _scheduler._preflight_allowed_roots(config)
+    # Unsafe allowed roots are reported before the per-root loop on purpose:
+    # dropping a root cascades into OUT_OF_ROOT verdicts below, so the root cause
+    # must lead the cascade it causes (a DATABASE_URL_* blocker may precede it).
+    allowed_roots, allowed_root_blockers = _scheduler._preflight_allowed_roots(config)
+    blockers.extend(allowed_root_blockers)
     root_checks: dict[str, Any] = {}
     for field_name, value in roots.items():
         root_check, blocker = _scheduler._storage_root_check(
