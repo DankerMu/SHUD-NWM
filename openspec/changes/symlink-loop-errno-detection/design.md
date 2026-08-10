@@ -226,6 +226,10 @@ records this differential by temporarily removing the split).
   the producer side of the same ladder — routed as follow-up
   issue #1345 (PR round-1 note), not expanded here.
 - Node interpreters (27=3.11.15, 22=3.12.7) see zero behavior
-  change; no remote receipt is required — the oracle is the
-  cross-version test matrix (local 3.14 + CI/venv 3.11), per the
-  issue's own Verification field.
+  change EXCEPT the `<missing>/../<loop>` input class disclosed
+  above (round-2 R2-1: this bullet is subordinate to that
+  correction — the two must be read together). No remote receipt
+  is required: that input class does not occur in real Basins
+  trees, and the oracle is the cross-version test matrix (local
+  3.14 + py3.11 venv + CI py3.11), per the issue's own
+  Verification field.

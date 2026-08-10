@@ -118,6 +118,13 @@ Issue: #1332 (S code / compact fixture). Branch:
   - Collateral sweep (beyond the floor): full 3.14
     `uv run pytest -q -m "not e2e and not grib and not integration"`
     → `12152 passed, 19 skipped, 131 deselected, 2 xfailed`.
+  - The counts above are AS OF the implementation head d11edfe1
+    (round-2 R2-2 labeling). Post round-1-fix head 08024018: both
+    basins files `93 passed, 2 skipped` on BOTH 3.14.2 and
+    3.11.14; `tests/test_production_scheduler.py` full `1144
+    passed` (3.14 and py3.11); `-k "symlink_loop or loop_behind"`
+    `10 passed` on both interpreters (three loop-behind-missing
+    anchors + outside-root dangling pin added by the fix pass).
   - `uv run ruff check .` clean;
     `openspec validate symlink-loop-errno-detection --strict
     --no-interactive` valid.
@@ -134,6 +141,17 @@ Issue: #1332 (S code / compact fixture). Branch:
 
 - [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
+  - Round 2 focused (08024018, scope = round-1 fix commit):
+    production code CLEAN — three one-liners verified correct on
+    dual interpreters, no reachable pathlib resolve remains in any
+    error lane (containment steps proved purely lexical), all four
+    new tests red-proof-verified independently, oracle integrity
+    pure addition (51/49/28 insertions, 0 deletions). 2 P3 closed
+    same-round: R2-1 D4 still carried the superseded
+    "zero behavior change" bullet verbatim alongside its
+    correction → subordinated to the disclosure; R2-2 evidence
+    counts stale after the fix pass's 4 new tests → counts labeled
+    per-head (d11edfe1 vs 08024018).
   - Round 1 NOT CLEAN (d11edfe1; 1 P1 + 1 P2 + 3 P3, all CONFIRMED
     by two independent verifier batches): P1-1 the ENOENT-lane
     fallback `path.resolve()` raises errno-less RuntimeError on
