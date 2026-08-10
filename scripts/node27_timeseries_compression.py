@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import json
 import os
 import re
@@ -63,12 +64,46 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # Statement timeouts. Chunk-catalog lookups against
 # ``timescaledb_information.chunks`` are catalog-only (no hypertable row
 # scan) so 60 s is generous; ``compress_chunk`` on a 7-day chunk of the
-# river/forcing hypertables takes minutes. The per-call ceiling is 14 minutes,
-# inside the wrapper's 900-second wall and systemd's 940-second wall, leaving
-# 60/100 seconds respectively for reconciliation, receipt publication, and
-# process cleanup.
+# river/forcing hypertables takes minutes.
+#
+# The three-layer budget chain (per-chunk statement timeout inside the
+# wrapper's ``timeout`` wall inside systemd's ``TimeoutStartSec``) is no
+# longer hardcoded: each layer is operator-configurable through the single
+# compression env file (issue #1156), and the defaults below are byte
+# identical to the previously hardcoded 840000 ms / 900 s / 940 s. A single
+# oversized chunk therefore no longer needs a manual ``statement_timeout=0``
+# DDL to get through the automated lane.
+#
+# ``config_from_args`` enforces the chain over whatever the operator
+# configures, before any database connection is opened:
+#   leg 1: ceil(compress_timeout_ms / 1000) + _CLEANUP_MARGIN_SECONDS
+#          <= wrapper_wall_seconds
+#          — the wrapper wall must outlast the statement plus reconciliation,
+#            receipt publication and process cleanup.
+#   leg 2: wrapper_wall_seconds + _SYSTEMD_MARGIN_SECONDS
+#          <= systemd_wall_seconds
+#          — ``timeout --signal=TERM --kill-after=30s`` may need a further
+#            30 s to escalate to KILL, so the systemd wall must sit above the
+#            wrapper wall by that plus a 10 s epsilon.
+# The defaults satisfy both legs exactly (840 + 60 = 900; 900 + 40 = 940).
+#
+# The invariant bounds ONE chunk's budget, not a whole tick: a tick may
+# compress up to ``per_tick_bound`` chunks under the same wrapper wall, so a
+# catch-up window that raises these values must also set
+# ``NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1``.
+#
+# ``systemd_wall_seconds`` is a DECLARED value — this process cannot read the
+# unit file, so keeping the declaration in step with the systemd drop-in is an
+# operator duty documented in
+# ``infra/env/node27-timeseries-compression.example`` and runbook §4.5
+# ("大 chunk 追赶") of docs/runbooks/tier-node27-timeseries-storage.md.
 _QUERY_TIMEOUT_MS = 60_000
-_COMPRESS_TIMEOUT_MS = 840_000
+_DEFAULT_COMPRESS_TIMEOUT_MS = 840_000
+_MIN_COMPRESS_TIMEOUT_MS = 1_000
+_DEFAULT_WRAPPER_WALL_SECONDS = 900
+_DEFAULT_SYSTEMD_WALL_SECONDS = 940
+_CLEANUP_MARGIN_SECONDS = 60
+_SYSTEMD_MARGIN_SECONDS = 40
 _CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CATALOG_ROWS = 50_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
@@ -119,6 +154,12 @@ class CompressionConfig:
     receipt_path: Path
     lock_path: Path
     enforce: bool
+    # Budget-chain fields. No dataclass defaults on purpose: the single
+    # construction site is ``config_from_args``, which must always bind the
+    # parsed (or defaulted) env values rather than silently inherit them.
+    compress_timeout_ms: int
+    wrapper_wall_seconds: int
+    systemd_wall_seconds: int
 
 
 @dataclass(frozen=True)
@@ -169,6 +210,30 @@ def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
     return value
 
 
+def _parse_positive_int_with_default(
+    env: Mapping[str, str], name: str, *, default: int, minimum: int
+) -> int:
+    """Budget-chain knobs are optional: unset OR empty falls back to the default.
+
+    This is deliberately looser than the mandatory ``LAG_SECONDS`` /
+    ``PER_TICK_BOUND`` semantics and deliberately identical to the shell
+    ``${VAR:-900}`` the wrapper uses — both sides must treat the empty string
+    the same way or the single source of truth drifts. Anything else present
+    goes through the same strict ``_parse_positive_int`` and fails closed.
+    """
+
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    return _parse_positive_int(raw, name=name, minimum=minimum)
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    """Exact integer ceiling division — no float rounding on the budget chain."""
+
+    return -(-numerator // denominator)
+
+
 def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> CompressionConfig:
     """Strict env + CLI parse. No truthiness fallback. Fails closed on bad shape."""
     env = os.environ if env is None else env
@@ -193,6 +258,42 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
         minimum=1,
     )
+    compress_timeout_ms = _parse_positive_int_with_default(
+        env,
+        "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS",
+        default=_DEFAULT_COMPRESS_TIMEOUT_MS,
+        minimum=_MIN_COMPRESS_TIMEOUT_MS,
+    )
+    wrapper_wall_seconds = _parse_positive_int_with_default(
+        env,
+        "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS",
+        default=_DEFAULT_WRAPPER_WALL_SECONDS,
+        minimum=1,
+    )
+    systemd_wall_seconds = _parse_positive_int_with_default(
+        env,
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS",
+        default=_DEFAULT_SYSTEMD_WALL_SECONDS,
+        minimum=1,
+    )
+    # Two-leg budget chain, fail closed before any DB connection is opened.
+    compress_timeout_seconds = _ceil_div(compress_timeout_ms, 1000)
+    leg_one = compress_timeout_seconds + _CLEANUP_MARGIN_SECONDS
+    if leg_one > wrapper_wall_seconds:
+        raise CompressionConfigError(
+            "compression budget chain violated (leg 1): "
+            f"ceil({compress_timeout_ms} ms / 1000) + {_CLEANUP_MARGIN_SECONDS} s cleanup margin = "
+            f"{compress_timeout_seconds} + {_CLEANUP_MARGIN_SECONDS} = {leg_one} s exceeds "
+            f"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS={wrapper_wall_seconds}"
+        )
+    leg_two = wrapper_wall_seconds + _SYSTEMD_MARGIN_SECONDS
+    if leg_two > systemd_wall_seconds:
+        raise CompressionConfigError(
+            "compression budget chain violated (leg 2): "
+            f"wrapper wall {wrapper_wall_seconds} s + {_SYSTEMD_MARGIN_SECONDS} s kill-after margin = "
+            f"{leg_two} s exceeds declared "
+            f"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS={systemd_wall_seconds}"
+        )
     if not lock_raw:
         raise CompressionConfigError("lock path must be set via --lock-path or NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
     lock_path = Path(str(lock_raw))
@@ -212,6 +313,9 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         receipt_path=receipt_path,
         lock_path=lock_path,
         enforce=bool(args.enforce),
+        compress_timeout_ms=compress_timeout_ms,
+        wrapper_wall_seconds=wrapper_wall_seconds,
+        systemd_wall_seconds=systemd_wall_seconds,
     )
 
 
@@ -428,14 +532,20 @@ def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: b
         connection.close()
 
 
-def _default_compress_chunk(database_url: str, chunk: ChunkRow) -> None:
+def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_timeout_ms: int) -> None:
+    # ``compress_timeout_ms`` is keyword-only with NO default: the assembly
+    # point in ``main()`` binds it with ``functools.partial`` from the parsed
+    # config, and forgetting to do so must raise TypeError rather than
+    # silently fall back to the historical 840000 ms ceiling. The value is a
+    # ``_parse_positive_int`` product (an int), so the interpolation below has
+    # no injection surface. ``CompressChunk`` stays a two-argument protocol.
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
         with connection:
             with connection.cursor() as cursor:
-                cursor.execute(f"SET statement_timeout = {_COMPRESS_TIMEOUT_MS}")
+                cursor.execute(f"SET statement_timeout = {compress_timeout_ms}")
                 cursor.execute(
                     "SELECT compress_chunk(%s::regclass)",
                     (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
@@ -1028,7 +1138,11 @@ def main(
                 now_utc=now,
                 fetch_chunks=fetch_chunks or _default_fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes or _default_measure_chunk_bytes,
-                compress_chunk=compress_chunk or _default_compress_chunk,
+                compress_chunk=compress_chunk
+                or functools.partial(
+                    _default_compress_chunk,
+                    compress_timeout_ms=config.compress_timeout_ms,
+                ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
                 head_sha=frozen_head_sha,
             )

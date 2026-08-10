@@ -31,7 +31,7 @@ exit "${WRAPPER_EXIT_CODE:-0}"
 _PINNED_LAUNCHER = "/usr/bin/timeout"
 _PINNED_LAUNCHER_GUARD = f"[ -x {_PINNED_LAUNCHER} ] || {{"
 _PINNED_LAUNCHER_EXEC = (
-    f'exec {_PINNED_LAUNCHER} --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"'
+    f'exec {_PINNED_LAUNCHER} --signal=TERM --kill-after=30s "${{WALL}}s" "$PYTHON_BIN" "$SCRIPT" "$@"'
 )
 
 
@@ -1049,5 +1049,84 @@ def test_compression_wrapper_refuses_an_unavailable_pinned_launcher(tmp_path: Pa
     assert json.loads(result.stderr) == {
         "status": "failed",
         "reason": "timeout launcher is unavailable",
+    }
+    assert not capture.exists()
+
+
+def _compression_wall_harness(
+    tmp_path: Path, wall_value: str | None
+) -> tuple[Path, dict[str, str], Path]:
+    """Run the compression wrapper with its pinned launcher replaced by the capture stub.
+
+    The stub stands in for `/usr/bin/timeout` itself, so the recorded argv is
+    exactly what the wrapper hands the launcher — DURATION operand included.
+    `_relaunched_wrapper` is the only harness that unconditionally substitutes
+    the launcher (`_wrapper_under_test` returns the production file untouched
+    on hosts that have `/usr/bin/timeout`, which would exec the real launcher
+    and record nothing).
+    """
+    bin_dir = _shell_tools(tmp_path)
+    python_bin = tmp_path / "python"
+    _write_executable(python_bin, _CAPTURE_SCRIPT)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("raise SystemExit(99)\n", encoding="utf-8")
+    capture = tmp_path / "capture.txt"
+    wrapper = _relaunched_wrapper(
+        tmp_path, "node27_timeseries_compression_once.sh", str(python_bin)
+    )
+    env_text = (
+        ""
+        if wall_value is None
+        else f"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS={shlex.quote(wall_value)}\n"
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PYTHONPATH": "",
+        "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT": str(tmp_path),
+        "NODE27_TIMESERIES_COMPRESSION_ENV_FILE": str(_env_file(tmp_path, env_text)),
+        "NODE27_TIMESERIES_COMPRESSION_PYTHON": str(python_bin),
+        "NODE27_TIMESERIES_COMPRESSION_SCRIPT": str(entrypoint),
+        "WRAPPER_CAPTURE": str(capture),
+    }
+    env.pop("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", None)
+    return wrapper, env, capture
+
+
+@pytest.mark.parametrize(
+    ("wall_value", "expected_duration"),
+    [(None, "900s"), ("", "900s"), ("1900", "1900s"), ("0900", "0900s")],
+)
+def test_compression_wrapper_passes_the_configured_wall_to_the_launcher(
+    tmp_path: Path, wall_value: str | None, expected_duration: str
+) -> None:
+    """B8: the env wall reaches `timeout` as its DURATION operand, unset/empty means 900s."""
+    wrapper, env, capture = _compression_wall_harness(tmp_path, wall_value)
+
+    result = subprocess.run(
+        [str(wrapper)], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    # _CAPTURE_SCRIPT line order: PYTHONPATH, then the launcher argv.
+    tokens = capture.read_text(encoding="utf-8").splitlines()
+    assert tokens[1:4] == ["--signal=TERM", "--kill-after=30s", expected_duration]
+
+
+@pytest.mark.parametrize("wall_value", ["abc", "0", "-5", "12.5", " 900", "900 "])
+def test_compression_wrapper_refuses_a_non_positive_integer_wall(
+    tmp_path: Path, wall_value: str
+) -> None:
+    """B8: a bad wall fails closed before the launcher is ever executed."""
+    wrapper, env, capture = _compression_wall_harness(tmp_path, wall_value)
+
+    result = subprocess.run(
+        [str(wrapper)], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stderr) == {
+        "status": "failed",
+        "reason": "wrapper wall must be a positive integer",
     }
     assert not capture.exists()
