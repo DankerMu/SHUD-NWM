@@ -114,14 +114,32 @@ Issue: #1329 (S code / M contract). Branch:
 
 ## 3. PR
 
-- [ ] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
-  Evidence-Floor 声明
-- [ ] 3.2 CI green (targeted Unit Tests)
+- [x] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
+  Evidence-Floor 声明 (PR #1333, head 54abaf39)
+- [x] 3.2 CI green (targeted Unit Tests, 54abaf39)
 
 ## 4. Review loop
 
 - [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
+  - Round 1 NOT CLEAN (54abaf39; 2 P2 + 1 P3, all CONFIRMED by two
+    independent verifier batches): C1 [P2, spec-disclosure] the
+    forward soft-first/hard-later geometry reports the LATER
+    root's hard message, falsifying the unqualified rule-5 SHALL
+    and delta 4's forward byte-identity claim (verifier probe:
+    6/6 combinations diverge vs master; fail-closed intact in all
+    12 runs) → fixed direction (a): spec SHALL scoped to
+    no-hard-error, scenario extended, proposal delta 4 third
+    sub-case, new anchor A5(d). C2 [P2, coverage]
+    FINAL_IC_MISSING detail text zero full-string coverage
+    (mutation gutting the manifest path survived 394 green; only
+    startswith pins exist) → new anchor A7. C3 [P3, coverage,
+    DEFER] unsafe-path (:856 zero coverage anywhere) and
+    oversized-artifact hard raises unanchored in sibling geometry;
+    surgical two-site re-class survives the floor, but the
+    plausible regression class (except-widening) is already killed
+    by A5(b)/(c) 4-RED; sites untouched by this diff → routed as
+    follow-up issue (task 5.0).
 - [ ] 4.2 Phase 7 final review clean on final head
 
 ## 5. Merge (pre-authorized) and closeout

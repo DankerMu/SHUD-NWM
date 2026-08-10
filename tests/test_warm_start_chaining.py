@@ -2854,6 +2854,18 @@ def _gate_uncaptured_message(manifest_path: Path, requested_hours: list[int]) ->
     )
 
 
+def _gate_final_ic_missing_message(manifest_path: Path) -> str:
+    """Rebuild the FINAL_IC_MISSING text from the contract, not the code (A7).
+
+    Independent oracle mirroring ``_gate_uncaptured_message``: the token leads,
+    then the manifest path the operator must open to diagnose it. Written as a
+    literal on purpose — importing the code's constant/f-string would make the
+    pin agree with any mutation of the detail (e.g. dropping the path).
+    """
+
+    return f"STATE_SAVE_SOURCE_FINAL_IC_MISSING: manifest {manifest_path} names no final IC to publish."
+
+
 def test_state_save_total_miss_workspace_does_not_shadow_healthy_checkpoint_sibling(tmp_path: Path) -> None:
     """A1 (AC-2): attempt N+1's total-miss tree yields to attempt N's checkpoints.
 
@@ -2976,6 +2988,29 @@ def test_state_save_reports_the_first_roots_missing_manifest_over_a_later_total_
     assert manager.qc_runs == []
 
 
+def test_state_save_final_ic_missing_message_names_the_manifest_verbatim(tmp_path: Path) -> None:
+    """A7: FULL-STRING pin on the FINAL_IC_MISSING text (single root, no ``output_uri``).
+
+    The existing anchors only assert the leading token, so a mutation dropping
+    the manifest path from the detail leaves the operator with an
+    undiagnosable message and still passes the whole floor. Byte-identity
+    against a contract-rebuilt oracle is what bites.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    output_root = _gate_workspace_output(tmp_path)
+    manifest_path = _write_gate_manifest(output_root, {"checkpoints": [], "provenance": _gate_provenance()})
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager)
+
+    assert str(exc_info.value) == _gate_final_ic_missing_message(manifest_path)
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
 def test_state_save_manifest_entry_overflow_never_yields_to_a_healthy_sibling(tmp_path: Path) -> None:
     """A5(b) (AC-5): the entry-count overflow stays a HARD error next to a healthy root.
 
@@ -3037,6 +3072,40 @@ def test_state_save_unparseable_manifest_never_yields_to_a_healthy_sibling(tmp_p
         _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
 
     assert str(exc_info.value).startswith("Invalid state checkpoint manifest")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_later_root_hard_error_supersedes_earlier_fall_through_reason(tmp_path: Path) -> None:
+    """A5(d) (AC-5): a LATER root's hard error is not subject to rule 5.
+
+    Geometry: workspace total-miss (falls through with
+    ``CHECKPOINTS_UNCAPTURED``) then an object-store manifest that is present
+    but unparseable. The hard error escapes the loop, so the operator is handed
+    the SECOND root's suspect-manifest text — naming the file they must open —
+    rather than the first root's soft reason. Teeth against an implementation
+    that swallows later-root hard errors into the ``first_rejection`` report.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    _gate_total_miss_manifest(workspace_root)
+    object_root = _gate_object_output(tmp_path)
+    object_manifest_dir = object_root / "state_checkpoints"
+    object_manifest_dir.mkdir(parents=True, exist_ok=True)
+    object_manifest = object_manifest_dir / "state_checkpoints.json"
+    object_manifest.write_text('{"checkpoints": [', encoding="utf-8")
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    message = str(exc_info.value)
+    assert message.startswith("Invalid state checkpoint manifest ")
+    assert str(object_manifest) in message
+    assert not message.startswith("STATE_SAVE_SOURCE_")
+    assert "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED" not in message
     assert manager.saved == []
     assert manager.qc_runs == []
 

@@ -27,9 +27,11 @@ final IC (`STATE_SAVE_SOURCE_FINAL_IC_MISSING`) — except a present-but-unparse
 an unsafe declared path, which keep the existing `Invalid state checkpoint manifest` /
 `State checkpoint path is unsafe` / `State checkpoint path escapes output directory` hard
 errors unchanged, and the legacy oversized-artifact and manifest-entry-count-overflow hard
-errors, which likewise never fall through and keep their messages verbatim. When no root
-publishes, the reported reason SHALL be the first existing root's rejection, byte-identical in
-the single-root case to the pre-change message. The final-IC fallback
+errors, which likewise never fall through and keep their messages verbatim; a hard error
+raised by ANY probed root — first or later — terminates the probe immediately and is the
+reported message, superseding an earlier root's fall-through rejection. When no root publishes
+and no probed root raised a hard error, the reported reason SHALL be the first existing root's
+rejection, byte-identical in the single-root case to the pre-change message. The final-IC fallback
 SHALL be reachable only when a verified manifest declares zero checkpoints AND
 `provenance.requested_checkpoint_hours` is empty AND no earlier existing root fell through
 with `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED` (the cross-root extension of the no-downgrade
@@ -105,13 +107,18 @@ publishes.
   unpublishable root yields instead of hard-rejecting — except that a root which fell through
   with `STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED` blocks any LATER root from publishing via the
   final-IC fallback lane (checkpoint-lane siblings remain eligible)
-- **AND** when BOTH roots are unpublishable, the reported reason is the first existing root's
-  rejection, byte-identical to the single-root message (in the reversed geometry — first root
-  failing an always-fall-through reason, later root failing on publishable-set — this reports
-  the first root's reason where the pre-change gate surfaced the later root's hard token)
+- **AND** when BOTH roots are unpublishable and neither raised a hard error, the reported
+  reason is the first existing root's rejection, byte-identical to the single-root message (in
+  the reversed geometry — first root failing an always-fall-through reason, later root failing
+  on publishable-set — this reports the first root's reason where the pre-change gate surfaced
+  the later root's hard token)
 - **AND** the hard exceptions (unparseable manifest, unsafe declared path, oversized artifact,
   entry-count overflow) still terminate immediately with their messages verbatim, never
-  yielding to a sibling root.
+  yielding to a sibling root — including when raised by a LATER root after an earlier root
+  fell through: the later root's hard message is reported, superseding the earlier root's
+  fall-through reason (the pre-change gate hard-rejected at the first root without ever
+  opening the sibling, so these messages change; fail-closed and the nonzero exit are
+  preserved).
 
 #### Scenario: Durable-output-reuse retries keep publishing
 - **WHEN** a retry restarts a candidate at the state-save stage reusing the durable output of

@@ -48,6 +48,11 @@ both-fail geometry (first root fails with an always-fall-through
 reason, later root fails on publishable-set) the reported token
 changes from master's later-root hard token to the first root's
 reason — rule-5 uniformity now applies to every non-hard failure.
+A later root's HARD error is NOT subject to rule 5: it escapes the
+loop and supersedes an earlier root's fall-through reason
+(proposal delta 4 third sub-case — these messages also change vs
+master, which hard-rejected at the first root without opening the
+sibling; pinned A5(d)).
 
 CROSS-ROOT DOWNGRADE GUARD (second ruling, proposal; single
 canonical trigger — round-2 P2-1): a later root's final-IC
@@ -169,7 +174,27 @@ RED on master 99cfc47d unless marked)
   (b)/(c) are GREEN-both-sides pins on new geometry (master also
   hard-rejects) — their teeth are against an over-eager
   implementation that widens fall-through beyond the two re-scoped
-  tokens.
+  tokens; (d) NEW pin (PR-review round-1 C1): first root
+  total-miss (`CHECKPOINTS_UNCAPTURED` fall-through) + second root
+  present-but-unparseable manifest ⇒ hard `StateManagerError`
+  whose message is the LATER root's verbatim
+  `Invalid state checkpoint manifest …` text (exact prefix +
+  root-path identity, not merely token-startswith) — pins the
+  hard-supersedes-fall-through reporting rule (proposal delta 4
+  third sub-case); RED against an implementation that reports the
+  first root's soft reason, and `manager.saved == []` asserts
+  fail-closed.
+
+- **A7 FINAL_IC_MISSING full-string pin** (PR-review round-1 C2 —
+  mutation dropping the manifest path from the detail survived all
+  394 floor tests): NEW single-root anchor asserting the COMPLETE
+  message via a `_gate_final_ic_missing_message(manifest_path)`
+  helper that rebuilds the expected text from the contract wording
+  (mirror of `_gate_uncaptured_message`, not a read-back of the
+  code constant); existing startswith pins
+  (`tests/test_warm_start_chaining.py:2600`,
+  `tests/test_shud_runtime.py:6482`) stay verbatim — zero edits
+  (A4 oracle integrity).
 
 - **A6 cross-root downgrade guard** (second ruling; GREEN-both-sides
   on outcome, differential teeth against the naive fall-through

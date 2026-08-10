@@ -101,8 +101,19 @@ fallback therefore remains available in the A2 liveness case.
    `CHECKPOINTS_UNCAPTURED`/`FINAL_IC_MISSING`; the re-scoped gate
    reports the FIRST root's reason (rule-5 uniformity). The
    forward geometry (first root publishable-set-fails, later root
-   also fails) keeps master's message byte-identical. Anchored
-   both ways (A3(a) forward GREEN pin, A3(b) reversed RED).
+   also fails SOFTLY) keeps master's message byte-identical.
+   Anchored both ways (A3(a) forward GREEN pin, A3(b) reversed
+   RED). THIRD sub-case (PR-review round-1 C1 disclosure): when
+   the first root falls through on publishable-set and a LATER
+   root raises a HARD error (unparseable manifest, unsafe declared
+   path, oversized artifact, entry-count overflow), the hard error
+   escapes the loop and is the reported message — master surfaced
+   the first root's `CHECKPOINTS_UNCAPTURED`/`FINAL_IC_MISSING`
+   without ever opening the sibling, so these messages change;
+   the loudest actionable error (e.g. a sibling's path-escape
+   signal) is deliberately not masked by the benign fall-through
+   text. Fail-closed and the nonzero exit are preserved. Anchored
+   A5(d) (exact-message pin).
 
 ## Non-goals
 
@@ -132,8 +143,10 @@ fallback therefore remains available in the A2 liveness case.
   failure surface — A1/A2 assert WHICH root's artifacts publish);
   fail-closed error-path (A3/A5). Not selected: filesystem-safety
   (no new fs ops), DB/scheduler (no orchestrator surface).
-- Evidence mapping: anchors A1-A6 → issue ACs (A6 protects the
-  second ruling's cross-root downgrade guard); floor =
+- Evidence mapping: anchors A1-A7 → issue ACs (A6 protects the
+  second ruling's cross-root downgrade guard; A5(d)/A7 added in
+  PR-review round 1 — hard-supersedes reporting pin and
+  FINAL_IC_MISSING full-string pin); floor =
   `uv run pytest -q tests/test_warm_start_chaining.py
   tests/test_state_manager.py tests/test_shud_runtime.py` +
   `uv run ruff check .` + `openspec validate
