@@ -5686,7 +5686,10 @@ def test_remove_tree_allow_symlinks_unlinks_a_symlinked_root_entry(tmp_path: Pat
 
     safe_fs.remove_tree_allow_symlinks(residue, "previous", containment_root=root)
 
-    assert not (residue / "previous").exists(follow_symlinks=False)
+    # `lexists`: the entry must be gone even as a DANGLING link (a `Path.exists`
+    # would also pass if the link survived with a deleted target). Written this
+    # way rather than `Path.exists(follow_symlinks=False)`, which is 3.12+ only.
+    assert not os.path.lexists(residue / "previous")
     assert (external / "victim.txt").read_text(encoding="utf-8") == "external must remain\n"
 
 
@@ -5725,6 +5728,128 @@ def test_remove_tree_allow_symlinks_wraps_an_os_level_failure_as_io(
         safe_fs.remove_tree_allow_symlinks(residue, "previous", containment_root=root)
 
     assert exc_info.value.kind == "io"
+
+
+def test_remove_tree_allow_symlinks_refuses_to_escape_the_containment_root(tmp_path: Path) -> None:
+    """#1330 D2.2: relaxing the symlink policy must not relax CONTAINMENT.
+
+    The twin (`rename_entry_no_follow`) has this tooth; without it here the
+    permissive primitive is the one place where an out-of-root argument could
+    delete a tree wholesale, and the refusal must stay `unsafe` (permanent) so
+    the hook never auto-retries it.
+    """
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "previous").mkdir(parents=True)
+    (outside / "previous" / "payload.txt").write_text("outside must remain\n", encoding="utf-8")
+
+    with pytest.raises(SafeFilesystemError) as exc_info:
+        safe_fs.remove_tree_allow_symlinks(outside, "previous", containment_root=root)
+
+    assert exc_info.value.kind == "unsafe"
+    assert (outside / "previous" / "payload.txt").read_text(encoding="utf-8") == "outside must remain\n"
+
+
+def test_remove_tree_allow_symlinks_refuses_a_symlinked_parent_directory(tmp_path: Path) -> None:
+    """#1330 D2.2: entries may be links; the PARENT walk stays `O_NOFOLLOW`.
+
+    Symlinks are tolerated inside the quarantine tree only. A symlinked
+    `output_residue` is tampered geometry, and the refusal must be `unsafe` —
+    `io` here would auto-retry a tamper forever at the hook.
+    """
+
+    root = tmp_path / "root"
+    root.mkdir()
+    external = tmp_path / "external"
+    (external / "previous").mkdir(parents=True)
+    (external / "previous" / "payload.txt").write_text("external must remain\n", encoding="utf-8")
+    (root / "output_residue").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(SafeFilesystemError) as exc_info:
+        safe_fs.remove_tree_allow_symlinks(root / "output_residue", "previous", containment_root=root)
+
+    assert exc_info.value.kind == "unsafe"
+    assert (external / "previous" / "payload.txt").read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize("unsafe_name", ["..", "nested/previous"], ids=["parent-traversal", "path-separator"])
+def test_new_no_follow_primitives_reject_unsafe_entry_names(tmp_path: Path, unsafe_name: str) -> None:
+    """#1330 D2.1/D2.2: an entry NAME is one component, never a path.
+
+    Both primitives take names that are resolved against a pinned dir-fd, so a
+    `..` or a separator would silently re-target the operation outside the
+    directory the caller pinned — `..` would rename or DELETE the parent itself.
+    `_reject_unsafe_entry_name` must fire on the source name, the destination
+    name and the removal name alike, and before `missing_ok` can swallow it.
+    """
+
+    root = tmp_path / "root"
+    source_parent = root / "src"
+    dest_parent = root / "dst"
+    (source_parent / "nested").mkdir(parents=True)
+    (dest_parent / "nested").mkdir(parents=True)
+    (source_parent / "previous").write_text("payload\n", encoding="utf-8")
+    (source_parent / "nested" / "previous").write_text("nested payload\n", encoding="utf-8")
+
+    with pytest.raises(SafeFilesystemError) as source_refusal:
+        safe_fs.rename_entry_no_follow(source_parent, unsafe_name, dest_parent, "previous", containment_root=root)
+    with pytest.raises(SafeFilesystemError) as dest_refusal:
+        safe_fs.rename_entry_no_follow(source_parent, "previous", dest_parent, unsafe_name, containment_root=root)
+    with pytest.raises(SafeFilesystemError) as removal_refusal:
+        safe_fs.remove_tree_allow_symlinks(source_parent, unsafe_name, containment_root=root, missing_ok=True)
+
+    assert source_refusal.value.kind == "unsafe"
+    assert dest_refusal.value.kind == "unsafe"
+    assert removal_refusal.value.kind == "unsafe"
+    # Nothing was renamed, nothing was removed, in either direction.
+    assert (source_parent / "previous").read_text(encoding="utf-8") == "payload\n"
+    assert (source_parent / "nested" / "previous").read_text(encoding="utf-8") == "nested payload\n"
+    assert sorted(path.name for path in dest_parent.iterdir()) == ["nested"]
+    assert source_parent.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_code"),
+    [
+        ("io", "STORAGE_WRITE_FAILED"),
+        ("unsafe", "WORKSPACE_PATH_UNSAFE"),
+        ("indeterminate", "WORKSPACE_PATH_UNSAFE"),
+        ("weird-future-kind", "WORKSPACE_PATH_UNSAFE"),
+        (None, "STORAGE_WRITE_FAILED"),
+    ],
+    ids=["io", "unsafe", "indeterminate", "kind-added-later", "bare-oserror"],
+)
+def test_output_hygiene_error_dispatch_is_total(tmp_path: Path, kind: str | None, expected_code: str) -> None:
+    """#1330 D2 error contract: the hook's dispatch is TOTAL over failure shapes.
+
+    The `execute()`-level anchors reach `io`, `unsafe` and the bare-`OSError`
+    lanes, but `indeterminate` and any kind a later change adds to `safe_fs` are
+    unreachable from there — a `kind == "unsafe"` dispatch would pass every one
+    of those anchors while silently routing an UNPROVEN geometry to the
+    auto-retry lane. Driven directly so the fail-closed default is pinned.
+    """
+
+    import errno as errno_module
+
+    from services.orchestrator.retry import is_retryable_failure
+
+    output_dir = tmp_path / "workspace" / "runs" / "run-x" / "output"
+    error: OSError | SafeFilesystemError = (
+        OSError(errno_module.ESTALE, "Stale file handle")
+        if kind is None
+        else SafeFilesystemError("refused", kind=kind)
+    )
+
+    result = runtime_module._output_hygiene_error(output_dir, error)
+
+    assert isinstance(result, SHUDRuntimeError)
+    assert result.error_code == expected_code
+    assert str(output_dir) in result.message
+    assert str(error) in result.message
+    # The code IS the retry verdict: transient only for the I/O lane.
+    assert is_retryable_failure(result.error_code) is (expected_code == "STORAGE_WRITE_FAILED")
 
 
 def test_execute_does_not_bless_a_previous_attempts_final_ic_residue(tmp_path: Path) -> None:
@@ -5885,6 +6010,41 @@ def test_execute_refuses_a_symlinked_output_without_following_or_quarantining(tm
     _assert_attempt_failure_accounting(tmp_path, repository, run_id, error_code="WORKSPACE_PATH_UNSAFE")
 
 
+def test_execute_refuses_a_plain_file_at_the_output_path(tmp_path: Path) -> None:
+    """#1330 A4 sibling: a REGULAR FILE at `output` is tampered geometry too.
+
+    The symlink anchor is refused inside `stat_no_follow` (its own symlink
+    check), so the hook's `S_ISDIR` guard is never the deciding branch there.
+    A plain file passes the probe and is judged only by that guard: without it
+    the run would rename a file to `output_residue/previous` and then solve into
+    a freshly created `output`, laundering tampered geometry into a green run.
+    """
+
+    from services.orchestrator.retry import is_retryable_failure
+
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    run_id = manifest["run_id"]
+    workspace = tmp_path / "workspace" / "runs" / run_id
+    workspace.mkdir(parents=True)
+    (workspace / "output").write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+    assert is_retryable_failure("WORKSPACE_PATH_UNSAFE") is False
+    # Refused BEFORE any mutation: the bytes are untouched and nothing moved.
+    assert (workspace / "output").is_file()
+    assert (workspace / "output").read_text(encoding="utf-8") == "not a directory\n"
+    assert not (workspace / "output_residue").exists()
+    _assert_attempt_failure_accounting(tmp_path, repository, run_id, error_code="WORKSPACE_PATH_UNSAFE")
+
+
 def test_execute_retains_only_the_latest_residue_tree_across_two_retries(tmp_path: Path) -> None:
     """#1330 A5: retention is exactly one tree, even when the evicted one holds a link.
 
@@ -5916,7 +6076,9 @@ def test_execute_retains_only_the_latest_residue_tree_across_two_retries(tmp_pat
     assert runtime.execute(deepcopy(manifest)).status == "succeeded"
 
     assert sorted(path.name for path in residue_root.iterdir()) == ["previous"]
-    assert not (residue_root / "previous" / "stale-link").exists(follow_symlinks=False)
+    # `lexists`, not `Path.exists(follow_symlinks=False)` (3.12+): the link must
+    # be gone as a LINK, dangling or not.
+    assert not os.path.lexists(residue_root / "previous" / "stale-link")
     retained_ic = (residue_root / "previous" / "demo.cfg.ic.update").read_text(encoding="utf-8")
     assert retained_ic != _STALE_ATTEMPT_FINAL_IC
     assert not (residue_root / "previous" / "stale-attempt-marker.txt").exists()
@@ -6139,6 +6301,66 @@ def test_execute_hygiene_probe_failure_is_transient_with_full_accounting(tmp_pat
     _assert_attempt_failure_accounting(tmp_path, repository, run_id, error_code="STORAGE_WRITE_FAILED")
 
 
+def test_execute_hygiene_post_probe_disappearance_is_transient_with_full_accounting(tmp_path: Path) -> None:
+    """#1330 A7(a)(iii) sibling: the BARE-`OSError` lane is reachable, and transient.
+
+    `safe_fs` re-raises `FileNotFoundError` BARE (no `kind`), so a concurrent
+    cleaner unlinking `output` between the hook's probe and its emptiness
+    listing lands at the dispatch as a plain `OSError`. That is a race, not
+    tampering: it must stay in the auto-retry lane. The hook's own
+    `except FileNotFoundError` covers the PROBE only, so this injection is aimed
+    at the listing — a dispatch that made bare `OSError`s permanent would strip
+    a self-healing race of its retry, and every `SafeFilesystemError` anchor
+    would stay green.
+    """
+
+    import errno as errno_module
+
+    from services.orchestrator.retry import is_retryable_failure
+
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _manifest()
+    run_id = manifest["run_id"]
+    _seed_previous_attempt_output(tmp_path, run_id)
+    real_scandir = os.scandir
+    fired = False
+
+    def _lose_the_dir_fd_listing_once(*args: Any, **kwargs: Any) -> Any:
+        # Only the dir-fd listing: the probe is an `os.stat`, so by the time this
+        # fires the probe has already succeeded and its `FileNotFoundError`
+        # handler is out of scope. One-shot, so the failure-accounting path that
+        # follows is not itself disturbed.
+        nonlocal fired
+        if args and isinstance(args[0], int) and not fired:
+            fired = True
+            raise FileNotFoundError(errno_module.ENOENT, "simulated post-probe unlink")
+        return real_scandir(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "scandir", _lose_the_dir_fd_listing_once)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.execute(manifest)
+
+    assert fired
+    assert exc_info.value.error_code == "STORAGE_WRITE_FAILED"
+    assert is_retryable_failure("STORAGE_WRITE_FAILED") is True
+    # The dispatch really saw a BARE `OSError`: had `safe_fs` wrapped it, the
+    # message would carry the primitive's own text and this would be the
+    # already-anchored `kind="io"` lane instead.
+    assert "simulated post-probe unlink" in exc_info.value.message
+    assert "Failed to list directory" not in exc_info.value.message
+    # Nothing was mutated: the listing precedes the quarantine entirely.
+    assert not (tmp_path / "workspace" / "runs" / run_id / "output_residue").exists()
+    assert (tmp_path / "workspace" / "runs" / run_id / "output" / "demo.cfg.ic.update").read_text(
+        encoding="utf-8"
+    ) == _STALE_ATTEMPT_FINAL_IC
+    _assert_attempt_failure_accounting(tmp_path, repository, run_id, error_code="STORAGE_WRITE_FAILED")
+
+
 def test_execute_hygiene_tamper_failure_is_permanent_with_full_accounting(tmp_path: Path) -> None:
     """#1330 A7(b): tampered geometry is permanent — retry can never fix it.
 
@@ -6201,3 +6423,56 @@ def test_execute_symlinked_residue_sibling_lands_in_the_permanent_lane(tmp_path:
         encoding="utf-8"
     ) == _STALE_ATTEMPT_FINAL_IC
     _assert_attempt_failure_accounting(tmp_path, repository, run_id, error_code="WORKSPACE_PATH_UNSAFE")
+
+
+def test_quarantined_residue_final_ic_is_unpublishable_by_the_state_gate(tmp_path: Path) -> None:
+    """#1330 A6(c): the A1 harm as the PUBLISH side sees it — nothing is admissible.
+
+    A1 pins the witness manifest (no `final_ic` key); A6(b) pins the happy lane
+    (fresh bytes published). Neither composes the two halves in the zero-hour
+    geometry that actually bit: on master the residue's `demo.cfg.ic.update`
+    survives in the reused tree, the writer names it, and the #1325 gate — which
+    verifies only that the manifest is self-consistent — happily publishes a
+    PREVIOUS attempt's state as this run's successor.
+
+    With the hook, the same run leaves the gate with no admissible state at all:
+    `STATE_SAVE_SOURCE_FINAL_IC_MISSING`, zero snapshots, zero QC. Refusing to
+    publish is the correct answer for a solve that computed no final state — and
+    it is the only assertion that can distinguish "not published" from "not
+    written", because the stale bytes still exist, quarantined one level up.
+    """
+
+    from packages.common.state_cli import save_state_for_run
+    from packages.common.state_manager import StateManagerError
+
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    stub = tmp_path / "no_final_ic_solver.py"
+    stub.write_text(_EXECUTE_NO_FINAL_IC_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    manifest = _manifest()
+    run_id = manifest["run_id"]
+    assert "state_checkpoint_hours" not in manifest["runtime"]
+    _seed_previous_attempt_output(tmp_path, run_id)
+
+    assert runtime.execute(manifest).status == "succeeded"
+
+    manager = _RoundTripStateManager(LocalObjectStore(object_root, "s3://nhms"))
+    with pytest.raises(StateManagerError) as exc_info:
+        save_state_for_run(
+            run_id,
+            manager=manager,
+            run_context=_round_trip_run_context(),
+            workspace_root=tmp_path / "workspace",
+        )
+
+    assert str(exc_info.value).startswith("STATE_SAVE_SOURCE_FINAL_IC_MISSING")
+    assert manager.saved == []
+    assert manager.qc_runs == []
+    # The stale IC was never deleted — it is simply outside every publishable
+    # root, so "nothing to publish" is a containment result, not data loss.
+    residue = tmp_path / "workspace" / "runs" / run_id / "output_residue" / "previous"
+    assert (residue / "demo.cfg.ic.update").read_text(encoding="utf-8") == _STALE_ATTEMPT_FINAL_IC
+    assert not (tmp_path / "workspace" / "runs" / run_id / "output" / "demo.cfg.ic.update").exists()
