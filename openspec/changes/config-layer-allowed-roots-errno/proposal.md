@@ -14,12 +14,12 @@
 - `_optional_config_path` 换 `os.path.realpath(expanded, strict=True)` + `except OSError` + errno 分流(`Path.resolve` 两形态禁用,同 #1344/#1345 范式):
   - 成功 → 规范化路径(现状)。
   - ENOENT → 非 strict `os.path.realpath` 回退(缺失根规范化语义与旧非 strict resolve 逐字对齐,全版本不抛)。
-  - 非 ENOENT(ELOOP/ENOTDIR/EACCES/…)→ **词法绝对路径原样下放**(expanduser + 相对时 cwd 绝对化),不抛、不裁决——由下游 `_preflight_allowed_roots`(PR #1346)剔根并产出结构化 blocker。
+  - 非 ENOENT(ELOOP/ENOTDIR/EACCES/…)→ **同样回退非 strict realpath**(round-1 C-X1 裁决:初稿"词法原样下放"在 `<file>/../<dir>` 形状引入新的 3.13+ 分歧、normpath 方案会开 symlink 祖先 fail-open,均被 verifier 实测否决;统一 realpath 回退 10 形状双腿全一致且 master 平价),不抛、不裁决——真不可解析的产物由下游 `_preflight_allowed_roots`(PR #1346)剔根并产出结构化 blocker;`..` 折叠后可解析的产物纳入(与 master 全版本行为逐字一致)。
 - 裁定理由:单一裁决点;#1346 的 blocker 与 `blockers[0]` 排序契约在 `_slurm_preflight` **seam** 上全版本真实可达(pass 级 ≤3.12 残余见下方披露 2)。选项 A(typed config error)会让刚合入的 blocker lane 变死代码、且把 NFS 瞬时错误(ESTALE/EACCES)升级为"进程无法启动"——即使一致性收窄到 seam,B 仍优于 A。
 - 解除 PR #1346 留下的两处测试 workaround:stub docstring 的"separate ≤3.12 crash site"免责说明删除;端到端 ELOOP 锚改为**生产时序**(环先于 config 构造存在)。断言零削弱。
 - 行为变更披露:
   1. ≤3.12 非 db-free 构造期崩溃 → 构造成功 + preflight 结构化 blocker(**seam 级**;pass 级见 2。契约升级,旧崩溃非契约)。
-  2. **幽灵根窗口(有界)**:非 ENOENT 的不可解析值现在会存活在 `config.allowed_storage_roots` 里直到 preflight 剔除。消费方:`_preflight_allowed_roots`(剔根+blocker,#1346 已修)与 `_scheduler_allowed_roots`(scheduler_runtime_roots.py:448-462,#1348 已建单的同族缺陷位点)。后者在 ≤3.12 上**无条件**接管崩溃点:`run_once`(scheduler_runtime.py:606-609,非 db-free 臂无 try/except)先于 `_slurm_preflight`(:1159)调用 `_scheduler_lock_evidence_root_preflight`,其 not-required 早退 payload 自身就调 `_scheduler_allowed_roots`(scheduler_runtime_roots.py:168)——环根仍抛无 errno RuntimeError。**诚实结论:本变更使 `_slurm_preflight` seam 在全版本获得结构化裁决(锚点与 CI 可证),但 pass 级在 ≤3.12 上仍以裸栈崩溃,#1347 的用户可见症状要到 #1348 落地才完全解决**;3.13+ 上该位点行为与今日无异(配置层今日同样放行)。本变更加一枚版本门 tripwire 钉(B8)钉住该残余,#1348 落地时必须翻转它。
+  2. **幽灵根窗口(有界)**:非 ENOENT 的不可解析值现在会存活在 `config.allowed_storage_roots` 里直到 preflight 剔除。消费方:`_preflight_allowed_roots`(剔根+blocker,#1346 已修)与 `_scheduler_allowed_roots`(scheduler_runtime_roots.py:448-462,#1348 已建单的同族缺陷位点)。后者在 ≤3.12 上**按 errno 二分,且与 lane 是否启用无关**:环根(ELOOP)无条件崩溃——`run_once`(scheduler_runtime.py:606-609,非 db-free 臂无 try/except)先于 `_slurm_preflight`(:1159)调用 `_scheduler_lock_evidence_root_preflight`,其 not-required 早退 payload 自身就调 `_scheduler_allowed_roots`(scheduler_runtime_roots.py:168),仍抛无 errno RuntimeError;其余非 ENOENT errno(ENOTDIR/EACCES)则**静默 fail-open**,幽灵根进入该 payload 的 `allowed_roots` 证据,与本变更前逐字同值(#1348 既有,零改变)。**诚实结论:本变更使 `_slurm_preflight` seam 在全版本获得结构化裁决(锚点与 CI 可证),但 pass 级在 ≤3.12 上仍以裸栈崩溃,#1347 的用户可见症状要到 #1348 落地才完全解决**;3.13+ 上该位点行为与今日无异(配置层今日同样放行)。本变更加一枚版本门 tripwire 钉(B8)钉住该残余,#1348 落地时必须翻转它。
 
 ## Impact
 

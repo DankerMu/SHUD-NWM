@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
-from errno import EACCES, ELOOP, ENOENT, ENOTDIR, EPERM
+from errno import EACCES, ELOOP, ENOTDIR, EPERM
 from pathlib import Path
 from typing import Any
 
@@ -505,22 +505,22 @@ def _optional_config_path(value: Path | str | None) -> Path | None:
     expanded = Path(value).expanduser()
     try:
         return Path(os.path.realpath(expanded, strict=True))
-    except OSError as error:
-        if getattr(error, "errno", None) == ENOENT:
-            # Non-strict os.path.realpath() never raises on 3.11-3.14 and
-            # reproduces the canonicalisation product of the old non-strict
-            # Path.resolve() verbatim for a merely missing path; Path.resolve()
-            # would raise an errno-less RuntimeError on <=3.12 once the
-            # `..`-collapsed tail lands on a symlink loop (`gone/../loopdir`).
-            return Path(os.path.realpath(expanded))
+    except OSError:
         # Classification belongs to the storage preflight, not to config
-        # construction: hand the lexical absolute value down so
-        # _preflight_allowed_roots drops the root and reports
+        # construction: hand the canonicalised value down so
+        # _preflight_allowed_roots drops an unresolvable root and reports
         # SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH on every supported
         # CPython, instead of aborting the whole process on <=3.12.
-        if not expanded.is_absolute():
-            return Path.cwd() / expanded
-        return expanded
+        #
+        # A single non-strict os.path.realpath() covers every strict failure:
+        # it never raises on 3.11-3.14 and reproduces the product of the old
+        # non-strict Path.resolve() verbatim -- POSIX order, symlinks first and
+        # `..` afterwards. Splitting on errno would buy nothing, because both
+        # would-be lanes converge on this same product; a lexical pass-through
+        # instead re-opens a 3.13+ vs <=3.12 divergence on `<file>/../<dir>`
+        # shapes, and normpath folding would erase symlink redirection and
+        # fabricate a root the operator never approved (design D2).
+        return Path(os.path.realpath(expanded))
 
 
 def _config_path_preserve_final_component(value: Path | str) -> Path:

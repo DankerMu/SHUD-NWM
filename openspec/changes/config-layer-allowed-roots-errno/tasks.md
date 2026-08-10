@@ -13,12 +13,14 @@ Must-preserve:成功车道规范化产物、ENOENT 规范化语义、db-free 臂
 ## 2. 测试锚点(tests/test_production_scheduler.py)
 
 - [x] 2.1 **B1(RED 主锚,preflight seam,生产时序)** 构造**前**已存在的自环 symlink 根 + 非 db-free 真 `ProductionSchedulerConfig`:构造成功(不抛任何异常)、`allowed_storage_roots` 含该根的词法绝对值;**preflight seam**(直接调 `_slurm_preflight(config)`):`status=="blocked"`、`blockers[0]["code"]=="SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"`、`checks["allowed_roots"]==[]`(config 须安全远端 database_url,防 DATABASE_URL_* 占 index 0)。**命名与断言不得声称 pass 级**(pass 级残余见 B8/D4)。RED 证:py3.11 现行代码构造抛 `RuntimeError`(`pytest.raises` 读数);3.14 腿为绿钉(自环词法值 == resolve 值,红腿在 py3.11,与 issue 影响面一致)。
-- [x] 2.2 **B2(errno 二分判别钉,symlink 祖先 ENOTDIR 形状)** 素材:`link -> realdir`(symlink 目录)、`realdir/file.txt` 普通文件、根 = `link/file.txt/sub`。两条车道产物**可观测区分**:词法车道 = `…/link/file.txt/sub`,非 strict realpath 车道 = `…/realdir/file.txt/sub`。断言 `config.allowed_storage_roots == (<link 词法形状>,)`——唯一判别"非 ENOENT 走词法下放"车道;端到端落 UNSAFE_PATH blocker。规范化祖先的 ENOTDIR 钉(值不变)由 #1346 A1b-e2e 既有锚继续覆盖,保持全绿。
+- [x] 2.2 **B2(回退车道判别钉,symlink 祖先 ENOTDIR 形状;round-1 C-X1 后翻转断言方向)** 素材不变:`link -> realdir`、`realdir/file.txt` 普通文件、根 = `link/file.txt/sub`(自守断言 `realpath(素材) != 素材` 保留)。断言改为 `config.allowed_storage_roots == (Path(os.path.realpath(<link 形状>)),)` 即 **realpath 产物(`realdir` 形状)**——判别"非 ENOENT 走统一 realpath 回退"而非词法下放;端到端仍落 UNSAFE_PATH blocker(产物仍不可解析)。
 - [x] 2.3 **B3(ENOENT 钉)** 缺失根构造:规范化纳入(产物与旧非 strict resolve 一致)、端到端无 allowed-roots blocker、两臂(db-free 用既有 env fixture 或 SimpleNamespace 对照)不回归。
 - [x] 2.4 **B4(崩溃车道钉)** `<missing>/../<loop>` 形状根 + 非 db-free 构造:构造永不裸抛、配置层产物 == `Path(os.path.realpath(<该形状>))`(非 strict 折叠为环本身,D3 类 3);端到端 preflight 判 ELOOP → **落 UNSAFE_PATH blocker 车道**(不是纳入——与今日 3.13+ 行为同,非回归)。py3.11 腿为现行代码构造崩溃的红证(#1344 P1 教训第三次押注)。
 - [x] 2.5 **B5(db-free 臂钉)** 同一环根 + db_free_required=True:构造成功、词法容忍产物不变(Non-Goal 锁定)。
 - [x] 2.6 **B6(workaround 解除,三处)** #1346 遗留:(1) stub docstring(:29900-29906 附近)删除"separate ≤3.12 crash site"免责句(stub 本身保留——单元锚仍然合法);(2) 端到端 ELOOP 锚(:30040-30047 附近)改为**构造前造环**并删除时序注释;(3) A1b-e2e 注释(:30065-30070 附近)——"ELOOP lane is shadowed / only reachable tightening lane / materialise post-construction"三句在本变更后全假,更新为"规范化祖先下 ENOTDIR 值不变的对照锚;symlink 祖先判别锚见 B2 新锚"。**断言体零削弱、零删除**;此为本 fixture 明示授权的既有测试注释/时序修改,PR 偏离记录须列出。
 - [x] 2.7 **B7(零回归)** `-k "preflight or allowed_root"` 双腿全绿(123 既有 + 新增);`tests/test_production_scheduler.py` 全文件 3.14 腿全绿。
+- [x] 2.9 **B9(折叠-纳入平价钉 + fail-open 反证,round-1 C-X1)** 根 = `<regular file>/"../"<existing dir>`:构造成功、产物 == `Path(os.path.realpath(<该形状>))`(折叠为 `<existing dir>`)、preflight **纳入**且零 allowed-roots blocker——**双腿断言完全一致**(钉住 C-X1 的新分歧已消除,master 平价)。对照臂(反证被否决的 normpath 方案):`linkdir -> <他处子树>`、根 = `<B>/linkdir/../<name>`,断言产物保留 symlink 重定向语义(realpath 先解链再折叠,产物在 `<他处子树>` 下,而非 `<B>/<name>`)。
+- [x] 2.10 **B8-match 收紧(errno lens note)** B8 的 `pytest.raises(RuntimeError)` 加 `match="Symlink loop"`,防其它 RuntimeError 误吞。
 - [x] 2.8 **B8(pass 级残余 tripwire,版本门)** `@pytest.mark.skipif(sys.version_info >= (3, 13), ...)`:构造前环根 + 非 db-free 真 config,`_scheduler_lock_evidence_root_preflight`(或 run_once 可达的最小等价面)在 ≤3.12 上 `pytest.raises(RuntimeError)`——**钉住 #1348 残余现状**。docstring 写明:#1348 落地时本钉必红,须翻转为修复后断言(结构化裁决)。3.13+ 跳过(该位点行为今日即 fail-open,归 #1348 锚)。
 
 ## 3. 突变击杀证
@@ -27,10 +29,12 @@ Must-preserve:成功车道规范化产物、ENOENT 规范化语义、db-free 臂
 - [x] N2 ENOENT 回退换 `expanded.resolve()` → B4 的 py3.11 腿必死。
 - [x] N3 非 ENOENT 车道改抛 typed error(模拟选项 A)→ B1 构造存活断言必死。
 - [x] N4 非 ENOENT 车道改 `return None`(静默丢根)→ B1 的 `allowed_storage_roots` 含根断言必死。
-- [x] N5 判据收窄为 `if ENOENT: 非strict回退 / elif ELOOP: 词法下放 / else: 非strict回退` → B2 的 `allowed_storage_roots == (<link 词法形状>,)` 断言必死(ENOTDIR 落入非 strict 车道产物变 `realdir` 形状)——symlink 祖先素材使两车道可观测区分,无对冲。
+- [x] N5(C-X1 后重定义)回退车道换回初稿词法下放(`expanded` + cwd 绝对化)→ B2 的 realpath 产物断言必死(产物变 `link` 词法形状)——symlink 祖先素材使两车道可观测区分,判别方向翻转后依然无对冲。
+- [x] N6(新)`<file>/../<realdir>` 场景下把回退换成 normpath 词法折叠(被否决的修法 (a))→ B9 的 symlink-祖先-fail-open 对照断言必死(见 2.9)。若 B9 未含该对照臂则此条降级为不适用并留一行理由。
 
 ## 4. 规格
 
+- [x] 4.2(round-1 C-Y2/C-X1)scenario THEN 增加行内限定 "on every scheduler pass that reaches the storage preflight"(置于三动词之前,#1348 落地后普遍成立、永不 stale;归档文本不点名 issue/版本/残余——#1345 教训);统一 realpath 回退使 "identical storage-preflight behavior" 对全输入域成立(C-X1 的 `<file>/../<dir>` 分歧消除),WHEN 的"cannot be canonically resolved"自然排除折叠后可解析形状。重新 validate。
 - [x] 4.1 `specs/slurm-array-runner-integration/spec.md` delta:MODIFIED `Array-capable model stages`,`unresolvable allowed storage root` scenario 共 **3 处编辑**:(1) 跨版本一致性主语收敛到 storage preflight(替换原 survive-canonicalization 限定——配置层不再中止,但 pass 级 ≤3.12 残余由 #1348 收口,故一致性只能以 preflight 为主语);(2) 新增 AND 子句(配置构造永不因不可解析 allowed root 中止,分类归 storage preflight);(3) ENOENT 子句限定 "remains merely missing after canonicalization"(D3 类 3 的 ENOENT-掩盖-环路形状最终判 unsafe,不与该句冲突)。`openspec validate config-layer-allowed-roots-errno --strict --no-interactive` 通过。
 
 ## Evidence Floor

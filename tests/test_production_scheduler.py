@@ -30131,16 +30131,19 @@ def test_slurm_preflight_blocks_preexisting_loop_allowed_root_built_by_real_conf
     assert preflight["checks"]["allowed_roots"] == []
 
 
-def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_passed_down_lexically(
+def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_realpath(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B2: the one shape that tells the two non-ENOENT candidate lanes apart.
+    """B2: the one shape that tells the two candidate fallback lanes apart.
 
     `link -> realdir` plus a regular `realdir/file.txt` makes the ENOTDIR root
     `link/file.txt/sub` observably different under lexical pass-through
-    (`.../link/file.txt/sub`) and under a non-strict realpath fallback
-    (`.../realdir/file.txt/sub`). The config layer must produce the former.
+    (`.../link/file.txt/sub`) and under the non-strict realpath fallback
+    (`.../realdir/file.txt/sub`). The config layer must produce the latter:
+    one fallback for every strict failure, canonicalising instead of
+    adjudicating. The value stays unresolvable, so the storage preflight still
+    owns the verdict and still drops the root.
     """
 
     roots = _slurm_roots(tmp_path)
@@ -30151,8 +30154,9 @@ def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_passed_down_lexica
     link = tmp_path / "link"
     link.symlink_to(realdir)
     lexical_root = link / "file.txt" / "sub"
+    canonical_root = Path(os.path.realpath(lexical_root))
     # Guard the discriminator itself: if these ever coincide the anchor is blind.
-    assert Path(os.path.realpath(lexical_root)) != lexical_root
+    assert canonical_root != lexical_root
 
     config = _gateway_config(
         roots["workspace_root"],
@@ -30164,14 +30168,14 @@ def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_passed_down_lexica
         slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
     )
 
-    assert config.allowed_storage_roots == (lexical_root,)
+    assert config.allowed_storage_roots == (canonical_root,)
 
     preflight = scheduler_module._slurm_preflight(config)
 
     assert preflight["status"] == "blocked"
     assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
     assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(lexical_root)
+    assert preflight["blockers"][0]["path"] == str(canonical_root)
     assert preflight["checks"]["allowed_roots"] == []
 
 
@@ -30282,6 +30286,97 @@ def test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_roo
     assert config.allowed_storage_roots == (loop,)
 
 
+def test_slurm_preflight_admits_file_dotdot_directory_allowed_root_on_every_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9: `<regular file>/../<existing dir>` stays admitted, on every CPython.
+
+    Only the 3.13+ strict walk rejects a component that a later `..` erases, so
+    this shape takes the strict lane on <=3.12 and the fallback lane on 3.13+.
+    Both land on the same canonical directory -- the value master produced on
+    every interpreter -- so the assertions below are byte-identical on the two
+    legs. That parity is the point: the config layer canonicalises, it does not
+    tighten, and a resolvable root is never turned into a blocker.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    plainfile = tmp_path / "plainfile"
+    plainfile.write_text("not a directory", encoding="utf-8")
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    folded_root = tmp_path / "plainfile" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(folded_root))
+    # Guard the material: the fold must really reach the existing directory.
+    assert canonical_root == Path(os.path.realpath(realdir))
+
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(folded_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (canonical_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
+
+
+def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B9 counter-arm: lexical `..` folding would fabricate an unapproved root.
+
+    `linkdir` points into a sibling subtree, so POSIX resolution (symlinks
+    first, `..` afterwards) reads `linkdir/../realname` as `other/realname` --
+    the directory the operator actually approved. Folding `..` lexically
+    instead would hand `<tmp>/realname` to the preflight: a root nobody
+    declared, admitted as a containment base because it merely looks missing.
+    The link target is deliberately never created, so the strict walk fails
+    with ENOENT on both legs and the fallback lane is the one under test.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    other = tmp_path / "other"
+    (other / "realname").mkdir(parents=True)
+    linkdir = tmp_path / "linkdir"
+    linkdir.symlink_to(other / "deep")
+    redirected_root = tmp_path / "linkdir" / ".." / "realname"
+    canonical_root = Path(os.path.realpath(redirected_root))
+    fabricated_root = tmp_path / "realname"
+    # Guard the discriminator: the two candidate products must really differ.
+    assert canonical_root == other / "realname"
+    assert Path(os.path.normpath(redirected_root)) == fabricated_root
+    assert not fabricated_root.exists()
+
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(redirected_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.allowed_storage_roots == (canonical_root,)
+    assert config.allowed_storage_roots != (fabricated_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
+
+
 @pytest.mark.skipif(
     sys.version_info >= (3, 13),
     reason="the pass-level crash needs a non-strict Path.resolve() that raises, i.e. CPython <=3.12",
@@ -30311,7 +30406,7 @@ def test_scheduler_root_preflight_still_raises_on_preexisting_loop_allowed_root(
     assert config.allowed_storage_roots == (loop,)
     assert config.require_runtime_roots is False
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="Symlink loop"):
         scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
 
