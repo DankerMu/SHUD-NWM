@@ -1261,6 +1261,13 @@ credential in process argv.
    900-second timeout. Do not use the timer or call `compress_chunk` manually.
    A timeout, partial result, scope mismatch or null/error `after_bytes` is
    terminal failed evidence and does not authorize a retry.
+   **Scope of this ban:** it governs this one-shot gated first-enforce
+   evidence protocol only. Incident catch-up on an already-live lane is a
+   different situation with its own ordered procedure — see §4.5
+   "大 chunk 追赶". Neither section overrides the other: §4.0 stays the
+   forensic first-enforce contract, §4.5 stays the catch-up contract, and a
+   manual `compress_chunk` remains banned here outright and is the documented
+   last resort there.
 10. Capture both-table pre/post snapshots with `hypertable_size(regclass)`
     (acceptance size), parent `pg_total_relation_size` (diagnostic only),
     compressed/uncompressed counts, and compressed sibling names/sizes. One
@@ -2160,6 +2167,152 @@ intended shape), §4.0 step 3 is the sole pre-mutation interception point.
 `informational` (measured_at, hostname, backend_type distribution, the real
 recurring unit's state) is dump-recorded and NEVER compared, so a scheduled
 check cannot flake on autovacuum or parallel-worker noise.
+
+### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
+
+An oversized terminal chunk — the 2026-07-25/26 incident chunk was 333 GB and
+took roughly 20 minutes — cannot pass the automated lane at the default
+budget: the per-chunk statement timeout is 14 minutes, and because selection is
+oldest-first (`ORDER BY range_end ASC`, then `eligible[:per_tick_bound]`) that
+one chunk is re-selected every tick and burns the whole tick, blocking
+everything behind it. Since `#1156` the three walls are operator-configurable
+through the single compression env file, so the fix is a bounded override
+window rather than a manual `statement_timeout = 0` DDL.
+
+**Runner wall ≠ supervisor wall.** This section tunes the *recurring runner*
+lane: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`, consumed by
+`scripts/node27_timeseries_compression_once.sh` as the `timeout` DURATION, plus
+`nhms-node27-timeseries-compression.service`'s `TimeoutStartSec`. The
+`--wall-seconds 900` on `nhms-node27-timeseries-compression-replay.service` and
+the supervisor's own hard wall (§4.0.1) are a *different* lane with a different
+knob; nothing here changes them, and they do not follow this env file.
+
+**The four values** (one env file,
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env`, mode 0600):
+
+|variable|catch-up value|rule|
+|---|---|---|
+|`NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (e.g. `1800000` for a 20-minute chunk)|minimum 1000|
+|`NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|`ceil(COMPRESS_TIMEOUT_MS/1000) + 60` is the enforced **floor**, not the sizing recipe — budget real headroom, `+300` or more (e.g. `2100`)|leg 1 of the invariant|
+|`NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|`WRAPPER_WALL_SECONDS + 40` or more (e.g. `2140`)|leg 2; a **declared** value — it must equal the drop-in you actually installed|
+|`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|the invariant bounds ONE chunk's budget; a second chunk in the same tick still dies on the wall|
+
+The runner refuses to open a database connection if either leg is violated, and
+the wrapper refuses to launch on a non-positive-integer wall. Both refusals are
+structured JSON on stderr.
+
+**Why `+60` is a floor and not a size.** Leg 1 is the *minimum* the runner will
+accept; it is not a measurement of what a tick costs outside `compress_chunk`.
+A single catch-up tick also pays for the display-watermark resolution, two
+10-second `git` lineage probes, the catalog enumeration (`fetch_chunks`), a
+chunk size measurement before *and* after the compress, and — on the error
+path — a reconcile probe. Every one of those DB legs is a 10-second connect
+plus a statement capped at 60 seconds (`_QUERY_TIMEOUT_MS`), and those caps are
+genuinely reachable under lock contention on this node (§8.6 documents the same
+60-second catalog/measurement cap being hit by concurrent
+`compress_chunk`/`decompress_chunk` work). Worst case that is roughly 300
+seconds of non-compress budget, so a wall sized at `compress + 60` can `TERM`
+the tick *after* a successful compress, during measurement or reconcile, and
+lose the receipt. Size the wall at `ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or
+more for a catch-up; the example row above (`1800000` ms → `2100` → `2140`)
+uses that shape.
+
+**Mandatory ordering.** The steps are ordered against a specific failure mode
+(`b21e2453`): a tick that passes the Python check against a *declared* systemd
+wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
+
+1. **systemd drop-in FIRST, then reload.** Before touching the env file:
+
+   ```bash
+   sudo mkdir -p /etc/systemd/system/nhms-node27-timeseries-compression.service.d
+   printf '[Service]\nTimeoutStartSec=2140\n' | \
+     sudo tee /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
+   sudo systemctl daemon-reload
+   systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   ```
+
+   The last line must report the new wall; the committed unit still ships
+   `TimeoutStartSec=940` and the repository is not edited for a catch-up.
+2. **Stop and mask the timer for the whole window**, and keep the other
+   compression lanes out of it:
+
+   ```bash
+   sudo systemctl stop nhms-node27-timeseries-compression.timer
+   sudo systemctl mask nhms-node27-timeseries-compression.timer
+   ```
+
+   A scheduled tick inside the window would read the override env, run to the
+   raised wall, and also overwrite the default receipt path. Do **not** start
+   `nhms-node27-timeseries-compression-replay.service` or any supervisor
+   compression task while the override is in place: those children re-enter the
+   *same* wrapper and fall back to this *same* default env file
+   (`CHILD_ENV_ALLOWLIST` carries no `..._ENV_FILE`), yet their own
+   `--wall-seconds 900` / `TimeoutStartSec=920` are untouched by this
+   procedure — that is the `TERM`-mid-DDL shape reproduced in another lane.
+3. **Snapshot the env file, then set the four values** (table above), keeping
+   mode 0600 and `nwm:nwm` ownership. The content snapshot is what the cleanup
+   check in step 4 diffs against, so it must be taken *before* the first edit:
+
+   ```bash
+   cp -p /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
+     ~/node27-compression-env.pre-catchup
+   stat -c '%a %U:%G' ~/node27-compression-env.pre-catchup   # 600 nwm:nwm
+   ```
+
+   `cp -p` preserves the 0600/`nwm:nwm` mode — the snapshot holds the same DSN
+   as the live file, so it is a secret and stays under `~nwm`. Also record
+   `stat -c '%a %U:%G'` on the live file before and after the edit; never print
+   the DSN.
+4. **Dry-run, then enforce, then clean up — in that order.** Run 4a and 4b
+   inside a `tmux`/`screen` session (same convention as §4.3.3): the enforcing
+   tick can run ~30 minutes, and an ssh hangup on a bare foreground invocation
+   kills the process group mid-DDL and leaves you with no terminal output —
+   only whatever receipt was already flushed.
+
+   ```bash
+   # a. dry-run tick: confirm the selection set is the intended chunk
+   /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh \
+     --receipt-path /home/nwm/node27-compression-catchup-dryrun.json
+   # b. the single enforcing tick, distinct receipt path (the lock path is
+   #    deliberately shared, so a stray timer tick still cannot overlap)
+   /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce \
+     --receipt-path /home/nwm/node27-compression-catchup-enforce.json
+   ```
+
+   Cleanup order is as hard a requirement as the setup order, and it is the
+   mirror image: **delete the env override FIRST**, then unmask and start the
+   timer, then remove the systemd drop-in and `daemon-reload`, then confirm the
+   next default tick writes to the default receipt path (the catch-up receipts
+   were per-invocation `--receipt-path` files; nothing restores itself).
+   Removing the drop-in or unmasking the timer while the env override is still
+   in place leaves exactly the b21e2453 configuration — a tick that passes the
+   Python leg-2 check against a declared 2140 and then hits the real 940
+   mid-DDL — and it re-arms the replay-lane hazard from step 2. **The catch-up
+   is not finished while any override residue exists**; verify with both:
+
+   ```bash
+   # env file byte-identical to the pre-window snapshot (no output = clean)
+   diff ~/node27-compression-env.pre-catchup \
+     /home/nwm/NWM/infra/env/node27-timeseries-compression.env
+   # real systemd wall back to the committed 940 s
+   systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   ```
+
+   Only delete `~/node27-compression-env.pre-catchup` after the `diff` is
+   clean. A `git status`-clean worktree is *not* one of these two checks — the
+   env file is gitignored (`.gitignore:18 infra/env/*`), so `git status` can
+   never see env residue; it is still worth a glance for the different failure
+   of someone having edited the committed unit file instead of installing the
+   drop-in.
+
+A manual silent-window `SET statement_timeout = 0; SELECT compress_chunk(...)`
+is the **last resort**, not the procedure: it produces no receipt, no
+provenance and no bounded lock, and it is what this section exists to avoid.
+
+**Scope vs §4.0 step 9.** The blanket "do not call `compress_chunk` manually"
+in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
+forensic evidence run. This section governs incident catch-up on a lane that is
+already live. The two do not overlap and neither relaxes the other.
 
 ## 7. Archive rebuild drill (`archive-rebuild-drill`)
 

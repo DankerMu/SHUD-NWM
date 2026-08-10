@@ -10,7 +10,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +30,7 @@ _WRAPPER_PATH = _ROOT / "scripts/node27_timeseries_compression_once.sh"
 _SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.service"
 _SYSTEMD_REPLAY_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression-replay.service"
 _SYSTEMD_TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.timer"
+_ENV_EXAMPLE_PATH = _ROOT / "infra/env/node27-timeseries-compression.example"
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
 
@@ -120,9 +123,253 @@ def test_config_parse_happy_path(tmp_path: Path) -> None:
     assert config.database_url.startswith("postgresql://")
 
 
-def test_compress_timeout_preserves_outer_cleanup_budgets() -> None:
-    assert compression._COMPRESS_TIMEOUT_MS == 840_000
-    assert compression._COMPRESS_TIMEOUT_MS < 900_000 < 940_000
+def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> None:
+    """B1: with no budget env set, the three fields are today's literals.
+
+    The runner's timeout budget chain became operator-configurable in #1156;
+    this pins the defaults byte-identical to the previously hardcoded values
+    and pins that both legs of the invariant hold exactly on them.
+    """
+    config = compression.config_from_args(_args(), _base_env(tmp_path))
+
+    assert config.compress_timeout_ms == 840_000
+    assert config.wrapper_wall_seconds == 900
+    assert config.systemd_wall_seconds == 940
+    assert compression._CLEANUP_MARGIN_SECONDS == 60
+    assert compression._SYSTEMD_MARGIN_SECONDS == 40
+    # Leg 1: statement timeout (seconds, rounded up) + cleanup margin fits the
+    # wrapper wall. Leg 2: wrapper wall + kill-after margin fits the declared
+    # systemd wall. Both are exact equalities at the defaults.
+    assert (
+        compression._ceil_div(config.compress_timeout_ms, 1000) + compression._CLEANUP_MARGIN_SECONDS
+        == config.wrapper_wall_seconds
+    )
+    assert config.wrapper_wall_seconds + compression._SYSTEMD_MARGIN_SECONDS == config.systemd_wall_seconds
+
+
+@pytest.mark.parametrize(
+    ("variable", "raw", "match"),
+    [
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "0", "COMPRESS_TIMEOUT_MS"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "-1", "COMPRESS_TIMEOUT_MS"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "abc", "COMPRESS_TIMEOUT_MS"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "999", "must be >= 1000"),
+        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "0", "WRAPPER_WALL_SECONDS"),
+        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "abc", "WRAPPER_WALL_SECONDS"),
+        ("NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS", "abc", "SYSTEMD_WALL_SECONDS"),
+    ],
+)
+def test_budget_chain_variables_parse_fail_closed(tmp_path: Path, variable: str, raw: str, match: str) -> None:
+    """B4: anything present but not a positive integer at/above the minimum is refused."""
+    env = _base_env(tmp_path, override={variable: raw})
+    with pytest.raises(compression.CompressionConfigError, match=match):
+        compression.config_from_args(_args(), env)
+
+
+def test_empty_budget_chain_variables_take_the_defaults(tmp_path: Path) -> None:
+    """B4: empty string means "unset" — same as the wrapper's ``${VAR:-900}``."""
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "",
+            "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "",
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "",
+        },
+    )
+    config = compression.config_from_args(_args(), env)
+    assert (config.compress_timeout_ms, config.wrapper_wall_seconds, config.systemd_wall_seconds) == (
+        840_000,
+        900,
+        940,
+    )
+
+
+class _FakeCursor:
+    """Minimal psycopg2 cursor recording every statement it is handed."""
+
+    def __init__(self, statements: list[tuple[str, object]]) -> None:
+        self._statements = statements
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self._statements.append((sql, params))
+
+    def fetchone(self) -> tuple[object, ...]:
+        return (None,)
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeConnection:
+    def __init__(self, statements: list[tuple[str, object]]) -> None:
+        self._statements = statements
+        self.closed = False
+
+    def __enter__(self) -> "_FakeConnection":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> bool:
+        return False
+
+    def cursor(self, *_args: object, **_kwargs: object) -> _FakeCursor:
+        return _FakeCursor(self._statements)
+
+    def set_session(self, **_kwargs: object) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _install_fake_psycopg2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[tuple, dict]], list[tuple[str, object]]]:
+    """Route every ``import psycopg2`` at call time to a recording double.
+
+    ``connect_calls`` is the DB-touch witness: a configuration that fails
+    closed before any database call leaves it empty.
+    """
+    connect_calls: list[tuple[tuple, dict]] = []
+    statements: list[tuple[str, object]] = []
+
+    def connect(*args: object, **kwargs: object) -> _FakeConnection:
+        connect_calls.append((args, kwargs))
+        return _FakeConnection(statements)
+
+    module = types.ModuleType("psycopg2")
+    module.connect = connect  # type: ignore[attr-defined]
+    extras = types.ModuleType("psycopg2.extras")
+    extras.RealDictCursor = object  # type: ignore[attr-defined]
+    module.extras = extras  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", module)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", extras)
+    return connect_calls, statements
+
+
+def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: the override reaches the real ``SET statement_timeout`` end to end.
+
+    Deliberately runs ``--enforce`` with NO injected ``compress_chunk``: the
+    dry-run path never reaches the compression hook, and injecting a fake hook
+    would step over the very assembly point (``functools.partial`` binding
+    ``config.compress_timeout_ms``) this pins.
+    """
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "1800000",
+            "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "1900",
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "1940",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    connect_calls, statements = _install_fake_psycopg2(monkeypatch)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    chunk = _chunk("hydro", "river_timeseries", "oversized", delta_days=9)
+
+    code = compression.main(
+        ["--enforce"],
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
+    )
+
+    assert code == 0
+    assert [sql for sql, _params in statements] == [
+        "SET statement_timeout = 1800000",
+        "SELECT compress_chunk(%s::regclass)",
+    ]
+    assert len(connect_calls) == 1
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    assert receipt["outcome"] == "clean"
+
+
+@pytest.mark.parametrize(
+    ("compress_ms", "wall", "systemd", "leg", "numbers"),
+    [
+        # Leg 1 violated: 900 s statement + 60 s cleanup does not fit a 900 s wall.
+        ("900000", "900", "940", "leg 1", ("900000", "900", "60", "960")),
+        # ms -> s uses ceil, so one millisecond over the limit is refused.
+        ("840001", "900", "940", "leg 1", ("840001", "841", "60", "901", "900")),
+        # Leg 2 violated: 900 s wall + 40 s kill-after margin exceeds a 920 s systemd wall.
+        ("840000", "900", "920", "leg 2", ("900", "40", "940", "920")),
+    ],
+)
+def test_main_rejects_a_budget_chain_violation_before_any_db_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    compress_ms: str,
+    wall: str,
+    systemd: str,
+    leg: str,
+    numbers: tuple[str, ...],
+) -> None:
+    """B3: fail closed, name the violated leg with every number, touch no DB.
+
+    ``fetch_display_watermark`` is intentionally NOT patched: it opens its own
+    connection, so a configuration that wrongly slipped through would show up
+    in ``connect_calls``.
+    """
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": compress_ms,
+            "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": wall,
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": systemd,
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    connect_calls, _statements = _install_fake_psycopg2(monkeypatch)
+
+    code = compression.main(["--enforce"])
+
+    assert code != 0
+    assert connect_calls == []
+    diagnostic = json.loads(capsys.readouterr().err.strip())
+    assert diagnostic["status"] == "failed"
+    assert f"budget chain violated ({leg})" in diagnostic["reason"]
+    for number in numbers:
+        assert number in diagnostic["reason"]
+
+
+def test_main_accepts_the_exact_budget_chain_equality(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B3: the boundary is ``<=`` — the default triple must not be rejected."""
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "840000",
+            "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "900",
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "940",
+        },
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    connect_calls, _statements = _install_fake_psycopg2(monkeypatch)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    chunk = _chunk("hydro", "river_timeseries", "at-the-boundary", delta_days=9)
+
+    code = compression.main(
+        [],
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
+        compress_chunk=lambda _dsn, _chunk: None,
+    )
+
+    assert code == 0
+    assert connect_calls == []
 
 
 def test_receipt_and_lock_alias_is_rejected(tmp_path: Path) -> None:
@@ -1278,10 +1525,51 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
     exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
     assert exec_lines == ["ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"]
     assert "node27_timeseries_compression_supervisor.py" not in service_text
-    assert "TimeoutStartSec=940" in service_text
+    # The unit's real wall must be the runner's DECLARED default systemd wall,
+    # which in turn must be the default wrapper wall plus the kill-after
+    # margin. Asserting the relation rather than re-writing "940" keeps the
+    # three artifacts on one source of truth.
+    timeout_start_lines = [line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")]
+    assert len(timeout_start_lines) == 1
+    unit_wall_seconds = int(timeout_start_lines[0].split("=", 1)[1])
+    assert unit_wall_seconds == compression._DEFAULT_SYSTEMD_WALL_SECONDS
+    assert unit_wall_seconds == compression._DEFAULT_WRAPPER_WALL_SECONDS + compression._SYSTEMD_MARGIN_SECONDS
+
     wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
-    assert ('exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"') in wrapper_text
+    assert (
+        'exec /usr/bin/timeout --signal=TERM --kill-after=30s "${WALL}s" "$PYTHON_BIN" "$SCRIPT" "$@"'
+    ) in wrapper_text
+    # The shell default must be the same number as the Python default.
+    wall_default_assignment = (
+        "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-"
+        f"{compression._DEFAULT_WRAPPER_WALL_SECONDS}}}"
+    )
+    assert wall_default_assignment == "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-900}"
+    assert wall_default_assignment in wrapper_text
+    # Fail-closed guard between the read and the exec.
+    assert (
+        'case "$WALL" in\n'
+        "  ''|*[!0-9]*) echo '{\"status\":\"failed\",\"reason\":"
+        '"wrapper wall must be a positive integer"}\' >&2; exit 1 ;;\n'
+        "esac\n"
+    ) in wrapper_text
+    assert '[ "$WALL" -ge 1 ] ||' in wrapper_text
     assert '"$SCRIPT" --enforce' not in wrapper_text
+
+
+def test_compression_env_example_documents_the_budget_chain() -> None:
+    """B7: the template carries the three knobs plus the drop-in sync duty."""
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=840000" in text
+    assert "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=900" in text
+    assert "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=940" in text
+    # Both legs of the invariant, spelled out for the operator.
+    assert "ceil(COMPRESS_TIMEOUT_MS / 1000) + 60 s cleanup margin" in text
+    assert "WRAPPER_WALL_SECONDS + 40 s kill-after margin" in text
+    # systemd drop-in conversion + reload, and the catch-up per-tick hint.
+    assert "nhms-node27-timeseries-compression.service.d/override.conf" in text
+    assert "systemctl daemon-reload" in text
+    assert "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1" in text
 
 
 def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:

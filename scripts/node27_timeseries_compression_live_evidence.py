@@ -62,6 +62,12 @@ MAX_SELECTED_BYTES = 8 * 1024**3
 MIN_FREE_BYTES = 300 * 1024**3
 EXPECTED_LAG_SECONDS = 604_800
 EXPECTED_BOUND = 1
+# Frozen archival-evidence contract; documents the wall at capture time,
+# deliberately NOT derived from the runner default. The runner's wall became
+# operator-configurable in issue #1156; deriving this expectation from that
+# default would let a later retune silently re-validate historical bundles
+# captured under a different wall. Same family as EXPECTED_LAG_SECONDS /
+# EXPECTED_BOUND above.
 EXPECTED_TIMEOUT_SECONDS = 900
 MAX_POST_MEASUREMENT_DRIFT_BYTES = 1024**2
 MAX_PREFLIGHT_TO_ENFORCE_SECONDS = 60
@@ -351,6 +357,11 @@ INVOCATION_ARGV: Mapping[str, list[str]] = {
         "<receipt-path>",
     ],
 }
+# Frozen archival-evidence contract; documents the wall at capture time,
+# deliberately NOT derived from the runner default. The wrapper's wall is
+# operator-configurable since issue #1156 (`"${WALL}s"`, default 900), but the
+# expected `launcher_argv` of an already-captured bundle is history and must
+# not move with the live default.
 _TIMEOUT_PREFIX = [
     "/usr/bin/timeout",
     "--signal=TERM",

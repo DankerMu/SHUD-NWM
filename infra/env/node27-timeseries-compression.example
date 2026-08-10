@@ -17,6 +17,56 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
 # Maximum number of chunks compressed per timer tick.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=5
 
+# --- Timeout budget chain (issue #1156) -------------------------------------
+# Three layers, one source of truth. Leaving a variable unset OR empty selects
+# the default shown below; the wrapper's shell default (${VAR:-900}) treats the
+# empty string the same way, so both sides agree.
+#
+#   leg 1: ceil(COMPRESS_TIMEOUT_MS / 1000) + 60 s cleanup margin
+#          <= WRAPPER_WALL_SECONDS
+#   leg 2: WRAPPER_WALL_SECONDS + 40 s kill-after margin
+#          <= SYSTEMD_WALL_SECONDS
+#
+# The runner refuses to open a database connection if either leg is violated,
+# and the wrapper refuses to launch on a non-positive-integer wall. The
+# defaults satisfy both legs exactly: 840 + 60 = 900 and 900 + 40 = 940.
+#
+# The "+ 60" in leg 1 is the enforced FLOOR, not a sizing recipe. A tick also
+# pays for the watermark lookup, two 10 s git probes, catalog enumeration, a
+# size measurement before and after the compress, and a reconcile probe on the
+# error path — each a 10 s connect plus a statement capped at 60 s, i.e. up to
+# ~300 s of non-compress budget under lock contention. When you raise these
+# values for a catch-up, budget ceil(COMPRESS_TIMEOUT_MS/1000) + 300 or more
+# for the wrapper wall, e.g. 1800000 ms -> 2100 -> 2140.
+#
+# Per-chunk `SET statement_timeout` for compress_chunk, in milliseconds.
+# Default 840000 = 14 minutes. Minimum 1000.
+NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=840000
+#
+# Wall passed to `timeout --signal=TERM --kill-after=30s` by
+# scripts/node27_timeseries_compression_once.sh. Default 900.
+NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=900
+#
+# DECLARED systemd wall. The runner cannot read the unit file, so this is a
+# cross-check of what you have actually deployed, not a control. Whenever you
+# change it you MUST also install the matching systemd drop-in FIRST and
+# reload, otherwise a timer tick passes the Python leg-2 check and then hits
+# the smaller real wall mid-DDL:
+#   mkdir -p /etc/systemd/system/nhms-node27-timeseries-compression.service.d
+#   printf '[Service]\nTimeoutStartSec=%s\n' "$SYSTEMD_WALL" > \
+#     /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
+#   systemctl daemon-reload
+# The committed unit ships TimeoutStartSec=940, matching the default below.
+NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=940
+#
+# Catch-up hint: when raising these values for one oversized chunk, also set
+# NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 — the invariant bounds ONE
+# chunk's budget, so a second chunk in the same tick still dies on the wall.
+# Full ordered procedure (drop-in first, timer stopped+masked, no replay in the
+# window, override removed FIRST on cleanup): runbook section 4.5
+# "大 chunk 追赶", docs/runbooks/tier-node27-timeseries-storage.md.
+# ----------------------------------------------------------------------------
+
 # Absolute paths (must be owned by the nwm user, mode 0600 on the receipt).
 NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_compression.json
 NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/tmp/nhms-node27-timeseries-compression.lock

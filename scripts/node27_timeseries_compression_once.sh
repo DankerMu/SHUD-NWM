@@ -25,6 +25,16 @@ set -a
 . "$ENV_FILE"
 set +a
 
+# Wrapper wall (issue #1156). Same env file, same name, same empty-string
+# handling as the runner's Python-side default injection, so the two sides
+# cannot drift. `*[!0-9]*` rejects negatives, decimals and whitespace;
+# fail closed rather than launch the runner unbounded or with a bogus wall.
+WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-900}
+case "$WALL" in
+  ''|*[!0-9]*) echo '{"status":"failed","reason":"wrapper wall must be a positive integer"}' >&2; exit 1 ;;
+esac
+[ "$WALL" -ge 1 ] || { echo '{"status":"failed","reason":"wrapper wall must be a positive integer"}' >&2; exit 1; }
+
 REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
 case "$REPO_ROOT" in
   *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
@@ -87,4 +97,4 @@ raise SystemExit(0 if valid else 1)
   exit 1
 fi
 
-exec /usr/bin/timeout --signal=TERM --kill-after=30s 900s "$PYTHON_BIN" "$SCRIPT" "$@"
+exec /usr/bin/timeout --signal=TERM --kill-after=30s "${WALL}s" "$PYTHON_BIN" "$SCRIPT" "$@"
