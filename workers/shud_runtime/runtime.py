@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -32,6 +32,11 @@ from packages.common.safe_fs import (
     stat_no_follow,
     unlink_no_follow,
 )
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    SHUD_FORCING_INDEX_MEMBERS,
+)
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.state_lineage import PACKAGED_IC_CONSUMPTION_FAILED, PACKAGED_IC_QUALITY
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
@@ -51,8 +56,9 @@ class SHUDRuntimeError(RuntimeError):
         self.message = message
 
 
-# Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from
-# ``qhh.tsd.forc`` as a daily rate in millimetres per day.
+# Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from the
+# package's station-index member (canonical ``shud/stations.tsd.forc``; legacy
+# packages carry ``shud/qhh.tsd.forc``) as a daily rate in millimetres per day.
 EXPECTED_PRCP_UNIT = "mm/day"
 # Forcing package manifests are JSON metadata that grow with station count
 # (per-station ``shud_file_entries``). The PRCP unit check is best-effort, so cap
@@ -930,7 +936,33 @@ class SHUDRuntime:
             if forcing_context is not None
             else self._forcing_declares_direct_grid(manifest)
         )
-        staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir, is_direct_grid=is_direct_grid)
+        # The staging probe needs the manifest anchor to resolve a non-direct-grid
+        # tree that legitimately carries a residual second station-index member.
+        # The declaration source is the checksum-verified package manifest: a
+        # production run manifest never carries ``forcing.files`` (the chain
+        # assembler in services/orchestrator/chain_manifest_contracts.py emits
+        # uri/checksum only), so run-manifest entries are the diagnostic lane
+        # fallback (scripts/create_qhh_shud_manifest.py writes them) and
+        # canonical-first inside the staging probe is the last resort.
+        # ``_authoritative_package_manifest_checksum_entries`` is deliberately not
+        # used here: it raises when the package manifest is absent, which would
+        # newly fail-close the non-direct-grid lane.
+        checksum_entries: Sequence[Mapping[str, Any]]
+        if forcing_context is not None:
+            declared_files = (forcing_context.package_manifest or {}).get("files")
+            checksum_entries = (
+                list(declared_files)
+                if isinstance(declared_files, list) and declared_files
+                else list(forcing_context.checksum_entries)
+            )
+        else:
+            checksum_entries = _forcing_checksum_entries(manifest)
+        staged_ids = self._stage_standard_shud_forcing(
+            manifest,
+            model_input_dir,
+            is_direct_grid=is_direct_grid,
+            checksum_entries=checksum_entries,
+        )
         if staged_ids is not None:
             if is_direct_grid:
                 _validate_direct_grid_sp_att_forcing_ids(
@@ -941,7 +973,9 @@ class SHUDRuntime:
         if is_direct_grid:
             raise SHUDRuntimeError(
                 "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING",
-                "Direct-grid forcing requires standard SHUD package staging with shud/qhh.tsd.forc; "
+                "Direct-grid forcing requires standard SHUD package staging with "
+                f"{CANONICAL_SHUD_FORCING_INDEX_MEMBER} "
+                f"(legacy {LEGACY_SHUD_FORCING_INDEX_MEMBER} also accepted); "
                 "refusing legacy fallback that rewrites .sp.att FORC ownership.",
             )
         source = model_input_dir / "forcing_debug.csv"
@@ -969,11 +1003,49 @@ class SHUDRuntime:
         model_input_dir: Path,
         *,
         is_direct_grid: bool,
+        checksum_entries: Sequence[Mapping[str, Any]] | None = None,
     ) -> set[int] | None:
         shud_dir = model_input_dir / "shud"
-        source_tsd = shud_dir / "qhh.tsd.forc"
-        if not _regular_file_exists(source_tsd, containment_root=model_input_dir):
+        # Filesystem-level decision over the accepted station-index identities,
+        # independent of the manifest gate on purpose: an unpacked tree can carry
+        # a member the manifest never declared.
+        #
+        # Two members means different things per staging mode:
+        #  - direct-grid staging is manifest-whitelisted, so a second file is
+        #    contamination -> fail closed (independent of the manifest gate).
+        #  - non-direct-grid staging copies the whole package prefix and the
+        #    producer never deletes, so an in-place re-produce over a
+        #    pre-migration prefix leaves an orphan legacy member behind. That is
+        #    a legitimate steady state: resolve it by the manifest-declared
+        #    member, with canonical-first as the fallback when the manifest does
+        #    not name exactly one accepted member.
+        staged_members = [
+            member
+            for member in SHUD_FORCING_INDEX_MEMBERS
+            if _regular_file_exists(shud_dir / PurePosixPath(member).name, containment_root=model_input_dir)
+        ]
+        if len(staged_members) > 1:
+            if is_direct_grid:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS",
+                    "Staged SHUD forcing package contains more than one station-index member "
+                    f"in {shud_dir}: {', '.join(staged_members)}; refusing to guess which one "
+                    "is authoritative. Direct-grid staging copies only manifest-allowlisted "
+                    "members, so the most likely cause is a prior attempt that staged a "
+                    "different station-index identity into this reused run input workspace "
+                    "(prior-attempt residue). Remediation: manually remove the stale member "
+                    "(or clear the run's input workspace) and re-drive; this error code is "
+                    "not retryable in place.",
+                )
+            declared_member = _manifest_declared_shud_forcing_index_member(checksum_entries)
+            staged_members = [
+                declared_member
+                if declared_member in staged_members
+                else next(member for member in SHUD_FORCING_INDEX_MEMBERS if member in staged_members)
+            ]
+        if not staged_members:
             return None
+        source_tsd = shud_dir / PurePosixPath(staged_members[0]).name
         rows = _read_shud_forcing_station_rows(source_tsd, is_direct_grid=is_direct_grid)
         if not rows:
             raise SHUDRuntimeError("SHUD_FORCING_STATIONS_EMPTY", f"No stations found in {source_tsd}.")
@@ -1792,14 +1864,40 @@ class SHUDRuntime:
                 )
 
     def _direct_grid_runtime_checksum_entries(self, checksum_entries: list[dict[str, str]]) -> list[dict[str, str]]:
-        tsd_entries = [entry for entry in checksum_entries if entry["relative_path"] == "shud/qhh.tsd.forc"]
+        tsd_entries = [entry for entry in checksum_entries if entry["relative_path"] in SHUD_FORCING_INDEX_MEMBERS]
         if not tsd_entries:
+            # Zero station-index members: unchanged behaviour. Direct-grid absence
+            # is adjudicated at the staging layer
+            # (``DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING``), not here.
             return []
+        matched_members = sorted({str(entry["relative_path"]) for entry in tsd_entries})
+        if len(matched_members) > 1:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS",
+                "Direct-grid forcing package manifest declares more than one station-index member: "
+                f"{', '.join(matched_members)}; refusing to guess which one is authoritative.",
+            )
+        tsd_relative_path = matched_members[0]
         tsd_entry = tsd_entries[0]
         tsd_uri = str(tsd_entry["uri"])
-        limit = _direct_grid_sensitive_member_limit("shud/qhh.tsd.forc")
+        limit = _direct_grid_sensitive_member_limit(tsd_relative_path)
         if limit is None:
             return [tsd_entry]
+        # Identity probe before the capped read. The blanket ``except`` below
+        # cannot tell "absent" from "over the cap", so a manifest that declares
+        # one accepted identity while the object tree carries only the other
+        # would otherwise surface as a bogus size-limit failure. A probe that
+        # itself errors is left to the read path's existing classification.
+        try:
+            declared_member_present = self.object_store.exists(tsd_uri)
+        except Exception:
+            declared_member_present = True
+        if not declared_member_present:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_READ_FAILED",
+                f"Manifest-declared SHUD station-index member {tsd_relative_path} is absent "
+                f"from the forcing object tree: {tsd_uri}",
+            )
         try:
             content = self.object_store.read_bytes_limited(tsd_uri, max_bytes=limit.max_bytes)
         except Exception as error:
@@ -1827,7 +1925,7 @@ class SHUDRuntime:
             too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
             line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
         )
-        required_relative_paths = {"shud/qhh.tsd.forc"}
+        required_relative_paths = {tsd_relative_path}
         for station_csv in _direct_grid_station_csv_filenames_from_tsd_lines(lines):
             required_relative_paths.add(f"shud/{station_csv}")
         entries_by_relative_path: dict[str, dict[str, str]] = {}
@@ -1859,7 +1957,8 @@ class SHUDRuntime:
         """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
 
         This is the SHUD staging terminus guard for #270: SHUD reads PRCP from
-        ``qhh.tsd.forc`` as a daily rate (``mm/day``, Decision A). If an upstream
+        the package's station-index member (canonical ``shud/stations.tsd.forc``,
+        legacy ``shud/qhh.tsd.forc``) as a daily rate (``mm/day``, Decision A). If an upstream
         regression re-introduced a per-step ``mm`` accumulation, SHUD would silently
         consume a physically wrong precip amount; an explicitly declared non-mm/day
         PRCP unit is therefore the one and only hard failure here.
@@ -1950,7 +2049,7 @@ class SHUDRuntime:
                     f"Forcing checksum entry is not a regular staged file: {relative_path}",
                 )
             normalized_relative_path = _staged_relative_posix(model_input_dir, staged_path)
-            if is_direct_grid and normalized_relative_path == "shud/qhh.tsd.forc":
+            if is_direct_grid and normalized_relative_path in SHUD_FORCING_INDEX_MEMBERS:
                 staged_bytes = _read_limited_staged_bytes(
                     staged_path,
                     root=model_input_dir,
@@ -1987,6 +2086,9 @@ class SHUDRuntime:
             ) from error
 
     def _object_checksum_limited(self, uri_or_key: str, *, limit: _DirectGridSensitiveMemberLimit) -> str:
+        # No identity probe here (unlike the station-index read): station CSV
+        # names are derived from the index content, so a manifest/object-tree
+        # identity mismatch cannot arise for them.
         try:
             return self.object_store.checksum_limited(uri_or_key, max_bytes=limit.max_bytes)
         except Exception as error:
@@ -3632,6 +3734,34 @@ def normalize_staged_ic_negative_residuals(
         manifest.setdefault("runtime", {})["initial_state_normalization"] = normalization.evidence()
 
 
+def _manifest_declared_shud_forcing_index_member(
+    checksum_entries: Sequence[Mapping[str, Any]] | None,
+) -> str | None:
+    """Return the station-index member the package manifest names, if exactly one.
+
+    Used as the staging anchor for non-direct-grid trees that carry both accepted
+    identities: the manifest and the canonical member are written in the same
+    produce, so manifest-current == last produce. Returns ``None`` when the
+    manifest names zero or both identities, which leaves the caller on its
+    canonical-first fallback.
+
+    Entries come from the checksum-verified ``forcing_package.json`` ``files``
+    list (producer shape: ``role``/``relative_path``/``uri``/``checksum``); the
+    non-SHUD entries there carry no ``relative_path`` and drop out of the
+    accepted-member intersection.
+    """
+
+    declared = {
+        str(entry.get("relative_path") or "").strip()
+        for entry in checksum_entries or ()
+        if isinstance(entry, Mapping)
+    }
+    matched = declared & set(SHUD_FORCING_INDEX_MEMBERS)
+    if len(matched) == 1:
+        return next(iter(matched))
+    return None
+
+
 def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
     forcing = manifest.get("forcing") or {}
     files = forcing.get("files") or forcing.get("file_checksums") or []
@@ -3745,7 +3875,7 @@ def _derive_package_manifest_file_relative_path(
 
 
 def _direct_grid_sensitive_member_limit(relative_path: str) -> _DirectGridSensitiveMemberLimit | None:
-    if relative_path == "shud/qhh.tsd.forc":
+    if relative_path in SHUD_FORCING_INDEX_MEMBERS:
         return _DirectGridSensitiveMemberLimit(
             max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
             error_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",

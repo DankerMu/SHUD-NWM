@@ -14,13 +14,18 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    SHUD_FORCING_INDEX_MEMBERS,
+)
 from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,7 +98,7 @@ def main() -> int:
     )
     forcing_manifest = _forcing_package_manifest(forcing_manifest_uri, object_store)
     station_count = _forcing_manifest_station_count(forcing_manifest)
-    _validate_shud_forcing_header(forcing_manifest, object_store, station_count)
+    station_source = _validate_shud_forcing_header(forcing_manifest, object_store, station_count)
     forcing_files = _forcing_file_checksums(forcing_manifest)
     start_time = _format_time(forcing["start_time"])
     end_time = _format_time(forcing["end_time"])
@@ -129,7 +134,7 @@ def main() -> int:
             "package_manifest_checksum": forcing_manifest_checksum,
             "files": forcing_files,
             "station_count": station_count,
-            "station_source": "qhh.tsd.forc",
+            "station_source": station_source,
             "shud_forcing_layout": "standard_multi_station",
         },
         "runtime": {
@@ -311,31 +316,56 @@ def _validate_shud_forcing_header(
     manifest: dict[str, Any],
     object_store: LocalObjectStore,
     station_count: int,
-) -> None:
+) -> str:
+    """Validate the station-index header and return the matched member basename.
+
+    Mirrors the runtime's exactly-one decision over
+    :data:`packages.common.shud_forcing_contract.SHUD_FORCING_INDEX_MEMBERS`:
+    the canonical member or the legacy one is accepted, both present is
+    fail-closed ambiguity, neither present is fail-closed absence.
+    """
     files = manifest.get("files")
     if not isinstance(files, list):
         raise RuntimeError("forcing package manifest is missing files.")
-    tsd_uri = ""
+    uri_by_member: dict[str, str] = {}
     for file_entry in files:
-        if isinstance(file_entry, dict) and file_entry.get("relative_path") == "shud/qhh.tsd.forc":
-            tsd_uri = str(file_entry.get("uri") or "")
-            break
+        if not isinstance(file_entry, dict):
+            continue
+        relative_path = file_entry.get("relative_path")
+        if relative_path in SHUD_FORCING_INDEX_MEMBERS and relative_path not in uri_by_member:
+            uri_by_member[str(relative_path)] = str(file_entry.get("uri") or "")
+    if len(uri_by_member) > 1:
+        raise RuntimeError(
+            "forcing package manifest declares more than one SHUD station-index member: "
+            f"{', '.join(sorted(uri_by_member))}."
+        )
+    if not uri_by_member:
+        raise RuntimeError(
+            "forcing package manifest is missing the SHUD station-index member "
+            f"{CANONICAL_SHUD_FORCING_INDEX_MEMBER} (legacy {LEGACY_SHUD_FORCING_INDEX_MEMBER} also accepted)."
+        )
+    member, tsd_uri = next(iter(uri_by_member.items()))
     if not tsd_uri:
-        raise RuntimeError("forcing package manifest is missing shud/qhh.tsd.forc.")
+        raise RuntimeError(f"forcing package manifest entry for {member} is missing uri.")
+    # Name the member that was actually resolved: hardcoding the legacy basename
+    # would misreport a canonical package (and the count-mismatch wings carry no
+    # URI, so the member name is their only identity signal).
+    member_name = PurePosixPath(member).name
     lines = object_store.read_bytes(tsd_uri).decode("utf-8-sig").splitlines()
     if not lines or not lines[0].strip():
-        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+        raise RuntimeError(f"{member_name} station header is empty: {tsd_uri}.")
     fields = lines[0].split()
     if not fields:
-        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+        raise RuntimeError(f"{member_name} station header is empty: {tsd_uri}.")
     try:
         header_count = int(fields[0])
     except ValueError as error:
-        raise RuntimeError(f"qhh.tsd.forc station header count is invalid: {fields[0]!r}.") from error
+        raise RuntimeError(f"{member_name} station header count is invalid: {fields[0]!r}.") from error
     if header_count != station_count:
         raise RuntimeError(
-            f"qhh.tsd.forc station header {header_count} does not match forcing manifest {station_count}."
+            f"{member_name} station header {header_count} does not match forcing manifest {station_count}."
         )
+    return member_name
 
 
 def _directory_uri(object_store: LocalObjectStore, key: str) -> str:

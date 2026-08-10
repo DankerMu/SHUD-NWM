@@ -128,6 +128,9 @@ forcing 采用原始 qhh/rSHUD 站点表：
 - station IDs：`qhh_forc_001` 到 `qhh_forc_386`
 - forcing package 标准 SHUD 文件：`shud/qhh.tsd.forc` + 386 个 `shud/X*.csv`
 - staged runtime 输入：`qhh.tsd.forc` 头部为 `386 20260521`，并复制 386 个站点 CSV 到 SHUD project 目录。
+
+> 注（2026-08-10，#1176）：上述 `shud/qhh.tsd.forc` 是本次复测当时的 package 成员名。#1176 迁移后，producer 只产流域中性 canonical 成员 `shud/stations.tsd.forc`；legacy 名仅对历史 package 只读兼容。当前契约见 `docs/modules/04_forcing_production_design.md`。
+
 - `qhh.sp.att` 的 `FORC` 映射保留原始多站点索引；本次 staged 文件中 `FORC` 有 347 个不同取值，不再 remap 到单站点。
 
 ### GFS、canonical 与 forcing

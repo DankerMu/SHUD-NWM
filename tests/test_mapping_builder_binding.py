@@ -13,7 +13,8 @@ Coverage
 * §4.2 station identity — station_id embeds mapping-asset identity and is
   never reused across mapping versions.
 * §4.2 filename safety — case-fold uniqueness; never collides with
-  reserved names (qhh.tsd.forc / manifest.json / debug / model-input
+  reserved names (the canonical station-index stations.tsd.forc and the
+  legacy qhh.tsd.forc / manifest.json / debug / model-input
   suffixes) on case-insensitive filesystems; regex-matches the parser's
   _SAFE_STATION_FORCING_FILENAME; not derived from rounded coordinates.
 * §4.2 coordinate rules — station lon/lat equal cell center under
@@ -40,6 +41,11 @@ import pyproj
 import pytest
 
 from packages.common import grid_signature as grid_signature_module
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_BASENAME,
+    LEGACY_SHUD_FORCING_INDEX_BASENAME,
+    SHUD_FORCING_INDEX_BASENAMES,
+)
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     make_regular_grid_cells,
 )
@@ -654,12 +660,36 @@ def test_emitted_filenames_never_collide_with_reserved_names() -> None:
             )
 
 
+def test_reserved_forcing_filenames_are_built_from_the_shared_station_index_contract() -> None:
+    """B7 (#1176): the reserved set derives from the shared identity authority.
+
+    The mapping builder must not keep a hand-copied station-index literal: both
+    the canonical and the legacy basenames come from
+    :mod:`packages.common.shud_forcing_contract`, so producer/runtime/builder
+    cannot drift apart. The non-station-index reserved names are unaffected.
+    """
+    assert set(SHUD_FORCING_INDEX_BASENAMES) <= RESERVED_FORCING_FILENAMES
+    assert CANONICAL_SHUD_FORCING_INDEX_BASENAME in RESERVED_FORCING_FILENAMES
+    assert LEGACY_SHUD_FORCING_INDEX_BASENAME in RESERVED_FORCING_FILENAMES
+    assert RESERVED_FORCING_FILENAMES == frozenset(
+        {
+            *SHUD_FORCING_INDEX_BASENAMES,
+            "manifest.json",
+            "package.json",
+            "resource_profile.json",
+            "binding.json",
+            "evidence.json",
+            "domain.shp",
+        }
+    )
+
+
 def test_emitter_rejects_reserved_filename_injection() -> None:
     """Emitter refuses if a reserved name is injected via a monkey-patched sanitizer.
 
     Structural safety proof: even if a downstream sanitize helper were
-    somehow rewired to produce ``qhh.tsd.forc``, the emitter's inline
-    reserved-name check catches it.
+    somehow rewired to produce the canonical station-index name
+    ``stations.tsd.forc``, the emitter's inline reserved-name check catches it.
     """
     used_cells, snapshot_cells = _make_used_cells_and_snapshot(used_count=2)
     shud_forcing_index = _make_shud_forcing_index(used_cells)
@@ -670,7 +700,7 @@ def test_emitter_rejects_reserved_filename_injection() -> None:
     original = binding_module.sanitize_station_forcing_filename
 
     def injected_sanitizer(*, shud_forcing_index: int) -> str:
-        return "qhh.tsd.forc" if shud_forcing_index == 1 else original(
+        return CANONICAL_SHUD_FORCING_INDEX_BASENAME if shud_forcing_index == 1 else original(
             shud_forcing_index=shud_forcing_index
         )
 

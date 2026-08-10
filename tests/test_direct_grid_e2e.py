@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.shud_forcing_contract import CANONICAL_SHUD_FORCING_INDEX_BASENAME
 from tests.test_forcing_producer import (
     FakeForcingRepository,
     _build_producer,
@@ -134,7 +135,7 @@ def test_issue_548_direct_grid_compact_e2e_producer_to_runtime_staging(
     assert all(row.valid_time != f003_time for row in point_rows)
 
     package_root = object_root / store.normalize_key(first.forcing_package_uri)
-    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8")
+    tsd_forc = (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8")
     assert tsd_forc.splitlines()[:5] == [
         "2 20260507",
         "shud",

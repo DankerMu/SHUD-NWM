@@ -699,7 +699,8 @@ HYDROLOGIC_CORE_FINGERPRINT_LABELS: tuple[str, ...] = (
 #   any arbitrary 8-digit substring. A bare ``\d{8}`` marker would
 #   false-block realistic non-cycle names — e.g. ``basin12345678.tsd.forc``
 #   (embedded basin ID) — which are legal in the active tree. It still
-#   never collides with baseline standard filenames like ``qhh.tsd.forc``
+#   never collides with baseline standard filenames like the canonical
+#   station-index ``stations.tsd.forc`` or the legacy ``qhh.tsd.forc``
 #   (no digits) or per-basin ``.tsd.forc`` with short numeric suffixes
 #   (< 8 digits), and it retains coverage for both the pure date name
 #   ``20200101.tsd.forc`` and the prefixed cycle name

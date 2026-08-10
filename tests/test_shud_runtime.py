@@ -17,6 +17,13 @@ import pytest
 from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.safe_fs import SafeFilesystemError
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_BASENAME,
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    LEGACY_SHUD_FORCING_INDEX_BASENAME,
+    LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    SHUD_FORCING_INDEX_MEMBERS,
+)
 from workers.shud_runtime import runtime as runtime_module
 from workers.shud_runtime.runtime import (
     DbFreeHydroRunRepository,
@@ -105,7 +112,15 @@ def _write_standard_shud_forcing(
     units: dict[str, str] | None = None,
     lineage: dict[str, Any] | None = None,
     station_ids: tuple[int, ...] = (1,),
+    index_member: str = CANONICAL_SHUD_FORCING_INDEX_MEMBER,
 ) -> dict[str, str]:
+    """Write a standard SHUD forcing package under ``object_root``.
+
+    ``index_member`` selects which accepted station-index identity the package
+    carries — canonical by default, legacy for the historical-package
+    compatibility lane. The returned dict records it under
+    ``tsd_relative_path`` so the runtime-manifest helper stays in sync.
+    """
     forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     shud_dir = forcing / "shud"
     shud_dir.mkdir(parents=True)
@@ -126,7 +141,8 @@ def _write_standard_shud_forcing(
         + "\n".join(station_lines)
         + "\n"
     )
-    (shud_dir / "qhh.tsd.forc").write_text(tsd_content, encoding="utf-8")
+    index_basename = index_member.rsplit("/", 1)[-1]
+    (shud_dir / index_basename).write_text(tsd_content, encoding="utf-8")
     for filename, content in csv_files.items():
         (shud_dir / filename).write_text(content, encoding="utf-8")
     manifest_payload: dict[str, Any] = {
@@ -134,8 +150,8 @@ def _write_standard_shud_forcing(
         "files": [
             {
                 "role": "shud_forcing",
-                "relative_path": "shud/qhh.tsd.forc",
-                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
+                "relative_path": index_member,
+                "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{index_member}",
                 "checksum": sha256_bytes(tsd_content.encode("utf-8")),
             },
         ],
@@ -158,6 +174,7 @@ def _write_standard_shud_forcing(
     return {
         "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
         "manifest_checksum": sha256_bytes(manifest_content),
+        "tsd_relative_path": index_member,
         "tsd_checksum": sha256_bytes(tsd_content.encode("utf-8")),
         "csv_checksum": sha256_bytes(csv_files["forcing.csv"].encode("utf-8"))
         if "forcing.csv" in csv_files
@@ -226,6 +243,7 @@ def _runtime(
 
 
 def _shud_project_manifest_with_forcing_checksums(checksums: dict[str, str]) -> dict[str, Any]:
+    index_member = checksums.get("tsd_relative_path", CANONICAL_SHUD_FORCING_INDEX_MEMBER)
     manifest = _manifest()
     manifest["model"] = {
         "model_id": "basins_basin_a_shud",
@@ -242,8 +260,8 @@ def _shud_project_manifest_with_forcing_checksums(checksums: dict[str, str]) -> 
         "files": [
             {
                 "role": "shud_forcing",
-                "relative_path": "shud/qhh.tsd.forc",
-                "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
+                "relative_path": index_member,
+                "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{index_member}",
                 "checksum": checksums["tsd_checksum"],
             },
             {
@@ -695,7 +713,7 @@ def test_runtime_direct_grid_requires_verified_package_manifest_before_forcing_s
     assert exc_info.value.error_code == "FORCING_PACKAGE_MANIFEST_REQUIRED"
     assert repository.statuses == ["created", "failed"]
     assert repository.failures[0][0] == "FORCING_PACKAGE_MANIFEST_REQUIRED"
-    assert not (model_input_dir / "shud" / "qhh.tsd.forc").exists()
+    assert not (model_input_dir / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
     assert not (model_input_dir / "alias-a.tsd.forc").exists()
 
 
@@ -714,7 +732,7 @@ def test_runtime_direct_grid_package_manifest_ignores_stale_outer_forcing_files(
     manifest = _shud_project_manifest_with_forcing_checksums(checksums)
     manifest["forcing"]["files"][0]["checksum"] = "stale-outer-tsd-checksum"
     manifest["forcing"]["files"][0]["uri"] = (
-        "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/stale/qhh.tsd.forc"
+        f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/stale/{CANONICAL_SHUD_FORCING_INDEX_BASENAME}"
     )
     manifest["forcing"]["files"][1]["checksum"] = "stale-outer-csv-checksum"
     manifest["forcing"]["files"][1]["uri"] = (
@@ -782,7 +800,7 @@ def test_runtime_direct_grid_oversized_manifest_tsd_uses_bounded_object_path_bef
         station_ids=(2, 3),
     )
     forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
-    tsd_path = forcing_dir / "shud" / "qhh.tsd.forc"
+    tsd_path = forcing_dir / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     oversized_tsd = (
         b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
         + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
@@ -814,11 +832,11 @@ def test_runtime_direct_grid_oversized_manifest_tsd_uses_bounded_object_path_bef
     with pytest.raises(SHUDRuntimeError) as exc_info:
         runtime.prepare_workspace(manifest, input_dir)
 
-    tsd_uri = "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc"
+    tsd_uri = f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}"
     assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
     assert tsd_uri not in tracking_store.checksum_calls
     assert tracking_store.read_bytes_limited_calls[-1] == (tsd_uri, 8 * 1024 * 1024)
-    assert not (input_dir / "alias-a" / "shud" / "qhh.tsd.forc").exists()
+    assert not (input_dir / "alias-a" / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
 
 
 def test_runtime_direct_grid_manifest_station_csv_uses_limited_checksum_not_full_checksum(
@@ -873,7 +891,7 @@ def test_runtime_neutral_package_manifest_with_outer_direct_grid_fails_before_fo
 
     assert exc_info.value.error_code == "FORCING_PACKAGE_MAPPING_MODE_MISSING"
     model_input_dir = input_dir / "alias-a"
-    assert not (model_input_dir / "shud" / "qhh.tsd.forc").exists()
+    assert not (model_input_dir / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
     assert not (model_input_dir / "alias-a.tsd.forc").exists()
 
 
@@ -944,7 +962,12 @@ def test_runtime_direct_grid_oversized_package_manifest_uses_bounded_read_before
     package_manifest_path = forcing_dir / "forcing_package.json"
     oversized_manifest = (
         b'{"lineage":{"forcing_mapping_mode":"direct_grid"},"files":['
-        + b'{"relative_path":"shud/qhh.tsd.forc","uri":"s3://nhms/example","checksum":"0"},' * 250_000
+        + (
+            b'{"relative_path":"'
+            + CANONICAL_SHUD_FORCING_INDEX_MEMBER.encode("utf-8")
+            + b'","uri":"s3://nhms/example","checksum":"0"},'
+        )
+        * 250_000
         + b"{}]}"
     )
     package_manifest_path.write_bytes(oversized_manifest)
@@ -972,7 +995,7 @@ def test_runtime_direct_grid_oversized_package_manifest_uses_bounded_read_before
     assert exc_info.value.error_code == "FORCING_PACKAGE_MANIFEST_READ_FAILED"
     assert checksums["manifest_uri"] not in tracking_store.checksum_calls
     assert tracking_store.read_bytes_limited_calls[-1] == (checksums["manifest_uri"], 16 * 1024 * 1024)
-    assert not (input_dir / "alias-a" / "shud" / "qhh.tsd.forc").exists()
+    assert not (input_dir / "alias-a" / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
 
 
 def test_runtime_direct_grid_package_manifest_tsd_checksum_mismatch_fails_before_staged_status(
@@ -993,7 +1016,7 @@ def test_runtime_direct_grid_package_manifest_tsd_checksum_mismatch_fails_before
         / "basin_v01"
         / "demo_model"
         / "shud"
-        / "qhh.tsd.forc"
+        / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     )
     tsd_path.write_text(tsd_path.read_text(encoding="utf-8") + "# stale mutation\n", encoding="utf-8")
     repository = FakeHydroRunRepository()
@@ -1146,6 +1169,598 @@ def test_runtime_direct_grid_standard_package_stages_multi_station_without_sp_at
     assert (model_input_dir / "forcing_002.csv").exists()
 
 
+def _other_index_member(index_member: str) -> str:
+    return next(
+        member
+        for member in (CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER)
+        if member != index_member
+    )
+
+
+def _write_two_station_direct_grid_sp_att(object_root: Path) -> None:
+    (
+        object_root
+        / "models"
+        / "basins_basin_a_shud"
+        / "vbasins-test"
+        / "package"
+        / "alias-a.sp.att"
+    ).write_text(
+        "2\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t1\n"
+        "2\t0\t0\t0\t2\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "index_member",
+    [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
+    ids=["canonical", "legacy"],
+)
+def test_runtime_direct_grid_stages_either_accepted_station_index_member(
+    tmp_path: Path,
+    index_member: str,
+) -> None:
+    """B2/B3 (#1176): canonical and legacy station-index members stage identically.
+
+    The package manifest is the authoritative checksum source here
+    (``_drop_runtime_forcing_files``), so this walks the whole path: manifest
+    required-member gate -> object checksum verification -> member staging ->
+    staged checksum verification -> ``{project}.tsd.forc`` emission.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_two_station_direct_grid_sp_att(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid", "spatial_mapping_method": "direct_grid"},
+        station_ids=(1, 2),
+        index_member=index_member,
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    staged_member = model_input_dir / "shud" / index_member.rsplit("/", 1)[-1]
+    other_member = model_input_dir / "shud" / _other_index_member(index_member).rsplit("/", 1)[-1]
+    assert staged_member.is_file()
+    assert not other_member.exists()
+    source_lines = staged_member.read_text(encoding="utf-8").splitlines()
+    # Package member name is pure transport identity: the staged destination is
+    # always ``{project}.tsd.forc`` regardless of which identity was consumed.
+    staged_lines = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8").splitlines()
+    assert staged_lines[0] == "2 20260501"
+    assert staged_lines[2] == "ID\tLon\tLat\tX\tY\tZ\tFilename"
+    assert staged_lines[3:] == source_lines[3:]
+    assert (model_input_dir / "forcing.csv").exists()
+    assert (model_input_dir / "forcing_002.csv").exists()
+    assert repository.statuses == []
+
+
+def test_runtime_direct_grid_manifest_declaring_both_index_members_fails_closed(tmp_path: Path) -> None:
+    """B4 (#1176): canonical + legacy in one manifest is fail-closed ambiguity."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing_dir / "shud"
+    tsd_content = (shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8")
+    (shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).write_text(tsd_content, encoding="utf-8")
+    package_manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"].append(
+        {
+            "role": "shud_forcing",
+            "relative_path": LEGACY_SHUD_FORCING_INDEX_MEMBER,
+            "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{LEGACY_SHUD_FORCING_INDEX_MEMBER}",
+            "checksum": sha256_bytes(tsd_content.encode("utf-8")),
+        }
+    )
+    manifest_content = json_bytes(package_manifest)
+    package_manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS"
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_manifest_duplicate_index_entries_stay_checksum_invalid(tmp_path: Path) -> None:
+    """B4b (#1176): same-member duplicates keep the pre-existing FORCING_CHECKSUM_INVALID.
+
+    The ambiguity code is reserved for *two distinct identities*; duplicate
+    entries for one identity must not be silently re-coded, because the same
+    duplicate check also covers every station CSV entry.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    package_manifest = json.loads((forcing_dir / "forcing_package.json").read_text(encoding="utf-8"))
+    entries = [
+        {
+            "relative_path": str(entry["relative_path"]),
+            "uri": str(entry["uri"]),
+            "checksum": str(entry["checksum"]),
+        }
+        for entry in package_manifest["files"]
+    ]
+    index_entry = next(
+        entry for entry in entries if entry["relative_path"] == CANONICAL_SHUD_FORCING_INDEX_MEMBER
+    )
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._direct_grid_runtime_checksum_entries([*entries, dict(index_entry)])
+
+    assert exc_info.value.error_code == "FORCING_CHECKSUM_INVALID"
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+
+
+def test_runtime_direct_grid_manifest_gate_returns_empty_without_index_member(tmp_path: Path) -> None:
+    """B6 (#1176): zero index members keeps returning ``[]`` — it must not raise.
+
+    Absence is adjudicated at the staging layer; turning this layer into a raise
+    would be an undeclared behaviour change for the pre-existing path.
+    """
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    assert runtime._direct_grid_runtime_checksum_entries([]) == []
+    assert (
+        runtime._direct_grid_runtime_checksum_entries(
+            [
+                {
+                    "relative_path": "shud/forcing.csv",
+                    "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/forcing.csv",
+                    "checksum": "0" * 64,
+                }
+            ]
+        )
+        == []
+    )
+
+
+def test_runtime_direct_grid_both_index_files_staged_on_disk_fails_closed(tmp_path: Path) -> None:
+    """B5 (#1176): the filesystem probe adjudicates independently of the manifest.
+
+    A stray second index file that the manifest never declared (e.g. shipped
+    inside the model package) must not let the runtime silently pick one.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    model_input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input" / "alias-a"
+    staged_shud_dir = model_input_dir / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    tsd_content = (
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\tforcing.csv\n"
+    )
+    for basename in (CANONICAL_SHUD_FORCING_INDEX_BASENAME, LEGACY_SHUD_FORCING_INDEX_BASENAME):
+        (staged_shud_dir / basename).write_text(tsd_content, encoding="utf-8")
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._prepare_shud_project_forcing(manifest, model_input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS"
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert not (model_input_dir / "alias-a.tsd.forc").exists()
+
+
+@pytest.mark.parametrize(
+    "index_member",
+    [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
+    ids=["canonical", "legacy"],
+)
+def test_runtime_direct_grid_staged_size_cap_applies_to_either_index_member(
+    tmp_path: Path,
+    index_member: str,
+) -> None:
+    """B8 (#1176): the ``.tsd.forc`` read cap binds both accepted identities."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    oversized_tsd = (
+        b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
+        + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    )
+    (staged_shud_dir / index_member.rsplit("/", 1)[-1]).write_bytes(oversized_tsd)
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+    manifest["forcing"]["files"][0]["checksum"] = sha256_bytes(oversized_tsd)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+
+
+def _forcing_shud_object_dir(object_root: Path) -> Path:
+    return object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model" / "shud"
+
+
+def _write_residual_index_member(object_root: Path, member: str, *, longitude: int) -> dict[str, str]:
+    """Drop a second station-index member into an already-written package tree.
+
+    The distinguishing ``longitude`` makes the staged ``{project}.tsd.forc``
+    discriminate which member the runtime actually consumed. Returns the package
+    manifest ``files`` entry for the residual member so a test can also declare
+    it in ``forcing_package.json``.
+    """
+    content = (
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        f"1\t{longitude}\t30\t1\t1\t1\tforcing.csv\n"
+    )
+    (_forcing_shud_object_dir(object_root) / member.rsplit("/", 1)[-1]).write_text(content, encoding="utf-8")
+    return {
+        "role": "shud_forcing",
+        "relative_path": member,
+        "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{member}",
+        "checksum": sha256_bytes(content.encode("utf-8")),
+    }
+
+
+def _forcing_package_manifest_path(object_root: Path) -> Path:
+    return object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model" / "forcing_package.json"
+
+
+def _rewrite_package_manifest(
+    object_root: Path,
+    checksums: dict[str, str],
+    *,
+    transform: Any,
+) -> dict[str, str]:
+    """Mutate the published ``forcing_package.json`` in place and refresh its checksum.
+
+    The runtime verifies the package manifest against the checksum the run
+    manifest declares, so any edit to the published manifest has to be handed
+    back through the returned ``manifest_checksum``.
+    """
+    manifest_path = _forcing_package_manifest_path(object_root)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    transform(payload)
+    content = json_bytes(payload)
+    manifest_path.write_bytes(content)
+    return {**checksums, "manifest_checksum": sha256_bytes(content)}
+
+
+def _declared_package_manifest_index_members(object_root: Path) -> set[str]:
+    payload = json.loads(_forcing_package_manifest_path(object_root).read_text(encoding="utf-8"))
+    return {
+        str(entry.get("relative_path"))
+        for entry in payload.get("files") or ()
+        if entry.get("relative_path") in set(SHUD_FORCING_INDEX_MEMBERS)
+    }
+
+
+@pytest.mark.parametrize(
+    "declared_member",
+    [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
+    ids=["declares-canonical", "declares-legacy"],
+)
+def test_runtime_direct_grid_manifest_declared_member_absent_from_object_tree_fails_with_read_error(
+    tmp_path: Path,
+    declared_member: str,
+) -> None:
+    """B11 (#1176 round-1 B2): identity mismatch is diagnosable, not a bogus size cap.
+
+    The manifest declares one accepted identity while the object tree carries
+    only the other. Without the existence probe the capped read's blanket
+    ``except`` mislabels the absence as ``DIRECT_GRID_TSD_FORC_TOO_LARGE``.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+        index_member=declared_member,
+    )
+    shud_dir = _forcing_shud_object_dir(object_root)
+    other_member = _other_index_member(declared_member)
+    (shud_dir / declared_member.rsplit("/", 1)[-1]).rename(shud_dir / other_member.rsplit("/", 1)[-1])
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
+    assert declared_member in exc_info.value.message
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def _assert_staged_index_member_content(
+    model_input_dir: Path,
+    repository: FakeHydroRunRepository,
+) -> None:
+    """Both members staged, but the declared one (longitude 100) supplied the rows."""
+    staged_shud_dir = model_input_dir / "shud"
+    assert (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).is_file()
+    assert (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert "777" not in tsd_forc
+    assert (model_input_dir / "forcing.csv").exists()
+    assert repository.statuses == []
+
+
+def test_runtime_non_direct_grid_residual_member_resolves_to_package_manifest_canonical(
+    tmp_path: Path,
+) -> None:
+    """B12 (#1176 round-1 A1/A2, round-2 R1/S1): a non-direct-grid tree may hold both members.
+
+    Non-direct-grid staging copies the whole package prefix and the producer
+    never deletes, so re-producing in place over a pre-migration prefix leaves an
+    orphan legacy member. That must resolve by the manifest anchor, not fail.
+
+    Production shape: the run manifest carries no ``forcing.files`` (the chain
+    assembler never emits it), so the anchor has to come from the
+    checksum-verified ``forcing_package.json``.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
+    _write_residual_index_member(object_root, LEGACY_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert "files" not in manifest["forcing"]
+    assert _declared_package_manifest_index_members(object_root) == {CANONICAL_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+def test_runtime_non_direct_grid_residual_member_resolves_to_package_manifest_legacy(
+    tmp_path: Path,
+) -> None:
+    """B13 (#1176 round-1 A1/A2, round-2 R1/S1): the package manifest anchor beats canonical preference.
+
+    A historical legacy package plus an orphan canonical member left by a rolled
+    back produce must stage the legacy member the package manifest still
+    declares — blind canonical-first would silently consume the stale orphan.
+    Anchored on the run manifest's ``forcing.files`` this pin is vacuous, because
+    production run manifests never carry that key.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert "files" not in manifest["forcing"]
+    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+@pytest.mark.parametrize(
+    "index_member",
+    [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
+    ids=["declares-canonical", "declares-legacy"],
+)
+def test_runtime_non_direct_grid_residual_member_falls_back_to_run_manifest_anchor(
+    tmp_path: Path,
+    index_member: str,
+) -> None:
+    """B12/B13 diagnostic lane (#1176 round-2 R1/S1): run-manifest ``forcing.files`` still anchors.
+
+    ``scripts/create_qhh_shud_manifest.py`` is the only writer of
+    ``forcing.files``; when the published package manifest publishes no file
+    list at all, those diagnostic entries remain the anchor.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    _write_residual_index_member(object_root, _other_index_member(index_member), longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload.pop("files", None),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    assert manifest["forcing"]["files"][0]["relative_path"] == index_member
+    assert _declared_package_manifest_index_members(object_root) == set()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+@pytest.mark.parametrize(
+    ("keep_run_manifest_files", "index_member"),
+    [
+        (True, LEGACY_SHUD_FORCING_INDEX_MEMBER),
+        (False, CANONICAL_SHUD_FORCING_INDEX_MEMBER),
+    ],
+    ids=["run-manifest-anchor", "canonical-first-fallback"],
+)
+def test_runtime_non_direct_grid_residual_member_without_package_manifest(
+    tmp_path: Path,
+    keep_run_manifest_files: bool,
+    index_member: str,
+) -> None:
+    """#1176 round-2 R1/S1: a package-manifest-less run walks the rest of the fallback chain.
+
+    With no ``package_manifest_uri``/checksum the forcing context carries
+    ``package_manifest is None``; resolution must fall through to the run
+    manifest's entries and then to canonical-first, never raise. Both cases put
+    the residual (longitude 777) member on the branch the fallback must not
+    take.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    _write_residual_index_member(object_root, _other_index_member(index_member), longitude=777)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"].pop("package_manifest_uri")
+    manifest["forcing"].pop("package_manifest_checksum")
+    if not keep_run_manifest_files:
+        _drop_runtime_forcing_files(manifest)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+def test_runtime_non_direct_grid_package_manifest_declaring_both_members_prefers_canonical(
+    tmp_path: Path,
+) -> None:
+    """S5 pin (#1176 round-2): declaring both members is tolerated outside direct-grid.
+
+    Direct-grid fails closed on two accepted identities; the non-direct-grid lane
+    is the tolerant one — a residual double declaration is a legitimate steady
+    state, so it resolves canonical-first and the run proceeds.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
+    residual_entry = _write_residual_index_member(object_root, LEGACY_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload["files"].append(residual_entry),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == set(SHUD_FORCING_INDEX_MEMBERS)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+@pytest.mark.parametrize(
+    "index_member",
+    [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
+    ids=["canonical", "legacy"],
+)
+def test_runtime_non_direct_grid_stages_either_single_index_member(
+    tmp_path: Path,
+    index_member: str,
+) -> None:
+    """B14 (#1176 round-1 A1/A2): single-member non-direct-grid staging is untouched.
+
+    The pre-existing parametrized coverage runs the direct-grid lineage; this is
+    the non-direct-grid variant, so the widened multi-member branch cannot be
+    read as widening the single-member path too.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    model_input_dir = input_dir / "alias-a"
+    other_basename = _other_index_member(index_member).rsplit("/", 1)[-1]
+    assert not (model_input_dir / "shud" / other_basename).exists()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert (model_input_dir / "forcing.csv").exists()
+    assert repository.statuses == []
+
+
 def test_runtime_direct_grid_missing_standard_forcing_fails_without_sp_att_rewrite(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
@@ -1181,6 +1796,9 @@ def test_runtime_direct_grid_missing_standard_forcing_fails_without_sp_att_rewri
         runtime.prepare_workspace(manifest, input_dir)
 
     assert exc_info.value.error_code == "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING"
+    # B6 (#1176): the fail-closed message names both accepted identities.
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
     assert "\t2\n" in (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
     assert "\t1\n" not in (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
 
@@ -1383,7 +2001,7 @@ def test_runtime_direct_grid_tsd_forc_too_large_fails_before_staged_status(tmp_p
         / "basin_v01"
         / "demo_model"
         / "shud"
-        / "qhh.tsd.forc"
+        / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     )
     tsd_bytes = b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n" + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
     tsd_path.write_bytes(tsd_bytes)
@@ -1425,7 +2043,7 @@ def test_runtime_direct_grid_oversized_tsd_directory_member_is_bounded_before_un
         station_ids=(1,),
     )
     forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
-    tsd_path = forcing_dir / "shud" / "qhh.tsd.forc"
+    tsd_path = forcing_dir / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     oversized_tsd = (
         b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
         + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
@@ -1450,7 +2068,7 @@ def test_runtime_direct_grid_oversized_tsd_directory_member_is_bounded_before_un
         config=config,
         repository=repository,
         object_store=LocalObjectStore(config.object_store_root, config.object_store_prefix),
-        sensitive_name="qhh.tsd.forc",
+        sensitive_name=CANONICAL_SHUD_FORCING_INDEX_BASENAME,
     )
     manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
@@ -1461,7 +2079,7 @@ def test_runtime_direct_grid_oversized_tsd_directory_member_is_bounded_before_un
 
     assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
     assert runtime.unbounded_sensitive_reads == []
-    assert not (input_dir / "alias-a" / "shud" / "qhh.tsd.forc").exists()
+    assert not (input_dir / "alias-a" / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
 
 
 def test_runtime_legacy_standard_shud_forcing_reader_allows_direct_grid_sized_tsd(tmp_path: Path) -> None:
@@ -1469,7 +2087,7 @@ def test_runtime_legacy_standard_shud_forcing_reader_allows_direct_grid_sized_ts
 
     shud_dir = tmp_path / "shud"
     shud_dir.mkdir()
-    tsd_path = shud_dir / "qhh.tsd.forc"
+    tsd_path = shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     tsd_path.write_bytes(
         b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
         + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
@@ -1626,7 +2244,7 @@ def test_runtime_direct_grid_checksum_cap_uses_package_manifest_when_outer_metad
         / "basin_v01"
         / "demo_model"
         / "shud"
-        / "qhh.tsd.forc"
+        / CANONICAL_SHUD_FORCING_INDEX_BASENAME
     )
     tsd_bytes = b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n" + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
     tsd_path.write_bytes(tsd_bytes)
@@ -1677,7 +2295,7 @@ def test_runtime_direct_grid_checksum_cap_fails_during_checksum_verification(tmp
         b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
         + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
     )
-    (staged_shud_dir / "qhh.tsd.forc").write_bytes(oversized_tsd)
+    (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_bytes(oversized_tsd)
     (staged_shud_dir / "forcing.csv").write_text(
         "2\t6\t20260501\t20260501\n"
         "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
@@ -1711,14 +2329,14 @@ def test_runtime_direct_grid_checksum_cap_uses_normalized_staged_tsd_path(tmp_pa
         b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
         + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
     )
-    (staged_shud_dir / "qhh.tsd.forc").write_bytes(oversized_tsd)
+    (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_bytes(oversized_tsd)
     (staged_shud_dir / "forcing.csv").write_text(
         "2\t6\t20260501\t20260501\n"
         "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
         "0\t1\t2\t3\t4\t5\n",
         encoding="utf-8",
     )
-    manifest["forcing"]["files"][0]["relative_path"] = "./shud/qhh.tsd.forc"
+    manifest["forcing"]["files"][0]["relative_path"] = f"./{CANONICAL_SHUD_FORCING_INDEX_MEMBER}"
     manifest["forcing"]["files"][0]["checksum"] = sha256_bytes(oversized_tsd)
 
     with pytest.raises(SHUDRuntimeError) as exc_info:
@@ -1741,7 +2359,7 @@ def test_runtime_direct_grid_station_csv_checksum_is_bounded(tmp_path: Path) -> 
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     staged_shud_dir = input_dir / "shud"
     staged_shud_dir.mkdir(parents=True)
-    (staged_shud_dir / "qhh.tsd.forc").write_text(
+    (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text(
         "1 20260501\n"
         "/data\n"
         "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
@@ -1822,7 +2440,7 @@ def test_runtime_direct_grid_station_filename_collision_fails_without_overwritin
     )
     forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     shud_dir = forcing_dir / "shud"
-    (shud_dir / "qhh.tsd.forc").write_text(
+    (shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text(
         "1 20260501\n"
         "/data\n"
         "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
@@ -1836,7 +2454,7 @@ def test_runtime_direct_grid_station_filename_collision_fails_without_overwritin
     )
     (shud_dir / "alias-a.sp.att").write_bytes(collision_bytes)
     (shud_dir / "forcing.csv").unlink()
-    checksums["tsd_checksum"] = sha256_bytes((shud_dir / "qhh.tsd.forc").read_bytes())
+    checksums["tsd_checksum"] = sha256_bytes((shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_bytes())
     checksums["csv_checksum"] = sha256_bytes(collision_bytes)
     manifest_path = forcing_dir / "forcing_package.json"
     package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1886,7 +2504,7 @@ def test_runtime_direct_grid_rejects_non_csv_station_filename_before_unbounded_m
     )
     forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     shud_dir = forcing_dir / "shud"
-    (shud_dir / "qhh.tsd.forc").write_text(
+    (shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text(
         "1 20260501\n"
         "/data\n"
         "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
@@ -1903,9 +2521,9 @@ def test_runtime_direct_grid_rejects_non_csv_station_filename_before_unbounded_m
     package_manifest["files"] = [
         {
             "role": "shud_forcing",
-            "relative_path": "shud/qhh.tsd.forc",
-            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
-            "checksum": sha256_bytes((shud_dir / "qhh.tsd.forc").read_bytes()),
+            "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+            "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}",
+            "checksum": sha256_bytes((shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_bytes()),
         },
         {
             "role": "shud_forcing_csv",
@@ -1956,7 +2574,7 @@ def test_runtime_direct_grid_rejects_directoried_station_filename_before_basenam
         "0\t1\t2\t3\t4\t5\n",
         encoding="utf-8",
     )
-    (shud_dir / "qhh.tsd.forc").write_text(
+    (shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text(
         "1 20260501\n"
         "/data\n"
         "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
@@ -1968,9 +2586,9 @@ def test_runtime_direct_grid_rejects_directoried_station_filename_before_basenam
     package_manifest["files"] = [
         {
             "role": "shud_forcing",
-            "relative_path": "shud/qhh.tsd.forc",
-            "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/qhh.tsd.forc",
-            "checksum": sha256_bytes((shud_dir / "qhh.tsd.forc").read_bytes()),
+            "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+            "uri": f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}",
+            "checksum": sha256_bytes((shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_bytes()),
         },
         {
             "role": "shud_forcing_csv",
@@ -2306,7 +2924,11 @@ def test_runtime_staging_fails_closed_on_invalid_package_manifest_even_with_oute
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["../qhh.tsd.forc", "shud/../qhh.tsd.forc", "/tmp/qhh.tsd.forc"],
+    [
+        f"../{CANONICAL_SHUD_FORCING_INDEX_BASENAME}",
+        f"shud/../{CANONICAL_SHUD_FORCING_INDEX_BASENAME}",
+        f"/tmp/{CANONICAL_SHUD_FORCING_INDEX_BASENAME}",
+    ],
 )
 def test_runtime_staging_rejects_forcing_relative_path_escape(tmp_path: Path, relative_path: str) -> None:
     object_root = tmp_path / "object-store"

@@ -61,7 +61,31 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
 
 ### 5.5 输出与 lineage
 
-两种模式都输出标准 SHUD 包：`shud/qhh.tsd.forc` 与每站 CSV。站点 CSV 只包含 `Time_Day/Precip/Temp/RH/Wind/RN`；`Press` 可保留在 `met.forcing_station_timeseries`、package manifest `units` 或 lineage 元数据中，但不得写入 SHUD CSV。
+两种模式都输出标准 SHUD 包：主站点索引成员 `shud/stations.tsd.forc` 与每站 CSV。站点 CSV 只包含 `Time_Day/Precip/Temp/RH/Wind/RN`；`Press` 可保留在 `met.forcing_station_timeseries`、package manifest `units` 或 lineage 元数据中，但不得写入 SHUD CSV。
+
+#### 5.5.1 主站点索引成员身份迁移（#1176）
+
+主站点索引成员名是**流域中性的纯运输身份**，不承载任何流域证据：
+
+- **canonical**：`shud/stations.tsd.forc`（manifest `role = shud_forcing`）。producer 只产此名，所有流域一致。
+- **legacy**：`shud/qhh.tsd.forc`。历史 object-store package 不重写，runtime/消费方**只读接受**。
+- **恰一决断（fail-closed 两翼）**：direct-grid 消费方在 package manifest 与解包后的文件系统两层各自要求
+  `{canonical, legacy}` 中**恰好一个**成员。两者并存 → `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`；
+  零个（direct-grid）→ `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`，报错文本列出两个可接受身份；
+  manifest 声明的成员在对象树中缺席 → `FORCING_CHECKSUM_READ_FAILED` 点名声明成员（不是 size-limit 码）。
+  单一事实源为 `packages/common/shud_forcing_contract.py`。
+- **非 direct-grid staging 的残余成员**：该路径是全前缀递归拷贝且 producer 从不清理，原地在
+  pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按声明源
+  回退链解析：package manifest 发布非空 `files` 列表时以它为准，否则退到 run-manifest 的诊断
+  `forcing.files`；所选声明源恰一命名可接受成员则用之，否则 canonical 兜底。
+  全缺维持既有内部 forcing 回退。
+- **staged 目的地不变**：runtime 读取成员后仍写出 `{project}.tsd.forc` 到模型输入目录，
+  SHUD 模型侧命名（含 QHH 项目真资产 `data/Basins/qhh/input/qhh/qhh.tsd.forc`）不受影响。
+- **legacy 分支截止条件**：当 object store 中不再存在缺少 canonical 成员的 direct-grid package
+  （核验方式：扫描各 `forcing_package.json` 的 `files[].relative_path`，确认无 `shud/qhh.tsd.forc`），
+  legacy 读侧分支可由后续 change 移除。不设代码定时器。
+- **本次迁移只解决文件名/身份语义**：node-27 只读核验确认 18 个运行流域的 package 各自 SHA-256 不同、
+  站点 bbox 各归其域，**未发现任何跨流域 forcing 数据污染**。
 
 direct-grid lineage/package manifest 必须记录 `forcing_mapping_mode`、`spatial_mapping_method`、
 binding URI/checksum、`model_input_package_id`、`.sp.att` path/checksum、`applicable_source_ids`、

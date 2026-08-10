@@ -30,6 +30,11 @@ from packages.common.grid_signature import (
 )
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    SHUD_FORCING_INDEX_BASENAMES,
+    SHUD_FORCING_ROLE,
+)
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import CompressedChunkGuardError
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
@@ -1907,7 +1912,9 @@ class ForcingProducer:
     def _precip_to_timestep_factor(self, source_id: str, precip_product: CanonicalProduct) -> float:
         """Return the multiplier that converts canonical precip into SHUD ``PRCP`` (mm/day).
 
-        The authoritative SHUD runtime unit for ``PRCP`` read from ``qhh.tsd.forc`` is a
+        The authoritative SHUD runtime unit for ``PRCP`` read from the package's
+        station-index member (``shud/stations.tsd.forc``; legacy packages carry
+        ``shud/qhh.tsd.forc``) is a
         daily rate, ``mm/day`` (Decision A). All canonical sources (GFS/IFS/ERA5) now emit
         precip in ``mm/day``: the canonical converter rescales each per-step accumulation by
         its own actual step (``24 / step_hours``) before persisting. The producer therefore
@@ -1983,7 +1990,11 @@ class ForcingProducer:
             shud_file_payloads.append((key, content_bytes))
             shud_file_entries.append(
                 {
-                    "role": "shud_forcing" if relative_path == "shud/qhh.tsd.forc" else "shud_forcing_csv",
+                    "role": (
+                        SHUD_FORCING_ROLE
+                        if relative_path == CANONICAL_SHUD_FORCING_INDEX_MEMBER
+                        else "shud_forcing_csv"
+                    ),
                     "relative_path": relative_path,
                     "uri": uri,
                     "checksum": sha256_bytes(content_bytes),
@@ -2606,7 +2617,7 @@ def format_shud_forcing_package(
                 + "\n"
             )
         files[f"shud/{filename}"] = csv_buffer.getvalue()
-    files["shud/qhh.tsd.forc"] = tsd.getvalue()
+    files[CANONICAL_SHUD_FORCING_INDEX_MEMBER] = tsd.getvalue()
     return files
 
 
@@ -2765,7 +2776,15 @@ def _safe_station_forcing_filename(filename: str) -> bool:
 
 
 def _reserved_shud_station_filenames() -> set[str]:
-    return {"qhh.tsd.forc", "forcing_package.json", "forcing_debug.csv", "forcing.tsd.forc"}
+    # Both station-index basenames stay reserved: a station CSV must never
+    # collide with the canonical index name nor with the legacy one still
+    # carried by historical packages.
+    return {
+        *SHUD_FORCING_INDEX_BASENAMES,
+        "forcing_package.json",
+        "forcing_debug.csv",
+        "forcing.tsd.forc",
+    }
 
 
 def _validate_package_filenames(

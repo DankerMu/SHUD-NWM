@@ -28,7 +28,8 @@ manifest's ``binding_uri``), and enforces the G5 cross-artifact contract:
   reused across mapping versions (§4.2, docs §7.4);
 * ``forcing_filename`` is safe, pathless, case-fold unique, and NOT derived
   from rounded coordinates; it never collides with reserved names
-  (``qhh.tsd.forc``, ``manifest.json``, debug/model-input filenames) on
+  (``stations.tsd.forc`` and the legacy ``qhh.tsd.forc`` station-index
+  identities, ``manifest.json``, debug/model-input filenames) on
   case-insensitive filesystems (§4.2, docs §7.3);
 * station lon/lat equal the registered cell center under 12-decimal
   rounding — the same rounding used by
@@ -201,6 +202,7 @@ from packages.common.grid_signature import (
 from packages.common.grid_signature import (
     canonical_json_bytes as _shared_canonical_json_bytes,
 )
+from packages.common.shud_forcing_contract import SHUD_FORCING_INDEX_BASENAMES
 from workers.forcing_producer.direct_grid_contract import (
     DIRECT_GRID_MODE,
     DirectGridContractError,
@@ -264,12 +266,15 @@ ALLOWED_Z_POLICIES: frozenset[str] = frozenset(
 STATION_ID_SEPARATOR: str = "::cell:"
 
 #: Reserved forcing filenames that MUST NOT be produced. Anchored on docs
-#: §7.3 clause "filename must not collide with `qhh.tsd.forc`, the manifest,
-#: debug artifacts, or model-input filenames on case-insensitive
-#: filesystems". Comparison is case-insensitive at check time.
+#: §7.3 clause "filename must not collide with the canonical station-index
+#: name `stations.tsd.forc`, the legacy station-index name `qhh.tsd.forc`, the
+#: manifest, debug artifacts, or model-input filenames on case-insensitive
+#: filesystems". Both station-index basenames come from the shared authority
+#: :mod:`packages.common.shud_forcing_contract` so this set cannot drift from
+#: the producer/runtime contract. Comparison is case-insensitive at check time.
 RESERVED_FORCING_FILENAMES: frozenset[str] = frozenset(
     {
-        "qhh.tsd.forc",
+        *SHUD_FORCING_INDEX_BASENAMES,
         "manifest.json",
         "package.json",
         "resource_profile.json",
