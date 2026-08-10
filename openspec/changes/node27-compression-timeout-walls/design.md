@@ -13,7 +13,11 @@
 ## D2 — 预算链不变式(fail-closed,DB 前;fixture-r1 C4/C8/C9 后:两腿 + 余量推导)
 
 ```
-_CLEANUP_MARGIN_SECONDS = 60      # 今日 900-840 余量:reconciliation + receipt + cleanup
+_CLEANUP_MARGIN_SECONDS = 60      # 今日 900-840 余量——**强制下限,非 sizing 建议**(round-1 V2-1):
+                                  # 60s 是默认三元组下的实测口径;每 tick 最坏还有 ~320s 非 compress
+                                  # 预算(watermark/git/fetch_chunks/双 measure/reconcile,各 catalog
+                                  # 腿在锁竞争下可打满 60s cap)。追赶 sizing 指引见 runbook §4.5
+                                  # (建议 +300 headroom);抬高本常量会打破默认三元组自身的腿 1,禁改。
 _SYSTEMD_MARGIN_SECONDS = 40      # 今日 940-900 余量 = timeout 的 --kill-after=30s + 10s ε
                                   # (TERM 后最坏再 30s 才 KILL,systemd 墙必须 > wall + kill-after)
 腿 1: ceil(compress_timeout_ms / 1000) + _CLEANUP_MARGIN_SECONDS <= wrapper_wall_seconds
@@ -74,7 +78,7 @@ exec /usr/bin/timeout --signal=TERM --kill-after=30s "${WALL}s" "$PYTHON_BIN" "$
   1. 先装 systemd drop-in(`TimeoutStartSec = 声明 systemd wall`)+ `daemon-reload`;
   2. 追赶窗内 `systemctl stop` + `mask` 定时 timer(防定时 tick 读到 override env 却撞未改的 systemd 墙——b21e2453 要防的形态,C4;也防 receipt 覆写,C10);**且不得触发 supervisor/replay lane 的 compression 任务**(fixture-r2 F2:supervisor 子进程走同一 wrapper,`CHILD_ENV_ALLOWLIST` 不含 `..._ENV_FILE`,replay 子进程回落到同一默认 env 文件,而 supervisor `--wall-seconds 900` HardWall 与 replay `TimeoutStartSec=920` 不随 override 调整——override 窗内跑 replay 即 TERM-mid-DDL 的另一 lane 复刻);
   3. env 设四值:`COMPRESS_TIMEOUT_MS` / `WRAPPER_WALL_SECONDS` / `SYSTEMD_WALL_SECONDS` / `PER_TICK_BOUND=1`(C9);
-  4. dry-run tick 核选择集 → `--enforce` tick(独立 `--receipt-path`,锁路径共享,C10)→ 清理,**顺序硬性**(fixture-r3 C-r3-2):**先删 env override**,再 unmask timer、撤 drop-in、恢复默认 receipt 路径——若先撤 drop-in/unmask 而 override 残留,定时 tick 会以 wall=1900 通过 Python 腿 2(声明 1940)却撞回落为 940 的 systemd 实墙,正是 b21e2453 的 TERM-mid-DDL;整个追赶流程不得在 override 残留状态下结束(残留亦重臂 F2 的 replay 风险)。
+  4. dry-run tick 核选择集 → `--enforce` tick(独立 `--receipt-path`,锁路径共享,C10)→ 清理,**顺序硬性**(fixture-r3 C-r3-2):**先删 env override**,再 unmask timer、撤 drop-in,并确认下一次默认 tick 写回默认 receipt 路径(round-1 V1-2:catch-up receipt 是 per-invocation `--receipt-path`,无需"恢复")——若先撤 drop-in/unmask 而 override 残留,定时 tick 会以 override wall(runbook 示例 2100,声明 2140)通过 Python 腿 2 却撞回落为 940 的 systemd 实墙,正是 b21e2453 的 TERM-mid-DDL;整个追赶流程不得在 override 残留状态下结束(残留亦重臂 F2 的 replay 风险)。runbook 追赶示例经 round-1 V2-1 改为 headroom 口径(+300,2100/2140),+60 仅为强制下限。
   人工静默窗 `SET statement_timeout=0; SELECT compress_chunk(...)` 明示为**最后手段**。supervisor/replay lane 代码零改动(Non-Goal)——共享 env 文件耦合只以 runbook 顺序纪律覆盖,并在 PR 中登记为已知残余。
 - **作用域划界**:对 **:1261**——该禁令属一次性 gated first-enforce 取证协议(取证期),新小节属事故追赶期,互不覆盖,两处互相引用。
 

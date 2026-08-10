@@ -24,6 +24,8 @@ node-27 压缩 runner 的三层超时预算全部硬编码:`_COMPRESS_TIMEOUT_MS
 - 文档:runbook(新小节 + :1261 划界;详见 What Changes 末条)。
 - 远端:node-27 实机 receipt 两阶段(design D7:阶段 A 合并前 clone 自身 wrapper + 生产解释器 override(`..._PYTHON`,provenance-safe)dry-run 零突变;阶段 B 合并后生产树 enforce tick,PR 评论补录;无大 chunk 时以传播实证替代并记偏离——不制造 333 GB chunk)。
 - **已知残余(r2 F2,登记不修)**:supervisor/replay lane 的 compression 子任务走同一 wrapper 且回落同一默认 env 文件(`CHILD_ENV_ALLOWLIST` 不含 `..._ENV_FILE`),override 窗内触发 replay 会撞未调整的 supervisor HardWall/`TimeoutStartSec=920`——以 runbook 强制顺序(override 窗内禁 replay + override 删除为硬性最后一步)覆盖,supervisor 代码零改动(Non-Goal)。
+- **已知残余(round-1 V2-2,登记不修)**:`openspec/changes/tier-node27-timeseries-storage/design.md:974-975`(他变更的 Round-2 冻结审结记录)仍写字面 `900s` wrapper——按 DOC_STATUS rung 1 以合入代码为准,该行属 audit-only 冻结上下文,本 PR 不改写他变更设计文档;在此登记分歧(DOC_STATUS :107-108 要求记录而非静默)。
+- **已知残余(round-1 V3-1,DEFER 路由跟踪 issue)**:三个预算值可 env 覆盖后 receipt 不再记录预算(schema `additionalProperties:false`,issue Out-of-scope 明禁改 schema)——审计归因缺口路由至跟进 issue #1351(additive optional budget 对象 + schema 分支 + 消费者容差)。
 
 ## Non-Goals(issue 边界复述)
 

@@ -31,6 +31,14 @@ NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=5
 # and the wrapper refuses to launch on a non-positive-integer wall. The
 # defaults satisfy both legs exactly: 840 + 60 = 900 and 900 + 40 = 940.
 #
+# The "+ 60" in leg 1 is the enforced FLOOR, not a sizing recipe. A tick also
+# pays for the watermark lookup, two 10 s git probes, catalog enumeration, a
+# size measurement before and after the compress, and a reconcile probe on the
+# error path — each a 10 s connect plus a statement capped at 60 s, i.e. up to
+# ~300 s of non-compress budget under lock contention. When you raise these
+# values for a catch-up, budget ceil(COMPRESS_TIMEOUT_MS/1000) + 300 or more
+# for the wrapper wall, e.g. 1800000 ms -> 2100 -> 2140.
+#
 # Per-chunk `SET statement_timeout` for compress_chunk, in milliseconds.
 # Default 840000 = 14 minutes. Minimum 1000.
 NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=840000
