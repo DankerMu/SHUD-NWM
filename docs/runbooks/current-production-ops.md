@@ -1602,9 +1602,11 @@ uses GIS segment ids directly, some segments can appear to have no flow.
 
 判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
 调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带两个
-`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（fail-closed，index 未改）
-或 `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193，index 可能已提交）——
-`details.error` 是具体的 state-manager reason：
+`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（pre-commit fail-closed，
+另含尚未分流的 `replace_uncertain` 族，见下面的判读口径）或
+`OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193，index 可能已提交）——
+`details.details.error` 是具体的 reason（provider_atomic 或 state-manager 的都可能；
+`..._COMMIT_UNCERTAIN` 另有 `details.details.error_reason`）：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
@@ -1626,8 +1628,13 @@ uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entrie
   "未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已包含本批 entry、
   以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再幂等重跑 stage
   或走下面的 replay 补账；出现收缩就按下面 exit 3 的
-  `destination_entries_lost_after_merge` 分支停手。`..._FAILED` 才是"index 未改"的
-  fail-closed 形态。
+  `destination_entries_lost_after_merge` 分支停手。
+- `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED` 覆盖 pre-commit fail-closed，**以及尚未分流的
+  `replace_uncertain` 族**（`provider_replace_uncertain`/`provider_postread_failed`：分流只认
+  phase 为 `release_uncertain` 的 ProviderAtomicError，这两个被包成 StateManagerError 后仍落
+  `..._FAILED`，此时 index 可能已提交；replay 侧同样按 commit-uncertain 处理）。看到
+  `..._FAILED` 且 `details.details.error` 是这两个 reason 之一时，同样先核 shared index 的
+  `entry_count` 再处置；其余 `..._FAILED` 才按"未提交"幂等重跑。
 - `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
   **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
   `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
@@ -1693,7 +1700,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 | exit | stderr `status` | 含义 | 处置 |
 |---|---|---|---|
 | 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
-| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁类/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁**获取**类（`provider_lock_unavailable`/`provider_lock_changed` 等，**不含**释放期的 `provider_lock_release_failed`——那是 exit 3）/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
 | 3 | `merge_committed_incomplete` | merge **已提交或不能证明未提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
 
 exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命中多个，stderr 的 `reason`

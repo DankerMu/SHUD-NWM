@@ -152,3 +152,11 @@ merge 侧把释放失败降级为返回值 warning（issue 备选）：调用方
 
 - 选用：`exception-semantics`（屏蔽方向、finally 改写）、`operator-evidence-contract`（rc/status/receipt 二分）、`cross-module-blast-radius`（兄弟锁点审计）。
 - 未选：`db-migration`/`display-boundary`（零触面）、`concurrency`（锁获取侧不动，#1192）、`perf`（无热路径变化）。
+
+## Review round 1 裁决记录（text-only closure）
+
+- **A1（P2，FIX_NOW 文本 + DEFER 代码）**：runbook 新增判读句把 `…_FAILED` 一律说成"index 未改"——`replace_uncertain` 族（`provider_replace_uncertain`/`provider_postread_failed`）被包成 StateManagerError 后自然路径仍落 `…_FAILED`，但 index 可能已提交。文本已收窄（§8.8 lead + triage bullet）；代码侧加宽分流判别属 pre-existing 缺口且超出本 fixture 范围（D2 明示 replace_uncertain 族不受分流影响、Must-preserve 钉 `…_FAILED` 非 release_uncertain 路径语义），路由 issue-scribe 立案。
+- **FB1（P2，FIX_NOW）**：spec delta 补 `## MODIFIED Requirements`——replay 需求"Untyped merge exceptions"场景的 WHEN 例证原文举"锁 teardown 裸 OSError"，本 change 后该例已 typed 化，例证更新为通用 merge-internals 裸异常并注明锁 teardown 不再是例子。
+- **FB2/FB3（P3，FIX_NOW）**：runbook exit-2 行"锁类"收窄为"锁获取类（不含 `provider_lock_release_failed`）"；`details.error` 字段路径修正为 `details.details.error`（顺带消掉 pre-existing 措辞偏差残余）。
+- **A2（DISCARD）**：释放失败时 parent_fd 恒关顺带修复 master 上 unlock 失败即跳过 parent close 的 pre-existing 泄漏——这正是 fixture Must-preserve 的 fd 不泄漏硬不变式（B1b 钉），非未声明扩权。
+- **A3（DISCARD）**：body 异常在途时 quiet-close 吞掉的释放错零痕迹（无日志）——B5 屏蔽方向钉的直接推论，fixture 认可的取舍；加日志属可观测性扩面，不在范围。
