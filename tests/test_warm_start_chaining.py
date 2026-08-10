@@ -3140,3 +3140,113 @@ def test_state_save_total_miss_root_blocks_a_later_roots_final_ic_fallback(tmp_p
     assert str(exc_info.value) == _gate_uncaptured_message(workspace_manifest, [6, 12])
     assert manager.saved == []
     assert manager.qc_runs == []
+
+
+def test_state_save_escaping_declared_path_never_yields_to_a_healthy_sibling(tmp_path: Path) -> None:
+    """A5(e) (AC-5): a path-ESCAPING declared entry stays a hard error next to a healthy root.
+
+    Covers the per-root gate path
+    ``_verify_state_source_root`` -> ``_verify_declared_checkpoints`` ->
+    ``_declared_artifact_state``, i.e. the containment raise inside
+    ``_declared_artifact_state`` — NOT the sibling copy of the same text in
+    ``_load_state_checkpoint_manifest`` (that one runs post-admission, on the
+    already-verified root). Previously untested geometry: an implementation that
+    re-classed this raise into a ``_StateSourceRejection`` would let the loop
+    fall through and PUBLISH the object-store sibling behind a manifest that
+    points outside its own output tree, and every other floor anchor would still
+    pass.
+
+    The escape target is written with a matching checksum on purpose: the reject
+    must be earned by the declared path's SHAPE, not by the file being absent or
+    drifted.
+    """
+
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    escape_valid_time = _dt(GATE_CYCLE_TIME) + timedelta(hours=6)
+    escape_content = _gate_ic_text(escape_valid_time, surface="0.6")
+    (workspace_root.parent / "escape.cfg.ic.update").write_text(escape_content, encoding="utf-8")
+    _write_gate_manifest(
+        workspace_root,
+        {
+            "checkpoints": [
+                {
+                    "lead_hours": 6,
+                    "valid_time": _format_time_for_test(escape_valid_time),
+                    "relative_path": "../escape.cfg.ic.update",
+                    "checkpoint_filename": "escape.cfg.ic.update",
+                    "checksum": sha256_bytes(escape_content.encode("utf-8")),
+                }
+            ],
+            "provenance": _gate_provenance(requested_hours=(6,)),
+        },
+    )
+    object_root = _gate_object_output(tmp_path)
+    f006 = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value) == "State checkpoint path escapes output directory: ../escape.cfg.ic.update"
+    assert manager.saved == []
+    assert manager.qc_runs == []
+
+
+def test_state_save_oversized_declared_artifact_never_yields_to_a_healthy_sibling(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """A5(f) (AC-5): an OVERSIZED declared artifact stays a hard error next to a healthy root.
+
+    Covers the bounded read inside ``_declared_artifact_state``
+    (``_read_limited_bytes_no_follow`` under the ``state checkpoint IC file``
+    label). Previously untested geometry: folding that ``StateManagerError``
+    into a ``_StateSourceRejection`` would fall through to the object-store
+    sibling and publish it, hiding that the first root declares an artifact the
+    publish path refuses to read.
+
+    The limit is patched AFTER the builders have hashed their content, so the
+    bound under test is the gate's, not the fixture's; it sits between the two
+    roots' file sizes so the sibling stays genuinely publishable — that is what
+    makes ``manager.saved == []`` an assertion rather than a tautology.
+    """
+
+    from packages.common import state_cli
+    from packages.common.state_manager import StateManagerError
+
+    workspace_root = _gate_workspace_output(tmp_path)
+    oversized_entry = _write_gate_checkpoint(workspace_root, 6)
+    oversized_path = workspace_root / str(oversized_entry["relative_path"])
+    oversized_bytes = oversized_path.read_bytes() + b"9 0.0\n" * 512
+    oversized_path.write_bytes(oversized_bytes)
+    oversized_entry["checksum"] = sha256_bytes(oversized_bytes)
+    _write_gate_manifest(
+        workspace_root,
+        {"checkpoints": [oversized_entry], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    object_root = _gate_object_output(tmp_path)
+    f006 = _write_gate_checkpoint(object_root, 6)
+    _write_gate_manifest(
+        object_root,
+        {"checkpoints": [f006], "provenance": _gate_provenance(requested_hours=(6,))},
+    )
+    limit = 1024
+    assert len(oversized_bytes) > limit
+    assert (object_root / str(f006["relative_path"])).stat().st_size < limit
+    monkeypatch.setattr(state_cli, "MAX_STATE_IC_BYTES", limit)
+    manager = _gate_manager(tmp_path)
+
+    with pytest.raises(StateManagerError) as exc_info:
+        _gate_save(tmp_path, manager, output_uri=f"s3://nhms/runs/{GATE_RUN_ID}/output/")
+
+    assert str(exc_info.value) == (
+        f"state checkpoint IC file exceeds size limit of {limit} bytes: {oversized_path}"
+    )
+    assert manager.saved == []
+    assert manager.qc_runs == []

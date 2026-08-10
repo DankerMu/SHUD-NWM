@@ -2326,6 +2326,58 @@ def test_state_checkpoint_manifest_rejects_symlink_checkpoint_ic(
     assert repository.snapshots == {}
 
 
+def test_state_checkpoint_manifest_rejects_escaping_declared_path(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    """A declared ``..`` path is a hard reject, pinned on the VERBATIM message.
+
+    Sibling of the symlink case above and the other half of the containment
+    guard in ``state_cli._declared_artifact_state``: the symlink branch had a
+    pin, the escape branch had none anywhere in the repo, so a mutation that
+    downgraded it (to a typed fall-through reason, or to a "missing" verdict)
+    passed the whole floor. Single root (``output_uri=None``) keeps this pin on
+    the message itself; the two-root fall-through geometry is pinned in
+    ``tests/test_warm_start_chaining.py``.
+    """
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    escape_bytes = _valid_ic_bytes(b"manifest-escape-target")
+    (output_dir.parent / "escape.cfg.ic.update").write_bytes(escape_bytes)
+    _write_witness_state_manifest(
+        output_dir,
+        run_id=run_id,
+        requested_hours=[12],
+        checkpoints=[
+            {
+                "relative_path": "../escape.cfg.ic.update",
+                "valid_time": "2026-05-21T18:00:00Z",
+                "checkpoint_filename": "escape.cfg.ic.update",
+                "checksum": sha256_bytes(escape_bytes),
+                "lead_hours": 12,
+            }
+        ],
+    )
+    run = state_cli.StateRunContext(
+        run_id=run_id,
+        model_id="model_a",
+        end_time=_dt("2026-05-21T18:00:00Z"),
+        output_uri=None,
+        source_id="gfs",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+    )
+
+    with pytest.raises(StateManagerError) as exc_info:
+        state_cli.save_state_for_run(run_id, manager=manager, run_context=run, workspace_root=workspace)
+
+    assert str(exc_info.value) == "State checkpoint path escapes output directory: ../escape.cfg.ic.update"
+    assert repository.snapshots == {}
+
+
 @pytest.mark.parametrize("case_name", ["oversized", "symlink"])
 def test_state_checkpoint_manifest_read_is_bounded_no_follow(
     monkeypatch: Any,
