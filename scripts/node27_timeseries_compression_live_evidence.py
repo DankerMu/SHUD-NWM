@@ -359,7 +359,8 @@ INVOCATION_ARGV: Mapping[str, list[str]] = {
 }
 # Frozen archival-evidence contract; documents the wall at capture time,
 # deliberately NOT derived from the runner default. The wrapper's wall is
-# operator-configurable since issue #1156 (`"${WALL}s"`, default 900), but the
+# operator-configurable since issue #1156 (`"${WALL}s"`, default 3900 since
+# issue #1352), but the
 # expected `launcher_argv` of an already-captured bundle is history and must
 # not move with the live default.
 _TIMEOUT_PREFIX = [

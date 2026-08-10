@@ -2170,14 +2170,24 @@ check cannot flake on autovacuum or parallel-worker noise.
 
 ### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
 
-An oversized terminal chunk — the 2026-07-25/26 incident chunk was 333 GB and
-took roughly 20 minutes — cannot pass the automated lane at the default
-budget: the per-chunk statement timeout is 14 minutes, and because selection is
-oldest-first (`ORDER BY range_end ASC`, then `eligible[:per_tick_bound]`) that
-one chunk is re-selected every tick and burns the whole tick, blocking
-everything behind it. Since `#1156` the three walls are operator-configurable
-through the single compression env file, so the fix is a bounded override
-window rather than a manual `statement_timeout = 0` DDL.
+A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
+automated lane, and because selection is oldest-first (`ORDER BY range_end
+ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
+tick and burns the whole tick, blocking everything behind it. Since `#1156` the
+three walls are operator-configurable through the single compression env file,
+so the fix is a bounded override window rather than a manual
+`statement_timeout = 0` DDL.
+
+**The defaults already cover the steady state — check before you override.**
+`#1352` resized them to `3600000` ms / `3900` s / `3940` s against measured
+node-27 numbers: compressing `hydro.river_timeseries` chunk
+`_hyper_3_32_chunk` (268 GB) took 1607 s on 2026-08-10, i.e. **~6.0 s/GB**, and
+`chunk_compression_stats` puts steady-state weekly chunks of that hypertable at
+268–409 GB (1600–2450 s). The 60-minute default therefore covers ~600 GB, about
+1.5× the largest chunk observed to date, and the 2026-07-25/26 incident chunk
+(333 GB, roughly 20 minutes) would pass unaided today. Override only for a
+chunk that measures beyond that envelope — first estimate it as
+`pg_total_relation_size / 1 GB × 6 s` and compare against the 3600 s ceiling.
 
 **Runner wall ≠ supervisor wall.** This section tunes the *recurring runner*
 lane: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`, consumed by
@@ -2192,9 +2202,9 @@ knob; nothing here changes them, and they do not follow this env file.
 
 |variable|catch-up value|rule|
 |---|---|---|
-|`NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (e.g. `1800000` for a 20-minute chunk)|minimum 1000|
-|`NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|`ceil(COMPRESS_TIMEOUT_MS/1000) + 60` is the enforced **floor**, not the sizing recipe — budget real headroom, `+300` or more (e.g. `2100`)|leg 1 of the invariant|
-|`NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|`WRAPPER_WALL_SECONDS + 40` or more (e.g. `2140`)|leg 2; a **declared** value — it must equal the drop-in you actually installed|
+|`NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (e.g. `5400000` for a 900 GB chunk at ~6.0 s/GB)|minimum 1000; must exceed the `3600000` default or there is nothing to override|
+|`NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|`ceil(COMPRESS_TIMEOUT_MS/1000) + 60` is the enforced **floor**, not the sizing recipe — budget real headroom, `+300` or more (e.g. `5700`)|leg 1 of the invariant|
+|`NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|`WRAPPER_WALL_SECONDS + 40` or more (e.g. `5740`)|leg 2; a **declared** value — it must equal the drop-in you actually installed|
 |`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|the invariant bounds ONE chunk's budget; a second chunk in the same tick still dies on the wall|
 
 The runner refuses to open a database connection if either leg is violated, and
@@ -2214,7 +2224,7 @@ genuinely reachable under lock contention on this node (§8.6 documents the same
 seconds of non-compress budget, so a wall sized at `compress + 60` can `TERM`
 the tick *after* a successful compress, during measurement or reconcile, and
 lose the receipt. Size the wall at `ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or
-more for a catch-up; the example row above (`1800000` ms → `2100` → `2140`)
+more for a catch-up; the example row above (`5400000` ms → `5700` → `5740`)
 uses that shape.
 
 **Mandatory ordering.** The steps are ordered against a specific failure mode
@@ -2225,14 +2235,14 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 
    ```bash
    sudo mkdir -p /etc/systemd/system/nhms-node27-timeseries-compression.service.d
-   printf '[Service]\nTimeoutStartSec=2140\n' | \
+   printf '[Service]\nTimeoutStartSec=5740\n' | \
      sudo tee /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
    sudo systemctl daemon-reload
    systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
    ```
 
-   The last line must report the new wall; the committed unit still ships
-   `TimeoutStartSec=940` and the repository is not edited for a catch-up.
+   The last line must report the new wall; the committed unit ships
+   `TimeoutStartSec=3940` and the repository is not edited for a catch-up.
 2. **Stop and mask the timer for the whole window**, and keep the other
    compression lanes out of it:
 
@@ -2286,7 +2296,7 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    were per-invocation `--receipt-path` files; nothing restores itself).
    Removing the drop-in or unmasking the timer while the env override is still
    in place leaves exactly the b21e2453 configuration — a tick that passes the
-   Python leg-2 check against a declared 2140 and then hits the real 940
+   Python leg-2 check against a declared 5740 and then hits the real 3940
    mid-DDL — and it re-arms the replay-lane hazard from step 2. **The catch-up
    is not finished while any override residue exists**; verify with both:
 
@@ -2294,7 +2304,7 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    # env file byte-identical to the pre-window snapshot (no output = clean)
    diff ~/node27-compression-env.pre-catchup \
      /home/nwm/NWM/infra/env/node27-timeseries-compression.env
-   # real systemd wall back to the committed 940 s
+   # real systemd wall back to the committed 3940 s
    systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
    ```
 

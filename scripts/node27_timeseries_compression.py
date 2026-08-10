@@ -69,10 +69,20 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # The three-layer budget chain (per-chunk statement timeout inside the
 # wrapper's ``timeout`` wall inside systemd's ``TimeoutStartSec``) is no
 # longer hardcoded: each layer is operator-configurable through the single
-# compression env file (issue #1156), and the defaults below are byte
-# identical to the previously hardcoded 840000 ms / 900 s / 940 s. A single
-# oversized chunk therefore no longer needs a manual ``statement_timeout=0``
-# DDL to get through the automated lane.
+# compression env file (issue #1156). A single oversized chunk therefore no
+# longer needs a manual ``statement_timeout=0`` DDL to get through the
+# automated lane.
+#
+# The defaults are sized for the 17-basin dual-source production régime rather
+# than for the pre-production régime the original 840000 ms / 900 s / 940 s
+# came from (issue #1352). Measured on node-27 2026-08-10: compressing
+# ``_hyper_3_32_chunk`` (268 GB) took 1607 s, i.e. ~6.0 s/GB, and
+# ``chunk_compression_stats`` puts steady-state weekly chunks of
+# ``hydro.river_timeseries`` at 268-409 GB — every one of them needs
+# 1600-2450 s. The old 840 s per-chunk ceiling could not compress a single
+# steady-state chunk, and because selection is oldest-first that chunk is
+# re-selected and burns every subsequent tick. 3600000 ms covers 600 GB at the
+# measured rate, ~1.5x the largest chunk observed to date.
 #
 # ``config_from_args`` enforces the chain over whatever the operator
 # configures, before any database connection is opened:
@@ -85,11 +95,13 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 #          — ``timeout --signal=TERM --kill-after=30s`` may need a further
 #            30 s to escalate to KILL, so the systemd wall must sit above the
 #            wrapper wall by that plus a 10 s epsilon.
-# The defaults satisfy both legs exactly (840 + 60 = 900; 900 + 40 = 940).
+# The defaults clear leg 1 with the 300 s of non-compress budget a real tick
+# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor) and satisfy leg 2
+# exactly (3900 + 40 = 3940).
 #
 # The invariant bounds ONE chunk's budget, not a whole tick: a tick may
 # compress up to ``per_tick_bound`` chunks under the same wrapper wall, so a
-# catch-up window that raises these values must also set
+# deployment whose chunks approach the per-chunk ceiling must also set
 # ``NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1``.
 #
 # ``systemd_wall_seconds`` is a DECLARED value — this process cannot read the
@@ -98,10 +110,10 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 # ``infra/env/node27-timeseries-compression.example`` and runbook §4.5
 # ("大 chunk 追赶") of docs/runbooks/tier-node27-timeseries-storage.md.
 _QUERY_TIMEOUT_MS = 60_000
-_DEFAULT_COMPRESS_TIMEOUT_MS = 840_000
+_DEFAULT_COMPRESS_TIMEOUT_MS = 3_600_000
 _MIN_COMPRESS_TIMEOUT_MS = 1_000
-_DEFAULT_WRAPPER_WALL_SECONDS = 900
-_DEFAULT_SYSTEMD_WALL_SECONDS = 940
+_DEFAULT_WRAPPER_WALL_SECONDS = 3_900
+_DEFAULT_SYSTEMD_WALL_SECONDS = 3_940
 _CLEANUP_MARGIN_SECONDS = 60
 _SYSTEMD_MARGIN_SECONDS = 40
 _CONNECT_TIMEOUT_SECONDS = 10
@@ -217,7 +229,7 @@ def _parse_positive_int_with_default(
 
     This is deliberately looser than the mandatory ``LAG_SECONDS`` /
     ``PER_TICK_BOUND`` semantics and deliberately identical to the shell
-    ``${VAR:-900}`` the wrapper uses — both sides must treat the empty string
+    ``${VAR:-3900}`` the wrapper uses — both sides must treat the empty string
     the same way or the single source of truth drifts. Anything else present
     goes through the same strict ``_parse_positive_int`` and fails closed.
     """
@@ -536,7 +548,7 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_time
     # ``compress_timeout_ms`` is keyword-only with NO default: the assembly
     # point in ``main()`` binds it with ``functools.partial`` from the parsed
     # config, and forgetting to do so must raise TypeError rather than
-    # silently fall back to the historical 840000 ms ceiling. The value is a
+    # silently fall back to any hardcoded ceiling. The value is a
     # ``_parse_positive_int`` product (an int), so the interpolation below has
     # no injection surface. ``CompressChunk`` stays a two-argument protocol.
     import psycopg2  # type: ignore[import-untyped]
