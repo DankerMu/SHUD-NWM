@@ -29887,6 +29887,177 @@ def test_db_free_slurm_storage_root_check_treats_symlink_loop_behind_missing_as_
     assert blocker["path"] == str(loop)
 
 
+# --- Issue #1345: allowed storage roots use the strict-realpath errno split ---
+
+_ALLOWED_ROOTS_UNSAFE_CODE = "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"
+
+
+def _allowed_roots_config(
+    *roots: Path,
+    workspace_root: Path,
+    db_free_required: bool = False,
+) -> Any:
+    """Stand-in exposing only the three attributes the seam reads.
+
+    ``ProductionSchedulerConfig`` canonicalises allowed roots with a non-strict
+    ``Path.resolve()`` of its own at construction time, a separate <=3.12 crash
+    site; this stub keeps the errno lanes of the preflight seam hermetic and
+    version-stable. The end-to-end anchor below still runs the real config.
+    """
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        allowed_storage_roots=tuple(roots),
+        workspace_root=workspace_root,
+        db_free_required=db_free_required,
+    )
+
+
+def test_preflight_allowed_roots_excludes_symlink_loop_root_with_blocker(tmp_path: Path) -> None:
+    # ELOOP is not absence: the root is dropped from the effective allowed roots
+    # and the reason is reported, instead of being admitted as a phantom
+    # containment base (non-strict resolution stopped raising on CPython 3.13+).
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _allowed_roots_config(loop, approved, workspace_root=approved)
+
+    roots, blockers = scheduler_module._preflight_allowed_roots(config)
+
+    assert roots == (Path(os.path.realpath(approved)),)
+    assert str(loop) not in {str(root) for root in roots}
+    assert len(blockers) == 1
+    assert blockers[0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert blockers[0]["field"] == "allowed_storage_roots"
+    assert blockers[0]["path"] == str(loop)
+
+
+def test_preflight_allowed_roots_excludes_not_a_directory_root_with_blocker(tmp_path: Path) -> None:
+    # errno binary pin: the verdict is "not ENOENT", not "only ELOOP". A regular
+    # file mid-path yields ENOTDIR on every supported CPython without symlinks.
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    regular_file = tmp_path / "file.txt"
+    regular_file.write_text("not a directory", encoding="utf-8")
+    not_a_dir_root = regular_file / "root"
+    config = _allowed_roots_config(not_a_dir_root, approved, workspace_root=approved)
+
+    roots, blockers = scheduler_module._preflight_allowed_roots(config)
+
+    assert roots == (Path(os.path.realpath(approved)),)
+    assert str(not_a_dir_root) not in {str(root) for root in roots}
+    assert len(blockers) == 1
+    assert blockers[0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert blockers[0]["field"] == "allowed_storage_roots"
+    assert blockers[0]["path"] == str(not_a_dir_root)
+
+
+def test_preflight_allowed_roots_keeps_db_free_lexical_fallback_for_symlink_loop(tmp_path: Path) -> None:
+    # Discriminator against the anchor above: the db-free arm keeps the PR #831
+    # lexical tolerance (an unmounted NFS root is legitimate configuration), so
+    # the same loop root is admitted and produces no blocker.
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _allowed_roots_config(loop, workspace_root=tmp_path, db_free_required=True)
+
+    roots, blockers = scheduler_module._preflight_allowed_roots(config)
+
+    assert roots == (loop,)
+    assert blockers == []
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+def test_preflight_allowed_roots_admits_missing_root_without_blocker(
+    tmp_path: Path,
+    db_free_required: bool,
+) -> None:
+    # ENOENT keeps the pre-existing "legitimate missing root" semantics on both
+    # arms: admitted through the non-strict fallback, never a blocker.
+    missing = tmp_path / "not-created-yet"
+    config = _allowed_roots_config(missing, workspace_root=tmp_path, db_free_required=db_free_required)
+
+    roots, blockers = scheduler_module._preflight_allowed_roots(config)
+
+    assert roots == (Path(os.path.realpath(missing)),)
+    assert blockers == []
+
+
+def test_preflight_allowed_roots_admits_loop_behind_missing_component_without_raising(
+    tmp_path: Path,
+) -> None:
+    # Crash lane: the strict walk aborts with ENOENT on the missing `gone`
+    # component, so the fallback must be non-strict `os.path.realpath` --
+    # `Path.resolve()` would raise an errno-less RuntimeError on <=3.12 once the
+    # `..` collapse lands on the loop.
+    loop = tmp_path / "loopdir"
+    loop.symlink_to(loop)
+    loop_behind_missing = tmp_path / "gone" / ".." / "loopdir"
+    config = _allowed_roots_config(loop_behind_missing, workspace_root=tmp_path)
+
+    roots, blockers = scheduler_module._preflight_allowed_roots(config)
+
+    assert roots == (Path(os.path.realpath(loop)),)
+    assert blockers == []
+
+
+def test_preflight_allowed_roots_dedupes_and_falls_back_to_workspace_root(tmp_path: Path) -> None:
+    # Invariants preserved across the return-shape upgrade.
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    duplicated = _allowed_roots_config(approved, approved, workspace_root=approved)
+    empty = _allowed_roots_config(workspace_root=approved)
+
+    deduped_roots, deduped_blockers = scheduler_module._preflight_allowed_roots(duplicated)
+    fallback_roots, fallback_blockers = scheduler_module._preflight_allowed_roots(empty)
+
+    assert deduped_roots == (Path(os.path.realpath(approved)),)
+    assert deduped_blockers == []
+    assert fallback_roots == (Path(os.path.realpath(approved)),)
+    assert fallback_blockers == []
+
+
+def test_slurm_preflight_symlink_loop_allowed_root_blocks_with_root_cause_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end assembly: the unresolvable root must not reach the evidence
+    # surface, and its blocker must sit at index 0 because the evidence consumer
+    # reads `blockers[0]` as the error code -- otherwise the cascaded
+    # `WORKSPACE_ROOT_OUT_OF_ROOT` buries the root cause.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path / "allowed-loop",),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    # The loop is materialised after construction on purpose: the config layer
+    # still canonicalises allowed roots with a non-strict `Path.resolve()`
+    # (scheduler_runtime_roots.py:505), which raises RuntimeError on <=3.12 for
+    # an already-looping root. That site is out of scope here.
+    configured_loop = config.allowed_storage_roots[0]
+    configured_loop.symlink_to(configured_loop)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
+    assert preflight["blockers"][0]["path"] == str(configured_loop)
+    assert preflight["checks"]["allowed_roots"] == []
+    # Fail-closed by construction: with no effective root left, every storage
+    # root falls out instead of being measured against a phantom base.
+    assert "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT" in {
+        blocker["code"] for blocker in preflight["blockers"]
+    }
+
+
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
     monkeypatch: Any,
     tmp_path: Path,

@@ -513,21 +513,53 @@ def _is_unsafe_numeric_ipv4_like_host(host: str) -> bool:
     return _database_host_ip_address(host) is None
 
 
-def _preflight_allowed_roots(config: Any) -> tuple[Path, ...]:
+def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[str, Any]]]:
+    """Resolve the configured allowed storage roots and report unsafe ones.
+
+    Strict resolution + errno split, same paradigm as ``_storage_root_check``:
+    a symlink loop no longer raises from non-strict resolution on CPython
+    3.13+, so the unsafe verdict comes from the kernel errno. ENOENT is NOT
+    unsafe - a merely missing root (db-free NFS not mounted, or simply not
+    created yet) keeps the historical "admitted" semantics on both arms and
+    never produces a blocker. Any other errno is unsafe on database-backed
+    runtimes: the root is dropped from the effective allowed roots so it can
+    never serve as a phantom containment base, and a blocker explains why.
+    """
+
     roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
+    db_free = bool(getattr(config, "db_free_required", False))
     resolved: list[Path] = []
+    blockers: list[dict[str, Any]] = []
     for root in roots:
+        expanded = root.expanduser()
         try:
-            candidate = root.expanduser().resolve()
-        except (OSError, RuntimeError):
-            if not bool(getattr(config, "db_free_required", False)):
-                raise
-            candidate = root.expanduser()
-            if not candidate.is_absolute():
-                candidate = Path.cwd() / candidate
+            candidate = Path(os.path.realpath(expanded, strict=True))
+        except OSError as error:
+            if getattr(error, "errno", None) == ENOENT:
+                # Non-strict os.path.realpath() never raises on 3.11-3.14;
+                # Path.resolve() would raise an errno-less RuntimeError on
+                # <=3.12 when the `..`-collapsed tail meets a symlink loop
+                # behind the missing component (e.g. `gone/../loopdir`).
+                candidate = Path(os.path.realpath(expanded))
+            elif db_free:
+                # PR #831 lexical-fallback tolerance, kept verbatim: on db-free
+                # runtimes an unresolvable root is legitimate configuration.
+                candidate = expanded
+                if not candidate.is_absolute():
+                    candidate = Path.cwd() / candidate
+            else:
+                blockers.append(
+                    {
+                        "code": "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH",
+                        "field": "allowed_storage_roots",
+                        "path": str(expanded),
+                        "message": "Slurm allowed storage root must be canonically resolvable.",
+                    }
+                )
+                continue
         if candidate not in resolved:
             resolved.append(candidate)
-    return tuple(resolved)
+    return tuple(resolved), blockers
 
 
 def _storage_root_check(
