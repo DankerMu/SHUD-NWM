@@ -117,7 +117,9 @@ GFS APCP 转换流程：
 
 GFS forcing package 的 `start_time/end_time` 表示覆盖窗口，不等同于最后一行时间。168h 预报应写成 `row_time_range = 0..165h`、`time_range/end_time = 168h`；最后一行 `165h` 覆盖 `165-168h`。
 
-SHUD `qhh.tsd.forc` 引用的单站 forcing CSV 中，`Time_Day` 必须使用相对 forcing `start_time` 的天数：首行是 `0`，3 小时步长下一行是 `0.125`。不得写成 Unix epoch day 或绝对儒略日；绝对日期只保留在文件头的 `start_date/end_date` 和 package manifest 中。
+SHUD 主站点索引成员 `shud/stations.tsd.forc`（canonical，流域中性；历史 package 的 legacy 名 `shud/qhh.tsd.forc` 只读兼容，见下）引用的单站 forcing CSV 中，`Time_Day` 必须使用相对 forcing `start_time` 的天数：首行是 `0`，3 小时步长下一行是 `0.125`。不得写成 Unix epoch day 或绝对儒略日；绝对日期只保留在文件头的 `start_date/end_date` 和 package manifest 中。
+
+主站点索引成员名是纯运输身份，不得当作 forcing 数据的流域证据（#1176）：producer 只发布 canonical 名；消费方在 package manifest 与解包后的文件系统两层都要求 `{canonical, legacy}` 中恰好一个成员，两者并存或全缺均 fail-closed。legacy 分支的截止条件是「object store 中不再存在缺少 canonical 成员的 direct-grid package」，届时可由后续 change 移除。本次迁移只解决命名/身份语义冲突，node-27 只读核验**未发现跨流域 forcing 数据污染**。
 
 ERA5 转换流程：ERA5 降水变量由 converter 按产品累计语义差分并换算为 `mm/day`；是否需要差分由 adapter/source policy 的 `accumulation_type` 决定，避免不同 ERA5 产品（ERA5、ERA5-Land、小时聚合）之间语义混淆。
 

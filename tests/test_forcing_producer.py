@@ -17,6 +17,12 @@ import pytest
 from packages.common.forcing_domain_handoff import parse_forcing_domain_handoff_path
 from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_BASENAME,
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    LEGACY_SHUD_FORCING_INDEX_BASENAME,
+    SHUD_FORCING_ROLE,
+)
 from workers.forcing_producer import (
     CanonicalProduct,
     DirectGridContractError,
@@ -32,6 +38,7 @@ from workers.forcing_producer import (
     parse_direct_grid_forcing_contract,
     wind_speed,
 )
+from workers.forcing_producer import producer as producer_module
 from workers.forcing_producer.direct_grid_contract import (
     MAX_DIRECT_GRID_STATION_BINDINGS,
     REQUIRED_MANIFEST_FIELDS,
@@ -1019,7 +1026,7 @@ def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path:
     result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     package_root = tmp_path / result.forcing_package_uri.strip("/")
-    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8").splitlines()
+    tsd_forc = (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8").splitlines()
     assert tsd_forc[0] == "2 20260507"
     assert tsd_forc[2] == "ID\tLon\tLat\tX\tY\tZ\tFilename"
     assert tsd_forc[3].split()[-1] == "X100.95Y36.25.csv"
@@ -1038,6 +1045,114 @@ def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path:
         "Press": "Pa",
     }
     assert [station["station_id"] for station in manifest["station_order"]] == ["qhh_forc_001", "qhh_forc_002"]
+
+
+def _neutral_identity_station(
+    station_id: str,
+    index: int,
+    longitude: float,
+    latitude: float,
+    elevation: float,
+    filename: str,
+) -> MetStation:
+    return MetStation(
+        station_id,
+        "basin_v1",
+        longitude,
+        latitude,
+        elevation,
+        "forcing_grid",
+        properties_json={
+            "shud_forcing_index": index,
+            "forcing_filename": filename,
+            "x": index,
+            "y": index + 1,
+            "z": elevation,
+        },
+    )
+
+
+def test_producer_publishes_canonical_station_index_member_for_every_basin(tmp_path: Path) -> None:
+    """B1 (#1176): the station-index member name is basin-neutral for every basin.
+
+    Two deterministic fixtures — one QHH-flavoured, one explicitly not — publish
+    the SAME canonical member name under the SAME ``shud_forcing`` role, while
+    each package's station rows come strictly from that fixture's own inputs
+    (different station counts, ids, coordinates and CSV filenames). That is the
+    positive proof that the member filename never carried basin identity.
+    """
+    fixtures = {
+        "qhh": (
+            "basins_qhh_shud",
+            (
+                _neutral_identity_station("qhh_forc_001", 1, 100.95, 36.25, 3657.0, "X100.95Y36.25.csv"),
+                _neutral_identity_station("qhh_forc_002", 2, 101.05, 36.25, 3375.0, "X101.05Y36.25.csv"),
+            ),
+        ),
+        "non_qhh": (
+            "demo_model",
+            (
+                _neutral_identity_station("heihe_forc_001", 1, 98.10, 38.60, 2100.0, "X98.1Y38.6.csv"),
+                _neutral_identity_station("heihe_forc_002", 2, 98.20, 38.70, 2200.0, "X98.2Y38.7.csv"),
+                _neutral_identity_station("heihe_forc_003", 3, 98.30, 38.80, 2300.0, "X98.3Y38.8.csv"),
+            ),
+        ),
+    }
+    station_rows_by_label: dict[str, list[list[str]]] = {}
+
+    for label, (model_id, stations) in fixtures.items():
+        root = tmp_path / label
+        root.mkdir()
+        store = LocalObjectStore(root)
+        repository = FakeForcingRepository(stations=stations, products=_write_canonical_products(store))
+        repository.basin_by_model[model_id] = "basin_v1"
+        repository.model_identity_by_model[model_id] = {
+            "basin_id": f"basin_{label}",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": f"rivnet_{label}",
+        }
+        producer = _build_producer(root, repository, store)
+
+        result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id=model_id)
+
+        package_root = root / result.forcing_package_uri.strip("/")
+        member_path = package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME
+        assert member_path.is_file(), f"{label}: canonical station-index member not published"
+        assert not (package_root / "shud" / LEGACY_SHUD_FORCING_INDEX_BASENAME).exists(), (
+            f"{label}: producer must not emit the legacy station-index identity"
+        )
+
+        package_manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+        index_entries = [
+            entry for entry in package_manifest["files"] if entry.get("role") == SHUD_FORCING_ROLE
+        ]
+        assert [entry["relative_path"] for entry in index_entries] == [CANONICAL_SHUD_FORCING_INDEX_MEMBER]
+        assert index_entries[0]["checksum"] == sha256_bytes(member_path.read_bytes())
+
+        lines = member_path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == f"{len(stations)} 20260507"
+        assert lines[2] == "ID\tLon\tLat\tX\tY\tZ\tFilename"
+        rows = [line.split("\t") for line in lines[3:]]
+        assert [int(row[0]) for row in rows] == [
+            station.properties_json["shud_forcing_index"] for station in stations
+        ]
+        assert [float(row[1]) for row in rows] == [pytest.approx(station.longitude) for station in stations]
+        assert [float(row[2]) for row in rows] == [pytest.approx(station.latitude) for station in stations]
+        assert [row[-1] for row in rows] == [
+            station.properties_json["forcing_filename"] for station in stations
+        ]
+        for station in stations:
+            assert (package_root / "shud" / str(station.properties_json["forcing_filename"])).is_file()
+        station_rows_by_label[label] = rows
+
+    # The two fixtures are genuinely distinct inputs, so a shared member name
+    # provably cannot be leaking one basin's stations into the other's package.
+    qhh_rows = station_rows_by_label["qhh"]
+    non_qhh_rows = station_rows_by_label["non_qhh"]
+    assert len(qhh_rows) == 2
+    assert len(non_qhh_rows) == 3
+    assert {row[-1] for row in qhh_rows}.isdisjoint({row[-1] for row in non_qhh_rows})
+    assert {row[1] for row in qhh_rows}.isdisjoint({row[1] for row in non_qhh_rows})
 
 
 def test_gfs_forcing_rows_use_cycle_start_with_next_interval_products(tmp_path: Path) -> None:
@@ -1160,7 +1275,7 @@ def test_produce_uses_only_forcing_grid_stations_for_qhh_package(tmp_path: Path)
     result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     package_root = tmp_path / result.forcing_package_uri.strip("/")
-    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8")
+    tsd_forc = (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8")
     assert result.station_count == 1
     assert repository.forcing_versions[result.forcing_version_id]["station_count"] == 1
     assert tsd_forc.splitlines()[0] == "1 20260507"
@@ -1351,7 +1466,7 @@ def test_direct_grid_existing_forcing_version_not_reused_when_manifest_output_fi
     package_root = tmp_path / first.forcing_package_uri.strip("/")
     manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
     station_csv_entry = next(entry for entry in manifest["files"] if entry["role"] == "shud_forcing_csv")
-    (package_root / "shud" / "qhh.tsd.forc").write_text("corrupt\n", encoding="utf-8")
+    (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text("corrupt\n", encoding="utf-8")
     (tmp_path / station_csv_entry["uri"].strip("/")).unlink()
 
     second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
@@ -1364,9 +1479,10 @@ def test_direct_grid_existing_forcing_version_not_reused_when_manifest_output_fi
     assert second.status == "forcing_ready"
     assert second.forcing_version_id == first.forcing_version_id
     assert repository.upsert_count == 2
-    assert store.checksum("forcing/gfs/2026050700/basin_v1/demo_model/shud/qhh.tsd.forc") == restored_entries[
-        "shud/qhh.tsd.forc"
-    ]["checksum"]
+    assert (
+        store.checksum(f"forcing/gfs/2026050700/basin_v1/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}")
+        == restored_entries[CANONICAL_SHUD_FORCING_INDEX_MEMBER]["checksum"]
+    )
     assert store.exists(station_csv_entry["uri"])
     assert store.checksum(station_csv_entry["uri"]) == next(
         entry["checksum"] for entry in restored_manifest["files"] if entry["uri"] == station_csv_entry["uri"]
@@ -1954,7 +2070,7 @@ def test_existing_forcing_version_not_reused_when_forcing_grid_station_set_chang
     assert {row.station_id for row in repository.timeseries} == {"qhh_forc_001", "qhh_forc_002"}
     package_root = tmp_path / second.forcing_package_uri.strip("/")
     manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
-    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8")
+    tsd_forc = (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8")
     assert manifest["station_count"] == 2
     assert manifest["lineage"]["station_signature"]["station_count"] == 2
     assert manifest["lineage"]["station_signature"]["station_ids"] == ["qhh_forc_001", "qhh_forc_002"]
@@ -2274,6 +2390,43 @@ def test_reserved_qhh_tsd_forc_station_filename_blocks_record_creation(tmp_path:
 
     assert repository.upsert_count == 0
     assert repository.forcing_versions == {}
+
+
+def test_reserved_canonical_tsd_forc_station_filename_blocks_record_creation(tmp_path: Path) -> None:
+    """B7 (#1176): the canonical station-index basename is reserved too.
+
+    Sibling of the legacy case above — a station CSV must never be able to
+    overwrite the package's own station index under either accepted identity.
+    """
+    station = MetStation(
+        "qhh_forc_001",
+        "basin_v1",
+        -74.7,
+        40.1,
+        50.0,
+        "forcing_grid",
+        properties_json={
+            "shud_forcing_index": 1,
+            "forcing_filename": CANONICAL_SHUD_FORCING_INDEX_BASENAME,
+        },
+    )
+    store, repository = _build_repository(tmp_path, stations=(station,))
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Reserved SHUD forcing filename"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.upsert_count == 0
+    assert repository.forcing_versions == {}
+
+
+def test_reserved_shud_station_filenames_cover_both_index_identities() -> None:
+    """B7 (#1176): the producer reserved set is built from the shared contract."""
+    reserved = producer_module._reserved_shud_station_filenames()
+
+    assert CANONICAL_SHUD_FORCING_INDEX_BASENAME in reserved
+    assert LEGACY_SHUD_FORCING_INDEX_BASENAME in reserved
+    assert {"forcing_package.json", "forcing_debug.csv", "forcing.tsd.forc"} <= reserved
 
 
 def test_direct_grid_contract_valid_parse_preserves_manifest_and_station_identity() -> None:
@@ -4704,7 +4857,7 @@ def _assert_direct_grid_package_contract(
     contract: Any,
 ) -> None:
     package_root = tmp_path / result.forcing_package_uri.strip("/")
-    tsd_forc = (package_root / "shud" / "qhh.tsd.forc").read_text(encoding="utf-8").splitlines()
+    tsd_forc = (package_root / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).read_text(encoding="utf-8").splitlines()
     assert tsd_forc[0] == f"{len(contract.stations)} 20260507"
     assert tsd_forc[2] == "ID\tLon\tLat\tX\tY\tZ\tFilename"
     tsd_rows = [line.split() for line in tsd_forc[3:]]

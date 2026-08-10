@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_BASENAME,
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    LEGACY_SHUD_FORCING_INDEX_BASENAME,
+    LEGACY_SHUD_FORCING_INDEX_MEMBER,
+)
 from scripts import create_qhh_shud_manifest as qhh_manifest
 from services.orchestrator.chain import ForecastOrchestrator
 from workers.model_registry import qhh_production_bootstrap
@@ -168,6 +174,84 @@ def test_qhh_manifest_validates_forcing_manifest_station_count_and_header(tmp_pa
     store.write_bytes_atomic(tsd_uri, b"\xef\xbb\xbf")
     with pytest.raises(RuntimeError, match="station header is empty"):
         qhh_manifest._validate_shud_forcing_header(manifest, store, 2)
+
+
+def _station_index_manifest(member: str, tsd_uri: str) -> dict:
+    return {
+        "station_count": 1,
+        "files": [{"role": "shud_forcing", "relative_path": member, "uri": tsd_uri}],
+        "lineage": {"station_signature": {"station_count": 1}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("member", "expected_source"),
+    [
+        (CANONICAL_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_BASENAME),
+        (LEGACY_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_BASENAME),
+    ],
+    ids=["canonical", "legacy"],
+)
+def test_qhh_manifest_accepts_either_station_index_member(
+    tmp_path: Path,
+    member: str,
+    expected_source: str,
+) -> None:
+    """B10 (#1176): the diagnostic manifest builder mirrors the runtime contract.
+
+    It consumes fresh producer packages (canonical) and historical ones
+    (legacy), and records the identity it actually matched so ``station_source``
+    can never contradict the file the header was read from.
+    """
+    store = LocalObjectStore(tmp_path)
+    tsd_uri = f"forcing/gfs/2026050700/basin_v1/demo_model/{member}"
+    store.write_bytes_atomic(tsd_uri, b"1 20260507\n/data\nID Lon Lat X Y Z Filename\n1 100 30 1 1 1 f.csv\n")
+
+    station_source = qhh_manifest._validate_shud_forcing_header(
+        _station_index_manifest(member, tsd_uri), store, 1
+    )
+
+    assert station_source == expected_source
+
+
+def test_qhh_manifest_rejects_both_station_index_members(tmp_path: Path) -> None:
+    """B10 (#1176): canonical + legacy in one manifest is fail-closed."""
+    store = LocalObjectStore(tmp_path)
+    tsd_bytes = b"1 20260507\n/data\nID Lon Lat X Y Z Filename\n1 100 30 1 1 1 f.csv\n"
+    canonical_uri = f"forcing/gfs/2026050700/basin_v1/demo_model/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}"
+    legacy_uri = f"forcing/gfs/2026050700/basin_v1/demo_model/{LEGACY_SHUD_FORCING_INDEX_MEMBER}"
+    store.write_bytes_atomic(canonical_uri, tsd_bytes)
+    store.write_bytes_atomic(legacy_uri, tsd_bytes)
+    manifest = {
+        "station_count": 1,
+        "files": [
+            {"role": "shud_forcing", "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER, "uri": canonical_uri},
+            {"role": "shud_forcing", "relative_path": LEGACY_SHUD_FORCING_INDEX_MEMBER, "uri": legacy_uri},
+        ],
+        "lineage": {"station_signature": {"station_count": 1}},
+    }
+
+    with pytest.raises(RuntimeError, match="more than one SHUD station-index member") as exc_info:
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 1)
+
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in str(exc_info.value)
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in str(exc_info.value)
+
+
+def test_qhh_manifest_missing_station_index_member_names_both_identities(tmp_path: Path) -> None:
+    """B10 (#1176): the absence error names both accepted identities."""
+    store = LocalObjectStore(tmp_path)
+    manifest = {
+        "station_count": 1,
+        "files": [{"role": "shud_forcing_csv", "relative_path": "shud/f.csv", "uri": "shud/f.csv"}],
+        "lineage": {"station_signature": {"station_count": 1}},
+    }
+
+    with pytest.raises(RuntimeError, match="missing the SHUD station-index member") as exc_info:
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 1)
+
+    assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in str(exc_info.value)
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in str(exc_info.value)
 
 
 def test_run_qhh_cycle_validates_model_output_interval_before_shud_runtime() -> None:
