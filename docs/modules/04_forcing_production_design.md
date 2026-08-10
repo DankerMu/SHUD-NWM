@@ -75,8 +75,9 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
   manifest 声明的成员在对象树中缺席 → `FORCING_CHECKSUM_READ_FAILED` 点名声明成员（不是 size-limit 码）。
   单一事实源为 `packages/common/shud_forcing_contract.py`。
 - **非 direct-grid staging 的残余成员**：该路径是全前缀递归拷贝且 producer 从不清理，原地在
-  pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按
-  package manifest checksum entries 声明的成员解析（manifest 未恰一命名时 canonical 兜底），
+  pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按声明源
+  回退链解析：package manifest 发布非空 `files` 列表时以它为准，否则退到 run-manifest 的诊断
+  `forcing.files`；所选声明源恰一命名可接受成员则用之，否则 canonical 兜底。
   全缺维持既有内部 forcing 回退。
 - **staged 目的地不变**：runtime 读取成员后仍写出 `{project}.tsd.forc` 到模型输入目录，
   SHUD 模型侧命名（含 QHH 项目真资产 `data/Basins/qhh/input/qhh/qhh.tsd.forc`）不受影响。

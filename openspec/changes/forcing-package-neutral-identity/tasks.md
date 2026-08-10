@@ -66,4 +66,12 @@ Must-preserve:staged 目的地 `{project}.tsd.forc` 命名、站点 CSV 名从 t
 - [x] 7.3 S2(消息级):`DIRECT_GRID_FORCING_INDEX_AMBIGUOUS` 报错文本按 verifier 措辞补 `in {shud_dir}` + 前次 attempt 残留假说 + 人工清理指引;结构卫生(input 目录 attempt-start 声明成员锚定清理)DEFER → 已路由 tracked issue #1355。
 - [x] 7.4 S3:`shud_forcing_contract.py` docstring 过时的无差别恰一规则替换为 DG/非 DG 双 bullet(verifier 措辞)。
 - [x] 7.5 S4:`docs/runbooks/qhh-backend-smoke.md` :129 与 :205 第二处回退 9af36a16 byte-identical;:130 后插入日期注记(2026-08-10,#1176)。
-- [x] 7.6 九文件套件独立复跑全绿 + ruff + validate;spec delta 无需变更(非 DG 场景措辞已按 package manifest 表述)。
+- [x] 7.6 九文件套件独立复跑全绿 + ruff + validate。~~spec delta 无需变更(非 DG 场景措辞已按 package manifest 表述)~~(该判断错误——round-3 U2 推翻:spec delta 仍是两步链措辞,见 8.1)。
+
+## 8. Round-3 权威文本收口(U1/U2/U4 FIX_NOW;T1/U3/T2 DEFER 路由;T3 DISCARD;6.2 不变量审计=全权威面一次性对齐)
+
+- [x] 8.1 U1/U2:spec delta :41 首 clause 加 direct-grid 限定;:48 THEN 改三步声明源回退链(verifier 措辞);:25 requirement prose 同步指明声明源(package manifest → run-manifest 诊断 lane);`docs/modules/04_forcing_production_design.md:78-79` 与 `docs/spec/02_data_product_and_time_semantics.md:126` 同步三步链(implementer 面)。
+- [x] 8.2 U4:proposal :14 整条按 D4-2 修正形态重写(DG 恰一/非 DG 容忍 lane 分层)。
+- [x] 8.3 sibling 面(6.2 审计):`shud_forcing_contract.py:19-21` docstring 指明声明源回退链;design D4-2 回退门措辞收紧(非空 files 即为准);T3 残余即此措辞收紧,无代码改动。
+- [x] 8.4 DEFER 路由:T1/U3 → anchor 归一化硬化 issue #1357;T2 → archive mover 孤儿成员政策 issue #1358;proposal 已登记两条残余。
+- [x] 8.5 ruff + validate + test_shud_runtime 快跑绿(纯文本/docstring 改动,无行为面)。

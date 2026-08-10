@@ -16,9 +16,11 @@ This module is that authority (issue #1176, change
   :data:`SHUD_FORCING_INDEX_MEMBERS` in both the package manifest and the staged
   filesystem — both members present, or none declared, is fail-closed;
 * non-direct-grid staging copies the whole package prefix and may legitimately
-  hold a residual second member, so it resolves by the manifest-declared member
-  with canonical-first as the fallback, and keeps the existing internal-forcing
-  fallback when zero members are present;
+  hold a residual second member, so it resolves by the declared member from the
+  checksum-verified package manifest's ``files`` list (falling back to the run
+  manifest's diagnostic forcing file entries when the package manifest publishes
+  none), with canonical-first as the final fallback, and keeps the existing
+  internal-forcing fallback when zero members are present;
 * either way, historical packages carrying
   :data:`LEGACY_SHUD_FORCING_INDEX_MEMBER` stay readable without ever being
   rewritten;

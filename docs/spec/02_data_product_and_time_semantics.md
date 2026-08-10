@@ -123,7 +123,7 @@ SHUD 主站点索引成员 `shud/stations.tsd.forc`（canonical，流域中性�
 
 - **并存**：direct-grid 消费方在 package manifest 与解包后的文件系统两层均 fail-closed（`DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`）。
 - **全缺**：只在 direct-grid staging 层 fail-closed（`DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`）；manifest 门空命中维持返回空列表。
-- **非 direct-grid**：该路径是全前缀拷贝，可合法留有原地再生产的残余成员——多成员按 package manifest 声明的成员解析（manifest 未恰一命名时 canonical 兜底），全缺维持既有内部 forcing 回退。
+- **非 direct-grid**：该路径是全前缀拷贝，可合法留有原地再生产的残余成员——多成员按声明源回退链解析（package manifest 非空 `files` → run-manifest 诊断 `forcing.files`；所选源恰一命名可接受成员则用之，否则 canonical 兜底），全缺维持既有内部 forcing 回退。
 - **manifest 声明的成员在对象树中缺席**：以 `FORCING_CHECKSUM_READ_FAILED` 点名该成员 fail-closed，而非 size-limit 码。
 
 legacy 分支的截止条件是「object store 中不再存在缺少 canonical 成员的 direct-grid package」，届时可由后续 change 移除。本次迁移只解决命名/身份语义冲突，node-27 只读核验**未发现跨流域 forcing 数据污染**。
