@@ -52,7 +52,7 @@ def _preflight_allowed_roots(config) -> tuple[tuple[Path, ...], list[dict[str, A
 
 ## D3 — 调用点与 facade
 
-- **gateway(scheduler_gateway.py:47,唯一真实调用点)**:
+- **gateway(scheduler_gateway.py:50,唯一真实调用点)**:
   `allowed_roots, allowed_root_blockers = _scheduler._preflight_allowed_roots(config)`,随即 `blockers.extend(allowed_root_blockers)`——**必须在 storage_roots 循环之前**。顺序有语义负载:`scheduler_candidate_execution_evidence.py:341-364` 取 `blockers[0]` 作 `error_code`/`error_message`;剔根后四个 storage root 会级联 `OUT_OF_ROOT`,根因 blocker 必须**领先于它自己引发的 OUT_OF_ROOT 级联**(非全局 index-0 保证:`DATABASE_URL_*` blocker 在 :38 合法先行,那本身也是根因;A1 端到端在安全 database_url 前提下钉住 `blockers[0]["code"]`)。`checks["allowed_roots"]` 构造零改动——被剔除的根天然不在 `allowed_roots` 里,证据面自动收敛(验收:被剔除的根不得出现在 `checks["allowed_roots"]`)。
 - **facade(scheduler_candidate_runtime.py:239 + :832)**:纯符号再导出,函数对象返回形状变化随符号透传,无需改动。实现任务必须 `grep -rn "_preflight_allowed_roots"` 全仓核对:除 preflight 定义、facade 再导出、gateway 调用外**不得**存在其他消费方(tests/ 已确认无直接调用者)。
 

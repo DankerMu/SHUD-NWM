@@ -21,7 +21,7 @@
 
 ## Impact
 
-- 代码:`services/orchestrator/scheduler_preflight.py`(判据+返回形状)、`services/orchestrator/scheduler_gateway.py:47`(唯一真实调用点,解包+extend)、`services/orchestrator/scheduler_candidate_runtime.py:239`(facade 纯符号再导出,无需改动——任务含 grep 核对无其他消费方)。
+- 代码:`services/orchestrator/scheduler_preflight.py`(判据+返回形状)、`services/orchestrator/scheduler_gateway.py:50`(唯一真实调用点,解包+extend)、`services/orchestrator/scheduler_candidate_runtime.py:239`(facade 纯符号再导出,无需改动——任务含 grep 核对无其他消费方)。
 - 测试:`tests/test_production_scheduler.py` 新增锚点;既有 114 条 preflight 测试零回归。
 - 规格:`slurm-array-runner-integration` MODIFIED requirement(新 scenario:unresolvable allowed storage root)。
 - 无 DB/远端接触面;无需 node-27 receipt。
