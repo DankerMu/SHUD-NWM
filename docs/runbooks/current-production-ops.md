@@ -1478,7 +1478,12 @@ Safe online mitigation:
 Exact-cycle missing-forcing regeneration (node-22 only):
 
 1. Confirm that the affected candidates are blocked only by
-   `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING`; that
+   `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING` (package
+   determined absent) or `forcing_version_row_absent` /
+   `FORCING_VERSION_ROW_ABSENT` (no provenance tier — journal row, journal
+   direct file, or object-store forcing-version sidecar — could witness the
+   package); the repair channel accepts both reason/classifier pairs, and the
+   repair action is the same idempotent exact-cycle forcing rebuild. Also that
    `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`; and that the current registry has
    18 source-scoped variants for each enabled source. The raw readiness record
    must say `status=ready`, `required=true`, and

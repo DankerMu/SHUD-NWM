@@ -743,7 +743,12 @@ class FileOrchestrationJournalRepository:
                     and str(event.get("entity_id") or "") in foreign_model_cycle_scope_job_ids
                 )
             ],
-            forcing_version=rows.forcing_version,
+            forcing_version=self._candidate_state_forcing_version(
+                rows.forcing_version,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            ),
             forecast_cycle=rows.forecast_cycle,
             retry_limit=retry_limit,
             job_limit=job_limit,
@@ -755,6 +760,41 @@ class FileOrchestrationJournalRepository:
         if run_manifest_identity is not None:
             state["run_manifest_model_package"] = run_manifest_identity
         return _public_candidate_state(state)
+
+    def _candidate_state_forcing_version(
+        self,
+        row: Mapping[str, Any] | None,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve candidate-state forcing provenance across the journal read tiers.
+
+        ``find_forcing_context`` already falls back to the journal direct file
+        (``<root>/forcing/<source>/<cycle>/<model>.json``) when the row tier is
+        empty; the candidate-state read must agree with it, otherwise the
+        downstream artifact guard sees ``forcing_version: null`` for a cycle whose
+        provenance IS on disk and demotes a recoverable candidate to a missing
+        package (#1203).  The recovered mapping is a SHALLOW COPY carrying a
+        ``forcing_version_source`` marker so an operator can tell the tiers apart;
+        ``rows`` is never mutated.
+
+        Error semantics deliberately diverge from ``find_forcing_context``: that
+        read is an explicit query whose caller wants the truth, so it raises.  This
+        one is a bulk per-candidate derivation, so a single corrupt direct file
+        degrades to "no witness" instead of failing the whole scheduler pass.
+        """
+
+        if row is not None:
+            return {**dict(row), "forcing_version_source": "journal"}
+        try:
+            direct = self._forcing_context(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        except FileOrchestrationJournalError:
+            return None
+        if direct is None:
+            return None
+        return {**dict(direct), "forcing_version_source": "direct"}
 
     def load_model_context(self, model_id: str) -> ModelContext:
         try:

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.source_identity import normalize_source_id
 from services.orchestrator.retry import classify_failure
 from services.orchestrator.scheduler_state_common import (
     _evidence_safe,
@@ -43,6 +47,7 @@ from services.orchestrator.scheduler_state_types import (
     TRANSIENT_RETRY_REASON_CODES,
     SchedulerCandidateLike,
 )
+from workers.data_adapters.base import format_cycle_time
 
 _COPYBACK_REQUIRED_RESTART_STAGES = {"copyback"}
 
@@ -331,15 +336,23 @@ def _missing_upstream_forecast_artifact_evidence(
     state: Mapping[str, Any],
     base_evidence: Mapping[str, Any],
     planned_retry: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return ``(blocker_evidence_or_None, forcing_provenance_annotation_or_None)``.
+
+    The annotation is an out-channel: the forcing provenance tier is observed even
+    when the guard does NOT block, so the decision the scheduler ultimately emits
+    can name the tier that witnessed (or failed to witness) the package (#1203).
+    """
+
     if not isinstance(planned_retry, Mapping):
-        return None
+        return None, None
     restart_stage = _canonical_downstream_stage(
         str(planned_retry.get("restart_stage") or planned_retry.get("restart_from_stage") or "")
     )
     if restart_stage is None:
-        return None
+        return None, None
 
+    forcing_provenance: dict[str, Any] | None = None
     if restart_stage == "forecast":
         forcing_uri = _first_artifact_uri(
             state,
@@ -351,29 +364,79 @@ def _missing_upstream_forecast_artifact_evidence(
             ),
         )
         if forcing_uri in (None, ""):
-            return _artifact_blocker_evidence(
+            sidecar = _forcing_sidecar_provenance(candidate)
+            if not sidecar.witness:
+                # Tier 1 (journal row), tier 2 (journal direct file) and tier 3
+                # (object-store sidecar) all failed to witness provenance: this is
+                # "cannot determine", NOT "package determined absent".  Still
+                # fail-closed, but with a reason an operator can act on.
+                forcing_provenance = {"source": "absent", "tier_status": sidecar.status}
+                return (
+                    _artifact_blocker_evidence(
+                        candidate,
+                        base_evidence,
+                        planned_retry,
+                        reason="forcing_version_row_absent",
+                        error_code="FORCING_VERSION_ROW_ABSENT",
+                        artifact_type="forcing_package_uri",
+                        artifact_uri=None,
+                        artifact_exists=False,
+                        forcing_provenance=forcing_provenance,
+                    ),
+                    forcing_provenance,
+                )
+            # The producer's ``forcing_package_uri`` is a DIRECTORY uri, which the
+            # object-path validator rejects (5 segments) and the probe would then
+            # report as missing.  The probe object is therefore the witnessed
+            # package MANIFEST FILE key -- never the directory-shaped package uri.
+            forcing_provenance = {
+                "source": "object_store_sidecar",
+                "probe": "manifest",
+                "package_uri": _evidence_safe(sidecar.package_uri),
+                "manifest_uri": _evidence_safe(sidecar.manifest_uri),
+                "forcing_version_id": _evidence_safe(sidecar.forcing_version_id),
+            }
+            sidecar_missing, sidecar_unsafe_reason = _artifact_uri_missing_status(
                 candidate,
-                base_evidence,
-                planned_retry,
-                reason="missing_forcing_package_uri",
-                error_code="FORCING_PACKAGE_URI_MISSING",
-                artifact_type="forcing_package_uri",
-                artifact_uri=None,
-                artifact_exists=False,
+                str(sidecar.manifest_uri),
             )
-        forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_uri)
-        if forcing_missing:
-            return _artifact_blocker_evidence(
-                candidate,
-                base_evidence,
-                planned_retry,
-                reason="missing_forcing_package_uri",
-                error_code="FORCING_PACKAGE_URI_MISSING",
-                artifact_type="forcing_package_uri",
-                artifact_uri=forcing_uri,
-                artifact_exists=False,
-                unsafe_reason=forcing_unsafe_reason,
-            )
+            if sidecar_missing:
+                forcing_provenance = {**forcing_provenance, "artifact_exists": False}
+                return (
+                    _artifact_blocker_evidence(
+                        candidate,
+                        base_evidence,
+                        planned_retry,
+                        reason="missing_forcing_package_uri",
+                        error_code="FORCING_PACKAGE_URI_MISSING",
+                        artifact_type="forcing_package_uri",
+                        artifact_uri=sidecar.package_uri,
+                        artifact_exists=False,
+                        unsafe_reason=sidecar_unsafe_reason,
+                        forcing_provenance=forcing_provenance,
+                    ),
+                    forcing_provenance,
+                )
+            forcing_provenance = {**forcing_provenance, "artifact_exists": True}
+        else:
+            forcing_provenance = _journal_forcing_provenance(state, forcing_uri)
+            forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_uri)
+            if forcing_missing:
+                return (
+                    _artifact_blocker_evidence(
+                        candidate,
+                        base_evidence,
+                        planned_retry,
+                        reason="missing_forcing_package_uri",
+                        error_code="FORCING_PACKAGE_URI_MISSING",
+                        artifact_type="forcing_package_uri",
+                        artifact_uri=forcing_uri,
+                        artifact_exists=False,
+                        unsafe_reason=forcing_unsafe_reason,
+                        forcing_provenance=forcing_provenance,
+                    ),
+                    forcing_provenance,
+                )
 
     copyback_uri = _first_artifact_uri(
         state,
@@ -390,29 +453,37 @@ def _missing_upstream_forecast_artifact_evidence(
     else:
         copyback_missing, copyback_unsafe_reason = True, None
     if copyback_uri not in (None, "") and copyback_missing:
-        return _artifact_blocker_evidence(
-            candidate,
-            base_evidence,
-            planned_retry,
-            reason="missing_copyback_source",
-            error_code="COPYBACK_SOURCE_MISSING",
-            artifact_type="copyback_source",
-            artifact_uri=copyback_uri,
-            artifact_exists=False,
-            unsafe_reason=copyback_unsafe_reason,
+        return (
+            _artifact_blocker_evidence(
+                candidate,
+                base_evidence,
+                planned_retry,
+                reason="missing_copyback_source",
+                error_code="COPYBACK_SOURCE_MISSING",
+                artifact_type="copyback_source",
+                artifact_uri=copyback_uri,
+                artifact_exists=False,
+                unsafe_reason=copyback_unsafe_reason,
+                forcing_provenance=forcing_provenance,
+            ),
+            forcing_provenance,
         )
     if copyback_uri in (None, "") and copyback_required:
-        return _artifact_blocker_evidence(
-            candidate,
-            base_evidence,
-            planned_retry,
-            reason="missing_copyback_source",
-            error_code="COPYBACK_SOURCE_MISSING",
-            artifact_type="copyback_source",
-            artifact_uri=None,
-            artifact_exists=False,
+        return (
+            _artifact_blocker_evidence(
+                candidate,
+                base_evidence,
+                planned_retry,
+                reason="missing_copyback_source",
+                error_code="COPYBACK_SOURCE_MISSING",
+                artifact_type="copyback_source",
+                artifact_uri=None,
+                artifact_exists=False,
+                forcing_provenance=forcing_provenance,
+            ),
+            forcing_provenance,
         )
-    return None
+    return None, forcing_provenance
 
 
 def _artifact_blocker_evidence(
@@ -426,9 +497,14 @@ def _artifact_blocker_evidence(
     artifact_uri: str | None,
     artifact_exists: bool,
     unsafe_reason: str | None = None,
+    forcing_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    provenance_evidence: dict[str, Any] = (
+        {"forcing_provenance": dict(forcing_provenance)} if forcing_provenance else {}
+    )
     return {
         **base_evidence,
+        **provenance_evidence,
         "decision": "blocked_missing_upstream_artifact",
         "reason": reason,
         "error_code": error_code,
@@ -456,6 +532,123 @@ def _artifact_blocker_evidence(
             "candidate_id": candidate.candidate_id,
             "run_id": candidate.run_id,
         },
+    }
+
+
+# Sidecar tier (#1203).  Mirrors the forcing producer's DB-free write side:
+# ``forcing/<source_segment>/<compact_cycle>/<basin_version_id>/<model_id>/``
+# holds ``forcing_version_record.json`` next to the package manifest
+# (``workers/forcing_producer/file_store.py:_write_forcing_version_sidecar`` and
+# ``workers/forcing_producer/producer.py`` prefix/``package_manifest_filename``).
+_FORCING_SIDECAR_FILENAME = "forcing_version_record.json"
+_FORCING_PACKAGE_MANIFEST_FILENAME = "forcing_package.json"
+_FORCING_SIDECAR_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class _ForcingSidecarProvenance:
+    """Outcome of the object-store forcing-version sidecar read.
+
+    ``witness`` is True only when the record names a package we can probe.  Every
+    other outcome is "tier unavailable" (``status`` carries the detail) and is
+    deliberately NOT treated as "package determined absent": the tier must never
+    fail open into a retry, and never raise out of the decision path.
+    """
+
+    witness: bool
+    status: str
+    package_uri: str | None = None
+    manifest_uri: str | None = None
+    forcing_version_id: str | None = None
+
+
+def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSidecarProvenance:
+    basin_version_id = str(getattr(candidate, "basin_version_id", None) or "").strip()
+    model_id = str(getattr(candidate, "model_id", None) or "").strip()
+    if not basin_version_id or not model_id:
+        return _ForcingSidecarProvenance(False, "identity_incomplete")
+    resource_profile = candidate.resource_profile if isinstance(candidate.resource_profile, Mapping) else {}
+    object_root = resource_profile.get("object_store_root") or os.getenv("OBJECT_STORE_ROOT")
+    if object_root in (None, ""):
+        # NOT the ``_object_manifest_is_missing`` fail-open quirk: an unconfigured
+        # store means this tier cannot witness anything, not that the package exists.
+        return _ForcingSidecarProvenance(False, "store_unconfigured")
+    prefix = str(resource_profile.get("object_store_prefix") or os.getenv("OBJECT_STORE_PREFIX", ""))
+    try:
+        source_segment = normalize_source_id(candidate.source_id).lower()
+        key = (
+            f"forcing/{source_segment}/{format_cycle_time(candidate.cycle_time_utc)}"
+            f"/{basin_version_id}/{model_id}/{_FORCING_SIDECAR_FILENAME}"
+        )
+    except (TypeError, ValueError):
+        return _ForcingSidecarProvenance(False, "identity_incomplete")
+    try:
+        store = LocalObjectStore(str(object_root), object_store_prefix=prefix)
+        if not store.exists(key):
+            return _ForcingSidecarProvenance(False, "sidecar_absent")
+        content = store.read_bytes_limited(key, max_bytes=_FORCING_SIDECAR_MAX_BYTES)
+    except (ObjectStoreError, OSError, ValueError):
+        return _ForcingSidecarProvenance(False, "sidecar_unreadable")
+    try:
+        record = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return _ForcingSidecarProvenance(False, "sidecar_malformed")
+    if not isinstance(record, Mapping):
+        return _ForcingSidecarProvenance(False, "sidecar_malformed")
+    package_uri = str(record.get("forcing_package_uri") or "").strip()
+    manifest_uri = _sidecar_package_manifest_uri(record, package_uri)
+    if not manifest_uri:
+        return _ForcingSidecarProvenance(False, "sidecar_malformed")
+    return _ForcingSidecarProvenance(
+        True,
+        "sidecar_witness",
+        package_uri=package_uri or None,
+        manifest_uri=manifest_uri,
+        forcing_version_id=str(record.get("forcing_version_id") or "") or None,
+    )
+
+
+def _sidecar_package_manifest_uri(record: Mapping[str, Any], package_uri: str) -> str | None:
+    """Resolve the package MANIFEST FILE key the existence probe can accept.
+
+    Isomorphic with the producer read side
+    (``workers/forcing_producer/file_store.py:_forcing_package_manifest_uri``):
+    prefer the witnessed ``lineage_json.forcing_package_manifest_uri``, and for
+    older records derive ``<package_uri>/forcing_package.json`` -- the producer's
+    default ``package_manifest_filename``.
+    """
+
+    lineage = record.get("lineage_json")
+    if isinstance(lineage, Mapping):
+        recorded = str(lineage.get("forcing_package_manifest_uri") or "").strip()
+        if recorded:
+            return recorded
+    if not package_uri:
+        return None
+    return f"{package_uri.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+
+
+def _journal_forcing_provenance(state: Mapping[str, Any], forcing_uri: str) -> dict[str, Any] | None:
+    """Name the journal tier that materialized ``state['forcing_version']`` (D1)."""
+
+    forcing_version = state.get("forcing_version")
+    if not isinstance(forcing_version, Mapping):
+        return None
+    source = str(forcing_version.get("forcing_version_source") or "")
+    if source not in {"journal", "direct"}:
+        return None
+    if forcing_uri not in {
+        str(forcing_version.get(key))
+        for key in ("forcing_package_uri", "forcing_uri", "package_uri", "forcing_package_path")
+        if forcing_version.get(key) not in (None, "")
+    }:
+        # The uri the guard probed came from another state container, so the
+        # journal tier marker does not describe it.
+        return None
+    return {
+        "source": source,
+        "package_uri": _evidence_safe(forcing_uri),
+        "forcing_version_id": _evidence_safe(forcing_version.get("forcing_version_id")),
     }
 
 

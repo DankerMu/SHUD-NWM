@@ -1143,9 +1143,14 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     # Since #1160 this URI-absent geometry (the journal records no forcing
     # provenance for the failed member) is demoted to the stable repair-eligible
     # missing-forcing blocker instead of re-issuing a forecast retry that would
-    # spin.  The projection assertions above -- this test's actual subject --
-    # are unchanged.
-    assert (failed_decision.action, failed_decision.reason) == ("blocked", "missing_forcing_package_uri")
+    # spin.  Since #1203 no provenance tier witnesses a package here (no journal
+    # row, no journal direct file, and ``resource_profile={}`` leaves the sidecar
+    # tier unconfigured), so the blocker carries the distinct "cannot determine"
+    # reason.  The projection assertions above -- this test's actual subject --
+    # are unchanged, as is the fail-closed block direction.
+    assert (failed_decision.action, failed_decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert failed_decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert failed_decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
     assert failed_decision.evidence["classifier"] == "missing_upstream_artifact"
     assert failed_decision.evidence["restart_stage"] == "forecast"
     assert failed_decision.evidence["artifact_guard"]["artifact_exists"] is False
