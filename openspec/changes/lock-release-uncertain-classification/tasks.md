@@ -6,7 +6,7 @@
 - [x] 1.2 `services/orchestrator/run_tree_copyback.py`：现有 except 内按 `phase == "release_uncertain"` 分流新 code `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（含 `error_reason` detail）；`chain_forecast_execution` 零改动（D2）
 - [x] 1.3 注释同步（D3）：`scripts/scheduler_state_index_copyback_replay.py:380-388` + `tests/test_scheduler_state_index_copyback_replay.py:505-507` 同源 prose（注释-only，断言零改动）；allowlist/replay 代码零改动
 - [x] 1.4 runbook（D4）：(a) `merge_commit_uncertain` bullet 补 `provider_lock_release_failed` 具名例；(b) §8.8 journal grep 扩为两码并列 + `…_COMMIT_UNCERTAIN` 判读 bullet（"可能已提交"处置方向）
-- [x] 1.5 D6 novel-phase 残余核查：grep `infra/` + `scripts/` 确认无对 refresh receipt `phase=="precommit"` 的筛选假设，结果记 PR body
+- [x] 1.5 D6 novel-phase 残余核查：grep `infra/` + `scripts/`——唯一读侧筛选点 `publish_scheduler_file_registry.py:474`（白名单外 fallback `precommit`，registry-publish 巷道将 novel token 拍平但与改前逐字节等价，无回归），结果记 PR body
 
 ## 2. 测试
 
@@ -26,4 +26,4 @@
 - [x] 3.2 `tests/test_orchestration_chain.py` copyback event 定向用例绿
 - [x] 3.3 `uv run ruff check .`；runbook markdownlint（仓库既有入口）
 - [x] 3.4 `openspec validate lock-release-uncertain-classification --strict --no-interactive`
-- [ ] 3.5 PR body：D6 兄弟点判定表（含 novel phase token 与 rollback 事实）+ 记录性偏离（replay 零代码变更、r3/r4 已交付面清单、双故障 uncertain→refused 重分类）
+- [x] 3.5 PR body：D6 兄弟点判定表（含 novel phase token 与 rollback 事实）+ 记录性偏离（replay 零代码变更、r3/r4 已交付面清单、双故障 uncertain→refused 重分类）

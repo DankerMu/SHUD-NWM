@@ -21,7 +21,7 @@ Issue #1193：`merge_state_snapshot_index_copyback` 的 destination CAS 提交�
 2. **自然路径独立 code**：`run_tree_copyback` 对 `phase == "release_uncertain"` 的 `ProviderAtomicError` 改抛 `RunTreeCopybackError("OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN", …)`（与 `…_FAILED` 区分）；`chain_forecast_execution` 现有 `except RunTreeCopybackError` 事件写入器自动携带新 code 落 `object_store_copyback` event（`status_to="failed"` 不变，code 承担二分）。
 3. **replay 侧零代码变更**：`provider_lock_release_failed` 不在 pre-commit allowlist ⇒ 现有机制自动走 `merge_commit_uncertain`（rc 3），`merge_error_reason` 从合成标识升级为真实 reason。仅同步 `:380-388` 注释中"裸 OSError 来自锁 teardown"的举例措辞（该例经 1 变为 typed）。
 4. **注入测试**（AC-1/2/3 + 归类正确性）：LOCK_UN/close 注入下——state_manager merge 抛 `release_uncertain` 且 destination 字节确为 merge 后内容（断言"已提交"事实）；replay rc 3 / `merge_committed_incomplete` / stdout 摘要 / receipt 落盘且 `merge_error_reason=provider_lock_release_failed`；run_tree_copyback 新 code + chain 事件断言；body 异常优先级；close（非 flock）失败同归类。
-5. **runbook 两处更新**：`merge_commit_uncertain` bullet 将 `provider_lock_release_failed`（提交后锁释放失败）列为 off-allowlist 的具名 reason 例（合成标识例保留给真正未分类异常）；§8.8 journal grep 扩为两码并列并补 `…_COMMIT_UNCERTAIN` 判读 bullet。
+5. **runbook 更新**（初版两处；round-1 闭环追加 `…_FAILED` 口径收窄、exit-2 锁获取类限定与字段路径修正）：`merge_commit_uncertain` bullet 将 `provider_lock_release_failed`（提交后锁释放失败）列为 off-allowlist 的具名 reason 例（合成标识例保留给真正未分类异常）；§8.8 journal grep 扩为两码并列并补 `…_COMMIT_UNCERTAIN` 判读 bullet。
 6. **兄弟锁点审计（AC-5，判定不改行为）**：`scheduler_file_provider_refresh.py:639/1320/1512`、`source_cycle_raw_manifest.py:432→:495`、`atomic_replace_provider_bytes` 自持锁分支——释放失败从裸 OSError 变为 typed `ProviderAtomicError`，逐点记录新归类落入的现有 except 口径与语义结论，既有测试全绿。
 
 ## Non-Goals
@@ -33,6 +33,6 @@ Issue #1193：`merge_state_snapshot_index_copyback` 的 destination CAS 提交�
 
 ## Impact
 
-- Affected specs: `file-state-snapshot-index`（ADDED 一条 requirement）。
+- Affected specs: `file-state-snapshot-index`（ADDED 一条 requirement；round-1 FB1 后另 MODIFIED replay requirement 的"Untyped merge exceptions"WHEN 例证——锁 teardown 已 typed 化，不再是裸异常例）。
 - Affected code: `packages/common/provider_atomic.py`（释放段）、`services/orchestrator/run_tree_copyback.py`（code 分流）、`scripts/scheduler_state_index_copyback_replay.py` 与 `tests/…replay.py:505-507`（均仅注释）、`docs/runbooks/current-production-ops.md`（bullet 补名 + §8.8 判读入口）、测试三文件新增注入用例。
 - 无 DB/display/调度行为面改动；故障注入式测试，**禁止**在 node-22 制造 fd/挂载故障（issue 明示）；无需远端 receipt。
