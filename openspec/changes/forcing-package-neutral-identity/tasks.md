@@ -10,7 +10,7 @@ Must-preserve:staged 目的地 `{project}.tsd.forc` 命名、站点 CSV 名从 t
 - [x] 1.3 `scripts/create_qhh_shud_manifest.py`::319-324 成员判定迁移双名恰一(r1-C1——producer 消费链 `run_qhh_backend_smoke.sh:158-169`/`run_qhh_cycle.sh:499,:509` 依赖它;canonical 或 legacy 恰一接受、双存拒绝、缺失报错双名);:132 `station_source` 改记实际命中成员 basename(r2-note);:347 后取 `member_name = PurePosixPath(member).name`,:352/:355/:359/:362 四条 header 失败消息插值 `member_name`(round-1 V3-1 解冻——其中 :359/:362 无 URI 兜底;`test_qhh_scripts_static.py` 的 `match="station header"` 子串断言零削弱)。
 - [x] 1.4 `workers/shud_runtime/runtime.py`:D4 三层恰一决断——manifest 门(:1795-1830,并存 → 新码 `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`;空命中保持 `[]`,同名 duplicate 保持 `FORCING_CHECKSUM_INVALID`)、staging 探测(:974,双文件裁决)、限长门(:1953/:3748 双名等价);:944 报错文本双名;:55/:1862 注释同步(r2-note);实现前 grep 确认错误码无闭集约束(有则登记 PR 偏离记录)。
 - [x] 1.5 `workers/mapping_builder/binding.py:270-272`:`RESERVED_FORCING_FILENAMES` 改由常量并集构造(canonical + legacy 都保留);:266-269 锚注释同步 spec delta;:31 注释同步;`rewrite.py:702` 注释同步(r2-note);grep evidence/receipt 面确认无载荷记录 `reserved_suffix`/`reserved_exact_match` reason 字符串(r2 残余风险,有则登记偏离)。
-- [x] 1.6 豁免面零改动核验:`git diff --stat` 不含 `qhh_production_bootstrap.py`/`run_qhh_backend_smoke.sh`/`seed_qhh_forcing_stations.py`/`file_store.py`/`data/Basins/**`;`docs/runbooks/qhh-backend-smoke.md` 按出现粒度(r2-C14):仅 :129 与 :205 第二处(package 成员散文)变更,:126/:130/:202/:205 第一处(真资产与 staged 目的地散文)不动(r1-C7/r2-C14)。
+- [x] 1.6 豁免面零改动核验:`git diff --stat` 不含 `qhh_production_bootstrap.py`/`run_qhh_backend_smoke.sh`/`seed_qhh_forcing_stations.py`/`file_store.py`/`data/Basins/**`;`docs/runbooks/qhh-backend-smoke.md` **记录不改写**(round-2 S4 推翻 r2-C14 改写预批):`:129`/`:205` 第二处回退 9af36a16 原文 byte-identical + `:130` 后日期注记;:126/:202/:205 第一处照旧不动。
 
 ## 2. 测试锚点(design D7)
 
@@ -37,7 +37,7 @@ Must-preserve:staged 目的地 `{project}.tsd.forc` 命名、站点 CSV 名从 t
 
 ## 5. 文档
 
-- [x] 5.1 `docs/modules/04_forcing_production_design.md:64` 与 `docs/spec/02_data_product_and_time_semantics.md:120`:canonical 名 + legacy 兼容与截止条件(D5)+ 明示"解决命名语义冲突,未发现跨流域数据污染"(AC-6);`docs/runbooks/qhh-backend-smoke.md` package 散文行(:129/:202/:205)同步 canonical、:126 真资产行不动(r1-C7)。
+- [x] 5.1 `docs/modules/04_forcing_production_design.md:64` 与 `docs/spec/02_data_product_and_time_semantics.md:120`:canonical 名 + legacy 兼容与截止条件(D5)+ 明示"解决命名语义冲突,未发现跨流域数据污染"(AC-6);`docs/runbooks/qhh-backend-smoke.md` **不改写记录**——:129/:205 第二处回退原文、:130 后加日期注记(round-2 S4);:126/:202 不动。
 
 ## Evidence Floor
 
@@ -58,3 +58,12 @@ Must-preserve:staged 目的地 `{project}.tsd.forc` 命名、站点 CSV 名从 t
 - [x] 6.4 V3-3:`docs/spec/02_data_product_and_time_semantics.md:122` 按裁决措辞改写(并存两层 fail-closed[DG];全缺仅 DG staging 层;manifest 门空命中返回空列表;非 DG 回退/manifest 锚定)。
 - [x] 6.5 新锚 B11-B16 全绿 + 既有 B4/B5/B8 锚零改动继续绿;spec delta 修订(非 DG 解析场景 + mismatch 场景)validate 通过。
 - [x] 6.6 V3-2 DISCARD 留痕:binding 值等断言维持设计档位,不加源码级断言(verifier 裁决:行为面被后缀规则冗余覆盖,producer 侧击杀面完好)。
+
+## 7. Round-2 修复(R1/S1/S2/S3/S4/S5;S2 结构卫生 DEFER 路由 issue #1355)
+
+- [x] 7.1 R1/S1:`_prepare_shud_project_forcing` 锚源改为校验和已验证的 `forcing_context.package_manifest["files"]`,回退链 package manifest files → run-manifest `forcing.files`(诊断 lane)→ canonical 兜底(design D4-2 修正文;禁用 `_authoritative_package_manifest_checksum_entries`)。
+- [x] 7.2 R1/S1 测试:B12/B13 重塑为生产 manifest 形态(`_drop_runtime_forcing_files` 剥离 run-manifest `forcing.files`,锚定走 package_manifest);保留诊断形态变体;新增 package_manifest 为 None 的兜底用例与非 DG manifest 声明双名 → canonical 优先钉(S5)。
+- [x] 7.3 S2(消息级):`DIRECT_GRID_FORCING_INDEX_AMBIGUOUS` 报错文本按 verifier 措辞补 `in {shud_dir}` + 前次 attempt 残留假说 + 人工清理指引;结构卫生(input 目录 attempt-start 声明成员锚定清理)DEFER → 已路由 tracked issue #1355。
+- [x] 7.4 S3:`shud_forcing_contract.py` docstring 过时的无差别恰一规则替换为 DG/非 DG 双 bullet(verifier 措辞)。
+- [x] 7.5 S4:`docs/runbooks/qhh-backend-smoke.md` :129 与 :205 第二处回退 9af36a16 byte-identical;:130 后插入日期注记(2026-08-10,#1176)。
+- [x] 7.6 九文件套件独立复跑全绿 + ruff + validate;spec delta 无需变更(非 DG 场景措辞已按 package manifest 表述)。

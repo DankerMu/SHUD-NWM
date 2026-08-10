@@ -126,8 +126,11 @@ forcing 采用原始 qhh/rSHUD 站点表：
 - source：`data/Basins/qhh/input/qhh/qhh.tsd.forc`
 - station count：386
 - station IDs：`qhh_forc_001` 到 `qhh_forc_386`
-- forcing package 标准 SHUD 文件：`shud/stations.tsd.forc` + 386 个 `shud/X*.csv`
+- forcing package 标准 SHUD 文件：`shud/qhh.tsd.forc` + 386 个 `shud/X*.csv`
 - staged runtime 输入：`qhh.tsd.forc` 头部为 `386 20260521`，并复制 386 个站点 CSV 到 SHUD project 目录。
+
+> 注（2026-08-10，#1176）：上述 `shud/qhh.tsd.forc` 是本次复测当时的 package 成员名。#1176 迁移后，producer 只产流域中性 canonical 成员 `shud/stations.tsd.forc`；legacy 名仅对历史 package 只读兼容。当前契约见 `docs/modules/04_forcing_production_design.md`。
+
 - `qhh.sp.att` 的 `FORC` 映射保留原始多站点索引；本次 staged 文件中 `FORC` 有 347 个不同取值，不再 remap 到单站点。
 
 ### GFS、canonical 与 forcing
@@ -202,7 +205,7 @@ forcing 采用原始 qhh/rSHUD 站点表：
 8. forcing producer 输出为平台内部格式，SHUD 需要 rSHUD/native 格式：runtime 阶段转换为 `qhh.tsd.forc` 与 `forcing.csv`。
 9. native SHUD CLI 与 mock 不同：runtime 新增 `shud_project` command style，按 `SHUD/shud -o <output_dir> -n <threads> qhh` 运行。
 10. native SHUD cfg 使用空白分隔，不是 `KEY = value`：runtime staging 修正 cfg 写法，并强制 ASCII 输出。
-11. qhh 校准输入 `sp.att` 的 `FORC` 引用原始 386 站点：新增 `scripts/seed_qhh_forcing_stations.py` 从 `qhh.tsd.forc` seed 386 个站点，forcing producer 对全部站点插值并输出 SHUD 标准 `shud/stations.tsd.forc` + 每站 CSV，runtime staging 保留原始 `FORC` 映射。
+11. qhh 校准输入 `sp.att` 的 `FORC` 引用原始 386 站点：新增 `scripts/seed_qhh_forcing_stations.py` 从 `qhh.tsd.forc` seed 386 个站点，forcing producer 对全部站点插值并输出 SHUD 标准 `qhh.tsd.forc` + 每站 CSV，runtime staging 保留原始 `FORC` 映射。
 12. registry GIS river segment 数量与 SHUD `.sp.riv` 输出数量不一致：新增 `scripts/seed_qhh_shud_output_segments.py`，parser 优先使用 SHUD output river identities。
 13. SHUD `.rivqdown.csv` 含 metadata/comment/header，且 `Time_min` 是 Unix minute：runtime verifier 和 output parser 已兼容该格式并转换真实 valid time。
 14. 386 站点下原 IDW 权重计算对全网格逐站排序过慢：`compute_idw_weights` 改为优先使用 `scipy.spatial.cKDTree`，无 scipy 时退回小堆近邻，保留 IDW 语义。

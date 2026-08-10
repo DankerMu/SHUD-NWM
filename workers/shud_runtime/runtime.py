@@ -938,11 +938,25 @@ class SHUDRuntime:
         )
         # The staging probe needs the manifest anchor to resolve a non-direct-grid
         # tree that legitimately carries a residual second station-index member.
-        checksum_entries = (
-            list(forcing_context.checksum_entries)
-            if forcing_context is not None
-            else _forcing_checksum_entries(manifest)
-        )
+        # The declaration source is the checksum-verified package manifest: a
+        # production run manifest never carries ``forcing.files`` (the chain
+        # assembler in services/orchestrator/chain_manifest_contracts.py emits
+        # uri/checksum only), so run-manifest entries are the diagnostic lane
+        # fallback (scripts/create_qhh_shud_manifest.py writes them) and
+        # canonical-first inside the staging probe is the last resort.
+        # ``_authoritative_package_manifest_checksum_entries`` is deliberately not
+        # used here: it raises when the package manifest is absent, which would
+        # newly fail-close the non-direct-grid lane.
+        checksum_entries: Sequence[Mapping[str, Any]]
+        if forcing_context is not None:
+            declared_files = (forcing_context.package_manifest or {}).get("files")
+            checksum_entries = (
+                list(declared_files)
+                if isinstance(declared_files, list) and declared_files
+                else list(forcing_context.checksum_entries)
+            )
+        else:
+            checksum_entries = _forcing_checksum_entries(manifest)
         staged_ids = self._stage_standard_shud_forcing(
             manifest,
             model_input_dir,
@@ -1014,8 +1028,14 @@ class SHUDRuntime:
             if is_direct_grid:
                 raise SHUDRuntimeError(
                     "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS",
-                    "Staged SHUD forcing package contains more than one station-index member: "
-                    f"{', '.join(staged_members)}; refusing to guess which one is authoritative.",
+                    "Staged SHUD forcing package contains more than one station-index member "
+                    f"in {shud_dir}: {', '.join(staged_members)}; refusing to guess which one "
+                    "is authoritative. Direct-grid staging copies only manifest-allowlisted "
+                    "members, so the most likely cause is a prior attempt that staged a "
+                    "different station-index identity into this reused run input workspace "
+                    "(prior-attempt residue). Remediation: manually remove the stale member "
+                    "(or clear the run's input workspace) and re-drive; this error code is "
+                    "not retryable in place.",
                 )
             declared_member = _manifest_declared_shud_forcing_index_member(checksum_entries)
             staged_members = [
@@ -3724,9 +3744,18 @@ def _manifest_declared_shud_forcing_index_member(
     produce, so manifest-current == last produce. Returns ``None`` when the
     manifest names zero or both identities, which leaves the caller on its
     canonical-first fallback.
+
+    Entries come from the checksum-verified ``forcing_package.json`` ``files``
+    list (producer shape: ``role``/``relative_path``/``uri``/``checksum``); the
+    non-SHUD entries there carry no ``relative_path`` and drop out of the
+    accepted-member intersection.
     """
 
-    declared = {str(entry.get("relative_path") or "").strip() for entry in checksum_entries or ()}
+    declared = {
+        str(entry.get("relative_path") or "").strip()
+        for entry in checksum_entries or ()
+        if isinstance(entry, Mapping)
+    }
     matched = declared & set(SHUD_FORCING_INDEX_MEMBERS)
     if len(matched) == 1:
         return next(iter(matched))

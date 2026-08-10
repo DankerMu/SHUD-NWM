@@ -12,10 +12,16 @@ This module is that authority (issue #1176, change
 ``forcing-package-neutral-identity``):
 
 * producers emit **only** :data:`CANONICAL_SHUD_FORCING_INDEX_MEMBER`;
-* consumers accept **exactly one** member from
-  :data:`SHUD_FORCING_INDEX_MEMBERS` — zero or two is fail-closed — so
-  historical packages carrying :data:`LEGACY_SHUD_FORCING_INDEX_MEMBER` stay
-  readable without ever being rewritten;
+* direct-grid consumers require **exactly one** member of
+  :data:`SHUD_FORCING_INDEX_MEMBERS` in both the package manifest and the staged
+  filesystem — both members present, or none declared, is fail-closed;
+* non-direct-grid staging copies the whole package prefix and may legitimately
+  hold a residual second member, so it resolves by the manifest-declared member
+  with canonical-first as the fallback, and keeps the existing internal-forcing
+  fallback when zero members are present;
+* either way, historical packages carrying
+  :data:`LEGACY_SHUD_FORCING_INDEX_MEMBER` stay readable without ever being
+  rewritten;
 * the member filename is a pure *transport* identity: it is never evidence of
   which basin the forcing data belongs to, and the runtime still stages it out
   as ``{project}.tsd.forc`` in the model input directory.
@@ -35,8 +41,9 @@ CANONICAL_SHUD_FORCING_INDEX_MEMBER = "shud/stations.tsd.forc"
 #: no direct-grid package in the object store lacks the canonical member.
 LEGACY_SHUD_FORCING_INDEX_MEMBER = "shud/qhh.tsd.forc"
 
-#: Every accepted station-index member path, canonical first. Consumers MUST
-#: resolve the station index by requiring exactly one of these.
+#: Every accepted station-index member path, canonical first — that order is the
+#: non-direct-grid fallback preference. Direct-grid consumers MUST require
+#: exactly one of these.
 SHUD_FORCING_INDEX_MEMBERS = (
     CANONICAL_SHUD_FORCING_INDEX_MEMBER,
     LEGACY_SHUD_FORCING_INDEX_MEMBER,
