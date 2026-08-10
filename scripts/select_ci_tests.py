@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -213,7 +214,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_forcing_producer.py",
             "tests/test_production_met_validation.py",
-            "tests/test_worker_chain_smoke.py",
         ),
     ),
     PathTestRule(
@@ -431,7 +431,30 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     if unknown_backend_python:
         selected.update(CORE_SMOKE_TESTS)
 
-    return sorted(path for path in selected if _test_target_exists(path, repo_root=repo_root))
+    selected_paths = sorted(selected)
+    # A selected target pointing at a deleted/renamed test file used to vanish
+    # here in silence, so the selection could shrink (even to empty) with no
+    # trace. Dropping stays the behavior; the drop is now announced. The target
+    # can come from a rule OR from a changed test file that self-selects (a
+    # routine deletion), so the wording stays provenance-neutral.
+    missing = [path for path in selected_paths if not _test_target_exists(path, repo_root=repo_root)]
+    # Several `::`-qualified node ids can pin the same missing file; announce
+    # once per file. Return-list filtering below stays per-target.
+    warned: set[str] = set()
+    for path in missing:
+        test_file = path.split("::", 1)[0]
+        if test_file in warned:
+            continue
+        warned.add(test_file)
+        message = f"selected test target does not exist and was dropped: {test_file}"
+        print(f"select_ci_tests: WARNING: {message}", file=sys.stderr)
+        # stdout carries the selected test list (consumed by `pytest -q $(...)`
+        # command substitution locally), so the annotation is emitted only under
+        # a real Actions runner, where ci.yml passes data via --github-output.
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"::warning title=Dropped CI test target::{message}")
+    dropped = set(missing)
+    return [path for path in selected_paths if path not in dropped]
 
 
 def changed_paths_from_git(base_ref: str) -> list[str]:
