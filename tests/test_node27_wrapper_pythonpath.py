@@ -1095,12 +1095,12 @@ def _compression_wall_harness(
 
 @pytest.mark.parametrize(
     ("wall_value", "expected_duration"),
-    [(None, "900s"), ("", "900s"), ("1900", "1900s"), ("0900", "0900s")],
+    [(None, "3900s"), ("", "3900s"), ("1900", "1900s"), ("0900", "0900s")],
 )
 def test_compression_wrapper_passes_the_configured_wall_to_the_launcher(
     tmp_path: Path, wall_value: str | None, expected_duration: str
 ) -> None:
-    """B8: the env wall reaches `timeout` as its DURATION operand, unset/empty means 900s."""
+    """B8: the env wall reaches `timeout` as its DURATION operand, unset/empty means 3900s."""
     wrapper, env, capture = _compression_wall_harness(tmp_path, wall_value)
 
     result = subprocess.run(

@@ -29,7 +29,7 @@ set +a
 # handling as the runner's Python-side default injection, so the two sides
 # cannot drift. `*[!0-9]*` rejects negatives, decimals and whitespace;
 # fail closed rather than launch the runner unbounded or with a bogus wall.
-WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-900}
+WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-3900}
 case "$WALL" in
   ''|*[!0-9]*) echo '{"status":"failed","reason":"wrapper wall must be a positive integer"}' >&2; exit 1 ;;
 esac

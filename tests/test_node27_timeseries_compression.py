@@ -127,23 +127,33 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
     """B1: with no budget env set, the three fields are today's literals.
 
     The runner's timeout budget chain became operator-configurable in #1156;
-    this pins the defaults byte-identical to the previously hardcoded values
-    and pins that both legs of the invariant hold exactly on them.
+    #1352 resized the defaults for the 17-basin dual-source régime, where
+    weekly hydro.river_timeseries chunks are 268-409 GB and compress at a
+    measured ~6.0 s/GB. This pins today's literals and pins that both legs of
+    the invariant hold on them.
     """
     config = compression.config_from_args(_args(), _base_env(tmp_path))
 
-    assert config.compress_timeout_ms == 840_000
-    assert config.wrapper_wall_seconds == 900
-    assert config.systemd_wall_seconds == 940
+    assert config.compress_timeout_ms == 3_600_000
+    assert config.wrapper_wall_seconds == 3_900
+    assert config.systemd_wall_seconds == 3_940
     assert compression._CLEANUP_MARGIN_SECONDS == 60
     assert compression._SYSTEMD_MARGIN_SECONDS == 40
     # Leg 1: statement timeout (seconds, rounded up) + cleanup margin fits the
-    # wrapper wall. Leg 2: wrapper wall + kill-after margin fits the declared
-    # systemd wall. Both are exact equalities at the defaults.
+    # wrapper wall. The margin is the enforced FLOOR, not the sizing recipe —
+    # the defaults deliberately clear it by the ~300 s of non-compress budget a
+    # real tick pays (watermark, git probes, catalog, two size measurements,
+    # reconcile), so this leg is a strict inequality, not an equality.
     assert (
         compression._ceil_div(config.compress_timeout_ms, 1000) + compression._CLEANUP_MARGIN_SECONDS
-        == config.wrapper_wall_seconds
+        < config.wrapper_wall_seconds
     )
+    assert (
+        config.wrapper_wall_seconds
+        >= compression._ceil_div(config.compress_timeout_ms, 1000) + 300
+    )
+    # Leg 2: wrapper wall + kill-after margin is exactly the declared systemd
+    # wall — nothing runs between the wrapper dying and systemd giving up.
     assert config.wrapper_wall_seconds + compression._SYSTEMD_MARGIN_SECONDS == config.systemd_wall_seconds
 
 
@@ -167,7 +177,7 @@ def test_budget_chain_variables_parse_fail_closed(tmp_path: Path, variable: str,
 
 
 def test_empty_budget_chain_variables_take_the_defaults(tmp_path: Path) -> None:
-    """B4: empty string means "unset" — same as the wrapper's ``${VAR:-900}``."""
+    """B4: empty string means "unset" — same as the wrapper's ``${VAR:-3900}``."""
     env = _base_env(
         tmp_path,
         override={
@@ -178,9 +188,9 @@ def test_empty_budget_chain_variables_take_the_defaults(tmp_path: Path) -> None:
     )
     config = compression.config_from_args(_args(), env)
     assert (config.compress_timeout_ms, config.wrapper_wall_seconds, config.systemd_wall_seconds) == (
-        840_000,
-        900,
-        940,
+        3_600_000,
+        3_900,
+        3_940,
     )
 
 
@@ -1527,8 +1537,8 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
     assert "node27_timeseries_compression_supervisor.py" not in service_text
     # The unit's real wall must be the runner's DECLARED default systemd wall,
     # which in turn must be the default wrapper wall plus the kill-after
-    # margin. Asserting the relation rather than re-writing "940" keeps the
-    # three artifacts on one source of truth.
+    # margin. Asserting the relation rather than re-writing the literal keeps
+    # the three artifacts on one source of truth.
     timeout_start_lines = [line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")]
     assert len(timeout_start_lines) == 1
     unit_wall_seconds = int(timeout_start_lines[0].split("=", 1)[1])
@@ -1544,7 +1554,7 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
         "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-"
         f"{compression._DEFAULT_WRAPPER_WALL_SECONDS}}}"
     )
-    assert wall_default_assignment == "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-900}"
+    assert wall_default_assignment == "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-3900}"
     assert wall_default_assignment in wrapper_text
     # Fail-closed guard between the read and the exec.
     assert (
@@ -1560,9 +1570,17 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
 def test_compression_env_example_documents_the_budget_chain() -> None:
     """B7: the template carries the three knobs plus the drop-in sync duty."""
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
-    assert "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=840000" in text
-    assert "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=900" in text
-    assert "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=940" in text
+    # The template's literals must be the runner's defaults — an operator who
+    # copies the template unedited must land exactly on them.
+    assert (
+        f"NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS={compression._DEFAULT_COMPRESS_TIMEOUT_MS}"
+    ) in text
+    assert (
+        f"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS={compression._DEFAULT_WRAPPER_WALL_SECONDS}"
+    ) in text
+    assert (
+        f"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS={compression._DEFAULT_SYSTEMD_WALL_SECONDS}"
+    ) in text
     # Both legs of the invariant, spelled out for the operator.
     assert "ceil(COMPRESS_TIMEOUT_MS / 1000) + 60 s cleanup margin" in text
     assert "WRAPPER_WALL_SECONDS + 40 s kill-after margin" in text
