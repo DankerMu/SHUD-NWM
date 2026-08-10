@@ -107,6 +107,7 @@ Issue: #1330 (S). Branch:
     by safe_fs :261-262/:367-368/:497-498 — inner catch on the
     probe, resolved before the step 1-5 wrapper); stale :451-452
     cite consolidated to :424-425 root/:450-451 entry.
+  - RUN-2 Round 1 NOT CLEAN (1 P1, 2 P2, 3 P3) — repaired
     (iteration 1/2): P1 D1 step 5 prescribed `_ensure_directory`,
     which pre-types kind="io" mkdir failures as
     `WORKSPACE_PATH_UNSAFE` (permanent) and — being a sibling
@@ -194,7 +195,7 @@ Issue: #1330 (S). Branch:
 
 ## 2. Implementation (implementer subagent)
 
-- [ ] 2.1 `packages/common/safe_fs.py`: TWO primitives per design
+- [x] 2.1 `packages/common/safe_fs.py`: TWO primitives per design
   D2 — `rename_entry_no_follow` (dir-fd `renameat`, both parents
   O_DIRECTORY|O_NOFOLLOW walked from containment root) and
   `remove_tree_allow_symlinks` (quarantine removal; unlinks symlink
@@ -205,7 +206,7 @@ Issue: #1330 (S). Branch:
   contract, run-2 r2 — a plain `OSError` forced beneath each new
   primitive at the os level surfaces as `SafeFilesystemError`
   `kind="io"`, per design D2 error contracts)
-- [ ] 2.2 `workers/shud_runtime/runtime.py` `execute()`:
+- [x] 2.2 `workers/shud_runtime/runtime.py` `execute()`:
   attempt-start hygiene hook per design D1, FIRST step inside the
   existing `try` (dir loop split: input/log before, output owned by
   the hook) — probe with FileNotFoundError=absent → skip straight
@@ -220,14 +221,14 @@ Issue: #1330 (S). Branch:
   `WORKSPACE_PATH_UNSAFE` (permanent); `OSError`/`kind="io"`
   anywhere incl. the probe/listing → `STORAGE_WRITE_FAILED`
   (transient, design D1)
-- [ ] 2.3 Anchors A1-A7 per design D4 (A1/A2/A5/A6 RED-proofed on
+- [x] 2.3 Anchors A1-A7 per design D4 (A1/A2/A5/A6 RED-proofed on
   master 55c020de; A3(a-c) pins green incl. the empty-reuse
   no-eviction pin; A4 SPLIT color — typed-error half green pin,
   accounting half RED on master; A7 both lanes with
   `is_retryable_failure` classification assertions — the I/O lane
   with THREE os-level forced-failure points, all required, per
   design D4 A7(a)); no existing assertion weakened
-- [ ] 2.4 Evidence floor + ruff green; deviations reported
+- [x] 2.4 Evidence floor + ruff green; deviations reported
   explicitly ("no deviations" stated if none)
 
 ## 3. PR
