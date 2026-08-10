@@ -16,7 +16,7 @@
 - ENOENT 保持"合法缺失根"语义:非 strict `os.path.realpath` 回退后照常纳入,两臂均不产 blocker(与旧非 strict resolve 对缺失路径的行为逐字对齐)。
 - db-free 臂对非 ENOENT 保持 PR #831 词法回退容忍,不产 blocker——判别器在 3.13+ 上恢复可观测差异。
 - 行为变更披露(契约升级,非回归),两个面:
-  1. ≤3.12 非 db-free 臂的环根由"RuntimeError 逃逸崩溃"升级为结构化 blocker + `status="blocked"`。旧行为不是任何调用方依赖的契约(gateway 不捕获该异常,崩溃即 500)。
+  1. ≤3.12 非 db-free 臂的环根由"RuntimeError 逃逸崩溃"升级为结构化 blocker + `status="blocked"`。旧行为不是任何调用方依赖的契约(gateway 不捕获该异常,崩溃即 500)。**可达性限定**:此升级只对"config 构造之后才出现的环"生效——构造前已存在的环根在 ≤3.12 上会先在配置层 `_optional_config_path`(scheduler_runtime_roots.py:505)崩溃,preflight 根本不跑;该上游位点由 #1347 独立跟踪,不在本变更范围。ELOOP 车道在生产解释器(3.11/3.12)经真实 config 仅对构造后出现的环可达;经真实 config 全版本可达的收紧车道是 ENOTDIR/EACCES 类。
   2. **收紧面覆盖全部非 ENOENT errno,且作用于所有版本(含生产 3.11/3.12)**:EACCES(祖先不可 traverse)/ENOTDIR(路径中段是普通文件)等根在旧代码所有版本上被非 strict resolve 静默纳入,新代码一律剔除 + blocker——与 #1344 `_storage_root_check` 同判据,故意 fail-closed。本变更不是 3.13+ 专属修复。
 
 ## Impact

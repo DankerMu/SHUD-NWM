@@ -30058,6 +30058,41 @@ def test_slurm_preflight_symlink_loop_allowed_root_blocks_with_root_cause_first(
     }
 
 
+def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A1b-e2e: the ENOTDIR shape survives the config layer's own non-strict
+    # canonicalisation verbatim on every supported interpreter, so this pins the
+    # only tightening lane reachable through a REAL `ProductionSchedulerConfig`
+    # on the production interpreters -- the ELOOP lane is shadowed on <=3.12 by
+    # the config-layer `Path.resolve()` crash site (tracked by #1347), which is
+    # why the loop anchor above has to materialise its symlink post-construction.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    regular_file = tmp_path / "file.txt"
+    regular_file.write_text("not a directory", encoding="utf-8")
+    not_a_dir_root = regular_file / "root"
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(not_a_dir_root,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    assert config.allowed_storage_roots == (not_a_dir_root,)
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
+    assert preflight["blockers"][0]["path"] == str(not_a_dir_root)
+    assert preflight["checks"]["allowed_roots"] == []
+
+
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
     monkeypatch: Any,
     tmp_path: Path,

@@ -15,6 +15,7 @@ Must-preserve:ENOENT 纳入语义、db-free 词法回退容忍(PR #831)、去重
 
 - [x] 2.1 **A1(RED 主锚)** 环根 + db_free=False:`_preflight_allowed_roots` 剔除环根且产出 code=`SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH`、field=`allowed_storage_roots` 的 blocker;端到端 `_slurm_preflight` status=`blocked`、**`blockers[0]["code"]` 即该根因码**(排序有语义:evidence 消费面取 `blockers[0]` 作 error_code,见 design D3)、环根不出现在 `checks["allowed_roots"]`。前提:config 须给安全远端 `database_url`(沿用 tests/test_production_scheduler.py:15091 的 `postgresql://nhms:secret@db.prod.example/nhms` 约定),否则 `DATABASE_URL_*` blocker 会占据 index 0,顺序断言失败且读数误导。RED 证:3.14 现行代码静默纳入且无 blocker;3.11 现行代码 **RuntimeError** 逃逸(pathlib ELOOP→无 errno RuntimeError;红证用 `pytest.raises(RuntimeError)` 读数,异常而非结构化 blocker)。
 - [x] 2.1b **A1b(errno 二分钉)** ENOTDIR 变体 + db_free=False:根配置为 `tmp_path/"file.txt"/"root"`(`file.txt` 为普通文件,四版本稳定 errno=20,hermetic 无需 symlink/chmod):同样剔除 + 同 code blocker——钉住判据是"非 ENOENT"而非"仅 ELOOP"。
+- [x] 2.1c **A1b-e2e(round-1 C-B2 修复)** A1b 升格补一条真 `ProductionSchedulerConfig` 端到端腿:ENOTDIR 根经真实 config 构造(该形状在四版本 config 层 canonicalization 下原样存活,无需构造后物化技巧),断言 `status=="blocked"`、`blockers[0]["code"]==SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH`、`checks["allowed_roots"]==[]`——钉住生产解释器上经真实 config 唯一可达的收紧车道(ELOOP 车道 ≤3.12 被配置层 #1347 遮蔽)。保留 stub 锚不动。
 - [x] 2.2 **A2(判别器钉)** 同一环根 + db_free=True:纳入(词法回退)、零 blocker——与 A1 构成臂间可观测差异(D5 注)。3.11 现行即绿(PR #831 语义钉)。
 - [x] 2.3 **A3(ENOENT 钉)** 不存在的根 × 两臂:纳入、零 blocker、无异常(旧非 strict resolve 语义逐字对齐)。
 - [x] 2.4 **A4(崩溃车道钉)** `<missing>/../<loop>` 形状根 + db_free=False:走 ENOENT 车道纳入、零 blocker、**永不裸抛**——py3.11 腿为回退车道误用 `Path.resolve()` 的崩溃红证(#1344 P1 教训)。
@@ -42,6 +43,11 @@ Must-preserve:ENOENT 纳入语义、db-free 词法回退容忍(PR #831)、去重
 - `uv run ruff check .` 通过;openspec validate 通过。
 - CI:PR targeted Unit Tests(py3.11)绿。
 - 无远端 receipt 需求(纯本地判据,无 DB/display 接触面)。
+
+## Round-1 评审记录注(不修项)
+
+- C-C1(CONFIRMED/DISCARD):重复配置条目产出重复 blocker(roots 去重、blockers 不去重)。唯一消费面 `residual_blockers` 为信息行,`blockers[0]` 不受影响,无计数型契约;记录为已知噪声,不修。
+- C-B1(REFUTED):"无远端 receipt"判定成立——生产 6 根部署为 db-free 臂(compute.example:50 `DB_FREE_REQUIRED=true`),新 blocker 不可达;db-backed runbook 不配 ALLOWED_ROOTS,回退 workspace_root 已被 #1344 的 `_storage_root_check` 同 errno 硬拦。
 
 ## Non-Goals(复述 proposal)
 

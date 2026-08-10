@@ -53,7 +53,7 @@ def _preflight_allowed_roots(config) -> tuple[tuple[Path, ...], list[dict[str, A
 ## D3 — 调用点与 facade
 
 - **gateway(scheduler_gateway.py:47,唯一真实调用点)**:
-  `allowed_roots, allowed_root_blockers = _scheduler._preflight_allowed_roots(config)`,随即 `blockers.extend(allowed_root_blockers)`——**必须在 storage_roots 循环之前**。顺序有语义负载:`scheduler_candidate_execution_evidence.py:341-364` 取 `blockers[0]` 作 `error_code`/`error_message`;剔根后四个 storage root 会级联 `OUT_OF_ROOT`,根因 blocker 必须排位第一,否则操作员看到的首要错误码是 `WORKSPACE_ROOT_OUT_OF_ROOT`,根因被埋(A1 端到端断言钉住 `blockers[0]["code"]`)。`checks["allowed_roots"]` 构造零改动——被剔除的根天然不在 `allowed_roots` 里,证据面自动收敛(验收:被剔除的根不得出现在 `checks["allowed_roots"]`)。
+  `allowed_roots, allowed_root_blockers = _scheduler._preflight_allowed_roots(config)`,随即 `blockers.extend(allowed_root_blockers)`——**必须在 storage_roots 循环之前**。顺序有语义负载:`scheduler_candidate_execution_evidence.py:341-364` 取 `blockers[0]` 作 `error_code`/`error_message`;剔根后四个 storage root 会级联 `OUT_OF_ROOT`,根因 blocker 必须**领先于它自己引发的 OUT_OF_ROOT 级联**(非全局 index-0 保证:`DATABASE_URL_*` blocker 在 :38 合法先行,那本身也是根因;A1 端到端在安全 database_url 前提下钉住 `blockers[0]["code"]`)。`checks["allowed_roots"]` 构造零改动——被剔除的根天然不在 `allowed_roots` 里,证据面自动收敛(验收:被剔除的根不得出现在 `checks["allowed_roots"]`)。
 - **facade(scheduler_candidate_runtime.py:239 + :832)**:纯符号再导出,函数对象返回形状变化随符号透传,无需改动。实现任务必须 `grep -rn "_preflight_allowed_roots"` 全仓核对:除 preflight 定义、facade 再导出、gateway 调用外**不得**存在其他消费方(tests/ 已确认无直接调用者)。
 
 ## D4 — 空有效根集合(fail-closed,不补救)
@@ -62,9 +62,9 @@ def _preflight_allowed_roots(config) -> tuple[tuple[Path, ...], list[dict[str, A
 
 ## D5 — 行为变更矩阵(披露面)
 
-| 场景 | 旧 3.13+/3.14 | 旧 ≤3.12 | 新(全版本一致) |
+| 场景 | 旧 3.13+/3.14 | 旧 ≤3.12 | 新(全版本一致,以 config 层可达输入域为限) |
 |---|---|---|---|
-| 环根, db_free=False | 静默纳入(fail-open) | **RuntimeError** 逃逸崩溃(pathlib ELOOP→无 errno RuntimeError) | 剔除 + UNSAFE_PATH blocker + status=blocked |
+| 环根, db_free=False | 静默纳入(fail-open) | **RuntimeError** 逃逸崩溃(pathlib ELOOP→无 errno RuntimeError) | 剔除 + UNSAFE_PATH blocker + status=blocked(≤3.12 上仅对构造后出现的环可达——构造前已存在的环在配置层 `_optional_config_path` 先崩,#1347 跟踪) |
 | 非 ENOENT 其他 errno(EACCES/ENOTDIR/ENAMETOOLONG…), db_free=False | 静默纳入 | **静默纳入**(非 strict resolve 不抛) | 剔除 + UNSAFE_PATH blocker(**所有版本收紧,含生产 3.11/3.12**) |
 | 环根, db_free=True | 静默纳入(resolve 产物) | 词法回退纳入 | 词法回退纳入,无 blocker |
 | 缺失根(ENOENT), 两臂 | 非 strict resolve 纳入 | 非 strict resolve 纳入 | 非 strict realpath 纳入,无 blocker(逐字对齐) |
