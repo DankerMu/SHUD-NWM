@@ -121,7 +121,7 @@ Issue: #1329 (S code / M contract). Branch:
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
+- [x] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
   - Round 2 focused (577ea1dd, scope = round-1 fix commit): 0 P1,
     0 P2, 4 P3 — both round-1 closures verified with independent
@@ -154,14 +154,18 @@ Issue: #1329 (S code / M contract). Branch:
     plausible regression class (except-widening) is already killed
     by A5(b)/(c) 4-RED; sites untouched by this diff → routed as
     follow-up issue (task 5.0).
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.2 Phase 7 final review clean on final head (4c648a49 —
+  CLEAN merge-ready; 3 independent mutation probes each killed by
+  the expected anchor; residual noted: guard raises
+  uncaptured_rejection ≡ first_rejection in the ≤2-root topology,
+  needs rule-5 sync only if root enumeration ever widens)
 
 ## 5. Merge (pre-authorized) and closeout
 
 - [x] 5.0 Follow-ups routed with numbers: #1334 (round-1 C3 DEFER —
   unsafe-path / oversized-artifact hard raises unanchored in
   sibling geometry; `state_cli.py:856` zero coverage anywhere)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
-  head
-- [ ] 5.2 Merge; archive change; loop-log line + audit; close issue
-  #1329
+- [x] 5.1 Chinese work summary + evidence posted (PR #1333 comment
+  5235741314); CI green on final head 4c648a49
+- [x] 5.2 Merged ffe9494e; change archived; loop-log line + audit;
+  issue #1329 auto-closed; branch deleted
