@@ -132,14 +132,14 @@ Issue: #1332 (S code / compact fixture). Branch:
 
 ## 3. PR
 
-- [ ] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
-  Evidence-Floor 声明
-- [ ] 3.2 CI green (targeted Unit Tests, py3.11 — the second
-  matrix leg)
+- [x] 3.1 Commit + push; PR with 变更摘要 / 偏离记录 / 测试证据 /
+  Evidence-Floor 声明 (PR #1344)
+- [x] 3.2 CI green (targeted Unit Tests, py3.11 — the second
+  matrix leg; green on d11edfe1, 08024018 and bd08d585)
 
 ## 4. Review loop
 
-- [ ] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
+- [x] 4.1 Cross-review rounds per gate ledger; candidates → dedup →
   per-class verifier batches; findings verified before fix
   - Round 2 focused (08024018, scope = round-1 fix commit):
     production code CLEAN — three one-liners verified correct on
@@ -178,12 +178,18 @@ Issue: #1332 (S code / compact fixture). Branch:
     stays green) → two assert lines. Follow-up routed: #1345
     (`_preflight_allowed_roots`, producer-side sibling, out of
     scope by D4).
-- [ ] 4.2 Phase 7 final review clean on final head
+- [x] 4.2 Phase 7 final review clean on final head (bd08d585 —
+  CLEAN merge-ready; AC 1-6 self-verified, 3 mutation probes each
+  pinned by the expected anchor, collateral sweep at final head
+  12156 passed = 12152 + the 4 fix-pass tests, adjacent surfaces
+  checked; residual doc note: D4 closing bullet narrower than its
+  first bullet, zero code impact)
 
 ## 5. Merge (pre-authorized) and closeout
 
-- [ ] 5.0 Follow-ups routed with numbers (if any arise in review)
-- [ ] 5.1 Chinese work summary + evidence posted; CI green on final
-  head
-- [ ] 5.2 Merge; archive change; loop-log line + audit; close issue
-  #1332
+- [x] 5.0 Follow-ups routed with numbers: #1345
+  (`_preflight_allowed_roots` producer-side sibling predicate)
+- [x] 5.1 Chinese work summary + evidence posted (PR #1344 comment
+  5237503382); CI green on final head bd08d585
+- [x] 5.2 Merged 5318200e; change archived; loop-log line + audit;
+  issue #1332 auto-closed; branch deleted
