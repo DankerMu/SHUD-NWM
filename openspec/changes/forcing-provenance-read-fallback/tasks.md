@@ -11,10 +11,10 @@
 
 ## 1R2. Round-2 修复（V5）
 
-- [ ] 1R2.1 读上限按生产实况：`_FORCING_SIDECAR_MAX_BYTES` 64 KiB → 16 MiB；`store.size()` 预判超限 → 新细因 `sidecar_oversized`（与 `sidecar_unreadable` 分立）；size/read 的 `ObjectStoreError` 仍不得逃逸（V5-C1）
-- [ ] 1R2.2 探针错语义归位：`ObjectStoreError` containment 分支从 `missing_forcing_package_uri` 改为 `forcing_version_row_absent` + `forcing_provenance={source:"absent", tier_status:"sidecar_manifest_probe_error"}`（V5-C2）
-- [ ] 1R2.3 runbook：分流表补 `sidecar_oversized`（重产无效——record 异常，先查 producer）与 `sidecar_manifest_probe_error`（重产无效——存储读故障）；evidence 判读清单补 `forcing_provenance.probe_key`/`.artifact_exists`/`artifact_guard.unsafe_reason`；复原 `:1503` 被截断的孤儿从句主干（V5-C3）
-- [ ] 1R2.4 测试：B4 `oversized` case 断言迁 `sidecar_oversized` 且播种超 16 MiB；B11 断言迁 row_absent/probe_error；新增 B12 生产量级 record（>1 MB lineage）恢复钉（V5-C1/C2）
+- [x] 1R2.1 读上限按生产实况：`_FORCING_SIDECAR_MAX_BYTES` 64 KiB → 16 MiB；`store.size()` 预判超限 → 新细因 `sidecar_oversized`（与 `sidecar_unreadable` 分立）；size/read 的 `ObjectStoreError` 仍不得逃逸（V5-C1）
+- [x] 1R2.2 探针错语义归位：`ObjectStoreError` containment 分支从 `missing_forcing_package_uri` 改为 `forcing_version_row_absent` + `forcing_provenance={source:"absent", tier_status:"sidecar_manifest_probe_error"}`（V5-C2）
+- [x] 1R2.3 runbook：分流表补 `sidecar_oversized`（重产无效——record 异常，先查 producer）与 `sidecar_manifest_probe_error`（重产无效——存储读故障）；evidence 判读清单补 `forcing_provenance.probe_key`/`.artifact_exists`/`artifact_guard.unsafe_reason`；复原 `:1503` 被截断的孤儿从句主干（V5-C3）
+- [x] 1R2.4 测试：B4 `oversized` case 断言迁 `sidecar_oversized` 且播种超 16 MiB；B11 断言迁 row_absent/probe_error；新增 B12 生产量级 record（>1 MB lineage）恢复钉（V5-C1/C2）
 
 ## 2. 测试
 
@@ -26,6 +26,11 @@
 - [x] 2.6 B6：空 provenance 几何 pins 全名单迁移（design D5 名单 13 处含 `test_gateway_reconcile.py:1148`），仅换 reason/error_code/classifier，block 方向断言逐字保留；名单外零改动；新发现同类先补名单
 - [x] 2.7 B7：candidate_state/find_forcing_context 一致性 + 两档全空 None + 损坏 direct 文件不抛退 None
 - [x] 2.8 B8：`forcing_provenance.source` 四值现形（object_store_sidecar 必须在 B1 不-block 几何出现）
+- [x] 2.9 B9：真实 sanitized 形状端到端（占位符 + sidecar 可恢复 → 不 block；sidecar 缺失 → row_absent）
+- [x] 2.10 B10a/B10b：prefix 漂移仍恢复；异体 manifest witness 不 fail-open
+- [x] 2.11 B11：探针 `ObjectStoreError` 护栏 + `run_once` 存活 + row_absent/probe_error 归类
+- [x] 2.12 B12：生产量级 record（>1 MB lineage）仍见证恢复（旧 64 KiB 上限下红）
+- [x] 2.13 B13：`sidecar_unreadable` 档回归锚（chmod 0 / symlink 几何）——round-3 覆盖缺口，移除档位读腿 containment 后须转红
 
 ## 3. Evidence Floor
 

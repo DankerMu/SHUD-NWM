@@ -115,7 +115,10 @@ The DB-free journal read paths SHALL resolve forcing provenance for the same (so
 - **THEN** the candidate state materializes the direct-file provenance
   (marked with the direct-file source) and the forcing-context read
   and the candidate-state read return the same forcing version
-  identity and package URI
+  identity, with the package URI in the candidate-state read subject
+  to the public-read redaction boundary (a redaction placeholder there
+  is the documented boundary value, not a disagreement between the two
+  reads)
 
 #### Scenario: Both journal tiers empty yields honest null
 

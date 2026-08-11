@@ -91,6 +91,7 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 | B9 | **真实 sanitized 形状端到端**（round-1 C4 钉）：经真实 `FileOrchestrationJournalRepository.candidate_state`（tier-1 行含 s3 形 URI → 占位符）+ producer 同构 sidecar + manifest 在场 + store/prefix 已配置 → **不 block**、source=object_store_sidecar；同几何 sidecar 缺失 → `forcing_version_row_absent`（非伪 missing） | test_production_scheduler |
 | B10 | prefix 漂移与异体 witness（round-1 V2-C2 钉）：record lineage URI 带 `s3://nhms-prod` 而 scheduler prefix `s3://nhms` → 派生 key 探针照常恢复（不伪 missing）；sidecar record 指向异体 manifest 而本候选派生 key 处无 manifest → **不**恢复（fail-closed，非 fail-open） | 同上 |
 | B11 | 探针后异常护栏（round-1 V2-C1 + round-2 V5-C2 钉）：manifest leaf 为 symlink（SafeFilesystemError→ObjectStoreError 几何）→ 决策 fail-closed 返回、**无异常逃逸**、`run_once` 不崩，且 reason=`forcing_version_row_absent`/`tier_status=sidecar_manifest_probe_error`（非 `missing_forcing_package_uri`） | 同上 |
+| B13 | **`sidecar_unreadable` 回归锚（round-3）**：sidecar record 权限置 0 或 leaf 为 symlink → `forcing_version_row_absent`/`tier_status=sidecar_unreadable`，无逃逸；判据=移除档位读腿 `except` 中的 `ObjectStoreError` 后本锚必须转红 | 同上 |
 | B12 | **生产量级 record 恢复钉（round-2 V5-C1）**：sidecar record 携带 >1 MB 的 `lineage_json.output_files`（生产实测 1.6–2.0 MB 形状）+ manifest 在场 → 仍解析成功、**不 block**、source=object_store_sidecar（64 KiB 上限下此用例必红） | 同上 |
 
 **B6 全名单（fixture 复审 P1-2 逐条核实的空-provenance 几何，实现期如再发现同类以同规则迁移并记 PR body）**：
@@ -158,6 +159,16 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 - **V4-C1（CONFIRMED，DEFER→#1365）**：空/相对 prefix 下未打码的目录形 recorded URI 仍走 tier-1/2 探针被吞成伪 missing——master 同款、且与 `design.md:54` 已裁定的"非占位符目录形 URI 属 pre-existing 另腿"同源；另经实测所有部署源均强制非空 prefix（缺失即 fail-closed 启动失败）。归 #1365 家族，不在本 change 修。
 - **V4-C2（CONFIRMED，DEFER→登记残余）**：copyback 腿无占位符防御（本 change 解除了 forcing 腿的遮蔽后该腿理论可达）；但全仓 grep 证实 `copyback_source_uri` 系列键**无任何生产写入方**（DB-free allowlist 亦不透传，实测注入后 state 无该键），当前树无操作员可触发路径。登记为残余 issue，不占本轮修复。
 - **V4-C3（CONFIRMED pre-existing，DEFER→#1365）**：`ObjectStoreError` containment 仅覆盖 sidecar 腿，tier-1/2 recorded-URI 腿（`:449`）与 copyback 腿（`:478`）在 master/HEAD 同样逃逸。`design.md:55` 已登记 tier-1/2；本轮补记 copyback 腿一并入 #1365 家族。
+
+## Review round 3 裁决记录（converging retro，预算 2 轮）
+
+三名 reviewer 中两名（fail-closed 语义轴、operator/blast-radius 轴）独立返回 clean；第三名（oracle 完整性轴）3 条，无行为缺陷：
+
+- **P2 spec 场景与实现相悖**：ADDED requirement 正文已在 round 1 加入打码边界让步，其场景 THEN 却仍要求两读路 "same … package URI"，与 B7 锚（`tests/test_file_orchestration_journal.py:577` 显式断言 URI **不**一致）直接矛盾。修复=场景 THEN 同步收窄（仅 spec 文本，零测试改动）。
+- **P2 `sidecar_unreadable` 唯一无锚**：七个 tier status 中六个已钉，最可能真实发生的一档（NFS EACCES/ESTALE、symlink leaf）无回归保护；判据=去掉 `:662` except 元组里的 `ObjectStoreError` 后 Evidence Floor 仍全绿。修复=B13（见 D5）。
+- **P3 fixture 勾选滞后**：1R2.x 已实现未勾、§2 缺 B9-B12 行。修复=本轮补齐（并新增 B13 行）。
+- 注记（非 finding）：B12 `output_files` 条目注释称 mirror 真实形状，而 producer 实际写 `{"role","uri","checksum"}`（`producer.py:2051-2056`）——纯注释漂移，随手改正。
+- 残余风险记录（非 finding）：16 MiB 上限不是解析峰值内存边界（生产 record 1.6-2.0 MB，每候选每趟只读一次，当前无风险）；`forcing_provenance.source` 的 `direct` 值在生产实际不可达（直读档记 s3 URI，公共读打码后改走 sidecar 档）——round-1 C1 已裁定的副作用，四值承诺在实际部署为三值。
 
 ## Risk packs
 

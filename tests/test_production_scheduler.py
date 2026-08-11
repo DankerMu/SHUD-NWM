@@ -9278,6 +9278,51 @@ def test_unavailable_sidecar_tier_blocks_as_row_absent_without_escaping_exceptio
     }
 
 
+def test_unreadable_sidecar_record_blocks_as_row_absent_without_escaping_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B13 (round-3): the RECORD read leg, distinct from B11's manifest PROBE leg.
+    # ``sidecar_unreadable`` is the tier status production most plausibly hits (NFS
+    # EACCES/ESTALE, a symlinked record leaf), and it is the only status with no
+    # anchor: dropping ``ObjectStoreError`` from the record-read ``except`` tuple in
+    # ``_forcing_sidecar_provenance`` would let a RuntimeError subclass escape and
+    # abort the whole scheduler pass while every other test stayed green.
+    #
+    # Geometry: the producer-isomorphic record IS written (so this is a read fault,
+    # not absence), then its leaf is replaced by a symlink to the identical bytes --
+    # the same deterministic, uid-independent shape B11 uses.  A ``chmod 0`` file
+    # would be silently readable as root and make the anchor vacuous.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate)
+    sidecar_path = object_store_root / sidecar["sidecar_key"]
+    relocated_record = tmp_path / "elsewhere-forcing_version_record.json"
+    relocated_record.write_bytes(sidecar_path.read_bytes())
+    sidecar_path.unlink()
+    sidecar_path.symlink_to(relocated_record)
+    # Pre-condition: the record is present and byte-identical, only unreadable
+    # through the store -- so "absent" would be the wrong classification.
+    assert sidecar_path.is_symlink()
+    assert json.loads(relocated_record.read_text(encoding="utf-8"))["forcing_package_uri"]
+    with pytest.raises(ObjectStoreError):
+        sidecar["store"].exists(sidecar["sidecar_key"])
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_unreadable",
+    }
+
+
 def test_directory_shaped_package_uri_is_never_the_existence_probe_object(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -9766,26 +9811,35 @@ def test_production_scale_sidecar_record_still_witnesses_the_package(
     baseline = _producer_forcing_sidecar(object_store_root, candidate=candidate)
     record = dict(baseline["record"])
     # Mirror the real shape: many per-station output-file entries, not one giant
-    # padded string.
+    # padded string.  The entry keys are the producer's own
+    # (``producer.py`` ``shud_file_entries`` / ``file_entries``:
+    # ``role``/``relative_path``/``uri``/``checksum``), so the record this anchor
+    # measures cannot drift from the record production actually writes.
+    def _station_label(index: int) -> str:
+        return f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}"
+
+    prefix_uri = baseline["package_uri"]
     record["lineage_json"] = {
         **baseline["record"]["lineage_json"],
         "output_files": [
-            {
-                "station_id": f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}",
-                "object_key": (
-                    f"forcing/gfs/2026052106/basin_a_v1/model_a/shud/"
-                    f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}.csv"
-                ),
-                "checksum": f"{index:064d}",
-                "size_bytes": 1024 * 1024 + index,
-                "rows": 241,
-            }
-            for index in range(8000)
+            {"role": "tsd_forc", "uri": f"{prefix_uri}forcing.tsd", "checksum": "0" * 64},
+            {"role": "csv_debug", "uri": f"{prefix_uri}forcing_debug.csv", "checksum": "1" * 64},
+            *(
+                {
+                    "role": "shud_forcing_csv",
+                    "relative_path": f"shud/{_station_label(index)}.csv",
+                    "uri": f"{prefix_uri}shud/{_station_label(index)}.csv",
+                    "checksum": f"{index:064d}",
+                }
+                for index in range(7900)
+            ),
         ],
     }
     sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, record=record)
     record_bytes = (object_store_root / sidecar["sidecar_key"]).stat().st_size
-    assert record_bytes > 1024 * 1024
+    # Inside the measured node-22 production band (1.6-2.0 MB), i.e. far above the
+    # retired 64 KiB cap and far below the current 16 MiB one.
+    assert 1_600_000 < record_bytes < 2_100_000
     assert record_bytes < scheduler_state_failure_module._FORCING_SIDECAR_MAX_BYTES
     state = _forecast_failure_state(candidate)
 
