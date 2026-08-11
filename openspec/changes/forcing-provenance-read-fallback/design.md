@@ -99,7 +99,7 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 
 - `tests/test_production_scheduler.py`：`:8889`、`:8918`（`_assert_stable_missing_forcing_blocker` `:8830-8848` 三重断言随迁）、`:8932`、`:8954`、`:9945`、`:10047-10051`、`:10591`（repair-rejection 组，`_missing_forcing_retry_state` 默认 `forcing_package_uri=None` `:9489-9505`；`_missing_forcing_repair_rejected_decision` 透传 reason `:1382-1384`）、`:28276-28279`（`absent_uri` 参数化 case）、`:29159`/`:29189`/`:29253`（`_seed_db_free_missing_forcing_blocker` `:29008-29033`）、`:32202`（`forcing_recorded=False` 分支）。
 - `tests/test_gateway_reconcile.py:1148`（`_file_cohort_repository` 无 forcing 行、`resource_profile={}`）——**该文件必须加入 Evidence Floor 定向命令**，否则回归到 merge 后才暴露。
-- **round-1 延伸 3 处（占位符语义合法翻转，已实施，round-2 V5-C4 补记入名单）**：`:28276-28279` 的 `[s3_missing]` 参数化 case（断言迁 `forcing_version_row_absent` + `tier_status`）；`:32887` 与 `:33985` 两处 fixture-shape 几何（改种非打码 object key，断言零变化）。三处均由本 change spec MODIFIED 授权，规则同名单内。
+- **round-1 延伸 3 处（占位符语义合法翻转，已实施，round-2 V5-C4 补记入名单）**：`:28276-28279` 的 `[s3_missing]` 参数化 case（断言迁 `forcing_version_row_absent` + `tier_status`）；master 侧 `:32119` 与 `:33532` 两处 fixture-shape 几何（改种非打码 object key，断言零变化）。三处均由本 change spec MODIFIED 授权，规则同名单内。
 - 迁移纪律：名单内仅改 reason/error_code/classifier 与新增 source 断言；block-不-retry 方向断言逐字保留；名单外断言零改动（发现新几何 → 先补名单入 PR body 再改）。
 
 - 播种 helper 复用：`_direct_forcing_context_record`、`_candidate_state`；sidecar 播种新 helper 与 producer 同构造（1.4）。

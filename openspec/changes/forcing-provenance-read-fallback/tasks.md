@@ -39,4 +39,4 @@
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate forcing-provenance-read-fallback --strict --no-interactive`
 - [x] 3.4 node-22 只读几何 receipt（journal null + sidecar 在场 + manifest 文件在场，D6；不制造失败）
-- [ ] 3.5 PR body：D3 消费方审计表（含 runbook + open change `fix-node22-scheduler-business-concurrency` 冲突裁定）+ D4 裁定 + D6 live-drill 偏离记录 + issue 引文失实更正（six-basin change 不存在、#874 无 inline pin）+ B6 逐条迁移 diff 清单
+- [x] 3.5 PR body：D3 消费方审计表（含 runbook + open change `fix-node22-scheduler-business-concurrency` 冲突裁定）+ D4 裁定 + D6 live-drill 偏离记录 + issue 引文失实更正（six-basin change 不存在、#874 无 inline pin）+ B6 逐条迁移 diff 清单
