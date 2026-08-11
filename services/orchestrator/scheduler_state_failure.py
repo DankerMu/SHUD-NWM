@@ -663,7 +663,14 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
         return _ForcingSidecarProvenance(False, "sidecar_unreadable")
     try:
         record = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        # ``RecursionError`` is listed explicitly because it is NOT a
+        # ``ValueError`` subclass: ``json`` raises it (not ``JSONDecodeError``)
+        # on a deeply nested document, which is small enough that every
+        # read-side guard above passes.  Uncaught it would escape this tier and
+        # abort the whole scheduler pass; a record we cannot parse is malformed,
+        # exactly like invalid JSON.  Same containment as
+        # ``file_orchestration_journal._decode_mapping``.
         return _ForcingSidecarProvenance(False, "sidecar_malformed")
     if not isinstance(record, Mapping):
         return _ForcingSidecarProvenance(False, "sidecar_malformed")

@@ -9323,6 +9323,62 @@ def test_unreadable_sidecar_record_blocks_as_row_absent_without_escaping_excepti
     }
 
 
+def _deeply_nested_json_bytes() -> bytes:
+    """Smallest probed nesting depth whose ``json.loads`` raises ``RecursionError``.
+
+    The depth at which CPython's JSON scanner gives up is interpreter- and
+    stack-size dependent (3.14 overflow-probes the real C stack rather than
+    honouring ``sys.setrecursionlimit``), so the payload is calibrated here
+    instead of being hard-coded: probe increasing depths and return the first
+    one that actually trips.  If no probed depth trips, the anchor fails loudly
+    rather than passing vacuously.
+    """
+
+    for depth in (1_000, 10_000, 100_000, 500_000):
+        payload = b"[" * depth + b"]" * depth
+        try:
+            json.loads(payload.decode("utf-8"))
+        except RecursionError:
+            return payload
+    pytest.fail("no probed nesting depth made json.loads raise RecursionError")
+
+
+def test_deeply_nested_sidecar_record_blocks_as_row_absent_without_escaping_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B14 (round-4): the record-PARSE leg, distinct from B13's record-READ leg.
+    # A deeply nested record is small (a couple of hundred KB), so ``exists`` /
+    # ``size`` / ``read_bytes_limited`` all succeed well inside the 16 MiB cap and
+    # the failure lands squarely on ``json.loads`` -- which raises ``RecursionError``,
+    # NOT a ``ValueError`` subclass.  Without ``RecursionError`` in the parse
+    # ``except`` tuple it escapes ``_forcing_sidecar_provenance``, escapes
+    # ``_missing_upstream_forecast_artifact_evidence`` and aborts the whole
+    # scheduler pass, while every other tier-failure geometry stays green.
+    # A record we cannot parse is ``sidecar_malformed``, same as invalid JSON.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    raw_sidecar_bytes = _deeply_nested_json_bytes()
+    # Pre-condition: the record is present and small enough that every read-side
+    # guard passes -- so "unreadable"/"oversized" would be the wrong classification.
+    assert len(raw_sidecar_bytes) < 16 * 1024 * 1024
+    _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, raw_sidecar_bytes=raw_sidecar_bytes)
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_malformed",
+    }
+
+
 def test_directory_shaped_package_uri_is_never_the_existence_probe_object(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

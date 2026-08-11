@@ -30,6 +30,7 @@
 - [x] 2.10 B10a/B10b：prefix 漂移仍恢复；异体 manifest witness 不 fail-open
 - [x] 2.11 B11：探针 `ObjectStoreError` 护栏 + `run_once` 存活 + row_absent/probe_error 归类
 - [x] 2.12 B12：生产量级 record（>1 MB lineage）仍见证恢复（旧 64 KiB 上限下红）
+- [x] 2.14 B14：深嵌套 record `RecursionError` 收敛为 `sidecar_malformed`，不逃逸（round-4）
 - [x] 2.13 B13：`sidecar_unreadable` 档回归锚（chmod 0 / symlink 几何）——round-3 覆盖缺口，移除档位读腿 containment 后须转红
 
 ## 3. Evidence Floor
@@ -37,5 +38,5 @@
 - [x] 3.1 `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_production_scheduler.py tests/test_gateway_reconcile.py` 全绿
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate forcing-provenance-read-fallback --strict --no-interactive`
-- [ ] 3.4 node-22 只读几何 receipt（journal null + sidecar 在场 + manifest 文件在场，D6；不制造失败）
+- [x] 3.4 node-22 只读几何 receipt（journal null + sidecar 在场 + manifest 文件在场，D6；不制造失败）
 - [ ] 3.5 PR body：D3 消费方审计表（含 runbook + open change `fix-node22-scheduler-business-concurrency` 冲突裁定）+ D4 裁定 + D6 live-drill 偏离记录 + issue 引文失实更正（six-basin change 不存在、#874 无 inline pin）+ B6 逐条迁移 diff 清单

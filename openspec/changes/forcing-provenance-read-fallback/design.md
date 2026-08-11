@@ -91,6 +91,7 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 | B9 | **真实 sanitized 形状端到端**（round-1 C4 钉）：经真实 `FileOrchestrationJournalRepository.candidate_state`（tier-1 行含 s3 形 URI → 占位符）+ producer 同构 sidecar + manifest 在场 + store/prefix 已配置 → **不 block**、source=object_store_sidecar；同几何 sidecar 缺失 → `forcing_version_row_absent`（非伪 missing） | test_production_scheduler |
 | B10 | prefix 漂移与异体 witness（round-1 V2-C2 钉）：record lineage URI 带 `s3://nhms-prod` 而 scheduler prefix `s3://nhms` → 派生 key 探针照常恢复（不伪 missing）；sidecar record 指向异体 manifest 而本候选派生 key 处无 manifest → **不**恢复（fail-closed，非 fail-open） | 同上 |
 | B11 | 探针后异常护栏（round-1 V2-C1 + round-2 V5-C2 钉）：manifest leaf 为 symlink（SafeFilesystemError→ObjectStoreError 几何）→ 决策 fail-closed 返回、**无异常逃逸**、`run_once` 不崩，且 reason=`forcing_version_row_absent`/`tier_status=sidecar_manifest_probe_error`（非 `missing_forcing_package_uri`） | 同上 |
+| B14 | **深嵌套 record 解析逃逸锚（round-4）**：`json.loads` 抛 `RecursionError`（非 `ValueError` 子类）→ 必须收成 `sidecar_malformed`，不得逃逸中止整趟 pass；判据=移除 except 元组中的 `RecursionError` 后本锚以逃逸异常转红。深度运行期自校准（不同解释器栈上限不同，硬编码浅深度会静默变绿） | 同上 |
 | B13 | **`sidecar_unreadable` 回归锚（round-3）**：sidecar record 权限置 0 或 leaf 为 symlink → `forcing_version_row_absent`/`tier_status=sidecar_unreadable`，无逃逸；判据=移除档位读腿 `except` 中的 `ObjectStoreError` 后本锚必须转红 | 同上 |
 | B12 | **生产量级 record 恢复钉（round-2 V5-C1）**：sidecar record 携带 >1 MB 的 `lineage_json.output_files`（生产实测 1.6–2.0 MB 形状）+ manifest 在场 → 仍解析成功、**不 block**、source=object_store_sidecar（64 KiB 上限下此用例必红） | 同上 |
 
@@ -155,10 +156,10 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 - **V5-C1（P1，CONFIRMED FIX_NOW）**：64 KiB 读上限 vs 生产 record 1.6–2.0 MB（node-22 只读实测全流域）——档位在生产对每个流域恒 `sidecar_unreadable`，修复在生产**完全失效**；且 `sidecar_unreadable` 把"超尺寸"与"权限/IO 拒读"混为一档，runbook 分流表因此对超尺寸行给出错误处置。修复=上限提至 16 MiB + `sidecar_oversized` 独立细因（`store.size` 预判）+ B12 生产量级恢复钉 + runbook 分流表补行。
 - **V5-C2（P2，CONFIRMED FIX_NOW）**：`sidecar_manifest_probe_error` 落 `missing_forcing_package_uri` → 操作员被导向"重产 forcing"，而重产不修 symlink/ESTALE，形成 repair 死胡同。修复=语义归位到 `forcing_version_row_absent` + `tier_status=sidecar_manifest_probe_error`（仍 fail-closed），runbook 归入"重产无效"类；B11 断言随迁。
 - **V5-C3（P2，CONFIRMED FIX_NOW，docs）**：runbook 一致性包——evidence 判读清单只列 `source`/`tier_status`（`probe_key`/`artifact_exists`/`artifact_guard.unsafe_reason` 未提），且 `:1503` 处遗留孤儿从句"Also that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`"（round-1 插表时截断了原句主干）。修复=补判读项 + 复原从句主干。
-- **V5-C4（P3→随轮修，fixture 记录同步）**：`design.md:17` 预测已被 round-1 实测证伪、D2 伪码与 tasks 1.2/1.4/1.6 文本停留在 round-1 前、B6 名单缺 round-1 延伸 3 处。修复=本轮 fixture 全量对齐（orchestrator 自持）。
-- **V4-C1（CONFIRMED，DEFER→#1365）**：空/相对 prefix 下未打码的目录形 recorded URI 仍走 tier-1/2 探针被吞成伪 missing——master 同款、且与 `design.md:54` 已裁定的"非占位符目录形 URI 属 pre-existing 另腿"同源；另经实测所有部署源均强制非空 prefix（缺失即 fail-closed 启动失败）。归 #1365 家族，不在本 change 修。
+- **V5-C4（P3→随轮修，fixture 记录同步）**：基线节「直读档写入方」条目的预测已被 round-1 实测证伪、D2 伪码与 tasks 1.2/1.4/1.6 文本停留在 round-1 前、B6 名单缺 round-1 延伸 3 处。修复=本轮 fixture 全量对齐（orchestrator 自持）。
+- **V4-C1（CONFIRMED，DEFER→#1365）**：空/相对 prefix 下未打码的目录形 recorded URI 仍走 tier-1/2 探针被吞成伪 missing——master 同款、且与本文件 D2「探针对象裁定」项已裁定的"非占位符目录形 URI 属 pre-existing 另腿"同源；另经实测所有部署源均强制非空 prefix（缺失即 fail-closed 启动失败）。归 #1365 家族，不在本 change 修。
 - **V4-C2（CONFIRMED，DEFER→登记残余）**：copyback 腿无占位符防御（本 change 解除了 forcing 腿的遮蔽后该腿理论可达）；但全仓 grep 证实 `copyback_source_uri` 系列键**无任何生产写入方**（DB-free allowlist 亦不透传，实测注入后 state 无该键），当前树无操作员可触发路径。登记为残余 issue，不占本轮修复。
-- **V4-C3（CONFIRMED pre-existing，DEFER→#1365）**：`ObjectStoreError` containment 仅覆盖 sidecar 腿，tier-1/2 recorded-URI 腿（`:449`）与 copyback 腿（`:478`）在 master/HEAD 同样逃逸。`design.md:55` 已登记 tier-1/2；本轮补记 copyback 腿一并入 #1365 家族。
+- **V4-C3（CONFIRMED pre-existing，DEFER→#1365）**：`ObjectStoreError` containment 仅覆盖 sidecar 腿，tier-1/2 recorded-URI 腿（`:449`）与 copyback 腿（`:478`）在 master/HEAD 同样逃逸。本文件 D2「探针后异常护栏」项已登记 tier-1/2；本轮补记 copyback 腿一并入 #1365 家族。
 
 ## Review round 3 裁决记录（converging retro，预算 2 轮）
 
@@ -169,6 +170,14 @@ if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位�
 - **P3 fixture 勾选滞后**：1R2.x 已实现未勾、§2 缺 B9-B12 行。修复=本轮补齐（并新增 B13 行）。
 - 注记（非 finding）：B12 `output_files` 条目注释称 mirror 真实形状，而 producer 实际写 `{"role","uri","checksum"}`（`producer.py:2051-2056`）——纯注释漂移，随手改正。
 - 残余风险记录（非 finding）：16 MiB 上限不是解析峰值内存边界（生产 record 1.6-2.0 MB，每候选每趟只读一次，当前无风险）；`forcing_provenance.source` 的 `direct` 值在生产实际不可达（直读档记 s3 URI，公共读打码后改走 sidecar 档）——round-1 C1 已裁定的副作用，四值承诺在实际部署为三值。
+
+## Review round 4 裁决记录（converging 预算内第 1 轮）
+
+两名 reviewer：契约/文档轴的 spec 与 runbook 两项 clean，行为/oracle 轴无 P1/P2。合计 1 条 P3 + 4 条证据文档一致性，全部当轮闭环，无 defer：
+
+- **P3（当轮修，非 defer）深嵌套 record 解析逃逸**：`json.loads` 的 `except` 元组不含 `RecursionError`（非 `ValueError` 子类），~200 KB 的深嵌套 record（远在 16 MiB 限内、`exists`/`size`/读全部成功）可让异常穿透档位与 guard、中止整趟 pass——与 round-1 V2-C1 同一失败类的未封口分支，reviewer 已实测复现。修复=元组补 `RecursionError` → `sidecar_malformed`（先例：`file_orchestration_journal._decode_mapping`）+ **B14** 锚（深度运行期自校准）。同类扫查：本 change 新增代码中 `json.load*` 仅此一处，manifest/lineage 腿只读已解码 mapping 或只做存在性探测，无第二处未封口解析。
+- **证据文档一致性（4 条，orchestrator 自持，当轮修）**：PR body 变更摘要仍写 round-1 前的 "≤64 KiB" 与"逐字信任 record manifest URI"（与 round-1/2 闭环节自相矛盾，merge reviewer 首屏即被误导）→ 改为终态描述；D3 消费方审计表三行行号在 master/head 均不成立 → 按 head 校正；本文件 round-2 裁决节的自引行号失准 → 改为节名引用；PR body 缺 round-3 闭环节且 Evidence Floor 枚举停在 3.3 → 补齐。
+- 残余（记录不修）：B13 只驱动 `store.exists`（stat 子腿），若未来把单个 try 拆成逐调用 containment，`size`/`read_bytes_limited` 腿将无锚——当前实现为单 try 覆盖三次调用，拆分不是可信重构路径。
 
 ## Risk packs
 
