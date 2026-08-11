@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.slurm_env import is_sensitive_slurm_env_key, reserved_slurm_env_reason
 from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import chain_repository_state as chain_repository_state_module
@@ -8841,6 +8841,7 @@ def _assert_stable_missing_forcing_blocker(
     *,
     artifact_uri: str | None,
     reason: str = "missing_forcing_package_uri",
+    unsafe_reason: str | None = None,
 ) -> None:
     """Pin the stable repair-eligible blocker for either reason/classifier pair.
 
@@ -8864,7 +8865,7 @@ def _assert_stable_missing_forcing_blocker(
         "artifact_type": "forcing_package_uri",
         "artifact_uri": artifact_uri,
         "artifact_exists": False,
-        "unsafe_reason": None,
+        "unsafe_reason": unsafe_reason,
         "stable_classifier": stable_classifier,
         "planned_retry_decision": "retry_failed",
         "planned_retry_reason": "retry_failed_candidate",
@@ -9087,8 +9088,13 @@ def _seed_producer_forcing_sidecar(
     write_manifest: bool = True,
     record: Mapping[str, Any] | None = None,
     raw_sidecar_bytes: bytes | None = None,
+    object_store_prefix: str = "",
 ) -> dict[str, Any]:
-    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    sidecar = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=object_store_prefix,
+    )
     store = sidecar["store"]
     payload = (
         raw_sidecar_bytes
@@ -9148,17 +9154,26 @@ def test_sidecar_tier_recovers_forcing_provenance_and_does_not_block_present_pac
     assert orchestrator.calls
 
 
+@pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
 def test_sidecar_tier_with_absent_manifest_keeps_the_missing_forcing_blocker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    object_store_prefix: str,
 ) -> None:
     # B2/AC-2 reverse pin: a witnessed-but-absent package must keep the unchanged
-    # #874/#1160 fail-closed blocker, only now with the tier named.
+    # #874/#1160 fail-closed blocker, only now with the tier named.  Covered for
+    # both the prefix-less shape and the production s3 prefix shape (design D2).
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
     candidate = _scheduler_candidate_fixture()
-    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    sidecar = _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        write_manifest=False,
+        object_store_prefix=object_store_prefix,
+    )
     state = _forecast_failure_state(candidate)
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
@@ -9168,7 +9183,10 @@ def test_sidecar_tier_with_absent_manifest_keeps_the_missing_forcing_blocker(
         "source": "object_store_sidecar",
         "probe": "manifest",
         "package_uri": sidecar["package_uri"],
+        # The record's own manifest uri is evidence only; ``probe_key`` is what the
+        # existence probe was actually given (derived from the candidate identity).
         "manifest_uri": sidecar["manifest_uri"],
+        "probe_key": sidecar["manifest_key"],
         "forcing_version_id": candidate.forcing_version_id,
         "artifact_exists": False,
     }
@@ -9308,13 +9326,19 @@ def test_forcing_sidecar_key_and_manifest_derivation_match_the_producer_write_si
         scheduler_state_failure_module._FORCING_PACKAGE_MANIFEST_FILENAME
         == ForcingProducerConfig.package_manifest_filename
     )
-    package_uri = "forcing/gfs/2026052106/basin_a_v1/model_a/"
-    assert scheduler_state_failure_module._sidecar_package_manifest_uri({}, package_uri) == (
-        _package_manifest_uri(package_uri, ForcingProducerConfig.package_manifest_filename)
+    key_dir = "forcing/gfs/2026052106/basin_a_v1/model_a"
+    probe_key = scheduler_state_failure_module._sidecar_manifest_probe_key(key_dir)
+    assert probe_key == _package_manifest_uri(f"{key_dir}/", ForcingProducerConfig.package_manifest_filename)
+    assert probe_key == _forcing_package_manifest_uri({}, f"{key_dir}/")
+    assert probe_key == "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    # The record's own manifest uri is read for evidence only and never probed.
+    assert (
+        scheduler_state_failure_module._sidecar_recorded_manifest_uri(
+            {"lineage_json": {"forcing_package_manifest_uri": "s3://nhms-prod/forcing/x.json"}}
+        )
+        == "s3://nhms-prod/forcing/x.json"
     )
-    assert scheduler_state_failure_module._sidecar_package_manifest_uri({}, package_uri) == (
-        _forcing_package_manifest_uri({}, package_uri)
-    )
+    assert scheduler_state_failure_module._sidecar_recorded_manifest_uri({}) is None
 
 
 def test_repair_authorization_accepts_both_missing_forcing_blocker_pairs(
@@ -9380,15 +9404,37 @@ def test_mixed_missing_forcing_reason_and_classifier_is_not_a_stable_blocker() -
 
 
 @pytest.mark.parametrize("tier", ["journal", "direct"])
-def test_decision_evidence_names_the_journal_forcing_provenance_tier(tier: str) -> None:
-    # B8: the journal row and journal direct-file tiers are visible in the emitted
-    # decision evidence exactly as the sidecar and absent tiers are.
+def test_decision_evidence_names_the_journal_forcing_provenance_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tier: str,
+) -> None:
+    # B8 (round-1 V1-C4): the journal row and journal direct-file tiers are visible
+    # in the emitted decision evidence exactly as the sidecar and absent tiers are.
+    # The geometry must NOT lean on the ``_object_manifest_is_missing`` root-
+    # unconfigured fail-open quirk: the object store IS configured, the recorded
+    # uri is a non-redacted shape ``candidate_state`` can actually emit (a relative
+    # object key survives ``_sanitize_file_provider_scalar`` verbatim), and the
+    # probed object is physically present.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     candidate = _scheduler_candidate_fixture()
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    # No sidecar record is written: the recovered uri can only have come from the
+    # journal tier under test.
+    sidecar["store"].write_bytes_atomic(sidecar["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    recorded_uri = sidecar["manifest_uri"]
+    assert recorded_uri == sidecar["manifest_key"]
+    assert (
+        file_orchestration_journal_module._sanitize_public_field("forcing_package_uri", recorded_uri)
+        == recorded_uri
+    )
     state = _forecast_failure_state(
         candidate,
         forcing_version={
             "forcing_version_id": candidate.forcing_version_id,
-            "forcing_package_uri": "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+            "forcing_package_uri": recorded_uri,
             "forcing_version_source": tier,
         },
     )
@@ -9399,9 +9445,289 @@ def test_decision_evidence_names_the_journal_forcing_provenance_tier(tier: str) 
     assert decision.action == "retry"
     assert decision.evidence["forcing_provenance"] == {
         "source": tier,
-        "package_uri": "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+        "package_uri": recorded_uri,
         "forcing_version_id": candidate.forcing_version_id,
     }
+
+
+def test_withheld_uri_placeholder_is_never_stamped_with_a_journal_provenance_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # F2/round-1 C2: no blocker may claim the journal/direct tier witnessed a
+    # package for a uri that was withheld by the public-read redaction boundary.
+    # Both the guard (which routes placeholders to the sidecar tier) and the tier
+    # stamper itself refuse the placeholder.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+
+    for placeholder in sorted(EVIDENCE_REDACTION_PLACEHOLDERS):
+        state = _forecast_failure_state(
+            candidate,
+            forcing_version={
+                "forcing_version_id": candidate.forcing_version_id,
+                "forcing_package_uri": placeholder,
+                "forcing_version_source": "journal",
+            },
+        )
+
+        assert scheduler_state_failure_module._journal_forcing_provenance(state, placeholder) is None
+
+        decision = scheduler_module._candidate_state_decision(candidate, state)
+
+        assert decision is not None
+        provenance = decision.evidence.get("forcing_provenance") or {}
+        assert provenance.get("source") not in {"journal", "direct"}
+        assert placeholder not in json.dumps(provenance, sort_keys=True)
+        # The withheld reference falls through to the sidecar tier, which has no
+        # record here -> the honest "cannot determine" blocker.
+        assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+        assert provenance == {"source": "absent", "tier_status": "sidecar_absent"}
+
+
+def _real_journal_candidate_state_with_recorded_s3_forcing_uri(
+    journal_root: Path,
+    *,
+    candidate: Any,
+) -> dict[str, Any]:
+    """Candidate state as the REAL journal read path emits it in production.
+
+    Writes a genuine failed-forecast cycle plus a tier-1 ``forcing_version`` row
+    carrying the producer's s3-shaped package uri, then reads it back through
+    ``FileOrchestrationJournalRepository.candidate_state`` so the public-read
+    redaction boundary is applied for real (the uri comes back as
+    ``[object-uri]``) instead of being simulated by hand (#1203 round-1 C4).
+    """
+
+    cycle_time = candidate.cycle_time_utc
+    cycle_segment = format_cycle_time(cycle_time)
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
+    repository.ensure_forecast_cycle(source_id=candidate.source_id, cycle_time=cycle_time)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_segment}_{candidate.model_id}_forecast",
+            "run_id": candidate.run_id,
+            "candidate_id": candidate.candidate_id,
+            "cycle_id": candidate.cycle_id,
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": candidate.source_id,
+            "model_id": candidate.model_id,
+            "job_type": "run_shud_forecast",
+            "stage": "forecast",
+            "status": "failed",
+            "slurm_job_id": "9001",
+            "error_code": "SLURM_JOB_TIMEOUT",
+            "error_message": "forecast task timed out",
+            "retry_count": 0,
+            "finished_at": _format_iso_z(cycle_time),
+        }
+    )
+    _record_journal_forcing_provenance(
+        journal_root,
+        source_id=candidate.source_id,
+        cycle_time=cycle_time,
+        model_id=candidate.model_id,
+        forcing_package_uri=(
+            f"s3://nhms/forcing/gfs/{cycle_segment}/{candidate.basin_version_id}/{candidate.model_id}/"
+        ),
+    )
+    state = repository.candidate_state(
+        source_id=candidate.source_id,
+        cycle_time=cycle_time,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+    )
+    assert state is not None
+    # The sanitized shape this whole fix exists for: the tier-1 row IS present,
+    # but its uri was withheld by the public-read boundary.
+    assert state["pipeline_status"] == "failed"
+    assert state["forcing_version"]["forcing_version_source"] == "journal"
+    assert state["forcing_version"]["forcing_package_uri"] == "[object-uri]"
+    return state
+
+
+@pytest.mark.parametrize("sidecar_seeded", [True, False])
+def test_sanitized_journal_uri_recovers_through_the_sidecar_tier_end_to_end(
+    tmp_path: Path,
+    sidecar_seeded: bool,
+) -> None:
+    # B9 (round-1 C4): end-to-end on the REAL sanitized shape, with the production
+    # object-store geometry (root + non-empty s3 prefix).  With the package in
+    # place the candidate recovers through the sidecar tier; without it the honest
+    # "cannot determine" blocker replaces the placeholder-driven false
+    # "package determined missing".
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = replace(
+        _scheduler_candidate_fixture(),
+        resource_profile={
+            "object_store_root": str(object_store_root),
+            "object_store_prefix": "s3://nhms",
+        },
+    )
+    if sidecar_seeded:
+        _seed_producer_forcing_sidecar(
+            object_store_root,
+            candidate=candidate,
+            object_store_prefix="s3://nhms",
+        )
+    state = _real_journal_candidate_state_with_recorded_s3_forcing_uri(
+        tmp_path / "journal",
+        candidate=candidate,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    if sidecar_seeded:
+        assert decision.action == "retry"
+        assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+        assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+        assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
+    else:
+        assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+        assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+        assert decision.evidence["forcing_provenance"] == {
+            "source": "absent",
+            "tier_status": "sidecar_absent",
+        }
+
+
+def test_sidecar_probe_survives_a_producer_scheduler_prefix_drift(tmp_path: Path) -> None:
+    # B10(a) (round-1 V2-C2): the record's manifest uri was written under a
+    # DIFFERENT object-store prefix than the scheduler reads with.  Probing that
+    # uri verbatim raises inside ``_normalize_s3_uri`` and the probe swallows it
+    # into a false "missing" for a physically present package; the derived key has
+    # no such leg.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = replace(
+        _scheduler_candidate_fixture(),
+        resource_profile={
+            "object_store_root": str(object_store_root),
+            "object_store_prefix": "s3://nhms",
+        },
+    )
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate, object_store_prefix="s3://nhms")
+    drifted_manifest_uri = sidecar["manifest_uri"].replace("s3://nhms/", "s3://nhms-prod/", 1)
+    assert drifted_manifest_uri.startswith("s3://nhms-prod/")
+    record = {
+        **sidecar["record"],
+        "lineage_json": {
+            **sidecar["record"]["lineage_json"],
+            "forcing_package_manifest_uri": drifted_manifest_uri,
+        },
+    }
+    _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        record=record,
+        object_store_prefix="s3://nhms",
+    )
+    # Control variable: trusting the recorded uri verbatim would report "missing".
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, drifted_manifest_uri)[0] is True
+
+    decision = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    provenance = decision.evidence["forcing_provenance"]
+    assert provenance["source"] == "object_store_sidecar"
+    assert provenance["artifact_exists"] is True
+    # The recorded uri stays visible as evidence, but the probe used the derived key.
+    assert provenance["manifest_uri"] == drifted_manifest_uri
+    assert provenance["probe_key"] == sidecar["manifest_key"]
+
+
+def test_sidecar_naming_a_foreign_manifest_is_not_this_candidates_witness(tmp_path: Path) -> None:
+    # B10(b) (round-1 V2-C2): a sidecar copied or restored from another candidate
+    # names a manifest that really exists -- for someone else.  Probing it verbatim
+    # would fail OPEN and release a retry for a package this candidate does not
+    # have; the derived key keeps the decision fail-closed.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = _scheduler_candidate_fixture()
+    foreign_candidate = replace(candidate, model_id="model_b")
+    foreign = _seed_producer_forcing_sidecar(object_store_root, candidate=foreign_candidate)
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    record = {
+        **sidecar["record"],
+        "forcing_package_uri": foreign["package_uri"],
+        "lineage_json": {"forcing_package_manifest_uri": foreign["manifest_uri"]},
+    }
+    _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        record=record,
+        write_manifest=False,
+    )
+    candidate = replace(candidate, resource_profile={"object_store_root": str(object_store_root)})
+    # Control variable: the foreign manifest really is present, so trusting the
+    # recorded uri verbatim would witness it as this candidate's package.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        foreign["manifest_uri"],
+    ) == (False, None)
+
+    decision = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=foreign["package_uri"])
+    assert decision.evidence["forcing_provenance"]["probe_key"] == sidecar["manifest_key"]
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is False
+
+
+def test_sidecar_manifest_probe_store_error_is_contained_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B11 (round-1 V2-C1): ``LocalObjectStore.exists`` raises ``ObjectStoreError``
+    # (a RuntimeError subclass, so the probe's own ``except (OSError, ValueError)``
+    # does not cover it) for a symlinked manifest leaf -- the same shape an NFS
+    # ESTALE/EIO stat produces.  It must be contained fail-closed, never escape and
+    # abort the whole scheduler pass.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    real_manifest = tmp_path / "elsewhere-forcing_package.json"
+    real_manifest.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    manifest_path = object_store_root / sidecar["manifest_key"]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.symlink_to(real_manifest)
+    with pytest.raises(ObjectStoreError):
+        sidecar["store"].exists(sidecar["manifest_key"])
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=sidecar["package_uri"],
+        unsafe_reason="sidecar_manifest_probe_error",
+    )
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is False
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert orchestrator.calls == []
 
 
 def test_healthy_candidate_reaching_failure_fallback_region_keeps_none_decision(
@@ -28608,14 +28934,21 @@ def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_befo
 @pytest.mark.parametrize(
     ("case_name", "forcing_package_uri", "expected_reason"),
     [
-        # Journal direct-file tier witnesses a package URI whose object the probe
-        # cannot find -> the unchanged "determined missing" pair (#874/#1160).
+        # The journal direct-file tier DOES witness a package uri, but this read
+        # path is the public one: the s3-shaped uri comes back as the redaction
+        # placeholder ``[object-uri]``.  A withheld reference is not a probeable
+        # package reference, so since #1203 it falls through to the sidecar tier
+        # (absent here) and blocks with the honest "cannot determine" pair instead
+        # of the placeholder-driven false "determined missing" (round-1 C1).  A
+        # non-redacted recorded uri still yields ``missing_forcing_package_uri``
+        # unchanged -- see
+        # ``test_failed_forecast_with_recorded_missing_forcing_blocks_instead_of_retrying``.
         (
             "s3_missing",
             "s3://nhms/forcing/gfs/2026052106/model_a/package.json",
-            "missing_forcing_package_uri",
+            "forcing_version_row_absent",
         ),
-        # No tier witnesses anything -> the distinct "cannot determine" pair (#1203).
+        # No tier witnesses anything -> the same "cannot determine" pair (#1203).
         ("absent_uri", None, "forcing_version_row_absent"),
     ],
 )
@@ -28707,9 +29040,9 @@ def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_bef
     assert state_evidence["error_code"] == expected_classifier
     assert state_evidence["classifier"] == "missing_upstream_artifact"
     assert state_evidence["artifact_guard"]["stable_classifier"] == expected_classifier
-    assert state_evidence["forcing_provenance"]["source"] == (
-        "direct" if forcing_package_uri is not None else "absent"
-    )
+    # Neither geometry leaves a probeable reference behind: the recorded one was
+    # withheld by the public-read boundary, the other never existed.
+    assert state_evidence["forcing_provenance"] == {"source": "absent", "tier_status": "sidecar_absent"}
     assert "NODE_FAILURE" not in json.dumps(state_evidence, sort_keys=True)
     assert orchestrator.calls == []
 
@@ -32561,14 +32894,27 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         assert len(completed_event_ids) == 1
 
     if forcing_recorded:
+        failed_member_basin_version_id = next(
+            str(model["basin_version_id"])
+            for model in models
+            if str(model["model_id"]) == str(failed_member["model_id"])
+        )
         _record_journal_forcing_provenance(
             root,
             source_id=source_id,
             cycle_time=_dt("2026-05-21T06:00:00Z"),
             model_id=str(failed_member["model_id"]),
+            # Recorded as a plain object key, not an ``s3://`` uri: this row is
+            # read back through the REAL public journal read, which withholds
+            # s3/published-shaped uris behind ``[object-uri]``.  Since #1203 a
+            # withheld uri is not a probeable witness (round-1 C1), so an s3-shaped
+            # fixture here would no longer record "provenance the guard can see" --
+            # the very thing this branch's ``forcing_recorded=True`` arm exists to
+            # set up.  A plain key is what the DB-free producer records when no
+            # object-store prefix is configured, and it survives the boundary.
             forcing_package_uri=(
-                f"s3://nhms/forcing/{source_id.lower()}/2026052106/"
-                f"{failed_member['model_id']}/forcing_package.json"
+                f"forcing/{source_id.lower()}/2026052106/"
+                f"{failed_member_basin_version_id}/{failed_member['model_id']}/forcing_package.json"
             ),
         )
 
@@ -33982,12 +34328,16 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
     # duplicate-pipeline skip, i.e. a candidate-scoped retry: a retryable failed
     # forecast member with recorded forcing provenance. Without it the pass never
     # reaches ``orchestrate_cycle`` and the unwedge assertions are vacuous.
+    # Recorded as a plain object key rather than an ``s3://`` uri: the public
+    # journal read withholds s3-shaped uris behind ``[object-uri]``, and since
+    # #1203 a withheld uri is not a probeable witness (round-1 C1), so an s3-shaped
+    # fixture would leave this candidate blocked and the assertions vacuous again.
     _record_journal_forcing_provenance(
         tmp_path / "journal",
         source_id="GFS",
         cycle_time=cycle_time,
         model_id="model_a",
-        forcing_package_uri="s3://nhms/runs/fcst_gfs_2026071200_model_a/forcing/package.tar",
+        forcing_package_uri="forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
     )
     repository.upsert_pipeline_job(
         {

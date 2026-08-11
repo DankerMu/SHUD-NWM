@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.retry import classify_failure
+from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_state_common import (
     _evidence_safe,
     _first_state_datetime,
@@ -363,7 +364,16 @@ def _missing_upstream_forecast_artifact_evidence(
                 "forcing_package_path",
             ),
         )
-        if forcing_uri in (None, ""):
+        if forcing_uri in (None, "") or _is_withheld_uri_placeholder(forcing_uri):
+            # A redaction placeholder is a WITHHELD reference, not a package
+            # reference: the public-read boundary rewrites every s3/published-shaped
+            # ``*_uri`` the journal read materializes into ``[object-uri]``
+            # (``file_orchestration_journal._sanitize_public_field``).  Probing it
+            # would report "missing" for a package nobody looked for, and would
+            # also shadow the sidecar tier, so it takes the recovery path exactly
+            # like an absent reference.  The probe itself is never taught about
+            # placeholders and the redaction boundary is never bypassed (#1203
+            # round-1 C1).
             sidecar = _forcing_sidecar_provenance(candidate)
             if not sidecar.witness:
                 # Tier 1 (journal row), tier 2 (journal direct file) and tier 3
@@ -387,19 +397,35 @@ def _missing_upstream_forecast_artifact_evidence(
                 )
             # The producer's ``forcing_package_uri`` is a DIRECTORY uri, which the
             # object-path validator rejects (5 segments) and the probe would then
-            # report as missing.  The probe object is therefore the witnessed
-            # package MANIFEST FILE key -- never the directory-shaped package uri.
+            # report as missing.  The probe object is therefore the package
+            # MANIFEST FILE key derived from THIS candidate's own sidecar key
+            # directory -- never the directory-shaped package uri, and never the
+            # record's recorded manifest uri taken verbatim (that one is evidence
+            # only: a producer/scheduler prefix drift would make it unresolvable,
+            # and a copied sidecar could point at a foreign manifest and fail open,
+            # #1203 round-1 V2-C2).
             forcing_provenance = {
                 "source": "object_store_sidecar",
                 "probe": "manifest",
                 "package_uri": _evidence_safe(sidecar.package_uri),
                 "manifest_uri": _evidence_safe(sidecar.manifest_uri),
+                "probe_key": _evidence_safe(sidecar.manifest_probe_key),
                 "forcing_version_id": _evidence_safe(sidecar.forcing_version_id),
             }
-            sidecar_missing, sidecar_unsafe_reason = _artifact_uri_missing_status(
-                candidate,
-                str(sidecar.manifest_uri),
-            )
+            try:
+                sidecar_missing, sidecar_unsafe_reason = _artifact_uri_missing_status(
+                    candidate,
+                    str(sidecar.manifest_probe_key),
+                )
+            except ObjectStoreError:
+                # ``LocalObjectStore.exists`` turns a ``SafeFilesystemError`` (a
+                # symlinked manifest leaf, an NFS ESTALE/EIO stat) into an
+                # ``ObjectStoreError``, a RuntimeError subclass the probe's own
+                # ``except (OSError, ValueError)`` does not cover.  Contain it here
+                # fail-closed: an unreadable probe is never a recovery, and never an
+                # escaping exception that aborts the whole scheduler pass (#1203
+                # round-1 V2-C1).  The probe itself stays unchanged.
+                sidecar_missing, sidecar_unsafe_reason = True, "sidecar_manifest_probe_error"
             if sidecar_missing:
                 forcing_provenance = {**forcing_provenance, "artifact_exists": False}
                 return (
@@ -558,7 +584,11 @@ class _ForcingSidecarProvenance:
     witness: bool
     status: str
     package_uri: str | None = None
+    #: The manifest uri the record itself recorded -- EVIDENCE ONLY, never probed.
     manifest_uri: str | None = None
+    #: The manifest object key derived from this candidate's own sidecar key
+    #: directory: the only thing the existence probe is ever given.
+    manifest_probe_key: str | None = None
     forcing_version_id: str | None = None
 
 
@@ -576,12 +606,13 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
     prefix = str(resource_profile.get("object_store_prefix") or os.getenv("OBJECT_STORE_PREFIX", ""))
     try:
         source_segment = normalize_source_id(candidate.source_id).lower()
-        key = (
+        key_dir = (
             f"forcing/{source_segment}/{format_cycle_time(candidate.cycle_time_utc)}"
-            f"/{basin_version_id}/{model_id}/{_FORCING_SIDECAR_FILENAME}"
+            f"/{basin_version_id}/{model_id}"
         )
     except (TypeError, ValueError):
         return _ForcingSidecarProvenance(False, "identity_incomplete")
+    key = f"{key_dir}/{_FORCING_SIDECAR_FILENAME}"
     try:
         store = LocalObjectStore(str(object_root), object_store_prefix=prefix)
         if not store.exists(key):
@@ -596,26 +627,50 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
     if not isinstance(record, Mapping):
         return _ForcingSidecarProvenance(False, "sidecar_malformed")
     package_uri = str(record.get("forcing_package_uri") or "").strip()
-    manifest_uri = _sidecar_package_manifest_uri(record, package_uri)
-    if not manifest_uri:
+    recorded_manifest_uri = _sidecar_recorded_manifest_uri(record)
+    if not package_uri and not recorded_manifest_uri:
+        # The record names no package at all, so it witnesses nothing.
         return _ForcingSidecarProvenance(False, "sidecar_malformed")
     return _ForcingSidecarProvenance(
         True,
         "sidecar_witness",
         package_uri=package_uri or None,
-        manifest_uri=manifest_uri,
+        manifest_uri=recorded_manifest_uri,
+        manifest_probe_key=_sidecar_manifest_probe_key(key_dir),
         forcing_version_id=str(record.get("forcing_version_id") or "") or None,
     )
 
 
-def _sidecar_package_manifest_uri(record: Mapping[str, Any], package_uri: str) -> str | None:
-    """Resolve the package MANIFEST FILE key the existence probe can accept.
+def _sidecar_manifest_probe_key(sidecar_key_dir: str) -> str:
+    """Derive the package MANIFEST FILE key the existence probe is given.
 
-    Isomorphic with the producer read side
-    (``workers/forcing_producer/file_store.py:_forcing_package_manifest_uri``):
-    prefer the witnessed ``lineage_json.forcing_package_manifest_uri``, and for
-    older records derive ``<package_uri>/forcing_package.json`` -- the producer's
-    default ``package_manifest_filename``.
+    Derived from THIS candidate's own sidecar key directory plus the producer's
+    default ``package_manifest_filename``, i.e. the producer's own
+    ``_package_manifest_uri`` construction applied to the key the sidecar itself
+    was read from.  Two failure legs make the record's recorded manifest uri
+    unusable as a probe object (#1203 round-1 V2-C2):
+
+    * a producer/scheduler ``OBJECT_STORE_PREFIX`` drift (``s3://nhms-prod`` vs
+      ``s3://nhms``) makes ``_normalize_s3_uri`` raise, which the probe swallows
+      into a false "missing" for a physically present package;
+    * a sidecar copied or restored from elsewhere can name a FOREIGN manifest,
+      which would then stand in as this candidate's witness and fail open.
+
+    A key derived from the candidate identity has neither leg, and is a manifest
+    FILE key (6 segments) rather than the directory-shaped package uri the
+    object-path validator rejects.
+    """
+
+    return f"{sidecar_key_dir.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+
+
+def _sidecar_recorded_manifest_uri(record: Mapping[str, Any]) -> str | None:
+    """Read the record's own manifest uri (``lineage_json``) for evidence only.
+
+    Same field the producer read side uses
+    (``workers/forcing_producer/file_store.py:_forcing_package_manifest_uri``),
+    surfaced so an operator can compare what the record claims against the key
+    that was actually probed.  It is never handed to the probe.
     """
 
     lineage = record.get("lineage_json")
@@ -623,14 +678,28 @@ def _sidecar_package_manifest_uri(record: Mapping[str, Any], package_uri: str) -
         recorded = str(lineage.get("forcing_package_manifest_uri") or "").strip()
         if recorded:
             return recorded
-    if not package_uri:
-        return None
-    return f"{package_uri.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+    return None
+
+
+def _is_withheld_uri_placeholder(value: str | None) -> bool:
+    """True when the value is a redaction placeholder, i.e. a withheld reference.
+
+    Reuses the shared placeholder set (``scheduler_init_state_match``) that the
+    init-state identity comparison already treats as "value withheld, not value
+    disagreeing"; the decision layer must not fork a second literal.
+    """
+
+    return str(value or "").strip() in EVIDENCE_REDACTION_PLACEHOLDERS
 
 
 def _journal_forcing_provenance(state: Mapping[str, Any], forcing_uri: str) -> dict[str, Any] | None:
     """Name the journal tier that materialized ``state['forcing_version']`` (D1)."""
 
+    if _is_withheld_uri_placeholder(forcing_uri):
+        # A withheld uri is never probed, so no blocker may be stamped with a
+        # journal/direct tier for it (#1203 round-1 C2).  Defence in depth: the
+        # caller already routes placeholders to the sidecar tier.
+        return None
     forcing_version = state.get("forcing_version")
     if not isinstance(forcing_version, Mapping):
         return None

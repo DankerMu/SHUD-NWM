@@ -577,9 +577,16 @@ def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths
 def test_candidate_state_applies_the_direct_file_forcing_fallback_the_context_read_has(
     tmp_path: Path,
 ) -> None:
-    # B7/AC-3 (#1203): with no forcing_version row, the candidate-state read must
-    # recover the same journal direct-file provenance ``find_forcing_context``
-    # already recovers, marked with its tier so an operator can tell them apart.
+    # B7/AC-3 (#1203, round-1 revision): with no forcing_version row, the
+    # candidate-state read must recover the same journal direct-file provenance
+    # ``find_forcing_context`` already recovers, marked with its tier so an
+    # operator can tell them apart.  The CONSISTENCY evidence is the forcing
+    # version IDENTITY: the two reads are not required to agree on the uri, because
+    # this read is the public one and the public-read redaction boundary withholds
+    # every s3-shaped uri behind a placeholder.  The placeholder assertion below
+    # documents that boundary; it is not a "the uris agree" claim.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
     latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[_active_job(cycle_time)])
@@ -595,10 +602,17 @@ def test_candidate_state_applies_the_direct_file_forcing_fallback_the_context_re
     state = _candidate_state(repository, cycle_time=cycle_time)
 
     assert state is not None
+    # The agreement pin: same recovered forcing version identity from both reads.
     assert state["forcing_version"]["forcing_version_id"] == forcing.forcing_version_id
-    assert state["forcing_version"]["forcing_package_uri"] == "[object-uri]"
     assert forcing.forcing_version_id == "forc_gfs_2026062800_model_a"
     assert state["forcing_version"]["forcing_version_source"] == "direct"
+    # The boundary pin: the recorded ``s3://`` uri reaches this read withheld, as
+    # the canonical redaction placeholder that downstream decision logic treats as
+    # "not probeable" rather than as a package reference.
+    assert forcing.forcing_package_uri == "s3://nhms/forcing/direct.tar"
+    recovered_uri = state["forcing_version"]["forcing_package_uri"]
+    assert recovered_uri == "[object-uri]"
+    assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
 
 
 def test_candidate_state_marks_the_journal_row_forcing_provenance_tier(tmp_path: Path) -> None:

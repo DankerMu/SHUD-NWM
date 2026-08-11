@@ -1483,7 +1483,24 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    `FORCING_VERSION_ROW_ABSENT` (no provenance tier — journal row, journal
    direct file, or object-store forcing-version sidecar — could witness the
    package); the repair channel accepts both reason/classifier pairs, and the
-   repair action is the same idempotent exact-cycle forcing rebuild. Also that
+   repair action is the same idempotent exact-cycle forcing rebuild.
+
+   A `forcing_version_row_absent` blocker is only repairable by a rebuild when
+   the tier that failed is a data tier. Route by
+   `state_evidence.forcing_provenance.tier_status`:
+
+   | `tier_status` | Fault | Does an exact-cycle forcing rebuild fix it? |
+   |---|---|---|
+   | `sidecar_absent` | No forcing-version sidecar for this cycle | Yes — rebuild writes the package, sidecar, and manifest |
+   | `sidecar_malformed` | Sidecar unparseable or names no package | Yes — rebuild rewrites the sidecar |
+   | `sidecar_unreadable` (permission/IO class) | Object-store read denied or failing | No — fix the store permissions/mount first |
+   | `store_unconfigured` | No `object_store_root` for this candidate | No — the rebuild could not even write; fix the config first |
+   | `identity_incomplete` | Candidate has no `basin_version_id`/`model_id` | No — fix the registry/candidate identity first |
+
+   For the three config/identity faults the rebuild will NOT clear the blocker;
+   repeating it only burns a cycle. Correct the configuration or identity, let
+   the next pass re-read the tiers, and only then repair if a data tier is still
+   the fault. Also that
    `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`; and that the current registry has
    18 source-scoped variants for each enabled source. The raw readiness record
    must say `status=ready`, `required=true`, and
@@ -1539,6 +1556,20 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    state_evidence.missing_forcing_repair.login_node_forcing = false
    state_evidence.cold_fallback_allowed = false
    ```
+
+   Read `state_evidence.forcing_provenance` on the same record to see which
+   provenance tier the blocker came from:
+
+   ```text
+   state_evidence.forcing_provenance.source = journal | direct |
+                                              object_store_sidecar | absent
+   state_evidence.forcing_provenance.tier_status = <sidecar tier detail, only
+                                                    when source = absent>
+   ```
+
+   `source = absent` with a config/identity `tier_status` (`store_unconfigured`,
+   `identity_incomplete`, or a permission-class `sidecar_unreadable`) means the
+   rebuild cannot clear the blocker — see the routing table in step 1.
 
    A rejected preview retains the original missing-forcing blocker and records
    a stable reason such as `raw_manifest_not_ready`,
