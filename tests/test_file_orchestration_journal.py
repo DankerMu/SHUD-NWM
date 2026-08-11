@@ -574,6 +574,116 @@ def test_file_orchestration_journal_canonical_source_alias_reads_canonical_paths
     assert forcing.max_lead_hours == 9
 
 
+def test_candidate_state_applies_the_direct_file_forcing_fallback_the_context_read_has(
+    tmp_path: Path,
+) -> None:
+    # B7/AC-3 (#1203, round-1 revision): with no forcing_version row, the
+    # candidate-state read must recover the same journal direct-file provenance
+    # ``find_forcing_context`` already recovers, marked with its tier so an
+    # operator can tell them apart.  The CONSISTENCY evidence is the forcing
+    # version IDENTITY: the two reads are not required to agree on the uri, because
+    # this read is the public one and the public-read redaction boundary withholds
+    # every s3-shaped uri behind a placeholder.  The placeholder assertion below
+    # documents that boundary; it is not a "the uris agree" claim.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[_active_job(cycle_time)])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    _write_json(
+        journal_root / "forcing/gfs/2026062800/model_a.json",
+        _direct_forcing_context_record(cycle_time=cycle_time),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    forcing = repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    # The agreement pin: same recovered forcing version identity from both reads.
+    assert state["forcing_version"]["forcing_version_id"] == forcing.forcing_version_id
+    assert forcing.forcing_version_id == "forc_gfs_2026062800_model_a"
+    assert state["forcing_version"]["forcing_version_source"] == "direct"
+    # The boundary pin: the recorded ``s3://`` uri reaches this read withheld, as
+    # the canonical redaction placeholder that downstream decision logic treats as
+    # "not probeable" rather than as a package reference.
+    assert forcing.forcing_package_uri == "s3://nhms/forcing/direct.tar"
+    recovered_uri = state["forcing_version"]["forcing_package_uri"]
+    assert recovered_uri == "[object-uri]"
+    assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
+
+
+def test_candidate_state_marks_the_journal_row_forcing_provenance_tier(tmp_path: Path) -> None:
+    # B7/B8: a row-tier hit is marked ``journal`` and the recovered row is a copy.
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[_active_job(cycle_time)]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["forcing_version"]["forcing_version_source"] == "journal"
+    assert state["forcing_version"]["forcing_version_id"] == "forc_gfs_2026062800_model_a"
+    rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    assert "forcing_version_source" not in rows.forcing_version
+
+
+def test_candidate_state_keeps_null_forcing_provenance_when_both_journal_tiers_are_empty(
+    tmp_path: Path,
+) -> None:
+    # B7: honest null -- no fabricated record when neither journal tier witnesses.
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[_active_job(cycle_time)])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["forcing_version"] is None
+    assert repository.find_forcing_context(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+    ).forcing_version_id is None
+
+
+def test_candidate_state_degrades_a_corrupt_direct_forcing_file_instead_of_failing_the_pass(
+    tmp_path: Path,
+) -> None:
+    # B7 (design D1 error-semantics ruling): the two read paths deliberately
+    # diverge on a corrupt direct file.  ``find_forcing_context`` is an explicit
+    # query and still raises; ``candidate_state`` is a bulk per-candidate
+    # derivation, so one corrupt file must not fail the whole scheduler pass.
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[_active_job(cycle_time)])
+    latest["forcing_version"] = None
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    corrupt = _direct_forcing_context_record(cycle_time=cycle_time)
+    corrupt["record_type"] = "model_context"
+    _write_json(journal_root / "forcing/gfs/2026062800/model_a.json", corrupt)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    assert state["forcing_version"] is None
+    assert state["pipeline_status"] == "queued"
+    with pytest.raises(OrchestratorError) as error:
+        repository.find_forcing_context(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    assert error.value.error_code == "FILE_JOURNAL_READ_BLOCKED"
+    assert "file_journal_record_type_mismatch" in error.value.message
+
+
 def test_file_orchestration_journal_source_scoped_read_handles_lowercase_ifs_history(
     tmp_path: Path,
 ) -> None:

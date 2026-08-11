@@ -80,6 +80,26 @@ _JOURNAL_IDENTITY_QUARANTINE_SKIP_REASONS = frozenset(
     {"terminal_hydro_success", "terminal_pipeline_success", "terminal_completed_cycle"}
 )
 
+#: Blocker reason -> stable classifier pairs the explicit single-cycle
+#: missing-forcing repair authorization channel accepts (#874/#1160 + #1203).
+#: ``missing_forcing_package_uri`` means "package determined absent";
+#: ``forcing_version_row_absent`` means "no provenance tier could witness it".
+#: Both are fail-closed and both are repaired by the SAME idempotent action
+#: (re-produce forcing for the exact cycle), so the channel accepts both.
+_MISSING_FORCING_BLOCKER_CLASSIFIER_BY_REASON = {
+    "missing_forcing_package_uri": "FORCING_PACKAGE_URI_MISSING",
+    "forcing_version_row_absent": "FORCING_VERSION_ROW_ABSENT",
+}
+_MISSING_FORCING_BLOCKER_REASONS = frozenset(_MISSING_FORCING_BLOCKER_CLASSIFIER_BY_REASON)
+_MISSING_FORCING_BLOCKER_REASON_BY_CLASSIFIER = {
+    classifier: reason for reason, classifier in _MISSING_FORCING_BLOCKER_CLASSIFIER_BY_REASON.items()
+}
+#: Decision token paired 1:1 with each blocker reason on the re-blocking echo path.
+_MISSING_FORCING_BLOCKER_DECISION_TOKENS = {
+    "missing_forcing_package_uri": "blocked_missing_forcing_package_uri",
+    "forcing_version_row_absent": "blocked_forcing_version_row_absent",
+}
+
 SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 _source_discovery_evidence_safe = _scheduler_discovery._source_discovery_evidence_safe
 _source_secret_text_safe = _scheduler_discovery._source_secret_text_safe
@@ -736,10 +756,13 @@ def build_candidates(
                         }
                     )
                     state_evidence["missing_forcing_repair"] = repair
+                    # Re-emit the token paired with the reason that blocked the
+                    # candidate before repair was authorized, not a fixed one.
+                    echoed_reason = _authorized_repair_blocker_reason(state_decision)
                     state_evidence.update(
                         {
-                            "decision": "blocked_missing_forcing_package_uri",
-                            "reason": "missing_forcing_package_uri",
+                            "decision": _MISSING_FORCING_BLOCKER_DECISION_TOKENS[echoed_reason],
+                            "reason": echoed_reason,
                             "classifier": "missing_upstream_artifact",
                             "restart_stage": "forecast",
                             "restart_from_stage": "forecast",
@@ -748,7 +771,7 @@ def build_candidates(
                     blocked.append(
                         _blocked_candidate(
                             candidate,
-                            "missing_forcing_package_uri",
+                            echoed_reason,
                             state_evidence=state_evidence,
                         )
                     )
@@ -1409,7 +1432,7 @@ def _repair_precondition_blocker(
         not _is_explicit_missing_forcing_repair_target(config, candidate.cycle_time_utc)
         or decision is None
         or decision.action != "blocked"
-        or decision.reason != "missing_forcing_package_uri"
+        or decision.reason not in _MISSING_FORCING_BLOCKER_REASONS
         or ordinary_blocker is None
     ):
         return None
@@ -1429,7 +1452,7 @@ def _repair_precondition_blocker(
     )
     return _blocked_candidate(
         candidate,
-        rejection.reason or "missing_forcing_package_uri",
+        rejection.reason or decision.reason,
         state_evidence=rejection.evidence,
     )
 
@@ -1440,7 +1463,7 @@ def _decision_is_stable_missing_forcing_blocker(
     if (
         decision is None
         or decision.action != "blocked"
-        or decision.reason != "missing_forcing_package_uri"
+        or decision.reason not in _MISSING_FORCING_BLOCKER_REASONS
         or decision.evidence.get("classifier") != "missing_upstream_artifact"
         or str(decision.evidence.get("restart_stage") or "") != "forecast"
     ):
@@ -1449,8 +1472,30 @@ def _decision_is_stable_missing_forcing_blocker(
     return (
         isinstance(artifact_guard, Mapping)
         and artifact_guard.get("artifact_type") == "forcing_package_uri"
-        and artifact_guard.get("stable_classifier") == "FORCING_PACKAGE_URI_MISSING"
+        # Reason and stable classifier must be the SAME pair -- a mixed pair is
+        # not a contract this channel has ever authorized.
+        and artifact_guard.get("stable_classifier")
+        == _MISSING_FORCING_BLOCKER_CLASSIFIER_BY_REASON[str(decision.reason)]
         and artifact_guard.get("artifact_exists") is False
+    )
+
+
+def _authorized_repair_blocker_reason(decision: CandidateStateDecision | None) -> str:
+    """Recover the blocker reason an authorized repair decision was derived from.
+
+    ``_apply_explicit_missing_forcing_repair_policy`` overwrites ``reason`` with
+    ``operator_repair_missing_forcing`` but preserves the original
+    ``artifact_guard`` (it only authorizes decisions that passed
+    ``_decision_is_stable_missing_forcing_blocker``), so the stable classifier is
+    the surviving witness of the underlying reason.
+    """
+
+    evidence = decision.evidence if decision is not None else {}
+    artifact_guard = evidence.get("artifact_guard") if isinstance(evidence, Mapping) else None
+    classifier = artifact_guard.get("stable_classifier") if isinstance(artifact_guard, Mapping) else None
+    return _MISSING_FORCING_BLOCKER_REASON_BY_CLASSIFIER.get(
+        str(classifier or ""),
+        "missing_forcing_package_uri",
     )
 
 
@@ -1516,7 +1561,11 @@ def _apply_explicit_missing_forcing_repair_policy(
 
     if not bool(getattr(config, "repair_missing_forcing", False)):
         return decision
-    if decision is None or decision.action != "blocked" or decision.reason != "missing_forcing_package_uri":
+    if (
+        decision is None
+        or decision.action != "blocked"
+        or decision.reason not in _MISSING_FORCING_BLOCKER_REASONS
+    ):
         return decision
 
     target_cycle = getattr(config, "repair_missing_forcing_cycle_time", None)

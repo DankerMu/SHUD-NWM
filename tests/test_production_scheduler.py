@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.slurm_env import is_sensitive_slurm_env_key, reserved_slurm_env_reason
 from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import chain_repository_state as chain_repository_state_module
@@ -8828,13 +8828,36 @@ def _forecast_failure_state(candidate: Any, **overrides: Any) -> dict[str, Any]:
     return state
 
 
-def _assert_stable_missing_forcing_blocker(decision: Any, *, artifact_uri: str | None) -> None:
+#: Blocker reason -> stable classifier, mirroring the production pair map
+#: (``scheduler_candidates._MISSING_FORCING_BLOCKER_CLASSIFIER_BY_REASON``).
+_STABLE_MISSING_FORCING_CLASSIFIERS = {
+    "missing_forcing_package_uri": "FORCING_PACKAGE_URI_MISSING",
+    "forcing_version_row_absent": "FORCING_VERSION_ROW_ABSENT",
+}
+
+
+def _assert_stable_missing_forcing_blocker(
+    decision: Any,
+    *,
+    artifact_uri: str | None,
+    reason: str = "missing_forcing_package_uri",
+    unsafe_reason: str | None = None,
+) -> None:
+    """Pin the stable repair-eligible blocker for either reason/classifier pair.
+
+    Since #1203 the "no provenance tier witnessed a package" geometry blocks with
+    ``forcing_version_row_absent``/``FORCING_VERSION_ROW_ABSENT`` instead of
+    claiming the package was determined missing; the fail-closed direction and the
+    whole structural repair-eligible contract are unchanged.
+    """
+
     from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
 
+    stable_classifier = _STABLE_MISSING_FORCING_CLASSIFIERS[reason]
     assert decision is not None
-    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert (decision.action, decision.reason) == ("blocked", reason)
     assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
-    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert decision.evidence["error_code"] == stable_classifier
     assert decision.evidence["classifier"] == "missing_upstream_artifact"
     assert decision.evidence["restart_stage"] == "forecast"
     assert decision.evidence["replacement_submitted"] is False
@@ -8842,8 +8865,8 @@ def _assert_stable_missing_forcing_blocker(decision: Any, *, artifact_uri: str |
         "artifact_type": "forcing_package_uri",
         "artifact_uri": artifact_uri,
         "artifact_exists": False,
-        "unsafe_reason": None,
-        "stable_classifier": "FORCING_PACKAGE_URI_MISSING",
+        "unsafe_reason": unsafe_reason,
+        "stable_classifier": stable_classifier,
         "planned_retry_decision": "retry_failed",
         "planned_retry_reason": "retry_failed_candidate",
     }
@@ -8897,7 +8920,11 @@ def test_failed_forecast_without_recorded_forcing_uri_blocks_instead_of_retrying
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=None,
+        reason="forcing_version_row_absent",
+    )
 
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -8911,7 +8938,7 @@ def test_failed_forecast_without_recorded_forcing_uri_blocks_instead_of_retrying
     result = scheduler.run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_version_row_absent"
     assert orchestrator.calls == []
 
 
@@ -8926,7 +8953,11 @@ def test_permanently_classified_missing_forcing_stays_repair_eligible(tmp_path: 
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=None,
+        reason="forcing_version_row_absent",
+    )
 
 
 def test_model_package_refresh_retry_still_blocks_on_missing_forcing_provenance() -> None:
@@ -8947,7 +8978,11 @@ def test_model_package_refresh_retry_still_blocks_on_missing_forcing_provenance(
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    _assert_stable_missing_forcing_blocker(decision, artifact_uri=None)
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=None,
+        reason="forcing_version_row_absent",
+    )
     assert decision.evidence["artifact_guard"]["planned_retry_reason"] == "retry_failed_candidate"
 
 
@@ -8985,11 +9020,895 @@ def test_policy_blocked_forecast_without_forcing_provenance_keeps_the_true_cause
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
     assert decision is not None
-    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
-    assert decision.evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
     assert _decision_is_stable_missing_forcing_blocker(decision) is True
     assert [job["error_code"] for job in decision.evidence["pipeline_jobs"]] == ["POLICY_BLOCKED"]
     assert decision.evidence["retry_policy"]["attempt"] == 3
+
+
+def _producer_forcing_sidecar(
+    object_store_root: Path,
+    *,
+    candidate: Any,
+    object_store_prefix: str = "",
+) -> dict[str, Any]:
+    """Build the forcing-version sidecar exactly as the DB-free producer writes it.
+
+    Reuses the producer's own key/URI constructors instead of hand-writing a
+    shape, so the decision-side derivation cannot silently drift from the write
+    side (#1203 task 1.4).  The record therefore carries the DIRECTORY-shaped
+    ``forcing_package_uri`` (``producer._directory_uri``) plus the manifest FILE
+    uri under ``lineage_json.forcing_package_manifest_uri``, and the sidecar key
+    is the ``forcing_version_record.json`` sibling
+    (``file_store._write_forcing_version_sidecar``).
+    """
+
+    from workers.forcing_producer.producer import (
+        ForcingProducerConfig,
+        _directory_uri,
+        _object_source_segment,
+    )
+
+    store = LocalObjectStore(object_store_root, object_store_prefix)
+    prefix = (
+        f"forcing/{_object_source_segment(candidate.source_id)}"
+        f"/{format_cycle_time(candidate.cycle_time_utc)}"
+        f"/{candidate.basin_version_id}/{candidate.model_id}"
+    )
+    package_uri = _directory_uri(store, prefix)
+    manifest_key = f"{prefix}/{ForcingProducerConfig.package_manifest_filename}"
+    sidecar_key = f"{store.normalize_key(package_uri).strip('/')}/forcing_version_record.json"
+    return {
+        "store": store,
+        "package_uri": package_uri,
+        "manifest_key": manifest_key,
+        "manifest_uri": store.uri_for_key(manifest_key),
+        "sidecar_key": sidecar_key,
+        "record": {
+            "forcing_version_id": candidate.forcing_version_id,
+            "model_id": candidate.model_id,
+            "source_id": candidate.source_id,
+            "cycle_time": _format_iso_z(candidate.cycle_time_utc),
+            "forcing_package_uri": package_uri,
+            "checksum": None,
+            "lineage_json": {
+                "forcing_package_manifest_uri": store.uri_for_key(manifest_key),
+                "forcing_package_manifest_checksum": "0" * 64,
+            },
+        },
+    }
+
+
+def _seed_producer_forcing_sidecar(
+    object_store_root: Path,
+    *,
+    candidate: Any,
+    write_manifest: bool = True,
+    record: Mapping[str, Any] | None = None,
+    raw_sidecar_bytes: bytes | None = None,
+    object_store_prefix: str = "",
+) -> dict[str, Any]:
+    sidecar = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=object_store_prefix,
+    )
+    store = sidecar["store"]
+    payload = (
+        raw_sidecar_bytes
+        if raw_sidecar_bytes is not None
+        else json.dumps(dict(record or sidecar["record"]), sort_keys=True).encode("utf-8")
+    )
+    store.write_bytes_atomic(sidecar["sidecar_key"], payload)
+    if write_manifest:
+        store.write_bytes_atomic(sidecar["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    return sidecar
+
+
+def test_sidecar_tier_recovers_forcing_provenance_and_does_not_block_present_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B1/AC-1: the live incident geometry -- journal records ``forcing_version:
+    # null`` -- but the forcing producer's object-store sidecar witnesses a
+    # package whose manifest file is physically present.  The recovery leg must
+    # proceed instead of being blocked by a fabricated missing package.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    _seed_producer_forcing_sidecar(object_store_root, candidate=candidate)
+    state = _forecast_failure_state(candidate)
+    assert "forcing_package_uri" not in state
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+    assert decision.evidence["reason"] not in {
+        "missing_forcing_package_uri",
+        "forcing_version_row_absent",
+    }
+    # B8: the tier that produced the provenance is readable on the decision the
+    # scheduler ultimately emits, not only on blockers.
+    assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert decision.evidence["forcing_provenance"]["probe"] == "manifest"
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+
+
+@pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
+def test_sidecar_tier_with_absent_manifest_keeps_the_missing_forcing_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_store_prefix: str,
+) -> None:
+    # B2/AC-2 reverse pin: a witnessed-but-absent package must keep the unchanged
+    # #874/#1160 fail-closed blocker, only now with the tier named.  Covered for
+    # both the prefix-less shape and the production s3 prefix shape (design D2).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        write_manifest=False,
+        object_store_prefix=object_store_prefix,
+    )
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=sidecar["package_uri"])
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "object_store_sidecar",
+        "probe": "manifest",
+        "package_uri": sidecar["package_uri"],
+        # The record's own manifest uri is evidence only; ``probe_key`` is what the
+        # existence probe was actually given (derived from the candidate identity).
+        "manifest_uri": sidecar["manifest_uri"],
+        "probe_key": sidecar["manifest_key"],
+        "forcing_version_id": candidate.forcing_version_id,
+        "artifact_exists": False,
+    }
+
+
+def test_absent_sidecar_blocks_with_the_distinct_row_absent_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B3: no journal row, no journal direct file, no sidecar -> "cannot determine",
+    # still fail-closed and still structurally repair-eligible.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["artifact_uri"] is None
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["forcing_provenance"] == {"source": "absent", "tier_status": "sidecar_absent"}
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_tier_status"),
+    [
+        ("malformed_json", "sidecar_malformed"),
+        ("oversized", "sidecar_oversized"),
+        ("store_unconfigured", "store_unconfigured"),
+        ("basin_version_missing", "identity_incomplete"),
+        ("no_package_reference", "sidecar_malformed"),
+    ],
+)
+def test_unavailable_sidecar_tier_blocks_as_row_absent_without_escaping_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case_name: str,
+    expected_tier_status: str,
+) -> None:
+    # B4: every tier failure classifies as "no witness" with its own detail --
+    # never as a determined-missing package, never fail-open, never raising.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = _scheduler_candidate_fixture()
+    if case_name == "store_unconfigured":
+        monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    if case_name == "malformed_json":
+        _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, raw_sidecar_bytes=b"{not-json")
+    elif case_name == "oversized":
+        # Must exceed the production-sized 16 MiB read cap, and must report its
+        # own tier detail rather than being conflated with a permission/IO read
+        # denial (#1203 round-2 V5-C1).
+        _seed_producer_forcing_sidecar(
+            object_store_root,
+            candidate=candidate,
+            raw_sidecar_bytes=b'{"pad": "' + b"p" * (16 * 1024 * 1024 + 1) + b'"}',
+        )
+    elif case_name == "no_package_reference":
+        record = {
+            key: value
+            for key, value in _producer_forcing_sidecar(object_store_root, candidate=candidate)["record"].items()
+            if key not in {"forcing_package_uri", "lineage_json"}
+        }
+        _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, record=record)
+    elif case_name == "basin_version_missing":
+        _seed_producer_forcing_sidecar(object_store_root, candidate=candidate)
+        candidate = replace(candidate, basin_version_id=None)
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": expected_tier_status,
+    }
+
+
+def test_unreadable_sidecar_record_blocks_as_row_absent_without_escaping_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B13 (round-3): the RECORD read leg, distinct from B11's manifest PROBE leg.
+    # ``sidecar_unreadable`` is the tier status production most plausibly hits (NFS
+    # EACCES/ESTALE, a symlinked record leaf), and it is the only status with no
+    # anchor: dropping ``ObjectStoreError`` from the record-read ``except`` tuple in
+    # ``_forcing_sidecar_provenance`` would let a RuntimeError subclass escape and
+    # abort the whole scheduler pass while every other test stayed green.
+    #
+    # Geometry: the producer-isomorphic record IS written (so this is a read fault,
+    # not absence), then its leaf is replaced by a symlink to the identical bytes --
+    # the same deterministic, uid-independent shape B11 uses.  A ``chmod 0`` file
+    # would be silently readable as root and make the anchor vacuous.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate)
+    sidecar_path = object_store_root / sidecar["sidecar_key"]
+    relocated_record = tmp_path / "elsewhere-forcing_version_record.json"
+    relocated_record.write_bytes(sidecar_path.read_bytes())
+    sidecar_path.unlink()
+    sidecar_path.symlink_to(relocated_record)
+    # Pre-condition: the record is present and byte-identical, only unreadable
+    # through the store -- so "absent" would be the wrong classification.
+    assert sidecar_path.is_symlink()
+    assert json.loads(relocated_record.read_text(encoding="utf-8"))["forcing_package_uri"]
+    with pytest.raises(ObjectStoreError):
+        sidecar["store"].exists(sidecar["sidecar_key"])
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_unreadable",
+    }
+
+
+def _deeply_nested_json_bytes() -> bytes:
+    """Smallest probed nesting depth whose ``json.loads`` raises ``RecursionError``.
+
+    The depth at which CPython's JSON scanner gives up is interpreter- and
+    stack-size dependent (3.14 overflow-probes the real C stack rather than
+    honouring ``sys.setrecursionlimit``), so the payload is calibrated here
+    instead of being hard-coded: probe increasing depths and return the first
+    one that actually trips.  If no probed depth trips, the anchor fails loudly
+    rather than passing vacuously.
+    """
+
+    for depth in (1_000, 10_000, 100_000, 500_000):
+        payload = b"[" * depth + b"]" * depth
+        try:
+            json.loads(payload.decode("utf-8"))
+        except RecursionError:
+            return payload
+    pytest.fail("no probed nesting depth made json.loads raise RecursionError")
+
+
+def test_deeply_nested_sidecar_record_blocks_as_row_absent_without_escaping_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B14 (round-4): the record-PARSE leg, distinct from B13's record-READ leg.
+    # A deeply nested record is small (a couple of hundred KB), so ``exists`` /
+    # ``size`` / ``read_bytes_limited`` all succeed well inside the 16 MiB cap and
+    # the failure lands squarely on ``json.loads`` -- which raises ``RecursionError``,
+    # NOT a ``ValueError`` subclass.  Without ``RecursionError`` in the parse
+    # ``except`` tuple it escapes ``_forcing_sidecar_provenance``, escapes
+    # ``_missing_upstream_forecast_artifact_evidence`` and aborts the whole
+    # scheduler pass, while every other tier-failure geometry stays green.
+    # A record we cannot parse is ``sidecar_malformed``, same as invalid JSON.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    raw_sidecar_bytes = _deeply_nested_json_bytes()
+    # Pre-condition: the record is present and small enough that every read-side
+    # guard passes -- so "unreadable"/"oversized" would be the wrong classification.
+    assert len(raw_sidecar_bytes) < 16 * 1024 * 1024
+    _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, raw_sidecar_bytes=raw_sidecar_bytes)
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_malformed",
+    }
+
+
+def test_directory_shaped_package_uri_is_never_the_existence_probe_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B4 pin: the producer's ``forcing_package_uri`` is a DIRECTORY uri that the
+    # object-path validator rejects, so probing it directly would report "missing"
+    # for a package that is physically present.  The sidecar tier must probe the
+    # witnessed manifest FILE key instead.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate)
+
+    package_uri = sidecar["package_uri"]
+    assert package_uri.endswith("/")
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, package_uri)[0] is True
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        sidecar["manifest_uri"],
+    ) == (False, None)
+
+    decision = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+
+    assert decision is not None
+    assert decision.action == "retry"
+
+
+def test_forcing_sidecar_key_and_manifest_derivation_match_the_producer_write_side() -> None:
+    # Task 1.4 anti-drift pin: the decision-side sidecar key and the manifest
+    # fallback derivation are literally the producer's own constructions.
+    from workers.forcing_producer.file_store import _forcing_package_manifest_uri
+    from workers.forcing_producer.producer import (
+        ForcingProducerConfig,
+        _object_source_segment,
+        _package_manifest_uri,
+    )
+
+    candidate = _scheduler_candidate_fixture()
+    expected_key = (
+        f"forcing/{_object_source_segment(candidate.source_id)}"
+        f"/{format_cycle_time(candidate.cycle_time_utc)}"
+        f"/{candidate.basin_version_id}/{candidate.model_id}"
+        f"/{scheduler_state_failure_module._FORCING_SIDECAR_FILENAME}"
+    )
+    assert expected_key == "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_version_record.json"
+    assert scheduler_state_failure_module._FORCING_SIDECAR_FILENAME == "forcing_version_record.json"
+    assert (
+        scheduler_state_failure_module._FORCING_PACKAGE_MANIFEST_FILENAME
+        == ForcingProducerConfig.package_manifest_filename
+    )
+    key_dir = "forcing/gfs/2026052106/basin_a_v1/model_a"
+    probe_key = scheduler_state_failure_module._sidecar_manifest_probe_key(key_dir)
+    assert probe_key == _package_manifest_uri(f"{key_dir}/", ForcingProducerConfig.package_manifest_filename)
+    assert probe_key == _forcing_package_manifest_uri({}, f"{key_dir}/")
+    assert probe_key == "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    # The record's own manifest uri is read for evidence only and never probed.
+    assert (
+        scheduler_state_failure_module._sidecar_recorded_manifest_uri(
+            {"lineage_json": {"forcing_package_manifest_uri": "s3://nhms-prod/forcing/x.json"}}
+        )
+        == "s3://nhms-prod/forcing/x.json"
+    )
+    assert scheduler_state_failure_module._sidecar_recorded_manifest_uri({}) is None
+
+
+def test_repair_authorization_accepts_both_missing_forcing_blocker_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B5: both reason/classifier pairs satisfy the structural check the explicit
+    # single-cycle repair authorization channel gates on, and each is paired 1:1
+    # with its own re-blocking decision token.
+    from services.orchestrator.scheduler_candidates import (
+        _MISSING_FORCING_BLOCKER_DECISION_TOKENS,
+        _authorized_repair_blocker_reason,
+        _decision_is_stable_missing_forcing_blocker,
+    )
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+
+    row_absent = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+    _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    determined_missing = scheduler_module._candidate_state_decision(
+        candidate,
+        _forecast_failure_state(candidate),
+    )
+
+    assert row_absent is not None and row_absent.reason == "forcing_version_row_absent"
+    assert determined_missing is not None and determined_missing.reason == "missing_forcing_package_uri"
+    assert _decision_is_stable_missing_forcing_blocker(row_absent) is True
+    assert _decision_is_stable_missing_forcing_blocker(determined_missing) is True
+    assert _MISSING_FORCING_BLOCKER_DECISION_TOKENS == {
+        "missing_forcing_package_uri": "blocked_missing_forcing_package_uri",
+        "forcing_version_row_absent": "blocked_forcing_version_row_absent",
+    }
+    # The authorized-repair decision overwrites ``reason``; the surviving stable
+    # classifier is what the echo path re-pairs the token with.
+    for blocker in (row_absent, determined_missing):
+        authorized = CandidateStateDecision("retry", "operator_repair_missing_forcing", blocker.evidence)
+        assert _authorized_repair_blocker_reason(authorized) == blocker.reason
+    assert _authorized_repair_blocker_reason(None) == "missing_forcing_package_uri"
+
+
+def test_mixed_missing_forcing_reason_and_classifier_is_not_a_stable_blocker() -> None:
+    # B5 negative: only the paired reason/classifier combinations are authorized.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    mixed = CandidateStateDecision(
+        "blocked",
+        "forcing_version_row_absent",
+        {
+            "classifier": "missing_upstream_artifact",
+            "restart_stage": "forecast",
+            "artifact_guard": {
+                "artifact_type": "forcing_package_uri",
+                "stable_classifier": "FORCING_PACKAGE_URI_MISSING",
+                "artifact_exists": False,
+            },
+        },
+    )
+
+    assert _decision_is_stable_missing_forcing_blocker(mixed) is False
+
+
+@pytest.mark.parametrize("tier", ["journal", "direct"])
+def test_decision_evidence_names_the_journal_forcing_provenance_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tier: str,
+) -> None:
+    # B8 (round-1 V1-C4): the journal row and journal direct-file tiers are visible
+    # in the emitted decision evidence exactly as the sidecar and absent tiers are.
+    # The geometry must NOT lean on the ``_object_manifest_is_missing`` root-
+    # unconfigured fail-open quirk: the object store IS configured, the recorded
+    # uri is a non-redacted shape ``candidate_state`` can actually emit (a relative
+    # object key survives ``_sanitize_file_provider_scalar`` verbatim), and the
+    # probed object is physically present.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    # No sidecar record is written: the recovered uri can only have come from the
+    # journal tier under test.
+    sidecar["store"].write_bytes_atomic(sidecar["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    recorded_uri = sidecar["manifest_uri"]
+    assert recorded_uri == sidecar["manifest_key"]
+    assert (
+        file_orchestration_journal_module._sanitize_public_field("forcing_package_uri", recorded_uri)
+        == recorded_uri
+    )
+    state = _forecast_failure_state(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": recorded_uri,
+            "forcing_version_source": tier,
+        },
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": tier,
+        "package_uri": recorded_uri,
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+
+def test_withheld_uri_placeholder_is_never_stamped_with_a_journal_provenance_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # F2/round-1 C2: no blocker may claim the journal/direct tier witnessed a
+    # package for a uri that was withheld by the public-read redaction boundary.
+    # Both the guard (which routes placeholders to the sidecar tier) and the tier
+    # stamper itself refuse the placeholder.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+
+    for placeholder in sorted(EVIDENCE_REDACTION_PLACEHOLDERS):
+        state = _forecast_failure_state(
+            candidate,
+            forcing_version={
+                "forcing_version_id": candidate.forcing_version_id,
+                "forcing_package_uri": placeholder,
+                "forcing_version_source": "journal",
+            },
+        )
+
+        assert scheduler_state_failure_module._journal_forcing_provenance(state, placeholder) is None
+
+        decision = scheduler_module._candidate_state_decision(candidate, state)
+
+        assert decision is not None
+        provenance = decision.evidence.get("forcing_provenance") or {}
+        assert provenance.get("source") not in {"journal", "direct"}
+        assert placeholder not in json.dumps(provenance, sort_keys=True)
+        # The withheld reference falls through to the sidecar tier, which has no
+        # record here -> the honest "cannot determine" blocker.
+        assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+        assert provenance == {"source": "absent", "tier_status": "sidecar_absent"}
+
+
+def _real_journal_candidate_state_with_recorded_s3_forcing_uri(
+    journal_root: Path,
+    *,
+    candidate: Any,
+) -> dict[str, Any]:
+    """Candidate state as the REAL journal read path emits it in production.
+
+    Writes a genuine failed-forecast cycle plus a tier-1 ``forcing_version`` row
+    carrying the producer's s3-shaped package uri, then reads it back through
+    ``FileOrchestrationJournalRepository.candidate_state`` so the public-read
+    redaction boundary is applied for real (the uri comes back as
+    ``[object-uri]``) instead of being simulated by hand (#1203 round-1 C4).
+    """
+
+    cycle_time = candidate.cycle_time_utc
+    cycle_segment = format_cycle_time(cycle_time)
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
+    repository.ensure_forecast_cycle(source_id=candidate.source_id, cycle_time=cycle_time)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_segment}_{candidate.model_id}_forecast",
+            "run_id": candidate.run_id,
+            "candidate_id": candidate.candidate_id,
+            "cycle_id": candidate.cycle_id,
+            "cycle_time": _format_iso_z(cycle_time),
+            "source_id": candidate.source_id,
+            "model_id": candidate.model_id,
+            "job_type": "run_shud_forecast",
+            "stage": "forecast",
+            "status": "failed",
+            "slurm_job_id": "9001",
+            "error_code": "SLURM_JOB_TIMEOUT",
+            "error_message": "forecast task timed out",
+            "retry_count": 0,
+            "finished_at": _format_iso_z(cycle_time),
+        }
+    )
+    _record_journal_forcing_provenance(
+        journal_root,
+        source_id=candidate.source_id,
+        cycle_time=cycle_time,
+        model_id=candidate.model_id,
+        forcing_package_uri=(
+            f"s3://nhms/forcing/gfs/{cycle_segment}/{candidate.basin_version_id}/{candidate.model_id}/"
+        ),
+    )
+    state = repository.candidate_state(
+        source_id=candidate.source_id,
+        cycle_time=cycle_time,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+    )
+    assert state is not None
+    # The sanitized shape this whole fix exists for: the tier-1 row IS present,
+    # but its uri was withheld by the public-read boundary.
+    assert state["pipeline_status"] == "failed"
+    assert state["forcing_version"]["forcing_version_source"] == "journal"
+    assert state["forcing_version"]["forcing_package_uri"] == "[object-uri]"
+    return state
+
+
+@pytest.mark.parametrize("sidecar_seeded", [True, False])
+def test_sanitized_journal_uri_recovers_through_the_sidecar_tier_end_to_end(
+    tmp_path: Path,
+    sidecar_seeded: bool,
+) -> None:
+    # B9 (round-1 C4): end-to-end on the REAL sanitized shape, with the production
+    # object-store geometry (root + non-empty s3 prefix).  With the package in
+    # place the candidate recovers through the sidecar tier; without it the honest
+    # "cannot determine" blocker replaces the placeholder-driven false
+    # "package determined missing".
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = replace(
+        _scheduler_candidate_fixture(),
+        resource_profile={
+            "object_store_root": str(object_store_root),
+            "object_store_prefix": "s3://nhms",
+        },
+    )
+    if sidecar_seeded:
+        _seed_producer_forcing_sidecar(
+            object_store_root,
+            candidate=candidate,
+            object_store_prefix="s3://nhms",
+        )
+    state = _real_journal_candidate_state_with_recorded_s3_forcing_uri(
+        tmp_path / "journal",
+        candidate=candidate,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    if sidecar_seeded:
+        assert decision.action == "retry"
+        assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+        assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+        assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
+    else:
+        assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+        assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+        assert decision.evidence["forcing_provenance"] == {
+            "source": "absent",
+            "tier_status": "sidecar_absent",
+        }
+
+
+def test_sidecar_probe_survives_a_producer_scheduler_prefix_drift(tmp_path: Path) -> None:
+    # B10(a) (round-1 V2-C2): the record's manifest uri was written under a
+    # DIFFERENT object-store prefix than the scheduler reads with.  Probing that
+    # uri verbatim raises inside ``_normalize_s3_uri`` and the probe swallows it
+    # into a false "missing" for a physically present package; the derived key has
+    # no such leg.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = replace(
+        _scheduler_candidate_fixture(),
+        resource_profile={
+            "object_store_root": str(object_store_root),
+            "object_store_prefix": "s3://nhms",
+        },
+    )
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate, object_store_prefix="s3://nhms")
+    drifted_manifest_uri = sidecar["manifest_uri"].replace("s3://nhms/", "s3://nhms-prod/", 1)
+    assert drifted_manifest_uri.startswith("s3://nhms-prod/")
+    record = {
+        **sidecar["record"],
+        "lineage_json": {
+            **sidecar["record"]["lineage_json"],
+            "forcing_package_manifest_uri": drifted_manifest_uri,
+        },
+    }
+    _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        record=record,
+        object_store_prefix="s3://nhms",
+    )
+    # Control variable: trusting the recorded uri verbatim would report "missing".
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, drifted_manifest_uri)[0] is True
+
+    decision = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    provenance = decision.evidence["forcing_provenance"]
+    assert provenance["source"] == "object_store_sidecar"
+    assert provenance["artifact_exists"] is True
+    # The recorded uri stays visible as evidence, but the probe used the derived key.
+    assert provenance["manifest_uri"] == drifted_manifest_uri
+    assert provenance["probe_key"] == sidecar["manifest_key"]
+
+
+def test_sidecar_naming_a_foreign_manifest_is_not_this_candidates_witness(tmp_path: Path) -> None:
+    # B10(b) (round-1 V2-C2): a sidecar copied or restored from another candidate
+    # names a manifest that really exists -- for someone else.  Probing it verbatim
+    # would fail OPEN and release a retry for a package this candidate does not
+    # have; the derived key keeps the decision fail-closed.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = _scheduler_candidate_fixture()
+    foreign_candidate = replace(candidate, model_id="model_b")
+    foreign = _seed_producer_forcing_sidecar(object_store_root, candidate=foreign_candidate)
+    sidecar = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    record = {
+        **sidecar["record"],
+        "forcing_package_uri": foreign["package_uri"],
+        "lineage_json": {"forcing_package_manifest_uri": foreign["manifest_uri"]},
+    }
+    _seed_producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        record=record,
+        write_manifest=False,
+    )
+    candidate = replace(candidate, resource_profile={"object_store_root": str(object_store_root)})
+    # Control variable: the foreign manifest really is present, so trusting the
+    # recorded uri verbatim would witness it as this candidate's package.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        foreign["manifest_uri"],
+    ) == (False, None)
+
+    decision = scheduler_module._candidate_state_decision(candidate, _forecast_failure_state(candidate))
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=foreign["package_uri"])
+    assert decision.evidence["forcing_provenance"]["probe_key"] == sidecar["manifest_key"]
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is False
+
+
+def test_sidecar_manifest_probe_store_error_is_contained_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B11 (round-1 V2-C1): ``LocalObjectStore.exists`` raises ``ObjectStoreError``
+    # (a RuntimeError subclass, so the probe's own ``except (OSError, ValueError)``
+    # does not cover it) for a symlinked manifest leaf -- the same shape an NFS
+    # ESTALE/EIO stat produces.  It must be contained fail-closed, never escape and
+    # abort the whole scheduler pass.
+    #
+    # Round-2 V5-C2: an unreadable probe object is "cannot determine", not
+    # "determined missing", so it lands on the row-absent blocker (which the
+    # runbook routes to "a rebuild does not fix this") rather than on
+    # ``missing_forcing_package_uri``, whose repair channel is the exact-cycle
+    # forcing rebuild -- a rebuild cannot clear a symlink/ESTALE/permission fault.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    real_manifest = tmp_path / "elsewhere-forcing_package.json"
+    real_manifest.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    manifest_path = object_store_root / sidecar["manifest_key"]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.symlink_to(real_manifest)
+    with pytest.raises(ObjectStoreError):
+        sidecar["store"].exists(sidecar["manifest_key"])
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["artifact_uri"] is None
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_manifest_probe_error",
+    }
+    # The repair channel still accepts it: fail-closed, not a dead end.
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_version_row_absent"
+    assert orchestrator.calls == []
+
+
+def test_production_scale_sidecar_record_still_witnesses_the_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B12 (round-2 V5-C1) production-scale regression pin: on node-22 the
+    # producer's ``forcing_version_record.json`` embeds per-station
+    # ``lineage_json.output_files``, measured at 1.6-2.0 MB for every basin of
+    # cycle 2026080100/IFS (largest ``basins_lh_gl`` = 2,014,038 bytes).  Under
+    # the original 64 KiB read cap every production basin degraded to
+    # ``sidecar_unreadable`` and the whole recovery tier was inert in production.
+    # A record of that shape and scale must still parse, still witness, and still
+    # let the candidate proceed.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    baseline = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    record = dict(baseline["record"])
+    # Mirror the real shape: many per-station output-file entries, not one giant
+    # padded string.  The entry keys are the producer's own
+    # (``producer.py`` ``shud_file_entries`` / ``file_entries``:
+    # ``role``/``relative_path``/``uri``/``checksum``), so the record this anchor
+    # measures cannot drift from the record production actually writes.
+    def _station_label(index: int) -> str:
+        return f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}"
+
+    prefix_uri = baseline["package_uri"]
+    record["lineage_json"] = {
+        **baseline["record"]["lineage_json"],
+        "output_files": [
+            {"role": "tsd_forc", "uri": f"{prefix_uri}forcing.tsd", "checksum": "0" * 64},
+            {"role": "csv_debug", "uri": f"{prefix_uri}forcing_debug.csv", "checksum": "1" * 64},
+            *(
+                {
+                    "role": "shud_forcing_csv",
+                    "relative_path": f"shud/{_station_label(index)}.csv",
+                    "uri": f"{prefix_uri}shud/{_station_label(index)}.csv",
+                    "checksum": f"{index:064d}",
+                }
+                for index in range(7900)
+            ),
+        ],
+    }
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, record=record)
+    record_bytes = (object_store_root / sidecar["sidecar_key"]).stat().st_size
+    # Inside the measured node-22 production band (1.6-2.0 MB), i.e. far above the
+    # retired 64 KiB cap and far below the current 16 MiB one.
+    assert 1_600_000 < record_bytes < 2_100_000
+    assert record_bytes < scheduler_state_failure_module._FORCING_SIDECAR_MAX_BYTES
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.evidence["reason"] not in {
+        "missing_forcing_package_uri",
+        "forcing_version_row_absent",
+    }
+    assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
 
 
 def test_healthy_candidate_reaching_failure_fallback_region_keeps_none_decision(
@@ -9942,7 +10861,10 @@ def test_exact_cycle_missing_forcing_repair_rejects_unverified_raw_manifest(
     result = scheduler.run_once()
 
     blocked = result.evidence["blocked_candidates"][0]
-    assert blocked["reason"] == "missing_forcing_package_uri"
+    # ``_missing_forcing_retry_state`` records no forcing package uri and no
+    # provenance tier witnesses one, so since #1203 the preserved blocker is the
+    # row-absent pair; the rejection contract itself is unchanged.
+    assert blocked["reason"] == "forcing_version_row_absent"
     assert blocked["state_evidence"]["missing_forcing_repair"]["status"] == "rejected"
     assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == expected_reason
     assert result.evidence["counts"]["submitted_count"] == 0
@@ -10044,11 +10966,15 @@ def test_missing_forcing_repair_rejects_when_canonical_input_is_not_ready(
     assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == "canonical_not_ready"
     assert blocked["state_evidence"]["missing_forcing_repair"]["canonical_readiness"]["ready"] is False
     assert "canonical_readiness" not in blocked["state_evidence"]
-    assert blocked["reason"] == "missing_forcing_package_uri"
-    assert blocked["state_evidence"]["reason"] == "missing_forcing_package_uri"
+    # Empty-provenance geometry: since #1203 the re-blocking echo re-emits the
+    # row-absent pair it was blocked with, not a hard-coded missing-package pair,
+    # with the decision token paired 1:1 to that reason (B5, echo side).
+    assert blocked["reason"] == "forcing_version_row_absent"
+    assert blocked["state_evidence"]["reason"] == "forcing_version_row_absent"
+    assert blocked["state_evidence"]["decision"] == "blocked_forcing_version_row_absent"
     assert blocked["state_evidence"]["classifier"] == "missing_upstream_artifact"
     assert blocked["state_evidence"]["artifact_guard"]["stable_classifier"] == (
-        "FORCING_PACKAGE_URI_MISSING"
+        "FORCING_VERSION_ROW_ABSENT"
     )
     assert result.evidence["counts"]["submitted_count"] == 0
 
@@ -10588,7 +11514,9 @@ def test_missing_forcing_repair_rejects_missing_partial_or_cold_state(
     result = scheduler.run_once()
 
     blocked = result.evidence["blocked_candidates"][0]
-    assert blocked["reason"] == "missing_forcing_package_uri"
+    # Empty-provenance geometry (see #1203): the preserved blocker is the
+    # row-absent pair; the warm-state rejection contract is unchanged.
+    assert blocked["reason"] == "forcing_version_row_absent"
     assert blocked["state_evidence"]["missing_forcing_repair"]["reason"] == expected_reason
     assert result.evidence["counts"]["submitted_count"] == 0
 
@@ -28185,10 +29113,24 @@ def test_db_free_strict_warm_start_run_once_blocks_corrupt_file_state_index_befo
 
 
 @pytest.mark.parametrize(
-    ("case_name", "forcing_package_uri"),
+    ("case_name", "forcing_package_uri", "expected_reason"),
     [
-        ("s3_missing", "s3://nhms/forcing/gfs/2026052106/model_a/package.json"),
-        ("absent_uri", None),
+        # The journal direct-file tier DOES witness a package uri, but this read
+        # path is the public one: the s3-shaped uri comes back as the redaction
+        # placeholder ``[object-uri]``.  A withheld reference is not a probeable
+        # package reference, so since #1203 it falls through to the sidecar tier
+        # (absent here) and blocks with the honest "cannot determine" pair instead
+        # of the placeholder-driven false "determined missing" (round-1 C1).  A
+        # non-redacted recorded uri still yields ``missing_forcing_package_uri``
+        # unchanged -- see
+        # ``test_failed_forecast_with_recorded_missing_forcing_blocks_instead_of_retrying``.
+        (
+            "s3_missing",
+            "s3://nhms/forcing/gfs/2026052106/model_a/package.json",
+            "forcing_version_row_absent",
+        ),
+        # No tier witnesses anything -> the same "cannot determine" pair (#1203).
+        ("absent_uri", None, "forcing_version_row_absent"),
     ],
 )
 def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_before_submission(
@@ -28196,6 +29138,7 @@ def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_bef
     tmp_path: Path,
     case_name: str,
     forcing_package_uri: str | None,
+    expected_reason: str,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / f"db-free-local-root-{case_name}")
     cycle_time = _dt("2026-05-21T06:00:00Z")
@@ -28273,10 +29216,14 @@ def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_bef
     state_evidence = blocked["state_evidence"]
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
-    assert blocked["reason"] == "missing_forcing_package_uri"
-    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    expected_classifier = _STABLE_MISSING_FORCING_CLASSIFIERS[expected_reason]
+    assert blocked["reason"] == expected_reason
+    assert state_evidence["error_code"] == expected_classifier
     assert state_evidence["classifier"] == "missing_upstream_artifact"
-    assert state_evidence["artifact_guard"]["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert state_evidence["artifact_guard"]["stable_classifier"] == expected_classifier
+    # Neither geometry leaves a probeable reference behind: the recorded one was
+    # withheld by the public-read boundary, the other never existed.
+    assert state_evidence["forcing_provenance"] == {"source": "absent", "tier_status": "sidecar_absent"}
     assert "NODE_FAILURE" not in json.dumps(state_evidence, sort_keys=True)
     assert orchestrator.calls == []
 
@@ -29156,8 +30103,10 @@ def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_raw_dis
     blocked = result.evidence["blocked_candidates"][0]
     state_evidence = blocked["state_evidence"]
     repair = state_evidence["missing_forcing_repair"]
-    assert blocked["reason"] == "missing_forcing_package_uri"
-    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    # Empty-provenance geometry (#1203): the preserved blocker is the row-absent
+    # pair; the repair-precondition rejection contract is unchanged.
+    assert blocked["reason"] == "forcing_version_row_absent"
+    assert state_evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
     assert repair["status"] == "rejected"
     assert repair["reason"] == expected_reason
     assert repair["detail"]["precondition"] == "source_discovery"
@@ -29186,8 +30135,9 @@ def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_entry_i
     state_evidence = blocked["state_evidence"]
     repair = state_evidence["missing_forcing_repair"]
     expected_reason = "nfs_raw_manifest_manifest_entry_local_key_identity_mismatch"
-    assert blocked["reason"] == "missing_forcing_package_uri"
-    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    # Empty-provenance geometry (#1203): row-absent pair, same rejection contract.
+    assert blocked["reason"] == "forcing_version_row_absent"
+    assert state_evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
     assert repair["status"] == "rejected"
     assert repair["reason"] == expected_reason
     assert repair["detail"]["precondition"] == "source_discovery"
@@ -29250,8 +30200,9 @@ def test_db_free_file_journal_exact_repair_preserves_missing_forcing_for_direct_
     blocked = result.evidence["blocked_candidates"][0]
     state_evidence = blocked["state_evidence"]
     repair = state_evidence["missing_forcing_repair"]
-    assert blocked["reason"] == "missing_forcing_package_uri"
-    assert state_evidence["error_code"] == "FORCING_PACKAGE_URI_MISSING"
+    # Empty-provenance geometry (#1203): row-absent pair, same rejection contract.
+    assert blocked["reason"] == "forcing_version_row_absent"
+    assert state_evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
     assert repair["status"] == "rejected"
     assert repair["reason"] == expected_reason
     assert repair["detail"]["precondition"] == "direct_grid_contract"
@@ -32124,14 +33075,27 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         assert len(completed_event_ids) == 1
 
     if forcing_recorded:
+        failed_member_basin_version_id = next(
+            str(model["basin_version_id"])
+            for model in models
+            if str(model["model_id"]) == str(failed_member["model_id"])
+        )
         _record_journal_forcing_provenance(
             root,
             source_id=source_id,
             cycle_time=_dt("2026-05-21T06:00:00Z"),
             model_id=str(failed_member["model_id"]),
+            # Recorded as a plain object key, not an ``s3://`` uri: this row is
+            # read back through the REAL public journal read, which withholds
+            # s3/published-shaped uris behind ``[object-uri]``.  Since #1203 a
+            # withheld uri is not a probeable witness (round-1 C1), so an s3-shaped
+            # fixture here would no longer record "provenance the guard can see" --
+            # the very thing this branch's ``forcing_recorded=True`` arm exists to
+            # set up.  A plain key is what the DB-free producer records when no
+            # object-store prefix is configured, and it survives the boundary.
             forcing_package_uri=(
-                f"s3://nhms/forcing/{source_id.lower()}/2026052106/"
-                f"{failed_member['model_id']}/forcing_package.json"
+                f"forcing/{source_id.lower()}/2026052106/"
+                f"{failed_member_basin_version_id}/{failed_member['model_id']}/forcing_package.json"
             ),
         )
 
@@ -32184,14 +33148,18 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         assert not [
             candidate
             for candidate in resumed_result.evidence["blocked_candidates"]
-            if candidate.get("reason") == "missing_forcing_package_uri"
+            if candidate.get("reason")
+            in {"missing_forcing_package_uri", "forcing_version_row_absent"}
         ]
     else:
         # Since #1160 the single failed member is NOT forecast-resubmitted: this
         # journal records no forcing provenance for it (``forcing_version: null``
         # -- the live incident geometry), so the missing-forcing guard demotes it
         # to the stable repair-eligible blocker instead of spinning the forecast
-        # cohort.  The 17 verified members still resume straight into state_save_qc.
+        # cohort.  Since #1203 that blocker names the distinct row-absent reason:
+        # no journal row, no journal direct file, and no configured object store
+        # for the sidecar tier.  The 17 verified members still resume straight
+        # into state_save_qc.
         assert submitted_stages.count("state_save_qc") == 1
         assert submitted_stages.count("forecast") == 0
         blocked_failed_member = next(
@@ -32199,7 +33167,11 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
             for candidate in resumed_result.evidence["blocked_candidates"]
             if str(candidate.get("model_id")) == str(failed_member["model_id"])
         )
-        assert blocked_failed_member["reason"] == "missing_forcing_package_uri"
+        assert blocked_failed_member["reason"] == "forcing_version_row_absent"
+        assert blocked_failed_member["state_evidence"]["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+        assert blocked_failed_member["state_evidence"]["artifact_guard"]["stable_classifier"] == (
+            "FORCING_VERSION_ROW_ABSENT"
+        )
         assert blocked_failed_member["state_evidence"]["classifier"] == "missing_upstream_artifact"
         assert blocked_failed_member["state_evidence"]["restart_stage"] == "forecast"
         assert blocked_failed_member["state_evidence"]["artifact_guard"]["artifact_exists"] is False
@@ -33537,12 +34509,16 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
     # duplicate-pipeline skip, i.e. a candidate-scoped retry: a retryable failed
     # forecast member with recorded forcing provenance. Without it the pass never
     # reaches ``orchestrate_cycle`` and the unwedge assertions are vacuous.
+    # Recorded as a plain object key rather than an ``s3://`` uri: the public
+    # journal read withholds s3-shaped uris behind ``[object-uri]``, and since
+    # #1203 a withheld uri is not a probeable witness (round-1 C1), so an s3-shaped
+    # fixture would leave this candidate blocked and the assertions vacuous again.
     _record_journal_forcing_provenance(
         tmp_path / "journal",
         source_id="GFS",
         cycle_time=cycle_time,
         model_id="model_a",
-        forcing_package_uri="s3://nhms/runs/fcst_gfs_2026071200_model_a/forcing/package.tar",
+        forcing_package_uri="forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
     )
     repository.upsert_pipeline_job(
         {

@@ -56,6 +56,33 @@ def _candidate_state_decision(
     candidate: SchedulerCandidateLike,
     raw_state: Mapping[str, Any] | None,
 ) -> CandidateStateDecision | None:
+    """Emit the candidate-state decision, tagged with the forcing provenance tier.
+
+    The artifact guard observes the provenance tier even when it does not block,
+    so the tier is threaded out through ``forcing_provenance`` and merged into the
+    decision that is ultimately emitted -- blocked or not (#1203, AC-4).
+    """
+
+    forcing_provenance: dict[str, Any] = {}
+    decision = _candidate_state_decision_evaluated(candidate, raw_state, forcing_provenance)
+    if decision is None or not forcing_provenance or "forcing_provenance" in decision.evidence:
+        return decision
+    return CandidateStateDecision(
+        decision.action,
+        decision.reason,
+        {**decision.evidence, "forcing_provenance": dict(forcing_provenance)},
+    )
+
+
+def _candidate_state_decision_evaluated(
+    candidate: SchedulerCandidateLike,
+    raw_state: Mapping[str, Any] | None,
+    forcing_provenance: dict[str, Any],
+) -> CandidateStateDecision | None:
+    def _record_forcing_provenance(annotation: Mapping[str, Any] | None) -> None:
+        if annotation and not forcing_provenance:
+            forcing_provenance.update(annotation)
+
     if raw_state is None:
         return None
     state = _bounded_candidate_state(raw_state)
@@ -207,12 +234,13 @@ def _candidate_state_decision(
     if completed_cycle_terminal is not None:
         return CandidateStateDecision("skip", "terminal_completed_cycle", completed_cycle_terminal)
 
-    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+    missing_upstream_artifact, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
         candidate,
         decision_state,
         evidence,
         completed_stage_retry,
     )
+    _record_forcing_provenance(provenance_annotation)
     if missing_upstream_artifact is not None:
         return CandidateStateDecision(
             "blocked",
@@ -246,12 +274,13 @@ def _candidate_state_decision(
         )
 
     downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)
-    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+    missing_upstream_artifact, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
         candidate,
         decision_state,
         evidence,
         downstream_retry,
     )
+    _record_forcing_provenance(provenance_annotation)
     if missing_upstream_artifact is not None:
         return CandidateStateDecision(
             "blocked",
@@ -266,12 +295,13 @@ def _candidate_state_decision(
         decision_state,
         evidence,
     )
-    missing_upstream_artifact = _missing_upstream_forecast_artifact_evidence(
+    missing_upstream_artifact, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
         candidate,
         decision_state,
         evidence,
         missing_forecast_output_recompute,
     )
+    _record_forcing_provenance(provenance_annotation)
     if missing_upstream_artifact is not None:
         return CandidateStateDecision(
             "blocked",
@@ -314,12 +344,13 @@ def _candidate_state_decision(
         nonlocal missing_forcing_evidence, missing_forcing_computed
         if not missing_forcing_computed:
             missing_forcing_computed = True
-            missing_forcing_evidence = _missing_upstream_forecast_artifact_evidence(
+            missing_forcing_evidence, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
                 candidate,
                 decision_state,
                 evidence,
                 _failure_retry(),
             )
+            _record_forcing_provenance(provenance_annotation)
         return missing_forcing_evidence
 
     package_refresh = _model_package_refresh_retry_evidence(candidate, decision_state, evidence)
