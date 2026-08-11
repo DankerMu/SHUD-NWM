@@ -425,7 +425,33 @@ def _missing_upstream_forecast_artifact_evidence(
                 # fail-closed: an unreadable probe is never a recovery, and never an
                 # escaping exception that aborts the whole scheduler pass (#1203
                 # round-1 V2-C1).  The probe itself stays unchanged.
-                sidecar_missing, sidecar_unsafe_reason = True, "sidecar_manifest_probe_error"
+                #
+                # An unreadable probe object is "cannot determine", NOT "package
+                # determined absent" (#1203 round-2 V5-C2): routing it to
+                # ``missing_forcing_package_uri`` would send the operator to the
+                # exact-cycle forcing rebuild, which cannot clear a symlinked leaf,
+                # an ESTALE handle, or a permission fault.  It therefore lands on
+                # the same row-absent blocker as every other no-witness leg --
+                # still fail-closed, still repair-eligible, with the tier detail
+                # carried so the runbook can route it to "rebuild is ineffective".
+                forcing_provenance = {
+                    "source": "absent",
+                    "tier_status": "sidecar_manifest_probe_error",
+                }
+                return (
+                    _artifact_blocker_evidence(
+                        candidate,
+                        base_evidence,
+                        planned_retry,
+                        reason="forcing_version_row_absent",
+                        error_code="FORCING_VERSION_ROW_ABSENT",
+                        artifact_type="forcing_package_uri",
+                        artifact_uri=None,
+                        artifact_exists=False,
+                        forcing_provenance=forcing_provenance,
+                    ),
+                    forcing_provenance,
+                )
             if sidecar_missing:
                 forcing_provenance = {**forcing_provenance, "artifact_exists": False}
                 return (
@@ -568,7 +594,14 @@ def _artifact_blocker_evidence(
 # ``workers/forcing_producer/producer.py`` prefix/``package_manifest_filename``).
 _FORCING_SIDECAR_FILENAME = "forcing_version_record.json"
 _FORCING_PACKAGE_MANIFEST_FILENAME = "forcing_package.json"
-_FORCING_SIDECAR_MAX_BYTES = 64 * 1024
+#: Sized from the records the producer actually writes: a production
+#: ``forcing_version_record.json`` embeds per-station
+#: ``lineage_json.output_files`` and measures 1.6-2.0 MB on node-22 (cycle
+#: 2026080100/IFS, largest basin 2,014,038 bytes).  The original 64 KiB cap made
+#: this tier fail ``sidecar_unreadable`` for EVERY production basin (#1203
+#: round-2 V5-C1).  16 MiB matches the existing
+#: ``object_store.MAX_OBJECT_MANIFEST_BYTES`` precedent; the read stays limited.
+_FORCING_SIDECAR_MAX_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -617,6 +650,14 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
         store = LocalObjectStore(str(object_root), object_store_prefix=prefix)
         if not store.exists(key):
             return _ForcingSidecarProvenance(False, "sidecar_absent")
+        if store.size(key) > _FORCING_SIDECAR_MAX_BYTES:
+            # Size pre-check so an anomalously large record is distinguishable
+            # from a permission/IO read denial (#1203 round-2 V5-C1): the two
+            # have completely different operator handling, and the runbook
+            # routing table routes them differently.  ``store.size`` raising
+            # ``ObjectStoreError`` on a stat fault is caught below and degrades
+            # to ``sidecar_unreadable`` -- never escapes.
+            return _ForcingSidecarProvenance(False, "sidecar_oversized")
         content = store.read_bytes_limited(key, max_bytes=_FORCING_SIDECAR_MAX_BYTES)
     except (ObjectStoreError, OSError, ValueError):
         return _ForcingSidecarProvenance(False, "sidecar_unreadable")

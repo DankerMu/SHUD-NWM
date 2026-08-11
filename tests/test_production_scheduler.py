@@ -9222,7 +9222,7 @@ def test_absent_sidecar_blocks_with_the_distinct_row_absent_reason(
     ("case_name", "expected_tier_status"),
     [
         ("malformed_json", "sidecar_malformed"),
-        ("oversized", "sidecar_unreadable"),
+        ("oversized", "sidecar_oversized"),
         ("store_unconfigured", "store_unconfigured"),
         ("basin_version_missing", "identity_incomplete"),
         ("no_package_reference", "sidecar_malformed"),
@@ -9246,10 +9246,13 @@ def test_unavailable_sidecar_tier_blocks_as_row_absent_without_escaping_exceptio
     if case_name == "malformed_json":
         _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, raw_sidecar_bytes=b"{not-json")
     elif case_name == "oversized":
+        # Must exceed the production-sized 16 MiB read cap, and must report its
+        # own tier detail rather than being conflated with a permission/IO read
+        # denial (#1203 round-2 V5-C1).
         _seed_producer_forcing_sidecar(
             object_store_root,
             candidate=candidate,
-            raw_sidecar_bytes=b'{"pad": "' + b"p" * (64 * 1024) + b'"}',
+            raw_sidecar_bytes=b'{"pad": "' + b"p" * (16 * 1024 * 1024 + 1) + b'"}',
         )
     elif case_name == "no_package_reference":
         record = {
@@ -9691,6 +9694,14 @@ def test_sidecar_manifest_probe_store_error_is_contained_fail_closed(
     # does not cover it) for a symlinked manifest leaf -- the same shape an NFS
     # ESTALE/EIO stat produces.  It must be contained fail-closed, never escape and
     # abort the whole scheduler pass.
+    #
+    # Round-2 V5-C2: an unreadable probe object is "cannot determine", not
+    # "determined missing", so it lands on the row-absent blocker (which the
+    # runbook routes to "a rebuild does not fix this") rather than on
+    # ``missing_forcing_package_uri``, whose repair channel is the exact-cycle
+    # forcing rebuild -- a rebuild cannot clear a symlink/ESTALE/permission fault.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
@@ -9707,12 +9718,18 @@ def test_sidecar_manifest_probe_store_error_is_contained_fail_closed(
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    _assert_stable_missing_forcing_blocker(
-        decision,
-        artifact_uri=sidecar["package_uri"],
-        unsafe_reason="sidecar_manifest_probe_error",
-    )
-    assert decision.evidence["forcing_provenance"]["artifact_exists"] is False
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "forcing_version_row_absent")
+    assert decision.evidence["error_code"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert decision.evidence["artifact_guard"]["artifact_uri"] is None
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_manifest_probe_error",
+    }
+    # The repair channel still accepts it: fail-closed, not a dead end.
+    assert _decision_is_stable_missing_forcing_blocker(decision) is True
 
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -9726,8 +9743,62 @@ def test_sidecar_manifest_probe_store_error_is_contained_fail_closed(
     result = scheduler.run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_version_row_absent"
     assert orchestrator.calls == []
+
+
+def test_production_scale_sidecar_record_still_witnesses_the_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # B12 (round-2 V5-C1) production-scale regression pin: on node-22 the
+    # producer's ``forcing_version_record.json`` embeds per-station
+    # ``lineage_json.output_files``, measured at 1.6-2.0 MB for every basin of
+    # cycle 2026080100/IFS (largest ``basins_lh_gl`` = 2,014,038 bytes).  Under
+    # the original 64 KiB read cap every production basin degraded to
+    # ``sidecar_unreadable`` and the whole recovery tier was inert in production.
+    # A record of that shape and scale must still parse, still witness, and still
+    # let the candidate proceed.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    baseline = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    record = dict(baseline["record"])
+    # Mirror the real shape: many per-station output-file entries, not one giant
+    # padded string.
+    record["lineage_json"] = {
+        **baseline["record"]["lineage_json"],
+        "output_files": [
+            {
+                "station_id": f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}",
+                "object_key": (
+                    f"forcing/gfs/2026052106/basin_a_v1/model_a/shud/"
+                    f"X{100 + index // 100}.{index % 100:02d}Y{30 + index // 100}.{index % 100:02d}.csv"
+                ),
+                "checksum": f"{index:064d}",
+                "size_bytes": 1024 * 1024 + index,
+                "rows": 241,
+            }
+            for index in range(8000)
+        ],
+    }
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, record=record)
+    record_bytes = (object_store_root / sidecar["sidecar_key"]).stat().st_size
+    assert record_bytes > 1024 * 1024
+    assert record_bytes < scheduler_state_failure_module._FORCING_SIDECAR_MAX_BYTES
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.evidence["reason"] not in {
+        "missing_forcing_package_uri",
+        "forcing_version_row_absent",
+    }
+    assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
 
 
 def test_healthy_candidate_reaching_failure_fallback_region_keeps_none_decision(

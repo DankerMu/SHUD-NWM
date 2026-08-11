@@ -14,7 +14,8 @@
   - sidecar 写侧 key 前缀 `forcing/{source_segment}/{compact_cycle}/{basin_version_id}/{model_id}`（`producer.py:1970`）；source segment 大小写以写侧为准，实现期与写侧同构造/同断言。
   - `_artifact_state_containers` 固定容器序含 `state["forcing_version"]`（`scheduler_state_failure.py:475/:481-483`）。
   - **公共读打码边界（round-1 C1 事实，推翻本设计初版前提）**：`candidate_state` 经 `_public_candidate_state` → `_sanitize_public_field`（`file_orchestration_journal.py:8271/:8297`）→ `_sanitize_file_provider_scalar`（`scheduler_file_providers.py:2249`）把所有 s3/published 形 `*_uri` 改写为占位符 `"[object-uri]"`——**D1 物化的 s3 形 URI 到判定层必为占位符**，非空、进 recorded-URI 分支、被探针 ValueError 吞成 missing=True，且屏蔽 sidecar 档（比不物化更糟）。打码边界不可绕过（`_PERSISTED_REDACTION_PLACEHOLDERS` `:8247`）；判定层认占位符的既有先例：`scheduler_init_state_match.py:54` `EVIDENCE_REDACTION_PLACEHOLDERS`、`scheduler_candidates.py:1824/:1971`。
-  - 直读档写入方：生产端零；测试端除 `_direct_forcing_context_record`（`tests/test_file_orchestration_journal.py:319-341`）外，`tests/test_production_scheduler.py:28257-28259` 内联播种、`:32127` `_record_journal_forcing_provenance` 写行档——D1 会让 `[s3_missing]` 参数化 case 从空 URI 分支改走探针分支（断言仍应过，B6 名单核对）。
+  - 直读档写入方：生产端零；测试端除 `_direct_forcing_context_record`（`tests/test_file_orchestration_journal.py:319-341`）外，`tests/test_production_scheduler.py:28257-28259` 内联播种、`:32127` `_record_journal_forcing_provenance` 写行档。**该行预测已被 round-1 实测证伪并更正**：打码边界（上一条）使 D1 物化的 s3 形 URI 到判定层成为占位符，`[s3_missing]` 参数化 case 并不走探针分支，而是落 sidecar 档 → `forcing_version_row_absent`（B6 延伸名单第 1 项）。
+  - **生产 sidecar 尺寸实测（round-2，node-22 只读）**：`forcing_version_record.json` 因含 per-station `lineage_json.output_files` 在生产为 **1.6–2.0 MB**（`2026080100`/IFS 全流域实测：`basins_lh_gl` 2,014,038 B 为最大，最小亦 >1.6 MB）——远超初版 64 KiB 读上限，即"档位在生产对每个流域恒为不可读"。读上限必须按生产实况定（见 D2）。
 
 ## 决策
 
@@ -32,16 +33,21 @@
 
 ```text
 uri = _first_artifact_uri(...)             # 既有（D1 后 journal/direct 档物化即命中，探针语义不动）
-if not uri:
+if not uri or _is_withheld_uri_placeholder(uri):   # round-1 C1：打码占位符=不可探 witness
     sidecar = _forcing_sidecar_provenance(candidate)   # 新 helper
     if sidecar.witness:                     # 档位命中
-        probe_uri = sidecar.manifest_uri    # ← 文件 key（P1-1）：lineage_json.forcing_package_manifest_uri
-                                            #    缺失时按 producer _package_manifest_uri 同构派生（默认名 forcing_package.json）
-        missing, unsafe = _artifact_uri_missing_status(candidate, probe_uri)  # 既有探针，语义不动
+        probe_key = sidecar.manifest_probe_key  # ← 由本候选 sidecar key 目录 + producer manifest 文件名派生
+                                            #    （round-1 V2-C2：record 内 manifest uri 降为 evidence，绝不进探针）
+        try:
+            missing, unsafe = _artifact_uri_missing_status(candidate, probe_key)  # 既有探针，语义不动
+        except ObjectStoreError:            # round-1 V2-C1 containment
+            return blocker(reason="forcing_version_row_absent", ...,   # round-2 V5-C2：探针错=无法判定
+                           forcing_provenance={source:"absent",
+                                               tier_status:"sidecar_manifest_probe_error"})
         if missing: return blocker(reason="missing_forcing_package_uri", ...,
                                    artifact_uri=sidecar.package_uri,
                                    forcing_provenance={source:"object_store_sidecar", probe:"manifest", ...})
-        annotation = {source:"object_store_sidecar", package_uri, manifest_uri}   # 不 block，注记外传
+        annotation = {source:"object_store_sidecar", package_uri, manifest_uri, probe_key}   # 不 block，注记外传
     else:                                   # 三档全空：无法判定
         return blocker(reason="forcing_version_row_absent",
                        error_code="FORCING_VERSION_ROW_ABSENT",
@@ -50,9 +56,10 @@ if not uri:
                        forcing_provenance={source:"absent", tier_status:sidecar.status})
 ```
 
-- `_forcing_sidecar_provenance`：key 由候选身份推导（与 producer 写侧同构造）；`basin_version_id=None`、root 未配置、`exists()` 假、`read_bytes_limited`（上限 64 KiB）抛错、JSON 畸形、`forcing_package_uri` 与 manifest URI 双缺——一律"档位不可用"+status 细因（`sidecar_absent`/`sidecar_unreadable`/`sidecar_malformed`/`store_unconfigured`/`identity_incomplete`），**不抛异常、不 fail-open**。
+- `_forcing_sidecar_provenance`：key 由候选身份推导（与 producer 写侧同构造）；`basin_version_id=None`、root 未配置、`exists()` 假、限量读抛错、超尺寸、JSON 畸形、`forcing_package_uri` 与 manifest URI 双缺——一律"档位不可用"+status 细因（`sidecar_absent`/`sidecar_unreadable`/`sidecar_oversized`/`sidecar_malformed`/`store_unconfigured`/`identity_incomplete`），**不抛异常、不 fail-open**。
+- **读上限按生产实况定（round-2 V5-C1，P1）**：生产 record 含 per-station `lineage_json.output_files`，实测 1.6–2.0 MB（基线节实测数据），初版 64 KiB 上限会让**每个流域**恒走 `sidecar_unreadable` → 档位在生产完全失效（issue 主诉的死锁只是换了个 token）。上限提高到 **16 MiB**（与 `object_store.MAX_OBJECT_MANIFEST_BYTES` 同量级先例），且超尺寸腿必须与权限/IO 腿**可区分**：先 `store.size(key)` 预判 → 超限即 `sidecar_oversized`（运维语义："record 异常膨胀"，与"读被拒"处置完全不同），读本体仍限量。B12 以生产量级（含大 `output_files` 数组、>1 MB）record 钉恢复腿真的走通。
 - **探针对象裁定（P1-1 + round-1 V2-C2 修订）**：tier-1/2（journal/direct）恢复的**非占位符** URI 走既有探针路径零改动（其目录形 URI 误判属 pre-existing 同源另腿，#1365 跟踪，不在本 change 修）；**sidecar 档探针 key 由 sidecar 自身的候选身份派生 key 目录 + producer manifest 文件名派生**（`<sidecar_key_dir>/forcing_package.json`），record 内 `lineage_json.forcing_package_manifest_uri` 仅作 evidence 佐证、**绝不作探针对象**——逐字信任 record URI 有两腿故障：(a) producer/scheduler `OBJECT_STORE_PREFIX` 漂移（s3://nhms-prod vs s3://nhms）→ `_normalize_s3_uri` ValueError 被吞成伪 missing；(b) 拷贝/恢复来源的 sidecar 指向异体 manifest → 冒充本候选 witness fail-open。派生 key 同时满足"manifest 文件 key、非目录形"钉。B1/B2 播种必须 producer 同构（目录形 `forcing_package_uri` + lineage manifest uri），且必须以**非空 `object_store_prefix`（生产 s3 形）**至少各覆盖一次。
-- **探针后异常护栏（round-1 V2-C1）**：sidecar 档探针调用点必须捕 `ObjectStoreError`（`LocalObjectStore.exists` 把 `SafeFilesystemError` 转成 RuntimeError 子类，既有 `except (OSError, ValueError)` 不覆盖；symlink leaf / NFS ESTALE/EIO 可达）→ 按 fail-closed 处理为 `missing_forcing_package_uri` + unsafe 细因，**绝不逃逸崩整趟 pass**。tier-1/2 recorded-URI 腿在 master 同样暴露（pre-existing，随 #1365 家族登记，不在本 change 修）。`_artifact_uri_missing_status`/`_object_manifest_is_missing` 本体仍零改动。
+- **探针后异常护栏（round-1 V2-C1）**：sidecar 档探针调用点必须捕 `ObjectStoreError`（`LocalObjectStore.exists` 把 `SafeFilesystemError` 转成 RuntimeError 子类，既有 `except (OSError, ValueError)` 不覆盖；symlink leaf / NFS ESTALE/EIO 可达）→ **绝不逃逸崩整趟 pass**。**round-2 V5-C2 修订**：该腿原按 `missing_forcing_package_uri` 落地，但探针错是"读不出"不是"判定为缺"——落 `missing_*` 会把 IO/权限故障导进"重产 forcing"通道（重产不修 symlink/ESTALE，操作员死胡同）。改为与其它不可判定腿同语义：`forcing_version_row_absent` + `tier_status="sidecar_manifest_probe_error"`，仍 fail-closed、仍 repair-eligible，且 runbook 分流表把它归入"重产无效"类。tier-1/2 recorded-URI 腿在 master 同样暴露（pre-existing，随 #1365 家族登记，不在本 change 修）。`_artifact_uri_missing_status`/`_object_manifest_is_missing` 本体仍零改动。
 - **evidence 出口（P2-2）**：guard helper 返回值从"blocker-or-None"扩为"(blocker-or-None, provenance_annotation)"（或等价 out-channel）；失败决策装配处把 `forcing_provenance` 并入**最终产出决策**（blocked 或非 blocked）的 evidence。B8 在 B1 几何（不 block）断言最终决策 evidence 携带 `forcing_provenance.source == "object_store_sidecar"`。
 - `_evidence_safe`/redact 复用；sidecar record 原文不整体入 evidence（只取 `forcing_version_id`/`forcing_package_uri`/manifest uri；顶层 `checksum` 恒 None 不取）。
 
@@ -76,19 +83,21 @@ if not uri:
 | B1 | journal 无行、tmp object store 播种 **producer 同构 sidecar**（目录形 package_uri + lineage manifest uri）、manifest 文件在场 → 决策**非** missing/row_absent、恢复腿推进；最终决策 evidence 带 `forcing_provenance.source="object_store_sidecar"`（AC-1 复现钉） | test_production_scheduler |
 | B2 | 同构 sidecar 在场、manifest 缺失 → `missing_forcing_package_uri` + source=object_store_sidecar（AC-2 真缺 fail-closed 反向钉） | 同上 |
 | B3 | sidecar 缺失 → `forcing_version_row_absent`/`FORCING_VERSION_ROW_ABSENT`（reason+error_code+stable_classifier 三重）、`artifact_uri=None`、结构 repair-eligible | 同上 |
-| B4 | 畸形 JSON / 超 64 KiB / root 未配置 / basin_version None → 同 B3 档位不可用细因，无异常逃逸；**目录形 package_uri 绝不直接进探针**钉 | 同上 |
+| B4 | 畸形 JSON / 超读上限（`sidecar_oversized`，与 `sidecar_unreadable` 分立）/ root 未配置 / basin_version None → 同 B3 档位不可用细因，无异常逃逸；**目录形 package_uri 绝不直接进探针**钉 | 同上 |
 | B5 | repair 授权双 reason 接受（提交/echo 两侧）+ token 配对 + `_decision_is_stable_missing_forcing_blocker(row_absent) is True` | 同上 |
 | B6 | 空 provenance 几何 pins **全名单迁移**（见下），仅换 reason/error_code/classifier 断言，block 方向断言逐字保留；URI 已记录几何 pins 零改动 | 三文件 |
 | B7 | candidate_state/find_forcing_context 直读档一致性 + 两档全空 None + **损坏 direct 文件不抛退 None**（P1-3） | test_file_orchestration_journal |
 | B8 | evidence `forcing_provenance.source` 四值现形：journal/direct（**非打码 URI 几何**，如本地 file 形 + store 已配置 + 文件在场）、object_store_sidecar（B1 不-block 几何）、absent（B3）——不得依赖 root 未配置 fail-open 怪癖伪绿 | 分摊 |
 | B9 | **真实 sanitized 形状端到端**（round-1 C4 钉）：经真实 `FileOrchestrationJournalRepository.candidate_state`（tier-1 行含 s3 形 URI → 占位符）+ producer 同构 sidecar + manifest 在场 + store/prefix 已配置 → **不 block**、source=object_store_sidecar；同几何 sidecar 缺失 → `forcing_version_row_absent`（非伪 missing） | test_production_scheduler |
 | B10 | prefix 漂移与异体 witness（round-1 V2-C2 钉）：record lineage URI 带 `s3://nhms-prod` 而 scheduler prefix `s3://nhms` → 派生 key 探针照常恢复（不伪 missing）；sidecar record 指向异体 manifest 而本候选派生 key 处无 manifest → **不**恢复（fail-closed，非 fail-open） | 同上 |
-| B11 | 探针后异常护栏（round-1 V2-C1 钉）：manifest leaf 为 symlink（SafeFilesystemError→ObjectStoreError 几何）→ 决策 fail-closed 返回、**无异常逃逸**、`run_once` 不崩 | 同上 |
+| B11 | 探针后异常护栏（round-1 V2-C1 + round-2 V5-C2 钉）：manifest leaf 为 symlink（SafeFilesystemError→ObjectStoreError 几何）→ 决策 fail-closed 返回、**无异常逃逸**、`run_once` 不崩，且 reason=`forcing_version_row_absent`/`tier_status=sidecar_manifest_probe_error`（非 `missing_forcing_package_uri`） | 同上 |
+| B12 | **生产量级 record 恢复钉（round-2 V5-C1）**：sidecar record 携带 >1 MB 的 `lineage_json.output_files`（生产实测 1.6–2.0 MB 形状）+ manifest 在场 → 仍解析成功、**不 block**、source=object_store_sidecar（64 KiB 上限下此用例必红） | 同上 |
 
 **B6 全名单（fixture 复审 P1-2 逐条核实的空-provenance 几何，实现期如再发现同类以同规则迁移并记 PR body）**：
 
 - `tests/test_production_scheduler.py`：`:8889`、`:8918`（`_assert_stable_missing_forcing_blocker` `:8830-8848` 三重断言随迁）、`:8932`、`:8954`、`:9945`、`:10047-10051`、`:10591`（repair-rejection 组，`_missing_forcing_retry_state` 默认 `forcing_package_uri=None` `:9489-9505`；`_missing_forcing_repair_rejected_decision` 透传 reason `:1382-1384`）、`:28276-28279`（`absent_uri` 参数化 case）、`:29159`/`:29189`/`:29253`（`_seed_db_free_missing_forcing_blocker` `:29008-29033`）、`:32202`（`forcing_recorded=False` 分支）。
 - `tests/test_gateway_reconcile.py:1148`（`_file_cohort_repository` 无 forcing 行、`resource_profile={}`）——**该文件必须加入 Evidence Floor 定向命令**，否则回归到 merge 后才暴露。
+- **round-1 延伸 3 处（占位符语义合法翻转，已实施，round-2 V5-C4 补记入名单）**：`:28276-28279` 的 `[s3_missing]` 参数化 case（断言迁 `forcing_version_row_absent` + `tier_status`）；`:32887` 与 `:33985` 两处 fixture-shape 几何（改种非打码 object key，断言零变化）。三处均由本 change spec MODIFIED 授权，规则同名单内。
 - 迁移纪律：名单内仅改 reason/error_code/classifier 与新增 source 断言；block-不-retry 方向断言逐字保留；名单外断言零改动（发现新几何 → 先补名单入 PR body 再改）。
 
 - 播种 helper 复用：`_direct_forcing_context_record`、`_candidate_state`；sidecar 播种新 helper 与 producer 同构造（1.4）。
@@ -139,6 +148,16 @@ if not uri:
 - **V1-C3（P3，CONFIRMED DEFER→本轮 spec 措辞收窄）**：URI 来自其它容器时决策无 `forcing_provenance` 键——"第五态"属 evidence 完整性非方向缺陷；处置=ADDED 场景收窄为"档位被咨询的 DB-free 读路径"（spec 文本，本轮随修）。
 - **V3-C2（P3，PLAUSIBLE DEFER→同上 spec 收窄）**：DB-backed 路径无 source 标记；requirement 主句本就限定 DB-free read paths，场景措辞同步收窄；DB 路径在所有 tracked 部署被 `NHMS_SCHEDULER_DB_FREE_REQUIRED=true` 钉死。
 - **V2-C3（REFUTED）**：4× 重读被 early-return 证伪（每趟至多一次）；store 构造 mkdir 副作用 pre-existing 且无边界。**V3-C3（REFUTED）**：task 勾选时序投诉与事实相反（PR body/receipt 先于勾选存在）。
+
+## Review round 2 裁决记录
+
+- **V5-C1（P1，CONFIRMED FIX_NOW）**：64 KiB 读上限 vs 生产 record 1.6–2.0 MB（node-22 只读实测全流域）——档位在生产对每个流域恒 `sidecar_unreadable`，修复在生产**完全失效**；且 `sidecar_unreadable` 把"超尺寸"与"权限/IO 拒读"混为一档，runbook 分流表因此对超尺寸行给出错误处置。修复=上限提至 16 MiB + `sidecar_oversized` 独立细因（`store.size` 预判）+ B12 生产量级恢复钉 + runbook 分流表补行。
+- **V5-C2（P2，CONFIRMED FIX_NOW）**：`sidecar_manifest_probe_error` 落 `missing_forcing_package_uri` → 操作员被导向"重产 forcing"，而重产不修 symlink/ESTALE，形成 repair 死胡同。修复=语义归位到 `forcing_version_row_absent` + `tier_status=sidecar_manifest_probe_error`（仍 fail-closed），runbook 归入"重产无效"类；B11 断言随迁。
+- **V5-C3（P2，CONFIRMED FIX_NOW，docs）**：runbook 一致性包——evidence 判读清单只列 `source`/`tier_status`（`probe_key`/`artifact_exists`/`artifact_guard.unsafe_reason` 未提），且 `:1503` 处遗留孤儿从句"Also that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`"（round-1 插表时截断了原句主干）。修复=补判读项 + 复原从句主干。
+- **V5-C4（P3→随轮修，fixture 记录同步）**：`design.md:17` 预测已被 round-1 实测证伪、D2 伪码与 tasks 1.2/1.4/1.6 文本停留在 round-1 前、B6 名单缺 round-1 延伸 3 处。修复=本轮 fixture 全量对齐（orchestrator 自持）。
+- **V4-C1（CONFIRMED，DEFER→#1365）**：空/相对 prefix 下未打码的目录形 recorded URI 仍走 tier-1/2 探针被吞成伪 missing——master 同款、且与 `design.md:54` 已裁定的"非占位符目录形 URI 属 pre-existing 另腿"同源；另经实测所有部署源均强制非空 prefix（缺失即 fail-closed 启动失败）。归 #1365 家族，不在本 change 修。
+- **V4-C2（CONFIRMED，DEFER→登记残余）**：copyback 腿无占位符防御（本 change 解除了 forcing 腿的遮蔽后该腿理论可达）；但全仓 grep 证实 `copyback_source_uri` 系列键**无任何生产写入方**（DB-free allowlist 亦不透传，实测注入后 state 无该键），当前树无操作员可触发路径。登记为残余 issue，不占本轮修复。
+- **V4-C3（CONFIRMED pre-existing，DEFER→#1365）**：`ObjectStoreError` containment 仅覆盖 sidecar 腿，tier-1/2 recorded-URI 腿（`:449`）与 copyback 腿（`:478`）在 master/HEAD 同样逃逸。`design.md:55` 已登记 tier-1/2；本轮补记 copyback 腿一并入 #1365 家族。
 
 ## Risk packs
 

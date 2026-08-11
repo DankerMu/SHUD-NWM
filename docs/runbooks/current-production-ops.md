@@ -1493,14 +1493,18 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    |---|---|---|
    | `sidecar_absent` | No forcing-version sidecar for this cycle | Yes — rebuild writes the package, sidecar, and manifest |
    | `sidecar_malformed` | Sidecar unparseable or names no package | Yes — rebuild rewrites the sidecar |
-   | `sidecar_unreadable` (permission/IO class) | Object-store read denied or failing | No — fix the store permissions/mount first |
+   | `sidecar_unreadable` (permission/IO class) | Reading the sidecar *record* was denied or failed | No — fix the store permissions/mount first |
+   | `sidecar_oversized` | The sidecar record exceeds the read limit | No — the record itself is anomalous; investigate the producer/lineage that wrote it first |
+   | `sidecar_manifest_probe_error` | Object-store read fault on the manifest object (symlinked leaf, stale NFS handle, permissions) | No — a rebuild cannot clear a read fault; fix the object/mount first |
    | `store_unconfigured` | No `object_store_root` for this candidate | No — the rebuild could not even write; fix the config first |
    | `identity_incomplete` | Candidate has no `basin_version_id`/`model_id` | No — fix the registry/candidate identity first |
 
-   For the three config/identity faults the rebuild will NOT clear the blocker;
-   repeating it only burns a cycle. Correct the configuration or identity, let
-   the next pass re-read the tiers, and only then repair if a data tier is still
-   the fault. Also that
+   For the five config/identity/read-fault statuses the rebuild will NOT clear
+   the blocker; repeating it only burns a cycle. Correct the configuration,
+   identity, or storage fault, let the next pass re-read the tiers, and only
+   then repair if a data tier is still the fault.
+
+   Also confirm that
    `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`; and that the current registry has
    18 source-scoped variants for each enabled source. The raw readiness record
    must say `status=ready`, `required=true`, and
@@ -1565,11 +1569,30 @@ Exact-cycle missing-forcing regeneration (node-22 only):
                                               object_store_sidecar | absent
    state_evidence.forcing_provenance.tier_status = <sidecar tier detail, only
                                                     when source = absent>
+   state_evidence.forcing_provenance.probe_key   = <manifest object key that was
+                                                    actually probed>
+   state_evidence.forcing_provenance.artifact_exists = true | false
+   state_evidence.artifact_guard.unsafe_reason   = <why the probe refused the
+                                                    reference, or null>
    ```
 
-   `source = absent` with a config/identity `tier_status` (`store_unconfigured`,
-   `identity_incomplete`, or a permission-class `sidecar_unreadable`) means the
-   rebuild cannot clear the blocker — see the routing table in step 1.
+   - `tier_status` names which provenance tier failed, and routes the repair
+     decision through the table in step 1.
+   - `probe_key` is the manifest object key the existence probe was actually
+     given (derived from this candidate's own identity). Compare it against
+     `manifest_uri`, which is only what the record *claimed*: a mismatch means
+     the record points somewhere other than this candidate's package.
+   - `artifact_exists` says whether that probed manifest object was found;
+     `false` on an `object_store_sidecar` source is a genuinely absent package,
+     not a read failure.
+   - `artifact_guard.unsafe_reason` says why the probe refused or could not use
+     the reference (unsafe path, invalid object key); `null` means the reference
+     was probeable and simply not found.
+
+   `source = absent` with a config/identity/read-fault `tier_status`
+   (`store_unconfigured`, `identity_incomplete`, a permission-class
+   `sidecar_unreadable`, `sidecar_oversized`, or `sidecar_manifest_probe_error`)
+   means the rebuild cannot clear the blocker — see the routing table in step 1.
 
    A rejected preview retains the original missing-forcing blocker and records
    a stable reason such as `raw_manifest_not_ready`,

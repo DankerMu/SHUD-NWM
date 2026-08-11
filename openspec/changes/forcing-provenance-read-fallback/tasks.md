@@ -3,11 +3,18 @@
 ## 1. 实现
 
 - [x] 1.1 `file_orchestration_journal.py` `candidate_state`：`rows.forcing_version is None` 时复用 `_forcing_context` 底层直读档（原始 mapping 层），浅拷贝物化 + `forcing_version_source="direct"`；journal 命中标 `"journal"`；两档空维持 `None`；调用点捕 `FileOrchestrationJournalError` 退化 None（不崩 pass）；`find_forcing_context` 零改动（D1）
-- [x] 1.2 `scheduler_state_failure.py`：新 helper `_forcing_sidecar_provenance`（候选身份推导 key、`read_bytes_limited` ≤64 KiB、五类不可用细因、绝不 fail-open/抛逃逸）；空 URI 分支三段化——sidecar 命中以 **manifest 文件 key** 进既有探针（目录形 package_uri 绝不直接进探针；真缺 → `missing_forcing_package_uri` 原语义），三档全空 → `forcing_version_row_absent`/`FORCING_VERSION_ROW_ABSENT`（reason+error_code+stable_classifier 三重）；guard 返回值扩 provenance annotation，最终决策 evidence 并入 `forcing_provenance`（D2）
+- [x] 1.2 `scheduler_state_failure.py`：新 helper `_forcing_sidecar_provenance`（候选身份推导 key、限量读上限按生产 record 实况定（round-2：16 MiB）、六类不可用细因（含 `sidecar_oversized`）、绝不 fail-open/抛逃逸）；空 URI 分支三段化——sidecar 命中以 **manifest 文件 key** 进既有探针（目录形 package_uri 绝不直接进探针；真缺 → `missing_forcing_package_uri` 原语义），三档全空 → `forcing_version_row_absent`/`FORCING_VERSION_ROW_ABSENT`（reason+error_code+stable_classifier 三重）；guard 返回值扩 provenance annotation，最终决策 evidence 并入 `forcing_provenance`（D2）
 - [x] 1.3 `scheduler_candidates.py`：新 token 对 `blocked_forcing_version_row_absent`↔`forcing_version_row_absent`；扩集**四处**（`:1412/:1443/:1519` reason + `:1452` stable_classifier 集合）+ `:1432` 兜底透传；`:728-754` echo 按底层 reason 回显；消费方逐点审计入 PR body（D3）
-- [x] 1.4 sidecar key 与 record 播种与 producer 写侧同构（复用/断言字面一致，防漂移；record 含目录形 package_uri + `lineage_json.forcing_package_manifest_uri`）；manifest 派生兜底复用 `_package_manifest_uri`/`package_manifest_filename`（默认 `forcing_package.json`，R1）；source segment 大小写以写侧为准（D2/基线）
+- [x] 1.4 sidecar key 与 record 播种与 producer 写侧同构（复用/断言字面一致，防漂移；record 含目录形 package_uri + `lineage_json.forcing_package_manifest_uri`）；**探针 key 由本候选 sidecar key 目录 + producer manifest 文件名派生**（`_sidecar_manifest_probe_key`，round-1 V2-C2；record 内 manifest uri 仅 evidence），默认文件名 `forcing_package.json`（R1）；source segment 大小写以写侧为准（D2/基线）
 - [x] 1.5 兄弟副本 D4 裁定复述入 PR body（chain_forecast_state/chain_analysis 保留合成 fallback，理由）
-- [x] 1.6 `docs/runbooks/current-production-ops.md:1480-1481` exact-cycle repair 前置条件扩双 reason/双 classifier（D3 文档消费面）
+- [x] 1.6 `docs/runbooks/current-production-ops.md` exact-cycle repair 前置条件扩双 reason/双 classifier + `tier_status` 分流表 + evidence 判读清单补 provenance 字段（D3 文档消费面，round-1 V3-C1 随修）
+
+## 1R2. Round-2 修复（V5）
+
+- [ ] 1R2.1 读上限按生产实况：`_FORCING_SIDECAR_MAX_BYTES` 64 KiB → 16 MiB；`store.size()` 预判超限 → 新细因 `sidecar_oversized`（与 `sidecar_unreadable` 分立）；size/read 的 `ObjectStoreError` 仍不得逃逸（V5-C1）
+- [ ] 1R2.2 探针错语义归位：`ObjectStoreError` containment 分支从 `missing_forcing_package_uri` 改为 `forcing_version_row_absent` + `forcing_provenance={source:"absent", tier_status:"sidecar_manifest_probe_error"}`（V5-C2）
+- [ ] 1R2.3 runbook：分流表补 `sidecar_oversized`（重产无效——record 异常，先查 producer）与 `sidecar_manifest_probe_error`（重产无效——存储读故障）；evidence 判读清单补 `forcing_provenance.probe_key`/`.artifact_exists`/`artifact_guard.unsafe_reason`；复原 `:1503` 被截断的孤儿从句主干（V5-C3）
+- [ ] 1R2.4 测试：B4 `oversized` case 断言迁 `sidecar_oversized` 且播种超 16 MiB；B11 断言迁 row_absent/probe_error；新增 B12 生产量级 record（>1 MB lineage）恢复钉（V5-C1/C2）
 
 ## 2. 测试
 
