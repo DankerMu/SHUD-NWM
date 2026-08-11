@@ -58,3 +58,14 @@ PRs, later-round catches core=2 vs rotated=78. The attribution moved
 further in the keep direction (rotated share 80% → 97.5%). Decision
 unchanged: **keep rotation**. Next revisit on maintainer override or a
 materially changed attribution ratio.
+
+## Revisit 2026-08-11 (post PR #1366 / issue #1203)
+
+Audit re-flagged DECIDABLE at 48 multi-round merged PRs, later-round
+catches core=2 vs rotated=156 (rotated share 98.7%). Attribution is
+unchanged in direction and still overwhelming, so the **keep rotation**
+decision stands. #1203 is itself a data point for it: the round-2 P1
+that would have shipped an inert fix (a 64 KiB sidecar read cap against
+1.6-2.0 MB production records) came from a rotated-in
+production-reachability lens, not from any core lens. Next revisit on
+maintainer override or a materially changed attribution ratio.
