@@ -296,3 +296,21 @@ compression state is never a retention gate. All new node-27 systemd
 units are registered in the resource-governance audit unit list
 ([`scripts/node27_resource_governance.py`](../../scripts/node27_resource_governance.py)
 `DEFAULT_SERVICES`).
+
+## Revision 2026-08-11 — archive lane retired; delete-without-archive authorized
+
+`/dev/md0` suffered a double-disk failure (#1309) and the operator decision
+(2026-08-11) is that the array will **not** be rebuilt. The archive lane —
+product-archive mover, the storage-inventory audit's archive leg, db-export
+salvage, and the archive-rebuild drill (`/data/GHDC/nwm-archive`) — is
+permanently retired; #1310, #1177 and #1228 were closed on that basis.
+
+Consequently the operator explicitly amends this ADR's core invariant:
+**"no deletion without archive receipt" no longer holds** — node-27
+timeseries retention is authorized to delete hot chunks without archive
+coverage. The change is deliberate and auditable, not a silent bypass:
+the retention runner keeps its fail-closed default and only skips the
+completeness/drill gates in an explicit gate-disabled mode whose receipt
+records the mode and cites this revision. Implementation is tracked in
+issue #1369. The display carve-out window and the compression sections
+of this ADR are unchanged (compression was never a retention gate).
