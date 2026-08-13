@@ -67,6 +67,17 @@
 - [x] 2S.4 B25：wrapper——已注入哨兵 + 644 env 文件 → BLOCKED rc=2；已注入 + 0600 正常放行不 source；未注入 + 0600 → source 且跑通（subprocess 真 bash）
 - [x] 2S.5 B26：`NHMS_FRONTIER_STALL_HOURS=nan/inf/1e30` → rc=2 结构化 config error 零邮件；默认 From 注入坏主机名 → sanitize 回落且 `_header_safe` 通过
 
+## 1T. Review round-3 修复（三轮门 depth retro 的 invariant closure；1×P2 + 2×P3）
+
+- [x] 1T.1 **P2** 邮件链整类收容：`_Outbox.send` 层 `except Exception` 覆盖 `build_message` + runner 调用 → SendResult 失败（UnicodeEncodeError 等落 degraded_pending/stalled 重试，over-report）；随附全文件 except 子句清点报告（收敛/有意保留窄集+理由）
+- [x] 1T.2 **P3** 删 `_degraded_clock_from_json` legacy 标量迁移（return {}，按 bootstrap；标量不可归因）；B17-throttled 改钉真实几何（resend_hours 收窄）或删除标 defensive；新增反向回归：legacy 标量 state → 首封 observability-unavailable 照发
+- [x] 1T.3 **P3** runbook §10.2 "唯一零邮件几何"改口：锁文件是一类，wrapper BLOCKED rc=2 家族 + config error 家族同为零邮件几何，triage 统一走 unit failed + `frontier-alert.log` 的 `BLOCKED rc=2 reason=` 行
+
+## 2T. Review round-3 回归锚
+
+- [x] 2T.1 B27：`NHMS_ALERT_EMAIL_TO` 含 surrogate 字节（`"ops\udcc4@example.com"`）→ 该 tick 不逃逸：send 失败落 receipt/degraded_pending、state 照写、下 tick 照跑（对照 pre-fix：FRONTIER_ALERT_UNCAUGHT_ERROR 冻结循环）
+- [x] 2T.2 B28：legacy 标量 state（含已置钟）→ `last_degraded_alert_by_kind == {}`；budget 跨越 → 恰一封 observability-unavailable（probe B 几何断言 1 非 0）
+
 ## 3. Evidence Floor
 
 - [x] 3.1 `uv run pytest -q tests/test_node27_frontier_stall_alert.py tests/test_node27_resource_governance.py` 全绿（治理注册是唯一触碰的既有代码点，其钉子测试随迁）

@@ -147,6 +147,11 @@ CONNECT_TIMEOUT_SEC = 10
 QUERY_TIMEOUT_MS = 30_000
 SENDMAIL_TIMEOUT_SEC = 60
 
+#: Return code recorded when the mail chain itself fails before/around the
+#: sendmail process (message build, encode, an unexpected runner error).
+#: EX_SOFTWARE-shaped so it cannot collide with a real sendmail exit status.
+SEND_INTERNAL_FAILURE_RC = 70
+
 #: Characters that would break out of a mail header. ``sendmail -t`` takes its
 #: recipients from the headers this runner writes, so a CR/LF in the configured
 #: address is a header-injection / silent-misdelivery vector (D3).
@@ -676,26 +681,27 @@ class AlertState:
 
 
 def _degraded_clock_from_json(payload: Mapping[str, Any]) -> dict[str, datetime]:
-    """Read the per-kind degraded clock, migrating the round-1 scalar.
+    """Read the per-kind degraded clock. A legacy scalar is NOT migrated.
 
     A state written by the previous revision carries a single
-    ``last_degraded_alert_at``. Mapping it onto BOTH kinds preserves the
-    throttling the operator already experienced (no burst of repeats right
-    after the upgrade) while every subsequent tick uses the per-kind clocks.
-    Migrating in the loader rather than bumping ``schema_version`` is
-    deliberate: a version bump would classify every deployed state as corrupt
-    and mail a monitoring-degraded alert for a routine upgrade.
+    ``last_degraded_alert_at`` that cannot be attributed to a kind — it may
+    have been armed by ``state-corrupt`` or by ``observability-unavailable``,
+    and nothing in the file says which. Fanning it out onto both kinds
+    reinstates exactly the cross-kind suppression the per-kind clock exists to
+    remove ("绝不允许" column of D2 row 3): one upgrade could swallow the
+    first-ever alert of the other kind for a whole resend window.
+
+    So the scalar is dropped and the clocks start empty (bootstrap). Cost of
+    NOT migrating: at most one duplicate mail per kind, immediately after the
+    upgrade — the allowed over-report direction. ``schema_version`` stays 1:
+    the old file is still perfectly readable, so bumping it would classify
+    every deployed state as corrupt and mail a degradation for a routine
+    upgrade.
     """
 
     raw = payload.get("last_degraded_alert_by_kind")
     if raw is None:
-        legacy = _parse_iso_or_none(payload.get("last_degraded_alert_at"))
-        if legacy is None:
-            return {}
-        return {
-            DEGRADED_STATE_CORRUPT: legacy,
-            DEGRADED_OBSERVABILITY_UNAVAILABLE: legacy,
-        }
+        return {}
     if not isinstance(raw, Mapping):
         raise ValueError("state has invalid last_degraded_alert_by_kind")
     clocks: dict[str, datetime] = {}
@@ -824,6 +830,14 @@ def acquire_lock(path: Path) -> int | None:
     ENOTDIR) is an operator misconfiguration and must surface as the same
     structured config error as a missing env var, not as a raw traceback out
     of ``main``.
+
+    The mapping is WHOLE-CLASS (round-3 invariant closure). This stage guards
+    the whole lane: if it raises, the tick never observes and never mails, so
+    an escaping class buys nothing but an unstructured traceback for the same
+    permanent silence. ``OSError`` keeps its own arm for the operator-readable
+    wording only, exactly like ``default_sendmail_runner``'s arms.
+    ``BlockingIOError`` is NOT containment — it is the documented
+    lock-contention signal and its meaning is "another tick is running".
     """
 
     fd: int | None = None
@@ -848,6 +862,12 @@ def acquire_lock(path: Path) -> int | None:
         if fd is not None:
             os.close(fd)
         raise FrontierAlertConfigError(f"cannot acquire lock file: {error}") from error
+    except Exception as error:  # noqa: BLE001 - whole-class containment, see docstring
+        if fd is not None:
+            os.close(fd)
+        raise FrontierAlertConfigError(
+            f"cannot acquire lock file: {type(error).__name__}: {error}"
+        ) from error
 
 
 def release_lock(fd: int | None) -> None:
@@ -878,7 +898,20 @@ SendmailRunner = Callable[[list[str], str], SendResult]
 
 
 def default_sendmail_runner(argv: list[str], message: str) -> SendResult:
-    """``sendmail -t -i`` over ``subprocess``. No SMTP credentials involved."""
+    """``sendmail -t -i`` over ``subprocess``. No SMTP credentials involved.
+
+    The specific arms below exist for their operator-readable wording only;
+    the trailing ``except Exception`` is what makes the containment WHOLE-CLASS
+    (round-3 invariant closure). ``message.encode("utf-8")`` raises
+    ``UnicodeEncodeError`` — neither an ``OSError`` nor a ``TimeoutExpired`` —
+    whenever a surrogate reaches the message, which ``os.environ`` produces for
+    free from a single non-UTF-8 byte in ``NHMS_ALERT_EMAIL_TO`` or in the
+    hostname. Escaping here killed the tick before ANY state/receipt/event was
+    written, so the runner died identically on every tick forever while
+    ``--dry-run`` stayed green. A send that cannot even be built is a FAILED
+    send, which is the over-report direction: unrecorded stall alerts retry,
+    degraded alerts queue in ``degraded_pending``.
+    """
 
     try:
         completed = subprocess.run(
@@ -892,6 +925,11 @@ def default_sendmail_runner(argv: list[str], message: str) -> SendResult:
         return SendResult(returncode=127, error=f"sendmail invocation failed: {error}")
     except subprocess.TimeoutExpired as error:
         return SendResult(returncode=124, error=f"sendmail timed out: {error}")
+    except Exception as error:  # noqa: BLE001 - whole-class containment, see docstring
+        return SendResult(
+            returncode=SEND_INTERNAL_FAILURE_RC,
+            error=f"sendmail invocation failed internally: {type(error).__name__}: {error}",
+        )
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", "replace").strip()
         return SendResult(returncode=completed.returncode, error=stderr or "sendmail exited non-zero")
@@ -960,10 +998,24 @@ class _Outbox:
     records: list[dict[str, Any]]
 
     def send(self, *, event: str, subject: str, body_lines: list[str], detail: str | None = None) -> bool:
-        argv = [self.config.sendmail_path, "-t", "-i"]
-        message = build_message(
-            self.config, event=event, subject=subject, now=self.now, body_lines=body_lines
-        )
+        """Attempt one mail. NEVER raises (round-3 invariant closure).
+
+        The whole mail chain — message construction AND the runner call — sits
+        inside one whole-class ``except``. Enumerating classes here has already
+        failed three review rounds in this file, and the failure geometry is
+        always the same: the exception escapes ``run_tick`` before the state,
+        receipt and event log are written, so the tick dies identically every
+        30 minutes with a frozen receipt and no mail — total silence from the
+        component whose entire job is not being silent. Containment must also
+        wrap ``build_message``: a runner-only guard leaves message construction
+        (header interpolation of operator-supplied values) outside the net.
+
+        ``BaseException`` (KeyboardInterrupt / SystemExit) is deliberately NOT
+        caught. A contained failure is recorded as a failed send, which is the
+        over-report direction: stall alerts stay unrecorded and retry next
+        tick, degraded alerts land in ``degraded_pending``.
+        """
+
         record: dict[str, Any] = {
             "event": event,
             "detail": detail,
@@ -975,7 +1027,17 @@ class _Outbox:
             record.update({"sent": False, "dry_run": True, "returncode": None, "error": None})
             self.records.append(record)
             return False
-        result = self.runner(argv, message)
+        try:
+            argv = [self.config.sendmail_path, "-t", "-i"]
+            message = build_message(
+                self.config, event=event, subject=subject, now=self.now, body_lines=body_lines
+            )
+            result = self.runner(argv, message)
+        except Exception as error:  # noqa: BLE001 - whole-class containment, see docstring
+            result = SendResult(
+                returncode=SEND_INTERNAL_FAILURE_RC,
+                error=f"mail chain failed internally: {type(error).__name__}: {error}",
+            )
         error = None
         if result.error:
             error = _redact_error_text(result.error, self.config.database_url)
@@ -1424,13 +1486,32 @@ def main(
     env: Mapping[str, str] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
+    env_map = os.environ if env is None else env
     try:
-        config = config_from_env(env)
+        config = config_from_env(env_map)
     except FrontierAlertConfigError as error:
         # Fail closed BEFORE any observation and before any send (D2 last row).
         print(
             json.dumps(
                 {"status": "failed", "code": CODE_CONFIG_INVALID, "reason": str(error)},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except Exception as error:  # noqa: BLE001 - whole-class containment
+        # Round-3 invariant closure: the config stage guards the whole lane, so
+        # an escaping class means the same permanent silence as a rejected
+        # config — but as a raw traceback, which is unstructured AND can echo
+        # the DSN past the redaction chokepoint into journald.
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "code": CODE_CONFIG_INVALID,
+                    "reason": f"{type(error).__name__}: "
+                    f"{_redact_error_text(error, env_map.get('DATABASE_URL', ''))}",
+                },
                 sort_keys=True,
             ),
             file=sys.stderr,

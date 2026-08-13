@@ -1929,9 +1929,14 @@ fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障
 | `NHMS_FRONTIER_STATE_PATH` 指到一个目录（锁能开、state 写不下去） | 去重钟随状态一起丢 → **每 tick 一封** `state-corrupt`（上限 48 封/日），同时每 tick exit 1、unit failed | 邮箱被刷屏；这是刻意选的过报方向，不是 bug |
 | **锁文件本身打不开**（卷只读、root 用 sudo 跑过一次留下 root 属主的 `<state>.lock`） | 结构化 config error、**rc=2、零邮件** —— 告警器根本没跑到观测那步 | **只有 `systemctl --user status nhms-node27-frontier-alert.service` 的 failed 状态和 `frontier-alert.log` 能看见**，邮箱一片安静。定期看治理 receipt 里的 unit 状态就是为了这个 |
 
-两种都先修路径/属主本身，别去调告警器参数。第二种是本 lane 唯一"故障但零邮件"的
-几何（配置期失败先于任何邮件通道），它靠 unit failed 兜底；几何不对称的进一步收口
-另立 issue。
+两种都先修路径/属主本身，别去调告警器参数。第二种只是"故障但零邮件"这一**族**的
+**一个**成员（失败都发生在任何邮件通道之前）：同族还有 wrapper 期的 env 文件是符号
+链接 / 权限宽于 0600 / 源失败，以及缺 `DATABASE_URL`、`NHMS_ALERT_EMAIL_TO` 的
+config error。wrapper 期成员的现场证据行是 bootstrap 日志
+`/home/nwm/node27-frontier-alert.log` 里的 `BLOCKED rc=2 reason=<REASON>`（如
+`ENV_FILE_SYMLINK_FORBIDDEN` / `ENV_FILE_MODE_UNSAFE`），runner 期成员则写
+`<log root>/frontier-alert.log`。全族排查路径相同：unit failed -> 上述日志 ->
+治理 receipt 里的 unit 状态；几何不对称的进一步收口另立 issue。
 
 ### 10.3 阈值口径（改之前先读这段）
 

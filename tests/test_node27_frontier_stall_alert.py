@@ -1127,11 +1127,51 @@ def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> No
 def test_b17_throttled_pending_degraded_survives_until_the_window_opens(tmp_path: Path) -> None:
     """A pending retry that lands inside the dedup window is not dropped.
 
-    Reachable geometry after the round-2 per-kind clocks: a state written by
-    the PREVIOUS revision, whose single scalar clock (armed by a delivered
-    ``state-corrupt`` mail) migrates onto both kinds while an
-    ``observability-unavailable`` retry is still queued. That is the literal
-    upgrade path, and it must not swallow the queued alert."""
+    Reachable geometry: the resend window is re-read from the environment on
+    every tick, so an operator widening 6 h -> 24 h can put an already-queued
+    retry back inside a throttle window. The queued alert must survive that,
+    not be absorbed."""
+
+    snapshot = _baseline_snapshot()
+    narrow = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="48")
+    _bootstrap(narrow, snapshot)
+    broken = _failing_provider(RuntimeError("db down"))
+
+    _tick(narrow, now=T0 + timedelta(hours=1), observe=broken, sendmail=FakeSendmail())
+    delivered = FakeSendmail()
+    armed_at = T0 + timedelta(hours=2)
+    _tick(narrow, now=armed_at, observe=broken, sendmail=delivered)
+    assert len(delivered.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in delivered.subject()
+
+    # Window elapsed -> the repeat is due, and its send fails -> queued.
+    failing = FakeSendmail([alerter.SendResult(returncode=1, error="queue full")])
+    _tick(narrow, now=armed_at + timedelta(hours=7), observe=broken, sendmail=failing)
+    assert len(failing.calls) == 1
+    assert [entry["kind"] for entry in _read_state(narrow).degraded_pending] == [
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
+    ]
+
+    # The operator widens the resend window; the queued retry is now inside it.
+    widened = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="48", NHMS_FRONTIER_RESEND_HOURS="24")
+    throttled = FakeSendmail()
+    _tick(widened, now=armed_at + timedelta(hours=8), snapshot=snapshot, sendmail=throttled)
+    assert throttled.calls == []
+    assert [entry["kind"] for entry in _read_state(widened).degraded_pending] == [
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
+    ], "a throttled pending retry must not be dropped"
+
+    opened = FakeSendmail()
+    _tick(widened, now=armed_at + timedelta(hours=25), snapshot=snapshot, sendmail=opened)
+    assert len(opened.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in opened.subject()
+    assert _read_state(widened).degraded_pending == []
+
+
+def test_b28_legacy_scalar_clock_is_not_migrated_and_never_suppresses(tmp_path: Path) -> None:
+    """A round-1 scalar cannot be attributed to a kind. Fanning it onto both
+    kinds would re-create the cross-kind suppression the per-kind clock exists
+    to remove; dropping it costs at most one duplicate mail."""
 
     config = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="48")
     snapshot = _baseline_snapshot()
@@ -1149,31 +1189,27 @@ def test_b17_throttled_pending_degraded_survives_until_the_window_opens(tmp_path
         "last_degraded_alert_at": armed_at.isoformat(),
         "last_error": None,
         "baseline_pending": False,
-        "degraded_pending": [
-            {"kind": alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE, "reason": "db down"}
-        ],
+        "degraded_pending": [],
     }
     config.state_path.parent.mkdir(parents=True, exist_ok=True)
     config.state_path.write_text(json.dumps(legacy_state), encoding="utf-8")
 
-    migrated = _read_state(config)
-    assert migrated.last_degraded_alert_by_kind == {
-        alerter.DEGRADED_STATE_CORRUPT: armed_at,
-        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE: armed_at,
-    }
+    loaded = _read_state(config)
+    assert loaded.last_degraded_alert_by_kind == {}
+    # design.md D1: baseline_pending_kind absent on a legacy state defaults to
+    # bootstrap, and the state stays readable (schema_version unchanged).
+    assert loaded.baseline_pending_kind == alerter.BASELINE_ORIGIN_BOOTSTRAP
+    assert loaded.schema_version == alerter.STATE_SCHEMA_VERSION
 
-    throttled = FakeSendmail()
-    _tick(config, now=armed_at + timedelta(hours=1), snapshot=snapshot, sendmail=throttled)
-    assert throttled.calls == []
-    assert [entry["kind"] for entry in _read_state(config).degraded_pending] == [
-        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
-    ], "a throttled pending retry must not be dropped"
+    broken = _failing_provider(RuntimeError("db down"))
+    _tick(config, now=armed_at + timedelta(minutes=30), observe=broken, sendmail=FakeSendmail())
+    crossed = FakeSendmail()
+    receipt = _tick(config, now=armed_at + timedelta(hours=1), observe=broken, sendmail=crossed)
 
-    opened = FakeSendmail()
-    _tick(config, now=armed_at + timedelta(hours=6), snapshot=snapshot, sendmail=opened)
-    assert len(opened.calls) == 1
-    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in opened.subject()
-    assert _read_state(config).degraded_pending == []
+    # Exactly one — not zero (suppressed by a migrated scalar) and not two.
+    assert len(crossed.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in crossed.subject()
+    assert receipt["degraded_events"] == [alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE]
 
 
 # ---------------------------------------------------------------------------
@@ -1681,6 +1717,184 @@ def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Pa
     assert config.email_from == "NHMS Frontier Alert <nwm@node-27>"
     assert config.stall_hours == 4.0
     assert config.sendmail_path == "/usr/sbin/sendmail"
+
+
+# ---------------------------------------------------------------------------
+# B27 — the mail chain contains failures whole-class (round-3 invariant).
+# ---------------------------------------------------------------------------
+
+
+def _recording_sendmail_binary(tmp_path: Path) -> tuple[Path, Path]:
+    """A real executable standing in for ``/usr/sbin/sendmail``, so the test
+    exercises the REAL ``default_sendmail_runner`` without faking the failure
+    away. It touches a marker file, which lets the test prove the failure
+    happened before the process was ever spawned."""
+
+    marker = tmp_path / "sendmail-was-invoked"
+    binary = tmp_path / "fake-sendmail"
+    binary.write_text(f'#!/bin/sh\ncat >/dev/null\n: >"{marker}"\n', encoding="utf-8")
+    binary.chmod(0o700)
+    return binary, marker
+
+
+def test_b27_undecodable_recipient_does_not_kill_the_tick(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A single non-UTF-8 byte in ``NHMS_ALERT_EMAIL_TO`` reaches the process as
+    a surrogate (``os.environ`` surrogateescape). ``message.encode("utf-8")``
+    then raises ``UnicodeEncodeError`` — not an ``OSError``, not a
+    ``TimeoutExpired``. Under the enumerated catch it escaped the runner, the
+    outbox and ``run_tick``, so the tick died before writing state, receipt or
+    events: identical death every tick, forever, with zero mail and zero
+    artifacts."""
+
+    binary, marker = _recording_sendmail_binary(tmp_path)
+    env = _env(
+        tmp_path,
+        NHMS_ALERT_EMAIL_TO="ops\udcc4@example.com",
+        NHMS_FRONTIER_SENDMAIL=str(binary),
+    )
+    config = alerter.config_from_env(env)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+    capsys.readouterr()
+
+    stall_at = T0 + timedelta(hours=4)
+    code = alerter.main(
+        ["--once"],
+        now=stall_at,
+        observe=_provider(snapshot),
+        sendmail_runner=None,  # the REAL runner, real encode path
+        env=env,
+    )
+
+    assert code == 1  # degraded, controlled — not a traceback
+    assert not marker.exists(), "the failure must be contained before exec, not after"
+
+    # The send is recorded as a FAILURE, so the alert is still owed.
+    receipt = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["send_failures"] == 1
+    assert receipt["stall_alert"] == "initial"
+    assert receipt["status"] == "degraded"
+    assert receipt["emails"][0]["sent"] is False
+    assert receipt["emails"][0]["returncode"] == alerter.SEND_INTERNAL_FAILURE_RC
+    assert "UnicodeEncodeError" in receipt["emails"][0]["error"]
+    assert DSN_PASSWORD not in json.dumps(receipt)
+
+    state = _read_state(config)
+    assert state.alert_active is True
+    assert state.last_alert_at is None  # undelivered -> retried, never "done"
+
+    events = [json.loads(line) for line in config.events_path.read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in events] == [alerter.EVENT_STALLED]
+    assert events[0]["sent"] is False
+
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert printed["status"] == "degraded"
+    assert printed["emails"][0]["sent"] is False
+
+    # And the lane keeps running: the next tick retries and delivers.
+    retry = FakeSendmail()
+    receipt = _tick(config, now=stall_at + timedelta(minutes=30), snapshot=snapshot, sendmail=retry)
+    assert len(retry.calls) == 1
+    assert receipt["stall_alert"] == "initial"  # still the first DELIVERED one
+    assert receipt["status"] == "stalled"
+    assert _read_state(config).last_alert_at == stall_at + timedelta(minutes=30)
+
+
+def test_b27_outbox_contains_a_runner_that_raises(tmp_path: Path) -> None:
+    """``default_sendmail_runner`` is not the only mail-chain seam: the runner
+    is injectable and ``build_message`` runs inside the outbox too, so the
+    containment has to sit at ``_Outbox.send`` as well."""
+
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    def exploding_runner(argv: list[str], message: str) -> alerter.SendResult:
+        raise MemoryError("runner blew up in an unenumerated way")
+
+    stall_at = T0 + timedelta(hours=4)
+    receipt = _tick(config, now=stall_at, snapshot=snapshot, sendmail=exploding_runner)
+
+    assert receipt["send_failures"] == 1
+    assert receipt["emails"][0]["returncode"] == alerter.SEND_INTERNAL_FAILURE_RC
+    assert "MemoryError" in receipt["emails"][0]["error"]
+    assert _read_state(config).last_alert_at is None
+    assert config.receipt_path.exists() and config.events_path.exists()
+
+
+def test_b27_outbox_contains_a_message_build_failure(tmp_path: Path, monkeypatch) -> None:
+    """The build step is inside the same contained region as the runner call."""
+
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    def exploding_build(*_args: Any, **_kwargs: Any) -> str:
+        raise ZeroDivisionError("message build blew up")
+
+    monkeypatch.setattr(alerter, "build_message", exploding_build)
+    sendmail = FakeSendmail()
+    receipt = _tick(config, now=T0 + timedelta(hours=4), snapshot=snapshot, sendmail=sendmail)
+
+    assert sendmail.calls == []
+    assert receipt["send_failures"] == 1
+    assert "ZeroDivisionError" in receipt["emails"][0]["error"]
+    assert _read_state(config).last_alert_at is None
+
+
+def test_b27_unexpected_config_stage_error_is_structured_and_redacted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+) -> None:
+    """Sweep convergence: the config stage guards the whole lane, so an
+    unenumerated class there must not become a raw traceback — which is
+    unstructured and can echo the DSN past the redaction chokepoint."""
+
+    def exploding_config(_env):
+        raise RuntimeError(f"driver exploded while parsing {DSN}")
+
+    monkeypatch.setattr(alerter, "config_from_env", exploding_config)
+    sendmail = FakeSendmail()
+
+    code = main_with(_env(tmp_path), now=T0, observe=_exploding_provider(), sendmail=sendmail)
+
+    assert code == 2
+    assert sendmail.calls == []
+    captured = capsys.readouterr()
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert "RuntimeError" in payload["reason"]
+    assert DSN_PASSWORD not in captured.err
+
+
+def test_b27_unexpected_lock_stage_error_is_a_structured_config_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same sweep, lock stage: ``OSError`` had an arm, everything else escaped."""
+
+    def exploding_open(*_args: Any, **_kwargs: Any) -> int:
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(alerter.os, "open", exploding_open)
+    with pytest.raises(alerter.FrontierAlertConfigError) as excinfo:
+        alerter.acquire_lock(tmp_path / "state" / "frontier.lock")
+    assert "ValueError" in str(excinfo.value)
+
+
+def test_b27_baseexception_from_the_runner_is_not_contained(tmp_path: Path) -> None:
+    """Whole-class means ``Exception``, not ``BaseException``: a
+    ``KeyboardInterrupt`` must still terminate the tick."""
+
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    def interrupting_runner(argv: list[str], message: str) -> alerter.SendResult:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _tick(config, now=T0 + timedelta(hours=4), snapshot=snapshot, sendmail=interrupting_runner)
 
 
 # ---------------------------------------------------------------------------
