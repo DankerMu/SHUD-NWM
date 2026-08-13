@@ -1,0 +1,56 @@
+# Node-27 published-frontier stall alerting (issue #1368 / OpenSpec:
+# node27-frontier-stall-alert).
+#
+# Copy to node27-frontier-alert.env and chmod 0600 — the wrapper
+# (scripts/node27_frontier_stall_alert_once.sh) refuses a missing, symlinked
+# or non-0600 env file.
+#
+# This lane only READS the database and only sends mail through the local
+# sendmail binary. It never writes to Postgres and holds no SMTP credentials.
+
+NODE27_FRONTIER_ALERT_REPO=/home/nwm/NWM
+
+# Node-27 primary Postgres — use the READ-ONLY role DSN (nhms_display_ro).
+# The alerter runs one read-only aggregate over hydro.hydro_run; a writer role
+# here would hand a monitoring lane needless mutation rights (least privilege).
+DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Alert recipient. REQUIRED, no default: an unset value fails the run closed
+# (structured config error, exit 2) rather than silently mailing nobody.
+NHMS_ALERT_EMAIL_TO=mumzy1995@163.com
+
+# Optional envelope sender. Default: "NHMS Frontier Alert <nwm@$(hostname)>".
+#NHMS_ALERT_EMAIL_FROM=NHMS Frontier Alert <nwm@node-27>
+
+# Stall window in hours. Default 4. Rationale: a full measured pass is
+# 2h16m-3h01m plus 15-30 min ingest lag, so the realistic upper bound of a
+# healthy production cycle is ~3h30m; 4 h leaves margin without hiding a real
+# outage for long. Progress is directional (new source, or a strict increase
+# of frontier / distinct-cycle count / latest arrival) and is NEVER compared
+# against wall-clock lag — while backfilling, the frontier is legitimately
+# days behind.
+NHMS_FRONTIER_STALL_HOURS=4
+
+# Resend window in hours while a stall persists. Default 6 (one stall = one
+# mail, then at most one mail per 6 h until progress resumes).
+NHMS_FRONTIER_RESEND_HOURS=6
+
+# Absolute path — persisted high-water baseline + alert state (mode 0600,
+# atomic tmp+rename). The single-instance lockfile is derived from it
+# (<state path>.lock) and the whole directory belongs to this lane.
+# Deleting this file is indistinguishable from a first install: the next tick
+# bootstraps a fresh baseline silently (blind window <= NHMS_FRONTIER_STALL_HOURS).
+NHMS_FRONTIER_STATE_PATH=/home/nwm/node27-frontier-alert-logs/frontier-alert-state.json
+
+# Absolute path — latest-tick observation receipt (atomically overwritten).
+# The append-only alert event log is derived beside it as
+# <receipt dir>/frontier-alert-events.jsonl.
+NHMS_FRONTIER_RECEIPT_PATH=/home/nwm/node27-frontier-alert-logs/frontier-alert-receipt.json
+
+# Absolute path to the local sendmail binary (invoked as `sendmail -t -i`).
+NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail
+
+# Consecutive failed observation ticks before an observability-unavailable
+# alert is raised. Default 2 (= 1 h at the 30 min timer cadence). Query
+# failures never reset the stall clock.
+NHMS_FRONTIER_QUERY_FAIL_TICKS=2

@@ -28,6 +28,8 @@ DEFAULT_SERVICES = (
     "nhms-node27-autopipe.timer",
     "nhms-node27-download.service",
     "nhms-node27-download.timer",
+    "nhms-node27-frontier-alert.service",
+    "nhms-node27-frontier-alert.timer",
     "nhms-node27-product-archive.service",
     "nhms-node27-product-archive.timer",
     "nhms-node27-raw-retention.service",

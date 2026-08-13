@@ -1,0 +1,12 @@
+[Unit]
+Description=NHMS node-27 published-frontier stall alert
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-frontier-alert-logs
+ExecStart=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh
+StandardOutput=append:/home/nwm/node27-frontier-alert-logs/systemd.log
+StandardError=append:/home/nwm/node27-frontier-alert-logs/systemd.err
+TimeoutStartSec=0

@@ -1867,7 +1867,132 @@ group by 1
 order by 1;
 ```
 
-## 10. 相关文档
+## 10. 前沿停摆告警（frontier stall alert）
+
+2026-08-12 事故：scheduler pass 在 forcing 阶段被 NFS 锁挂死，unit 恒
+`activating` 从未 failed，业务化静默停摆 ~11h 零告警。补的不是"某个 unit 的超时"，
+而是"没有任何机制发现业务化不再产出"。`nhms-node27-frontier-alert.timer`
+（每 30 分钟，`scripts/node27_frontier_stall_alert.py`）就是这个机制：它不看
+Slurm、不看 unit 状态，只看**最终落库产物**——node-22 任何故障类都坍缩成同一个
+可观测量：前沿不再推进。
+
+### 10.1 判据（progress-based，不看墙上时钟）
+
+每 tick 对 `hydro.hydro_run` 做一次只读聚合，限 `cycle_time IS NOT NULL` 且
+`status IN ('succeeded','parsed','published')`，按 `COALESCE(source_id,'__null_source__')`
+取三个 marker：
+
+| marker | 含义 |
+|---|---|
+| `max(cycle_time)` | 前沿 |
+| `count(DISTINCT cycle_time)` | 回填计数 |
+| `max(created_at)` | 到达高水位 |
+
+**进度 = 出现新 source，或某 source 的任一 marker 相对持久化基线严格增大**。
+关键性质，看告警时别搞错：
+
+- 判据**永不**比对墙上时钟。追欠账时前沿本就落后数天，wall-clock 判据恒误报。
+- **减少不算进度**：行转出集合（`failed`/`cancelled`/`superseded`/`pending`）、
+  人工 DBA 删除、source 整体消失，都不重置 stall 计时。
+- **基线只升不降**（per-source 高水位）：marker 掉下去再回到原值不算"严格增"，
+  否则 `succeeded → failed → parsed` 的出入集合会在真实停摆期伪造一次进度。
+- 集合内跃迁（`succeeded → parsed → published`，同一行同一 cycle）**不动快照**，
+  不是进度也不是异常。
+
+### 10.2 三类告警邮件怎么读
+
+| 邮件 | 触发 | 第一步做什么 |
+|---|---|---|
+| `frontier-stalled` | 连续 ≥ `NHMS_FRONTIER_STALL_HOURS`（默认 4h）无进度。首触发一封，持续未恢复每 `NHMS_FRONTIER_RESEND_HOURS`（默认 6h）重发一封 | 按 §6"如何判断是否卡住"走：先看 node-22 `squeue` + scheduler unit 是否恒 `activating`（本次事故几何），再看 node-27 autopipe 日志。邮件正文自带 per-source 快照与 `last_change_at`，可直接判断是"全线停"还是"某 source 早就没数据" |
+| `frontier-recovered` | 告警期内出现方向性进度，闭环一封 | 只是闭环通知，不需要处置。正文列出触发恢复的 marker 变化，可用于确认真的是新产出而不是人为改库 |
+| `monitoring-degraded` | 告警器**自身**降级，两个细类：`state-corrupt`（状态文件损坏/schema 不符，已按当前观测重建基线）、`observability-unavailable`（观测查询连续失败 ≥ `NHMS_FRONTIER_QUERY_FAIL_TICKS`，默认 2 tick = 1h） | 这类邮件说明"你现在看不见前沿了"，与业务是否正常无关。`observability-unavailable` 先查 DB 可达性与只读角色口令；`state-corrupt` 检查 `NHMS_FRONTIER_STATE_PATH` 所在目录是否被别的东西写坏/磁盘满 |
+
+fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障只会**提高**告警倾向。
+具体地——查询失败**不重置** stall 计时（瞎着也照样按点发 stalled）；状态损坏立即
+发降级邮件而不是静默重置计时；sendmail 非零退出**不记**"已告警"，下一 tick 必然
+重试；缺 `DATABASE_URL` 或 `NHMS_ALERT_EMAIL_TO` 直接结构化 config error 退出非零
+（unit failed 可见），绝不带默认收件人静默跑。状态文件**缺失**是唯一的静默分支：
+那是首次安装/换路径的 bootstrap，只记 `baseline_established_at`，代价是人为删档会
+伪装成 bootstrap、盲窗 ≤ 一个 stall 窗口。
+
+### 10.3 阈值口径（改之前先读这段）
+
+默认 4h 的来源：全趟实测 2h16m–3h01m，加落库滞后 15–30min，健康周期的现实上界
+约 3h30m，4h 是留余量后的最小安全值。**别为了"少收几封"随手上调**——阈值就是
+"业务停多久才被发现"的上限。真要调，先在 node-27 记录几天的真实 pass 时长再定，
+并同步改 `infra/env/node27-frontier-alert.env` 与本节。resend 6h 同理：调大等于
+延长"已知停摆但没人再被提醒"的窗口。
+
+### 10.4 误报处置
+
+先确认是不是**真**误报——"前沿 4h 没动"本身几乎总是事实，问题只在于是不是可接受：
+
+1. 计划内停机 / 人工暂停业务化：告警属预期。停机前 `systemctl --user stop
+   nhms-node27-frontier-alert.timer`，恢复后再 start；别改阈值。
+2. 上游断供导致某个 source 长期不来：判据是**观测级**的（任一 source 推进=业务
+   活着），单 source 断供不会触发本告警；若全部 source 同时断供，那不是误报。
+3. 怀疑判据本身出问题：`--dry-run` 完整跑一遍判定并打印本应发生的动作，**零副作用**
+   （不发邮件、不写 state/receipt/JSONL）：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+set -a; . infra/env/node27-frontier-alert.env; set +a
+.venv/bin/python scripts/node27_frontier_stall_alert.py --once --dry-run | python3 -m json.tool
+```
+
+4. 确认业务其实活着而告警仍在：读 receipt 的 `baseline` 与 `observation` 两块，
+   对比哪个 marker 应该增而没增；`hydro.hydro_run` 侧用 §9 的值守 SQL 交叉验证。
+
+### 10.5 状态、产物与恢复闭环语义
+
+- 状态：`NHMS_FRONTIER_STATE_PATH`（原子 tmp+rename，含 `schema_version`、
+  per-source 高水位基线、`last_change_at`、`alert_active`、`last_alert_at`）。
+  单实例互斥是**脚本内** `fcntl.flock`（锁文件 `<state>.lock`），第二实例结构化
+  no-op 退出 0，不会重复观测或重复发信。
+- 产物：`NHMS_FRONTIER_RECEIPT_PATH`（每 tick 原子覆写，latest 语义）+ 同目录
+  `frontier-alert-events.jsonl`（追加式告警事件流）。两者都不是正式 schema
+  产物，无跨工具消费方。
+- 恢复闭环：`alerting` 状态下一旦出现方向性进度，发**恰一封** `frontier-recovered`
+  并清 `alert_active`；此后重新计满一个完整 stall 窗口才可能再次触发，不会因为
+  "刚恢复又慢了半小时"连环发信。恢复邮件发送失败不会把告警重新挂起（不存在的
+  停摆不该被重新武装），失败事实记在 receipt 与 JSONL 里。
+
+### 10.6 信号口径（认领的盲区，不是 bug）
+
+本 lane 观测的是 **post-ingest 前沿**（含 `succeeded`），**不是**严格的
+display-published 前沿。即：ingest 仍在落库、但 parse/publish 段静默冻结的几何
+**不会**触发本告警。这是刻意取舍——该故障类会让 autopipeline 非零退出、unit
+failed，属于 systemd 已经能看见的面，与本 issue 针对的"挂死但从不 failed"不同类。
+要观测 display 已发布前沿，另立 issue，别把判据混进本 lane。
+
+同样不在本 lane 范围：`RuntimeMaxUSec` 之类 unit 超时兜底、钉钉/企业微信通道、
+per-source 独立告警、以及任何自动恢复动作（本 lane 只通知不处置）。
+
+### 10.7 安装
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+cp infra/env/node27-frontier-alert.example infra/env/node27-frontier-alert.env
+chmod 600 infra/env/node27-frontier-alert.env
+# 填入只读角色 DSN（nhms_display_ro）与收件人；wrapper 会拒绝非 0600 / 符号链接 env
+install -m 644 infra/systemd/nhms-node27-frontier-alert.service ~/.config/systemd/user/
+install -m 644 infra/systemd/nhms-node27-frontier-alert.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-node27-frontier-alert.timer
+systemctl --user list-timers 'nhms-node27-frontier-alert.timer' --no-pager
+tail -n 50 /home/nwm/node27-frontier-alert-logs/frontier-alert.log
+```
+
+首 tick 是 bootstrap：**预期零邮件**，receipt 记 `baseline_established_at`。要验证
+真实投递，把 state 里的 `last_change_at` 人为回拨 5h，下一 tick 会真发一封
+stalled；投递验证必须三重——sendmail exit 0 + mail log 远端 250 + 收件箱人工确认，
+不得只看 exit 0。unit 已注册进 `scripts/node27_resource_governance.py`
+`DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态（timer 被人 disable
+掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。
+
+## 11. 相关文档
 
 - [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md)：current physical
   deployment source of truth.
