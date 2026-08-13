@@ -36,7 +36,15 @@ case "$ENV_FILE" in
   *) blocked "ENV_FILE_NOT_ABSOLUTE" ;;
 esac
 
-if [ -f "$ENV_FILE" ]; then
+# Single reader (design D4, review round-1 B-C3): under systemd the env file
+# is loaded exactly once by EnvironmentFile=, and systemd's parser is NOT the
+# shell's. Re-sourcing it here would make a value's meaning depend on which
+# parser ran last (quoting, $-expansion, backslashes) — two readers, two
+# grammars, one file. So the wrapper sources the file ONLY on the manual
+# debugging path, detected by DATABASE_URL not being injected yet.
+if [ -n "${DATABASE_URL:-}" ]; then
+  : "env already injected (systemd EnvironmentFile=); not re-sourcing $ENV_FILE"
+elif [ -f "$ENV_FILE" ]; then
   if [ -L "$ENV_FILE" ]; then
     blocked "ENV_FILE_SYMLINK_FORBIDDEN"
   fi

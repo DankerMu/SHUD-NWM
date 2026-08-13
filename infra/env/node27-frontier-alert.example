@@ -7,20 +7,38 @@
 #
 # This lane only READS the database and only sends mail through the local
 # sendmail binary. It never writes to Postgres and holds no SMTP credentials.
+#
+# SINGLE READER: under systemd this file is read once by
+# `EnvironmentFile=` in nhms-node27-frontier-alert.service. The wrapper only
+# sources it when DATABASE_URL is NOT already injected (i.e. manual debugging
+# from a shell), so no value is ever parsed by both grammars in one run.
+# Values here must nevertheless mean the same thing to BOTH parsers: quote any
+# value containing spaces (systemd strips the surrounding quotes, so does the
+# shell). WARNING: a password containing  $ ` " \  is NOT dual-grammar safe —
+# bash expands/eats those inside double quotes while systemd does not. If the
+# read-only role's password needs such characters, use single quotes and verify
+# both paths, or (preferred) pick a password from [A-Za-z0-9._~-].
 
 NODE27_FRONTIER_ALERT_REPO=/home/nwm/NWM
 
 # Node-27 primary Postgres — use the READ-ONLY role DSN (nhms_display_ro).
 # The alerter runs one read-only aggregate over hydro.hydro_run; a writer role
 # here would hand a monitoring lane needless mutation rights (least privilege).
+# The runner supplies its own bounded connect_timeout (10 s) and
+# statement_timeout (30 s); do NOT append connect_timeout=0 or any unbounded
+# libpq keyword here — an unbounded connect would let the watchdog hang the
+# same way the thing it watches did.
 DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME_PW@127.0.0.1:55432/nhms
 
 # Alert recipient. REQUIRED, no default: an unset value fails the run closed
 # (structured config error, exit 2) rather than silently mailing nobody.
+# A CR/LF anywhere in this value is rejected at config time (header injection).
 NHMS_ALERT_EMAIL_TO=mumzy1995@163.com
 
 # Optional envelope sender. Default: "NHMS Frontier Alert <nwm@$(hostname)>".
-#NHMS_ALERT_EMAIL_FROM=NHMS Frontier Alert <nwm@node-27>
+# Quoted because the value contains spaces: systemd strips the surrounding
+# double quotes and so does the shell, so both readers see the same string.
+#NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <nwm@node-27>"
 
 # Stall window in hours. Default 4. Rationale: a full measured pass is
 # 2h16m-3h01m plus 15-30 min ingest lag, so the realistic upper bound of a

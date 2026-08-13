@@ -27,29 +27,34 @@
 - **进度定义**：见上（方向性严格增判据）。无任何 source 产生进度 → stall 计时继续。
 - **告警条件**：`now - last_change_at >= stall_hours（默认 4h）`。阈值依据：全趟 2h16m-3h01m + 落库滞后 15-30min，上界 ~3h30m 留余量（issue 实测口径）。
 - **状态机**：`ok --stall≥4h--> alerting --progress--> ok(发 recovered)`；`alerting` 内每 `resend_hours（默认 6h）` 重发。
-- 状态持久化 JSON（`state_path`）：`{snapshot, last_change_at, alert_active, last_alert_at, consecutive_query_failures, schema_version, baseline_established_at, baseline_reset_at}`；**tmp+rename 原子写**。
+- 状态持久化 JSON（`state_path`）：`{snapshot, last_change_at, alert_active, last_alert_at, consecutive_query_failures, schema_version, baseline_established_at, baseline_reset_at, last_degraded_alert_at, last_error, baseline_pending, degraded_pending}`；**tmp+rename 原子写**。`last_degraded_alert_at`/`last_error` 系实现期偏离 1 追认（degraded 家族独立去重钟 + 打码后最近错误）；`baseline_pending`/`degraded_pending` 系 review round-1 修正（见 D2 修订行）。
+- **基线只能由真实观测建立**（review round-1 A-C1 修正）：rebuild/bootstrap tick 若观测同时失败，**不得**落空基线、不得记 `baseline_established_at`/`baseline_reset_at`——否则下一次成功观测会把所有 source 判成"新 source"伪造进度，把 stall 时钟推迟整个 DB 中断时长（漏报方向）。此时置 `baseline_pending`，下一次成功观测**静默填充基线、不算进度、不动 `last_change_at`**（盲窗仍 ≤ D2 记账的 stall_hours 上界）。
 - 时钟：注入式 `now()`（UTC），测试可拨。
 
 ### D2 — fail-safe 语义（宁可多报不可漏报，issue 硬要求）
 
 | 故障 | 处置 | 绝不允许 |
 |---|---|---|
-| 状态文件**缺失**（首次 bootstrap / 换 state_path） | **静默**建基线：receipt 记 `baseline_established_at`，零邮件（否则每次全新安装必发一封，live receipt 事件归属说不清）。接受的权衡：state 被人为删除会伪装成 bootstrap，盲窗 ≤ stall_hours——监控连续性由 timer 装载 + 治理审计兜底，记录在案 | 把 bootstrap 当损坏发降级告警（噪音）|
-| 状态文件**损坏/schema_version 不符** | 立即发 `monitoring-degraded` 告警（去重同 6h 窗），以当前观测重建基线并如实记 `baseline_reset_at` | 静默重置 stall 计时（那是漏报方向） |
-| DB 查询失败 | 本 tick 记 `consecutive_query_failures += 1`；**不更新** `last_change_at`（stall 时钟照走）；连续 ≥2 tick（1h）发 `observability-unavailable` 告警（同 6h 去重） | 把查询失败当"无进度证据不足"而跳过计时 |
-| sendmail 非零退出/binary 缺失 | 记入 receipt/日志（打码后），**不记** `last_alert_at` → 下 tick 必然重试 | 记成"已告警"（吞掉重试） |
+| 状态文件**缺失**（首次 bootstrap / 换 state_path） | **静默**建基线：receipt 记 `baseline_established_at`，零邮件（否则每次全新安装必发一封，live receipt 事件归属说不清）。观测同时失败 → `baseline_pending`（不记 established，见 D1）。接受的权衡：state 被人为删除会伪装成 bootstrap，盲窗 ≤ stall_hours——监控连续性由 timer 装载 + 治理审计兜底，记录在案 | 把 bootstrap 当损坏发降级告警（噪音）；以空观测冒充已建基线 |
+| 状态文件**损坏/schema_version 不符**（含非 UTF-8 字节损坏、深嵌套 JSON 的 `UnicodeDecodeError`/`RecursionError`——读/解析两阶段全部收容进本行，绝不逃逸） | 立即发 `monitoring-degraded` 告警，以当前观测重建基线并如实记 `baseline_reset_at`；观测同时失败 → `baseline_pending`。发送失败 → `degraded_pending` 落盘，下 tick 重试（受 `last_degraded_alert_at` 6h 去重钟约束）。**持久性损坏**（state 不可写，如 state_path 被指向目录）下去重钟随 state 一起丢失 → 每 tick 发一封：over-report 方向、48 封/日上界，伴随每 tick exit 1 + unit failed 的响亮信号，接受并记录（review round-1 A-C3 裁定） | 静默重置 stall 计时（那是漏报方向）；state 读/解析异常裸逃逸出 run |
+| DB 查询失败（连接与语句均**有界**：`connect_timeout` + `statement_timeout`——挂死不是失败、走不到本行，必须先被超时转化为失败） | 本 tick 记 `consecutive_query_failures += 1`；**不更新** `last_change_at`（stall 时钟照走）；连续 ≥2 tick（1h）发 `observability-unavailable` 告警（同 6h 去重） | 把查询失败当"无进度证据不足"而跳过计时；无界阻塞调用（监控器自身复现 11h 挂死几何） |
+| sendmail 非零退出/binary 缺失 | 记入 receipt/日志（打码后），**不记** `last_alert_at` → 下 tick 必然重试。唯一例外：`frontier-recovered` 发送失败不重试、不重新武装告警（已不存在的停摆不该被重新武装；失败进 receipt/JSONL，exit 1 使 unit failed 可见——review round-1 C-C1 裁定，spec delta 已同步收口） | 记成"已告警"（吞掉重试） |
+| 锁文件目录不可建/不可写（EACCES/EROFS/ENOTDIR） | 结构化 config error、退出非零（与 env 缺失同支，绝不裸 traceback） | 未映射异常类裸逃逸 |
 | env 缺 `DATABASE_URL`/`NHMS_ALERT_EMAIL_TO` | 启动即结构化 config error、退出非零（systemd unit failed 可见） | 带默认收件人静默运行 |
 
 ### D3 — 邮件通道
 
 - `subprocess` 调 `/usr/sbin/sendmail -t -i`（路径可配 `sendmail_path`，测试注入 fake 记录 invocation）。无 SMTP 凭据参与。
-- 信头：`From: NHMS Frontier Alert <nwm@<hostname>>`（可配）、`To: $NHMS_ALERT_EMAIL_TO`、`Subject` 含事件类型与 stall 时长；正文含 per-source 观测明细（诊断用）、`last_change_at`、阈值、runbook 指引。
+- 信头：`From: NHMS Frontier Alert <nwm@<hostname>>`（可配）、`To: $NHMS_ALERT_EMAIL_TO`、`Subject` 含事件类型与 stall 时长；正文含 per-source 观测明细（诊断用）、`last_change_at`、阈值、runbook 指引。`sendmail -t` 下收件人完全由信头决定：`NHMS_ALERT_EMAIL_TO`/`NHMS_ALERT_EMAIL_FROM` 含 CR/LF 即 config 期 fail-closed 拒绝（防头注入/误配静默跑偏）。
+- **stalled 标签以投递事实为准**：`initial`/`resend` 由 `last_alert_at is None` 判定（与去重钟同源），不得用 `alert_active`——首封发送失败后的重试必须仍标 `initial`（operator 重建时间线依赖它）。
 - **DSN/凭据零泄漏**：所有异常文本经打码（复用 retention `_redact_error_text` 模式，实现期抽公共 helper 或同构复制并注明出处）后才可进邮件/日志/receipt。
 - 三类事件：`frontier-stalled` / `frontier-recovered` / `monitoring-degraded`（含 observability-unavailable 细类）。
 
 ### D4 — systemd / env / 治理
 
 - `infra/systemd/nhms-node27-frontier-alert.{service,timer}`：`Type=oneshot`、`OnCalendar=*:00/30`、`EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env`；单实例互斥在 **Python 内**做（`fcntl.flock` 于 state 目录 lockfile，非阻塞，占用即结构化 no-op 退出 0）——wrapper `scripts/node27_frontier_stall_alert_once.sh` 保持薄壳；in-script 锁可被 pytest 直接钉（B13），wrapper 层锁先例（10 个 `*_once.sh` 中 3 个 flock + 1 个非 flock 锁）不可测。
+- **本 unit 的 tick 必须有执行期限**（review round-1 B-C2 裁定）：`TimeoutStartSec` 设有界值（oneshot 的整个执行即 start 阶段；模板同族的 `TimeoutStartSec=0` 对秒级 tick 的监控 unit 不适用——挂死的监控器必须转成 unit failed 可见）。proposal Non-Goals 的 "RuntimeMaxUSec 兜底另开" 只覆盖 autopipe 业务 unit（阈值论证不可迁移），不豁免本 unit。
+- **env 文件单读者**（review round-1 B-C3 裁定）：systemd 部署路径以 `EnvironmentFile=` 为准，wrapper 仅在关键变量未注入时才 `source`（手工调试路径）；`.example` 值必须双语法安全（systemd 与 bash 同释义，含空格值加引号），并注明密码含 `` $ ` " \ `` 时两解析器分歧的风险。
 - `infra/env/node27-frontier-alert.example`：`DATABASE_URL`（**只读角色 DSN**）、`NHMS_ALERT_EMAIL_TO`、`NHMS_ALERT_EMAIL_FROM`（可选）、`NHMS_FRONTIER_STALL_HOURS=4`、`NHMS_FRONTIER_RESEND_HOURS=6`、`NHMS_FRONTIER_STATE_PATH`、`NHMS_FRONTIER_RECEIPT_PATH`、`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`、`NHMS_FRONTIER_QUERY_FAIL_TICKS=2`。
 - `node27_resource_governance.py` `DEFAULT_SERVICES` 增补该 unit。
 - 每 tick 原子覆写单文件观测 receipt（latest 语义）+ 追加式 alert 事件 JSONL——无正式 schema（Non-goal 记录在案）。
@@ -75,6 +80,13 @@ Regression rows:
 - 查询失败 tick → stall 时钟不重置；连续 2 tick → observability 邮件
 - env 缺失 → 结构化 config error 退出非零、零邮件调用
 - 任意故障注入路径的邮件/日志/receipt 文本 0 命中 DSN 密码子串
+- 非 UTF-8/深嵌套 state 损坏 → 走 corrupt 分支（degraded 邮件 + 重建），零异常逃逸
+- rebuild/bootstrap 与观测失败同 tick → `baseline_pending`，下一成功观测不判进度、不动 `last_change_at`
+- degraded 发送失败 → `degraded_pending` 落盘，下 tick 重试成功
+- 首封 stalled 发送失败后的重试 → 标签仍为 `initial`
+- `NHMS_ALERT_EMAIL_TO`/`_FROM` 含 CR/LF → config 期拒绝
+- psycopg2.connect 带有界 `connect_timeout`（钉常量/调用参数）
+- 锁路径 EACCES/ENOTDIR → 结构化 config error（非裸 traceback）
 
 ## 边界面清单（high）
 

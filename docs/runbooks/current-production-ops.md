@@ -1905,7 +1905,12 @@ Slurm、不看 unit 状态，只看**最终落库产物**——node-22 任何故
 |---|---|---|
 | `frontier-stalled` | 连续 ≥ `NHMS_FRONTIER_STALL_HOURS`（默认 4h）无进度。首触发一封，持续未恢复每 `NHMS_FRONTIER_RESEND_HOURS`（默认 6h）重发一封 | 按 §6"如何判断是否卡住"走：先看 node-22 `squeue` + scheduler unit 是否恒 `activating`（本次事故几何），再看 node-27 autopipe 日志。邮件正文自带 per-source 快照与 `last_change_at`，可直接判断是"全线停"还是"某 source 早就没数据" |
 | `frontier-recovered` | 告警期内出现方向性进度，闭环一封 | 只是闭环通知，不需要处置。正文列出触发恢复的 marker 变化，可用于确认真的是新产出而不是人为改库 |
-| `monitoring-degraded` | 告警器**自身**降级，两个细类：`state-corrupt`（状态文件损坏/schema 不符，已按当前观测重建基线）、`observability-unavailable`（观测查询连续失败 ≥ `NHMS_FRONTIER_QUERY_FAIL_TICKS`，默认 2 tick = 1h） | 这类邮件说明"你现在看不见前沿了"，与业务是否正常无关。`observability-unavailable` 先查 DB 可达性与只读角色口令；`state-corrupt` 检查 `NHMS_FRONTIER_STATE_PATH` 所在目录是否被别的东西写坏/磁盘满 |
+| `monitoring-degraded` | 告警器**自身**降级，两个细类：`state-corrupt`（状态文件损坏/schema 不符/非 UTF-8 字节/深嵌套 JSON，已按当前观测重建基线）、`observability-unavailable`（观测查询连续失败 ≥ `NHMS_FRONTIER_QUERY_FAIL_TICKS`，默认 2 tick = 1h） | 这类邮件说明"你现在看不见前沿了"，与业务是否正常无关。`observability-unavailable` 先查 DB 可达性与只读角色口令；`state-corrupt` 检查 `NHMS_FRONTIER_STATE_PATH` 所在目录是否被别的东西写坏/磁盘满 |
+
+degraded 邮件正文若以 `(retry: ...)` 开头，说明**上一 tick 就已经降级、只是邮件没发出去**
+（sendmail 非零退出）：告警被落盘进 state 的 `degraded_pending`，本封是补发。
+判读时间线时以正文里的 `Reason` 与上一 tick 的 receipt 为准，别把补发当成新故障。
+补发同样受 6h 去重钟约束；只要没发成功就一直挂在 `degraded_pending` 里，不会被丢。
 
 fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障只会**提高**告警倾向。
 具体地——查询失败**不重置** stall 计时（瞎着也照样按点发 stalled）；状态损坏立即
@@ -1914,6 +1919,11 @@ fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障
 （unit failed 可见），绝不带默认收件人静默跑。状态文件**缺失**是唯一的静默分支：
 那是首次安装/换路径的 bootstrap，只记 `baseline_established_at`，代价是人为删档会
 伪装成 bootstrap、盲窗 ≤ 一个 stall 窗口。
+
+**持久性损坏**（例如 `NHMS_FRONTIER_STATE_PATH` 被指到一个目录、或所在卷只读）会
+让去重钟跟着状态一起丢，于是**每 tick 一封** `state-corrupt`（上限 48 封/日），
+同时每 tick exit 1、unit failed。这是刻意选的过报方向，不是 bug——收到这种连发时
+别去调告警器，先修 state 路径本身。
 
 ### 10.3 阈值口径（改之前先读这段）
 
@@ -1947,9 +1957,18 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
 ### 10.5 状态、产物与恢复闭环语义
 
 - 状态：`NHMS_FRONTIER_STATE_PATH`（原子 tmp+rename，含 `schema_version`、
-  per-source 高水位基线、`last_change_at`、`alert_active`、`last_alert_at`）。
-  单实例互斥是**脚本内** `fcntl.flock`（锁文件 `<state>.lock`），第二实例结构化
-  no-op 退出 0，不会重复观测或重复发信。
+  per-source 高水位基线、`last_change_at`、`alert_active`、`last_alert_at`、
+  `baseline_pending`、`degraded_pending`）。单实例互斥是**脚本内** `fcntl.flock`
+  （锁文件 `<state>.lock`），第二实例结构化 no-op 退出 0，不会重复观测或重复发信。
+  锁目录不可建/不可写（EACCES/EROFS/ENOTDIR）走结构化 config error 退出 2，不是
+  裸 traceback。
+- **`baseline_pending`（基线待建）**：基线只能由**真实观测**建立。若 bootstrap 或
+  损坏重建那一 tick 观测同时失败，脚本**不落空基线、不记** `baseline_established_at`
+  / `baseline_reset_at`，只置 `baseline_pending=true`。下一次成功观测会**静默**填充
+  基线——**不算进度、不动 `last_change_at`、不清 `alert_active`**。这条很关键：若
+  当时把空基线当真，下一次成功观测会把所有 source 判成"新 source"=进度，把 stall
+  时钟整整推后一个 DB 中断时长（漏报）。在 receipt 里看到 `baseline_pending: true`
+  就意味着"现在没有可比对的基线"，优先修 DB 可达性。
 - 产物：`NHMS_FRONTIER_RECEIPT_PATH`（每 tick 原子覆写，latest 语义）+ 同目录
   `frontier-alert-events.jsonl`（追加式告警事件流）。两者都不是正式 schema
   产物，无跨工具消费方。
@@ -1957,6 +1976,11 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
   并清 `alert_active`；此后重新计满一个完整 stall 窗口才可能再次触发，不会因为
   "刚恢复又慢了半小时"连环发信。恢复邮件发送失败不会把告警重新挂起（不存在的
   停摆不该被重新武装），失败事实记在 receipt 与 JSONL 里。
+- **发送失败的重试语义**：stalled 邮件发失败 → 不记 `last_alert_at`，下 tick 必重试，
+  且补发那封**仍标 `initial`**（它才是本轮真正投出去的第一封，operator 的时间线
+  按投递事实重建）。degraded 邮件发失败 → 进 `degraded_pending`，下 tick 在 6h
+  去重钟允许时补发，成功即清；补发正文带 `(retry: ...)` 前缀。recovered 邮件发失败
+  是唯一不重试的一类（见上）。
 
 ### 10.6 信号口径（认领的盲区，不是 bug）
 
@@ -1977,6 +2001,7 @@ cd /home/nwm/NWM
 cp infra/env/node27-frontier-alert.example infra/env/node27-frontier-alert.env
 chmod 600 infra/env/node27-frontier-alert.env
 # 填入只读角色 DSN（nhms_display_ro）与收件人；wrapper 会拒绝非 0600 / 符号链接 env
+bash -n infra/env/node27-frontier-alert.env   # 填完先过一遍语法（见下 env 语法警示）
 install -m 644 infra/systemd/nhms-node27-frontier-alert.service ~/.config/systemd/user/
 install -m 644 infra/systemd/nhms-node27-frontier-alert.timer   ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -1991,6 +2016,19 @@ stalled；投递验证必须三重——sendmail exit 0 + mail log 远端 250 + 
 不得只看 exit 0。unit 已注册进 `scripts/node27_resource_governance.py`
 `DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态（timer 被人 disable
 掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。
+
+**env 文件单读者 + 双语法警示**：systemd 路径下 env 由 service 的
+`EnvironmentFile=` 读**一次**；wrapper 只在 `DATABASE_URL` 尚未注入（手工 shell
+调试）时才 `source`，不会二次解析。但同一份文件仍可能被两种语法读到，所以：含空格
+的值**必须加引号**（systemd 与 bash 都会剥掉外层双引号），密码里出现
+`` $ ` " \ `` 时两个解析器**释义不同**（bash 在双引号内会展开/吞掉，systemd 不会）
+——这种口令要么换成 `[A-Za-z0-9._~-]` 字符集，要么两条路径都实测一遍。改完
+`.env` 先跑 `bash -n`，再 `systemctl --user restart`。
+
+**tick 有执行期限**：service 用 `TimeoutStartSec=900`（不是同族的 `0`）。oneshot
+的整个执行就是 start 阶段，所以这是唯一生效的期限；正常 tick 是秒级（connect 10s +
+statement 30s + sendmail 60s 上限），900s 只兜挂死。**挂死的监控器必须变成 unit
+failed**——否则就是 2026-08-12 那套"恒 activating、零告警"的几何在监控层重演。
 
 ## 11. 相关文档
 

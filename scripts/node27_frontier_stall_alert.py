@@ -60,7 +60,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -133,8 +133,20 @@ EVENTS_FILENAME = "frontier-alert-events.jsonl"
 
 RUNBOOK_REFERENCE = "docs/runbooks/current-production-ops.md - 前沿停摆告警"
 
+#: Every blocking call in a tick is bounded (D2 row 3, review round-1 B-C1):
+#: an unbounded connect would let the *monitor* reproduce the very hang it
+#: exists to report — the TCP default can block for minutes while the timer
+#: fires again every 30 min. Same value/discipline as the compression sibling
+#: ``scripts/node27_timeseries_compression.py:119`` (``_CONNECT_TIMEOUT_SECONDS``,
+#: used at :464 and :506).
+CONNECT_TIMEOUT_SEC = 10
 QUERY_TIMEOUT_MS = 30_000
 SENDMAIL_TIMEOUT_SEC = 60
+
+#: Characters that would break out of a mail header. ``sendmail -t`` takes its
+#: recipients from the headers this runner writes, so a CR/LF in the configured
+#: address is a header-injection / silent-misdelivery vector (D3).
+HEADER_FORBIDDEN_CHARS = ("\r", "\n", "\x00")
 
 
 class FrontierAlertConfigError(Exception):
@@ -177,10 +189,30 @@ class AlertConfig:
         return timedelta(hours=self.resend_hours)
 
 
-def _required_env(env: Mapping[str, str], name: str) -> str:
+def _required_env(env: Mapping[str, str], name: str, *, header_safe: bool = False) -> str:
     value = env.get(name)
     if value is None or not value.strip():
         raise FrontierAlertConfigError(f"{name} must be set")
+    if header_safe:
+        # Validate the RAW value: stripping first would hide a trailing CR/LF.
+        return _header_safe(name, value)
+    return value.strip()
+
+
+def _header_safe(name: str, value: str) -> str:
+    """Reject header-breaking control characters BEFORE they reach a header.
+
+    Checked on the RAW value, not the stripped one: ``"ops@x\\r\\nBcc: ..."``
+    strips clean at the tail but injects a header in the middle, and even a
+    trailing bare CR/LF signals a mangled env file that must fail closed
+    rather than mail somewhere unintended (D3 / review round-1 C-C3).
+    """
+
+    for char in HEADER_FORBIDDEN_CHARS:
+        if char in value:
+            raise FrontierAlertConfigError(
+                f"{name} must not contain control characters (found {char!r})"
+            )
     return value.strip()
 
 
@@ -230,9 +262,9 @@ def config_from_env(env: Mapping[str, str] | None = None) -> AlertConfig:
 
     env = os.environ if env is None else env
     database_url = _required_env(env, "DATABASE_URL")
-    email_to = _required_env(env, "NHMS_ALERT_EMAIL_TO")
-    email_from = env.get("NHMS_ALERT_EMAIL_FROM") or ""
-    email_from = email_from.strip() or default_email_from()
+    email_to = _required_env(env, "NHMS_ALERT_EMAIL_TO", header_safe=True)
+    email_from_raw = env.get("NHMS_ALERT_EMAIL_FROM") or ""
+    email_from = _header_safe("NHMS_ALERT_EMAIL_FROM", email_from_raw) or default_email_from()
     sendmail_path_raw = env.get("NHMS_FRONTIER_SENDMAIL") or ""
     sendmail_path = sendmail_path_raw.strip() or DEFAULT_SENDMAIL_PATH
     if not Path(sendmail_path).is_absolute():
@@ -393,7 +425,9 @@ def default_observe(config: AlertConfig) -> Snapshot:
     import psycopg2.extras  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
-        config.database_url, cursor_factory=psycopg2.extras.RealDictCursor
+        config.database_url,
+        connect_timeout=CONNECT_TIMEOUT_SEC,
+        cursor_factory=psycopg2.extras.RealDictCursor,
     )
     try:
         with connection:
@@ -515,6 +549,15 @@ class AlertState:
     # the state outlet for post-mortem.
     last_degraded_alert_at: datetime | None = None
     last_error: str | None = None
+    # ``baseline_pending``: a rebuild/bootstrap tick whose observation ALSO
+    # failed holds no baseline at all (D1 review round-1 A-C1). Persisting an
+    # empty snapshot as if it were a live baseline would make every source look
+    # "new" on the next successful observation — forged progress that pushes
+    # the stall clock out by the whole outage.
+    # ``degraded_pending``: degraded alerts whose send failed, retried on the
+    # next tick under the 6 h dedup clock (D2 row 2, review round-1 A-C2).
+    baseline_pending: bool = False
+    degraded_pending: list[dict[str, str]] = field(default_factory=list)
     schema_version: int = STATE_SCHEMA_VERSION
 
     def to_json(self) -> dict[str, Any]:
@@ -529,6 +572,8 @@ class AlertState:
             "baseline_reset_at": _iso_or_none(self.baseline_reset_at),
             "last_degraded_alert_at": _iso_or_none(self.last_degraded_alert_at),
             "last_error": self.last_error,
+            "baseline_pending": self.baseline_pending,
+            "degraded_pending": [dict(entry) for entry in self.degraded_pending],
         }
 
     @classmethod
@@ -550,6 +595,13 @@ class AlertState:
         last_error = payload.get("last_error")
         if last_error is not None and not isinstance(last_error, str):
             raise ValueError("state has invalid last_error")
+        # Both round-1 fields default when absent: a state written before they
+        # existed stays readable, so schema_version remains 1 (an unreadable
+        # old state would fire a spurious monitoring-degraded email).
+        baseline_pending = payload.get("baseline_pending", False)
+        if not isinstance(baseline_pending, bool):
+            raise ValueError("state has invalid baseline_pending")
+        degraded_pending = _degraded_pending_from_json(payload.get("degraded_pending", []))
         return cls(
             snapshot=snapshot_from_json(payload.get("snapshot", {})),
             last_change_at=last_change_at,
@@ -560,8 +612,27 @@ class AlertState:
             baseline_reset_at=_parse_iso_or_none(payload.get("baseline_reset_at")),
             last_degraded_alert_at=_parse_iso_or_none(payload.get("last_degraded_alert_at")),
             last_error=last_error,
+            baseline_pending=baseline_pending,
+            degraded_pending=degraded_pending,
             schema_version=STATE_SCHEMA_VERSION,
         )
+
+
+def _degraded_pending_from_json(payload: Any) -> list[dict[str, str]]:
+    if not isinstance(payload, list):
+        raise ValueError("state has invalid degraded_pending")
+    entries: list[dict[str, str]] = []
+    for entry in payload:
+        if not isinstance(entry, Mapping):
+            raise ValueError("state has invalid degraded_pending entry")
+        kind = entry.get("kind")
+        reason = entry.get("reason")
+        if kind not in (DEGRADED_STATE_CORRUPT, DEGRADED_OBSERVABILITY_UNAVAILABLE):
+            raise ValueError(f"state has unknown degraded_pending kind {kind!r}")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("state has invalid degraded_pending reason")
+        entries.append({"kind": kind, "reason": reason or ""})
+    return entries
 
 
 @dataclass(frozen=True)
@@ -572,16 +643,32 @@ class StateLoad:
 
 
 def load_state(path: Path) -> StateLoad:
-    """D2 rows 1+2: split *missing* (bootstrap) from *corrupt* (degraded)."""
+    """D2 rows 1+2: split *missing* (bootstrap) from *corrupt* (degraded).
+
+    Total containment on BOTH stages (review round-1 A-C4). The read stage
+    must catch ``ValueError`` as well as ``OSError``: ``Path.read_text`` raises
+    ``UnicodeDecodeError`` (a ``ValueError``, NOT an ``OSError``) on a
+    byte-corrupted state file, and an escaping decode error would take the
+    whole tick down — i.e. the alerter goes silent exactly when its own state
+    is damaged, which is the under-report direction this lane exists to
+    forbid. The parse stage must additionally catch ``RecursionError`` (a
+    ``RuntimeError``), which ``json.loads`` raises on pathologically nested
+    input. Both land in the corrupt branch: degraded email + honest rebuild.
+    """
 
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return StateLoad(STATE_LOAD_MISSING, None)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         return StateLoad(STATE_LOAD_CORRUPT, None, f"state file unreadable: {error}")
     try:
         return StateLoad(STATE_LOAD_OK, AlertState.from_json(json.loads(raw)))
+    except RecursionError:
+        # Formatting the exception is deliberately avoided here: the stack is
+        # freshly unwound and the message carries no operator value beyond the
+        # class name.
+        return StateLoad(STATE_LOAD_CORRUPT, None, "state file unusable: RecursionError")
     except (json.JSONDecodeError, ValueError, TypeError) as error:
         return StateLoad(STATE_LOAD_CORRUPT, None, f"state file unusable: {error}")
 
@@ -628,12 +715,20 @@ def append_events(path: Path, events: list[Mapping[str, Any]]) -> None:
 
 
 def acquire_lock(path: Path) -> int | None:
-    """Non-blocking ``fcntl.flock``. ``None`` means another instance holds it."""
+    """Non-blocking ``fcntl.flock``. ``None`` means another instance holds it.
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(path, flags, 0o600)
+    Directory creation and ``os.open`` are INSIDE the mapped try (review
+    round-1 B-C4): a read-only or non-directory lock parent (EACCES / EROFS /
+    ENOTDIR) is an operator misconfiguration and must surface as the same
+    structured config error as a missing env var, not as a raw traceback out
+    of ``main``.
+    """
+
+    fd: int | None = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(path, flags, 0o600)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise FrontierAlertConfigError("lock file must be a regular file")
@@ -644,10 +739,12 @@ def acquire_lock(path: Path) -> int | None:
             return None
         return fd
     except FrontierAlertConfigError:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         raise
     except OSError as error:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         raise FrontierAlertConfigError(f"cannot acquire lock file: {error}") from error
 
 
@@ -787,6 +884,82 @@ class _Outbox:
         return result.ok
 
 
+def _degraded_subject(kind: str, consecutive_failures: int, *, retry: bool = False) -> str:
+    if kind == DEGRADED_OBSERVABILITY_UNAVAILABLE:
+        if retry and consecutive_failures == 0:
+            # A retry after the query recovered: quoting "0 consecutive query
+            # failures" would read as nonsense in the operator's inbox.
+            return (
+                f"[NHMS] {EVENT_DEGRADED}: {DEGRADED_OBSERVABILITY_UNAVAILABLE}"
+                " (undelivered alert from an earlier tick)"
+            )
+        return (
+            f"[NHMS] {EVENT_DEGRADED}: {DEGRADED_OBSERVABILITY_UNAVAILABLE}"
+            f" ({consecutive_failures} consecutive query failures)"
+        )
+    return f"[NHMS] {EVENT_DEGRADED}: {kind} on node-27 frontier alerter"
+
+
+def _degraded_body(
+    config: AlertConfig,
+    *,
+    kind: str,
+    reason: str,
+    retry: bool,
+    now: datetime,
+    state: AlertState,
+    observation: Snapshot | None,
+    observation_error: str | None,
+    stall_for: timedelta,
+) -> list[str]:
+    lines: list[str] = []
+    if retry:
+        lines += [
+            "(retry: a previous tick raised this alert but the send failed;"
+            " the alert was persisted rather than dropped)",
+            "",
+        ]
+    if kind == DEGRADED_STATE_CORRUPT:
+        lines += [
+            "The frontier alerter's persisted state was unusable and has been rebuilt.",
+            f"Reason: {reason}",
+            f"Baseline reset at: {_iso_or_none(state.baseline_reset_at)}",
+            "",
+            "The stall clock was NOT silently reset in the operator's favour:"
+            " the rebuild is recorded and the next stall window starts now.",
+            "",
+        ]
+        if state.baseline_pending:
+            lines += [
+                "Baseline is PENDING: the observation query failed on the same"
+                " tick, so no baseline was invented. The next successful"
+                " observation fills it silently and does not count as progress.",
+                f"Observation error: {observation_error}",
+            ]
+        else:
+            lines += _snapshot_lines("Rebuilt baseline", state.snapshot)
+    elif retry and state.consecutive_query_failures == 0:
+        lines += [
+            "An observability-unavailable alert was raised on an earlier tick and"
+            " could not be delivered then. The observation query has since"
+            " succeeded — this mail exists so the outage is not lost from the"
+            " operator's timeline.",
+            f"Original error: {reason}",
+        ]
+    else:
+        lines += [
+            f"The frontier observation query has failed {state.consecutive_query_failures}"
+            f" consecutive ticks (budget {config.query_fail_ticks}).",
+            f"Last error: {reason}",
+            "",
+            "The stall clock keeps running across query failures:"
+            f" last observed change {_iso_or_none(state.last_change_at)}"
+            f" ({_format_duration(stall_for)} ago).",
+        ]
+    lines += ["", f"Now: {_iso_or_none(now)}", f"Runbook: {RUNBOOK_REFERENCE}"]
+    return lines
+
+
 def _emit_log(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
@@ -819,17 +992,25 @@ def run_tick(
     except Exception as error:  # noqa: BLE001 - D2 row 3: any query failure
         observation_error = _redact_error_text(error, config.database_url)
 
-    if load.status == STATE_LOAD_OK and load.state is not None:
-        state = load.state
+    rebuilt = not (load.status == STATE_LOAD_OK and load.state is not None)
+    if not rebuilt:
+        state = load.state  # type: ignore[assignment]
     else:
         # Missing (bootstrap) and corrupt (degraded) both rebuild the baseline
         # from the current observation; they differ only in whether an email
         # goes out and which timestamp is recorded (D2 rows 1+2).
-        state = AlertState(snapshot=dict(observation or {}), last_change_at=now)
-        if load.status == STATE_LOAD_MISSING:
-            state.baseline_established_at = now
+        state = AlertState(snapshot={}, last_change_at=now)
+        if observation is None:
+            # A-C1: no observation means no baseline. Recording an empty
+            # snapshot as established would make every source look new on the
+            # next successful tick — forged progress worth the whole outage.
+            state.baseline_pending = True
         else:
-            state.baseline_reset_at = now
+            state.snapshot = dict(observation)
+            if load.status == STATE_LOAD_MISSING:
+                state.baseline_established_at = now
+            else:
+                state.baseline_reset_at = now
 
     corrupt_reason = (
         _redact_error_text(load.reason or "state unusable", config.database_url)
@@ -839,16 +1020,27 @@ def run_tick(
 
     progressed = False
     progress_reasons: tuple[str, ...] = ()
+    baseline_filled = False
     if observation is not None:
-        if load.status == STATE_LOAD_OK:
+        if rebuilt:
+            # Freshly (re)built baseline: the observation IS the baseline (or,
+            # when it was unobtainable, the baseline stays pending), so there
+            # is nothing to compare against this tick.
+            pass
+        elif state.baseline_pending:
+            # A-C1 fill: a pending baseline is filled SILENTLY. Not progress,
+            # ``last_change_at`` untouched (the stall clock keeps running from
+            # the rebuild point) and ``alert_active`` untouched.
+            state.snapshot = dict(observation)
+            state.baseline_pending = False
+            baseline_filled = True
+            if state.baseline_established_at is None and state.baseline_reset_at is None:
+                state.baseline_established_at = now
+        else:
             progress = evaluate_progress(state.snapshot, observation)
             progressed = progress.progressed
             progress_reasons = progress.reasons
             state.snapshot = progress.baseline
-        else:
-            # Freshly (re)built baseline: the observation IS the baseline, so
-            # there is nothing to compare against this tick.
-            state.snapshot = dict(observation)
         state.consecutive_query_failures = 0
         state.last_error = None
     else:
@@ -892,7 +1084,12 @@ def run_tick(
             or (now - state.last_alert_at) >= config.resend_delta
         )
         if due:
-            stall_event = "initial" if not state.alert_active else "resend"
+            # D3 / review round-1 C-C2: the label follows DELIVERY fact, not
+            # ``alert_active``. A first alert whose send failed leaves
+            # ``alert_active`` true with ``last_alert_at`` unset; its retry is
+            # still the first delivered alert of this stall and must say so —
+            # the operator rebuilds the outage timeline from these labels.
+            stall_event = "initial" if state.last_alert_at is None else "resend"
             body = [
                 f"No directional frontier progress for {_format_duration(stall_for)}"
                 f" (threshold {_hours(config.stall_hours)}).",
@@ -927,64 +1124,91 @@ def run_tick(
             # D2 row 4: a failed send is NOT recorded as delivered, so the next
             # tick retries immediately.
 
-    degraded_events: list[str] = []
+    # ---- degraded family: retries first, then this tick's new events -------
+    # ``degraded_due`` is evaluated ONCE: two different degraded kinds raised
+    # in the same tick both go out (they are distinct signals), while the 6 h
+    # clock still throttles repeats of the same condition. A corrupt state
+    # carries no clock at all (it was unreadable), so that branch always sends
+    # — the accepted over-report of D2 row 2.
     degraded_due = (
         state.last_degraded_alert_at is None
         or (now - state.last_degraded_alert_at) >= config.resend_delta
     )
+    pending_before = [dict(entry) for entry in state.degraded_pending]
+    queue: list[dict[str, Any]] = [
+        {"kind": entry["kind"], "reason": entry.get("reason", ""), "retry": True}
+        for entry in pending_before
+    ]
     if load.status == STATE_LOAD_CORRUPT:
-        # Corrupt state means the dedup clock itself was unreadable, so this
-        # branch always alerts (over-report direction, D2 row 2).
-        body = [
-            "The frontier alerter's persisted state was unusable and has been rebuilt.",
-            f"Reason: {corrupt_reason}",
-            f"Baseline reset at: {_iso_or_none(state.baseline_reset_at)}",
-            "",
-            "The stall clock was NOT silently reset in the operator's favour:"
-            " the rebuild is recorded and the next stall window starts now.",
-            "",
-            *(
-                _snapshot_lines("Rebuilt baseline", state.snapshot)
-                if observation is not None
-                else [f"Observation also unavailable: {observation_error}"]
-            ),
-            "",
-            f"Runbook: {RUNBOOK_REFERENCE}",
-        ]
+        queue.append(
+            {"kind": DEGRADED_STATE_CORRUPT, "reason": corrupt_reason or "", "retry": False}
+        )
+    if observation is None and state.consecutive_query_failures >= config.query_fail_ticks:
+        queue.append(
+            {
+                "kind": DEGRADED_OBSERVABILITY_UNAVAILABLE,
+                "reason": observation_error or "",
+                "retry": False,
+            }
+        )
+    # One email per kind per tick: a fresh occurrence supersedes the retry's
+    # (older) reason text but INHERITS its retry flag — the undelivered alert
+    # is still undelivered, so if this tick is throttled it must stay pending
+    # rather than be silently absorbed by the fresh occurrence.
+    deduped: dict[str, dict[str, Any]] = {}
+    for entry in queue:
+        previous = deduped.get(entry["kind"])
+        if previous is None:
+            deduped[entry["kind"]] = dict(entry)
+        elif not entry["retry"]:
+            deduped[entry["kind"]] = {
+                "kind": entry["kind"],
+                "reason": entry["reason"],
+                "retry": previous["retry"] or entry["retry"],
+            }
+
+    degraded_events: list[str] = []
+    still_pending: list[dict[str, str]] = []
+    for kind in (DEGRADED_STATE_CORRUPT, DEGRADED_OBSERVABILITY_UNAVAILABLE):
+        entry = deduped.get(kind)
+        if entry is None:
+            continue
+        if not degraded_due:
+            # Throttled, not lost: a previously FAILED send stays pending so a
+            # later tick retries it; a merely throttled fresh occurrence does
+            # not become pending (it is a repeat of an already-delivered one).
+            if entry["retry"]:
+                still_pending.append({"kind": kind, "reason": entry["reason"]})
+            continue
+        body = _degraded_body(
+            config,
+            kind=kind,
+            reason=entry["reason"],
+            retry=bool(entry["retry"]),
+            now=now,
+            state=state,
+            observation=observation,
+            observation_error=observation_error,
+            stall_for=stall_for,
+        )
         sent = outbox.send(
             event=EVENT_DEGRADED,
-            detail=DEGRADED_STATE_CORRUPT,
-            subject=f"[NHMS] monitoring-degraded: {DEGRADED_STATE_CORRUPT} on node-27 frontier alerter",
+            detail=kind,
+            subject=_degraded_subject(
+                kind, state.consecutive_query_failures, retry=bool(entry["retry"])
+            ),
             body_lines=body,
         )
-        degraded_events.append(DEGRADED_STATE_CORRUPT)
+        degraded_events.append(kind)
         if sent:
             state.last_degraded_alert_at = now
-    if observation is None and state.consecutive_query_failures >= config.query_fail_ticks:
-        if degraded_due:
-            body = [
-                f"The frontier observation query has failed {state.consecutive_query_failures}"
-                f" consecutive ticks (budget {config.query_fail_ticks}).",
-                f"Last error: {observation_error}",
-                "",
-                "The stall clock keeps running across query failures:"
-                f" last observed change {_iso_or_none(state.last_change_at)}"
-                f" ({_format_duration(stall_for)} ago).",
-                "",
-                f"Runbook: {RUNBOOK_REFERENCE}",
-            ]
-            sent = outbox.send(
-                event=EVENT_DEGRADED,
-                detail=DEGRADED_OBSERVABILITY_UNAVAILABLE,
-                subject=(
-                    f"[NHMS] monitoring-degraded: {DEGRADED_OBSERVABILITY_UNAVAILABLE}"
-                    f" ({state.consecutive_query_failures} consecutive query failures)"
-                ),
-                body_lines=body,
-            )
-            degraded_events.append(DEGRADED_OBSERVABILITY_UNAVAILABLE)
-            if sent:
-                state.last_degraded_alert_at = now
+        elif not dry_run:
+            # A-C2: a degraded alert that failed to send is NOT lost; it is
+            # persisted and retried on the next tick under the same clock.
+            still_pending.append({"kind": kind, "reason": entry["reason"]})
+    # ``--dry-run`` decides nothing durable: the queue it would have drained
+    # stays exactly as it was on disk, and the receipt reports that truth.
+    state.degraded_pending = pending_before if dry_run else still_pending
 
     send_failures = [record for record in outbox.records if not record["dry_run"] and not record["sent"]]
     receipt: dict[str, Any] = {
@@ -1000,6 +1224,9 @@ def run_tick(
         "baseline": snapshot_to_json(state.snapshot),
         "progress": progressed,
         "progress_reasons": list(progress_reasons),
+        "baseline_pending": state.baseline_pending,
+        "baseline_filled": baseline_filled,
+        "degraded_pending": [dict(entry) for entry in state.degraded_pending],
         "last_change_at": _iso_or_none(state.last_change_at),
         "stall_seconds": stall_for.total_seconds(),
         "stall_hours_threshold": config.stall_hours,

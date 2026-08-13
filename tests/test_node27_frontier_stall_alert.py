@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -132,9 +133,15 @@ def _failing_provider(error: Exception) -> alerter.ObservationProvider:
     return observe
 
 
+class _MustNotHappen(BaseException):
+    """Derived from BaseException on purpose: ``run_tick`` treats any
+    ``Exception`` from the provider as a query failure, which would quietly
+    absorb a guard violation instead of failing the test."""
+
+
 def _exploding_provider() -> alerter.ObservationProvider:
     def observe(_config: alerter.AlertConfig):  # pragma: no cover - must not run
-        raise AssertionError("observation must not be attempted")
+        raise _MustNotHappen("observation must not be attempted")
 
     return observe
 
@@ -709,6 +716,16 @@ def test_b10_failed_send_is_not_recorded_and_retries_next_tick(tmp_path: Path) -
     assert alerter.EVENT_STALLED in retry.subject()
     assert receipt["emails"][0]["sent"] is True
     assert _read_state(config).last_alert_at == now
+    # B18: the retry is still the FIRST delivered alert of this stall. Labeling
+    # it "resend" would tell the operator a mail they never got had gone out.
+    assert receipt["stall_alert"] == "initial"
+    assert receipt["emails"][0]["detail"] == "initial"
+
+    # The next one, now that a mail was actually delivered, is a resend.
+    later = FakeSendmail()
+    receipt = _tick(config, now=now + timedelta(hours=6), snapshot=snapshot, sendmail=later)
+    assert len(later.calls) == 1
+    assert receipt["stall_alert"] == "resend"
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +805,521 @@ def test_b13_lock_is_released_so_the_next_tick_runs(tmp_path: Path) -> None:
     fd = alerter.acquire_lock(config.lock_path)
     assert fd is not None
     alerter.release_lock(fd)
+
+
+# ---------------------------------------------------------------------------
+# B14 — byte-level and parser-resource state corruption stay contained.
+# ---------------------------------------------------------------------------
+
+
+def _deeply_nested_json(depth: int = 100_000) -> str:
+    return "[" * depth + "]" * depth
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [
+        lambda path: path.write_bytes(b"\xff\xfe\x00\x80garbage"),
+        lambda path: path.write_text(_deeply_nested_json(), encoding="utf-8"),
+    ],
+    ids=["non_utf8_bytes", "pathological_nesting"],
+)
+def test_b14_byte_and_parser_corruption_land_in_the_corrupt_branch(tmp_path: Path, writer) -> None:
+    """``UnicodeDecodeError`` is a ValueError (not an OSError) and
+    ``RecursionError`` is a RuntimeError: neither is caught by a naive
+    OSError/JSONDecodeError pair, and either escaping means the alerter goes
+    silent exactly when its own state is damaged."""
+
+    config = _config(tmp_path)
+    _bootstrap(config, _baseline_snapshot())
+    writer(config.state_path)
+
+    load = alerter.load_state(config.state_path)
+    assert load.status == alerter.STATE_LOAD_CORRUPT
+    assert load.state is None
+
+    sendmail = FakeSendmail()
+    now = T0 + timedelta(hours=1)
+    receipt = _tick(config, now=now, snapshot=_baseline_snapshot(), sendmail=sendmail)
+
+    assert receipt["state_load"] == alerter.STATE_LOAD_CORRUPT
+    assert receipt["degraded_events"] == [alerter.DEGRADED_STATE_CORRUPT]
+    assert len(sendmail.calls) == 1
+    state = _read_state(config)
+    assert state.baseline_reset_at == now
+    assert state.snapshot["gfs"].cycles == 40
+
+
+def test_b14_corruption_is_contained_end_to_end_through_main(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _env(tmp_path)
+    config = alerter.config_from_env(env)
+    _bootstrap(config, _baseline_snapshot())
+    config.state_path.write_bytes(b"\xff\xfe\x00\x80garbage")
+
+    sendmail = FakeSendmail()
+    code = main_with(
+        env, now=T0 + timedelta(hours=1), observe=_provider(_baseline_snapshot()), sendmail=sendmail
+    )
+
+    assert code == 1  # degraded, but a controlled degraded
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert printed["degraded_events"] == [alerter.DEGRADED_STATE_CORRUPT]
+    assert "Traceback" not in printed.get("status", "")
+    assert len(sendmail.calls) == 1
+    # The state is usable again on the very next tick.
+    assert alerter.load_state(config.state_path).status == alerter.STATE_LOAD_OK
+
+
+# ---------------------------------------------------------------------------
+# B15 — every blocking call is bounded.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.executed: list[str] = []
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str) -> None:
+        self.executed.append(sql)
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self.rows
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+        self.closed = False
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_b15_default_observe_passes_a_bounded_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unbounded connect would let the watchdog hang the way the pass it
+    watches hung. Pinned at the call site, not only on the constant."""
+
+    import sys
+    import types
+
+    cursor = _FakeCursor(
+        [
+            {
+                "source_key": "gfs",
+                "frontier": datetime(2026, 8, 12, 18, 0, tzinfo=UTC),
+                "cycles": 40,
+                "latest_created": datetime(2026, 8, 12, 23, 30, tzinfo=UTC),
+            }
+        ]
+    )
+    connection = _FakeConnection(cursor)
+    recorded: dict[str, Any] = {}
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_extras = types.ModuleType("psycopg2.extras")
+    fake_extras.RealDictCursor = object  # type: ignore[attr-defined]
+
+    def _connect(dsn: str, **kwargs: Any) -> _FakeConnection:
+        recorded["dsn"] = dsn
+        recorded.update(kwargs)
+        return connection
+
+    fake_psycopg2.connect = _connect  # type: ignore[attr-defined]
+    fake_psycopg2.extras = fake_extras  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_extras)
+
+    config = _config(tmp_path)
+    snapshot = alerter.default_observe(config)
+
+    assert recorded["dsn"] == DSN
+    assert recorded["connect_timeout"] == alerter.CONNECT_TIMEOUT_SEC
+    assert 0 < alerter.CONNECT_TIMEOUT_SEC <= 60
+    assert f"SET statement_timeout = {alerter.QUERY_TIMEOUT_MS}" in cursor.executed
+    assert 0 < alerter.QUERY_TIMEOUT_MS <= 300_000
+    assert connection.closed is True
+    assert snapshot["gfs"].cycles == 40
+
+
+# ---------------------------------------------------------------------------
+# B16 — a baseline is only ever established from a real observation.
+# ---------------------------------------------------------------------------
+
+
+def test_b16_corrupt_plus_failed_observation_leaves_the_baseline_pending(tmp_path: Path) -> None:
+    """Verifier probe geometry A-C1. If the empty rebuild baseline were
+    persisted as live, the next successful observation would read as four new
+    sources = progress, pushing the stall clock out by the whole outage."""
+
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    stall = FakeSendmail()
+    _tick(config, now=T0 + timedelta(hours=4), snapshot=snapshot, sendmail=stall)
+    assert len(stall.calls) == 1
+    assert _read_state(config).alert_active is True
+
+    # T0+5h: state corrupt AND the observation fails on the same tick.
+    config.state_path.write_text("{corrupt", encoding="utf-8")
+    blind = FakeSendmail()
+    rebuild_at = T0 + timedelta(hours=5)
+    receipt = _tick(
+        config,
+        now=rebuild_at,
+        observe=_failing_provider(RuntimeError("db down")),
+        sendmail=blind,
+    )
+
+    assert receipt["state_load"] == alerter.STATE_LOAD_CORRUPT
+    assert receipt["baseline_pending"] is True
+    assert receipt["baseline_reset_at"] is None
+    assert receipt["baseline_established_at"] is None
+    assert len(blind.calls) == 1  # the monitoring-degraded mail still goes out
+    state = _read_state(config)
+    assert state.baseline_pending is True
+    assert state.snapshot == {}
+    assert state.last_change_at == rebuild_at
+
+    # T0+6h: the observation comes back with EXACTLY the pre-corruption data.
+    fill = FakeSendmail()
+    receipt = _tick(config, now=T0 + timedelta(hours=6), snapshot=snapshot, sendmail=fill)
+
+    assert fill.calls == []
+    assert receipt["progress"] is False
+    assert receipt["baseline_filled"] is True
+    assert receipt["baseline_pending"] is False
+    state = _read_state(config)
+    assert state.last_change_at == rebuild_at  # clock untouched by the fill
+    assert state.snapshot["gfs"].cycles == 40
+
+    # The stall clock therefore runs from the rebuild point: T0+9h, not T0+10h.
+    quiet = FakeSendmail()
+    _tick(config, now=T0 + timedelta(hours=8, minutes=59), snapshot=snapshot, sendmail=quiet)
+    assert quiet.calls == []
+
+    fires = FakeSendmail()
+    receipt = _tick(config, now=T0 + timedelta(hours=9), snapshot=snapshot, sendmail=fires)
+    assert len(fires.calls) == 1
+    assert alerter.EVENT_STALLED in fires.subject()
+    assert receipt["stall_alert"] == "initial"
+
+
+def test_b16_bootstrap_plus_failed_observation_is_pending_and_silent(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    blind = FakeSendmail()
+
+    receipt = _tick(
+        config, now=T0, observe=_failing_provider(RuntimeError("db down")), sendmail=blind
+    )
+
+    assert blind.calls == []  # a fresh install is not a degradation
+    assert receipt["state_load"] == alerter.STATE_LOAD_MISSING
+    assert receipt["baseline_pending"] is True
+    assert receipt["baseline_established_at"] is None
+    state = _read_state(config)
+    assert state.snapshot == {}
+    assert state.baseline_pending is True
+
+    fill_at = T0 + timedelta(hours=1)
+    fill = FakeSendmail()
+    receipt = _tick(config, now=fill_at, snapshot=_baseline_snapshot(), sendmail=fill)
+
+    assert fill.calls == []
+    assert receipt["progress"] is False
+    assert receipt["baseline_filled"] is True
+    state = _read_state(config)
+    assert state.baseline_pending is False
+    assert state.baseline_established_at == fill_at
+    assert state.last_change_at == T0  # the pending fill never moves the clock
+    assert state.snapshot["ifs"].cycles == 17
+
+
+# ---------------------------------------------------------------------------
+# B17 — a degraded alert whose send failed is retried, once.
+# ---------------------------------------------------------------------------
+
+
+def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    config.state_path.write_text("{corrupt", encoding="utf-8")
+    failing = FakeSendmail([alerter.SendResult(returncode=1, error="sendmail: queue full")])
+    receipt = _tick(config, now=T0 + timedelta(hours=1), snapshot=snapshot, sendmail=failing)
+
+    assert len(failing.calls) == 1
+    assert receipt["emails"][0]["sent"] is False
+    assert receipt["degraded_pending"] == [
+        {"kind": alerter.DEGRADED_STATE_CORRUPT, "reason": receipt["state_load_reason"]}
+    ]
+    state = _read_state(config)
+    assert state.last_degraded_alert_at is None
+    assert [entry["kind"] for entry in state.degraded_pending] == [alerter.DEGRADED_STATE_CORRUPT]
+
+    # A --dry-run tick in between drains nothing: no send, state untouched,
+    # and the receipt still reports the queue as pending.
+    before = config.state_path.read_bytes()
+    dry_receipt = _tick(
+        config,
+        now=T0 + timedelta(hours=1, minutes=10),
+        snapshot=snapshot,
+        sendmail=ExplodingSendmail(),  # raises if the dry run tries to send
+        dry_run=True,
+    )
+    assert dry_receipt["degraded_pending"] == [
+        {"kind": alerter.DEGRADED_STATE_CORRUPT, "reason": receipt["state_load_reason"]}
+    ]
+    assert config.state_path.read_bytes() == before
+
+    retry_at = T0 + timedelta(hours=1, minutes=30)
+    retry = FakeSendmail()
+    receipt = _tick(config, now=retry_at, snapshot=snapshot, sendmail=retry)
+
+    assert len(retry.calls) == 1
+    assert alerter.DEGRADED_STATE_CORRUPT in retry.subject()
+    assert "retry" in retry.messages[0]
+    assert receipt["state_load"] == alerter.STATE_LOAD_OK  # the retry is not a new corruption
+    assert receipt["degraded_pending"] == []
+    state = _read_state(config)
+    assert state.last_degraded_alert_at == retry_at
+    assert state.degraded_pending == []
+
+    # No duplicate inside the 6 h dedup window, and nothing left pending.
+    quiet = FakeSendmail()
+    receipt = _tick(config, now=retry_at + timedelta(hours=1), snapshot=snapshot, sendmail=quiet)
+    assert quiet.calls == []
+    assert receipt["degraded_events"] == []
+
+
+def test_b17_throttled_pending_degraded_survives_until_the_window_opens(tmp_path: Path) -> None:
+    """A pending retry that lands inside the dedup window is not dropped: it
+    stays pending until the window opens (over-report direction preserved).
+
+    Geometry: one tick raises BOTH degraded kinds. The first send arms the 6 h
+    clock, the second fails — so the failed one is pending while the clock is
+    armed. ``stall_hours`` is widened so the stall channel stays out of the
+    way."""
+
+    config = _config(
+        tmp_path, NHMS_FRONTIER_STALL_HOURS="48", NHMS_FRONTIER_QUERY_FAIL_TICKS="1"
+    )
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    config.state_path.write_text("{corrupt", encoding="utf-8")
+    mixed = FakeSendmail(
+        [alerter.SendResult(returncode=0), alerter.SendResult(returncode=1, error="queue full")]
+    )
+    armed_at = T0 + timedelta(hours=1)
+    receipt = _tick(
+        config, now=armed_at, observe=_failing_provider(RuntimeError("db down")), sendmail=mixed
+    )
+
+    assert receipt["degraded_events"] == [
+        alerter.DEGRADED_STATE_CORRUPT,
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE,
+    ]
+    state = _read_state(config)
+    assert state.last_degraded_alert_at == armed_at
+    assert [entry["kind"] for entry in state.degraded_pending] == [
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
+    ]
+
+    throttled = FakeSendmail()
+    _tick(config, now=armed_at + timedelta(hours=1), snapshot=snapshot, sendmail=throttled)
+    assert throttled.calls == []
+    assert [entry["kind"] for entry in _read_state(config).degraded_pending] == [
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
+    ], "a throttled pending retry must not be dropped"
+
+    opened = FakeSendmail()
+    receipt = _tick(
+        config, now=armed_at + timedelta(hours=6), snapshot=snapshot, sendmail=opened
+    )
+    assert len(opened.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in opened.subject()
+    assert _read_state(config).degraded_pending == []
+
+
+# ---------------------------------------------------------------------------
+# B19 — header-breaking recipient/sender configuration fails closed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["NHMS_ALERT_EMAIL_TO", "NHMS_ALERT_EMAIL_FROM"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ops@example.invalid\r\nBcc: attacker@example.invalid",
+        "ops@example.invalid\n",
+        "ops@example.invalid\r",
+    ],
+    ids=["injected_header", "trailing_lf", "trailing_cr"],
+)
+def test_b19_crlf_in_addresses_is_rejected_at_config_time(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], key: str, value: str
+) -> None:
+    env = _env(tmp_path, **{key: value})
+    sendmail = FakeSendmail()
+
+    code = main_with(env, now=T0, observe=_exploding_provider(), sendmail=sendmail)
+
+    assert code == 2
+    assert sendmail.calls == []
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert key in payload["reason"]
+
+
+# ---------------------------------------------------------------------------
+# B20 — an unusable lock path is a config error, not a traceback.
+# ---------------------------------------------------------------------------
+
+
+def test_b20_unwritable_lock_directory_is_a_structured_config_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    readonly_root = tmp_path / "readonly"
+    readonly_root.mkdir()
+    env = _env(tmp_path, NHMS_FRONTIER_STATE_PATH=str(readonly_root / "nested" / "state.json"))
+    readonly_root.chmod(0o500)
+    sendmail = FakeSendmail()
+    try:
+        code = main_with(env, now=T0, observe=_exploding_provider(), sendmail=sendmail)
+    finally:
+        readonly_root.chmod(0o700)
+
+    assert code == 2
+    assert sendmail.calls == []
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert "lock" in payload["reason"]
+
+
+def test_b20_lock_path_under_a_regular_file_is_a_structured_config_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("", encoding="utf-8")
+    env = _env(tmp_path, NHMS_FRONTIER_STATE_PATH=str(blocker / "state.json"))
+    sendmail = FakeSendmail()
+
+    code = main_with(env, now=T0, observe=_exploding_provider(), sendmail=sendmail)
+
+    assert code == 2
+    assert sendmail.calls == []
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+
+
+# ---------------------------------------------------------------------------
+# B21 — the shipped .example is safe under BOTH readers.
+# ---------------------------------------------------------------------------
+
+_EXAMPLE_PATH = Path(__file__).resolve().parents[1] / "infra/env/node27-frontier-alert.example"
+_ASSIGNMENT_RE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
+_COMMENTED_ASSIGNMENT_RE = re.compile(r"^#\s?(?P<body>[A-Z][A-Z0-9_]*=.*)$")
+
+
+def _example_with_all_assignments_active() -> str:
+    lines: list[str] = []
+    for line in _EXAMPLE_PATH.read_text(encoding="utf-8").splitlines():
+        commented = _COMMENTED_ASSIGNMENT_RE.match(line)
+        lines.append(commented.group("body") if commented else line)
+    return "\n".join(lines) + "\n"
+
+
+def _systemd_style_parse(text: str) -> dict[str, str]:
+    """Minimal EnvironmentFile= reader: no expansion, strip matching quotes."""
+
+    parsed: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _ASSIGNMENT_RE.match(stripped)
+        if match is None:
+            continue
+        value = match.group("value").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        parsed[match.group("key")] = value
+    return parsed
+
+
+def test_b21_example_is_syntax_clean_with_every_assignment_uncommented(tmp_path: Path) -> None:
+    """Every commented example line is a line an operator will uncomment. An
+    unquoted ``<nwm@host>`` would be a shell redirect the moment they do."""
+
+    candidate = tmp_path / "node27-frontier-alert.env"
+    candidate.write_text(_example_with_all_assignments_active(), encoding="utf-8")
+
+    result = subprocess.run(["bash", "-n", str(candidate)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    # Guard against a vacuous pass: the uncommenting must actually have
+    # activated the commented sender example (the line most likely to be a
+    # shell redirect if someone drops the quotes).
+    activated = [
+        line
+        for line in candidate.read_text(encoding="utf-8").splitlines()
+        if line.startswith("NHMS_ALERT_EMAIL_FROM=")
+    ]
+    assert activated == ['NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <nwm@node-27>"']
+
+
+def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Path) -> None:
+    text = _example_with_all_assignments_active()
+    candidate = tmp_path / "node27-frontier-alert.env"
+    candidate.write_text(text, encoding="utf-8")
+
+    expected = _systemd_style_parse(text)
+    assert set(expected) >= {
+        "DATABASE_URL",
+        "NHMS_ALERT_EMAIL_TO",
+        "NHMS_ALERT_EMAIL_FROM",
+        "NHMS_FRONTIER_STALL_HOURS",
+        "NHMS_FRONTIER_STATE_PATH",
+        "NHMS_FRONTIER_SENDMAIL",
+    }
+
+    keys = sorted(expected)
+    script = 'set -a; . "$1"; shift; for key in "$@"; do printf "%s=%s\\n" "$key" "${!key}"; done'
+    result = subprocess.run(
+        ["bash", "-c", script, "_", str(candidate), *keys], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+    from_bash = dict(line.split("=", 1) for line in result.stdout.splitlines())
+    assert from_bash == expected
+
+    # And the shipped values are accepted by the runner's own parser.
+    config = alerter.config_from_env(expected)
+    assert config.email_from == "NHMS Frontier Alert <nwm@node-27>"
+    assert config.stall_hours == 4.0
+    assert config.sendmail_path == "/usr/sbin/sendmail"
 
 
 # ---------------------------------------------------------------------------
