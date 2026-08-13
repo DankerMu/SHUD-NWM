@@ -4,7 +4,8 @@
 # Deliberately a THIN shell (design D4): the single-instance mutex lives in
 # the python runner (fcntl.flock on a lockfile beside the state file) so it is
 # unit-testable, unlike the wrapper-level flock the sibling *_once.sh scripts
-# use. This wrapper only does what a shell must do: refuse an unsafe env file,
+# use. This wrapper only does what a shell must do: refuse an unsafe env file
+# (symlinked or not mode-0600 — checked on EVERY path, systemd or manual),
 # make the log directory, and exec the runner.
 
 set -u
@@ -36,22 +37,36 @@ case "$ENV_FILE" in
   *) blocked "ENV_FILE_NOT_ABSOLUTE" ;;
 esac
 
-# Single reader (design D4, review round-1 B-C3): under systemd the env file
-# is loaded exactly once by EnvironmentFile=, and systemd's parser is NOT the
-# shell's. Re-sourcing it here would make a value's meaning depend on which
-# parser ran last (quoting, $-expansion, backslashes) — two readers, two
-# grammars, one file. So the wrapper sources the file ONLY on the manual
-# debugging path, detected by DATABASE_URL not being injected yet.
-if [ -n "${DATABASE_URL:-}" ]; then
-  : "env already injected (systemd EnvironmentFile=); not re-sourcing $ENV_FILE"
-elif [ -f "$ENV_FILE" ]; then
-  if [ -L "$ENV_FILE" ]; then
-    blocked "ENV_FILE_SYMLINK_FORBIDDEN"
-  fi
+# --- env file safety: UNCONDITIONAL (design D4, round-2 P2) ----------------
+# The permission contract on this file (0600, never a symlink) is ORTHOGONAL
+# to who parses it: the file holds the read-only role's password whether the
+# wrapper sources it or systemd already did. Round-1 put these checks behind
+# the "should I source?" branch, which silently accepted a mode-0644 password
+# file on the systemd path while three documents still promised refusal.
+# -L is tested BEFORE -e because -e follows the link: a dangling symlink is a
+# symlink, and must be refused as one rather than reported as missing.
+if [ -L "$ENV_FILE" ]; then
+  blocked "ENV_FILE_SYMLINK_FORBIDDEN"
+fi
+if [ -e "$ENV_FILE" ]; then
   ENV_MODE=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || true)
   if [ "$ENV_MODE" != "600" ]; then
     blocked "ENV_FILE_MODE_UNSAFE"
   fi
+fi
+
+# --- single reader: only the SOURCING is gated -----------------------------
+# Under systemd the env file is loaded exactly once by EnvironmentFile=, and
+# systemd's parser is NOT the shell's. Re-sourcing here would make a value's
+# meaning depend on which parser ran last (quoting, $-expansion, backslashes).
+# The sentinel is LANE-SCOPED (Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1
+# in the service unit) rather than DATABASE_URL: DATABASE_URL is the most
+# shared variable name in this repo, so a debugging shell that happens to have
+# another lane's DSN exported would skip sourcing and run this lane against the
+# wrong database.
+if [ -n "${NODE27_FRONTIER_ALERT_ENV_INJECTED:-}" ]; then
+  : "env injected by systemd EnvironmentFile=; not re-sourcing $ENV_FILE"
+elif [ -e "$ENV_FILE" ]; then
   set -a
   # shellcheck disable=SC1090
   if ! . "$ENV_FILE"; then

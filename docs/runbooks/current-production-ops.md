@@ -1909,7 +1909,9 @@ Slurm、不看 unit 状态，只看**最终落库产物**——node-22 任何故
 
 degraded 邮件正文若以 `(retry: ...)` 开头，说明**上一 tick 就已经降级、只是邮件没发出去**
 （sendmail 非零退出）：告警被落盘进 state 的 `degraded_pending`，本封是补发。
-判读时间线时以正文里的 `Reason` 与上一 tick 的 receipt 为准，别把补发当成新故障。
+判读时间线**必须查 `frontier-alert-events.jsonl`**（追加式，每封告警一行）——
+receipt 是 latest-only、每 tick 被原子覆写，出事那一 tick 的 receipt 早就没了。
+以 JSONL 里的事件序列 + 邮件正文的 `Reason` 为准，别把补发当成新故障。
 补发同样受 6h 去重钟约束；只要没发成功就一直挂在 `degraded_pending` 里，不会被丢。
 
 fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障只会**提高**告警倾向。
@@ -1920,10 +1922,16 @@ fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障
 那是首次安装/换路径的 bootstrap，只记 `baseline_established_at`，代价是人为删档会
 伪装成 bootstrap、盲窗 ≤ 一个 stall 窗口。
 
-**持久性损坏**（例如 `NHMS_FRONTIER_STATE_PATH` 被指到一个目录、或所在卷只读）会
-让去重钟跟着状态一起丢，于是**每 tick 一封** `state-corrupt`（上限 48 封/日），
-同时每 tick exit 1、unit failed。这是刻意选的过报方向，不是 bug——收到这种连发时
-别去调告警器，先修 state 路径本身。
+**持久性损坏**这类误配置有**两种截然不同的表现**，别把它们当成一回事：
+
+| 现场 | 表现 | 怎么发现 |
+|---|---|---|
+| `NHMS_FRONTIER_STATE_PATH` 指到一个目录（锁能开、state 写不下去） | 去重钟随状态一起丢 → **每 tick 一封** `state-corrupt`（上限 48 封/日），同时每 tick exit 1、unit failed | 邮箱被刷屏；这是刻意选的过报方向，不是 bug |
+| **锁文件本身打不开**（卷只读、root 用 sudo 跑过一次留下 root 属主的 `<state>.lock`） | 结构化 config error、**rc=2、零邮件** —— 告警器根本没跑到观测那步 | **只有 `systemctl --user status nhms-node27-frontier-alert.service` 的 failed 状态和 `frontier-alert.log` 能看见**，邮箱一片安静。定期看治理 receipt 里的 unit 状态就是为了这个 |
+
+两种都先修路径/属主本身，别去调告警器参数。第二种是本 lane 唯一"故障但零邮件"的
+几何（配置期失败先于任何邮件通道），它靠 unit failed 兜底；几何不对称的进一步收口
+另立 issue。
 
 ### 10.3 阈值口径（改之前先读这段）
 
@@ -1951,14 +1959,17 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
 .venv/bin/python scripts/node27_frontier_stall_alert.py --once --dry-run | python3 -m json.tool
 ```
 
-4. 确认业务其实活着而告警仍在：读 receipt 的 `baseline` 与 `observation` 两块，
-   对比哪个 marker 应该增而没增；`hydro.hydro_run` 侧用 §9 的值守 SQL 交叉验证。
+4. 确认业务其实活着而告警仍在：读**当前** receipt 的 `baseline` 与 `observation`
+   两块，对比哪个 marker 应该增而没增；要看**历史**（哪一 tick 开始不动、发过几封）
+   一律读 `frontier-alert-events.jsonl`——receipt 只有最新一 tick，每 tick 覆写。
+   `hydro.hydro_run` 侧用 §9 的值守 SQL 交叉验证。
 
 ### 10.5 状态、产物与恢复闭环语义
 
 - 状态：`NHMS_FRONTIER_STATE_PATH`（原子 tmp+rename，含 `schema_version`、
   per-source 高水位基线、`last_change_at`、`alert_active`、`last_alert_at`、
-  `baseline_pending`、`degraded_pending`）。单实例互斥是**脚本内** `fcntl.flock`
+  `baseline_pending`+`baseline_pending_kind`、`degraded_pending`、
+  `last_degraded_alert_by_kind`）。单实例互斥是**脚本内** `fcntl.flock`
   （锁文件 `<state>.lock`），第二实例结构化 no-op 退出 0，不会重复观测或重复发信。
   锁目录不可建/不可写（EACCES/EROFS/ENOTDIR）走结构化 config error 退出 2，不是
   裸 traceback。
@@ -1968,7 +1979,9 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
   基线——**不算进度、不动 `last_change_at`、不清 `alert_active`**。这条很关键：若
   当时把空基线当真，下一次成功观测会把所有 source 判成"新 source"=进度，把 stall
   时钟整整推后一个 DB 中断时长（漏报）。在 receipt 里看到 `baseline_pending: true`
-  就意味着"现在没有可比对的基线"，优先修 DB 可达性。
+  就意味着"现在没有可比对的基线"，优先修 DB 可达性。填充时按 `baseline_pending_kind`
+  记到正确的戳位：损坏起源记 `baseline_reset_at`（如实说"这是一次降级重建"），
+  bootstrap 起源记 `baseline_established_at`——损坏重建绝不冒充全新安装。
 - 产物：`NHMS_FRONTIER_RECEIPT_PATH`（每 tick 原子覆写，latest 语义）+ 同目录
   `frontier-alert-events.jsonl`（追加式告警事件流）。两者都不是正式 schema
   产物，无跨工具消费方。
@@ -1981,6 +1994,10 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
   按投递事实重建）。degraded 邮件发失败 → 进 `degraded_pending`，下 tick 在 6h
   去重钟允许时补发，成功即清；补发正文带 `(retry: ...)` 前缀。recovered 邮件发失败
   是唯一不重试的一类（见上）。
+- **degraded 去重钟是 per-kind 的**（`last_degraded_alert_by_kind`）：`state-corrupt`
+  与 `observability-unavailable` 各有自己的 6h 窗。一封 `state-corrupt` **不会**
+  压掉紧随其后的首封 `observability-unavailable`——那等于整类事件从未被告知
+  （漏报方向）。同类 6h 内的重复仍然去重。
 
 ### 10.6 信号口径（认领的盲区，不是 bug）
 
@@ -2000,7 +2017,8 @@ ssh -p 32099 nwm@210.77.77.27
 cd /home/nwm/NWM
 cp infra/env/node27-frontier-alert.example infra/env/node27-frontier-alert.env
 chmod 600 infra/env/node27-frontier-alert.env
-# 填入只读角色 DSN（nhms_display_ro）与收件人；wrapper 会拒绝非 0600 / 符号链接 env
+# 填入只读角色 DSN（nhms_display_ro）与收件人。wrapper 在**任何**路径（systemd 或
+# 手工）都拒绝符号链接 / 非 0600 的 env 文件——权限契约与"谁来 source"无关。
 bash -n infra/env/node27-frontier-alert.env   # 填完先过一遍语法（见下 env 语法警示）
 install -m 644 infra/systemd/nhms-node27-frontier-alert.service ~/.config/systemd/user/
 install -m 644 infra/systemd/nhms-node27-frontier-alert.timer   ~/.config/systemd/user/
@@ -2018,8 +2036,12 @@ stalled；投递验证必须三重——sendmail exit 0 + mail log 远端 250 + 
 掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。
 
 **env 文件单读者 + 双语法警示**：systemd 路径下 env 由 service 的
-`EnvironmentFile=` 读**一次**；wrapper 只在 `DATABASE_URL` 尚未注入（手工 shell
-调试）时才 `source`，不会二次解析。但同一份文件仍可能被两种语法读到，所以：含空格
+`EnvironmentFile=` 读**一次**，同时 service 注入 lane 专属哨兵
+`Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1`；wrapper 只在该哨兵**缺席**
+（手工 shell 调试）时才 `source`，不会二次解析。哨兵刻意不用 `DATABASE_URL`——那是
+全仓最常被别的 lane 导出的变量名，用它当哨兵会让调试 shell 里带着他 lane DSN 的人
+静默跳过 source、跑错库。注意：**符号链接 / 0600 校验不受哨兵约束，恒执行**。
+但同一份文件仍可能被两种语法读到，所以：含空格
 的值**必须加引号**（systemd 与 bash 都会剥掉外层双引号），密码里出现
 `` $ ` " \ `` 时两个解析器**释义不同**（bash 在双引号内会展开/吞掉，systemd 不会）
 ——这种口令要么换成 `[A-Za-z0-9._~-]` 字符集，要么两条路径都实测一遍。改完

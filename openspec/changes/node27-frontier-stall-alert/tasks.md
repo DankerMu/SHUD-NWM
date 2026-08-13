@@ -49,6 +49,24 @@
 - [x] 2R.7 B20：锁目录只读 → 结构化 config error（非裸 traceback）
 - [x] 2R.8 B21：`.example` 全部非注释行 + 全部注释示例行去注释后均通过 bash 语法（`bash -n` 级）且值与 systemd 释义一致（引号规约钉）
 
+## 1S. Review round-2 修复（3×P2 + 4×P3，verifier 裁决；state-corruption-escape 类重复 → 不变式审计升级为整类收容）
+
+- [x] 1S.1 **P2** wrapper symlink/0600 校验上移出哨兵门（无条件执行，仅 source 留门内）；哨兵改 lane-scoped `NODE27_FRONTIER_ALERT_ENV_INJECTED=1`（service 注入）；新增 wrapper 测试（兄弟先例形态，必含已注入路径用例）
+- [x] 1S.2 **P2** degraded 去重钟 per-kind：`last_degraded_alert_by_kind: dict`（旧标量读入迁移，schema_version 不变）；`degraded_due` 判定移进 per-kind 循环
+- [x] 1S.3 **P2** `load_state` 读+解析两阶段收敛为整类收容（`except Exception`，`RecursionError` 分支保留注释理由；reason 带 `type(error).__name__`）——不变式：失败类收容不得用枚举集
+- [x] 1S.4 **P3** `baseline_pending_kind`（bootstrap|reset，缺省 bootstrap 兼容）：corrupt 起源填充记 `baseline_reset_at`，degraded retry 邮件正文戳位如实
+- [x] 1S.5 **P3** runbook §10.2 锁/只读卷措辞如实分叉（锁不可开 → rc=2 零邮件仅 unit failed；state_path 指目录 → 每 tick 一封）；§10.4 时间线判读改指 JSONL（receipt 已被覆写）
+- [x] 1S.6 **P3** `NHMS_FRONTIER_STALL_HOURS`/`_RESEND_HOURS` config 期拒 nan/inf/超界（timedelta 构造入 config try，数值不可用=rc=2 config error；注意 `math.isfinite` 不够，1e30 也炸 timedelta）
+- [x] 1S.7 **P3** 默认 From 主机名 sanitize（剔除禁字符回落 `node-27`，绝不 reject——reject 把装饰性异常升级成零邮件 config error，反方向）
+
+## 2S. Review round-2 回归锚
+
+- [x] 2S.1 B22：极值时间戳 state（`9999-12-31T23:59:59-14:00`）→ corrupt 分支、一封 degraded、下 tick 自愈（state 已重写）
+- [x] 2S.2 B23：state-corrupt 邮件发出后 <6h 内 observability budget 跨越 → observability-unavailable 照发（跨类不抑制）；同类 6h 内重复仍去重
+- [x] 2S.3 B24：corrupt 起源 pending 填充 → `baseline_reset_at == fill_at ∧ established is None`；bootstrap 起源对偶（既有断言保留）
+- [x] 2S.4 B25：wrapper——已注入哨兵 + 644 env 文件 → BLOCKED rc=2；已注入 + 0600 正常放行不 source；未注入 + 0600 → source 且跑通（subprocess 真 bash）
+- [x] 2S.5 B26：`NHMS_FRONTIER_STALL_HOURS=nan/inf/1e30` → rc=2 结构化 config error 零邮件；默认 From 注入坏主机名 → sanitize 回落且 `_header_safe` 通过
+
 ## 3. Evidence Floor
 
 - [x] 3.1 `uv run pytest -q tests/test_node27_frontier_stall_alert.py tests/test_node27_resource_governance.py` 全绿（治理注册是唯一触碰的既有代码点，其钉子测试随迁）

@@ -998,12 +998,14 @@ def test_b16_corrupt_plus_failed_observation_leaves_the_baseline_pending(tmp_pat
     assert len(blind.calls) == 1  # the monitoring-degraded mail still goes out
     state = _read_state(config)
     assert state.baseline_pending is True
+    assert state.baseline_pending_kind == alerter.BASELINE_ORIGIN_RESET
     assert state.snapshot == {}
     assert state.last_change_at == rebuild_at
 
     # T0+6h: the observation comes back with EXACTLY the pre-corruption data.
+    fill_at = T0 + timedelta(hours=6)
     fill = FakeSendmail()
-    receipt = _tick(config, now=T0 + timedelta(hours=6), snapshot=snapshot, sendmail=fill)
+    receipt = _tick(config, now=fill_at, snapshot=snapshot, sendmail=fill)
 
     assert fill.calls == []
     assert receipt["progress"] is False
@@ -1012,6 +1014,13 @@ def test_b16_corrupt_plus_failed_observation_leaves_the_baseline_pending(tmp_pat
     state = _read_state(config)
     assert state.last_change_at == rebuild_at  # clock untouched by the fill
     assert state.snapshot["gfs"].cycles == 40
+    # B24: the fill stamps the field matching the ORIGIN. A corruption rebuild
+    # that stamped ``baseline_established_at`` would read forever after as a
+    # fresh installation instead of a recorded degradation.
+    assert state.baseline_reset_at == fill_at
+    assert state.baseline_established_at is None
+    assert receipt["baseline_reset_at"] == fill_at.isoformat()
+    assert receipt["baseline_established_at"] is None
 
     # The stall clock therefore runs from the rebuild point: T0+9h, not T0+10h.
     quiet = FakeSendmail()
@@ -1040,6 +1049,7 @@ def test_b16_bootstrap_plus_failed_observation_is_pending_and_silent(tmp_path: P
     state = _read_state(config)
     assert state.snapshot == {}
     assert state.baseline_pending is True
+    assert state.baseline_pending_kind == alerter.BASELINE_ORIGIN_BOOTSTRAP
 
     fill_at = T0 + timedelta(hours=1)
     fill = FakeSendmail()
@@ -1051,6 +1061,7 @@ def test_b16_bootstrap_plus_failed_observation_is_pending_and_silent(tmp_path: P
     state = _read_state(config)
     assert state.baseline_pending is False
     assert state.baseline_established_at == fill_at
+    assert state.baseline_reset_at is None  # B24 dual: bootstrap origin
     assert state.last_change_at == T0  # the pending fill never moves the clock
     assert state.snapshot["ifs"].cycles == 17
 
@@ -1075,7 +1086,7 @@ def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> No
         {"kind": alerter.DEGRADED_STATE_CORRUPT, "reason": receipt["state_load_reason"]}
     ]
     state = _read_state(config)
-    assert state.last_degraded_alert_at is None
+    assert state.last_degraded_alert_by_kind == {}
     assert [entry["kind"] for entry in state.degraded_pending] == [alerter.DEGRADED_STATE_CORRUPT]
 
     # A --dry-run tick in between drains nothing: no send, state untouched,
@@ -1103,7 +1114,7 @@ def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> No
     assert receipt["state_load"] == alerter.STATE_LOAD_OK  # the retry is not a new corruption
     assert receipt["degraded_pending"] == []
     state = _read_state(config)
-    assert state.last_degraded_alert_at == retry_at
+    assert state.last_degraded_alert_by_kind == {alerter.DEGRADED_STATE_CORRUPT: retry_at}
     assert state.degraded_pending == []
 
     # No duplicate inside the 6 h dedup window, and nothing left pending.
@@ -1114,38 +1125,42 @@ def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> No
 
 
 def test_b17_throttled_pending_degraded_survives_until_the_window_opens(tmp_path: Path) -> None:
-    """A pending retry that lands inside the dedup window is not dropped: it
-    stays pending until the window opens (over-report direction preserved).
+    """A pending retry that lands inside the dedup window is not dropped.
 
-    Geometry: one tick raises BOTH degraded kinds. The first send arms the 6 h
-    clock, the second fails — so the failed one is pending while the clock is
-    armed. ``stall_hours`` is widened so the stall channel stays out of the
-    way."""
+    Reachable geometry after the round-2 per-kind clocks: a state written by
+    the PREVIOUS revision, whose single scalar clock (armed by a delivered
+    ``state-corrupt`` mail) migrates onto both kinds while an
+    ``observability-unavailable`` retry is still queued. That is the literal
+    upgrade path, and it must not swallow the queued alert."""
 
-    config = _config(
-        tmp_path, NHMS_FRONTIER_STALL_HOURS="48", NHMS_FRONTIER_QUERY_FAIL_TICKS="1"
-    )
+    config = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="48")
     snapshot = _baseline_snapshot()
-    _bootstrap(config, snapshot)
-
-    config.state_path.write_text("{corrupt", encoding="utf-8")
-    mixed = FakeSendmail(
-        [alerter.SendResult(returncode=0), alerter.SendResult(returncode=1, error="queue full")]
-    )
     armed_at = T0 + timedelta(hours=1)
-    receipt = _tick(
-        config, now=armed_at, observe=_failing_provider(RuntimeError("db down")), sendmail=mixed
-    )
+    legacy_state = {
+        "schema_version": 1,
+        "snapshot": alerter.snapshot_to_json(snapshot),
+        "last_change_at": T0.isoformat(),
+        "alert_active": False,
+        "last_alert_at": None,
+        "consecutive_query_failures": 0,
+        "baseline_established_at": T0.isoformat(),
+        "baseline_reset_at": None,
+        # Round-1 shape: ONE scalar clock for the whole degraded family.
+        "last_degraded_alert_at": armed_at.isoformat(),
+        "last_error": None,
+        "baseline_pending": False,
+        "degraded_pending": [
+            {"kind": alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE, "reason": "db down"}
+        ],
+    }
+    config.state_path.parent.mkdir(parents=True, exist_ok=True)
+    config.state_path.write_text(json.dumps(legacy_state), encoding="utf-8")
 
-    assert receipt["degraded_events"] == [
-        alerter.DEGRADED_STATE_CORRUPT,
-        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE,
-    ]
-    state = _read_state(config)
-    assert state.last_degraded_alert_at == armed_at
-    assert [entry["kind"] for entry in state.degraded_pending] == [
-        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE
-    ]
+    migrated = _read_state(config)
+    assert migrated.last_degraded_alert_by_kind == {
+        alerter.DEGRADED_STATE_CORRUPT: armed_at,
+        alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE: armed_at,
+    }
 
     throttled = FakeSendmail()
     _tick(config, now=armed_at + timedelta(hours=1), snapshot=snapshot, sendmail=throttled)
@@ -1155,12 +1170,137 @@ def test_b17_throttled_pending_degraded_survives_until_the_window_opens(tmp_path
     ], "a throttled pending retry must not be dropped"
 
     opened = FakeSendmail()
-    receipt = _tick(
-        config, now=armed_at + timedelta(hours=6), snapshot=snapshot, sendmail=opened
-    )
+    _tick(config, now=armed_at + timedelta(hours=6), snapshot=snapshot, sendmail=opened)
     assert len(opened.calls) == 1
     assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in opened.subject()
     assert _read_state(config).degraded_pending == []
+
+
+# ---------------------------------------------------------------------------
+# B22 — containment is whole-class, not an enumeration.
+# ---------------------------------------------------------------------------
+
+
+def test_b22_extreme_timestamp_state_self_heals_instead_of_dying_every_tick(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``9999-12-31T23:59:59-14:00`` parses fine and then raises ``OverflowError``
+    inside ``astimezone`` — neither an OSError/ValueError nor a RecursionError.
+    Under an enumerated catch it escapes, so the alerter dies on every tick,
+    mails nothing and never rewrites the state that is killing it: permanent
+    silence."""
+
+    env = _env(tmp_path)
+    config = alerter.config_from_env(env)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+    poisoned = json.loads(config.state_path.read_text(encoding="utf-8"))
+    poisoned["last_change_at"] = "9999-12-31T23:59:59-14:00"
+    config.state_path.write_text(json.dumps(poisoned), encoding="utf-8")
+
+    load = alerter.load_state(config.state_path)
+    assert load.status == alerter.STATE_LOAD_CORRUPT
+    assert "OverflowError" in (load.reason or "")
+
+    sendmail = FakeSendmail()
+    heal_at = T0 + timedelta(hours=1)
+    code = main_with(env, now=heal_at, observe=_provider(snapshot), sendmail=sendmail)
+
+    assert code == 1  # degraded, controlled
+    assert len(sendmail.calls) == 1
+    assert alerter.DEGRADED_STATE_CORRUPT in sendmail.subject()
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert printed["degraded_events"] == [alerter.DEGRADED_STATE_CORRUPT]
+
+    # Self-healed: the poisoned state was REWRITTEN, so the next tick is normal.
+    state = _read_state(config)
+    assert state.last_change_at == heal_at
+    assert state.baseline_reset_at == heal_at
+    next_tick = FakeSendmail()
+    receipt = _tick(config, now=heal_at + timedelta(minutes=30), snapshot=snapshot, sendmail=next_tick)
+    assert next_tick.calls == []
+    assert receipt["state_load"] == alerter.STATE_LOAD_OK
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [
+        {"last_alert_at": "9999-12-31T23:59:59-14:00"},
+        {"snapshot": {"gfs": {"frontier": "9999-12-31T23:59:59-14:00", "cycles": 1,
+                              "latest_created": "2026-08-12T23:00:00+00:00"}}},
+        {"baseline_established_at": "0001-01-01T00:00:00+14:00"},
+    ],
+    ids=["last_alert_at", "snapshot_marker", "baseline_stamp"],
+)
+def test_b22_every_timestamp_field_is_contained(tmp_path: Path, poison: dict[str, Any]) -> None:
+    """The overflow is not special to one field — containment must be at the
+    stage, not per field."""
+
+    config = _config(tmp_path)
+    _bootstrap(config, _baseline_snapshot())
+    payload = json.loads(config.state_path.read_text(encoding="utf-8"))
+    payload.update(poison)
+    config.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert alerter.load_state(config.state_path).status == alerter.STATE_LOAD_CORRUPT
+
+    sendmail = FakeSendmail()
+    receipt = _tick(config, now=T0 + timedelta(hours=1), snapshot=_baseline_snapshot(), sendmail=sendmail)
+    assert receipt["degraded_events"] == [alerter.DEGRADED_STATE_CORRUPT]
+    assert len(sendmail.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# B23 — the degraded dedup clock is per kind.
+# ---------------------------------------------------------------------------
+
+
+def test_b23_state_corrupt_mail_does_not_suppress_the_first_observability_mail(
+    tmp_path: Path,
+) -> None:
+    """One shared clock let a delivered state-corrupt mail throttle the FIRST
+    EVER observability-unavailable — an entire event class the operator had
+    never seen, lost for a whole resend window."""
+
+    config = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="48")
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    corrupt_at = T0 + timedelta(hours=1)
+    config.state_path.write_text("{corrupt", encoding="utf-8")
+    corrupt_mail = FakeSendmail()
+    _tick(config, now=corrupt_at, snapshot=snapshot, sendmail=corrupt_mail)
+    assert len(corrupt_mail.calls) == 1
+    assert alerter.DEGRADED_STATE_CORRUPT in corrupt_mail.subject()
+
+    broken = _failing_provider(RuntimeError("db down"))
+    first_failure = FakeSendmail()
+    _tick(config, now=corrupt_at + timedelta(minutes=30), observe=broken, sendmail=first_failure)
+    assert first_failure.calls == []  # budget is 2 ticks
+
+    # Budget crossed only 1 h after the state-corrupt mail: well inside the 6 h
+    # window of the OTHER kind, and it must still go out.
+    budget_crossed = FakeSendmail()
+    receipt = _tick(config, now=corrupt_at + timedelta(hours=1), observe=broken, sendmail=budget_crossed)
+    assert len(budget_crossed.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in budget_crossed.subject()
+    assert receipt["degraded_events"] == [alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE]
+
+    clocks = _read_state(config).last_degraded_alert_by_kind
+    assert set(clocks) == {alerter.DEGRADED_STATE_CORRUPT, alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE}
+
+    # Same-kind repeat inside its own window is still deduped.
+    repeat = FakeSendmail()
+    receipt = _tick(config, now=corrupt_at + timedelta(hours=2), observe=broken, sendmail=repeat)
+    assert repeat.calls == []
+    assert receipt["degraded_events"] == []
+    assert receipt["consecutive_query_failures"] == 3
+
+    # ...and released once that kind's own window elapses.
+    reopened = FakeSendmail()
+    _tick(config, now=corrupt_at + timedelta(hours=7), observe=broken, sendmail=reopened)
+    assert len(reopened.calls) == 1
+    assert alerter.DEGRADED_OBSERVABILITY_UNAVAILABLE in reopened.subject()
 
 
 # ---------------------------------------------------------------------------
@@ -1235,10 +1375,231 @@ def test_b20_lock_path_under_a_regular_file_is_a_structured_config_error(
 
 
 # ---------------------------------------------------------------------------
+# B25 — wrapper contract (real bash subprocess).
+# Sibling precedent: tests/test_node27_timeseries_retention.py wrapper section.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_WRAPPER_PATH = _REPO_ROOT / "scripts/node27_frontier_stall_alert_once.sh"
+_SERVICE_PATH = _REPO_ROOT / "infra/systemd/nhms-node27-frontier-alert.service"
+
+
+def _wrapper_sandbox(tmp_path: Path) -> tuple[Path, Path]:
+    """A stub interpreter + entrypoint so the wrapper can run to completion
+    without importing the real runner."""
+
+    python_bin = tmp_path / "stub-python"
+    python_bin.write_text(
+        "#!/bin/sh\n"
+        'echo "RUNNER_INVOKED args=$*"\n'
+        'echo "RUNNER_SAW_DATABASE_URL=${DATABASE_URL:-<unset>}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    script = tmp_path / "runner.py"
+    script.write_text("", encoding="utf-8")
+    return python_bin, script
+
+
+def _run_wrapper(tmp_path: Path, env_file: Path, *, injected: bool) -> subprocess.CompletedProcess[str]:
+    python_bin, script = _wrapper_sandbox(tmp_path)
+    process_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "NODE27_FRONTIER_ALERT_REPO": str(tmp_path / "repo"),
+        "NODE27_FRONTIER_ALERT_ENV_FILE": str(env_file),
+        "NODE27_FRONTIER_ALERT_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "NODE27_FRONTIER_ALERT_LOG_ROOT": str(tmp_path / "logs"),
+        "NODE27_FRONTIER_ALERT_PYTHON": str(python_bin),
+        "NODE27_FRONTIER_ALERT_SCRIPT": str(script),
+    }
+    if injected:
+        process_env["NODE27_FRONTIER_ALERT_ENV_INJECTED"] = "1"
+        # systemd would have exported the file's contents itself.
+        process_env["DATABASE_URL"] = "postgresql://injected:pw@127.0.0.1:55432/nhms"
+    (tmp_path / "repo").mkdir(exist_ok=True)
+    return subprocess.run(
+        ["/bin/bash", str(_WRAPPER_PATH)],
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _write_env_file(path: Path, mode: int) -> Path:
+    path.write_text(
+        'DATABASE_URL=postgresql://sourced:pw@127.0.0.1:55432/nhms\n'
+        "NHMS_ALERT_EMAIL_TO=ops@example.invalid\n",
+        encoding="utf-8",
+    )
+    path.chmod(mode)
+    return path
+
+
+def test_b25_injected_path_still_refuses_a_world_readable_env_file(tmp_path: Path) -> None:
+    """The regression this pins: gating the 0600 check behind "should I
+    source?" let the systemd path accept a mode-0644 file holding the
+    read-only role's password, while .example, the runbook and the wrapper's
+    own header all promised refusal."""
+
+    env_file = _write_env_file(tmp_path / "alert.env", 0o644)
+
+    result = _run_wrapper(tmp_path, env_file, injected=True)
+
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr + (tmp_path / "bootstrap.log").read_text(encoding="utf-8")
+    assert "ENV_FILE_MODE_UNSAFE" in combined
+    assert "RUNNER_INVOKED" not in combined
+
+
+def test_b25_injected_path_refuses_a_symlinked_env_file(tmp_path: Path) -> None:
+    target = _write_env_file(tmp_path / "real.env", 0o600)
+    link = tmp_path / "alert.env"
+    link.symlink_to(target)
+
+    result = _run_wrapper(tmp_path, link, injected=True)
+
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr + (tmp_path / "bootstrap.log").read_text(encoding="utf-8")
+    assert "ENV_FILE_SYMLINK_FORBIDDEN" in combined
+
+
+def test_b25_dangling_symlink_is_a_symlink_not_a_missing_file(tmp_path: Path) -> None:
+    link = tmp_path / "alert.env"
+    link.symlink_to(tmp_path / "never-existed.env")
+
+    result = _run_wrapper(tmp_path, link, injected=False)
+
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr + (tmp_path / "bootstrap.log").read_text(encoding="utf-8")
+    assert "ENV_FILE_SYMLINK_FORBIDDEN" in combined
+
+
+def test_b25_injected_path_proceeds_without_re_sourcing(tmp_path: Path) -> None:
+    env_file = _write_env_file(tmp_path / "alert.env", 0o600)
+
+    result = _run_wrapper(tmp_path, env_file, injected=True)
+
+    assert result.returncode == 0, result.stderr
+    log = (tmp_path / "logs" / "frontier-alert.log").read_text(encoding="utf-8")
+    assert "RUNNER_INVOKED args=" in log
+    assert "--once" in log
+    # The injected value survived: the file was NOT sourced over the top of it.
+    assert "RUNNER_SAW_DATABASE_URL=postgresql://injected:pw@127.0.0.1:55432/nhms" in log
+
+
+def test_b25_manual_path_sources_the_env_file(tmp_path: Path) -> None:
+    env_file = _write_env_file(tmp_path / "alert.env", 0o600)
+
+    result = _run_wrapper(tmp_path, env_file, injected=False)
+
+    assert result.returncode == 0, result.stderr
+    log = (tmp_path / "logs" / "frontier-alert.log").read_text(encoding="utf-8")
+    assert "RUNNER_SAW_DATABASE_URL=postgresql://sourced:pw@127.0.0.1:55432/nhms" in log
+
+
+def test_b25_manual_path_refuses_a_missing_env_file(tmp_path: Path) -> None:
+    result = _run_wrapper(tmp_path, tmp_path / "absent.env", injected=False)
+
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr + (tmp_path / "bootstrap.log").read_text(encoding="utf-8")
+    assert "ENV_FILE_MISSING" in combined
+
+
+def test_b25_service_unit_injects_the_lane_scoped_sentinel() -> None:
+    service = _SERVICE_PATH.read_text(encoding="utf-8")
+    wrapper = _WRAPPER_PATH.read_text(encoding="utf-8")
+
+    assert "Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1" in service
+    assert "EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env" in service
+    assert "NODE27_FRONTIER_ALERT_ENV_INJECTED" in wrapper
+    # The sentinel must not be the repo-wide shared variable name.
+    assert 'if [ -n "${DATABASE_URL:-}" ]; then' not in wrapper
+    assert "TimeoutStartSec=900" in service
+
+
+# ---------------------------------------------------------------------------
+# B26 — numeric config and derived sender are fail-safe in the right direction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["NHMS_FRONTIER_STALL_HOURS", "NHMS_FRONTIER_RESEND_HOURS"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e30", "1e400"])
+def test_b26a_unusable_hour_windows_fail_closed_at_config_time(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], key: str, value: str
+) -> None:
+    """``float()`` accepts nan/inf and ``1e30`` is finite yet overflows
+    ``timedelta``: without constructing the delta during config parsing these
+    blow up mid-tick, after the runner believed it was configured."""
+
+    env = _env(tmp_path, **{key: value})
+    sendmail = FakeSendmail()
+
+    code = main_with(env, now=T0, observe=_exploding_provider(), sendmail=sendmail)
+
+    assert code == 2
+    assert sendmail.calls == []
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert key in payload["reason"]
+    assert not config_paths_exist(tmp_path)
+
+
+def config_paths_exist(tmp_path: Path) -> bool:
+    return (tmp_path / "state").exists() or (tmp_path / "receipts").exists()
+
+
+def test_b26a_large_but_usable_hour_window_is_accepted(tmp_path: Path) -> None:
+    config = _config(tmp_path, NHMS_FRONTIER_STALL_HOURS="8760")  # one year
+    assert config.stall_delta == timedelta(hours=8760)
+
+
+@pytest.mark.parametrize(
+    "hostname, expected_host",
+    [
+        ("node-27", "node-27"),
+        ("node\r\n27", "node27"),
+        ("\r\n", "node-27"),
+        ("", "node-27"),
+        ("  spaced  ", "spaced"),
+    ],
+)
+def test_b26b_derived_sender_sanitizes_instead_of_rejecting(hostname: str, expected_host: str) -> None:
+    """A decorative hostname anomaly must never become a zero-mail config
+    error — that trades a cosmetic problem for silence, the wrong direction.
+    An operator-supplied NHMS_ALERT_EMAIL_FROM with CR/LF is still rejected
+    (B19); only the derived default is sanitized."""
+
+    sender = alerter.default_email_from(hostname)
+
+    assert sender == f"NHMS Frontier Alert <nwm@{expected_host}>"
+    # And the sanitized value survives the header-safety gate unchanged.
+    assert alerter._header_safe("NHMS_ALERT_EMAIL_FROM", sender) == sender
+
+
+def test_b26b_derived_sender_is_used_and_mailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(alerter.socket, "gethostname", lambda: "node\r\n27")
+    env = _env(tmp_path)
+    env.pop("NHMS_ALERT_EMAIL_FROM")
+    config = alerter.config_from_env(env)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+
+    sendmail = FakeSendmail()
+    _tick(config, now=T0 + timedelta(hours=4), snapshot=snapshot, sendmail=sendmail)
+
+    assert len(sendmail.calls) == 1
+    assert sendmail.header("From") == "NHMS Frontier Alert <nwm@node27>"
+    # One header block, not an injected extra line.
+    assert sendmail.messages[0].count("From: ") == 1
+
+
+# ---------------------------------------------------------------------------
 # B21 — the shipped .example is safe under BOTH readers.
 # ---------------------------------------------------------------------------
 
-_EXAMPLE_PATH = Path(__file__).resolve().parents[1] / "infra/env/node27-frontier-alert.example"
+_EXAMPLE_PATH = _REPO_ROOT / "infra/env/node27-frontier-alert.example"
 _ASSIGNMENT_RE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 _COMMENTED_ASSIGNMENT_RE = re.compile(r"^#\s?(?P<body>[A-Z][A-Z0-9_]*=.*)$")
 

@@ -2,15 +2,18 @@
 # node27-frontier-stall-alert).
 #
 # Copy to node27-frontier-alert.env and chmod 0600 — the wrapper
-# (scripts/node27_frontier_stall_alert_once.sh) refuses a missing, symlinked
-# or non-0600 env file.
+# (scripts/node27_frontier_stall_alert_once.sh) refuses a symlinked or
+# non-0600 env file on EVERY path (systemd or manual: the permission contract
+# does not depend on who parses the file), and refuses a missing file on the
+# manual path.
 #
 # This lane only READS the database and only sends mail through the local
 # sendmail binary. It never writes to Postgres and holds no SMTP credentials.
 #
 # SINGLE READER: under systemd this file is read once by
-# `EnvironmentFile=` in nhms-node27-frontier-alert.service. The wrapper only
-# sources it when DATABASE_URL is NOT already injected (i.e. manual debugging
+# `EnvironmentFile=` in nhms-node27-frontier-alert.service, which also sets
+# `Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1`. The wrapper sources the
+# file only when that lane-scoped sentinel is absent (i.e. manual debugging
 # from a shell), so no value is ever parsed by both grammars in one run.
 # Values here must nevertheless mean the same thing to BOTH parsers: quote any
 # value containing spaces (systemd strips the surrounding quotes, so does the
