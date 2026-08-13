@@ -128,6 +128,6 @@ Domain packs（`openspec/project-profile.md`，逐个表态）：
 
 ## Evidence mapping
 
-- AC 单测（判据/去重/recovered/持久化/fail-safe）→ tasks B1-B10
+- AC 单测（判据/去重/recovered/持久化/fail-safe）→ tasks B1-B13 + 三轮复审回归锚 B14-B28（§2R/§2S/§2T）
 - AC live receipt（timer 装载、真实 DB、真实邮件、拨钟触发）→ tasks 3.4（node-27 实机四步）
 - AC ruff / openspec validate → tasks 3.2/3.3

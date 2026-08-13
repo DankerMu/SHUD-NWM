@@ -1930,13 +1930,19 @@ fail-safe 方向是**宁可多报不可漏报**：告警器的任何内部故障
 | **锁文件本身打不开**（卷只读、root 用 sudo 跑过一次留下 root 属主的 `<state>.lock`） | 结构化 config error、**rc=2、零邮件** —— 告警器根本没跑到观测那步 | **只有 `systemctl --user status nhms-node27-frontier-alert.service` 的 failed 状态和 `frontier-alert.log` 能看见**，邮箱一片安静。定期看治理 receipt 里的 unit 状态就是为了这个 |
 
 两种都先修路径/属主本身，别去调告警器参数。第二种只是"故障但零邮件"这一**族**的
-**一个**成员（失败都发生在任何邮件通道之前）：同族还有 wrapper 期的 env 文件是符号
-链接 / 权限宽于 0600 / 源失败，以及缺 `DATABASE_URL`、`NHMS_ALERT_EMAIL_TO` 的
-config error。wrapper 期成员的现场证据行是 bootstrap 日志
-`/home/nwm/node27-frontier-alert.log` 里的 `BLOCKED rc=2 reason=<REASON>`（如
-`ENV_FILE_SYMLINK_FORBIDDEN` / `ENV_FILE_MODE_UNSAFE`），runner 期成员则写
-`<log root>/frontier-alert.log`。全族排查路径相同：unit failed -> 上述日志 ->
-治理 receipt 里的 unit 状态；几何不对称的进一步收口另立 issue。
+**一个**成员：同族还有 wrapper 期的 env 文件是符号链接 / 权限宽于 0600 / 源失败，
+以及缺 `DATABASE_URL`、`NHMS_ALERT_EMAIL_TO` 的 config error —— 这些都发生在任何
+邮件通道之前，现场证据行是 bootstrap 日志 `/home/nwm/node27-frontier-alert.log` 里的
+`BLOCKED rc=2 reason=<REASON>`（如 `ENV_FILE_SYMLINK_FORBIDDEN` /
+`ENV_FILE_MODE_UNSAFE`），runner 期成员则写 `<log root>/frontier-alert.log`。
+
+族里还有一个**通道之内**的成员：收件人/发件人取值让邮件正文编不出来（env 里混进
+非 UTF-8 字节，进程内表现为代理对）。它每 tick 都走完判定、把发送记成
+`returncode=70`（`SEND_INTERNAL_FAILURE_RC`）的失败并 exit 1、unit failed，但
+**不会**有 `BLOCKED rc=2` 行；证据在 `frontier-alert-receipt.json` 的
+`send_failures` / `emails[].error` 与 `frontier-alert-events.jsonl` 的 `sent:false`
+（告警本身不算已送达，下一 tick 继续重试）。全族排查路径相同：unit failed ->
+上述日志/receipt -> 治理 receipt 里的 unit 状态；几何不对称的进一步收口另立 issue。
 
 ### 10.3 阈值口径（改之前先读这段）
 

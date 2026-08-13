@@ -1,6 +1,6 @@
 """Unit pins for the node-27 frontier stall alerter (issue #1368).
 
-Test anchors B1-B13 of
+Test anchors B1-B28 of
 ``openspec/changes/node27-frontier-stall-alert/tasks.md`` §2. Every test
 injects a fake clock (explicit ``now=`` datetimes), a fake sendmail runner
 (records invocations) and a fake observation provider — no database, no real
@@ -86,8 +86,13 @@ class FakeSendmail:
 
 
 class ExplodingSendmail:
+    """Raises ``_MustNotHappen`` (a ``BaseException``) on purpose: after the
+    round-3 whole-class containment in ``_Outbox.send``, an ``AssertionError``
+    here would be absorbed into a "failed send" record and this guard would
+    stop guarding."""
+
     def __call__(self, argv: list[str], message: str) -> alerter.SendResult:  # pragma: no cover
-        raise AssertionError("sendmail must not be invoked")
+        raise _MustNotHappen("sendmail must not be invoked")
 
 
 def _obs(
@@ -1099,6 +1104,7 @@ def test_b17_failed_degraded_send_is_persisted_and_retried(tmp_path: Path) -> No
         sendmail=ExplodingSendmail(),  # raises if the dry run tries to send
         dry_run=True,
     )
+    assert dry_receipt["emails"][0]["dry_run"] is True
     assert dry_receipt["degraded_pending"] == [
         {"kind": alerter.DEGRADED_STATE_CORRUPT, "reason": receipt["state_load_reason"]}
     ]

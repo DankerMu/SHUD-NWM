@@ -149,7 +149,9 @@ SENDMAIL_TIMEOUT_SEC = 60
 
 #: Return code recorded when the mail chain itself fails before/around the
 #: sendmail process (message build, encode, an unexpected runner error).
-#: EX_SOFTWARE-shaped so it cannot collide with a real sendmail exit status.
+#: ``EX_SOFTWARE`` from sysexits, chosen for its meaning ("internal software
+#: error"). It is NOT unique to this runner — sendmail speaks sysexits and can
+#: exit 70 itself; the recorded error text is what disambiguates the two.
 SEND_INTERNAL_FAILURE_RC = 70
 
 #: Characters that would break out of a mail header. ``sendmail -t`` takes its
