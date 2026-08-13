@@ -27,3 +27,5 @@
 ## 待实测项（live receipt 期）
 
 从 node-27 直发 `mumzy1995@163.com` 的真实可达性：投递验证=sendmail exit 0 + mail log 远端 250 + 收件箱人工确认三重，**不得只验 sendmail 返回 0**（issue 原文要求）。若 163 拒收/进垃圾箱，按 issue 预案回来重新拍板通道，deviation 记录。
+
+**2026-08-13 实测判决**：非 163 拒收——node-27 本机 postfix 刻意空路由（`default_transport = error`），`/usr/sbin/sendmail` exit 0 后异步 bounce（`dsn=5.0.0`），"只验 exit 0"盲区被实锤。按预案重新拍板（用户裁定）：改认证 SMTP shim 直投 `smtp.163.com:465`（出网 465 实测可达；见 design D3、tasks §1U）。250 改由目的方提交服务器同步返回，三重验证口径随之更新（tasks 3.4）。

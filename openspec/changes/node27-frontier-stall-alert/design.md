@@ -44,7 +44,8 @@
 
 ### D3 — 邮件通道
 
-- `subprocess` 调 `/usr/sbin/sendmail -t -i`（路径可配 `sendmail_path`，测试注入 fake 记录 invocation）。无 SMTP 凭据参与。
+- `subprocess` 调 `<sendmail_path> -t -i`（路径可配 `sendmail_path`，测试注入 fake 记录 invocation）。lane 自身无 SMTP 凭据参与。
+- **投递通道（live receipt 期改判）**：node-27 本机 postfix 被管理员刻意空路由（`default_transport = error`、loopback-only）——`/usr/sbin/sendmail` exit 0 后异步 bounce 全部外网信（2026-08-13 实测 `dsn=5.0.0 status=bounced`）。生产通道改为 `NHMS_FRONTIER_SENDMAIL` 指向 sendmail 兼容 shim `scripts/node27_frontier_smtp_sendmail.py`：stdin 读信、`-t` 取信头收件人、`smtplib.SMTP_SSL` 认证直投 `smtp.163.com:465`（出网 465 实测可达）。凭据（`NHMS_SMTP_USER`/`NHMS_SMTP_PASS` 授权码）只存在于 0600 env 文件、只被 shim 读取，任何输出路径不得含口令；`NHMS_ALERT_EMAIL_FROM` 必须等于认证账号（163 政策）。shim 失败收容同样整类闭合（全文件不变式延伸），信封 250 由目的方提交服务器同步返回并以 `SMTP-ACCEPTED` 证据行落 stderr——本机 postfix 的"exit 0 后异步 bounce"盲区由此收口。
 - 信头：`From: NHMS Frontier Alert <nwm@<hostname>>`（可配）、`To: $NHMS_ALERT_EMAIL_TO`、`Subject` 含事件类型与 stall 时长；正文含 per-source 观测明细（诊断用）、`last_change_at`、阈值、runbook 指引。`sendmail -t` 下收件人完全由信头决定：`NHMS_ALERT_EMAIL_TO`/`NHMS_ALERT_EMAIL_FROM` 含 CR/LF 即 config 期 fail-closed 拒绝（防头注入/误配静默跑偏）。
 - **stalled 标签以投递事实为准**：`initial`/`resend` 由 `last_alert_at is None` 判定（与去重钟同源），不得用 `alert_active`——首封发送失败后的重试必须仍标 `initial`（operator 重建时间线依赖它）。
 - **DSN/凭据零泄漏**：所有异常文本经打码（复用 retention `_redact_error_text` 模式，实现期抽公共 helper 或同构复制并注明出处）后才可进邮件/日志/receipt。
@@ -55,7 +56,7 @@
 - `infra/systemd/nhms-node27-frontier-alert.{service,timer}`：`Type=oneshot`、`OnCalendar=*:00/30`、`EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env`；单实例互斥在 **Python 内**做（`fcntl.flock` 于 state 目录 lockfile，非阻塞，占用即结构化 no-op 退出 0）——wrapper `scripts/node27_frontier_stall_alert_once.sh` 保持薄壳；in-script 锁可被 pytest 直接钉（B13），wrapper 层锁先例（10 个 `*_once.sh` 中 3 个 flock + 1 个非 flock 锁）不可测。
 - **本 unit 的 tick 必须有执行期限**（review round-1 B-C2 裁定）：`TimeoutStartSec` 设有界值（oneshot 的整个执行即 start 阶段；模板同族的 `TimeoutStartSec=0` 对秒级 tick 的监控 unit 不适用——挂死的监控器必须转成 unit failed 可见）。proposal Non-Goals 的 "RuntimeMaxUSec 兜底另开" 只覆盖 autopipe 业务 unit（阈值论证不可迁移），不豁免本 unit。
 - **env 文件单读者**（review round-1 B-C3 裁定；round-2 修正）：systemd 部署路径以 `EnvironmentFile=` 为准，wrapper 仅在未注入时才 `source`（手工调试路径）；哨兵用 **lane-scoped 标记**（service 内 `Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1`），不用 `DATABASE_URL`（跨 lane 最共享的变量名，调试 shell 里他 lane 的 DSN 会误跳 source）。**symlink/0600 校验与"谁来 source"正交，必须无条件执行**（round-2 P2：1R.5 把校验一并关进 elif，systemd 路径上 644 明文口令文件被静默放行）；仅 `source` 本身留在哨兵门内。wrapper 必须有测试（兄弟先例 `tests/test_node27_timeseries_retention.py` wrapper 段），且必须含"已注入路径"用例。`.example` 值必须双语法安全（systemd 与 bash 同释义，含空格值加引号），并注明密码含 `` $ ` " \ `` 时两解析器分歧的风险。
-- `infra/env/node27-frontier-alert.example`：`DATABASE_URL`（**只读角色 DSN**）、`NHMS_ALERT_EMAIL_TO`、`NHMS_ALERT_EMAIL_FROM`（可选）、`NHMS_FRONTIER_STALL_HOURS=4`、`NHMS_FRONTIER_RESEND_HOURS=6`、`NHMS_FRONTIER_STATE_PATH`、`NHMS_FRONTIER_RECEIPT_PATH`、`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`、`NHMS_FRONTIER_QUERY_FAIL_TICKS=2`。
+- `infra/env/node27-frontier-alert.example`：`DATABASE_URL`（**只读角色 DSN**）、`NHMS_ALERT_EMAIL_TO`、`NHMS_ALERT_EMAIL_FROM`（可选）、`NHMS_FRONTIER_STALL_HOURS=4`、`NHMS_FRONTIER_RESEND_HOURS=6`、`NHMS_FRONTIER_STATE_PATH`、`NHMS_FRONTIER_RECEIPT_PATH`、`NHMS_FRONTIER_SENDMAIL`（生产=shim 绝对路径；`/usr/sbin/sendmail` 仅适用于未空路由的主机）、`NHMS_FRONTIER_QUERY_FAIL_TICKS=2`、SMTP shim 段（`NHMS_SMTP_HOST/PORT/USER/PASS`，口令人工落置不入库）。
 - `node27_resource_governance.py` `DEFAULT_SERVICES` 增补该 unit。
 - 每 tick 原子覆写单文件观测 receipt（latest 语义）+ 追加式 alert 事件 JSONL——无正式 schema（Non-goal 记录在案）。
 

@@ -1690,7 +1690,7 @@ def test_b21_example_is_syntax_clean_with_every_assignment_uncommented(tmp_path:
         for line in candidate.read_text(encoding="utf-8").splitlines()
         if line.startswith("NHMS_ALERT_EMAIL_FROM=")
     ]
-    assert activated == ['NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <nwm@node-27>"']
+    assert activated == ['NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <alerts@example.com>"']
 
 
 def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Path) -> None:
@@ -1720,9 +1720,14 @@ def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Pa
 
     # And the shipped values are accepted by the runner's own parser.
     config = alerter.config_from_env(expected)
-    assert config.email_from == "NHMS Frontier Alert <nwm@node-27>"
+    assert config.email_from == "NHMS Frontier Alert <alerts@example.com>"
     assert config.stall_hours == 4.0
-    assert config.sendmail_path == "/usr/sbin/sendmail"
+    # The shipped channel is the authenticated SMTP shim, NOT node-27's local
+    # /usr/sbin/sendmail: that postfix is null-routed (default_transport =
+    # error) and exits 0 on mail it then asynchronously bounces (observed
+    # 2026-08-13), which the alerter would record as a delivered alert.
+    assert config.sendmail_path == "/home/nwm/NWM/scripts/node27_frontier_smtp_sendmail.py"
+    assert "NHMS_SMTP_USER" in expected and "NHMS_SMTP_PASS" in expected
 
 
 # ---------------------------------------------------------------------------

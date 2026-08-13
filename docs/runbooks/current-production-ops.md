@@ -2010,7 +2010,32 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
   压掉紧随其后的首封 `observability-unavailable`——那等于整类事件从未被告知
   （漏报方向）。同类 6h 内的重复仍然去重。
 
-### 10.6 信号口径（认领的盲区，不是 bug）
+### 10.6 投递通道（认证 SMTP shim，不要用本机 sendmail）
+
+告警器只会 `<NHMS_FRONTIER_SENDMAIL> -t -i`（正文走 stdin，exit 0 == 已发），
+它自己不认识 SMTP。**node-27 上这个路径必须指向
+`scripts/node27_frontier_smtp_sendmail.py`**（stdlib-only shim，直接以
+`smtplib.SMTP_SSL` + 认证向 `smtp.163.com:465` 投递），凭据只从
+`NHMS_SMTP_HOST/PORT/USER/PASS` 读，绝不走 argv，`NHMS_SMTP_PASS` 只喂
+`login()`、不进任何输出。
+
+**不要用默认的 `/usr/sbin/sendmail`**：node-27 的本机 postfix 是刻意断路的
+（`default_transport = error`，只听 loopback）。它照单全收、exit 0，然后**异步**
+把所有外发信退掉——2026-08-13 实测 `dsn=5.0.0 status=bounced`。即"exit 0 但从未
+投出"，告警器会把它记成一封成功的 stalled 邮件。
+
+shim 的退出码即投递事实：0 = 目的地提交服务器**同步**回了 250（stderr 留一行
+`SMTP-ACCEPTED host=... code=250 recipients=<n>`）；69 = 投递失败
+（`SMTP-FAILED stage=connect|login|send ...`，或部分收件人被拒的
+`SMTP-PARTIAL-REFUSAL ...`）；64 = 配置/用法错（缺 `NHMS_SMTP_USER` /
+`NHMS_SMTP_PASS`、端口非法、正文无收件人）；70 = 内部故障兜底（整类 contained，
+永不吐 traceback）。全部非零都会被告警器当作发送失败记进 receipt 与 JSONL，下一
+tick 按 §10.5 的重试语义重来。socket 有 30s 超时，外层还有告警器的 60s 墙。
+
+163 会拒绝 From 头与认证账号不一致的信，而 shim **不改** From 头——所以
+`NHMS_ALERT_EMAIL_FROM` 必须等于 `NHMS_SMTP_USER`（见 `.example`）。
+
+### 10.7 信号口径（认领的盲区，不是 bug）
 
 本 lane 观测的是 **post-ingest 前沿**（含 `succeeded`），**不是**严格的
 display-published 前沿。即：ingest 仍在落库、但 parse/publish 段静默冻结的几何
@@ -2021,14 +2046,24 @@ failed，属于 systemd 已经能看见的面，与本 issue 针对的"挂死但
 同样不在本 lane 范围：`RuntimeMaxUSec` 之类 unit 超时兜底、钉钉/企业微信通道、
 per-source 独立告警、以及任何自动恢复动作（本 lane 只通知不处置）。
 
-### 10.7 安装
+**投递侧那条盲区已经不是理论问题，也已经收口**（2026-08-13 live receipt）：
+告警器只认 sendmail 的退出码，而本机 postfix 的 exit 0 只代表"本机收下了"。实测
+它随后异步 bounce（`dsn=5.0.0 status=bounced relay=none`，`default_transport = error`）
+——**投递失败而告警器记成成功**，是本 lane 唯一漏报方向的几何。改用 §10.6 的认证
+SMTP shim 后该盲区闭合：250 由目的方提交服务器**同步**返回才退 0，并留下
+`SMTP-ACCEPTED` 证据行。**若把 `NHMS_FRONTIER_SENDMAIL` 改回 `/usr/sbin/sendmail`，
+盲区原样复现。**
+
+### 10.8 安装
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
 cd /home/nwm/NWM
 cp infra/env/node27-frontier-alert.example infra/env/node27-frontier-alert.env
 chmod 600 infra/env/node27-frontier-alert.env
-# 填入只读角色 DSN（nhms_display_ro）与收件人。wrapper 在**任何**路径（systemd 或
+# 填入只读角色 DSN（nhms_display_ro）、收件人，以及 §10.6 的 NHMS_SMTP_USER /
+# NHMS_SMTP_PASS（163 授权码，手工存入、绝不入库）；NHMS_ALERT_EMAIL_FROM 必须
+# 等于 NHMS_SMTP_USER。wrapper 在**任何**路径（systemd 或
 # 手工）都拒绝符号链接 / 非 0600 的 env 文件——权限契约与"谁来 source"无关。
 bash -n infra/env/node27-frontier-alert.env   # 填完先过一遍语法（见下 env 语法警示）
 install -m 644 infra/systemd/nhms-node27-frontier-alert.service ~/.config/systemd/user/
@@ -2041,8 +2076,9 @@ tail -n 50 /home/nwm/node27-frontier-alert-logs/frontier-alert.log
 
 首 tick 是 bootstrap：**预期零邮件**，receipt 记 `baseline_established_at`。要验证
 真实投递，把 state 里的 `last_change_at` 人为回拨 5h，下一 tick 会真发一封
-stalled；投递验证必须三重——sendmail exit 0 + mail log 远端 250 + 收件箱人工确认，
-不得只看 exit 0。unit 已注册进 `scripts/node27_resource_governance.py`
+stalled；投递验证必须三重——shim exit 0 + stderr 的 `SMTP-ACCEPTED ... code=250`
+（250 来自 smtp.163.com 提交服务器，同步）+ 收件箱人工确认，**不得只看 exit 0**
+（用本机 sendmail 时 exit 0 什么都不证明，见 §10.7）。unit 已注册进 `scripts/node27_resource_governance.py`
 `DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态（timer 被人 disable
 掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。
 

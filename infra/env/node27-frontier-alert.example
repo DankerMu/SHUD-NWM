@@ -7,8 +7,10 @@
 # does not depend on who parses the file), and refuses a missing file on the
 # manual path.
 #
-# This lane only READS the database and only sends mail through the local
-# sendmail binary. It never writes to Postgres and holds no SMTP credentials.
+# This lane only READS the database and only sends mail through a
+# sendmail-compatible binary; it never writes to Postgres. The alerter process
+# itself holds no SMTP credentials — the NHMS_SMTP_* values below are read by
+# the sendmail shim it execs (see NHMS_FRONTIER_SENDMAIL).
 #
 # SINGLE READER: under systemd this file is read once by
 # `EnvironmentFile=` in nhms-node27-frontier-alert.service, which also sets
@@ -38,10 +40,14 @@ DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # A CR/LF anywhere in this value is rejected at config time (header injection).
 NHMS_ALERT_EMAIL_TO=mumzy1995@163.com
 
-# Optional envelope sender. Default: "NHMS Frontier Alert <nwm@$(hostname)>".
+# From header. Default: "NHMS Frontier Alert <nwm@$(hostname)>".
 # Quoted because the value contains spaces: systemd strips the surrounding
 # double quotes and so does the shell, so both readers see the same string.
-#NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <nwm@node-27>"
+# With the authenticated SMTP shim below this is effectively REQUIRED: 163
+# rejects a From header that differs from the authenticated account, and the
+# shim never rewrites the header, so the default nwm@<hostname> would fail
+# every send (shim exit 69, stage=send). Set it to NHMS_SMTP_USER's address.
+#NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <alerts@example.com>"
 
 # Stall window in hours. Default 4. Rationale: a full measured pass is
 # 2h16m-3h01m plus 15-30 min ingest lag, so the realistic upper bound of a
@@ -68,8 +74,35 @@ NHMS_FRONTIER_STATE_PATH=/home/nwm/node27-frontier-alert-logs/frontier-alert-sta
 # <receipt dir>/frontier-alert-events.jsonl.
 NHMS_FRONTIER_RECEIPT_PATH=/home/nwm/node27-frontier-alert-logs/frontier-alert-receipt.json
 
-# Absolute path to the local sendmail binary (invoked as `sendmail -t -i`).
-NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail
+# Absolute path to the sendmail-compatible binary (invoked as `<path> -t -i`,
+# message on stdin, exit 0 == sent).
+#
+# WARNING — the /usr/sbin/sendmail default does NOT deliver on node-27: the
+# local postfix is null-routed (`default_transport = error`, loopback-only).
+# It accepts the message with exit 0 and then asynchronously bounces it
+# (observed live 2026-08-13: `dsn=5.0.0 status=bounced`), so the lane records
+# a successful send for mail that never left the box.
+#
+# Use the authenticated-SMTP shim instead: it submits over SMTPS directly to
+# the provider and only exits 0 on a synchronous 250 (evidence line
+# `SMTP-ACCEPTED host=... code=250 recipients=<n>` on stderr).
+NHMS_FRONTIER_SENDMAIL=/home/nwm/NWM/scripts/node27_frontier_smtp_sendmail.py
+
+# --- SMTP shim channel (read ONLY by scripts/node27_frontier_smtp_sendmail.py;
+# the alerter itself never touches these). Credentials are environment-only,
+# never argv. NHMS_SMTP_PASS is passed to login() and to nothing else — it is
+# never interpolated into any log or error line.
+NHMS_SMTP_HOST=smtp.163.com
+NHMS_SMTP_PORT=465
+NHMS_SMTP_USER=alerts@example.com
+# 163 SMTP authorization code (NOT the mailbox login password) — deposit
+# manually on node-27, never commit. Dual-grammar warning above applies: a
+# code containing  $ ` " \  is not safe for both readers; 163 codes are
+# alphanumeric, so leave it unquoted.
+NHMS_SMTP_PASS=REPLACE_ME_163_AUTH_CODE
+# Reminder: NHMS_ALERT_EMAIL_FROM above must carry this same address — 163
+# rejects a From header that differs from the authenticated account, and the
+# shim leaves the header exactly as the alerter built it.
 
 # Consecutive failed observation ticks before an observability-unavailable
 # alert is raised. Default 2 (= 1 h at the 30 min timer cadence). Query
