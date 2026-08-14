@@ -7,7 +7,7 @@
 ## 1. 实现
 
 - [x] 1.1 `db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`：两条 `DROP INDEX CONCURRENTLY IF EXISTS`（D1 名字逐字），先例 000041/000042 文体 rationale 注释，含带外索引自证注释
-- [x] 1.2 `packages/common/forecast_store.py` `_qhh_latest_query_indexes()` 证据陈述对齐（D3：`covered_by_mvt_identity_lookup_index` → pkey 承接如实陈述），`tests/test_migrations.py:370` / `tests/test_forecast_api.py:1735` 两钉同步；**最终承接者措辞以 3.4 第 6 查询（`river_sample_rows`）post-drop EXPLAIN 实测为准，merge 前定稿**
+- [ ] 1.2 `packages/common/forecast_store.py` `_qhh_latest_query_indexes()` 证据陈述对齐（D3），`tests/test_migrations.py` / `tests/test_forecast_api.py` 两钉同步；**承接者归因与措辞以 3.4 第 6 查询（`river_sample_rows`）post-drop EXPLAIN 实测定稿——3.4 已前移 merge 前（round-1 C4 裁决），故本项在 3.4 之后、merge 之前完成**（静态推理提示：pkey 可用前缀仅 2 列且不含 basin_version_id，更可能的承接者是保留的 000021 selected_identity discovery 索引——以实测为准）
 - [x] 1.3 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` 追加 supersession 注记（2026-08-14 实测 162 GB / 5,571 scans，被 #1338 依新证据 supersede；不改原正文段落）
 
 ## 2. 测试
@@ -21,7 +21,7 @@
 - [x] 3.1 `uv run pytest -q tests/test_migrations.py tests/test_forecast_api.py`
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate drop-redundant-river-ts-indexes --strict --no-interactive`
-- [ ] 3.4 node-27 实机（D2 手工 psql 路径，merge 后），顺序硬约束：
+- [ ] 3.4 node-27 实机（D2 手工 psql 路径；**merge 前执行**，前置条件 = round 复审 clean + CI 含 "SQL Migration Dry Run" 绿——round-1 C4 裁决：SQL 已由测试钉冻结、drop 可逆且回滚 DDL 在册、无自动 apply 通道、AC2 对 merge 无排序要求），顺序硬约束：
   1. pre-flight（F2/F4）：两索引 `pg_get_indexdef`（hypertable 级 + 至少一个 chunk 级）落盘 `.workplans/issue-1338/`；`timescaledb_information.chunks` 的 `is_compressed` 分布记录
   2. pre-drop EXPLAIN（D4 **八**查询）+ 尺寸基线——**hypertable 上必须用 chunk 聚合/`hypertable_index_size()`，父表 `pg_total_relation_size` 恒近零会废掉 AC2**；`_hyper_3_32_chunk` 单列
   3. apply 000049：`screen`/`nohup` 内执行（F4：`DROP INDEX CONCURRENTLY` 中断可留 invalid 索引）→ 收尾 `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid OR NOT indisready` 必须为空，非空则普通 `DROP INDEX` 清理残留后重跑

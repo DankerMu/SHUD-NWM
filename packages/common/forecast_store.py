@@ -3433,21 +3433,25 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "columns": ["basin_id", "basin_version_id"],
         },
         # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
-        # (#1338): its column set duplicated the primary key's, and the pkey was
-        # already serving this lookup. The naming below is confirmed against the
-        # #1338 post-drop EXPLAIN receipt for the river window query before merge —
-        # if the live plan picks something else, this statement follows the
-        # measurement rather than the inference.
+        # (#1338). The naming below is the PRE-RECEIPT static-analysis expectation,
+        # not a measured plan: the river leg (see river_sample_rows) equality-binds
+        # run_id + basin_version_id + river_network_version_id + variable with a
+        # valid_time range, which is an exact prefix of the retained 000021 index
+        # named here. The pkey is not the successor — it carries no
+        # basin_version_id and its third column river_segment_id is unbound, so its
+        # usable prefix stops at two columns. No post-drop EXPLAIN receipt exists
+        # yet; the #1338 pre-merge live leg (post-drop EXPLAIN of the river window
+        # query) finalizes these values, and measurement wins over inference.
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_pkey",
-            "status": "covered_by_primary_key_prefix",
+            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+            "status": "covered_by_selected_identity_valid_time_discovery_index",
             "columns": [
                 "run_id",
+                "basin_version_id",
                 "river_network_version_id",
-                "river_segment_id",
                 "variable",
-                "valid_time",
+                "valid_time DESC",
             ],
         },
         {

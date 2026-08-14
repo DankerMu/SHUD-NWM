@@ -28,13 +28,13 @@
 
 - 沿 **000047 手工 psql 先例**：`docker exec nhms-db psql -U nhms -d nhms -v ON_ERROR_STOP=1 -f`（逐条语句；`CONCURRENTLY` 不能进事务块，psql 默认 autocommit 满足）。二次重放验证幂等（`IF EXISTS` → no-op）。
 - **不做** schema_migrations 补记或漂移修复（范围外报告；migrate.py 未来全量跑到 000049 时 `IF EXISTS` 保证安全重放）。
-- 顺序硬约束：**pre-drop EXPLAIN/尺寸取证必须发生在 apply 之前**（AC3 的"前"一半在 merge 前后皆可采，但必须在 drop 前）。
+- 顺序硬约束：**pre-drop EXPLAIN/尺寸取证必须发生在 apply 之前**；且整条 3.4 实机腿**在 merge 前执行**（前置 = round 复审 clean + CI SQL dry run 绿）——使 1.2 的归因措辞在 merge 前由实测定稿，不留"pending 值被测试钉死、post-merge 实测翻案需二次 PR"的洞（round-1 C1/C2/C4 裁决）。
 
 ### D3 — 证据对齐范围（对 issue PR Boundary 的记录偏离）
 
 - issue 说"不做任何 schema 或代码适配"，PR Boundary 限 `db/migrations/`。但 `_qhh_latest_query_indexes()` 是**证据自述函数**（introspection metadata，不在任何查询执行路径上）：删索引后不改，仓库将自述"该查询由 mvt_identity_lookup 覆盖"——与本 change 自己的迁移直接矛盾。
 - 裁定：改**恰好这一处**状态陈述（`covered_by_mvt_identity_lookup_index` → 实测承接者的如实陈述，列元组同步）+ 两处测试钉同步。不碰任何执行路径代码。此为偏离记录第 1 条，PR body 显式声明（注：`query_indexes` 是公开 API 响应字段 `openapi/nhms.v1.yaml:3407-3428`，`index`/`status` 为无 enum 自由字符串、前端不渲染，改值不破契约——PR body 写明）。
-- 预期承接索引 = pkey（列集合相同；`variable` 单值使中缀列过滤零代价）——由 **D4 第 6 条（`river_sample_rows`）的 node-27 post-drop EXPLAIN 证实**；若实测承接者不是 pkey，按实测改陈述（陈述跟实测走，不跟推断走）。1.2 的最终措辞在 3.4 实测后定稿、merge 前提交。
+- 预期承接索引 = pkey（列集合相同；`variable` 单值使中缀列过滤零代价）——由 **D4 第 6 条（`river_sample_rows`）的 node-27 post-drop EXPLAIN 证实**；若实测承接者不是 pkey，按实测改陈述（陈述跟实测走，不跟推断走）。1.2 的最终措辞在 3.4（已前移 merge 前）实测后定稿、merge 前提交；在 receipt 产出前 forecast_store 注释必须用 pending 措辞，不得以肯定语气记载未产出的证据。
 
 ### D4 — EXPLAIN 取证查询集（AC3）
 

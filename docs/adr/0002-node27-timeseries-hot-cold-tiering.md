@@ -336,9 +336,14 @@ Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
 - `river_timeseries_mvt_identity_lookup_idx`: **162 GB** (up from 32 GB in July)
   for **5,571** `idx_scan`, against **796,096,944** `river_timeseries_pkey` scans
   over the same window. Its column *set* is identical to the pkey's — only the
-  order differs — and `variable` is single-valued table-wide, so leading with
-  `(run_id, variable, valid_time)` buys no selectivity the pkey prefix does not
-  already provide.
+  order differs — but the same set is not the same coverage: with `variable`
+  single-valued table-wide it behaves as `(run_id, valid_time, rnv, segid)`, a
+  run-scoped time prefix the pkey cannot offer (the pkey orders `rnv`/`segid`
+  ahead of `variable`/`valid_time`). Those 5,571 scans are evidence the planner
+  sometimes picks it — the ingest window `DELETE`
+  (`workers/output_parser/parser.py:745-755`) binds `run_id` + `rnv` +
+  `variable` + a `valid_time` range, a 3-column window on this index against a
+  2-column pkey prefix.
 - `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
   strict prefix of the index above. No in-repo migration created it; it was
   created out-of-band on node-27.
@@ -347,11 +352,15 @@ Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
 
 Both are dropped by
 [`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`](../../db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql)
-(~167 GB at the measured sizes; the node-27 apply receipt records the actual
-before/after), gated on before/after `EXPLAIN (ANALYZE, BUFFERS)` receipts
-for the in-repo query surfaces that name-match the dropped columns: any Seq Scan
-fallback or order-of-magnitude slowdown rolls the drop back by re-creating the
-index (the re-create DDL for both is preserved verbatim in that migration's
-comments). The general lesson for this ADR: "cannot be pruned further" is a
-measurement, not a property — index redundancy claims expire and must be
-re-measured against growth, not carried forward.
+(~167 GB at the measured sizes; the node-27 apply receipt — pending, produced by
+the pre-merge live leg — will record the actual before/after). This is a
+**tradeoff, not a redundancy removal**: 162 GB of
+carrying cost weighed against 5,571 scans, with a real residual coverage loss
+on the run-scoped time-window shapes above. That loss is exactly what the pre-merge
+before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measures, over the in-repo query
+surfaces that name-match the dropped columns: any Seq Scan fallback or
+order-of-magnitude slowdown rolls the drop back by re-creating the index (the
+re-create DDL for both is preserved verbatim in that migration's comments). The
+general lesson for this ADR: "cannot be pruned further" is a measurement, not a
+property — index redundancy claims expire and must be re-measured against
+growth, not carried forward.

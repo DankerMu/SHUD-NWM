@@ -462,13 +462,19 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         assert index_name in index_evidence_source
 
     # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx, so the river leg
-    # of the evidence payload must name the primary key that actually serves the lookup.
+    # of the evidence payload must name the retained 000021 index whose leading columns
+    # are an exact prefix match for the river window query (4 equality binds + a
+    # valid_time range) — not the pkey, whose usable prefix stops at two columns.
     # Matched on the payload key/value pairs rather than a bare substring, so the drop
     # rationale may keep naming the dropped index in a comment.
-    assert '"index": "river_timeseries_pkey"' in index_evidence_source
-    assert '"status": "covered_by_primary_key_prefix"' in index_evidence_source
+    assert (
+        '"index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx"' in index_evidence_source
+    )
+    assert '"status": "covered_by_selected_identity_valid_time_discovery_index"' in index_evidence_source
     assert '"index": "river_timeseries_mvt_identity_lookup_idx"' not in index_evidence_source
     assert '"status": "covered_by_mvt_identity_lookup_index"' not in index_evidence_source
+    assert '"index": "river_timeseries_pkey"' not in index_evidence_source
+    assert '"status": "covered_by_primary_key_prefix"' not in index_evidence_source
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
