@@ -374,8 +374,9 @@ shared-NFS canonical provider。registry JSON 位于 shared root，但其中
 `s3://nhms/models/...` 始终由 private `OBJECT_STORE_ROOT` 解析；不得依赖历史双份 package、
 合并两根，也不得关闭 private root 上的 object verification——registry package 解析、refresh
 续期的 checkpoint 校验、state-index copyback 的 source 侧全量校验一律照旧。唯一例外是
-**shared root 上历史 state entry 的对象存在性**：node-27 product-archive mover 按 14 天策略
-归档 shared root 的 state 对象，而没有任何组件剪枝 shared state index，因此 copyback merge
+**shared root 上历史 state entry 的对象存在性**：已退役的 node-27 product-archive mover
+（#1370）曾按 14 天策略归档 shared root 的 state 对象，而没有任何组件剪枝 shared state
+index——被它搬走的对象不会回来，index 里的历史 entry 仍指向空位，因此 copyback merge
 只校验并搬运本次胜出的 source entry，不再要求 shared index 里历史 entry 的对象仍在
 shared root（#1189，见 8.8）。不要照旧文档把 destination 侧全量 object verification
 "恢复"回去——那会原地重装同一个链停摆雷。
@@ -1023,16 +1024,16 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 注意第二行：DB 数据与归档层现在**共用文件系统**，这是对 2026-07-26
 "归档 FS 不得承载 pgdata" 边界的一次**有记录的例外**（成因、代价与承受条件见
 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment (2026-08-06)"）。
-运维含义：DB 增长会挤压归档层的 refuse 阈值，可能重现 mover ↔ retention 死锁。
+运维含义：mover ↔ retention 死锁已随归档车道退役消失（#1370），但它的余量
+告警也一并消失——DB 在 `ghdc` 上的增长现在**无人观测**，只能靠下面的手工核查。
 
-容量核查必须**两块盘都看**：`df -h /home /data/GHDC`。治理 receipt 的口径是
-partial 且**两个方向都失真**：`archive_root` 块**确实**报 `/dev/md0` 的
-free/total 并带 warn/refuse 告警（需 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
-两个都设——两个都不设则 `band=unconfigured` 静默不告警；只设一个是
-`ValueError`，整个治理 audit fail-closed、连 receipt 都不产出）；但 `pgdata_root` 只 `du`
-`/home/nwm/nhms-pgdata`，DB 体量**少报**迁走的字节；而 `archive_root.used_bytes`
-是整个归档根的 `du`，表空间就在根下面，归档体量**多报**了约 502 GB。单独量归档用
-`du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive`。issue #1290。
+容量核查必须**两块盘都看**：`df -h /home /data/GHDC`，而且必须**手工**看：
+归档车道已随 #1370 永久退役（ADR 0002 Revision 2026-08-11），治理 receipt
+不再有 `archive_root` 块，也不再读 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
+——`/dev/md0` 现在**完全没有**自动余量观测。receipt 仍在的 `pgdata_root` 只 `du`
+`/home/nwm/nhms-pgdata`，DB 体量**少报**迁走的字节。归档层体量单独量：
+`du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive`（表空间在归档根下面，
+不排除会多报约 502 GB）。历史口径偏差记在 issue #1290。
 
 重建 `nhms-db` 容器的流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿
@@ -1698,8 +1699,9 @@ uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entrie
   **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
   `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
 - shared root（`/ghdc/data/nwm/object-store`）下历史 state 对象缺失 —— **不再**是 copyback
-  失败原因（#1189 已收窄；node-27 mover 按 14 天归档 shared 对象，调度器与 refresh 都以
-  private root 解析对象）。若仍看到该失败，说明运行的是修复前的代码，先确认部署 SHA。
+  失败原因（#1189 已收窄；已退役的 node-27 mover 曾按 14 天归档 shared 对象且不会归还，
+  调度器与 refresh 都以 private root 解析对象）。若仍看到该失败，说明运行的是修复前的
+  代码，先确认部署 SHA。
 - provider-refresh 天天"成功"不能证明 copyback 正常：refresh 只续期、只用 private root
   解析对象。判"链是否在写入" 必须看 shared index 的 entry_count 是否随 cycle 增长。
 

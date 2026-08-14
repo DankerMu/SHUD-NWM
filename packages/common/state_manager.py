@@ -1968,9 +1968,10 @@ def _merge_state_snapshot_index_copyback_locked(
                 now=None,
                 max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
                 # #1189: the shared root is a rolling mirror whose old state
-                # objects are archived by node-27's product-archive mover while
-                # nothing prunes this index, so destination-side object
-                # existence is not an invariant.  Structure, schema, payload
+                # objects WERE archived by node-27's product-archive mover
+                # (retired in #1370) while nothing prunes this index, so
+                # destination-side object existence is not an invariant and
+                # historical entries still reference absent objects.  Structure, schema, payload
                 # checksum, entry limits, required fields, URI safety and
                 # identity/state-id uniqueness are all still enforced, and the
                 # source side below still verifies every object it publishes.
@@ -2019,9 +2020,9 @@ def _merge_state_snapshot_index_copyback_locked(
         # root), a source entry that lost its collision must not overwrite the
         # shared object that the published destination entry's checksum
         # describes, and a source entry byte-identical to the destination entry
-        # is already in the index -- its object lifecycle belongs to the
-        # archive mover, so replaying an old cycle must not resurrect it
-        # (#1189).  `destination_entries` is empty on the bootstrap path, so a
+        # is already in the index -- its object lifecycle was the archive
+        # mover's (retired in #1370), so replaying an old cycle must not
+        # resurrect it (#1189).  `destination_entries` is empty on the bootstrap path, so a
         # first copyback still copies everything it publishes.
         winning_source_entries = [
             entry

@@ -1,5 +1,5 @@
 # Node-27 timeseries compression runner (issue #851 / OpenSpec: tier-node27-timeseries-storage).
-# This runner does NOT read NHMS_ARCHIVE_ROOT / archive watermarks — compression is DB-side only. Do not sync this env against node27-product-archive.env / node27-storage-inventory-audit.env / node27-resource-governance.env.
+# Compression is DB-side only and has no archive-lane coupling (the archive lane retired in #1370, ADR 0002 Revision 2026-08-11). Do not sync this env against node27-resource-governance.env.
 #
 # Copy to node27-timeseries-compression.env and chmod 0600.
 

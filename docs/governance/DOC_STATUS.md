@@ -152,15 +152,18 @@ docs or OpenSpec change rather than silently choosing a stale fact.
 - `.agents`, `.codex`, `apps/frontend/artifacts`, and root `artifacts/`
   ownership policy is defined above by path family.
 - `docs/runbooks/tier-node27-timeseries-storage.md` is the **current
-  runbook** for the node-27 timeseries hot/cold tiering operational
-  surface (archive mover, storage-inventory audit, DB-export salvage,
-  compression migration + runner, compressed-chunk write guard,
-  archive rebuild drill, gated `drop_chunks` retention, systemd
-  wiring). It has authority over any older per-sub-issue notes for
-  these surfaces; ADR
+  runbook** for the node-27 timeseries storage-tier operational surface
+  (compression migration + runner, compressed-chunk write guard,
+  `drop_chunks` retention, systemd wiring). The cold tier it was
+  originally written for — the archive mover, storage-inventory audit,
+  DB-export salvage and archive rebuild drill — is **permanently
+  retired** (#1370, ADR 0002 Revision 2026-08-11); those sections are
+  gone from the runbook and their history lives in git. It has
+  authority over any older per-sub-issue notes for these surfaces; ADR
   [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md)
   cross-links it as the operator entrypoint. Live receipts land under
-  `docs/runbooks/receipts/tier-node27-timeseries-storage/**`.
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/**`, including
+  the immutable receipts of the retired lanes.
 
 ## Display Route Authority (M26 single-map)
 

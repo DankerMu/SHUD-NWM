@@ -332,8 +332,8 @@ def config_from_env(env: Mapping[str, str] | None = None) -> AlertConfig:
 
 # ---------------------------------------------------------------------------
 # Redaction (D3). Provenance: same discipline as
-# ``scripts/node27_timeseries_retention.py:_redact_error_text`` (#1213), which
-# in turn mirrors ``scripts/node27_db_export_salvage.py::_mask_dsn_in_message``.
+# ``scripts/node27_timeseries_retention.py:_redact_error_text`` (#1213). Both
+# route through the shared policy in ``packages/common/redaction.py``.
 # ---------------------------------------------------------------------------
 
 
