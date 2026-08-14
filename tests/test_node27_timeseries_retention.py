@@ -2748,6 +2748,12 @@ def test_runbook_8_5_documents_archive_gate_field_and_boundary_partial_change() 
 def test_env_example_warns_about_the_missing_archive_backstop() -> None:
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     assert re.search(rf"^#?{re.escape(_ARCHIVE_GATE_ENV_KEY)}=", text, flags=re.MULTILINE)
+    # The gate line must ship UNCOMMENTED and set to the only accepted value:
+    # a commented-out line leaves the key unset, which the runner refuses with
+    # RETENTION_CONFIG_INVALID (exit 2, no receipt) since #1370.
+    assert re.search(
+        rf"^{re.escape(_ARCHIVE_GATE_ENV_KEY)}=disabled$", text, flags=re.MULTILINE
+    )
     assert _ADR_PATH_ANCHOR in text
     assert _ADR_REVISION_ANCHOR in text
     assert "irreversible" in text.lower()

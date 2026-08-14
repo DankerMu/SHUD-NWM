@@ -136,7 +136,9 @@ for headroom, and `du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive` to
 separate the retired archive's residue from the live tablespace. Quote both,
 or quote neither.
 
-Tracked in issue #1290.
+No open tracker owns this caliber question: #1290 (governance-receipt capacity
+caliber) and #1309 (the `/dev/md0` double-disk failure) are both CLOSED and are
+historical records only — cite them as background, not as work in flight.
 
 **Establishing the tablespace for the first time** (DR from scratch, or a
 brand-new tablespace). Order matters — the container must carry the mount
@@ -246,12 +248,17 @@ against the committed `.example` templates as of 2026-08-01:
 
 - **Compression per-tick bound is retuned live.** See §4 "Per-tick capacity
   (live state 2026-08-01)".
-- **DB retention timer.** Not enabled as of the 2026-08-01 verification. The
-  2026-08-14 operator decision (issue #1369) enables it at the committed
-  05:15 UTC cadence with the archive gate `disabled` — since #1370 the only
-  value the runner accepts. Until the live receipts from that bringup are
-  committed, verify the timer's real state on the box. See §8.1 "Current
-  bringup state".
+- **DB retention timer.** Not enabled as of the 2026-08-01 verification;
+  enabled on 2026-08-14 (issue #1369 operator decision) at the committed
+  05:15 UTC daily cadence with the archive gate `disabled` — since #1370 the
+  only value the runner accepts. That bringup's four live receipts ARE
+  committed under
+  `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/`
+  (`retention-dryrun-20260814T095619Z.json`,
+  `retention-enforce-20260814T095746Z.json`, and the two wrapper receipts
+  `retention-20260814T095802Z.json` / `retention-20260814T095832Z.json`).
+  As always, re-verify with `systemctl --user list-timers` before quoting the
+  live state. See §8.1 "Current bringup state".
 - **Retired-lane residue.** The archive tier's directories under
   `/data/GHDC/nwm-archive` and its per-lane log roots under `/home/nwm` are
   no longer written by anything. Removing them is optional operator cleanup
@@ -401,11 +408,19 @@ credential in process argv.
    must contain exactly D3's indexed segment/order columns, both hypertables
    compression-enabled, and no compression-policy job. A nonzero first apply
    stops the run; repairing partial DDL is separately authorized.
-6. Install the committed recurring service/timer and replay service byte-for-byte under
+6. Create this lane's own log directory FIRST — no shared install step creates
+   it, and neither unit can create it for itself:
+
+   ```bash
+   mkdir -p ~/node27-timeseries-compression-logs
+   ```
+
+   Then install the committed recurring service/timer and replay service byte-for-byte under
    `~/.config/systemd/user/`, verify both file hashes, `daemon-reload`. The replay
    unit refuses to start — a clean systemd condition failure — until the run-plan,
-   the replay env, AND `~/node27-timeseries-compression-logs` from install step 1
-   all exist: systemd must open the `StandardOutput=append:` log targets BEFORE
+   the replay env, AND the `~/node27-timeseries-compression-logs` directory
+   created at the start of this step all exist: systemd must open the
+   `StandardOutput=append:` log targets BEFORE
    `ExecStartPre` runs, so the log directory can never be created by the unit itself
    (measured on node-27 as `status=209/STDOUT` without the guard). Then run
    `systemctl --user enable nhms-node27-timeseries-compression.timer` **without
@@ -1813,8 +1828,9 @@ commented placeholder; run it only after the two manual receipts in §8.4
 
 #### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
 
-Historical posture, kept because every receipt committed under
-`docs/runbooks/receipts/.../timeseries-retention/` predates the change:
+Historical posture, kept because the receipts committed under
+`docs/runbooks/receipts/.../timeseries-retention/` that predate 2026-08-14
+were produced under it:
 
 - `nhms-node27-timeseries-retention.timer` was `disabled` and `inactive` —
   step 3's `enable --now` line was commented out in reality, not just in
@@ -1835,8 +1851,16 @@ mode with `ENFORCE=0` → manual dry-run receipt → **blast-radius inventory
 `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
 manual tick (≤ per-tick bound) → `enable --now` the timer → capture
 `list-timers` → after the second tick confirm two distinctly timestamped
-receipts coexist (step 4). Until those live receipts are committed, treat the timer
-state on the box as the authority and re-verify with
+receipts coexist (step 4). That bringup ran on 2026-08-14: the timer is
+enabled at 05:15 UTC daily, the whole 6-chunk backlog was ground down (5
+candidates in the first enforce plus the 1 deferred remainder in the next
+tick, leaving `deferred_remainder: []`), and its four live receipts are
+committed under
+`docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/`
+(`retention-dryrun-20260814T095619Z.json`,
+`retention-enforce-20260814T095746Z.json`,
+`retention-20260814T095802Z.json`, `retention-20260814T095832Z.json`). The
+box remains the authority on the timer's present state — re-verify with
 `systemctl --user list-timers` before quoting it. Rolling back can only mean
 stopping FURTHER deletion — set `NODE27_TIMESERIES_RETENTION_ENFORCE=0` and/or
 disable the timer (never delete the archive-gate line; since #1370 that just
@@ -1928,11 +1952,13 @@ listed like any other candidate: nothing defers them (§8.5).
 ### 8.2 Wire-format codes
 
 The runner emits structured refusal reasons on `outcome=refused`. Codes
-are byte-identical across code (`scripts/node27_timeseries_retention.py`
-`WIRE_CODES` frozenset), this runbook, the design fixture
-(`openspec/changes/tier-node27-timeseries-storage/design.md` #855 block),
-and the unit tests. Any addition / rename / removal MUST land in all four
-surfaces in the same commit.
+are byte-identical across three live surfaces: code
+(`scripts/node27_timeseries_retention.py` `WIRE_CODES` frozenset), this
+runbook §8.2, and the unit tests. Any addition / rename / removal MUST land
+in all three surfaces in the same commit. The #855 design fixture
+(`openspec/changes/tier-node27-timeseries-storage/design.md`) is frozen and
+read as history — it is explicitly OUTSIDE the byte-identity mandate and is
+never updated to match a code change.
 
 Historical note (#1370): the thirteen archive-family codes — five
 completeness-receipt codes and eight drill codes — were retired together with
@@ -2144,13 +2170,15 @@ shape:
   — the archive gates are skipped under that authorization. The reference
   string is a schema `const`, so a receipt cannot cite a vaguer source.
 
-Two historical shapes still exist on disk and are never rewritten:
-`archive_gate.mode = "enabled"` (schema `1.1`, written while both modes were
-selectable) and receipts declaring `schema_version = "1.0"` with no
-`archive_gate` field at all (pre-#1369, produced under the hard gate). The
-schema still admits both; the runner cannot produce either, because
-`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` must read `disabled` and any other
-value refuses with `RETENTION_CONFIG_INVALID` before a receipt exists.
+Exactly one historical shape exists on disk and is never rewritten: receipts
+declaring `schema_version = "1.0"` with no `archive_gate` field at all
+(pre-#1369, produced under the hard gate). Node-27 went straight from that
+`1.0` shape to `1.1` with `mode = "disabled"`, so no receipt with
+`archive_gate.mode = "enabled"` was ever produced — the schema enum still
+admits that value, but nothing on disk carries it and the runner cannot
+write it, because `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` must read
+`disabled` and any other value refuses with `RETENTION_CONFIG_INVALID`
+before a receipt exists.
 
 - `outcome=dry-run`: `mode=dry-run`; `candidate_chunks[]` lists chunks
   that WOULD be dropped up to the per-tick bound; `deferred_remainder[]`

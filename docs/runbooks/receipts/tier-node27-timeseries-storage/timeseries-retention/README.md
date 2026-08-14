@@ -162,7 +162,7 @@ production (see #1072's reversibility warning).
 ### `retention-dryrun-20260814T095619Z.json`
 
 First `disabled`-gate landing receipt (issue #1369 bringup step, runbook
-§8.4 BRANCH B step 2). Manual direct-`python` dry-run with the
+§8.4 step 2). Manual direct-`python` dry-run with the
 `NODE27_TIMESERIES_RETENTION_ENFORCE=0` prefix and an explicit
 timestamped `--receipt-path`, after the deployed env file was switched to
 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled` and its
@@ -180,7 +180,7 @@ deferred_remainder[]` name-for-name.
 
 ### `retention-enforce-20260814T095746Z.json`
 
-First `disabled`-gate enforce (same bringup, §8.4 BRANCH B step 3):
+First `disabled`-gate enforce (same bringup, §8.4 step 3):
 manual `--enforce` with explicit `--receipt-path` after flipping the env
 file to `NODE27_TIMESERIES_RETENTION_ENFORCE=1`. Result:
 `outcome=enforced`, rc=0, all five candidates dropped with per-chunk
