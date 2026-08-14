@@ -2608,6 +2608,27 @@ def test_checkpoint_rejects_one_deviating_recurring_field_and_names_it(
         assert "shows current activity or unexpected identity" in message
 
 
+def test_checkpoint_names_the_reset_failed_remedy_for_the_real_wall_trip_geometry(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The geometry systemd ACTUALLY leaves behind after the per-chunk timeout
+    # wall (runbook §4.5): `ActiveState=failed` AND `SubState=failed` together,
+    # MainPID cleared, fragment still the pinned one.  The single-field
+    # parametrization above can only reach `SubState=failed` on top of an
+    # `inactive` base, so this is the only case that pins the remedy sentence to
+    # the shape an operator will really meet -- narrowing the failed branch to
+    # `ActiveState == "inactive"` would silently demote it to the generic text.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    wall_tripped = {**RECURRING_RAN_THIS_BOOT_SHOW, "ActiveState": "failed", "SubState": "failed"}
+    with pytest.raises(supervisor.SupervisorError) as raised:
+        _capture_with_recurring(probe_bin, tmp_path, wall_tripped, slug="wall-tripped")
+    message = str(raised.value)
+    assert "ActiveState='failed'" in message
+    assert "SubState='failed'" in message
+    assert "not running" in message
+    assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
+
+
 def test_recurring_gate_is_field_for_field_identical_in_both_planes(
     probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

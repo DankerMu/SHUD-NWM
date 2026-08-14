@@ -4563,6 +4563,30 @@ def test_recurring_failed_sentence_is_not_claimed_over_a_polluted_document(tmp_p
     assert "reset-failed" not in message
 
 
+def test_recurring_failed_sentence_covers_the_real_wall_trip_geometry(tmp_path: Path) -> None:
+    # The converse of the pollution guard above, and the shape systemd really
+    # leaves after the per-chunk timeout wall (runbook §4.5): `ActiveState` and
+    # `SubState` BOTH `failed`, MainPID cleared, the pinned fragment intact.
+    # The single-field parametrization can only reach `SubState=failed` over an
+    # `inactive` base, so this is the only guard keeping the remedy sentence
+    # attached to the geometry the operator will actually meet.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(
+        bundle,
+        tmp_path,
+        {**RECURRING_RAN_THIS_BOOT, "ActiveState": "failed", "SubState": "failed"},
+        serial="wall-tripped-failed",
+        first_only=True,
+    )
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert "ActiveState='failed'" in message
+    assert "SubState='failed'" in message
+    assert "not running" in message
+    assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
