@@ -246,8 +246,16 @@ Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
 0600). Read them on the box before quoting any value; these are the deltas
 against the committed `.example` templates as of 2026-08-01:
 
-- **Compression per-tick bound is retuned live.** See §4 "Per-tick capacity
-  (live state 2026-08-01)".
+- **Compression per-tick bound.** No longer a drift: the committed template
+  and the deployed env both carry `=4` since issue #1237 decided it as a
+  capacity target (the box already ran `=4`; the template's stale `=5` was
+  the side that moved). Still read the live value off the box before quoting
+  it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
+- **Compression chunk-selection lag.**
+  `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` was OBSERVED at `172800` on
+  2026-08-14 where the committed template ships `604800`; this is recorded as
+  an observation only — it is not a target value and #1237 neither judged nor
+  changed it.
 - **DB retention timer.** Not enabled as of the 2026-08-01 verification;
   enabled on 2026-08-14 (issue #1369 operator decision) at the committed
   05:15 UTC daily cadence with the archive gate `disabled` — since #1370 the
@@ -276,31 +284,98 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
-### Per-tick capacity (live state 2026-08-01)
+### Per-tick capacity (live state 2026-08-14, decided in #1237)
 
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
-tick compresses. The committed template
-(`infra/env/node27-timeseries-compression.example`) ships `=5`; the deployed
-`/home/nwm/NWM/infra/env/node27-timeseries-compression.env` was verified at
-`=4` on 2026-08-01 (retuned on the box, presumably during the July catch-up).
-The template value is intentionally left alone here — which number is the
-right capacity target is an operator/capacity decision, tracked in
-issue #1237.
+tick compresses. **The decided value is 4** — a capacity target derived from
+the measured inputs below, not an arbitrary default and not an after-the-fact
+blessing of a July retune. Issue #1237 is the decision record. The committed
+template (`infra/env/node27-timeseries-compression.example`) now ships `=4`
+and a test pins that exact assignment line; the deployed
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env` already ran `=4`
+(verified on the box 2026-08-01 and 2026-08-14), so the decision moved the
+template only and changed nothing on node-27. The former `5` vs `4`
+template/live drift is resolved.
 
-The number that matters is a capacity relation, not a constant: the per-tick
-bound × timer frequency must compress at least as fast as ingest produces new
-terminal chunks. The compression timer fires **once daily** (`OnCalendar=*-*-*
-04:25:00 UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
-throughput is `bound × 1 tick/day` — 4 chunks/day at the live value. During
-July 2026 `hydro.river_timeseries` grew by roughly 43 GB/day (816 GB total at
-the 2026-07-26 `/home`-full incident). A per-tick bound that cannot keep up
-leaves uncompressed chunks accumulating on the hot tier, which is one of the
-two inputs to that incident (the other being the archive root sharing the hot
-filesystem — see `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
-"Amendment (2026-07-26)"). As of 2026-08-01 the latest live compression
-receipt is `outcome=clean` with zero backlog, so the current bound is keeping
-up post-catch-up. When retuning, read the live value off the box first and
-record the new value with the receipt that justified it.
+**The relation is dual — both constraints are mandatory.**
+
+1. **Throughput.** `bound × 1 tick/day ≥ steady arrival of 2 terminal
+   chunks/week`. The timer fires **once daily** (`OnCalendar=*-*-* 04:25:00
+   UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
+   `bound=4` buys 28 chunk-slots/week against an arrival of 2 — **14×
+   headroom**.
+2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~300 s non-compress overhead ≤
+   NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`, the live
+   default from `#1156`/`#1352`, no override installed). That wall bounds the
+   **whole tick**, not one chunk, and the runner has no in-loop elapsed guard:
+   overrunning it means the wrapper's `timeout` sends `TERM` mid-DDL.
+
+Measured inputs (node-27, read-only, 2026-08-14 unless noted):
+
+- **Arrival rate = 2/week.** Both hot hypertables use a 7-day
+  `chunk_time_interval` with aligned range boundaries
+  (`timescaledb_information.dimensions`; census 5 river / 6 forcing chunks),
+  so two terminal chunks become eligible on the **same day, once a week**. The
+  2026-08-14T04:25 tick receipt compressed exactly that pair in 30m36s
+  (≈1836 s), matching the §4.5 estimator's prediction of 1836 s for
+  230 GB + 12.7 GB.
+- **Backlog ceiling ≤6 chunks — CONDITIONAL, not physical.** The DB retention
+  window bounds uncompressed stock at ≤3 per table, hence ≤6 for the lane. The
+  window in force is the **live 21 days**, not the committed template's 14
+  (that drift is recorded in "Current policy (effective 2026-07-21)" near the
+  top of this runbook, the `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`
+  paragraph). The retention timer was only enabled on 2026-08-14 (`#1369`), so
+  the convergence to the steady stock is not yet observed. **If that timer is
+  disabled or the window is changed, this premise fails** and the bound must
+  be re-derived from the formula above.
+- **Per-chunk cost.** Steady-state `hydro.river_timeseries` chunks measure
+  268–409 GB → 1608–2454 s each at ~6.0 s/GB (§4.5). Therefore `3 river + 1
+  forcing ≈ 5280–7818 s`, which **exceeds the 3900 s wall** outright.
+- **Live value was already 4**, so no operational change accompanies this
+  decision.
+- **Chunk count is decoupled from ingest volume.** Chunks are cut on the time
+  dimension (7 d), so doubling ingest makes terminal chunks *bigger*, not more
+  numerous. Growth pressure lands entirely on the per-chunk timeout budget
+  (`#1156`/`#1352`), never on this bound.
+
+**`bound=4` is a throughput ceiling, not redeemable single-tick capacity.** At
+river chunk sizes the wall admits roughly **≤2 chunks in one tick**; the
+weekly pair (1 river + 1 forcing ≈ 1836 s) clears it comfortably. Do not read
+"4" as "four river chunks in one tick" — that selection dies on the wall.
+
+**Catch-up does not depend on this bound.** Draining a real backlog is §4.5
+"大 chunk 追赶": set `PER_TICK_BOUND=1` and raise the timeout/wall triple
+(systemd drop-in first), one chunk per tick. Raising the bound is not a
+catch-up tool and never was.
+
+**No timer frequency change is required.** The main argument is the
+decoupling above — a second daily tick would find no extra terminal chunks to
+compress, because arrival is set by the 7-day chunk width, not by ingest
+volume. The 14× throughput headroom is the secondary confirmation. No cadence
+follow-up issue is opened.
+
+Why the bound matters at all: uncompressed chunks piling up on the hot tier
+was one of the two inputs to the 2026-07-25/26 `/home`-full incident (the
+other being the archive root sharing the hot filesystem — see
+`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
+(2026-07-26)").
+
+**Invalidation conditions.** Re-derive from the two constraints above when any
+of these change:
+
+- `chunk_time_interval` on either hot hypertable (moves the arrival rate).
+- A third hot hypertable joins the lane (moves the arrival rate).
+- The DB retention timer is disabled, or its window changes (kills the ≤6
+  backlog ceiling premise).
+- The wrapper wall / timeout budget changes, including a temporary §4.5
+  override window (moves the wall constraint).
+- Chunk boundaries de-align between the two hypertables. This spreads the two
+  weekly terminals over different days and therefore **reduces** per-tick
+  load — a safe direction, listed here only so it is not misread as a
+  regression.
+
+When retuning, read the live value off the box first and record the new value
+with the receipt that justified it.
 
 ### 4.0 Controlled initial live run (`#1069`)
 

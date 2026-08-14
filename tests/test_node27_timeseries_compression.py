@@ -1590,6 +1590,22 @@ def test_compression_env_example_documents_the_budget_chain() -> None:
     assert "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1" in text
 
 
+def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:
+    """#1237: the per-tick bound is a decided capacity target, not a default.
+
+    The substring pins above cannot see this line — the only other
+    `PER_TICK_BOUND=` occurrence in the template is the commented catch-up
+    hint (`=1`). Anchor the assignment line itself so a silent drift back to
+    the pre-#1237 `=5` fails CI. Derivation: runbook §4 "Per-tick capacity".
+    """
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.search(
+        r"^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4$",
+        text,
+        flags=re.MULTILINE,
+    )
+
+
 def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:
     replay = _SYSTEMD_REPLAY_SERVICE_PATH.read_text(encoding="utf-8")
     assert "node27_timeseries_compression_supervisor.py --enforce" in replay
