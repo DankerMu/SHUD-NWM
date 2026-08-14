@@ -1732,10 +1732,29 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "river_timeseries_mvt_identity_lookup_idx",
+        "river_timeseries_pkey",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
     }
+    # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx; the river leg of
+    # the evidence payload must report the primary key serving the lookup, in pkey
+    # column order.
+    assert [
+        item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"
+    ] == [
+        {
+            "table": "hydro.river_timeseries",
+            "index": "river_timeseries_pkey",
+            "status": "covered_by_primary_key_prefix",
+            "columns": [
+                "run_id",
+                "river_network_version_id",
+                "river_segment_id",
+                "variable",
+                "valid_time",
+            ],
+        }
+    ]
 
 def test_latest_qhh_no_candidate_full_404_still_raises() -> None:
     # 无任何候选时 latest-product 整体 404（既有契约不变）。

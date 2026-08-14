@@ -13,6 +13,10 @@ Layout amendment: 2026-07-26 (archive root moved off the `/home` hot
 filesystem to `/data/GHDC/nwm-archive`; see "Amendment (2026-07-26)" below,
 which supersedes Decision item 1's path wording)
 
+Context amendment: 2026-08-14 (the Context claim that the remaining
+`hydro.river_timeseries` index families "cannot be pruned further" is
+superseded by new measurements; see "Amendment (2026-08-14)" below)
+
 ## Status
 
 Accepted
@@ -314,3 +318,40 @@ completeness/drill gates in an explicit gate-disabled mode whose receipt
 records the mode and cites this revision. Implementation is tracked in
 issue #1369. The display carve-out window and the compression sections
 of this ADR are unchanged (compression was never a retention gate).
+
+## Amendment (2026-08-14): the river index families could be pruned further
+
+The Context above records, from the 2026-07-04 measurements, that
+`hydro.river_timeseries`'s "remaining index families are functional (pkey 30 GB,
+MVT identity lookup 32 GB) and cannot be pruned further". That forward-looking
+claim is **superseded by #1338**; the original Context text stays as written
+(it is an accurate record of what was measured in July), and the Status is
+unchanged — nothing in the Decision depended on the claim.
+
+### What the new measurement shows
+
+Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
+`hydro.river_timeseries` chunks; inventory in `.workplans/issue-1338/`):
+
+- `river_timeseries_mvt_identity_lookup_idx`: **162 GB** (up from 32 GB in July)
+  for **5,571** `idx_scan`, against **796,096,944** `river_timeseries_pkey` scans
+  over the same window. Its column *set* is identical to the pkey's — only the
+  order differs — and `variable` is single-valued table-wide, so leading with
+  `(run_id, variable, valid_time)` buys no selectivity the pkey prefix does not
+  already provide.
+- `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
+  strict prefix of the index above. No in-repo migration created it; it was
+  created out-of-band on node-27.
+
+### Disposition
+
+Both are dropped by
+[`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`](../../db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql)
+(~167 GB at the measured sizes; the node-27 apply receipt records the actual
+before/after), gated on before/after `EXPLAIN (ANALYZE, BUFFERS)` receipts
+for the in-repo query surfaces that name-match the dropped columns: any Seq Scan
+fallback or order-of-magnitude slowdown rolls the drop back by re-creating the
+index (the re-create DDL for both is preserved verbatim in that migration's
+comments). The general lesson for this ADR: "cannot be pruned further" is a
+measurement, not a property — index redundancy claims expire and must be
+re-measured against growth, not carried forward.

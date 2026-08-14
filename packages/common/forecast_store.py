@@ -3432,16 +3432,22 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "status": "covered_by_latest_product_basin_lookup_index",
             "columns": ["basin_id", "basin_version_id"],
         },
+        # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
+        # (#1338): its column set duplicated the primary key's, and the pkey was
+        # already serving this lookup. The naming below is confirmed against the
+        # #1338 post-drop EXPLAIN receipt for the river window query before merge —
+        # if the live plan picks something else, this statement follows the
+        # measurement rather than the inference.
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_mvt_identity_lookup_idx",
-            "status": "covered_by_mvt_identity_lookup_index",
+            "index": "river_timeseries_pkey",
+            "status": "covered_by_primary_key_prefix",
             "columns": [
                 "run_id",
-                "variable",
-                "valid_time",
                 "river_network_version_id",
                 "river_segment_id",
+                "variable",
+                "valid_time",
             ],
         },
         {
