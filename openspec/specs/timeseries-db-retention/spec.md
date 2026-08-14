@@ -168,307 +168,102 @@ self-consistent.
   because `_MEASURE_WARNING_GREP_FENCE` is an f-string derivation of the
   token rather than an independent literal
 
-### Requirement: The retention gate MUST refuse when the drill's recorded judgment span does not contain the retention drop window
-
-`check_drill_gate` SHALL read the drill receipt's
-`salvage_derivation.drop_window` and SHALL refuse fail-closed with wire code
-`DRILL_DERIVATION_WINDOW_TOO_NARROW` whenever that recorded window exists
-but does not contain (closed-interval; equality passes) the retention drop
-window, before any coverage-union evidence is consulted; a receipt without
-the `salvage_derivation` section SHALL keep current behavior, a recorded
-`drop_window` of null SHALL pass the guard, and a present-but-unusable
-`salvage_derivation` shape (not a Mapping, missing `drop_window` key,
-unparseable, or inverted window) SHALL refuse with the same code.
-
-#### Scenario: Narrow drill cannot vouch for a wider drop (issue A/B replay)
-
-- **WHEN** completeness subjects A `[06-14, 06-28]` and B `[06-20, 06-27]`
-  are both db-export/complete, the drill receipt records
-  `salvage_derivation.drop_window = [06-18, 06-19]` and carries only A's
-  full-window coverage tuple, and retention judges drop window
-  `[06-18, 06-25]`
-- **THEN** `check_drill_gate` SHALL return
-  `DRILL_DERIVATION_WINDOW_TOO_NARROW` as the first reason (previously:
-  empty reasons → PASS → false-positive release)
-
-#### Scenario: No-derivation-section receipt keeps current behavior
-
-- **WHEN** the drill receipt has no `salvage_derivation` section (pre-#1206
-  receipts or explicit-manifest drills, which never write the section)
-- **THEN** the gate SHALL behave exactly as before this change (the
-  cross-subject substitution residual for section-less receipts is pinned
-  by a test and recorded in runbook §7.5)
-
-#### Scenario: Un-narrowed, containing, and window-equal drills are not refused
-
-- **WHEN** the recorded `drop_window` is null, contains the retention drop
-  window, or is exactly equal to it, with otherwise complete evidence
-- **THEN** the gate SHALL NOT emit `DRILL_DERIVATION_WINDOW_TOO_NARROW`
-  (a live drill records an equal-or-wider window than the runner's own
-  drop window — equality is the tight end of that range; no false
-  negatives introduced)
-
-#### Scenario: Unusable derivation shape refuses
-
-- **WHEN** the `salvage_derivation` section is present but unusable — not
-  a Mapping, `drop_window` key missing, window unparseable, or inverted
-  (`end` before `start`)
-- **THEN** the gate SHALL refuse with `DRILL_DERIVATION_WINDOW_TOO_NARROW`
-
-#### Scenario: Wire code syncs across all four registry surfaces
-
-- **WHEN** the new code is added
-- **THEN** it SHALL appear in `WIRE_CODES`, the wire-code registry tests,
-  runbook §8.2 (table and priority chain), and the
-  `tier-node27-timeseries-storage` design fixture #855 block in the same
-  commit
-
-#### Scenario: Refusal is visible on the receipt surface
-
-- **WHEN** `run_retention` refuses via this guard
-- **THEN** the refused receipt's `refusal_reason` SHALL be
-  `DRILL_DERIVATION_WINDOW_TOO_NARROW` and the code SHALL be a member of
-  `WIRE_CODES`
-
-### Requirement: The retention gate MUST refuse when the gate-time requirement set contains a salvage-backed window the drill's completeness snapshot never contained
-
-`check_drill_gate` SHALL refuse fail-closed with wire code
-`DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` whenever the drill receipt's
-`salvage_derivation` records `db_export_windows` (the normalized universe
-of db-export/complete subject windows in the completeness receipt the
-drill consumed) and any salvage-backed target window derived from the
-gate-time completeness receipt is not an exact member of that recorded
-set, before any coverage-union evidence is consulted for those targets;
-a receipt without
-the `salvage_derivation` section or without the `db_export_windows` field
-SHALL keep current behavior, a recorded set that is present but unusable
-in shape SHALL refuse with the same code, and requirement shrink (targets
-all members of a larger recorded set) SHALL pass.
-
-#### Scenario: Snapshot drift with a new subject refuses (issue v1/v2 replay)
-
-- **WHEN** the drill consumed completeness v1 containing only subject A
-  (db-export/complete, window `[06-01, 06-30]`) and recorded
-  `db_export_windows = [[06-01, 06-30]]` with `drop_window: null`, the
-  gate-time completeness v2 additionally contains new subject B
-  (db-export/complete, window `[06-10, 06-20]`), the drill's coverage
-  carries A's full-window db-export tuple, and retention judges drop
-  window `[06-05, 06-15]`
-- **THEN** `check_drill_gate` SHALL return
-  `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` as the first reason (previously:
-  empty reasons → PASS → false-positive release), and the same receipts
-  WITHOUT the `db_export_windows` field SHALL still return empty reasons
-  (pinned pre-fix oracle and recorded residual)
-
-#### Scenario: Unchanged or shrunk requirement set is not refused, and membership is judged over drop-filtered targets only
-
-- **WHEN** the gate-time completeness receipt yields targets whose
-  `{start, end}` pairs are all members of the drill's recorded
-  `db_export_windows` (identical snapshot, daily regeneration without new
-  db-export subjects, or a subject removed since the drill), with
-  otherwise complete evidence and drill age within `drill_max_age_days` —
-  including when the gate-time receipt ALSO contains a new
-  db-export/complete subject whose window does NOT overlap the drop window
-- **THEN** the gate SHALL NOT emit `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`
-  (no false negatives; daily completeness rewrites alone never invalidate
-  a drill receipt, and a new subject outside the drop window is not a
-  gate-time requirement — design D1/D2)
-
-#### Scenario: One-sided window change and empty recorded universe refuse
-
-- **WHEN** a gate-time target shares its `start` (or its `end`) with a
-  recorded window but differs on the other endpoint (e.g. a backfill
-  extended subject A from `[06-01, 06-30]` to `[06-01, 07-15]`), or the
-  drill recorded `db_export_windows: []` and any target exists
-- **THEN** the gate SHALL refuse with `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`
-  (membership is exact on BOTH endpoints; an empty recorded universe has
-  no members)
-
-#### Scenario: Unusable recorded set refuses
-
-- **WHEN** `salvage_derivation.db_export_windows` is present but not a
-  list, or contains an entry that is not a window object with string
-  `start`/`end`
-- **THEN** the gate SHALL refuse with `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`
-
-#### Scenario: Emit-to-gate round trip binds without translation
-
-- **WHEN** a derivation-mode drill receipt built by the real emit path is
-  judged by `check_drill_gate` against the very completeness receipt it
-  was derived from
-- **THEN** the binding check SHALL pass (no refusal from field-name or
-  normalization mismatch between emit and gate), and adding a new
-  db-export/complete subject overlapping the drop window to that
-  completeness receipt SHALL flip the same pair to
-  `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`
-
-#### Scenario: Refusal is visible on the receipt surface and the code registers on all four surfaces
-
-- **WHEN** `run_retention` refuses via this guard
-- **THEN** the refused receipt's `refusal_reason` SHALL be
-  `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`, and the code SHALL appear in
-  `WIRE_CODES`, the wire-code registry tests, runbook §8.2 (table and
-  priority chain), and the `tier-node27-timeseries-storage` design fixture
-  #855 block in the same commit
-
-### Requirement: The db-export coverage refusal MUST localize the shortfall window
-
-The retention gate's db-export leg SHALL, when refusing for per-window
-coverage shortfall, emit `refusal_reason` in the form
-`DRILL_COVERAGE_DB_EXPORT_MISSING:<clipped_start>/<clipped_end>` — the
-first uncovered salvage-backed target in ascending window order, clipped
-to the drop window, serialized with the module's canonical UTC `Z`
-ISO-8601 rendering — and SHALL, when refusing because an overlapping
-db-export
-subject derives no salvage-backed window at all, emit
-`DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window`; the bare
-registered code SHALL remain a strict prefix of every emitted form, the
-`WIRE_CODES` registry and receipt schema SHALL be unchanged, and gate
-judgment semantics (which inputs refuse) SHALL be byte-identical to the
-pre-change behavior.
-
-#### Scenario: Shortfall names the first uncovered clipped window
-
-- **WHEN** multiple salvage-backed windows are derived and the k-th (not
-  first, not last) lacks db-export tuple-union coverage after clipping
-- **THEN** `refusal_reason` SHALL be exactly the bare code plus `:` plus
-  that k-th clipped window as `<start>/<end>`, and the tick SHALL refuse
-  on that single shortfall (early return preserved)
-
-#### Scenario: Clipping is rendered, not the raw subject
-
-- **WHEN** the uncovered subject window overruns the drop window on both
-  sides
-- **THEN** the suffix SHALL carry the clipped intersection bounds, not
-  the raw subject bounds
-
-#### Scenario: Empty derivation carries the dedicated suffix
-
-- **WHEN** the completeness receipt has a db-export subject overlapping
-  the drop window but no salvage-backed window is derivable (D2
-  fail-closed, #1162)
-- **THEN** `refusal_reason` SHALL be exactly
-  `DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window`
-
-#### Scenario: Inverted clip renders its inverted interval
-
-- **WHEN** a salvage-backed window's intersection with the drop window is
-  inverted (corrupt subject, #1162 guard)
-- **THEN** the refusal SHALL use the per-window suffix form rendering the
-  inverted interval verbatim, and the refusal SHALL remain fail-closed
-
-#### Scenario: Registry and token-walk surfaces are unchanged
-
-- **WHEN** the suffixed forms are emitted
-- **THEN** `WIRE_CODES` SHALL still contain exactly the bare code, the
-  H6 forward/reverse token-walk suites SHALL pass unmodified, and the
-  runbook §8.2 / §7.5 / §8.7 and the pending
-  `tier-node27-timeseries-storage` design wire-format entries SHALL
-  describe both payload forms (including that the suffix carries the
-  CLIPPED window and does not string-match the receipt's unclipped
-  entries) in the same commit
-
 ### Requirement: The archive gate MUST support an explicit auditable disabled mode while the default stays fail-closed
 
-The retention runner SHALL accept an archive-gate mode from
-`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` (unset → `enabled`; the
-stripped, lowercased value MUST be `enabled` or `disabled`; any other set
-value including the empty string SHALL refuse with
-`RETENTION_CONFIG_INVALID`, exit 2, no receipt) overridable by a CLI
-`--archive-gate` choice argument. In `disabled` mode — authorized by ADR
-0002 Revision 2026-08-11 — the runner SHALL skip loading and judging both
-archive-side gates (completeness and drill), SHALL treat the two archive
-receipt path variables as optional and unread (their max-age variables
-keep their existing parse-time validation — fail-closed on malformed
-values — but their values have no effect in `disabled` mode), with
-exactly two documented semantic consequences at the
-completeness object's non-gate consumers: boundary-partial chunks are no
-longer bounds-deferred (they become drop candidates — without archive data
-the "partially covered" notion itself is gone) and the enforced receipt's
-`salvage_backed_windows` SHALL be the empty list. Every other behavior
-SHALL be unchanged: lock semantics, watermark reference time, retention
-window, per-tick bound, dry-run versus enforce, measure-before-drop
-ordering, and fail-closed drop-failure handling. Every receipt (all three
-outcome branches) SHALL carry an `archive_gate` object recording the
-effective mode, with a constant `adr_reference` citing the ADR revision
-required exactly when the mode is `disabled`; the receipt schema version
-SHALL bump to `1.1` and historical receipts SHALL remain byte-unchanged.
-No new wire code SHALL be added, and in `disabled` mode none of the
-thirteen archive-family codes (five `COMPLETENESS_*` plus eight `DRILL_*`)
-SHALL be reachable while the runner-own refusal codes remain reachable.
-When the mode is `disabled`, this requirement supersedes the unconditional
-refusal and boundary-partial-deferral scenarios of the pending
-`Retention enforcement is hard-gated on archive receipts` requirement
-(`tier-node27-timeseries-storage` change fixture, #855) — those scenarios
-retain force only while the gate is `enabled`.
+The retention runner SHALL accept only the explicit `disabled`
+archive-gate mode — the archive lane is permanently retired (ADR 0002
+Revision 2026-08-11) and the `enabled` mode is retired with it:
+`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` (after strip and lowercase)
+MUST equal `disabled`; when the variable is unset, set to `enabled`, or
+set to any other value, the runner SHALL refuse with
+`RETENTION_CONFIG_INVALID`, exit 2, no receipt, and diagnostics citing
+the ADR revision and the explicit-`disabled` requirement — the unset
+default never deletes data. The retired gate machinery (completeness and
+drill receipt loaders, both gate adjudications, the two receipt path and
+two max-age variables, and the thirteen archive-family wire codes) SHALL
+be removed; `WIRE_CODES` SHALL contain no `COMPLETENESS_` or `DRILL_`
+prefixed member. The disabled-mode runtime semantics are unchanged
+byte-for-byte: candidates partition with `covered_eligible = eligible`
+(boundary-partial chunks are drop candidates), enforced receipts record
+`salvage_backed_windows` as the empty list, and every receipt carries the
+`archive_gate` object with `mode = "disabled"` and the constant
+`adr_reference` under receipt schema `1.1`, which this change does not
+modify. Historical receipts remain byte-unchanged.
 
-#### Scenario: Unset mode preserves today's fail-closed behavior byte-identically
+#### Scenario: Explicit disabled is the only accepted mode
 
-- **WHEN** the runner starts with `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE`
-  unset and no `--archive-gate` flag
-- **THEN** both archive gates SHALL be loaded and judged exactly as before
-  this change, the archive receipt path variables SHALL remain required,
-  and the pre-change archive-gate adjudication tests SHALL pass unmodified
-  (the only pre-existing test edits anywhere in the change are the
-  schema-version/example syncs and the two format-negative repairs)
+- **WHEN** the runner starts with
+  `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`
+- **THEN** it SHALL run with the same disabled-mode behavior as before
+  this change, and the pre-change disabled-BEHAVIOR tests SHALL pass
+  unmodified (tests that encode `enabled` as a reachable mode — the
+  parse table's enabled rows, CLI-enabled-beats-env, enabled-requires-
+  paths, and enabled-parametrized receipt tests — are rewritten to the
+  retired semantics and enumerated in the change tasks)
 
 #### Scenario: Disabled enforce deletes without archive receipts and records the authorization
 
-- **WHEN** the mode is `disabled`, enforce is on, both archive receipt path
-  variables are absent, and eligible chunks exist beyond the retention
-  window
-- **THEN** the runner SHALL drop up to the per-tick bound without touching
-  any archive receipt path, and the enforced receipt SHALL validate against
-  schema `1.1` with `archive_gate.mode = "disabled"`, `adr_reference` equal
-  to the pinned ADR 0002 Revision 2026-08-11 constant, and
-  `salvage_backed_windows` equal to the empty list
+- **WHEN** the mode is `disabled`, enforce is on, and eligible chunks
+  exist beyond the retention window
+- **THEN** the runner SHALL drop up to the per-tick bound, and the
+  enforced receipt SHALL validate against schema `1.1` with
+  `archive_gate.mode = "disabled"`, the pinned ADR 0002 Revision
+  2026-08-11 `adr_reference`, and `salvage_backed_windows` equal to the
+  empty list
 
-#### Scenario: Boundary-partial chunks become candidates in disabled mode
+#### Scenario: Boundary-partial chunks are drop candidates
 
-- **WHEN** a chunk that enabled mode would move to `deferred_remainder`
-  via the completeness-bounds partition is evaluated with the mode
-  `disabled`
-- **THEN** it SHALL appear in the candidate set (documented semantic
-  change, stated in the code comment, runbook §8.5, and receipt-reading
-  guidance consistently)
+- **WHEN** a chunk only partially covered by the retention cutoff window
+  boundary is evaluated
+- **THEN** it SHALL appear in the candidate set (the completeness-bounds
+  deferral is retired with the archive lane)
 
-#### Scenario: Disabled dry-run skips gates but never drops
+#### Scenario: Disabled dry-run never drops
 
 - **WHEN** the mode is `disabled` and enforce is off
-- **THEN** the receipt SHALL have `outcome = "dry-run"` with candidate and
-  deferred lists populated as today, `archive_gate.mode = "disabled"`, and
-  no chunk SHALL be dropped
+- **THEN** the receipt SHALL have `outcome = "dry-run"` with candidate
+  and deferred lists populated, and no chunk SHALL be dropped
 
-#### Scenario: Invalid mode value refuses before any action
+#### Scenario: Runner-own refusals stay reachable and auditable
 
-- **WHEN** the environment variable is set to any value outside the enum
-  (e.g. `disable`, `true`, `1`, or the empty string)
-- **THEN** the runner SHALL exit 2 with `RETENTION_CONFIG_INVALID`
-  diagnostics and SHALL write no receipt
-
-#### Scenario: Runner-own refusals stay reachable and auditable in disabled mode
-
-- **WHEN** a concurrent invocation holds the lock while the mode is
-  `disabled`
-- **THEN** the tick SHALL refuse with `RETENTION_CONCURRENT_INVOCATION` and
-  the refused receipt SHALL also carry `archive_gate.mode = "disabled"`
+- **WHEN** a concurrent invocation holds the lock
+- **THEN** the tick SHALL refuse with `RETENTION_CONCURRENT_INVOCATION`
+  and the refused receipt SHALL carry `archive_gate.mode = "disabled"`
   with the required `adr_reference`
 
-#### Scenario: Receipt schema rejects unauditable gate records
+#### Scenario: Operator documentation carries the retirement and cadence pins verbatim
 
-- **WHEN** a receipt document omits `archive_gate`, or records
-  `mode = "disabled"` without `adr_reference`, or records
-  `mode = "enabled"` with an `adr_reference`, or carries a non-constant
-  `adr_reference` string, or still declares `schema_version = "1.0"`
-- **THEN** schema validation SHALL fail for each of those documents
+- **WHEN** runbook §8 and the env-file template are read after this
+  change
+- **THEN** they SHALL present `disabled` as the only mode with the ADR
+  anchor text (`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
+  plus `Revision 2026-08-11`) intact, the timer cadence pin
+  (`OnCalendar=*-*-* 05:15:00 UTC`) SHALL remain unchanged, and the
+  documented rollback SHALL be "set
+  `NODE27_TIMESERIES_RETENTION_ENFORCE=0` and/or disable the timer" —
+  never "drop the archive-gate env line", which after this change is a
+  config-invalid state, not a rollback
 
-#### Scenario: Operator documentation carries the carve-out verbatim
+#### Scenario: Unset mode refuses without deleting
 
-- **WHEN** runbook §8.4 preconditions and the env-file template are read
-  after this change
-- **THEN** they SHALL present `disabled` mode as an explicit, ADR-cited
-  alternative to the two-receipt preconditions (anchor text
-  `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` plus
-  `Revision 2026-08-11`), never as an undocumented bypass, and the timer
-  cadence pin (`OnCalendar=*-*-* 05:15:00 UTC`) SHALL remain unchanged
+- **WHEN** the runner starts with the variable unset and no
+  `--archive-gate` flag
+- **THEN** it SHALL exit 2 with `RETENTION_CONFIG_INVALID` diagnostics
+  citing ADR 0002 Revision 2026-08-11, SHALL write no receipt, and SHALL
+  drop no chunk
+
+#### Scenario: The retired enabled mode refuses with retirement diagnostics
+
+- **WHEN** the variable (or the CLI flag) requests `enabled`
+- **THEN** the runner SHALL exit 2 with `RETENTION_CONFIG_INVALID`
+  diagnostics stating the archive lane is permanently retired, SHALL
+  write no receipt, and none of the archive-family gate behaviors SHALL
+  be reachable
+
+#### Scenario: Archive-family wire codes are gone
+
+- **WHEN** the runner's wire-code set is enumerated after this change
+- **THEN** it SHALL contain exactly the runner-own codes and no member
+  prefixed `COMPLETENESS_` or `DRILL_`, and the receipt schema `1.1`
+  SHALL be byte-unchanged by this change
 

@@ -3,146 +3,19 @@
 ## Purpose
 TBD - created by archiving change retention-drill-salvage-window-scope. Update Purpose after archive.
 ## Requirements
-### Requirement: db-export drill coverage is salvage-window-scoped
+### Requirement: The archive rebuild drill capability is permanently retired
 
-When the completeness receipt reports any `coverage = db-export` subject overlapping the candidate drop window, the retention gate SHALL require drill `db-export` coverage only over the salvage-backed windows — the windows of `coverage = db-export` subjects with `verdict = complete` that overlap the drop window, each intersected with the drop window — evaluating the drill's `db-export` tuple union against each such window independently. The gate SHALL NOT treat an empty derivation as satisfying the requirement. A nonsense (inverted) intersection is never treated as satisfied. The gate SHALL NOT require `db-export` coverage over portions of the drop window backed by product archives, and the `forcing` and `runs` coverage legs SHALL retain their whole-drop-window union semantics unchanged.
+The archive rebuild drill SHALL NOT exist as a runnable capability: the
+drill script, its wrapper, its receipt schema, its env template, and its
+tests are removed from the repository (ADR 0002 Revision 2026-08-11,
+#1370). Historical drill receipts under
+`docs/runbooks/receipts/tier-node27-timeseries-storage/archive-rebuild-drill/`
+remain as immutable evidence.
 
-#### Scenario: Drop window spanning the salvage-era boundary is admissible
+#### Scenario: No drill components remain in the repository
 
-- **WHEN** the drop window mixes a salvage-backed sub-window (complete `db-export` subject) with product-archive-backed time, the drill's `db-export` tuple union covers that sub-window intersected with the drop window, and the `forcing` and `runs` unions cover the whole drop window
-- **THEN** the drill gate passes without `DRILL_COVERAGE_DB_EXPORT_MISSING`
-
-#### Scenario: Coverage gap inside a salvage-backed window still refuses
-
-- **WHEN** the drill's `db-export` tuple union leaves a gap inside any salvage-backed window (intersected with the drop window)
-- **THEN** the gate refuses with `DRILL_COVERAGE_DB_EXPORT_MISSING`
-
-#### Scenario: Salvage-backed window derivation yields nothing (defence in depth)
-
-- **WHEN** a `coverage = db-export` subject overlaps the drop window but no salvage-backed window can be derived from it (a shape the completeness receipt schema and the completeness gate both already reject upstream)
-- **THEN** the drill gate SHALL treat the db-export requirement as unsatisfied and refuse with `DRILL_COVERAGE_DB_EXPORT_MISSING`, never as satisfied
-
-### Requirement: Salvage input derives from the completeness receipt
-
-When invoked with a completeness receipt, the rebuild drill SHALL derive its
-`db-export` salvage-manifest set from that receipt's subjects with
-`coverage=="db-export"` and `verdict=="complete"`, mapping each subject to its
-archive manifest path under `<archive_root>/db-export/` using the salvage
-tool's lane and identity mapping for both the `forcing` and `runs` lanes,
-with subject identities path-safety-validated before any path join.
-Subjects of lanes with no db-export mapping (e.g. `states`) SHALL be refused
-or skipped with recorded evidence, never silently dropped. When a drop
-window is supplied, derivation SHALL filter to subjects whose windows overlap
-it under the retention gate's closed-interval overlap convention —
-boundary-touching and zero-length intersections stay in scope — and the
-drill receipt SHALL record the drop window used (or its absence). Explicitly
-supplied salvage manifests SHALL be unioned with the derived set
-(deduplicated by resolved path), and the drill receipt SHALL record each
-input's provenance (derived vs explicit). The derived set SHALL be subject
-to fail-closed bounds on cardinality and aggregate decompressed bytes in
-addition to the existing per-object size cap.
-
-Derivation SHALL be activated only by an explicit `--completeness-receipt`
-flag or by a drill-scoped environment variable that no sibling tool sets.
-A derivation yielding zero manifests SHALL NOT be a refusal; the drill SHALL
-proceed and record the empty derived set as receipt evidence. An invocation
-supplying a completeness receipt without any product archive manifest SHALL
-be refused at configuration time, before any salvage input is read.
-
-#### Scenario: Derived tuples cover the gate demand
-
-- **WHEN** the drill runs with a completeness receipt and a drop window
-- **THEN** for every salvage-backed demand window the retention gate derives
-  from the same receipt and drop window, the window's clip to the drop
-  window MUST be covered by the union of the drill receipt's db-export
-  coverage tuples
-
-#### Scenario: Missing manifest fails closed
-
-- **WHEN** a derived subject's archive manifest file is absent or unreadable
-- **THEN** the drill MUST emit a FAIL receipt naming the missing paths and
-  exit non-zero, never a PASS over the narrower set
-
-#### Scenario: Stale manifest window diverges from the receipt subject
-
-- **WHEN** a derived manifest's selector window differs from the receipt
-  subject's window
-- **THEN** the drill MUST emit a FAIL receipt recording the divergence,
-  because its coverage tuples take their windows from the manifest and a
-  silent divergence would attest the wrong window
-
-#### Scenario: No receipt supplied
-
-- **WHEN** the drill runs without a completeness receipt
-- **THEN** its behavior MUST be unchanged from the explicit
-  `--salvage-manifest` whitelist contract
-
-#### Scenario: A sibling tool's environment does not activate derivation
-
-- **WHEN** the drill runs with no `--completeness-receipt` flag and no
-  drill-scoped receipt-path variable, but the db-export salvage tool's own
-  receipt-path variable is exported in the environment
-- **THEN** derivation MUST stay off and the drill MUST behave exactly as the
-  explicit `--salvage-manifest` whitelist contract
-
-#### Scenario: Empty derivation is evidence, not a refusal
-
-- **WHEN** a supplied completeness receipt yields no `db-export` +
-  `complete` subject overlapping the drop window
-- **THEN** the drill MUST NOT refuse; it MUST run its archive-manifest leg
-  and record the empty derived set (derived count zero plus the drop window
-  used) in the receipt, matching the retention gate, which demands no
-  db-export coverage for that receipt and drop window
-
-#### Scenario: Receipt without a product archive manifest is refused early
-
-- **WHEN** the drill is invoked with a completeness receipt but no product
-  archive manifest
-- **THEN** it MUST be refused at configuration time with a message naming
-  the archive-manifest flag, before any salvage input is read, because a
-  PASS receipt requires at least one restored product cycle
-
-### Requirement: A derivation-mode drill MUST record its completeness snapshot's db-export universe
-
-A derivation-mode drill SHALL record — whether derivation was activated
-by `--completeness-receipt` or by the drill-scoped environment variable,
-per the existing activation requirement — in
-`salvage_derivation` the field `db_export_windows` — the normalized
-`{start, end}` windows of ALL subjects with `coverage == "db-export"` AND
-`verdict == "complete"` in the consumed completeness receipt, unfiltered
-by any drop window, deduplicated by exact pair and sorted ascending (the
-same normalization as the retention gate's
-`derive_salvage_backed_windows`) — the key SHALL be present even when
-that set is empty (an empty list, never an omitted field: the gate treats
-an absent field as the pre-binding compat skip, so omit-when-empty would
-silently disarm the binding guard) — plus `completeness_generated_at`
-equal to the consumed receipt's `generated_at`; explicit-manifest drills SHALL
-continue to omit the `salvage_derivation` section entirely, and the
-receipt SHALL validate against
-`schemas/archive_rebuild_drill_receipt.schema.json`.
-
-#### Scenario: Universe recorded unfiltered and schema-valid
-
-- **WHEN** a derivation-mode drill runs with a narrowed drop window
-  against a completeness receipt containing db-export/complete subjects,
-  including one whose window does not overlap that drop window
-- **THEN** `salvage_derivation.db_export_windows` SHALL contain the
-  normalized windows of ALL db-export/complete subjects (including the
-  non-overlapping one), `completeness_generated_at` SHALL equal the
-  consumed receipt's `generated_at`, and the receipt SHALL be
-  schema-valid
-
-#### Scenario: Empty universe still recorded
-
-- **WHEN** a derivation-mode drill runs against a completeness receipt
-  containing no db-export/complete subjects
-- **THEN** `salvage_derivation.db_export_windows` SHALL be present and
-  equal to the empty list
-
-#### Scenario: Explicit-manifest drills are unchanged
-
-- **WHEN** a drill runs with `--salvage-manifest` and no
-  `--completeness-receipt`
-- **THEN** the receipt SHALL omit `salvage_derivation` entirely, exactly
-  as before this change
+- **WHEN** the repository is searched for
+  `scripts/node27_archive_rebuild_drill.py`, its `_once.sh` wrapper, and
+  `schemas/archive_rebuild_drill_receipt.schema.json`
+- **THEN** none SHALL exist, and no production code SHALL reference them
 
