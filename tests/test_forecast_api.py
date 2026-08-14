@@ -1740,7 +1740,8 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     # the evidence payload must report the retained 000021 discovery index — the river
     # window query's 4 equality binds plus valid_time range are an exact prefix of it,
     # while the pkey (no basin_version_id, unbound river_segment_id at position 3) only
-    # yields a 2-column prefix. Pending the #1338 pre-merge live EXPLAIN receipt.
+    # yields a 2-column prefix. Confirmed by the #1338 post-drop EXPLAIN receipt (PR #1377,
+    # 2026-08-14): the Q6 shape still plans on this retained index after the drop.
     assert [
         item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"
     ] == [

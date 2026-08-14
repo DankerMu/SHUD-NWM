@@ -355,11 +355,15 @@ on PR #1377 (2026-08-14)):
   on it (even the proxy's Index Only Scan reported `Heap Fetches: 216`). The
   stats probe's real ts leg takes no payload columns, so index-only is feasible
   there. The statically expected
-  post-drop successor for those two reads is the pkey (usable prefix `run_id` +
-  `rnv`, remaining predicates as in-index filters), but that is a pre-receipt
-  prediction, not a measurement: the other retained indexes stay live
-  candidates, and the pre-merge post-drop `EXPLAIN` gate determines the actual
-  plan. The ingest window `DELETE` already planned on the pkey pre-drop
+  post-drop successor for those two reads was the pkey (usable prefix `run_id` +
+  `rnv`, remaining predicates as in-index filters), and the post-drop receipt
+  (PR #1377 comments, 2026-08-14) **confirmed** it: both shapes fell to a
+  `river_timeseries_pkey` Index Only Scan — no Seq Scan fallback, no other
+  retained index picked up — at Q1 warm **10.4 ms** vs **2.5 ms** pre-drop
+  (a **4.2x** residual cost: the disclosed tradeoff, not an order-of-magnitude
+  regression) and Q8 **2.9 ms**. All other captured shapes' plans were unchanged
+  against the same-compression-state immediate pre-drop baseline. The ingest
+  window `DELETE` already planned on the pkey pre-drop
   (baseline Q7, all four predicates pushed into the pkey `Index Cond`), so the
   write path is not a consumer.
 - `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
@@ -371,21 +375,32 @@ on PR #1377 (2026-08-14)):
 
 Both are dropped by
 [`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`](../../db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql)
-(~167 GB at the measured sizes; the node-27 apply receipt — pending, produced by
-the pre-merge live leg — will record the actual before/after). This is a
+(~167 GB at the sizes measured when the ticket was written; the node-27 apply
+receipt (PR #1377 comments, 2026-08-14) records the actual before/after:
+**293.6 GB → 193.2 GB, ~100 GB reclaimed**. The delta against the ~167 GB
+estimate is not a mis-measurement of either number — a compression drift
+between capture and apply had already dropped part of the chunk btrees, so the
+dated capture and the dated apply are each valid for their own moment, and the
+receipt records the drift). This is a
 **tradeoff, not a redundancy removal**: 162 GB of
 carrying cost weighed against 5,571 scans, with a real residual coverage loss
-on the two read shapes above. The pre-merge before/after
-`EXPLAIN (ANALYZE, BUFFERS)` gate measures the before/after latency of those two
-**predicate shapes** — the gate's Q1/Q8 are single-table proxies, so real-query
-latency is **not** measured by the gate: any Seq Scan fallback or
-order-of-magnitude slowdown in the shape plans rolls the drop back by
-re-creating the index (the re-create DDL for both is preserved verbatim in that
+on the two read shapes above — now priced at the 4.2x recorded there. The
+pre-merge before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measured the
+before/after latency of those two **predicate shapes** — the gate's Q1/Q8 are
+single-table proxies, so real-query latency was **not** measured by the gate.
+The rollback trigger was a Seq Scan fallback or an order-of-magnitude slowdown
+in the shape plans; the receipt showed neither (pkey Index Only Scan, 4.2x), so
+the drop stands. Should a later measurement cross that line, re-creating the
+index rolls it back (the re-create DDL for both is preserved verbatim in that
 migration's comments).
 Re-creating the index is not by itself a durable rollback: as that migration's
 rollback-procedure note records, the build takes a `SHARE` lock on
-`hydro.river_timeseries` (blocking ingest writes), `CREATE INDEX CONCURRENTLY`
-on this hypertable is unverified in-repo, and the full filename
+`hydro.river_timeseries` (blocking ingest writes) and that lock is unavoidable —
+the #1338 live-leg pre-check (node-27, 2026-08-14) had
+`CREATE INDEX CONCURRENTLY` **rejected** on this hypertable
+(`ERROR: hypertables do not support concurrent index creation`, TimescaleDB
+2.10.2) while plain `CREATE INDEX` was accepted, so plain `CREATE INDEX` under a
+`SHARE` lock for the full build is the only rollback path — and the full filename
 `000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql` must
 also be recorded in `public.schema_migrations.version` (or the file reverted) —
 inserting the shorthand `000049` leaves `migrate.py` still treating the

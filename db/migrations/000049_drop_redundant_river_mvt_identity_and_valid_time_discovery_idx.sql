@@ -14,24 +14,31 @@
 -- can never be index-only on it (even the proxy's Index Only Scan reported Heap Fetches:
 -- 216). The stats probe's real ts leg takes no payload columns, so index-only is feasible
 -- there. The statically expected post-drop
--- successor for those two reads is the pkey (usable prefix run_id + rnv, remaining
--- predicates as in-index filters), but that is a pre-receipt prediction, not a
--- measurement: the other retained indexes stay live candidates, and the #1338 pre-merge
--- post-drop EXPLAIN gate determines the actual plan. The ingest
+-- successor for those two reads was the pkey (usable prefix run_id + rnv, remaining
+-- predicates as in-index filters), and the #1338 pre-merge post-drop EXPLAIN gate ran
+-- on node-27 (2026-08-14, receipt posted on PR #1377) and measured exactly that: both
+-- shapes fell to a river_timeseries_pkey Index Only Scan, no Seq Scan fallback and no
+-- other retained index picked up -- at Q1 warm 10.4 ms vs 2.5 ms pre-drop (a 4.2x
+-- residual cost, the disclosed tradeoff below, not an order-of-magnitude regression)
+-- and Q8 2.9 ms. The ingest
 -- window DELETE already planned on the pkey pre-drop (baseline Q7), so the write path is
 -- not a consumer. So this drop is a measured TRADEOFF, not a redundancy removal. Live
 -- node-27 measurement 2026-08-14 (8 chunks aggregated): 162 GB of carrying cost for
 -- those 5,571 idx_scan, against 796,096,944 pkey scans over the same window. The residual
--- coverage loss on those two reads is real; the #1338 pre-merge EXPLAIN (ANALYZE, BUFFERS)
--- gate measures the before/after latency of these two PREDICATE SHAPES -- the gate's Q1/Q8
--- are single-table proxies, so real-query latency is NOT measured by the gate. If the
--- shape plans regress, the verbatim rollback below re-creates the index.
+-- coverage loss on those two reads is real and now measured; the #1338 pre-merge
+-- EXPLAIN (ANALYZE, BUFFERS) gate measured the before/after latency of these two
+-- PREDICATE SHAPES -- the gate's Q1/Q8 are single-table proxies, so real-query latency
+-- is NOT measured by the gate. If the shape plans regress further, the verbatim
+-- rollback below re-creates the index.
 -- ROLLBACK PROCEDURE (applies to both re-create blocks in this file): (i) the bare
 -- CREATE INDEX takes a SHARE lock on hydro.river_timeseries for the whole build -- the
 -- full ~162 GB here, ~4.6 GB for the discovery index below -- which blocks ingest writes
--- (workers/output_parser) though not reads; (ii) whether CREATE INDEX CONCURRENTLY is
--- accepted on this hypertable (TimescaleDB 2.10.2, compressed chunks present) is
--- unverified in-repo -- verify on node-27 during the #1338 live leg before relying on it;
+-- (workers/output_parser) though not reads, and that bare CREATE INDEX is the ONLY
+-- rollback path available: (ii) CREATE INDEX CONCURRENTLY is REJECTED on this hypertable
+-- -- the #1338 live-leg rollback pre-check on node-27 (2026-08-14) got
+-- 'ERROR: hypertables do not support concurrent index creation' (TimescaleDB 2.10.2,
+-- compressed chunks present) while plain CREATE INDEX was accepted, so a rollback
+-- necessarily blocks ingest writes for the full build; there is no non-blocking variant;
 -- (iii) a durable rollback ALSO requires recording the full filename
 -- '000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql' in
 -- public.schema_migrations.version (or reverting this file) -- inserting the shorthand
@@ -48,21 +55,26 @@ DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx
 -- prefix of the index dropped above -- btree scans backwards, so the DESC direction
 -- is not a distinction -- and measured 4663 MB for 10,864 idx_scan; those 10,864
 -- cumulative idx_scan are NOT individually attributed to queries. Both in-repo
--- discovery surfaces are expected to keep a working server -- an expectation the #1338
--- pre-merge post-drop EXPLAIN gate confirms, not a receipt: valid_times_for_layer's
+-- discovery surfaces keep a working server -- confirmed by the #1338 post-drop EXPLAIN
+-- receipt (node-27 2026-08-14, posted on PR #1377), which measured both retained
+-- indexes' plans unchanged against the same-compression-state immediate pre-drop
+-- baseline: valid_times_for_layer's
 -- named-identity branch (services/tiles/mvt.py) is an exact prefix match on the retained
 -- river_timeseries_mvt_selected_identity_valid_time_discovery_idx and already planned on
 -- it pre-drop (#1338 baseline Q2, verbatim capture of that branch), and its no-basin
 -- branch binds no run_id, so it falls to the retained river_timeseries_valid_time_idx,
 -- which it already planned on pre-drop (#1338 baseline Q3, verbatim capture of that
--- branch). The index dropped here appears in neither plan.
+-- branch). In both of those posted 05:29Z baseline plans the index dropped here appears
+-- in neither executed plan node (the immediate 05:45Z pre-drop capture contains only a
+-- never-executed branch on chunk 55, so it is not evidence of use either).
 -- No in-repo migration ever created it: it was created out-of-band directly
 -- on node-27, so this file drops an object the migration chain never produced. That
 -- makes IF EXISTS load-bearing rather than decorative -- on any database rebuilt
 -- from the migration chain (CI, hermetic test DBs, future nodes) the index never
 -- existed and this statement must replay as a no-op. The ROLLBACK PROCEDURE caveats
 -- recorded above apply here too: SHARE lock on hydro.river_timeseries for the ~4.6 GB
--- build (blocks ingest writes), CONCURRENTLY unverified on this hypertable, and the
+-- build (blocks ingest writes; CONCURRENTLY is rejected on this hypertable, as verified
+-- above, so there is no non-blocking alternative), and the
 -- public.schema_migrations.version bookkeeping -- keyed on the full filename
 -- '000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql', not the
 -- shorthand '000049' -- without which the next migrate.py run silently
