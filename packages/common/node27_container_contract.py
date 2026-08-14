@@ -70,9 +70,9 @@ CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 # ExecMainStartTimestamp``, 2026-08-02), which records no LoadState and so
 # cannot by itself establish "nonexistent"; the nonexistence comes from that
 # probe's design in scripts/node27_external_contract_snapshot.py --
-# ``RESERVED_WITNESS_UNIT`` is a name deliberately never installed (:88-107),
+# ``RESERVED_WITNESS_UNIT`` is a name deliberately never installed (:88-108),
 # and collection refuses fail-closed unless the probe reports
-# ``LoadState == "not-found"`` (:307-315).
+# ``LoadState == "not-found"`` (:308-316).
 # The same committed snapshot measures the other direction too: an
 # inactive/dead unit CAN report a real ``ExecMainStartTimestamp``.
 # ``informational.recurring_unit`` records
@@ -81,7 +81,7 @@ CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 # CST"``.  Dual-carrier again, since ``informational.*`` entries carry no
 # ``_provenance`` wrapper by design: date from ``informational.measured_at``
 # (``2026-08-02T11:13:05.968511Z``), command from the frozen
-# ``PROBE_RECURRING_UNIT`` argv (snapshot script :180-184).  ``informational.*``
+# ``PROBE_RECURRING_UNIT`` argv (snapshot script :181-185).  ``informational.*``
 # sits OUTSIDE the drift lock -- ``COMPARED_SECTIONS`` holds only
 # ``contract``/``host_context``, so these entries are dump-recorded diagnostics,
 # never compared, and carry no ``contract.*``-grade guarantee.  That measured
@@ -90,18 +90,20 @@ CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 # ``recurring_unit_idle_divergences`` predicate at the bottom of this module,
 # under which this literal is EVIDENCE the recurring gate no longer reads.
 # Where this literal is still load-bearing after #1255: the never-started
-# rendering hermetic fixtures reproduce in both planes' test suites, the
-# recurring show document's evidence typing (a real ``ExecMainStartTimestamp``
-# and this sentinel are both admissible strings there), and -- as an explicit
-# REJECTION, unchanged -- the is-active side of each plane, where a replay unit
-# claiming to be the active owner must carry a real timestamp
+# rendering hermetic fixtures reproduce in both planes' test suites, and -- as
+# an explicit REJECTION, unchanged -- the is-active side of each plane, where a
+# replay unit claiming to be the active owner must carry a real timestamp
 # (scripts/node27_timeseries_compression_supervisor.py:1399-1402,
 # scripts/node27_timeseries_compression_live_evidence.py:1002-1006).
+# Not a load-bearing site, though it reads like one: the recurring show
+# document's evidence typing demands only that ``ExecMainStartTimestamp`` be a
+# string, so a real timestamp and this sentinel are equally admissible there and
+# the check references this constant nowhere.
 # Source: packages/common/node27_external_contract_snapshot.json --
 # ``contract.systemd_unset_timestamp``, ``host_context.systemd_version``,
 # ``informational.recurring_unit`` + ``informational.measured_at``; witness
 # design and fail-closed refusal in
-# scripts/node27_external_contract_snapshot.py (:88-107, :180-184, :307-315).
+# scripts/node27_external_contract_snapshot.py (:88-108, :181-185, :308-316).
 SYSTEMD_UNSET_TIMESTAMP = "n/a"
 
 # MEASURED on the real node-27 primary (PG 15 -- ``15.2 (Ubuntu
@@ -123,7 +125,7 @@ SYSTEMD_UNSET_TIMESTAMP = "n/a"
 # carries no ``_provenance`` wrapper by design: date from
 # ``informational.measured_at`` (``2026-08-02T11:13:05.968511Z``), command from
 # the frozen ``PROBE_BACKEND_TYPE_DISTRIBUTION`` argv (snapshot script
-# :204-208); and ``informational.*`` sits OUTSIDE the drift lock
+# :205-209); and ``informational.*`` sits OUTSIDE the drift lock
 # (``COMPARED_SECTIONS`` holds only ``contract``/``host_context``), so this set
 # is a dump-recorded diagnostic, never compared -- one host at one instant, not
 # a guarantee.
@@ -135,19 +137,19 @@ SYSTEMD_UNSET_TIMESTAMP = "n/a"
 # second postflight ran, so an "ANY non-idle session = conflict" predicate can
 # essentially never pass a post-mutation checkpoint.  The same anecdote is
 # retold from the same source at
-# scripts/node27_timeseries_compression_supervisor.py:1226-1229.
+# scripts/node27_timeseries_compression_supervisor.py:1227-1230.
 # DESIGN RULING of this plane (a decision, not a measurement): the external
 # writers the trust boundary targets are judged on a TWO-CONJUNCT predicate --
 # ``backend_type == CLIENT_BACKEND_TYPE`` AND
 # ``has_write_privilege_on_target is True`` -- carried identically by both
-# planes (scripts/node27_timeseries_compression_supervisor.py:1257-1261,
-# scripts/node27_timeseries_compression_live_evidence.py:943-947).  Client-
+# planes (scripts/node27_timeseries_compression_supervisor.py:1258-1262,
+# scripts/node27_timeseries_compression_live_evidence.py:956-960).  Client-
 # backend-ness is the NECESSARY first conjunct, the eligibility filter for
 # "external writer" -- it is not sufficient: the display API's read-only
 # ``nhms_display_ro`` pool renders as ``'client backend'`` too, so a
 # client-backend-only judgment was measured to abort every post-decompress
 # checkpoint on a live node with the display API up, and the second conjunct is
-# the resulting G14 narrowing (supervisor.py:1230-1241).  Both planes still
+# the resulting G14 narrowing (supervisor.py:1231-1242).  Both planes still
 # capture every session at full fidelity; only the judgment narrows.  Nothing
 # is asserted here about PostgreSQL's semantics for any other backend type.
 # Source: packages/common/node27_external_contract_snapshot.json --
@@ -394,18 +396,33 @@ def recurring_unit_idle_failure(show: Mapping[str, Any]) -> str | None:
     """Return ``None`` when the recurring unit is idle, else a diagnosis line.
 
     The two planes prepend their own label/error-type conventions to this text.
-    ``SubState="failed"`` gets its own sentence: a per-chunk timeout wall can
-    leave the unit ``failed/failed`` until the next tick or an operator
-    ``reset-failed`` (runbook §4.5), which is neither concurrent compression nor
-    an identity swap -- describing it as either sends the operator hunting a
-    running job that does not exist.
+    The left-behind-failed geometry gets its own sentence: a per-chunk timeout
+    wall can leave the unit ``failed`` with ``MainPID=0`` until the next tick or
+    an operator ``reset-failed`` (runbook §4.5), which is neither concurrent
+    compression nor an identity swap -- describing it as either sends the
+    operator hunting a running job that does not exist.  That sentence is
+    claimed narrowly, because it asserts BOTH "not running" and a remedy for
+    THIS unit: ``SubState="failed"`` alone does not earn it.  The document must
+    also carry ``MainPID == 0`` (strict ``int``, as in the predicate above) and
+    the pinned ``FragmentPath``; a document that reports a live PID or some
+    other unit's fragment is exactly the case where "not running" would be a
+    lie and ``reset-failed`` on the pinned name the wrong remedy, so it falls
+    through to the generic sentence.  ``ActiveState`` is deliberately NOT
+    constrained: systemd leaves a failed unit ``ActiveState=failed`` while the
+    hermetic fixtures carry ``inactive`` with ``SubState=failed``, and both are
+    the same operator situation.
     """
 
     divergences = recurring_unit_idle_divergences(show)
     if not divergences:
         return None
     detail = "; ".join(divergences)
-    if show.get("SubState") == "failed":
+    if (
+        show.get("SubState") == "failed"
+        and type(show.get("MainPID")) is int
+        and show.get("MainPID") == 0
+        and show.get("FragmentPath") == RECURRING_COMPRESSION_UNIT_FRAGMENT_PATH
+    ):
         return (
             "recurring compression unit is in the failed state from an earlier tick, not running: "
             f"{detail} -- clear it with `systemctl --user reset-failed {RECURRING_COMPRESSION_UNIT}` "

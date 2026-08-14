@@ -5,7 +5,7 @@
 - 风险：**误拒绝**（陈旧谓词烧掉授权窗口，本 issue 存在理由）×**误放行**（谓词改弱后真并发压缩溜进 mutation window——绝不允许方向）×**排障误导**（错误文本指错方向）。
 - fixture level：**compact**（S 规模谓词修改；双平面对称 + 语义决策已由 maintainer 拍板）。
 
-## 现状基线（fixture 撰写时核实）
+## 现状基线（fixture 撰写时核实；行号为**改前** master 状态，改后行有位移）
 
 - supervisor 断言：`scripts/node27_timeseries_compression_supervisor.py:1382-1393`（整体字典等值，`SupervisorError("checkpoint recurring compression unit is not inactive")`）。
 - live-evidence 同形断言：`scripts/node27_timeseries_compression_live_evidence.py:965-976`（`EvidenceError("... is not canonically inactive")`）。
@@ -30,8 +30,8 @@
 | `ExecMainStartTimestamp` / `...Monotonic` | **不判定**，仅证据 | boot 历史，与"当前是否并发"正交 |
 
 - **2026-08-14 node-27 实测**（fixture review F1 责成的前置探测，read-only `systemctl --user show`，timer 已于 08-13 12:25 CST tick）：`ActiveState=inactive SubState=dead MainPID=0 FragmentPath=<canonical>`，但 `InvocationID=0d8bd46e8f634e0296d8cbf49a938231`（**非空保留**）、`ExecMainStartTimestamp=Thu 2026-08-13 12:25:00 CST`。systemd 在 unit 保持 loaded（enabled timer 持续引用）期间保留 invocation/timestamp runtime state——`InvocationID=""` 判定与整体等值同样是"本 boot 从未启动"谓词，必须一并降级为证据字段。B1 固件必须用这组实测值。
-- **活动事实由三字段闭合**：unit 为 `Type=oneshot` 且无 `RemainAfterExit`（`infra/systemd/nhms-node27-timeseries-compression.service`），运行中必为 `activating/start` + 非零 `MainPID`，结束必回 `inactive/dead` + `MainPID=0`；`ExecStopPost`/`deactivating`/`reloading` 几何均被 `ActiveState != "inactive"` 拦下。**点时谓词覆盖不了的"窗口中途 timer 触发"竞态另有两道护栏且本 change 不动**：窗口 journal 拒绝任何 recurring 激活（supervisor `:1445`、live_evidence `:1013-1015`），以及 checkpoint 的 DB 写权限 backend / relation lock 断言（supervisor `:1350-1353`）。
-- 三个证据字段**必须仍出现在 checkpoint show 文档**（AC 明文：不得为了让断言通过而删字段）：`unit_show` 的字段采集集合不变；live-evidence 侧**新增** `_require_exact_keys(recurring, {七字段})` + 时间戳/InvocationID 类型校验（风格对齐 `live_evidence.py:938/:943` 的 `_require_*` 惯例）——现状整体等值就是键集的唯一钉子，删等值后若不新增键集钉，AC5 失去执行点（fixture review F2）。
+- **活动事实由三字段闭合**：unit 为 `Type=oneshot` 且无 `RemainAfterExit`（`infra/systemd/nhms-node27-timeseries-compression.service`），运行中必为 `activating/start` + 非零 `MainPID`，结束必回 `inactive/dead` + `MainPID=0`；`ExecStopPost`/`deactivating`/`reloading` 几何均被 `ActiveState != "inactive"` 拦下。**点时谓词覆盖不了的"窗口中途 timer 触发"竞态另有两道护栏且本 change 不动**：窗口 journal 拒绝任何 recurring 激活（supervisor `:1442-1443`、live_evidence `:1032-1034`），以及 checkpoint 的 DB 写权限 backend / relation lock 断言（supervisor `:1351-1354`）。
+- 三个证据字段**必须仍出现在 checkpoint show 文档**（AC 明文：不得为了让断言通过而删字段）：`unit_show` 的字段采集集合不变；live-evidence 侧**新增** `_require_exact_keys(recurring, {七字段})` + 时间戳/InvocationID 类型校验（风格对齐 `live_evidence.py:939/:944` 的 `_require_*` 惯例）——现状整体等值就是键集的唯一钉子，删等值后若不新增键集钉，AC5 失去执行点（fixture review F2）。
 - **不引入**时间序断言（时钟域换算新增脆弱面，三字段已闭合活动事实，YAGNI）。
 - 谓词收敛为共享 helper 或两端字面同构均可，但**字段集合与判定必须逐字对称**（产/验双平面；issue-1069 缺陷类"双平面独立硬编码、修一半烂一半"在仓内有专门 regression lock 先例 `tests/test_node27_timeseries_compression_live_evidence.py:4095-4130`，本 change 以 B6 同型钉住）。
 - never-started（`"n/a"` + `InvocationID=""`）形态在新谓词下同样放行——表述为"该形态**重新生成**的 bundle 仍通过"（=B3）；不存在"旧 bundle 向后兼容"一说（bundle 的 `verifier_head_sha` 钉死 repo HEAD，改动前 bundle 本就无法被改动后 verifier 校验——fixture review F7）。

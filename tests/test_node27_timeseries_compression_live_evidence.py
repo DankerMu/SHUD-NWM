@@ -4494,6 +4494,13 @@ def test_recurring_unit_gate_still_accepts_the_never_started_form(tmp_path: Path
         ("ActiveState", "activating", "'activating'"),
         ("SubState", "failed", "'failed'"),
         ("MainPID", 4242, "4242"),
+        # JSON `true`/`false` for MainPID: Python's bool/int equality would let
+        # `False == 0` pass a value-only check, so the predicate compares types
+        # as strictly as values.  LIVE-PLANE ONLY by construction -- the
+        # supervisor reads MainPID out of real `systemctl show` stdout through
+        # `int()`, so no bool can reach its gate, while a hand-edited evidence
+        # document can carry one.
+        ("MainPID", False, "False"),
         (
             "FragmentPath",
             "/etc/systemd/user/nhms-node27-timeseries-compression.service",
@@ -4525,6 +4532,35 @@ def test_recurring_unit_gate_rejects_one_deviating_field_and_names_it(
         assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
     else:
         assert "shows current activity or unexpected identity" in message
+
+
+def test_recurring_failed_sentence_is_not_claimed_over_a_polluted_document(tmp_path: Path) -> None:
+    # `SubState == "failed"` alone must not buy the "not running" headline plus
+    # the reset-failed remedy: this document names ANOTHER unit's fragment, is
+    # ActiveState=active and carries a live MainPID.  "Not running" would be a
+    # lie about it and `reset-failed` on the pinned name the wrong remedy, so
+    # the generic current-activity/identity sentence is the honest one.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(
+        bundle,
+        tmp_path,
+        {
+            **RECURRING_RAN_THIS_BOOT,
+            "FragmentPath": "/etc/systemd/user/nhms-node27-timeseries-compression.service",
+            "ActiveState": "active",
+            "SubState": "failed",
+            "MainPID": 4242,
+        },
+        serial="polluted-failed",
+        first_only=True,
+    )
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert "shows current activity or unexpected identity" in message
+    assert "MainPID=4242" in message
+    assert "not running" not in message
+    assert "reset-failed" not in message
 
 
 @pytest.mark.parametrize(

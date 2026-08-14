@@ -2106,7 +2106,7 @@ uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$
 
 `systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
 unset the probe exits non-zero with "Failed to connect to bus"
-(`scripts/node27_timeseries_compression_supervisor.py:176-183`) and the check
+(`scripts/node27_timeseries_compression_supervisor.py:187-194`) and the check
 reports a probe-execution failure — that is a broken probe, not a verdict about
 the host. Fix the environment and rerun.
 
@@ -2326,6 +2326,24 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 A manual silent-window `SET statement_timeout = 0; SELECT compress_chunk(...)`
 is the **last resort**, not the procedure: it produces no receipt, no
 provenance and no bounded lock, and it is what this section exists to avoid.
+
+**What a wall leaves behind, and how to clear it.** Whichever of the three
+walls trips — the `statement_timeout` on the DDL, the real systemd
+`TimeoutStartSec` taking `TERM` mid-DDL, or `/usr/bin/timeout` inside
+`scripts/node27_timeseries_compression_once.sh` — the tick exits nonzero, and
+because `nhms-node27-timeseries-compression.service` is `Type=oneshot` with no
+`Restart=`, the unit is left `failed/failed` with `MainPID=0`. It stays that way
+until the next timer tick overwrites the state, or until an operator runs
+`systemctl --user reset-failed nhms-node27-timeseries-compression.service`. That
+is a *residue*, not a running job: the mutation-window checkpoint gate (the
+replay supervisor of §4.0.2 and the §4.0.1 live-evidence twin, which bind one
+shared predicate) refuses such a window with a dedicated message that says the
+unit is failed from an earlier tick, not running, and names that `reset-failed`
+as the remedy. This does **not** conflict
+with the "do not `reset-failed` to manufacture a clean state" rule in §4.0
+step 4: that rule guards the ADJACENT `nhms-node27-autopipe.service` during the
+gated first-enforce evidence capture, where the failed state is itself the
+evidence being preserved — a different unit in a different phase.
 
 **Scope vs §4.0 step 9.** The blanket "do not call `compress_chunk` manually"
 in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
