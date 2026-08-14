@@ -3434,13 +3434,15 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
         },
         # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
         # (#1338); the retained 000021 index named below is a PRE-DROP MEASUREMENT,
-        # not a static guess: baseline Q6 (river_sample_rows window query, see
-        # .workplans/issue-1338/predrop-baseline.txt) recorded Index Scans on this
-        # index's chunk indexes already serving the river leg pre-drop, which matches
-        # that query's shape — run_id + basin_version_id + river_network_version_id +
+        # not a static guess: baseline Q6 — a single-table shape capture of
+        # river_sample_rows' ts window predicates, whereas the real query joins
+        # candidate_runs with correlated bounds — recorded Index Scans on this index's
+        # chunk indexes already serving that shape pre-drop, which matches the river
+        # leg's predicates: run_id + basin_version_id + river_network_version_id +
         # variable equality-bound with a valid_time range, an exact prefix of it. The
         # dropped index does not appear in that plan at all, so the plan is expected
-        # unchanged post-drop. The pkey is not the successor — it carries no
+        # unchanged post-drop. (Baseline provenance: the #1338 pre-drop EXPLAIN receipt
+        # posted on PR #1377, 2026-08-14.) The pkey is not the successor — it carries no
         # basin_version_id and its third column river_segment_id is unbound, so its
         # usable prefix stops at two columns. Only the post-drop confirmation is
         # pending: the #1338 pre-merge live leg re-runs the same query after the drop

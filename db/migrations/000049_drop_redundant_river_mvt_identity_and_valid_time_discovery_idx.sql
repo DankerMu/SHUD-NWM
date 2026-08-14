@@ -2,12 +2,18 @@
 -- river_segment_id) carries the same column SET as the primary key, but same set is not
 -- same coverage: with `variable` single-valued table-wide it behaves as
 -- (run_id, valid_time, rnv, segid) -- a run-scoped time prefix the pkey cannot offer,
--- because the pkey orders rnv/segid ahead of variable/valid_time. The measured consumers
--- of its 5,571 idx_scan are reads: the #1338 pre-drop baseline shows the national-tile
--- typed_values access (services/tiles/mvt.py:603-651) and the source-identity stats probe
--- (mvt.py:530-553) served by Index Only Scans here, both binding run_id + variable +
--- valid_time + rnv with NO basin_version_id, which the retained selected_identity index
--- cannot serve (its 2nd column is basin_version_id). The statically expected post-drop
+-- because the pkey orders rnv/segid ahead of variable/valid_time. The in-repo query
+-- shapes measured to use this index are two reads (the #1338 pre-drop baseline Q1/Q8
+-- shape captures: the national-tile typed_values ts-access leg, services/tiles/mvt.py:603-651,
+-- and the source-identity stats probe, mvt.py:530-553), both binding run_id + variable +
+-- valid_time + rnv with NO basin_version_id (which the retained selected_identity index
+-- cannot serve -- its 2nd column is basin_version_id); the 5,571 cumulative idx_scan are
+-- NOT individually attributed to queries. Both baseline captures used this index, but Q1
+-- is a single-table shape proxy, not the real query: the real typed_values CTE projects
+-- value/unit/quality_flag/basin_version_id, none of them in this index, so the real query
+-- can never be index-only on it (even the proxy's Index Only Scan reported Heap Fetches:
+-- 216). The stats probe's real ts leg takes no payload columns, so index-only is feasible
+-- there. The statically expected post-drop
 -- successor for those two reads is the pkey (usable prefix run_id + rnv, remaining
 -- predicates as in-index filters), but that is a pre-receipt prediction, not a
 -- measurement: the other retained indexes stay live candidates, and the #1338 pre-merge
@@ -19,6 +25,16 @@
 -- coverage loss on those two reads is real and their before/after latency is exactly what
 -- the #1338 pre-merge EXPLAIN (ANALYZE, BUFFERS) gate measures; if it regresses, the
 -- verbatim rollback below re-creates the index.
+-- ROLLBACK PROCEDURE (applies to both re-create blocks in this file): (i) the bare
+-- CREATE INDEX takes a SHARE lock on hydro.river_timeseries for the whole build -- the
+-- full ~162 GB here, ~4.6 GB for the discovery index below -- which blocks ingest writes
+-- (workers/output_parser) though not reads; (ii) whether CREATE INDEX CONCURRENTLY is
+-- accepted on this hypertable (TimescaleDB 2.10.2, compressed chunks present) is
+-- unverified in-repo -- verify on node-27 during the #1338 live leg before relying on it;
+-- (iii) a durable rollback ALSO requires recording 000049 in public.schema_migrations (or
+-- reverting this file), otherwise the next full migrate.py run (e.g. scripts/run_qhh_cycle.sh
+-- invokes packages/common/migrate.py unattended) sees 000049 unapplied and silently
+-- re-drops the rebuilt index -- IF EXISTS makes that re-drop succeed without error.
 -- Rollback (verbatim re-create, from 000019):
 --   CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id);
 DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx;
@@ -26,17 +42,23 @@ DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx
 -- The valid-time discovery index (run_id, variable, valid_time DESC) is a strict
 -- prefix of the index dropped above -- btree scans backwards, so the DESC direction
 -- is not a distinction -- and measured 4663 MB for 10,864 idx_scan. Both in-repo
--- discovery surfaces keep a working server: valid_times_for_layer's named-identity
--- branch (services/tiles/mvt.py) is an exact prefix match on the retained
--- river_timeseries_mvt_selected_identity_valid_time_discovery_idx, and its no-basin
--- branch binds no run_id, so it falls to the retained river_timeseries_valid_time_idx
--- (in-repo measured precedent: the SkipScan plan recorded in openspec archive
--- 2026-06-20-refactor-display-overview-bootstrap design).
+-- discovery surfaces are expected to keep a working server -- an expectation the #1338
+-- pre-merge post-drop EXPLAIN gate confirms, not a receipt: valid_times_for_layer's
+-- named-identity branch (services/tiles/mvt.py) is an exact prefix match on the retained
+-- river_timeseries_mvt_selected_identity_valid_time_discovery_idx and already planned on
+-- it pre-drop (#1338 baseline Q2, verbatim capture of that branch), and its no-basin
+-- branch binds no run_id, so it falls to the retained river_timeseries_valid_time_idx,
+-- which it already planned on pre-drop (#1338 baseline Q3, verbatim capture of that
+-- branch). The index dropped here appears in neither plan.
 -- No in-repo migration ever created it: it was created out-of-band directly
 -- on node-27, so this file drops an object the migration chain never produced. That
 -- makes IF EXISTS load-bearing rather than decorative -- on any database rebuilt
 -- from the migration chain (CI, hermetic test DBs, future nodes) the index never
--- existed and this statement must replay as a no-op. Rollback (verbatim re-create,
+-- existed and this statement must replay as a no-op. The ROLLBACK PROCEDURE caveats
+-- recorded above apply here too: SHARE lock on hydro.river_timeseries for the ~4.6 GB
+-- build (blocks ingest writes), CONCURRENTLY unverified on this hypertable, and the
+-- public.schema_migrations bookkeeping without which the next migrate.py run silently
+-- re-drops the rebuilt index. Rollback (verbatim re-create,
 -- captured from pg_get_indexdef on node-27, 2026-08-14):
 --   CREATE INDEX river_timeseries_valid_time_discovery_idx ON hydro.river_timeseries USING btree (run_id, variable, valid_time DESC);
 DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_valid_time_discovery_idx;

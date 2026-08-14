@@ -2,12 +2,12 @@
 
 ## Why
 
-`hydro.river_timeseries` 上两条索引的存储/写放大成本与其实测使用面严重失衡（2026-08-14 node-27 实测，8 chunk 聚合）——删除是**实测 TRADEOFF**，不是零使用冗余清理：
+`hydro.river_timeseries` 上两条索引的存储成本（另有索引维护写开销，未实测）与其实测使用面严重失衡（2026-08-14 node-27 实测，8 chunk 聚合）——删除是**实测 TRADEOFF**，不是零使用冗余清理：
 
-- `river_timeseries_mvt_identity_lookup_idx`（000019 创建；列 `(run_id, variable, valid_time, river_network_version_id, river_segment_id)`）——**162 GB / idx_scan 5,571**（同期 pkey 被扫 **7.96 亿**次）。列**集合**与 pkey `(run_id, river_network_version_id, river_segment_id, variable, valid_time)` 相同但**覆盖不同**：`variable` 全表单值使其实际表现为 `(run_id, valid_time, rnv, segid)` 的 run 级时间前缀——pkey 给不出这个形状（rnv/segid 排在 variable/valid_time 之前）。这 5,571 次扫描的实测消费者是两条读面（predrop-baseline Q1/Q8：national tile typed_values 与 source-identity stats probe，均绑 run_id+variable+valid_time+rnv、**无** basin_version_id，保留的 selected_identity 索引第 2 列即 basin_version_id 故无法承接）。静态预期 post-drop 承接者为 pkey（可用前缀 run_id+rnv，余谓词 in-index filter）——**此为 pre-receipt 预测非实测**，其他保留索引仍是候选，实际计划与前后延迟由 3.4 post-drop EXPLAIN 门实测裁定；退化即按注释原文回滚。删除依据是 162 GB 成本 vs 该两读面的权衡，不是"planner 不用它"。
+- `river_timeseries_mvt_identity_lookup_idx`（000019 创建；列 `(run_id, variable, valid_time, river_network_version_id, river_segment_id)`）——**162 GB / idx_scan 5,571**（同期 pkey 被扫 **7.96 亿**次）。列**集合**与 pkey `(run_id, river_network_version_id, river_segment_id, variable, valid_time)` 相同但**覆盖不同**：`variable` 全表单值使其实际表现为 `(run_id, valid_time, rnv, segid)` 的 run 级时间前缀——pkey 给不出这个形状（rnv/segid 排在 variable/valid_time 之前）。实测会走该索引的在册查询形状是两条读面（predrop-baseline Q1/Q8 形状捕获：national tile typed_values 的 ts 访问腿与 source-identity stats probe，均绑 run_id+variable+valid_time+rnv、**无** basin_version_id，保留的 selected_identity 索引第 2 列即 basin_version_id 故无法承接）；5,571 是累计计数器，**未逐一归因**到具体查询（与下条索引同一口径）。静态预期 post-drop 承接者为 pkey（可用前缀 run_id+rnv，余谓词 in-index filter）——**此为 pre-receipt 预测非实测**，其他保留索引仍是候选，实际计划与前后延迟由 3.4 post-drop EXPLAIN 门实测裁定；退化即按注释原文回滚。删除依据是 162 GB 成本 vs 该两读面的权衡，不是"planner 不用它"。
 - `river_timeseries_valid_time_discovery_idx`（列 `(run_id, variable, valid_time DESC)`，**仓内无迁移出处——node-27 带外创建**）——4663 MB / idx_scan 10,864；列是上者的严格前缀（方向差异 btree 反向扫描等价），实测（predrop-baseline Q2/Q3）其两条 discovery 面本就分别由保留的 `mvt_selected_identity_valid_time_discovery_idx` 与 `valid_time_idx` 服务（被删索引不在这两个计划中）——预期删除不改变计划，由 3.4 post-drop EXPLAIN 复核确认。其 10,864 次 idx_scan 的具体消费查询未逐一归因，post-drop 门以八查询全集覆盖回归面。
 
-issue 开票时（单 chunk 3_32：95 GB / 999 scans）到今日已膨胀至全表 162 GB——前提只增不减。合计预计回收 **~167 GB**（活库 `/home` 1.7 TB 卷，DB 已 389 GB+增长）。删除可逆（重建索引即恢复）。
+issue 开票时的 95 GB / 999 scans 是**单 chunk 3_32 口径**，本次 162 GB 是 **8-chunk 聚合口径**，两者不可直接相减（该 chunk 现已压缩、总大小 56 kB——predrop-baseline）；可比的表级增长证据见 ADR 0002：2026-07 表级 32 GB → 2026-08-14 162 GB。合计预计回收 **~167 GB**（活库 `/home` 1.7 TB 卷，DB 已 389 GB+增长）。删除可逆（重建索引即恢复）。
 
 ## What Changes
 

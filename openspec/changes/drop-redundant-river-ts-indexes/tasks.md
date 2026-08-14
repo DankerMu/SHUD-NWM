@@ -21,7 +21,7 @@
 - [x] 3.1 `uv run pytest -q tests/test_migrations.py tests/test_forecast_api.py`
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate drop-redundant-river-ts-indexes --strict --no-interactive`
-- [ ] 3.4 node-27 实机（D2 手工 psql 路径；**merge 前执行**，前置条件 = round 复审 clean + CI 含 "SQL Migration Dry Run" 绿——round-1 C4 裁决：SQL 已由测试钉冻结、drop 可逆且回滚 DDL 在册、无自动 apply 通道、AC2 对 merge 无排序要求），顺序硬约束：
+- [ ] 3.4 node-27 实机（D2 手工 psql 路径；**merge 前执行**，前置条件 = round 复审 clean + CI 含 "SQL Migration Dry Run" 绿——round-1 C4 裁决：SQL 已由测试钉冻结、drop 可逆且回滚 DDL 在册、自动 migrate 通道（`scripts/run_qhh_cycle.sh:412` 等调 `migrate.py`）对已删索引系 `IF EXISTS` no-op 安全重放（**但回滚重建后该通道会静默再删——durable 回滚须补记 schema_migrations，见 000049 注释**）、AC2 对 merge 无排序要求），顺序硬约束：
   1. pre-flight（F2/F4）：两索引 `pg_get_indexdef`（hypertable 级 + 至少一个 chunk 级）落盘 `.workplans/issue-1338/`；`timescaledb_information.chunks` 的 `is_compressed` 分布记录
   2. pre-drop EXPLAIN（D4 **八**查询）+ 尺寸基线——**hypertable 上必须用 chunk 聚合/`hypertable_index_size()`，父表 `pg_total_relation_size` 恒近零会废掉 AC2**；`_hyper_3_32_chunk` 单列；**八查询 SQL 脚本原文保全于 `.workplans/issue-1338/predrop-queries.sql`（round-3 P2-3），post-drop 必须逐字节重用同一脚本以保证前后计划可比**
   3. apply 000049：`screen`/`nohup` 内执行（F4：`DROP INDEX CONCURRENTLY` 中断可留 invalid 索引）→ 收尾 `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid OR NOT indisready` 必须为空，非空则普通 `DROP INDEX` 清理残留后重跑

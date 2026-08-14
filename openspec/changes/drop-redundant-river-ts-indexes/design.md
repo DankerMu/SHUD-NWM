@@ -11,7 +11,7 @@
 - 创建出处：`mvt_identity_lookup_idx` = `db/migrations/000019`；`valid_time_discovery_idx` **无仓内出处**（带外）；先例 drop 文体 = `000041` / `000042`（单条 `DROP INDEX CONCURRENTLY IF EXISTS` + rationale 注释，经 migrate.py 在 node-27 成功应用并记账，schema_migrations 顶行 000042 首见于 2026-07-07 loop-log——CONCURRENTLY 在本 hypertable 拓扑可行的实证；**caveat（F4）**：该先例发生在 000047 启用 TimescaleDB 压缩**之前**，今日 `hydro.river_timeseries` 已有 compressed chunk（`parser.py:734` 守卫证明生产生效），3.4 pre-flight 必须记录 `timescaledb_information.chunks` 的 `is_compressed` 分布）。
 - harness：`packages/common/migrate.py` 全局 autocommit、无事务包裹（`:161`），`CONCURRENTLY` 天然可行；`schema_migrations(version, applied_at)` 记账跳过。
 - node-27 记账漂移：schema_migrations 止于 `000045`；`000046-48` 生效未记账（000047 系 runbook 手工双跑先例）。
-- 仓内引用面：`packages/common/forecast_store.py:3420-3446` `_qhh_latest_query_indexes()` 陈述 `covered_by_mvt_identity_lookup_index`，被 `tests/test_migrations.py:370` 与 `tests/test_forecast_api.py:1735` 钉住；`tests/test_migrations.py:253-283` 钉的是 `mvt_selected_identity_valid_time_discovery_idx`（保留集，不受影响）。
+- 仓内引用面：`packages/common/forecast_store.py:3420-3446` `_qhh_latest_query_indexes()` 陈述 `covered_by_mvt_identity_lookup_index`，被 `tests/test_migrations.py:370`（**merge-base 行号**；本 PR 在其前插入约 91 行，HEAD 上该钉已重写为 `:456-477` 的键值钉）与 `tests/test_forecast_api.py:1735` 钉住；`tests/test_migrations.py:253-283`（merge-base；HEAD 为 `:344-376`）钉的是 `mvt_selected_identity_valid_time_discovery_idx`（保留集，不受影响）。
 - ADR 0002 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md:33-34` "cannot be pruned further"（ADR Date: 2026-07-03；该句在 **Context** 的 2026-07-04 实测段，非任何 Decision 依赖项）。
 
 ## 决策
@@ -38,9 +38,9 @@
 
 ### D4 — EXPLAIN 取证查询集（AC3）
 
-删除前后各跑一次 `EXPLAIN (ANALYZE, BUFFERS)`，同参数同库：
+删除前后各跑一次 `EXPLAIN (ANALYZE, BUFFERS)`，同参数同库、逐字节同一脚本（`.workplans/issue-1338/predrop-queries.sql`）。**取证集的证据性质（round-4 根因改标）**：脚本跑的是八条**谓词形状捕获**，非八条真实查询原文——Q2/Q3/Q5/Q7 与真实查询逐字同形；Q1/Q4/Q6/Q8 是真实查询 ts 访问腿的**单表形状代理**（literal 参数、无 join、投影缩减）。形状代理证明的是"该谓词形状可用/在用哪条索引"，**不证明**真实查询的计划节点类型（如 Index Only 与否取决于真实投影列），也**不证明**累计 idx_scan 计数器的构成归因。
 
-1. `services/tiles/mvt.py` national tile `typed_values`/`untyped_ranked` CTE（`:603-651`）——被删 `mvt_identity_lookup_idx` 的**唯一在册消费面**，主取证对象。
+1. `services/tiles/mvt.py` national tile `typed_values`/`untyped_ranked` CTE（`:603-651`）——被删 `mvt_identity_lookup_idx` 的**两条实测消费形状之一（另一条为第 8 条）**，主取证对象；Q1 为其 ts 访问腿的单表形状代理。
 2. `services/tiles/mvt.py` `valid_times_for_layer` 具名身份分支（`:1220-1234`，走保留集 `selected_identity_valid_time_discovery_idx`，应零变化）。
 3. `services/tiles/mvt.py` `valid_times_for_layer` 无 basin 分支（`:1236-1242`，列匹配被删 `valid_time_discovery_idx`，删后承接者取证）。
 4. `services/tiles/mvt.py` hydro 层 basin/segment tile CTE（`:454-474`）。
@@ -49,13 +49,13 @@
 7. **（F3）**`workers/output_parser/parser.py:745-755` ingest 窗口 `DELETE` 谓词（对已存在 run 的窗口做只读 `EXPLAIN`，不真删）——**pre-drop 实测（baseline Q7）已在 pkey 上、四谓词全推入 Index Cond，写路径非被删索引消费面**；保留在判定集作廉价回归锚。
 8. **（F3）**`services/tiles/mvt.py:530-553` `source_identity_stats_sql`（national identity 探针）。
 
-判定：**八条**无一退化为 Seq Scan，且**八条全部**执行时间无数量级劣化——其中 **1 与 8 是被删索引的实测消费面**（predrop-baseline Q1/Q8 Index Only Scan），是 post-drop 退化风险的焦点；3/6/7 的 pre-drop 计划本就在保留索引/pkey 上（Q3=valid_time_idx、Q6=selected_identity、Q7=pkey），作廉价回归锚保留在判定集内。**若出现退化：立即重建被删索引回滚（可逆性即回滚方案），change 终止并回 upstream**。
+判定：**八条**无一退化为 Seq Scan，且**八条全部**执行时间无数量级劣化——其中 **1 与 8 的谓词形状实测会走被删索引**（predrop-baseline Q1/Q8 形状捕获走该索引；注意 Q1 代理呈现的 Index Only Scan **不外推**到真实 typed_values CTE——其投影 `value/unit/quality_flag/basin_version_id` 不在被删索引内，真实查询在该索引上不可能 Index Only 且 Q1 自身 Heap Fetches: 216；Q8 的真实 ts 腿不取载荷列，Index Only 可行），是 post-drop 退化风险的焦点；3/6/7 的 pre-drop 计划本就在保留索引/pkey 上（Q3=valid_time_idx、Q6=selected_identity、Q7=pkey），作廉价回归锚保留在判定集内。**若出现退化：立即重建被删索引回滚（可逆性即回滚方案），change 终止并回 upstream**。
 
 ### D5 — 测试形态（B 锚）
 
 - B1（迁移文本钉，`tests/test_migrations.py` 既有文体）：`000049` 文件存在、恰含两条 `DROP INDEX CONCURRENTLY IF EXISTS`、目标名逐字、不含任何保留集索引名、编号接 `000048` 之后无冲突。**硬约束（fixture review F5）**：`tests/test_migrations.py:52-60` 的迁移体检门要求文本（lower）子串命中 `create`/`select`/`do`/`alter` 之一，两个目标名与自然 rationale 措辞一个都不含——解法**规定为**在注释中写入两条回滚用 `CREATE INDEX` 语句原文（同时满足 F2 的回滚 DDL 保全），**禁止**以削体检门过关。
-- B2（证据对齐钉）：`_qhh_latest_query_indexes()` 不再陈述 `mvt_identity_lookup`，新陈述与既有测试断言同步（`test_migrations.py:370` / `test_forecast_api.py:1735` 改后仍绿且仍在断言实质内容，不得删钉了事）。
-- B3（保留集回归）：`test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates`（`:253-283`）等既有迁移测试不动仍绿。
+- B2（证据对齐钉）：`_qhh_latest_query_indexes()` 不再陈述 `mvt_identity_lookup`，新陈述与既有测试断言同步（merge-base `test_migrations.py:370` 旧裸子串钉在 HEAD 已重写为 `:456-477` 键值钉+反向钉；`test_forecast_api.py:1735` 响应体等值钉改后仍绿且仍在断言实质内容，不得删钉了事）。
+- B3（保留集回归）：`test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates`（merge-base `:253-283`；HEAD `:344-376`）等既有迁移测试不动仍绿。
 - 红证：B1 在迁移文件缺失/名字打错时红；B2 在 forecast_store 未同步时红（先跑旧断言证红再改）。
 
 ## Invariant Matrix（本 change 触及）

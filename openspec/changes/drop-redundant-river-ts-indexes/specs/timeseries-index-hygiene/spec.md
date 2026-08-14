@@ -8,7 +8,7 @@ Dropping an index on a production timeseries hypertable SHALL be justified by li
 
 #### Scenario: evidence-backed drop
 
-- **WHEN** a migration drops an index whose live measurements show negligible scans relative to a same-column-set survivor, and post-drop plans show no Seq Scan fallback or order-of-magnitude slowdown on the matched query surfaces
+- **WHEN** a migration drops an index whose measured carrying cost (size, scan counts) is weighed against its measured in-repo query surfaces as a recorded tradeoff — with every coverage loss enumerated and bounded by a before/after `EXPLAIN` gate — and post-drop plans show no Seq Scan fallback or order-of-magnitude slowdown on the matched query surfaces
 - **THEN** the drop stands, and the recorded receipt carries the before/after sizes and plans
 
 #### Scenario: plan regression after drop

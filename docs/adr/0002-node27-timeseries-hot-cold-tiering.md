@@ -331,7 +331,8 @@ unchanged — nothing in the Decision depended on the claim.
 ### What the new measurement shows
 
 Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
-`hydro.river_timeseries` chunks; inventory in `.workplans/issue-1338/`):
+`hydro.river_timeseries` chunks; inventory in the #1338 pre-drop receipt posted
+on PR #1377 (2026-08-14)):
 
 - `river_timeseries_mvt_identity_lookup_idx`: **162 GB** (up from 32 GB in July)
   for **5,571** `idx_scan`, against **796,096,944** `river_timeseries_pkey` scans
@@ -339,13 +340,21 @@ Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
   order differs — but the same set is not the same coverage: with `variable`
   single-valued table-wide it behaves as `(run_id, valid_time, rnv, segid)`, a
   run-scoped time prefix the pkey cannot offer (the pkey orders `rnv`/`segid`
-  ahead of `variable`/`valid_time`). The measured consumers of those 5,571 scans
-  are reads: the #1338 pre-drop baseline shows the national-tile `typed_values`
-  access (`services/tiles/mvt.py:603-651`) and the source-identity stats probe
-  (`mvt.py:530-553`) served by Index Only Scans on this index, both binding
-  `run_id` + `variable` + `valid_time` + `rnv` with **no** `basin_version_id` —
-  a shape the retained `..._mvt_selected_identity_valid_time_discovery_idx`
-  cannot serve (its 2nd column is `basin_version_id`). The statically expected
+  ahead of `variable`/`valid_time`). The in-repo query shapes measured to use
+  this index are two reads — the #1338 pre-drop baseline Q1/Q8 shape captures:
+  the national-tile `typed_values` ts-access leg
+  (`services/tiles/mvt.py:603-651`) and the source-identity stats probe
+  (`mvt.py:530-553`) — both binding `run_id` + `variable` + `valid_time` +
+  `rnv` with **no** `basin_version_id`, a shape the retained
+  `..._mvt_selected_identity_valid_time_discovery_idx` cannot serve (its 2nd
+  column is `basin_version_id`); the 5,571 cumulative `idx_scan` are **not**
+  individually attributed to queries. Both baseline captures used this index,
+  but Q1 is a single-table shape proxy rather than the real query: the real
+  `typed_values` CTE projects `value`/`unit`/`quality_flag`/`basin_version_id`,
+  none of which this index carries, so the real query can never be index-only
+  on it (even the proxy's Index Only Scan reported `Heap Fetches: 216`). The
+  stats probe's real ts leg takes no payload columns, so index-only is feasible
+  there. The statically expected
   post-drop successor for those two reads is the pkey (usable prefix `run_id` +
   `rnv`, remaining predicates as in-index filters), but that is a pre-receipt
   prediction, not a measurement: the other retained indexes stay live
@@ -369,7 +378,13 @@ on the two read shapes above. That loss is exactly what the pre-merge
 before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measures, over the in-repo query
 surfaces that name-match the dropped columns: any Seq Scan fallback or
 order-of-magnitude slowdown rolls the drop back by re-creating the index (the
-re-create DDL for both is preserved verbatim in that migration's comments). The
+re-create DDL for both is preserved verbatim in that migration's comments).
+Re-creating the index is not by itself a durable rollback: as that migration's
+rollback-procedure note records, the build takes a `SHARE` lock on
+`hydro.river_timeseries` (blocking ingest writes), `CREATE INDEX CONCURRENTLY`
+on this hypertable is unverified in-repo, and 000049 must also be recorded in
+`public.schema_migrations` (or the file reverted) or the next unattended
+`migrate.py` run silently re-drops the rebuilt index. The
 general lesson for this ADR: "cannot be pruned further" is a measurement, not a
 property — index redundancy claims expire and must be re-measured against
 growth, not carried forward.
