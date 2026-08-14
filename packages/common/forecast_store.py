@@ -3444,9 +3444,10 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
         # unchanged post-drop. (Baseline provenance: the #1338 pre-drop EXPLAIN receipt
         # posted on PR #1377, 2026-08-14.) The pkey is not the successor — it carries no
         # basin_version_id and its third column river_segment_id is unbound, so its
-        # usable prefix stops at two columns. Only the post-drop confirmation is
-        # pending: the #1338 pre-merge live leg re-runs the same query after the drop
-        # and finalizes these values, and measurement wins over inference.
+        # usable prefix stops at two columns. The post-drop EXPLAIN (receipt posted on
+        # PR #1377, 2026-08-14) confirmed the plan unchanged: the Q6 shape still scans
+        # this index's chunk indexes after migration 000049 dropped
+        # mvt_identity_lookup.
         {
             "table": "hydro.river_timeseries",
             "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
