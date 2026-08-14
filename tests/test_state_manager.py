@@ -2611,9 +2611,10 @@ async def test_state_snapshot_api_list_and_get(
 def test_state_index_copyback_merge_publishes_new_entry_beside_archived_destination_object(
     tmp_path: Path,
 ) -> None:
-    # #1189: node-27's product-archive mover removes shared-root state objects
-    # after 14 days while nothing prunes the shared index, so the destination
-    # index legitimately references objects that no longer exist there.  The
+    # #1189: node-27's product-archive mover (retired in #1370) removed
+    # shared-root state objects after 14 days while nothing pruned the shared
+    # index, so the destination index legitimately references objects that do
+    # not exist there.  The
     # merge must still publish the new authoritative entry, keep the historical
     # entry, and never resurrect the archived object.
     private_root = tmp_path / "object-store"
@@ -2758,8 +2759,9 @@ def test_state_index_copyback_merge_is_idempotent_over_archived_destination_hist
     assert second["merged_entry_count"] == 2
     assert second["entry_count"] == 2
     # The replayed entry is already published byte-identically, so the second
-    # merge touches no object at all (#1189 A2): its object lifecycle belongs to
-    # the archive mover from the moment the entry is in the index.
+    # merge touches no object at all (#1189 A2): its object lifecycle stopped
+    # being the merge's concern the moment the entry entered the index (it was
+    # the archive mover's, retired in #1370).
     assert second["checkpoint_copied_count"] == 0
     assert second["checkpoint_replaced_count"] == 0
     assert second["checkpoint_reused_count"] == 0
@@ -2840,8 +2842,9 @@ def test_state_index_copyback_merge_does_not_resurrect_archived_object_of_identi
 ) -> None:
     # #1189 (A2): replaying an old cycle re-presents entries the shared index
     # already holds byte-identically.  Those entries are published already and
-    # their shared objects belong to node-27's archive mover, so the merge must
-    # not copy them back -- a replay must never resurrect an archived object.
+    # their shared objects were node-27's archive mover's (retired in #1370),
+    # so the merge must not copy them back -- a replay must never resurrect an
+    # archived object.
     private_root = tmp_path / "object-store"
     shared_root = tmp_path / "shared-object-store"
     state_key = "states/gfs/model_a/republished/state.cfg.ic"

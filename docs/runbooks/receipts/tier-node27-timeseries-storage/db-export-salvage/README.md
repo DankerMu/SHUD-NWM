@@ -1,4 +1,27 @@
+---
+status: archived
+current_authority:
+  - path: docs/runbooks/tier-node27-timeseries-storage.md
+    section: "Retirement record: the cold archive lane is gone (2026-08-11)"
+    reason: current node-27 timeseries storage-tier procedures
+superseded_by: none
+status_since: 2026-08-14
+archive_scope: whole-document
+retained_for: immutable live evidence of the retired archive lane
+---
+
 # Issue #1070 Task 3.3 live evidence
+
+**Retired lane — read as history, not as procedure.** The node-27 cold archive
+tier was permanently retired on 2026-08-11
+([`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../../../../adr/0002-node27-timeseries-hot-cold-tiering.md)
+Revision 2026-08-11) after the `/dev/md0` double-disk failure, and #1370
+deleted `scripts/node27_db_export_salvage.py` together with its wrapper and env template.
+The receipts in this directory are immutable evidence of runs that happened;
+they cannot be regenerated, and no command described below is runnable today.
+Retention now deletes chunks with no archive backstop — see
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../../../tier-node27-timeseries-storage.md)
+§8.
 
 This directory preserves the immutable node-27 receipts for the explicitly authorized #1070 Task 3.3 live database-export salvage run on 2026-07-15.
 

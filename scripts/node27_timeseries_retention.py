@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
-"""Gated TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
+"""TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
 
 Drops chunks strictly older than a configurable window (default 14 d) from
 the two D3 detail hypertables ``hydro.river_timeseries`` and
-``met.forcing_station_timeseries``. The runner refuses enforce mode unless
-BOTH gate receipts are fresh AND cover the drop window:
+``met.forcing_station_timeseries``.
 
-1. **Archive-completeness receipt** (emitted by ``node27_storage_inventory_audit``,
-   schema ``schemas/archive_completeness_receipt.schema.json``). Runner reads
-   only from the receipt — no shadow DB oracle. Physical chunks wholly outside
-   ``coverage_bounds`` are deferred; the runner refuses when no eligible chunk
-   is fully evidenced or when any subject overlapping the covered candidate
-   window carries ``verdict != complete``.
-2. **Archive-rebuild-drill receipt** (emitted by
-   ``node27_archive_rebuild_drill``, schema
-   ``schemas/archive_rebuild_drill_receipt.schema.json``). Refuses if the
-   drill is FAIL, stale, or its declared ``coverage[]`` tuples fail the per-
-   source rule in ``docs/runbooks/tier-node27-timeseries-storage.md §7.5``:
-   the forcing-recovery UNION (``forcing`` plus verified ``db-export``) and
-   the ``runs`` UNION MUST span the drop window (the drill emits per-cycle
-   24 h tuples — no single tuple is expected to cover a 14 d drop window on
-   its own); ``source=db-export`` remains independently required iff the
-   completeness receipt reports any overlapping db-export subject.
+ADR 0002 (as revised 2026-08-11): the archive lane was permanently retired
+after the ``/dev/md0`` double-disk failure, and the ADR's "no deletion
+without archive receipt" invariant was explicitly amended. #1370 completed
+that retirement: the archive-completeness and archive-rebuild-drill gates,
+their receipt loaders, and the thirteen archive-family wire codes no longer
+exist, and ``enabled`` is a retired mode rather than a selectable one.
 
-Design references (design.md #855 fixture pins H1-H17):
+``NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE`` therefore MUST be set
+explicitly to ``disabled``; unset, ``enabled``, or any other value refuses
+with ``RETENTION_CONFIG_INVALID`` (exit 2, no receipt, diagnostics citing the
+ADR revision). The fail-closed direction is unchanged — an unset variable
+never deletes anything — and the deletion authority stays auditable: every
+receipt records ``archive_gate.mode = "disabled"`` plus the pinned citation
+``docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11``.
 
-- H1 completeness receipt authority; H2 drill per-source coverage rule.
+Design references (design.md #855 fixture pins H1-H17), as they stand after
+the archive-lane retirement:
+
 - H3 catalog enumeration honours per-tick bound (``drop_chunks`` cannot
   bound cardinality server-side; runner enumerates
   ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
@@ -36,29 +33,15 @@ Design references (design.md #855 fixture pins H1-H17):
   ``chunks_detailed_size(<hypertable>).total_bytes`` filtered to the chunk so
   a compressed chunk's compressed sibling relation counts too (#1125).
 - H5 fail-closed on per-chunk drop failure — whole tick refuses.
-- H6 wire codes byte-identical across code / runbook §8.2 / design #855.
+- H6 wire codes byte-identical across code / runbook §8.2 / design #855
+  (H1/H2/H8/H9 retired with the gates; the thirteen archive-family codes
+  they defined are gone — see #1370).
 - H7 predicate ``range_end <= cutoff`` (non-strict; divergence from #851's
   strict ``<`` — a chunk with ``range_end == cutoff`` has all row times
   strictly less than cutoff, satisfying "entire range older than window").
-- H8 freshness defaults (completeness 26 h, drill 30 d).
-- H9 ``salvage_backed_windows[]`` derived from completeness receipt subjects
-  only (chunk boundaries do not carry lane/subject identity).
 - H10 lock path byte-identical with runbook §8 + ``.example``.
 - H12 statement timeouts: 60 s for catalog enumeration, 300 s per ``drop_chunks``.
 - H13 env prefix ``NODE27_TIMESERIES_RETENTION_*``.
-
-ADR 0002 (as revised 2026-08-11): the runner is dual-mode. Its DEFAULT
-(``NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE`` unset / ``enabled``) is the
-fail-closed archive-receipt gate described above — the retention gate IS the
-archive receipt gate. The archive lane was permanently retired after the
-``/dev/md0`` double-disk failure, so the ADR's "no deletion without archive
-receipt" invariant was explicitly amended: an operator may select the
-``disabled`` mode, in which the completeness/drill gates are neither loaded
-nor judged. That mode is deliberate and auditable, not a silent bypass —
-every receipt records the effective mode and a ``disabled`` receipt cites
-``docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11``
-(issue #1369). No wire code is added; in ``disabled`` mode the thirteen
-archive-family codes are simply unreachable.
 
 ADR 0001 display carve-out: no imports touching ``apps/api`` or
 ``apps/frontend``.
@@ -96,8 +79,14 @@ from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 SCHEMA_VERSION = "1.1"
 TOOL_VERSION = "node27-timeseries-retention/1"
 
-# #1369 archive-gate mode (ADR 0002 Revision 2026-08-11). Not a wire code and
-# not a refusal: it is the third behavioral axis next to dry-run/enforce.
+# Archive-gate mode (#1369, ADR 0002 Revision 2026-08-11). Not a wire code and
+# not a refusal: it is the recorded deletion authority on every receipt.
+# ``ARCHIVE_GATE_ENABLED`` is RETIRED (#1370) and survives for exactly two
+# reasons: the receipt schema's ``mode`` enum still admits it so historical
+# 1.1 receipts stay validatable, and ``--archive-gate`` keeps it as a choice
+# so requesting it lands in ``_resolve_archive_gate`` — the single refusal
+# path that carries the wire code and the ADR citation — instead of an
+# argparse usage error. The runner never emits it.
 ARCHIVE_GATE_ENABLED = "enabled"
 ARCHIVE_GATE_DISABLED = "disabled"
 ARCHIVE_GATE_MODES: frozenset[str] = frozenset({ARCHIVE_GATE_ENABLED, ARCHIVE_GATE_DISABLED})
@@ -107,18 +96,16 @@ ARCHIVE_GATE_ENV = "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE"
 ARCHIVE_GATE_ADR_REFERENCE = (
     "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
 )
+# Operator-facing retirement diagnostics (#1370). Both fragments are pinned by
+# tests: the first names the authority, the second says what to do about it.
+ARCHIVE_GATE_RETIRED_DIAGNOSTIC = (
+    "archive lane permanently retired (ADR 0002 Revision 2026-08-11)"
+)
 
 # H10 canonical lock path — byte-identical with runbook §8 + `.example`.
 _DEFAULT_LOCK_PATH_STR = "/tmp/nhms-node27-timeseries-retention.lock"
 
-# H8 freshness defaults.
-_DEFAULT_COMPLETENESS_MAX_AGE_HOURS = 26
-_DEFAULT_DRILL_MAX_AGE_DAYS = 30
-
 # H3 per-tick bound + window defaults (matches spec §Window and mechanism).
-# Shared with the archive-side min-age guard (#1227): the guard reads this
-# file's window variable and must resolve a missing/empty assignment to the
-# SAME default this runner uses, so the constant has one home.
 _DEFAULT_WINDOW_DAYS = DEFAULT_RETENTION_WINDOW_DAYS
 _DEFAULT_PER_TICK_BOUND = 5
 
@@ -138,23 +125,17 @@ TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(
 # H6 wire-format codes — byte-identical across:
 # * this module (``WIRE_CODES`` frozenset),
 # * ``docs/runbooks/tier-node27-timeseries-storage.md`` §8.2,
-# * ``openspec/changes/tier-node27-timeseries-storage/design.md`` #855 fixture,
-# * ``tests/test_node27_timeseries_retention.py``.
-# Any addition / rename / removal MUST land in all four surfaces in the same
-# commit (same-class recurrence discipline from #854).
-CODE_COMPLETENESS_RECEIPT_MISSING = "COMPLETENESS_RECEIPT_MISSING"
-CODE_COMPLETENESS_RECEIPT_STALE = "COMPLETENESS_RECEIPT_STALE"
-CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT = "COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT"
-CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW = "COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW"
-CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW = "COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW"
-CODE_DRILL_RECEIPT_MISSING = "DRILL_RECEIPT_MISSING"
-CODE_DRILL_RECEIPT_STALE = "DRILL_RECEIPT_STALE"
-CODE_DRILL_RECEIPT_FAIL = "DRILL_RECEIPT_FAIL"
-CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW = "DRILL_DERIVATION_WINDOW_TOO_NARROW"
-CODE_DRILL_COVERAGE_FORCING_MISSING = "DRILL_COVERAGE_FORCING_MISSING"
-CODE_DRILL_COVERAGE_RUNS_MISSING = "DRILL_COVERAGE_RUNS_MISSING"
-CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND = "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND"
-CODE_DRILL_COVERAGE_DB_EXPORT_MISSING = "DRILL_COVERAGE_DB_EXPORT_MISSING"
+# * ``tests/test_node27_timeseries_retention.py``,
+# * ``openspec/changes/tier-node27-timeseries-storage/design.md`` (#855) —
+#   the forward-walk test reads this fixture too.
+# Any addition / rename MUST land in all four surfaces in the same commit
+# (same-class recurrence discipline from #854). Retirement is the asymmetry:
+# retired codes stay verbatim in the #855 fixture and move to the reverse
+# walk's allowlist instead of being deleted from it.
+#
+# #1370: the thirteen archive-family codes (``COMPLETENESS_*`` x5,
+# ``DRILL_*`` x8) retired together with the archive lane and the ``enabled``
+# gate mode. Only the runner's own refusals remain.
 CODE_RETENTION_CONFIG_INVALID = "RETENTION_CONFIG_INVALID"
 CODE_RETENTION_CONCURRENT_INVOCATION = "RETENTION_CONCURRENT_INVOCATION"
 CODE_RETENTION_DROP_FAILED = "RETENTION_DROP_FAILED"
@@ -162,19 +143,6 @@ CODE_RETENTION_UNCAUGHT_ERROR = "RETENTION_UNCAUGHT_ERROR"
 
 WIRE_CODES: frozenset[str] = frozenset(
     {
-        CODE_COMPLETENESS_RECEIPT_MISSING,
-        CODE_COMPLETENESS_RECEIPT_STALE,
-        CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
-        CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW,
-        CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW,
-        CODE_DRILL_RECEIPT_MISSING,
-        CODE_DRILL_RECEIPT_STALE,
-        CODE_DRILL_RECEIPT_FAIL,
-        CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW,
-        CODE_DRILL_COVERAGE_FORCING_MISSING,
-        CODE_DRILL_COVERAGE_RUNS_MISSING,
-        CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND,
-        CODE_DRILL_COVERAGE_DB_EXPORT_MISSING,
         CODE_RETENTION_CONFIG_INVALID,
         CODE_RETENTION_CONCURRENT_INVOCATION,
         CODE_RETENTION_DROP_FAILED,
@@ -184,8 +152,6 @@ WIRE_CODES: frozenset[str] = frozenset(
 
 _ROOT = Path(__file__).resolve().parents[1]
 _RECEIPT_SCHEMA_PATH = _ROOT / "schemas/timeseries_retention_receipt.schema.json"
-_COMPLETENESS_SCHEMA_PATH = _ROOT / "schemas/archive_completeness_receipt.schema.json"
-_DRILL_SCHEMA_PATH = _ROOT / "schemas/archive_rebuild_drill_receipt.schema.json"
 
 
 # ---------------------------------------------------------------------------
@@ -203,16 +169,6 @@ class RetentionConfigError(RuntimeError):
     """
 
 
-class ReceiptGateError(RuntimeError):
-    """Signal a gate refusal tagged with a wire-format code."""
-
-    def __init__(self, code: str, detail: str = "") -> None:
-        self.code = code
-        self.detail = detail
-        message = f"{code}: {detail}" if detail else code
-        super().__init__(message)
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -223,24 +179,21 @@ class RetentionConfig:
     """Immutable retention runner configuration.
 
     Every field is populated via :func:`config_from_args` from the H13 env
-    catalogue plus CLI overrides. Defaults are pinned to H8/H10/H12/§Window.
+    catalogue plus CLI overrides. Defaults are pinned to H10/H12/§Window.
 
-    ``completeness_receipt_path`` / ``drill_receipt_path`` are ``None`` in
-    ``archive_gate="disabled"`` mode (#1369): the archive lane is retired, so
-    requiring a path to a file that can never exist would be pseudo-config.
+    ``archive_gate`` is always ``disabled`` — :func:`_resolve_archive_gate`
+    admits nothing else (#1370). It is carried on the config (rather than
+    assumed) because every receipt must record the deletion authority in
+    force when it was written.
     """
 
     database_url: str
     window_days: int
     per_tick_bound: int
-    completeness_receipt_path: Path | None
-    drill_receipt_path: Path | None
-    completeness_max_age_hours: int
-    drill_max_age_days: int
     receipt_path: Path
     lock_path: Path
     enforce: bool
-    archive_gate: str = ARCHIVE_GATE_ENABLED
+    archive_gate: str = ARCHIVE_GATE_DISABLED
 
 
 @dataclass(frozen=True)
@@ -268,14 +221,6 @@ class ChunkRow:
     @property
     def hypertable_key(self) -> str:
         return f"{self.hypertable_schema}.{self.hypertable_name}"
-
-
-@dataclass(frozen=True)
-class DropWindow:
-    """The time interval [start, end] the runner is asking gates to cover."""
-
-    start: datetime
-    end: datetime
 
 
 def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
@@ -333,23 +278,29 @@ def _resolve_path(
 
 
 def _resolve_archive_gate(args_value: str | None, env_value: str | None) -> str:
-    """Resolve the #1369 archive-gate mode (CLI wins, then env, then default).
+    """Resolve the archive-gate mode (CLI wins, then env). Only ``disabled``.
 
-    Strict enum, deliberately NOT the ``--enforce`` truthiness precedent: this
-    is a three-value risk switch on a production delete path, so a typo
-    (``disable``, ``true``, ``1``, the empty string) MUST fail closed with
-    ``RETENTION_CONFIG_INVALID`` rather than silently resolve to a mode.
+    #1370: the archive lane is permanently retired, so this is no longer a
+    mode switch — it is an explicit acknowledgement. ``disabled`` (after
+    strip + lowercase) is the only accepted value; unset, the retired
+    ``enabled``, and every typo (``disable``, ``true``, ``1``, the empty
+    string) refuse with ``RETENTION_CONFIG_INVALID``.
+
+    The fail-closed direction is unchanged. Before this change an unset
+    variable selected the archive gate, which then refused for want of
+    receipts nothing produces any more; now it refuses at config parse. In
+    both worlds an unset variable deletes nothing — what changed is that the
+    refusal is diagnosable instead of a hourly gate refusal on a dead lane.
     """
     raw = args_value if args_value is not None else env_value
-    if raw is None:
-        return ARCHIVE_GATE_ENABLED
-    normalized = raw.strip().lower()
-    if normalized not in ARCHIVE_GATE_MODES:
-        raise RetentionConfigError(
-            f"{ARCHIVE_GATE_ENV} must be one of "
-            f"{sorted(ARCHIVE_GATE_MODES)} (unset = {ARCHIVE_GATE_ENABLED}), got {raw!r}"
-        )
-    return normalized
+    if raw is not None and raw.strip().lower() == ARCHIVE_GATE_DISABLED:
+        return ARCHIVE_GATE_DISABLED
+    raise RetentionConfigError(
+        f"{ARCHIVE_GATE_ENV} must be {ARCHIVE_GATE_DISABLED!r}, got {raw!r}: "
+        f"{ARCHIVE_GATE_RETIRED_DIAGNOSTIC}; "
+        f"set {ARCHIVE_GATE_ENV}={ARCHIVE_GATE_DISABLED} to acknowledge that "
+        "chunks are dropped with no archive backstop"
+    )
 
 
 def config_from_args(
@@ -373,34 +324,9 @@ def config_from_args(
         name="NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND",
         default=_DEFAULT_PER_TICK_BOUND,
     )
-    completeness_max_age_hours = _optional_positive_int(
-        env.get("NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS"),
-        name="NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS",
-        default=_DEFAULT_COMPLETENESS_MAX_AGE_HOURS,
-    )
-    drill_max_age_days = _optional_positive_int(
-        env.get("NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS"),
-        name="NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS",
-        default=_DEFAULT_DRILL_MAX_AGE_DAYS,
-    )
-    # D4 conditional requirement: the two archive receipt paths are required
-    # ONLY in enabled mode. In disabled mode they are not resolved at all —
-    # ``_resolve_path(..., required=False)`` raises by construction, so
-    # "optional" here means "never asked for", and any value the operator left
-    # in the env file is deliberately ignored (never opened).
-    completeness_receipt_path: Path | None = None
-    drill_receipt_path: Path | None = None
-    if archive_gate == ARCHIVE_GATE_ENABLED:
-        completeness_receipt_path = _resolve_path(
-            getattr(args, "completeness_receipt_path", None),
-            env.get("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH"),
-            name="NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
-        )
-        drill_receipt_path = _resolve_path(
-            getattr(args, "drill_receipt_path", None),
-            env.get("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH"),
-            name="NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
-        )
+    # #1370: the two archive receipt paths and their two max-age variables are
+    # gone with the gates. A box whose env file still carries them keeps
+    # working — the runner simply never reads those keys.
     receipt_path = _resolve_path(
         getattr(args, "receipt_path", None),
         env.get("NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"),
@@ -423,10 +349,6 @@ def config_from_args(
         database_url=database_url,
         window_days=window_days,
         per_tick_bound=per_tick_bound,
-        completeness_receipt_path=completeness_receipt_path,
-        drill_receipt_path=drill_receipt_path,
-        completeness_max_age_hours=completeness_max_age_hours,
-        drill_max_age_days=drill_max_age_days,
         receipt_path=receipt_path,
         lock_path=lock_path,
         enforce=enforce,
@@ -442,27 +364,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--receipt-path", dest="receipt_path", type=str, default=None)
     parser.add_argument("--lock-path", dest="lock_path", type=str, default=None)
     parser.add_argument(
-        "--completeness-receipt-path",
-        dest="completeness_receipt_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--drill-receipt-path",
-        dest="drill_receipt_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
         "--archive-gate",
         dest="archive_gate",
+        # ``enabled`` stays a CHOICE although it is retired: argparse would
+        # reject it with a bare usage error, and the operator needs the wire
+        # code plus the ADR citation that ``_resolve_archive_gate`` emits.
         choices=[ARCHIVE_GATE_ENABLED, ARCHIVE_GATE_DISABLED],
         default=None,
         help=(
-            "archive-receipt gate mode; default (unset) is the fail-closed "
-            f"{ARCHIVE_GATE_ENABLED!r}. {ARCHIVE_GATE_DISABLED!r} skips both "
-            "archive gates under ADR 0002 Revision 2026-08-11 and DELETES "
-            "WITHOUT ANY ARCHIVE BACKSTOP"
+            f"must be {ARCHIVE_GATE_DISABLED!r} (or set {ARCHIVE_GATE_ENV}): "
+            f"{ARCHIVE_GATE_RETIRED_DIAGNOSTIC}, so chunks are DROPPED WITH "
+            f"NO ARCHIVE BACKSTOP. {ARCHIVE_GATE_ENABLED!r} is retired and "
+            "refuses with RETENTION_CONFIG_INVALID"
         ),
     )
     return parser
@@ -508,7 +421,7 @@ def acquire_lock(path: Path) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# Receipt-loading helpers (H1/H2).
+# Schema + timestamp helpers.
 # ---------------------------------------------------------------------------
 
 
@@ -528,533 +441,6 @@ def _parse_iso(value: str) -> datetime:
 def _iso(value: datetime) -> str:
     """Emit RFC-3339 ``Z``-suffixed UTC — mirrors compression `:260-261`."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def load_completeness_receipt(path: Path) -> dict[str, Any]:
-    """Load + schema-validate the archive-completeness receipt.
-
-    Raises :class:`ReceiptGateError` with
-    ``CODE_COMPLETENESS_RECEIPT_MISSING`` on missing / unreadable / schema-
-    invalid file; the missing wire code covers all "receipt is not usable"
-    conditions since the schema does not carve out a separate invalid-shape
-    code.
-
-    Uses ``_RECEIPT_FORMAT_CHECKER`` so ``format: date-time`` on
-    ``generated_at`` / ``coverage_bounds`` / ``windows[].window.*`` is
-    ENFORCED at load — symmetric with the emitter side. Without a format
-    checker jsonschema treats ``format`` as informational and any
-    malformed subject window ``start`` / ``end`` would fall through to the
-    per-subject silent-False fallback in ``_subject_overlaps_drop`` (RF-F1
-    R2 fix — loader-side symmetry with emit side).
-    """
-    if not path.is_file() or path.is_symlink():
-        raise ReceiptGateError(CODE_COMPLETENESS_RECEIPT_MISSING, str(path))
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReceiptGateError(CODE_COMPLETENESS_RECEIPT_MISSING, str(error)) from error
-    try:
-        jsonschema.validate(
-            data,
-            _load_schema(_COMPLETENESS_SCHEMA_PATH),
-            format_checker=_RECEIPT_FORMAT_CHECKER,
-        )
-    except jsonschema.ValidationError as error:
-        raise ReceiptGateError(
-            CODE_COMPLETENESS_RECEIPT_MISSING,
-            f"schema violation: {error.message}",
-        ) from error
-    if not isinstance(data, dict):
-        raise ReceiptGateError(
-            CODE_COMPLETENESS_RECEIPT_MISSING, "receipt is not a JSON object"
-        )
-    return data
-
-
-def load_drill_receipt(path: Path) -> dict[str, Any]:
-    """Load + schema-validate the archive-rebuild-drill receipt.
-
-    Uses ``_RECEIPT_FORMAT_CHECKER`` so ``format: date-time`` on the
-    receipt's timestamped fields is ENFORCED at load — symmetric with the
-    emitter side (RF-F1 R2 fix). A malformed ``coverage[].window.start``
-    would otherwise fall through to the silent-False fallback in
-    ``_tuples_cover_window``.
-    """
-    if not path.is_file() or path.is_symlink():
-        raise ReceiptGateError(CODE_DRILL_RECEIPT_MISSING, str(path))
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReceiptGateError(CODE_DRILL_RECEIPT_MISSING, str(error)) from error
-    try:
-        jsonschema.validate(
-            data,
-            _load_schema(_DRILL_SCHEMA_PATH),
-            format_checker=_RECEIPT_FORMAT_CHECKER,
-        )
-    except jsonschema.ValidationError as error:
-        raise ReceiptGateError(
-            CODE_DRILL_RECEIPT_MISSING,
-            f"schema violation: {error.message}",
-        ) from error
-    if not isinstance(data, dict):
-        raise ReceiptGateError(CODE_DRILL_RECEIPT_MISSING, "receipt is not a JSON object")
-    return data
-
-
-# ---------------------------------------------------------------------------
-# Gate checks (H1, H2).
-# ---------------------------------------------------------------------------
-
-
-def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
-    """Two closed intervals overlap iff neither ends before the other begins."""
-    return a_start <= b_end and b_start <= a_end
-
-
-def _subject_overlaps_drop(subject: Mapping[str, Any], drop: DropWindow) -> bool:
-    window = subject.get("window") or {}
-    try:
-        s_start = _parse_iso(window["start"])
-        s_end = _parse_iso(window["end"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return _overlaps(s_start, s_end, drop.start, drop.end)
-
-
-def check_completeness_gate(
-    receipt: Mapping[str, Any],
-    drop_window: DropWindow | None,
-    max_age_hours: int,
-    now: datetime,
-) -> list[str]:
-    """Evaluate H1: bounds + per-subject verdict + staleness.
-
-    Returns a list containing at most one refusal code (in refusal-priority
-    order). An empty list means the completeness gate is satisfied.
-    Order: STALE → BOUNDS → GAP → PENDING (MISSING is raised by the loader).
-    """
-    reasons: list[str] = []
-    generated_at_raw = receipt.get("generated_at")
-    if not isinstance(generated_at_raw, str):
-        # Fail-closed — schema validation should have caught this already;
-        # treat as stale so the receipt is not consulted further.
-        reasons.append(CODE_COMPLETENESS_RECEIPT_STALE)
-        return reasons
-    try:
-        generated_at = _parse_iso(generated_at_raw)
-    except ValueError:
-        reasons.append(CODE_COMPLETENESS_RECEIPT_STALE)
-        return reasons
-    age = now - generated_at
-    # Future-dated receipts (negative age) are not fresh — the receipt was
-    # emitted with a clock ahead of the runner's; reuse STALE rather than
-    # introducing a new wire code (byte-identity discipline from #854 R2).
-    if age < timedelta(0) or age > timedelta(hours=max_age_hours):
-        reasons.append(CODE_COMPLETENESS_RECEIPT_STALE)
-        return reasons
-    if drop_window is None:
-        # H17 zero-eligible enforce: no drop window to gate; return empty.
-        return reasons
-    bounds = receipt.get("coverage_bounds") or {}
-    try:
-        bounds_start = _parse_iso(bounds["start"])
-        bounds_end = _parse_iso(bounds["end"])
-    except (KeyError, TypeError, ValueError):
-        reasons.append(CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT)
-        return reasons
-    if not (bounds_start <= drop_window.start and bounds_end >= drop_window.end):
-        reasons.append(CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT)
-        return reasons
-    windows = receipt.get("windows") or []
-    # H1 (b): any in-window subject with verdict != complete refuses. Codes
-    # are distinct per verdict so operators know which failure mode fired.
-    # Priority: gap (missing) before pending-archive (in-progress).
-    for subject in windows:
-        if not isinstance(subject, Mapping):
-            continue
-        if not _subject_overlaps_drop(subject, drop_window):
-            continue
-        if subject.get("verdict") == "gap":
-            reasons.append(CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW)
-            return reasons
-    for subject in windows:
-        if not isinstance(subject, Mapping):
-            continue
-        if not _subject_overlaps_drop(subject, drop_window):
-            continue
-        if subject.get("verdict") == "pending-archive":
-            reasons.append(CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW)
-            return reasons
-    return reasons
-
-
-def _completeness_has_db_export_overlap(
-    receipt: Mapping[str, Any], drop_window: DropWindow
-) -> bool:
-    """H2 driver: is db-export coverage required by the drill?
-
-    True iff the completeness receipt has any subject with
-    ``coverage == "db-export"`` whose window overlaps the drop window.
-    """
-    for subject in receipt.get("windows") or []:
-        if not isinstance(subject, Mapping):
-            continue
-        if subject.get("coverage") != "db-export":
-            continue
-        if _subject_overlaps_drop(subject, drop_window):
-            return True
-    return False
-
-
-def _drill_derivation_window_contains(
-    receipt: Mapping[str, Any], drop_window: DropWindow
-) -> bool:
-    """#1207 layer 1: does the drill's DECLARED judgment span cover this drop?
-
-    The drill records the drop window it was invoked with at
-    ``salvage_derivation.drop_window`` (machine-readable since #1206). A
-    drill that declared a NARROWER span than what retention wants to drop
-    cannot vouch for this drop: its coverage tuples carry no subject
-    identity, so subject A's wide tuple would silently vouch for a subject
-    B that the narrowed drill never derived and never restore-verified.
-
-    Unified rule (design D2 of ``fix-retention-drill-window-guard``):
-
-    * key ``salvage_derivation`` entirely ABSENT → ``True`` (no-derivation-
-      section receipt: pre-#1206 receipts AND today's explicit-manifest
-      drills, which never write the section — behavior unchanged);
-    * key PRESENT but unusable (not a Mapping, ``drop_window`` key missing,
-      window neither Mapping nor ``null``, unparseable, or inverted) →
-      ``False``. A section that exists but cannot be judged is never
-      evidence — symmetric with the inverted-tuple defence in
-      :func:`_tuples_cover_window`;
-    * ``drop_window`` is ``null`` → ``True`` (the drill ran un-narrowed);
-    * well-formed window → closed-interval containment. Equality on either
-      endpoint PASSES: the runbook §7.5 standard invocation passes the §7.3
-      step 3 interval verbatim, and that interval is a documented
-      conservative SUPERSET of the runner's own drop window (the runner also
-      intersects the eligible chunks with the completeness
-      ``coverage_bounds``), so a live drill records a window EQUAL to or
-      WIDER than the retention one, never narrower.
-    """
-    if "salvage_derivation" not in receipt:
-        return True
-    section = receipt.get("salvage_derivation")
-    if not isinstance(section, Mapping) or "drop_window" not in section:
-        return False
-    window = section["drop_window"]
-    if window is None:
-        return True
-    if not isinstance(window, Mapping):
-        return False
-    start_raw = window.get("start")
-    end_raw = window.get("end")
-    if not isinstance(start_raw, str) or not isinstance(end_raw, str):
-        return False
-    try:
-        start = _parse_iso(start_raw)
-        end = _parse_iso(end_raw)
-    except ValueError:
-        return False
-    # Redundant for any well-ordered drop window (containment below already
-    # refuses an inverted recorded window); kept as an explicit defence so an
-    # inverted window can never be read as evidence.
-    if end < start:
-        return False
-    return start <= drop_window.start and end >= drop_window.end
-
-
-def _drill_snapshot_binds(
-    receipt: Mapping[str, Any], targets: Sequence[Mapping[str, str]]
-) -> bool:
-    """#1220: was every gate-time requirement window in the drill's snapshot?
-
-    The gate's requirement set comes from the completeness receipt it loads
-    NOW; the drill's evidence comes from a receipt up to
-    ``drill_max_age_days`` old. The completeness receipt is rewritten in
-    place daily, so a db-export subject added AFTER the drill (backfill /
-    rerun selector) enters the requirement set without ever having been
-    restore-verified — and because coverage tuples carry no subject
-    identity, an older subject's wide tuple vouches for it.
-
-    The drill records the db-export universe of the snapshot it consumed at
-    ``salvage_derivation.db_export_windows`` (unfiltered by any drop window,
-    same normalization as :func:`derive_salvage_backed_windows`). Rule
-    (design D3 of ``fix-retention-drill-snapshot-binding``):
-
-    * key ``salvage_derivation`` entirely ABSENT → ``True`` (pre-#1206
-      receipts AND explicit-manifest drills — same population and same
-      neutral treatment as :func:`_drill_derivation_window_contains`);
-    * section present but ``db_export_windows`` key ABSENT → ``True``
-      (post-#1206 pre-binding receipts; recorded residual in runbook §7.5 —
-      the guard is simply dormant for them);
-    * key present but unusable (not a list, an entry that is not a Mapping,
-      missing / non-string endpoints) → ``False``. A record that exists but
-      cannot be judged is never evidence — symmetric with #1207's D2;
-    * else ``True`` iff EVERY target's exact ``(start, end)`` pair is a
-      member of the recorded set. The subset direction is deliberate:
-      requirement SHRINK (a subject removed since the drill) passes, only
-      ADDITIONS the drill never saw refuse. Binding the whole gate-time
-      universe instead of the drop-filtered targets would refuse whenever
-      any db-export subject appears anywhere — the daily-outage direction
-      design D1 rejects.
-
-    Binding is judged at WINDOW granularity because that is the gate's own
-    requirement granularity (``derive_salvage_backed_windows`` dedups to
-    ``{start, end}`` pairs). A new subject whose window is byte-identical to
-    a verified one is indistinguishable here and remains layer-2's job
-    (residual, runbook §7.5).
-    """
-    if "salvage_derivation" not in receipt:
-        return True
-    section = receipt.get("salvage_derivation")
-    if not isinstance(section, Mapping):
-        # Unreachable through `check_drill_gate` (#1207's guard already
-        # refused a non-Mapping section before this runs); fail-closed here
-        # so the helper is safe to call on its own.
-        return False
-    if "db_export_windows" not in section:
-        return True
-    recorded_raw = section["db_export_windows"]
-    if not isinstance(recorded_raw, list):
-        return False
-    recorded: set[tuple[str, str]] = set()
-    for entry in recorded_raw:
-        if not isinstance(entry, Mapping):
-            return False
-        start = entry.get("start")
-        end = entry.get("end")
-        if not isinstance(start, str) or not isinstance(end, str):
-            return False
-        recorded.add((start, end))
-    for target in targets:
-        if (target["start"], target["end"]) not in recorded:
-            return False
-    return True
-
-
-def check_drill_gate(
-    receipt: Mapping[str, Any],
-    completeness_receipt: Mapping[str, Any],
-    drop_window: DropWindow | None,
-    max_age_days: int,
-    now: datetime,
-) -> list[str]:
-    """Evaluate H2: PASS/FAIL + staleness + forcing/runs/db-export coverage.
-
-    Order: STALE → FAIL → derivation-window → forcing → runs → db-export
-    [empty-derivation → snapshot-binding → per-target coverage]
-    (MISSING is raised by the loader).
-
-    The derivation-window guard (#1207) runs BEFORE every coverage leg: if
-    the drill recorded a ``salvage_derivation.drop_window`` that does not
-    CONTAIN this drop window, no coverage-union evidence from that run is
-    consulted at all — see :func:`_drill_derivation_window_contains`.
-
-    Inside the db-export leg the snapshot-binding guard (#1220) runs after
-    the empty-derivation refusal and BEFORE any per-target coverage tuple is
-    consulted: a requirement window the drill's completeness snapshot never
-    contained refuses with ``DRILL_COMPLETENESS_SNAPSHOT_UNBOUND`` — see
-    :func:`_drill_snapshot_binds`.
-
-    The db-export leg is salvage-window-scoped (#1162): drill ``db-export``
-    coverage is required only over each salvage-backed window intersected
-    with the drop window, judged per window — product-archive-backed
-    stretches of the drop window have no db-export package and must not be
-    required to; ``forcing`` / ``runs`` keep whole-drop-window semantics.
-    """
-    reasons: list[str] = []
-    generated_at_raw = receipt.get("generated_at")
-    if not isinstance(generated_at_raw, str):
-        reasons.append(CODE_DRILL_RECEIPT_STALE)
-        return reasons
-    try:
-        generated_at = _parse_iso(generated_at_raw)
-    except ValueError:
-        reasons.append(CODE_DRILL_RECEIPT_STALE)
-        return reasons
-    age = now - generated_at
-    # Future-dated receipts (negative age) reuse STALE per H8 discipline.
-    if age < timedelta(0) or age > timedelta(days=max_age_days):
-        reasons.append(CODE_DRILL_RECEIPT_STALE)
-        return reasons
-    if receipt.get("verdict") != "PASS":
-        reasons.append(CODE_DRILL_RECEIPT_FAIL)
-        return reasons
-    if drop_window is None:
-        return reasons
-    if not _drill_derivation_window_contains(receipt, drop_window):
-        reasons.append(CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW)
-        return reasons
-    coverage = receipt.get("coverage") or []
-    if not _drill_covers(coverage, "forcing", drop_window):
-        reasons.append(CODE_DRILL_COVERAGE_FORCING_MISSING)
-        return reasons
-    if not _drill_covers(coverage, "runs", drop_window):
-        reasons.append(CODE_DRILL_COVERAGE_RUNS_MISSING)
-        return reasons
-    if _completeness_has_db_export_overlap(completeness_receipt, drop_window):
-        targets = derive_salvage_backed_windows(completeness_receipt, drop_window)
-        if not targets:
-            # D2 fail-closed (#1162): the driver saw a db-export subject but
-            # nothing is derivable from it (verdict != complete). An empty
-            # derivation is NEVER "requirement satisfied".
-            # #1175: dedicated payload — no window exists to name, and the
-            # lowercase-hyphen token can never collide with an ISO interval.
-            reasons.append(
-                f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}:no-derivable-window"
-            )
-            return reasons
-        if not _drill_snapshot_binds(receipt, targets):
-            # #1220: the requirement set drifted past the drill's snapshot.
-            # Judged BEFORE the tuple union below, otherwise the exact
-            # substitution this guard kills would decide first.
-            reasons.append(CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND)
-            return reasons
-        for target in targets:
-            clipped = _clip_to_drop(target, drop_window)
-            # Zero-length intersections (subject endpoint exactly touching a
-            # drop boundary, closed-interval `_overlaps`) stay in scope; an
-            # INVERTED clip (`end < start`, only reachable from an inverted
-            # subject window) is refused fail-closed instead of being handed
-            # to `_drill_covers`, which would vacuously "cover" it — see
-            # `_clip_to_drop`.
-            if clipped.end < clipped.start or not _drill_covers(coverage, "db-export", clipped):
-                # #1175: localize the shortfall — the FIRST uncovered target in
-                # the ascending derivation order, rendered as the CLIPPED
-                # interval (an inverted clip renders inverted, which IS the
-                # diagnosis). Detail suffix only; the bare code stays the
-                # registered `WIRE_CODES` token and a strict prefix.
-                reasons.append(
-                    f"{CODE_DRILL_COVERAGE_DB_EXPORT_MISSING}"
-                    f":{_iso(clipped.start)}/{_iso(clipped.end)}"
-                )
-                return reasons
-    return reasons
-
-
-def _clip_to_drop(window: Mapping[str, str], drop_window: DropWindow) -> DropWindow:
-    """Intersect a salvage-backed window with the drop window (#1162).
-
-    Subject windows overrun the drop window on BOTH sides in practice (7 d
-    forcing_version windows vs. chunk boundaries). Inputs come from
-    :func:`derive_salvage_backed_windows`, which only yields subjects whose
-    window parsed and overlapped, so parsing is total here and the result is
-    normally non-empty (possibly zero-length, which stays in scope).
-
-    An INVERTED subject window (``end`` before ``start``) is the one shape
-    that yields ``end < start`` here; the caller refuses fail-closed on it.
-    Symmetric with the inverted-tuple defence in :func:`_tuples_cover_window`
-    (``if end < start: continue``) — a nonsense interval never counts as
-    evidence.
-    """
-    start = max(_parse_iso(window["start"]), drop_window.start)
-    end = min(_parse_iso(window["end"]), drop_window.end)
-    return DropWindow(start=start, end=end)
-
-
-def _tuples_cover_window(
-    tuples: Sequence[Mapping[str, Any]], drop_window: DropWindow
-) -> bool:
-    """Return True iff the UNION of tuple windows covers ``drop_window``.
-
-    H2 semantics per runbook §7.5: the drill emits per-cycle 24 h coverage
-    tuples (one per verified product manifest); a 14 d drop window is
-    covered by ~14 daily tuples whose union spans it — no single tuple
-    needs to individually contain the drop window.
-
-    Standard interval-merge: sort by start, coalesce overlapping/adjacent
-    intervals, then check whether any merged interval fully contains the
-    drop window.
-    """
-    parsed: list[tuple[datetime, datetime]] = []
-    for entry in tuples:
-        if not isinstance(entry, Mapping):
-            continue
-        window = entry.get("window") or {}
-        try:
-            start = _parse_iso(window["start"])
-            end = _parse_iso(window["end"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if end < start:
-            continue
-        parsed.append((start, end))
-    if not parsed:
-        return False
-    parsed.sort(key=lambda w: w[0])
-    merged: list[tuple[datetime, datetime]] = []
-    for start, end in parsed:
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    for start, end in merged:
-        if start <= drop_window.start and end >= drop_window.end:
-            return True
-    return False
-
-
-def _drill_covers(
-    coverage: Sequence[Mapping[str, Any]], source: str, drop: DropWindow
-) -> bool:
-    """H2 recovery coverage: the source tuple union spans the drop window.
-
-    A verified ``db-export`` selector is a forcing-timeseries recovery object,
-    so it participates in the forcing union while retaining its independent
-    db-export gate. This lets historical DB-only forcing remain recoverable
-    without inventing a missing product-archive forcing package.
-    """
-    accepted_sources = {source}
-    if source == "forcing":
-        accepted_sources.add("db-export")
-    filtered = [
-        entry
-        for entry in coverage
-        if isinstance(entry, Mapping) and entry.get("source") in accepted_sources
-    ]
-    return _tuples_cover_window(filtered, drop)
-
-
-def derive_salvage_backed_windows(
-    completeness_receipt: Mapping[str, Any], drop_window: DropWindow | None
-) -> list[dict[str, str]]:
-    """H9: unique ``{start, end}`` dicts sorted ascending.
-
-    From completeness subjects where ``coverage == "db-export"`` AND
-    ``verdict == "complete"`` AND the subject window overlaps the drop
-    window. Chunk boundaries deliberately are NOT the input (chunks do not
-    carry lane/subject identity; recovery per §3.2 is
-    completeness-selector-scoped).
-    """
-    if drop_window is None:
-        return []
-    seen: set[tuple[str, str]] = set()
-    windows: list[dict[str, str]] = []
-    for subject in completeness_receipt.get("windows") or []:
-        if not isinstance(subject, Mapping):
-            continue
-        if subject.get("coverage") != "db-export":
-            continue
-        if subject.get("verdict") != "complete":
-            continue
-        if not _subject_overlaps_drop(subject, drop_window):
-            continue
-        window = subject.get("window") or {}
-        start = window.get("start")
-        end = window.get("end")
-        if not isinstance(start, str) or not isinstance(end, str):
-            continue
-        key = (start, end)
-        if key in seen:
-            continue
-        seen.add(key)
-        windows.append({"start": start, "end": end})
-    windows.sort(key=lambda w: (w["start"], w["end"]))
-    return windows
 
 
 # ---------------------------------------------------------------------------
@@ -1140,11 +526,9 @@ def _redact_error_text(error: BaseException, dsn: str) -> str:
     included — on DSN parse failures, so an unredacted interpolation is a
     password-grade leak onto two persisted surfaces.
 
-    Mirrors the salvage runner's ``_mask_dsn_in_message``
-    (``scripts/node27_db_export_salvage.py:1039-1041``): the shared policy in
-    ``packages/common/redaction.py`` strips the verbatim DSN plus its password
-    in both URL-encoded and driver-decoded forms, and the marker is rendered
-    as ``***`` for operator-facing text.
+    The shared policy in ``packages/common/redaction.py`` strips the verbatim
+    DSN plus its password in both URL-encoded and driver-decoded forms, and
+    the marker is rendered as ``***`` for operator-facing text.
 
     libpq additionally echoes the ROLE name back on connection failures, in
     two shapes the DSN policy does not cover:
@@ -1351,7 +735,9 @@ def _validate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     """Validate the receipt with a FormatChecker so ``format: date-time`` on
     ``generated_at`` and ``salvage_backed_windows[].{start,end}`` is
     enforced (schema pins the format; without a checker, jsonschema treats
-    format as informational and silently accepts any string).
+    format as informational and silently accepts any string). The schema is
+    unmodified by #1370, so it still accepts the historical receipts whose
+    ``salvage_backed_windows`` is non-empty.
     """
     schema = _load_schema(_RECEIPT_SCHEMA_PATH)
     jsonschema.validate(receipt, schema, format_checker=_RECEIPT_FORMAT_CHECKER)
@@ -1361,8 +747,11 @@ def _validate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
 def _archive_gate_block(mode: str) -> dict[str, Any]:
     """Build the required ``archive_gate`` object (#1369, schema 1.1).
 
-    ``disabled`` receipts carry the pinned ADR citation; ``enabled`` receipts
-    MUST NOT (the schema's nested ``oneOf`` rejects both mistakes).
+    Mirrors the schema's nested ``oneOf``: a ``disabled`` block carries the
+    pinned ADR citation, an ``enabled`` block MUST NOT. The runner only ever
+    emits ``disabled`` (#1370) — the ``enabled`` shape is kept so this stays a
+    faithful mirror of the unmodified schema that still validates historical
+    1.1 receipts.
     """
     if mode not in ARCHIVE_GATE_MODES:
         raise ValueError(f"unknown archive gate mode: {mode!r}")
@@ -1380,10 +769,9 @@ def build_receipt(
     candidate_chunks: Sequence[str] = (),
     dropped_chunks: Sequence[Mapping[str, Any]] = (),
     deferred_remainder: Sequence[str] = (),
-    salvage_backed_windows: Sequence[Mapping[str, str]] = (),
     reference_time: datetime | None = None,
     window_days: int | None = None,
-    archive_gate: str = ARCHIVE_GATE_ENABLED,
+    archive_gate: str = ARCHIVE_GATE_DISABLED,
 ) -> dict[str, Any]:
     """Assemble a schema-``oneOf``-conformant receipt.
 
@@ -1391,12 +779,12 @@ def build_receipt(
     ``dry-run`` / ``refused`` / ``enforced``. ``refused`` receipts always
     carry ``mode=enforce`` because the schema pins that pairing (dry-run
     invocations that hit a refusal path — concurrent invocation, uncaught
-    error, gate refusal — surface an ``enforce+refused`` receipt so
-    operators see the wire code).
+    error — surface an ``enforce+refused`` receipt so operators see the wire
+    code).
 
     All three branches carry ``archive_gate`` (#1369) — a refused receipt
-    must self-describe the gate mode in force when it refused, or the audit
-    trail has a hole exactly where the deletion authority is questioned.
+    must self-describe the deletion authority in force when it refused, or
+    the audit trail has a hole exactly where that authority is questioned.
     """
     gate_block = _archive_gate_block(archive_gate)
     if outcome == "dry-run":
@@ -1450,7 +838,10 @@ def build_receipt(
                 for item in dropped_chunks
             ],
             "deferred_remainder": list(deferred_remainder),
-            "salvage_backed_windows": [dict(w) for w in salvage_backed_windows],
+            # #1370: with the archive lane retired nothing can vouch for a
+            # deletion, so the schema-required list is structurally empty —
+            # "nothing endorsed this", stated rather than left ambiguous.
+            "salvage_backed_windows": [],
         }
         if reference_time is not None and window_days is not None:
             receipt.update(
@@ -1460,48 +851,6 @@ def build_receipt(
             )
         return _validate_receipt(receipt)
     raise ValueError(f"unknown outcome: {outcome!r}")
-
-
-def _drop_window_from_eligible(
-    eligible: Sequence[ChunkRow], cutoff: datetime
-) -> DropWindow | None:
-    if not eligible:
-        return None
-    starts = [c.range_start for c in eligible]
-    ends = [c.range_end for c in eligible]
-    # drop window is the covering interval of the eligible chunks. This is
-    # what the completeness + drill receipts must cover.
-    return DropWindow(start=min(starts), end=max(ends))
-
-
-def _partition_by_completeness_bounds(
-    eligible: Sequence[ChunkRow], receipt: Mapping[str, Any]
-) -> tuple[list[ChunkRow], list[ChunkRow]]:
-    """Keep boundary-partial chunks deferred instead of blocking later work.
-
-    Timescale aligns chunk boundaries to the partition interval, not to the
-    first observed row. The first physical chunk can therefore begin before
-    the inventory receipt's truthful coverage start. Such a chunk must stay
-    intact, while later chunks whose entire physical range is evidenced may
-    still progress.
-
-    Invalid bounds deliberately produce no covered chunks so the caller
-    retains the existing fail-closed bounds refusal.
-    """
-    bounds = receipt.get("coverage_bounds") or {}
-    try:
-        start = _parse_iso(bounds["start"])
-        end = _parse_iso(bounds["end"])
-    except (KeyError, TypeError, ValueError):
-        return [], list(eligible)
-    if end < start:
-        return [], list(eligible)
-    covered: list[ChunkRow] = []
-    deferred: list[ChunkRow] = []
-    for chunk in eligible:
-        target = covered if start <= chunk.range_start and chunk.range_end <= end else deferred
-        target.append(chunk)
-    return covered, deferred
 
 
 def publish_receipt(config: RetentionConfig, receipt: Mapping[str, Any]) -> None:
@@ -1547,23 +896,22 @@ def run_retention(
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     drop_chunk: DropChunk | None = None,
 ) -> dict[str, Any]:
-    """Four-phase retention: gate → enumerate → measure → drop.
+    """Three-phase retention: enumerate → measure → drop.
 
     Returns the schema-validated receipt dict; the caller is responsible for
     publication.
 
-    ``config.archive_gate`` is the third axis (#1369), orthogonal to
-    dry-run/enforce: in ``disabled`` mode the archive-side phases (1a/1b/2b
-    completeness, 1c/2c drill) are skipped entirely, together with the two
-    NON-gate consumers of the completeness object flagged below. Everything
-    else — lock, watermark reference time, retention window, per-tick bound,
-    measure-before-drop ordering, H5 fail-closed drop handling — is unchanged.
+    #1370: the gate phase is gone. ``config.archive_gate`` is always
+    ``disabled`` (``_resolve_archive_gate`` admits nothing else) and is used
+    only to stamp the deletion authority onto every receipt. Everything else —
+    lock, watermark reference time, retention window, per-tick bound,
+    measure-before-drop ordering, H5 fail-closed drop handling — is unchanged
+    from the pre-retirement disabled-mode behavior, byte for byte.
     """
     fetch_chunks = fetch_chunks or _default_fetch_chunks
     measure_chunk_bytes = measure_chunk_bytes or _default_measure_chunk_bytes
     drop_chunk = drop_chunk or _default_drop_chunk
     reference_time = (reference_time or now).astimezone(UTC)
-    gate_enabled = config.archive_gate == ARCHIVE_GATE_ENABLED
 
     def _build(outcome: str, **kwargs: Any) -> dict[str, Any]:
         return build_receipt(
@@ -1575,87 +923,22 @@ def run_retention(
             **kwargs,
         )
 
-    completeness: dict[str, Any] | None = None
-    if gate_enabled:
-        # Phase 1a: load completeness receipt (raises MISSING on IO/schema fail).
-        try:
-            completeness = load_completeness_receipt(config.completeness_receipt_path)
-        except ReceiptGateError as error:
-            return _build("refused", refusal_reason=error.code)
-
-        # Phase 1b: completeness freshness check runs BEFORE enumeration so a
-        # stale receipt does not cause a needless DB round-trip. Bounds / gap /
-        # pending checks require the drop window (post-enumeration).
-        stale_reasons = check_completeness_gate(
-            completeness,
-            drop_window=None,
-            max_age_hours=config.completeness_max_age_hours,
-            now=now,
-        )
-        if stale_reasons:
-            return _build("refused", refusal_reason=stale_reasons[0])
-
-    # Phase 2a: enumerate chunks + compute drop window.
+    # Phase 1: enumerate eligible chunks.
+    # There is no archive coverage object any more and therefore no
+    # "partially covered" notion, so a chunk straddling what used to be the
+    # inventory coverage boundary is NOT deferred: it is a drop candidate like
+    # any other (runbook §8.5).
     cutoff = reference_time - timedelta(days=config.window_days)
     eligible = fetch_chunks(config, cutoff)
-    if gate_enabled:
-        assert completeness is not None  # set above whenever the gate is on
-        covered_eligible, _boundary_deferred = _partition_by_completeness_bounds(
-            eligible, completeness
-        )
-        if eligible and not covered_eligible:
-            return _build(
-                "refused",
-                refusal_reason=CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
-            )
-    else:
-        # Non-gate consumer 1 of the completeness object (#1369 design D2).
-        # With the archive lane retired there is no coverage_bounds object and
-        # therefore no "partially covered" notion at all, so boundary-partial
-        # chunks are NOT deferred here: in disabled mode they ARE dropped.
-        # That is a documented semantic change to the delete surface (runbook
-        # §8.5), not an oversight.
-        covered_eligible = list(eligible)
-    drop_window = _drop_window_from_eligible(covered_eligible, cutoff)
 
-    if gate_enabled:
-        assert completeness is not None
-        # Phase 2b: rerun completeness gate against the concrete drop window
-        # (bounds / gap / pending — H1a + H1b).
-        reasons = check_completeness_gate(
-            completeness,
-            drop_window=drop_window,
-            max_age_hours=config.completeness_max_age_hours,
-            now=now,
-        )
-        if reasons:
-            return _build("refused", refusal_reason=reasons[0])
-
-        # Phase 1c/2c: drill receipt (MISSING / STALE / FAIL / coverage). Loaded
-        # here so completeness bounds/gap/pending refusals fire first (matches
-        # brief's refusal-ordering table).
-        try:
-            drill = load_drill_receipt(config.drill_receipt_path)
-        except ReceiptGateError as error:
-            return _build("refused", refusal_reason=error.code)
-        drill_reasons = check_drill_gate(
-            drill,
-            completeness_receipt=completeness,
-            drop_window=drop_window,
-            max_age_days=config.drill_max_age_days,
-            now=now,
-        )
-        if drill_reasons:
-            return _build("refused", refusal_reason=drill_reasons[0])
-
-    # Phase 3: apply H3 per-tick bound.
-    selected = list(covered_eligible[: config.per_tick_bound])
+    # Phase 2: apply H3 per-tick bound.
+    selected = list(eligible[: config.per_tick_bound])
     selected_names = {chunk.qualified_name for chunk in selected}
     deferred_remainder = [
         chunk.qualified_name for chunk in eligible if chunk.qualified_name not in selected_names
     ]
 
-    # Phase 4a: dry-run branch.
+    # Phase 3a: dry-run branch.
     if not config.enforce:
         return _build(
             "dry-run",
@@ -1663,7 +946,7 @@ def run_retention(
             deferred_remainder=deferred_remainder,
         )
 
-    # Phase 4b: enforce — measure BEFORE drop (H4).
+    # Phase 3b: enforce — measure BEFORE drop (H4).
     measured = measure_chunk_bytes(config, selected)
 
     dropped: list[dict[str, Any]] = []
@@ -1689,21 +972,12 @@ def run_retention(
             }
         )
 
-    # Non-gate consumer 2 of the completeness object (#1369 design D2): with
-    # no completeness receipt there is no archive endorsement to record, so
-    # the schema-required list is explicitly empty — "nothing vouched for this
-    # deletion", stated in the receipt rather than left ambiguous.
-    salvage_windows: Sequence[Mapping[str, str]]
-    if gate_enabled:
-        assert completeness is not None
-        salvage_windows = derive_salvage_backed_windows(completeness, drop_window)
-    else:
-        salvage_windows = []
+    # ``salvage_backed_windows`` is emitted as the empty list by
+    # :func:`build_receipt` — nothing can endorse a deletion any more.
     return _build(
         "enforced",
         dropped_chunks=dropped,
         deferred_remainder=deferred_remainder,
-        salvage_backed_windows=salvage_windows,
     )
 
 
@@ -1789,8 +1063,7 @@ def main(
                 drop_chunk=drop_chunk,
             )
         except Exception as error:
-            # RETENTION_UNCAUGHT_ERROR — symmetric with #854
-            # DRILL_UNCAUGHT_ERROR. Emit a schema-valid refused receipt
+            # RETENTION_UNCAUGHT_ERROR: emit a schema-valid refused receipt
             # rather than a raw stack trace.
             # #1213: this is the path a psycopg2 DSN-parse failure takes, and
             # that exception echoes the whole conninfo (password included), so

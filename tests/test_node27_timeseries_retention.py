@@ -1,16 +1,19 @@
 """Unit tests for the node-27 timeseries retention runner (issue #855 §6.1 + §6.2).
 
-Covers:
+#1370 retired the archive lane, so H1/H2/H8/H9 (the completeness and drill
+gates, their freshness rules, and the salvage-backed-window derivation) and
+their thirteen wire codes are gone; the archive gate is a required explicit
+``disabled`` acknowledgement, nothing else. What remains under test:
 
-- H1 completeness receipt authority + bounds/gap/pending refusal ordering.
-- H2 drill per-source coverage + FAIL / stale / missing refusal ordering.
+- D1 archive-gate resolution: only explicit ``disabled`` runs; unset, the
+  retired ``enabled``, and every other value refuse with
+  RETENTION_CONFIG_INVALID, exit 2, no receipt, retirement diagnostics.
 - H3 per-tick bound + deferred_remainder.
 - H4 freed_bytes measured BEFORE drop (mock-ordering assertion).
 - H5 per-chunk drop failure → whole-tick refused (H5 fail-closed).
-- H6 wire codes byte-identical across code / runbook §8.2 / design #855.
+- H6 wire codes byte-identical across code / runbook §8.2 / design #855, and
+  shrunk to the four runner-own codes.
 - H7 boundary predicate ``range_end <= cutoff``.
-- H8 freshness at boundary + past.
-- H9 salvage_backed_windows derivation.
 - H10 _default_lock_path() byte-identity + zero-arg signature parity.
 - H11 governance registration (covered in test_node27_resource_governance.py).
 - H17 zero-eligible enforce → outcome=enforced, all arrays empty, exit 0.
@@ -19,6 +22,7 @@ Covers:
 - Uncaught error path → RETENTION_UNCAUGHT_ERROR.
 - #1213 credential redaction of every persisted error surface (receipt file
   bytes + stderr/wrapper log) on the drop-phase and uncaught-fallback paths.
+- Receipt schema 1.1 (unmodified by #1370) + the ``archive_gate`` block.
 - CLI + wrapper contract.
 """
 
@@ -79,8 +83,6 @@ def _args(**overrides: object) -> argparse.Namespace:
         "dry_run": False,
         "receipt_path": None,
         "lock_path": None,
-        "completeness_receipt_path": None,
-        "drill_receipt_path": None,
         "archive_gate": None,
     }
     defaults.update(overrides)
@@ -94,178 +96,6 @@ def _args(**overrides: object) -> argparse.Namespace:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-# #1175: the db-export coverage refusal carries a DETAIL SUFFIX localizing the
-# shortfall — the FIRST uncovered salvage-backed target in ascending derivation
-# order, CLIPPED to the drop window (`<start>/<end>`), or the dedicated
-# `no-derivable-window` token for the #1162 D2 empty-derivation branch. The bare
-# code stays the registered `WIRE_CODES` member and a strict prefix of both
-# forms. These helpers spell the wire token and the separator out literally so
-# the assertions are an oracle for the format, not an echo of the emitter.
-_DB_EXPORT_MISSING_NO_DERIVABLE = "DRILL_COVERAGE_DB_EXPORT_MISSING:no-derivable-window"
-
-
-def _db_export_missing(start: datetime, end: datetime) -> str:
-    """Expected `refusal_reason` for a per-window db-export shortfall (#1175).
-
-    ``start`` / ``end`` are the CLIPPED bounds the caller derives from its own
-    fixture windows ∩ drop window — an inverted clip is rendered verbatim.
-    """
-    return f"DRILL_COVERAGE_DB_EXPORT_MISSING:{_iso(start)}/{_iso(end)}"
-
-
-def _completeness_receipt(
-    *,
-    generated_at: datetime = _NOW - timedelta(hours=1),
-    bounds_start: datetime | None = None,
-    bounds_end: datetime | None = None,
-    subjects: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    if bounds_start is None:
-        bounds_start = _NOW - timedelta(days=365)
-    if bounds_end is None:
-        bounds_end = _NOW
-    if subjects is None:
-        subjects = [
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=60)),
-                    "end": _iso(_NOW - timedelta(days=59)),
-                },
-                "coverage": "product-archive",
-                "verdict": "complete",
-            }
-        ]
-    return {
-        "schema_version": "1.1",
-        "generated_at": _iso(generated_at),
-        "outcome": (
-            "complete" if all(subject.get("verdict") == "complete" for subject in subjects) else "incomplete"
-        ),
-        "coverage_bounds": {"start": _iso(bounds_start), "end": _iso(bounds_end)},
-        "windows": list(subjects),
-        "salvage_selectors": [],
-    }
-
-
-def test_blocked_upstream_receipt_is_distinguishable_from_missing_path(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "archive-completeness.json"
-    blocked = {
-        "schema_version": "1.1",
-        "generated_at": _iso(_NOW),
-        "outcome": "blocked",
-        "refusal_reason": "EVIDENCE_BLOCKED",
-    }
-    path.write_text(json.dumps(blocked), encoding="utf-8")
-    assert retention.load_completeness_receipt(path) == blocked
-    path.unlink()
-    with pytest.raises(retention.ReceiptGateError) as missing:
-        retention.load_completeness_receipt(path)
-    assert missing.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
-
-
-def _daily_coverage_tuples(
-    start: datetime, end: datetime, source: str
-) -> list[dict[str, Any]]:
-    """Emit per-cycle 24 h coverage tuples (mirrors the drill's real emit shape).
-
-    The archive rebuild drill emits one coverage tuple per verified product
-    manifest (typically one daily cycle → one 24 h window). A retention
-    drop window spanning N days is normally covered by N daily tuples whose
-    UNION spans the drop window — no single tuple contains the whole drop
-    window on its own.
-
-    A2 fixture helper — pattern-level fix for #854 R1 fake-oracle-in-tests:
-    real drill receipts NEVER carry a single tuple spanning the full retention window.
-    """
-    tuples: list[dict[str, Any]] = []
-    cursor = start
-    while cursor < end:
-        window_end = min(cursor + timedelta(days=1), end)
-        tuples.append(
-            {
-                "source": source,
-                "window": {"start": _iso(cursor), "end": _iso(window_end)},
-            }
-        )
-        cursor = window_end
-    return tuples
-
-
-def _drill_receipt(
-    *,
-    generated_at: datetime = _NOW - timedelta(days=1),
-    verdict: str = "PASS",
-    forcing_window: tuple[datetime, datetime] | None = None,
-    runs_window: tuple[datetime, datetime] | None = None,
-    db_export_window: tuple[datetime, datetime] | None = None,
-    forcing_tuples: Sequence[Mapping[str, Any]] | None = None,
-    runs_tuples: Sequence[Mapping[str, Any]] | None = None,
-    db_export_tuples: Sequence[Mapping[str, Any]] | None = None,
-    differences: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Build a drill receipt fixture emitting per-cycle 24 h coverage tuples.
-
-    Callers that pass a scalar ``forcing_window=(a, b)`` receive per-day
-    tuples covering ``[a, b]`` via :func:`_daily_coverage_tuples`; callers
-    that want a custom shape (gap in the middle, overlapping cycles,
-    single-day-only coverage) pass explicit ``*_tuples`` sequences instead.
-
-    Passing ``*_window=None`` still means "no coverage for this source"
-    (matches legacy shape); passing ``*_tuples=[]`` also means "no
-    coverage". A ``forcing_window`` without an explicit ``forcing_tuples``
-    override is auto-day-split.
-    """
-    # Default covers [_NOW - 100 d, _NOW] as ~100 per-day tuples for both
-    # timeseries sources — enough union to cover any drop window used in
-    # tests (chunks are typically 60-90 days old). The wide default keeps
-    # tests focused on gate behavior rather than boundary arithmetic.
-    if forcing_tuples is None and forcing_window is None:
-        forcing_window = (_NOW - timedelta(days=100), _NOW)
-    if runs_tuples is None and runs_window is None:
-        runs_window = (_NOW - timedelta(days=100), _NOW)
-    coverage: list[dict[str, Any]] = []
-    if forcing_tuples is not None:
-        coverage.extend(dict(t) for t in forcing_tuples)
-    elif forcing_window is not None:
-        coverage.extend(_daily_coverage_tuples(forcing_window[0], forcing_window[1], "forcing"))
-    if runs_tuples is not None:
-        coverage.extend(dict(t) for t in runs_tuples)
-    elif runs_window is not None:
-        coverage.extend(_daily_coverage_tuples(runs_window[0], runs_window[1], "runs"))
-    if db_export_tuples is not None:
-        coverage.extend(dict(t) for t in db_export_tuples)
-    elif db_export_window is not None:
-        coverage.extend(_daily_coverage_tuples(db_export_window[0], db_export_window[1], "db-export"))
-    receipt: dict[str, Any] = {
-        "schema_version": "1.0",
-        "generated_at": _iso(generated_at),
-        "verdict": verdict,
-        "staging_database": {
-            "database": "nhms_drill",
-            "schema": "archive_drill_20260710",
-            "instance_id": "node27-primary-pg15",
-        },
-        "coverage": coverage,
-    }
-    if verdict == "PASS":
-        receipt["comparisons"] = {
-            "cycles": ["runs-cycle-1"],
-            "selectors": [],
-            "counts": [{"item": "runs-cycle-1", "expected": 10, "actual": 10}],
-        }
-    else:
-        receipt["differences"] = list(differences or [])
-        if not receipt["differences"]:
-            receipt["differences"] = [
-                {"item": "drill", "expected": {"code": "STAGING_COUNT_MISMATCH"}, "actual": {"row_count": 0}}
-            ]
-    return receipt
 
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
@@ -297,24 +127,12 @@ def _chunk(
 
 
 def _build_config(tmp_path: Path, *, enforce: bool = False, **overrides: Any) -> retention.RetentionConfig:
-    completeness_path = tmp_path / "completeness.json"
-    drill_path = tmp_path / "drill.json"
-    receipt_path = tmp_path / "receipt.json"
-    lock_path = tmp_path / "runner.lock"
-    if not completeness_path.exists():
-        _write_json(completeness_path, _completeness_receipt())
-    if not drill_path.exists():
-        _write_json(drill_path, _drill_receipt())
     kwargs: dict[str, Any] = {
         "database_url": "postgresql://user:pw@127.0.0.1:55432/nhms",
         "window_days": _DROP_WINDOW_DAYS,
         "per_tick_bound": 5,
-        "completeness_receipt_path": completeness_path,
-        "drill_receipt_path": drill_path,
-        "completeness_max_age_hours": 26,
-        "drill_max_age_days": 30,
-        "receipt_path": receipt_path,
-        "lock_path": lock_path,
+        "receipt_path": tmp_path / "receipt.json",
+        "lock_path": tmp_path / "runner.lock",
         "enforce": enforce,
     }
     kwargs.update(overrides)
@@ -359,7 +177,20 @@ class _StubRunner:
 # ---------------------------------------------------------------------------
 
 
+# #1370: the thirteen archive-family codes retired with the archive lane
+# (ADR 0002 Revision 2026-08-11). Only the four runner-own codes survive.
 _EXPECTED_WIRE_CODES = frozenset(
+    {
+        "RETENTION_CONFIG_INVALID",
+        "RETENTION_CONCURRENT_INVOCATION",
+        "RETENTION_DROP_FAILED",
+        "RETENTION_UNCAUGHT_ERROR",
+    }
+)
+
+# The retired archive-family codes, spelled out so the negative assertion is
+# an oracle rather than an echo of the module.
+_RETIRED_ARCHIVE_FAMILY_CODES = frozenset(
     {
         "COMPLETENESS_RECEIPT_MISSING",
         "COMPLETENESS_RECEIPT_STALE",
@@ -374,10 +205,6 @@ _EXPECTED_WIRE_CODES = frozenset(
         "DRILL_COVERAGE_RUNS_MISSING",
         "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND",
         "DRILL_COVERAGE_DB_EXPORT_MISSING",
-        "RETENTION_CONFIG_INVALID",
-        "RETENTION_CONCURRENT_INVOCATION",
-        "RETENTION_DROP_FAILED",
-        "RETENTION_UNCAUGHT_ERROR",
     }
 )
 
@@ -385,7 +212,26 @@ _EXPECTED_WIRE_CODES = frozenset(
 def test_wire_codes_match_fixture_exactly() -> None:
     """H6: WIRE_CODES frozenset content is byte-identical with the fixture."""
     assert retention.WIRE_CODES == _EXPECTED_WIRE_CODES
-    assert len(retention.WIRE_CODES) == 17
+    assert len(retention.WIRE_CODES) == 4
+
+
+def test_wire_codes_contain_no_archive_family_member() -> None:
+    """#1370: the archive lane is retired, so no gate code can survive.
+
+    Both the by-name check (the thirteen retired codes) and the by-prefix
+    check (any future re-introduction under the same namespaces) must hold.
+    """
+    assert retention.WIRE_CODES.isdisjoint(_RETIRED_ARCHIVE_FAMILY_CODES)
+    assert not [
+        code
+        for code in retention.WIRE_CODES
+        if code.startswith("COMPLETENESS_") or code.startswith("DRILL_")
+    ]
+    assert not [
+        name
+        for name in dir(retention)
+        if name.startswith("CODE_COMPLETENESS_") or name.startswith("CODE_DRILL_")
+    ]
 
 
 def test_wire_codes_byte_identical_across_code_runbook_design() -> None:
@@ -415,6 +261,13 @@ _WIRE_CODE_ALLOWLIST: frozenset[str] = frozenset(
         # The frozenset symbol name itself, mentioned in prose.
         "WIRE_CODES",
     }
+    # #1370: the thirteen archive-family codes were retired together with the
+    # `enabled` archive-gate mode (ADR 0002 Revision 2026-08-11). They are no
+    # longer `WIRE_CODES` members, but the reverse walk still scans the FROZEN
+    # #855 pending design fixture, which spells all thirteen verbatim and must
+    # not be edited. Allowlisting them keeps the walk mechanism intact instead
+    # of narrowing its corpus.
+    | _RETIRED_ARCHIVE_FAMILY_CODES
 )
 
 
@@ -557,16 +410,12 @@ def test_chunk_query_does_not_filter_compressed_chunks() -> None:
 
 
 def _base_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
-    completeness_path = tmp_path / "completeness.json"
-    drill_path = tmp_path / "drill.json"
-    if not completeness_path.exists():
-        _write_json(completeness_path, _completeness_receipt())
-    if not drill_path.exists():
-        _write_json(drill_path, _drill_receipt())
+    """A deployable env: the archive gate is `disabled`, which since #1370 is
+    a REQUIRED explicit assignment, not a default.
+    """
     env: dict[str, str] = {
         "DATABASE_URL": "postgresql://user:secretpw@127.0.0.1:55432/nhms",
-        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": str(completeness_path),
-        "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": str(drill_path),
+        "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE": "disabled",
         "NODE27_TIMESERIES_RETENTION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
         "NODE27_TIMESERIES_RETENTION_LOCK_PATH": str(tmp_path / "runner.lock"),
     }
@@ -583,8 +432,7 @@ def test_config_parse_happy_path(tmp_path: Path) -> None:
     config = retention.config_from_args(_args(), env)
     assert config.window_days == 14
     assert config.per_tick_bound == 5
-    assert config.completeness_max_age_hours == 26
-    assert config.drill_max_age_days == 30
+    assert config.archive_gate == "disabled"
     assert config.enforce is False
     assert str(config.lock_path) == str(tmp_path / "runner.lock")
 
@@ -648,10 +496,7 @@ def test_config_enforce_env_falsy_is_dry_run(tmp_path: Path) -> None:
         ({"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": "not-an-int"}, "WINDOW_DAYS"),
         ({"NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND": "0"}, "PER_TICK_BOUND"),
         ({"NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND": "-3"}, "PER_TICK_BOUND"),
-        ({"NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS": "0"}, "COMPLETENESS_MAX_AGE_HOURS"),
-        ({"NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS": "-1"}, "DRILL_MAX_AGE_DAYS"),
-        ({"NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": None}, "COMPLETENESS_RECEIPT_PATH"),
-        ({"NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": None}, "DRILL_RECEIPT_PATH"),
+        ({"NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE": None}, "ARCHIVE_GATE"),
         ({"NODE27_TIMESERIES_RETENTION_RECEIPT_PATH": None}, "RECEIPT_PATH"),
         ({"NODE27_TIMESERIES_RETENTION_RECEIPT_PATH": "relative/receipt.json"}, "absolute"),
         ({"NODE27_TIMESERIES_RETENTION_LOCK_PATH": "relative.lock"}, "absolute"),
@@ -666,1896 +511,6 @@ def test_config_parse_fails_closed(
 
 
 # ---------------------------------------------------------------------------
-# H1 completeness receipt authority — one refusal per case (spec §6.1 row 1)
-# ---------------------------------------------------------------------------
-
-
-def test_completeness_receipt_missing_refuses(tmp_path: Path) -> None:
-    config = _build_config(tmp_path)
-    # Delete completeness receipt.
-    config.completeness_receipt_path.unlink()
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_MISSING
-    assert stub.calls == []  # never fetched
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_completeness_receipt_stale_refuses(tmp_path: Path) -> None:
-    stale = _completeness_receipt(generated_at=_NOW - timedelta(hours=27))
-    completeness_path = tmp_path / "completeness.json"
-    _write_json(completeness_path, stale)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_completeness_bounds_insufficient_refuses(tmp_path: Path) -> None:
-    """H1 (a): coverage_bounds must fully contain the drop window."""
-    completeness = _completeness_receipt(
-        # bounds narrower than the drop window's start.
-        bounds_start=_NOW - timedelta(days=40),
-        bounds_end=_NOW - timedelta(days=32),
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    chunks = [
-        _chunk("hydro", "river_timeseries", "chk-old", delta_days=80, duration_days=7),
-    ]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_boundary_partial_chunk_is_deferred_while_fully_covered_chunk_progresses(
-    tmp_path: Path,
-) -> None:
-    """A physical chunk may start before the first evidenced row window.
-
-    That boundary-partial chunk remains intact, but it must not globally
-    block the next chunk whose complete range is inside the receipt bounds.
-    """
-    completeness = _completeness_receipt(
-        bounds_start=_NOW - timedelta(days=65),
-        bounds_end=_NOW,
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path, per_tick_bound=5, enforce=False)
-    partial = _chunk(
-        "hydro", "river_timeseries", "chk-partial", delta_days=60, duration_days=7
-    )
-    covered = _chunk(
-        "hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7
-    )
-    stub = _StubRunner([partial, covered])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert receipt["outcome"] == "dry-run"
-    assert receipt["candidate_chunks"] == [covered.qualified_name]
-    assert receipt["deferred_remainder"] == [partial.qualified_name]
-    assert not any(call[0] == "drop" for call in stub.calls)
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_completeness_gap_in_drop_window_refuses(tmp_path: Path) -> None:
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "runs",
-                "subject": {"run_id": "run-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=63)),
-                },
-                "coverage": "none",
-                "verdict": "gap",
-            }
-        ]
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW
-
-
-def test_completeness_pending_in_drop_window_refuses(tmp_path: Path) -> None:
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=63)),
-                },
-                "coverage": "hot-object-store",
-                "verdict": "pending-archive",
-            }
-        ]
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW
-
-
-# ---------------------------------------------------------------------------
-# H2 drill receipt — one refusal per shortfall (spec §6.1 row 2)
-# ---------------------------------------------------------------------------
-
-
-def test_drill_receipt_missing_refuses(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    config.drill_receipt_path.unlink()
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_MISSING
-
-
-def test_db_export_recovery_participates_in_forcing_coverage_union(tmp_path: Path) -> None:
-    """Verified DB-export objects recover forcing rows when no product
-    forcing package exists for the historical interval.
-    """
-    start = _NOW - timedelta(days=67)
-    end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "forc-salvaged"},
-                "window": {"start": _iso(start), "end": _iso(end)},
-                "coverage": "db-export",
-                "verdict": "complete",
-            }
-        ]
-    )
-    drill = _drill_receipt(
-        forcing_tuples=[],
-        runs_window=(start, end),
-        db_export_window=(start, end),
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path, enforce=False)
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-salvaged", delta_days=60, duration_days=7
-    )
-    stub = _StubRunner([chunk])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert receipt["outcome"] == "dry-run"
-    assert receipt["candidate_chunks"] == [chunk.qualified_name]
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_drill_receipt_stale_refuses(tmp_path: Path) -> None:
-    stale_drill = _drill_receipt(generated_at=_NOW - timedelta(days=45))
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", stale_drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_STALE
-
-
-def test_drill_receipt_fail_refuses(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(verdict="FAIL"),
-    )
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_FAIL
-
-
-def test_drill_coverage_forcing_missing_refuses(tmp_path: Path) -> None:
-    """A2 real-shape: drill emits per-cycle daily runs tuples, ZERO forcing tuples."""
-    # Provide only runs coverage; drill lacks forcing coverage entirely.
-    drill = _drill_receipt(forcing_tuples=[])
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_FORCING_MISSING
-
-
-def test_drill_coverage_runs_missing_refuses(tmp_path: Path) -> None:
-    """A2 real-shape: drill emits per-cycle daily forcing tuples, ZERO runs tuples."""
-    drill = _drill_receipt(runs_tuples=[])
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_RUNS_MISSING
-
-
-def test_drill_coverage_db_export_missing_refuses(tmp_path: Path) -> None:
-    """H2: db-export required iff completeness has db-export subject overlap."""
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-salvage"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=63)),
-                },
-                "coverage": "db-export",
-                "verdict": "complete",
-            }
-        ]
-    )
-    # Drill has forcing + runs but NO db-export coverage.
-    drill = _drill_receipt(db_export_window=None)
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    # #1175: drop window is the eligible chunk's range [72 d, 65 d]; the sole
-    # salvage subject [70 d, 63 d] clips to [70 d, 65 d].
-    assert receipt["refusal_reason"] == _db_export_missing(
-        _NOW - timedelta(days=70), _NOW - timedelta(days=65)
-    )
-
-
-def test_drill_coverage_db_export_not_required_without_completeness_overlap(
-    tmp_path: Path,
-) -> None:
-    """H2 symmetry: no completeness db-export subject → no db-export required."""
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    # No db-export coverage in drill either — should still pass since
-    # completeness carries no db-export subject overlapping the drop window.
-    _write_json(tmp_path / "drill.json", _drill_receipt(db_export_window=None))
-    config = _build_config(tmp_path, enforce=True)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "enforced"
-
-
-# ---------------------------------------------------------------------------
-# #1162 — the db-export leg is salvage-window-scoped: drill `db-export`
-# coverage is required only over each salvage-backed window (completeness
-# `coverage=db-export` + `verdict=complete` subject overlapping the drop
-# window) intersected with the drop window, evaluated per window. The
-# forcing / runs legs keep whole-drop-window UNION semantics.
-# ---------------------------------------------------------------------------
-
-
-def _db_export_subject(
-    start: datetime,
-    end: datetime,
-    *,
-    version: str = "fv-salvage",
-    verdict: str = "complete",
-) -> dict[str, Any]:
-    return {
-        "lane": "forcing",
-        "subject": {"forcing_version_id": version},
-        "window": {"start": _iso(start), "end": _iso(end)},
-        "coverage": "db-export",
-        "verdict": verdict,
-    }
-
-
-def _product_archive_subject(
-    start: datetime, end: datetime, *, version: str = "fv-product"
-) -> dict[str, Any]:
-    return {
-        "lane": "forcing",
-        "subject": {"forcing_version_id": version},
-        "window": {"start": _iso(start), "end": _iso(end)},
-        "coverage": "product-archive",
-        "verdict": "complete",
-    }
-
-
-def _db_export_tuples(start: datetime, end: datetime) -> list[dict[str, Any]]:
-    """Per-cycle 24 h `db-export` tuples spanning ``[start, end]``."""
-    return _daily_coverage_tuples(start, end, "db-export")
-
-
-def _run_dry(tmp_path: Path, completeness: Mapping[str, Any], drill: Mapping[str, Any],
-             chunk: retention.ChunkRow) -> dict[str, Any]:
-    """Drive the full runner in dry-run so the gate verdict is observable."""
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path)
-    stub = _StubRunner([chunk])
-    return retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-
-def test_drill_db_export_scoped_to_salvage_window_admits_mixed_drop_window(
-    tmp_path: Path,
-) -> None:
-    """#1162 regression anchor: a drop window straddling the salvage-era
-    boundary is admissible.
-
-    The salvage-backed sub-window sits at the head of the drop window and the
-    drill's `db-export` union covers exactly that sub-window; the remainder is
-    product-archive-backed and has (and should have) no db-export package.
-    The whole-drop-window db-export requirement deadlocked this shape.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    salvage_end = _NOW - timedelta(days=70)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, salvage_end),
-            _product_archive_subject(salvage_end, drop_end),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, salvage_end))
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-mixed", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt.get("refusal_reason") is None
-    assert receipt["outcome"] == "dry-run"
-    assert receipt["candidate_chunks"] == [chunk.qualified_name]
-
-
-def test_drill_db_export_gap_inside_salvage_window_still_refuses(tmp_path: Path) -> None:
-    """#1162: narrowing the span must not weaken the check — a hole inside the
-    salvage-backed window (∩ drop window) still refuses."""
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    salvage_end = _NOW - timedelta(days=70)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, salvage_end),
-            _product_archive_subject(salvage_end, drop_end),
-        ]
-    )
-    # Union covers [74 d, 72 d] and [71 d, 70 d] — a 24 h hole at [72 d, 71 d].
-    drill = _drill_receipt(
-        db_export_tuples=(
-            _db_export_tuples(drop_start, _NOW - timedelta(days=72))
-            + _db_export_tuples(_NOW - timedelta(days=71), salvage_end)
-        )
-    )
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-gap", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    # #1175: the single salvage target [74 d, 70 d] is already inside the drop
-    # window, so the suffix renders it unchanged.
-    assert receipt["refusal_reason"] == _db_export_missing(drop_start, salvage_end)
-
-
-def test_drill_db_export_multiple_salvage_windows_each_must_be_covered(
-    tmp_path: Path,
-) -> None:
-    """#1162: two non-adjacent salvage windows are judged INDEPENDENTLY —
-    covering only one refuses (this is the per-window vs. any-window and
-    per-window vs. hull discriminator; the space between the two windows is
-    product-archive-backed and is never required)."""
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    first_end = _NOW - timedelta(days=72)
-    second_start = _NOW - timedelta(days=68)
-    second_end = _NOW - timedelta(days=66)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, first_end, version="fv-salvage-a"),
-            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
-            _product_archive_subject(first_end, second_start, version="fv-product-mid"),
-            _product_archive_subject(second_end, drop_end, version="fv-product-tail"),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, first_end))
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-multi-partial", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    # #1175: the FIRST window is covered, so the suffix names the SECOND
-    # (uncovered) target [68 d, 66 d] — not the first, not the drop window.
-    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
-
-
-def test_drill_db_export_multiple_salvage_windows_all_covered_admits(
-    tmp_path: Path,
-) -> None:
-    """#1162: both salvage windows covered → admitted even though the drill's
-    db-export union has a hole BETWEEN them (that stretch is product-archive
-    backed, so a hull/whole-window reading would wrongly refuse)."""
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    first_end = _NOW - timedelta(days=72)
-    second_start = _NOW - timedelta(days=68)
-    second_end = _NOW - timedelta(days=66)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, first_end, version="fv-salvage-a"),
-            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
-            _product_archive_subject(first_end, second_start, version="fv-product-mid"),
-            _product_archive_subject(second_end, drop_end, version="fv-product-tail"),
-        ]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=(
-            _db_export_tuples(drop_start, first_end)
-            + _db_export_tuples(second_start, second_end)
-        )
-    )
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-multi-full", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt.get("refusal_reason") is None
-    assert receipt["outcome"] == "dry-run"
-
-
-def test_drill_db_export_refusal_names_the_kth_uncovered_salvage_window(
-    tmp_path: Path,
-) -> None:
-    """#1175 localization oracle: with THREE salvage-backed targets and the gap
-    in the MIDDLE one, the suffix names exactly that window.
-
-    The neighbouring two-window row has its gap in the LAST target, so it
-    cannot tell "first uncovered target" apart from "last target" or "last
-    uncovered target". Here the first and third targets are fully covered by
-    the drill's db-export union, so any emitter that reports targets[0],
-    targets[-1], the hull of the targets, or the drop window itself renders a
-    different interval than the asserted [70 d, 68 d].
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    first_start, first_end = drop_start, _NOW - timedelta(days=72)
-    second_start, second_end = _NOW - timedelta(days=70), _NOW - timedelta(days=68)
-    third_start, third_end = _NOW - timedelta(days=66), _NOW - timedelta(days=64)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(first_start, first_end, version="fv-salvage-a"),
-            _product_archive_subject(first_end, second_start, version="fv-product-1"),
-            _db_export_subject(second_start, second_end, version="fv-salvage-b"),
-            _product_archive_subject(second_end, third_start, version="fv-product-2"),
-            _db_export_subject(third_start, third_end, version="fv-salvage-c"),
-            _product_archive_subject(third_end, drop_end, version="fv-product-3"),
-        ]
-    )
-    # Covers the first and third salvage windows; the second has NO db-export
-    # tuple at all.
-    drill = _drill_receipt(
-        db_export_tuples=(
-            _db_export_tuples(first_start, first_end)
-            + _db_export_tuples(third_start, third_end)
-        )
-    )
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-kth", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt["refusal_reason"] == _db_export_missing(second_start, second_end)
-
-
-def test_drill_db_export_empty_salvage_derivation_refuses_fail_closed() -> None:
-    """#1162 D2 (function-level, defence in depth): a `coverage=db-export`
-    subject that overlaps the drop window but is NOT `verdict=complete`
-    derives ZERO salvage-backed windows — the drill leg must treat that as
-    unsatisfied, never as satisfied, even when the drill's db-export union
-    covers the whole drop window.
-
-    This shape is intercepted twice upstream: the completeness receipt schema
-    rejects `db-export` + `pending-archive` at load
-    (`coverage_verdict_contract`,
-    `schemas/archive_completeness_receipt.schema.json:159-183`), and the
-    completeness gate refuses in-window `pending-archive` subjects before the
-    drill gate ever runs. It is therefore driven at function level with a
-    hand-built completeness dict — the `run_retention` / `_write_json`
-    end-to-end path cannot carry it. The case locks the drill leg's own
-    fail-closed behaviour, not an observable production path.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = {
-        "schema_version": "1.1",
-        "generated_at": _iso(_NOW - timedelta(hours=1)),
-        "outcome": "incomplete",
-        "coverage_bounds": {
-            "start": _iso(_NOW - timedelta(days=365)),
-            "end": _iso(_NOW),
-        },
-        "windows": [
-            _db_export_subject(drop_start, drop_end, verdict="pending-archive")
-        ],
-        "salvage_selectors": [],
-    }
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
-
-    reasons = retention.check_drill_gate(
-        drill,
-        completeness_receipt=completeness,
-        drop_window=retention.DropWindow(start=drop_start, end=drop_end),
-        max_age_days=30,
-        now=_NOW,
-    )
-
-    # #1175: no window is derivable, so the refusal carries the dedicated
-    # payload rather than an interval.
-    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
-
-
-def test_drill_db_export_salvage_window_clipped_at_drop_window_start(
-    tmp_path: Path,
-) -> None:
-    """#1162 clip (left): a salvage subject starting BEFORE the drop window is
-    required only over the intersection — the drill covers nothing older than
-    `drop.start` and is still admitted."""
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    salvage_end = _NOW - timedelta(days=70)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(_NOW - timedelta(days=80), salvage_end),
-            _product_archive_subject(salvage_end, drop_end),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, salvage_end))
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-clip-left", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt.get("refusal_reason") is None
-    assert receipt["outcome"] == "dry-run"
-
-
-def test_drill_db_export_salvage_window_clipped_at_drop_window_end(
-    tmp_path: Path,
-) -> None:
-    """#1162 clip (right): a salvage subject running PAST the drop window end
-    (the live shape — 7 d forcing_version windows routinely overrun a chunk
-    boundary) is required only over the intersection."""
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    salvage_start = _NOW - timedelta(days=64)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(salvage_start, _NOW - timedelta(days=50)),
-            _product_archive_subject(drop_start, salvage_start),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(salvage_start, drop_end))
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-clip-right", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt.get("refusal_reason") is None
-    assert receipt["outcome"] == "dry-run"
-
-
-def _drill_gate_reasons(
-    completeness: Mapping[str, Any],
-    drill: Mapping[str, Any],
-    drop_window: retention.DropWindow,
-) -> list[str]:
-    """Call the H2 gate directly so the db-export leg's FULL verdict list is
-    observable.
-
-    The runner collapses the gate to a single `refusal_reason`, which cannot
-    distinguish "refused once" from "refused once per salvage window" — the
-    clip-edge cases below assert on the exact reason LIST.
-    """
-    return retention.check_drill_gate(
-        drill,
-        completeness_receipt=completeness,
-        drop_window=drop_window,
-        max_age_days=30,
-        now=_NOW,
-    )
-
-
-def test_drill_db_export_refusal_renders_clipped_not_raw_subject_bounds() -> None:
-    """#1175: a subject overrunning the drop window on BOTH sides (the live
-    shape — 7 d forcing_version windows vs. chunk boundaries) is reported by its
-    CLIPPED bounds.
-
-    The raw subject spans [80 d, 50 d]; the requirement — and therefore the
-    refusal — is only [74 d, 60 d]. An emitter echoing `target["start"]` /
-    `target["end"]` would name a window the retention tick never judged and
-    would send the operator hunting outside the drop window.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    raw_start = _NOW - timedelta(days=80)
-    raw_end = _NOW - timedelta(days=50)
-    completeness = _completeness_receipt(
-        subjects=[_db_export_subject(raw_start, raw_end, version="fv-salvage-overrun")]
-    )
-    # Union stops 5 d short of the clipped end → the clipped target is uncovered.
-    drill = _drill_receipt(
-        db_export_tuples=_db_export_tuples(drop_start, _NOW - timedelta(days=65))
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    assert reasons == [_db_export_missing(drop_start, drop_end)]
-    assert _iso(raw_start) not in reasons[0]
-    assert _iso(raw_end) not in reasons[0]
-
-
-def test_drill_db_export_shortfall_at_clipped_window_end_refuses() -> None:
-    """#1162 right-edge oracle: a 6 h db-export shortfall at the END of each
-    salvage window (∩ drop window) refuses.
-
-    Two salvage windows are in scope — one wholly inside the drop window, one
-    overhanging `drop.end` (the live shape) — and the drill's db-export union
-    stops 6 h short of BOTH clipped ends. A clip that is even one day loose on
-    the right would admit this receipt; the single-element reason list also
-    pins that the leg early-returns on the FIRST shortfall rather than
-    accumulating one code per uncovered window.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    inner_start = _NOW - timedelta(days=72)
-    inner_end = _NOW - timedelta(days=70)
-    overhang_start = _NOW - timedelta(days=64)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(inner_start, inner_end, version="fv-salvage-inner"),
-            # Runs 10 d past drop.end → clipped to [64 d, drop.end].
-            _db_export_subject(
-                overhang_start, _NOW - timedelta(days=50), version="fv-salvage-overhang"
-            ),
-        ]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=(
-            _db_export_tuples(inner_start, _NOW - timedelta(days=70, hours=6))
-            + _db_export_tuples(overhang_start, _NOW - timedelta(days=60, hours=6))
-        )
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    # #1175: both targets fall short, and the early return surfaces the FIRST
-    # in ascending order — the inner window [72 d, 70 d].
-    assert reasons == [_db_export_missing(inner_start, inner_end)]
-
-
-def test_drill_db_export_shortfall_at_clipped_window_start_refuses() -> None:
-    """#1162 left-edge oracle: a 6 h db-export shortfall at the START of each
-    salvage window (∩ drop window) refuses.
-
-    Mirror of the right-edge case — one salvage window overhangs `drop.start`
-    and one sits wholly inside, and the drill's db-export union begins 6 h too
-    late for BOTH clipped starts. A clip that is loose on the left would admit
-    this receipt.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    overhang_end = _NOW - timedelta(days=70)
-    inner_start = _NOW - timedelta(days=66)
-    inner_end = _NOW - timedelta(days=64)
-    completeness = _completeness_receipt(
-        subjects=[
-            # Starts 6 d before drop.start → clipped to [drop.start, 70 d].
-            _db_export_subject(
-                _NOW - timedelta(days=80), overhang_end, version="fv-salvage-overhang"
-            ),
-            _db_export_subject(inner_start, inner_end, version="fv-salvage-inner"),
-        ]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=(
-            _db_export_tuples(_NOW - timedelta(days=73, hours=18), overhang_end)
-            + _db_export_tuples(_NOW - timedelta(days=65, hours=18), inner_end)
-        )
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    # #1175: the first target is the overhanging subject, and the suffix carries
-    # its CLIPPED start (`drop.start`), not the raw 80 d subject start.
-    assert reasons == [_db_export_missing(drop_start, overhang_end)]
-
-
-def test_drill_db_export_zero_length_clipped_window_is_still_evaluated() -> None:
-    """#1162: a salvage window whose end exactly TOUCHES `drop.start` clips to
-    a zero-length target, and that target is still judged (tasks 1.1) — it is
-    not silently skipped as "nothing to cover".
-
-    The drill carries real db-export tuples that stop strictly before
-    `drop.start`, so the refusal comes from the zero-length target genuinely
-    not being covered, not from the empty-tuple path.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[_db_export_subject(_NOW - timedelta(days=81), drop_start)]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=_db_export_tuples(
-            _NOW - timedelta(days=81), _NOW - timedelta(days=75)
-        )
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    # #1175: the zero-length clip renders as the same instant twice.
-    assert reasons == [_db_export_missing(drop_start, drop_start)]
-
-
-def test_drill_db_export_zero_length_clipped_window_covered_admits() -> None:
-    """#1162 admit half of the zero-length oracle: the same touching-endpoint
-    subject ADMITS once the drill's db-export union actually contains that
-    instant.
-
-    Paired with the refuse case above this pins the fail-closed guard to
-    `end < start` (genuinely inverted) rather than `end <= start`: a guard
-    that also tripped on a zero-length target would refuse this receipt even
-    though the required instant is covered, i.e. it would fail OPEN-closed on
-    a live shape (a 7 d forcing_version window ending exactly on a chunk
-    boundary).
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[_db_export_subject(_NOW - timedelta(days=81), drop_start)]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=_db_export_tuples(_NOW - timedelta(days=81), drop_start)
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    assert reasons == []
-
-
-def test_drill_db_export_inverted_subject_window_refuses_fail_closed() -> None:
-    """#1162: an INVERTED completeness subject window (`end` before `start`)
-    clips to an inverted target, which is refused fail-closed.
-
-    Without the guard the inverted interval is vacuously "covered" by any
-    tuple straddling it — here a single 1 s db-export tuple — so a corrupt
-    receipt would ADMIT the drop. Symmetric with the inverted-tuple defence
-    in `_tuples_cover_window`.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    inverted_start = _NOW - timedelta(days=64)  # LATER than the window `end`
-    inverted_end = _NOW - timedelta(days=70)
-    completeness = _completeness_receipt(
-        subjects=[_db_export_subject(inverted_start, inverted_end)]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=[
-            {
-                "source": "db-export",
-                "window": {
-                    "start": _iso(inverted_end),
-                    "end": _iso(inverted_end + timedelta(seconds=1)),
-                },
-            }
-        ]
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    # #1175: the inverted clip [64 d, 70 d] is rendered VERBATIM — a refusal
-    # naming an interval whose end precedes its start is the diagnosis that the
-    # completeness subject itself is corrupt.
-    assert reasons == [_db_export_missing(inverted_start, inverted_end)]
-
-
-def test_drill_db_export_inverted_target_after_a_covered_target_refuses() -> None:
-    """#1162: the inverted-clip guard is applied to EVERY target, not just the
-    first one the loop happens to visit.
-
-    Targets are sorted ascending, so the valid subject ([72 d, 69 d], fully
-    covered by the drill) is judged first and the corrupt inverted subject
-    second. The drill's db-export union is deliberately chosen to straddle the
-    inverted interval, so a guard that only defended the first target would
-    hand `[64 d, 70 d]` to `_drill_covers`, get a vacuous True, and ADMIT the
-    drop on a corrupt receipt.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    valid_start = _NOW - timedelta(days=72)
-    valid_end = _NOW - timedelta(days=69)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(valid_start, valid_end, version="fv-salvage-valid"),
-            # `start` is LATER than `end` → clips to an inverted target.
-            _db_export_subject(
-                _NOW - timedelta(days=64),
-                _NOW - timedelta(days=70),
-                version="fv-salvage-inverted",
-            ),
-        ]
-    )
-    # Union [72 d, 69 d] straddles the inverted interval [64 d, 70 d]:
-    # union.start <= 64 d and union.end >= 70 d, so `_tuples_cover_window`
-    # would vacuously accept it.
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(valid_start, valid_end))
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    # #1175: the first target is covered, so the suffix names the SECOND —
-    # rendered inverted, exactly as the corrupt subject clips.
-    assert reasons == [
-        _db_export_missing(_NOW - timedelta(days=64), _NOW - timedelta(days=70))
-    ]
-
-
-def test_drill_db_export_salvage_subject_outside_drop_window_is_not_a_target() -> None:
-    """#1162: only salvage-backed windows that OVERLAP the drop window become
-    db-export targets.
-
-    A long-past `coverage=db-export` subject ([200 d, 193 d]) sits far outside
-    the [74 d, 60 d] drop window; the drill's db-export union covers only the
-    in-window subject. Requiring drill coverage for out-of-window salvage
-    subjects would refuse this admissible drop — the ancient subject clips to
-    an inverted interval, which the fail-closed guard then rejects — so the
-    gate would be unsatisfiable for any historical salvage era.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    in_window_start = _NOW - timedelta(days=70)
-    in_window_end = _NOW - timedelta(days=66)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(
-                _NOW - timedelta(days=200),
-                _NOW - timedelta(days=193),
-                version="fv-salvage-ancient",
-            ),
-            _db_export_subject(
-                in_window_start, in_window_end, version="fv-salvage-in-window"
-            ),
-        ]
-    )
-    drill = _drill_receipt(
-        db_export_tuples=_db_export_tuples(in_window_start, in_window_end)
-    )
-
-    reasons = _drill_gate_reasons(
-        completeness, drill, retention.DropWindow(start=drop_start, end=drop_end)
-    )
-
-    assert reasons == []
-
-
-# ---------------------------------------------------------------------------
-# #1207 layer 1 — drill derivation-window guard. The drill records the drop
-# window it was invoked with (`salvage_derivation.drop_window`, #1206); a
-# drill that declared a NARROWER judgment span than the retention drop window
-# cannot vouch for that drop, because its coverage tuples carry no subject
-# identity (subject A's wide tuple would substitute for a never-derived,
-# never-restore-verified subject B).
-# ---------------------------------------------------------------------------
-
-
-# Exact windows from the issue #1207 read-only probe.
-_ISSUE_A_START = datetime(2026, 6, 14, tzinfo=UTC)
-_ISSUE_A_END = datetime(2026, 6, 28, tzinfo=UTC)
-_ISSUE_B_START = datetime(2026, 6, 20, tzinfo=UTC)
-_ISSUE_B_END = datetime(2026, 6, 27, tzinfo=UTC)
-_ISSUE_DRILL_START = datetime(2026, 6, 18, tzinfo=UTC)
-_ISSUE_DRILL_END = datetime(2026, 6, 19, tzinfo=UTC)
-_ISSUE_DROP_START = datetime(2026, 6, 18, tzinfo=UTC)
-_ISSUE_DROP_END = datetime(2026, 6, 25, tzinfo=UTC)
-
-
-def _salvage_derivation(window: Mapping[str, Any] | None) -> dict[str, Any]:
-    """A schema-valid `salvage_derivation` section (#1206 drill emit shape).
-
-    ``window`` is the recorded `--drop-window-*` interval, or ``None`` for a
-    drill that ran un-narrowed (`oneOf: [window, null]` per
-    `schemas/archive_rebuild_drill_receipt.schema.json`).
-    """
-    return {
-        "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
-        "drop_window": dict(window) if window is not None else None,
-        "candidate_count": 2,
-        "derived_count": 1,
-        "skipped": [],
-    }
-
-
-def _issue_1207_receipts(
-    derivation: Mapping[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Rebuild the issue's A/B scenario.
-
-    Completeness carries TWO db-export/complete subjects — A `[06-14, 06-28]`
-    and B `[06-20, 06-27]` — and the drill carries ONLY A's full-window
-    db-export tuples. Both subjects clip into the `[06-18, 06-25]` drop
-    window, and A's tuples span both clipped targets, so the db-export leg is
-    satisfied by evidence that never covered B. ``derivation=None`` builds the
-    no-derivation-section receipt (the pre-guard shape).
-    """
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(_ISSUE_A_START, _ISSUE_A_END, version="fv-salvage-a"),
-            _db_export_subject(_ISSUE_B_START, _ISSUE_B_END, version="fv-salvage-b"),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(_ISSUE_A_START, _ISSUE_A_END))
-    if derivation is not None:
-        drill["salvage_derivation"] = dict(derivation)
-    return completeness, drill
-
-
-def _issue_1207_drop_window() -> retention.DropWindow:
-    return retention.DropWindow(start=_ISSUE_DROP_START, end=_ISSUE_DROP_END)
-
-
-def test_drill_derivation_window_narrower_than_drop_refuses_issue_1207_replay() -> None:
-    """#1207 (a): the issue's A/B replay flips PASS → REFUSE.
-
-    The drill declared it judged only `[06-18, 06-19]` while retention wants
-    to drop `[06-18, 06-25]`; subject B `[06-20, 06-27]` was therefore never
-    derived, never restore-verified, and only subject A's wide tuple vouches
-    for it. The guard must fire FIRST — before any coverage-union evidence
-    from that run is consulted.
-    """
-    completeness, drill = _issue_1207_receipts(
-        _salvage_derivation({"start": _iso(_ISSUE_DRILL_START), "end": _iso(_ISSUE_DRILL_END)})
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons[0] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
-    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
-
-
-def test_drill_no_derivation_section_keeps_pre_guard_behavior() -> None:
-    """#1207 (b) + pinned residual: the SAME A/B receipt without the
-    `salvage_derivation` section still PASSES.
-
-    Two receipt populations legitimately lack the section — receipts
-    predating #1206 and today's explicit-manifest drills (`--salvage-manifest`
-    without `--completeness-receipt`), which never write it. Their behavior is
-    unchanged by design (D2), which also pins the residual: cross-subject
-    tuple substitution survives on that path and is only closed by layer 2
-    per-subject attribution. This assertion is simultaneously the pre-fix
-    oracle — it is exactly the PASS the guard flips above.
-    """
-    completeness, drill = _issue_1207_receipts(None)
-    assert "salvage_derivation" not in drill
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == []
-
-
-def test_drill_derivation_window_null_passes_guard() -> None:
-    """#1207 (c): `drop_window: null` = the drill ran un-narrowed → pass."""
-    completeness, drill = _issue_1207_receipts(_salvage_derivation(None))
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == []
-
-
-def test_drill_derivation_window_strictly_containing_passes_guard() -> None:
-    """#1207 (d1): a drill window strictly wider on BOTH sides passes.
-
-    The drill judged `[06-14, 06-28]` — a superset of the `[06-18, 06-25]`
-    drop window — so both subjects were in its derivation set.
-    """
-    completeness, drill = _issue_1207_receipts(
-        _salvage_derivation({"start": _iso(_ISSUE_A_START), "end": _iso(_ISSUE_A_END)})
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == []
-
-
-def test_drill_derivation_window_exactly_equal_passes_guard() -> None:
-    """#1207 (d2) BOUNDARY: drill window EXACTLY EQUAL to the retention drop
-    window passes.
-
-    Runbook §7.5's standard invocation tells operators to paste the §7.3
-    step-3 interval verbatim into `--drop-window-start/--drop-window-end`.
-    That interval is a documented CONSERVATIVE SUPERSET of the runner's own
-    drop window (the runner additionally intersects the eligible chunks with
-    the completeness `coverage_bounds`), so the standard invocation records
-    a window that is EQUAL to or WIDER than the retention drop window, never
-    narrower — equality is the tight end of that range and must pass. A
-    strict-inequality containment test would refuse it.
-    """
-    completeness, drill = _issue_1207_receipts(
-        _salvage_derivation({"start": _iso(_ISSUE_DROP_START), "end": _iso(_ISSUE_DROP_END)})
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == []
-
-
-def test_drill_derivation_window_narrowed_only_at_start_refuses() -> None:
-    """#1207 (d3) BOUNDARY: narrowing on the START side alone still refuses.
-
-    The drill judged `[06-20, 06-28]` — its END covers the `[06-18, 06-25]`
-    drop window completely, only its START is late. Subject A `[06-14,
-    06-28]` overhangs the drop start and was still derived, so its tuples
-    vouch for `[06-18, 06-20)` that this drill never judged.
-
-    This row kills the start-side conjunct: a predicate that dropped
-    `start <= drop_window.start` (checking only the end), or that compared
-    the start against the wrong endpoint (`start <= drop_window.end`), would
-    admit this receipt. The (a) replay above narrows BOTH sides and so
-    survives either mutation.
-    """
-    completeness, drill = _issue_1207_receipts(
-        _salvage_derivation({"start": _iso(_ISSUE_B_START), "end": _iso(_ISSUE_A_END)})
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
-
-
-@pytest.mark.parametrize(
-    ("label", "section"),
-    [
-        ("not-a-mapping", ["not", "a", "mapping"]),
-        (
-            "drop-window-key-missing",
-            {
-                "completeness_receipt_path": "/home/nwm/audit-logs/completeness-receipt.json",
-                "candidate_count": 2,
-                "derived_count": 1,
-                "skipped": [],
-            },
-        ),
-        ("window-not-a-mapping", {"drop_window": "2026-06-18T00:00:00Z/2026-06-25T00:00:00Z"}),
-        ("start-unparseable", {"drop_window": {"start": "not-a-timestamp", "end": "2026-06-25T00:00:00Z"}}),
-        ("start-not-a-string", {"drop_window": {"start": 20260618, "end": "2026-06-25T00:00:00Z"}}),
-        (
-            "inverted",
-            {"drop_window": {"start": "2026-06-25T00:00:00Z", "end": "2026-06-18T00:00:00Z"}},
-        ),
-    ],
-)
-def test_drill_derivation_section_unusable_shape_refuses(
-    label: str, section: Any
-) -> None:
-    """#1207 (e): a `salvage_derivation` section that EXISTS but cannot be
-    judged is never evidence — refuse fail-closed with the same code.
-
-    Symmetric with the inverted-tuple defence in `_tuples_cover_window`.
-    Most of these shapes are intercepted upstream by `load_drill_receipt`'s
-    jsonschema validation (→ `DRILL_RECEIPT_MISSING`), so this is
-    defence-in-depth at the pure-function seam; the INVERTED window is the
-    one shape the schema cannot express, so it is the only row here that can
-    reach the gate on the production path. It does not isolate the explicit
-    `end < start` branch — containment already refuses any inverted window
-    against a well-ordered drop window (see the branch comment in
-    `_drill_derivation_window_contains`); the row pins the OUTCOME, not the
-    branch that produces it.
-    """
-    completeness, drill = _issue_1207_receipts(None)
-    drill["salvage_derivation"] = section
-
-    reasons = _drill_gate_reasons(completeness, drill, _issue_1207_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW], label
-
-
-def test_drill_derivation_window_guard_surfaces_as_refusal_reason(tmp_path: Path) -> None:
-    """#1207 (f) integration: the guard's code reaches the receipt surface.
-
-    Drives the full runner (fake chunk/measure/drop seams) with a
-    schema-valid narrowed drill receipt: the eligible chunk's range is the
-    `[74 d, 60 d]` drop window while the drill recorded a 2 d judgment span
-    inside it, so `run_retention` must publish `outcome=refused` with
-    `refusal_reason = DRILL_DERIVATION_WINDOW_TOO_NARROW`.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[_db_export_subject(drop_start, drop_end, version="fv-salvage-wide")]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
-    drill["salvage_derivation"] = _salvage_derivation(
-        {
-            "start": _iso(_NOW - timedelta(days=70)),
-            "end": _iso(_NOW - timedelta(days=68)),
-        }
-    )
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-narrow-drill", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
-    assert receipt["refusal_reason"] in retention.WIRE_CODES
-    jsonschema.validate(receipt, _load_schema())
-
-
-# ---------------------------------------------------------------------------
-# #1220 snapshot binding — the gate's REQUIREMENT set comes from the
-# completeness receipt it loads NOW (rewritten in place daily), its EVIDENCE
-# from a drill receipt up to 30 d old. A db-export subject added after the
-# drill entered the requirement set never having been restore-verified, and
-# an older subject's identity-less tuple vouched for it. The drill now
-# records the db-export universe of the snapshot it consumed and the gate
-# binds every target window to it.
-# ---------------------------------------------------------------------------
-
-
-# Windows from the issue's in-memory v1/v2 replay.
-_SNAP_A_START = datetime(2026, 6, 1, tzinfo=UTC)
-_SNAP_A_END = datetime(2026, 6, 30, tzinfo=UTC)
-_SNAP_B_START = datetime(2026, 6, 10, tzinfo=UTC)
-_SNAP_B_END = datetime(2026, 6, 20, tzinfo=UTC)
-_SNAP_DROP_START = datetime(2026, 6, 5, tzinfo=UTC)
-_SNAP_DROP_END = datetime(2026, 6, 15, tzinfo=UTC)
-# A later db-export subject that does NOT overlap the drop window.
-_SNAP_D_START = datetime(2026, 8, 1, tzinfo=UTC)
-_SNAP_D_END = datetime(2026, 8, 10, tzinfo=UTC)
-
-_UNSET = object()
-
-
-def _win(start: datetime, end: datetime) -> dict[str, str]:
-    return {"start": _iso(start), "end": _iso(end)}
-
-
-def _bound_salvage_derivation(
-    *,
-    drop_window: Mapping[str, Any] | None = None,
-    db_export_windows: Any = _UNSET,
-    completeness_generated_at: str | None = None,
-) -> dict[str, Any]:
-    """`salvage_derivation` with the #1220 snapshot-binding fields.
-
-    Sibling of :func:`_salvage_derivation` (the #1206/#1207 shape). Passing
-    ``db_export_windows=_UNSET`` reproduces the post-#1206 pre-binding
-    population: the section exists, the recorded universe does not.
-    """
-    section = _salvage_derivation(drop_window)
-    if db_export_windows is not _UNSET:
-        section["db_export_windows"] = db_export_windows
-    if completeness_generated_at is not None:
-        section["completeness_generated_at"] = completeness_generated_at
-    return section
-
-
-def _snapshot_completeness(
-    subjects: Sequence[tuple[datetime, datetime, str]],
-    *,
-    generated_at: datetime = _NOW - timedelta(hours=1),
-) -> dict[str, Any]:
-    return _completeness_receipt(
-        generated_at=generated_at,
-        subjects=[
-            _db_export_subject(start, end, version=version)
-            for start, end, version in subjects
-        ],
-    )
-
-
-def _snapshot_drill(
-    derivation: Mapping[str, Any] | None,
-    *,
-    runs_tuples: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """A PASS drill whose db-export union spans subject A's FULL window.
-
-    That union is exactly the substitution vehicle: it covers every clipped
-    target in these fixtures, so without the binding guard the db-export leg
-    returns empty reasons for a subject the drill never saw.
-    """
-    drill = _drill_receipt(
-        db_export_tuples=_db_export_tuples(_SNAP_A_START, _SNAP_A_END),
-        runs_tuples=runs_tuples,
-    )
-    if derivation is not None:
-        drill["salvage_derivation"] = dict(derivation)
-    return drill
-
-
-def _snapshot_drop_window() -> retention.DropWindow:
-    return retention.DropWindow(start=_SNAP_DROP_START, end=_SNAP_DROP_END)
-
-
-def test_snapshot_drift_with_new_subject_refuses_issue_1220_replay() -> None:
-    """#1220 (a): the issue's v1/v2 replay flips PASS → REFUSE.
-
-    The drill consumed completeness v1 (subject A `[06-01, 06-30]` only) and
-    recorded that universe; at gate time v2 additionally carries subject B
-    `[06-10, 06-20]`, added by a backfill after the drill. B was never
-    restore-verified, yet A's wide db-export tuple spans B's clipped target.
-    """
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons[0] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
-    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
-
-
-def test_snapshot_drift_without_recorded_universe_keeps_pre_fix_behavior() -> None:
-    """#1220 (a) pre-fix oracle + residual pin: the SAME drift PASSES when the
-    drill receipt has a `salvage_derivation` section but no
-    `db_export_windows` field.
-
-    That is the post-#1206 / pre-#1220 receipt population: the guard is
-    dormant for them (design D5-(a)), and this empty reason list is exactly
-    the false PASS the row above flips.
-    """
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(_bound_salvage_derivation())
-    assert "db_export_windows" not in drill["salvage_derivation"]
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-def test_snapshot_drift_without_derivation_section_keeps_pre_fix_behavior() -> None:
-    """#1220 (a) compat front half: the same drift with NO `salvage_derivation`
-    section at all still PASSES (pre-#1206 receipts and explicit-manifest
-    drills — the population #1207's guard also skips)."""
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(None)
-    assert "salvage_derivation" not in drill
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-def test_snapshot_identical_universe_passes() -> None:
-    """#1220 (b): the drill recorded exactly the gate-time universe → pass."""
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[
-                _win(_SNAP_A_START, _SNAP_A_END),
-                _win(_SNAP_B_START, _SNAP_B_END),
-            ],
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-def test_snapshot_requirement_shrink_passes() -> None:
-    """#1220 (b): recorded `[A, B]`, gate-time only A → pass.
-
-    Membership is a SUBSET test in the target → recorded direction: a subject
-    that disappeared since the drill removes a requirement and can never make
-    the drill's evidence insufficient. An implementation that compared the
-    two sets for equality (or required recorded ⊆ targets) would refuse here.
-    """
-    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[
-                _win(_SNAP_A_START, _SNAP_A_END),
-                _win(_SNAP_B_START, _SNAP_B_END),
-            ],
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-def test_snapshot_daily_regeneration_alone_never_refuses() -> None:
-    """#1220 (c) / design D1: a NEWER completeness snapshot with the SAME
-    db-export windows passes.
-
-    The audit rewrites the completeness receipt in place every day while the
-    drill budget is 30 d, so at nearly every tick the loaded receipt is newer
-    than the drill's. Refusing on `generated_at` inequality (or a digest)
-    would refuse ~every tick after day one — `completeness_generated_at` is
-    recorded for diagnostics only and is never a refusal input.
-    """
-    completeness = _snapshot_completeness(
-        [(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")],
-        generated_at=_NOW - timedelta(minutes=5),
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-            completeness_generated_at=_iso(_NOW - timedelta(days=20)),
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-def test_snapshot_new_subject_outside_drop_window_passes() -> None:
-    """#1220 (d): binding is judged over the drop-filtered TARGETS only.
-
-    The gate-time receipt gained subject D `[08-01, 08-10]`, disjoint from
-    the `[06-05, 06-15]` drop window, so D is not a requirement of this tick.
-    Binding the whole gate-time db-export universe instead would refuse
-    whenever any db-export subject appears anywhere — the daily-outage
-    direction design D1 rejects.
-    """
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_D_START, _SNAP_D_END, "fv-salvage-d"),
-        ]
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-        )
-    )
-    assert retention.derive_salvage_backed_windows(
-        completeness, _snapshot_drop_window()
-    ) == [_win(_SNAP_A_START, _SNAP_A_END)]
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == []
-
-
-@pytest.mark.parametrize(
-    ("label", "target"),
-    [
-        # A backfill EXTENDED subject A: same start, later end.
-        ("shared-start-longer-end", (_SNAP_A_START, datetime(2026, 7, 15, tzinfo=UTC))),
-        # Same end, earlier start.
-        ("shared-end-earlier-start", (datetime(2026, 5, 20, tzinfo=UTC), _SNAP_A_END)),
-    ],
-)
-def test_snapshot_one_sided_window_change_refuses(
-    label: str, target: tuple[datetime, datetime]
-) -> None:
-    """#1220 (e): membership is exact on BOTH endpoints.
-
-    A window sharing exactly one endpoint with a recorded window covers rows
-    the drill never verified (the extension), so a start-only or end-only
-    comparison would admit it.
-    """
-    completeness = _snapshot_completeness([(target[0], target[1], "fv-salvage-a")])
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
-
-
-def test_snapshot_empty_recorded_universe_refuses() -> None:
-    """#1220 (f): `db_export_windows: []` with a non-empty requirement set
-    refuses.
-
-    An empty recorded universe has no members — the drill consumed a snapshot
-    with no db-export/complete subject at all, so every gate-time target is
-    drift. An `if not recorded: return True` short-circuit dies here.
-    """
-    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
-    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=[]))
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND]
-
-
-@pytest.mark.parametrize(
-    ("label", "recorded"),
-    [
-        ("not-a-list", "2026-06-01T00:00:00Z/2026-06-30T00:00:00Z"),
-        ("mapping-not-a-list", {"start": "2026-06-01T00:00:00Z", "end": "2026-06-30T00:00:00Z"}),
-        ("entry-not-a-mapping", ["2026-06-01T00:00:00Z"]),
-        ("entry-missing-end", [{"start": "2026-06-01T00:00:00Z"}]),
-        ("entry-start-not-a-string", [{"start": 20260601, "end": "2026-06-30T00:00:00Z"}]),
-    ],
-)
-def test_snapshot_unusable_recorded_universe_refuses(label: str, recorded: Any) -> None:
-    """#1220 (g): a recorded universe that exists but cannot be judged is
-    never evidence — refuse fail-closed.
-
-    Unreachable through `load_drill_receipt` now that the schema types the
-    field; this is defence-in-depth at the pure-function seam, symmetric with
-    #1207's unusable-section rows.
-    """
-    completeness = _snapshot_completeness([(_SNAP_A_START, _SNAP_A_END, "fv-salvage-a")])
-    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows=recorded))
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND], label
-
-
-def test_snapshot_binds_helper_refuses_non_mapping_section() -> None:
-    """Defence-in-depth: `_drill_snapshot_binds` on its own refuses a
-    `salvage_derivation` that is not an object.
-
-    Unreachable via `check_drill_gate` — #1207's guard refuses a non-Mapping
-    section with `DRILL_DERIVATION_WINDOW_TOO_NARROW` before this helper runs
-    (pinned by `test_drill_derivation_section_unusable_shape_refuses`) — so
-    the branch is asserted at the helper seam instead of the gate seam.
-    """
-    assert (
-        retention._drill_snapshot_binds(
-            {"salvage_derivation": ["not", "a", "mapping"]},
-            [_win(_SNAP_A_START, _SNAP_A_END)],
-        )
-        is False
-    )
-
-
-def test_snapshot_empty_derivation_still_refuses_db_export_missing_first() -> None:
-    """#1220 (h) precedence: the empty-derivation refusal (#1162 D2) precedes
-    the binding check.
-
-    The completeness receipt has an overlapping db-export subject whose
-    verdict is not `complete`, so the requirement set is EMPTY — there is
-    nothing to bind, and the surfaced code must stay
-    `DRILL_COVERAGE_DB_EXPORT_MISSING`.
-
-    The recorded universe is deliberately UNUSABLE (`"not-a-list"`), which
-    `_drill_snapshot_binds` refuses regardless of the target set: the binding
-    guard would surface `DRILL_COMPLETENESS_SNAPSHOT_UNBOUND` if it ran
-    first, so the code below is a real ordering pin rather than a shape both
-    legs happen to accept.
-
-    Same function-level convention as
-    `test_drill_db_export_empty_salvage_derivation_refuses_fail_closed`:
-    `db-export` + `pending-archive` is rejected by the completeness receipt
-    schema at load, so this shape is driven at the pure-function seam.
-    """
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(
-                _SNAP_A_START, _SNAP_A_END, version="fv-salvage-a", verdict="pending-archive"
-            )
-        ]
-    )
-    drill = _snapshot_drill(_bound_salvage_derivation(db_export_windows="not-a-list"))
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    # #1175: the D2 payload, not an interval — nothing was derivable to name.
-    assert reasons == [_DB_EXPORT_MISSING_NO_DERIVABLE]
-
-
-def test_snapshot_narrowed_drill_refuses_with_window_code_first() -> None:
-    """#1220 (h) precedence + design D5-(d) tripwire: #1207's containment
-    guard outranks the binding guard.
-
-    This ordering is load-bearing, not cosmetic: the recorded universe is
-    UNFILTERED, so "recorded ⇒ the drill actually derived it" only holds
-    because containment already forced retention-drop ⊆ drill-drop. If this
-    row ever starts reporting the binding code, #1207's guard was weakened or
-    reordered and the binding guard silently degraded with it.
-    """
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            drop_window=_win(_SNAP_DROP_START, datetime(2026, 6, 7, tzinfo=UTC)),
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-        )
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW]
-
-
-def test_snapshot_missing_runs_coverage_refuses_before_binding() -> None:
-    """#1220 (h) precedence: the runs leg outranks the binding guard — the
-    binding check lives INSIDE the db-export leg, not at whole-gate level."""
-    completeness = _snapshot_completeness(
-        [
-            (_SNAP_A_START, _SNAP_A_END, "fv-salvage-a"),
-            (_SNAP_B_START, _SNAP_B_END, "fv-salvage-b"),
-        ]
-    )
-    drill = _snapshot_drill(
-        _bound_salvage_derivation(
-            db_export_windows=[_win(_SNAP_A_START, _SNAP_A_END)],
-        ),
-        runs_tuples=[],
-    )
-
-    reasons = _drill_gate_reasons(completeness, drill, _snapshot_drop_window())
-
-    assert reasons == [retention.CODE_DRILL_COVERAGE_RUNS_MISSING]
-
-
-def test_snapshot_unbound_surfaces_as_refusal_reason(tmp_path: Path) -> None:
-    """#1220 (i) integration: the guard's code reaches the receipt surface.
-
-    Drives the full runner (fake chunk/measure/drop seams): the eligible
-    chunk's range is the `[74 d, 60 d]` drop window, the drill recorded only
-    subject A's window, and the gate-time completeness receipt carries a
-    second db-export/complete subject inside that drop window.
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
-            _db_export_subject(
-                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
-            ),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
-    drill["salvage_derivation"] = _bound_salvage_derivation(
-        db_export_windows=[_win(drop_start, drop_end)],
-        completeness_generated_at=_iso(_NOW - timedelta(days=2)),
-    )
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-unbound-drill", delta_days=60, duration_days=14
-    )
-
-    receipt = _run_dry(tmp_path, completeness, drill, chunk)
-
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
-    assert receipt["refusal_reason"] in retention.WIRE_CODES
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_enforced_receipt_echoes_unclipped_salvage_subject_windows(tmp_path: Path) -> None:
-    """#1162 tasks 1.4: `salvage_backed_windows[]` echoes the RAW completeness
-    subject windows; only the GATE clips them to the drop window.
-
-    The subject overhangs the drop window on both sides ([80 d, 50 d] vs. a
-    [74 d, 60 d] drop window), so a receipt that reported the clipped interval
-    would be visibly different — and would misreport the operator's manual
-    `COPY FROM` recovery scope (runbook §3.2) as narrower than it is.
-    """
-    subject_start = _NOW - timedelta(days=80)
-    subject_end = _NOW - timedelta(days=50)
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    _write_json(
-        tmp_path / "completeness.json",
-        _completeness_receipt(subjects=[_db_export_subject(subject_start, subject_end)]),
-    )
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end)),
-    )
-    config = _build_config(tmp_path, enforce=True)
-    # A single 14 d chunk whose range is exactly the drop window.
-    chunk = _chunk(
-        "met", "forcing_station_timeseries", "chk-overhang", delta_days=60, duration_days=14
-    )
-    stub = _StubRunner([chunk])
-
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-
-    assert receipt["outcome"] == "enforced"
-    assert receipt["salvage_backed_windows"] == [
-        {"start": _iso(subject_start), "end": _iso(subject_end)}
-    ]
-
-
-# ---------------------------------------------------------------------------
-# H2 UNION-of-tuples semantics (A2 — same-class:fake-oracle-in-tests fix
-# for #854 R1). The drill emits per-cycle 24 h coverage tuples; the runner
-# refuses only when the UNION does not cover the drop window.
-# ---------------------------------------------------------------------------
-
-
-def _daily_source_tuples(
-    start: datetime, end: datetime, source: str
-) -> list[dict[str, Any]]:
-    """Local shim mirroring _daily_coverage_tuples for readability in tests."""
-    return _daily_coverage_tuples(start, end, source)
-
-
-def _drop_window(now: datetime, days: int) -> retention.DropWindow:
-    return retention.DropWindow(start=now - timedelta(days=days), end=now)
-
-
-def test_a2a_fourteen_daily_tuples_union_covers_drop_window() -> None:
-    """A2-a: 14 per-cycle tuples spanning drop window → drill coverage PASSES."""
-    now = _NOW
-    drop = _drop_window(now, _DROP_WINDOW_DAYS)
-    tuples = _daily_source_tuples(drop.start, drop.end, "forcing")
-    assert len(tuples) == _DROP_WINDOW_DAYS
-    assert retention._drill_covers(tuples, "forcing", drop) is True
-
-
-def test_a2b_fourteen_daily_tuples_with_gap_union_fails() -> None:
-    """A2-b: 14 per-cycle tuples with a 1-day gap in the middle → coverage FAILS."""
-    now = _NOW
-    drop = _drop_window(now, _DROP_WINDOW_DAYS)
-    all_tuples = _daily_source_tuples(drop.start, drop.end, "forcing")
-    # Remove the tuple covering day 7 → 8 to introduce a mid-window gap.
-    gapped = [t for i, t in enumerate(all_tuples) if i != 7]
-    assert len(gapped) == _DROP_WINDOW_DAYS - 1
-    assert retention._drill_covers(gapped, "forcing", drop) is False
-
-
-def test_a2c_two_overlapping_tuples_union_covers() -> None:
-    """A2-c: 2 overlapping tuples whose union covers the drop window → PASS."""
-    now = _NOW
-    drop = _drop_window(now, _DROP_WINDOW_DAYS)
-    tuples = [
-        {
-            "source": "forcing",
-            "window": {
-                "start": _iso(drop.start),
-                "end": _iso(drop.start + timedelta(days=9)),
-            },
-        },
-        {
-            "source": "forcing",
-            "window": {
-                "start": _iso(drop.start + timedelta(days=7)),
-                "end": _iso(drop.end),
-            },
-        },
-    ]
-    assert retention._drill_covers(tuples, "forcing", drop) is True
-
-
-def test_a2d_single_tuple_covering_last_day_fails() -> None:
-    """A2-d: single per-cycle tuple covering only last day of drop window → FAIL."""
-    now = _NOW
-    drop = _drop_window(now, _DROP_WINDOW_DAYS)
-    tuples = [
-        {
-            "source": "forcing",
-            "window": {
-                "start": _iso(drop.end - timedelta(days=1)),
-                "end": _iso(drop.end),
-            },
-        },
-    ]
-    assert retention._drill_covers(tuples, "forcing", drop) is False
-
-
-def test_a2e_real_shape_uses_drill_identity_window(tmp_path: Path) -> None:
-    """A2-e (real-shape integration): craft coverage tuples from N synthetic
-    cycle times via the drill module's ``_identity_window`` emit shape.
-
-    This closes the same-class:fake-oracle-in-tests gap from #854 R1: unit
-    tests exercise the exact tuple shape the drill produces per cycle,
-    not a synthetic single-tuple stand-in.
-    """
-    from scripts.node27_archive_rebuild_drill import _identity_window as drill_identity_window
-
-    # Build 14 synthetic per-cycle manifests, each with a 24 h producer
-    # window matching the drill's real shape. Union must cover the 14-day
-    # drop window.
-    now = _NOW
-    drop = _drop_window(now, _DROP_WINDOW_DAYS)
-    cycle_tuples: list[dict[str, Any]] = []
-    cursor = drop.start
-    while cursor < drop.end:
-        cycle_end = min(cursor + timedelta(days=1), drop.end)
-        # Fabricate a manifest with the same producer-time shape the drill
-        # would emit; delegate window derivation to the drill module.
-        manifest = {
-            "producer": {"start_time": _iso(cursor), "end_time": _iso(cycle_end)},
-            "identity": {"cycle_time": _iso(cursor)},
-        }
-        window = drill_identity_window(manifest)
-        cycle_tuples.append({"source": "runs", "window": window})
-        cursor = cycle_end
-    assert len(cycle_tuples) == _DROP_WINDOW_DAYS
-    # Real drill emit shape → union covers → drill_covers PASSES.
-    assert retention._drill_covers(cycle_tuples, "runs", drop) is True
-    # Sanity: remove a middle cycle to introduce a gap → FAIL.
-    gapped = [t for i, t in enumerate(cycle_tuples) if i != 7]
-    assert retention._drill_covers(gapped, "runs", drop) is False
-
-
-def test_a2_full_runner_accepts_union_covering_per_cycle_drill_receipt(
-    tmp_path: Path,
-) -> None:
-    """A2 end-to-end: full runner accepts a drill receipt whose forcing/runs
-    coverage is per-cycle daily tuples (real drill emit shape) — not a
-    single synthetic tuple. This is the pattern-level closure for
-    #854 R1 (fake-oracle-in-tests): if the drill receipt is realistic,
-    the runner must still accept it.
-    """
-    now = _NOW
-    # Chunks: 60 days back, 7 days duration → drop window ≈ [now-67d, now-60d].
-    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
-    # Drill emits ~7 daily forcing + 7 daily runs tuples covering the drop
-    # window plus a small safety margin (mirrors production drill cadence).
-    forcing_tuples = _daily_source_tuples(
-        now - timedelta(days=70), now - timedelta(days=58), "forcing"
-    )
-    runs_tuples = _daily_source_tuples(
-        now - timedelta(days=70), now - timedelta(days=58), "runs"
-    )
-    assert len(forcing_tuples) == 12
-    assert len(runs_tuples) == 12
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(forcing_tuples=forcing_tuples, runs_tuples=runs_tuples),
-    )
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, now, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "enforced", receipt
-
-
-def test_a2_full_runner_refuses_when_per_cycle_forcing_tuples_have_gap(
-    tmp_path: Path,
-) -> None:
-    """A2 end-to-end refusal: per-cycle drill receipt with a mid-drop-window
-    forcing gap → DRILL_COVERAGE_FORCING_MISSING (union does NOT cover).
-    """
-    now = _NOW
-    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60, duration_days=7)]
-    forcing_all = _daily_source_tuples(
-        now - timedelta(days=70), now - timedelta(days=58), "forcing"
-    )
-    # Drop the tuple sitting inside the drop window ([now-67d, now-60d]).
-    forcing_gapped = [
-        t
-        for t in forcing_all
-        if not (
-            _iso(now - timedelta(days=65)) <= t["window"]["start"] < _iso(now - timedelta(days=63))
-        )
-    ]
-    assert len(forcing_gapped) < len(forcing_all)
-    runs_tuples = _daily_source_tuples(
-        now - timedelta(days=70), now - timedelta(days=58), "runs"
-    )
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(forcing_tuples=forcing_gapped, runs_tuples=runs_tuples),
-    )
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, now, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_COVERAGE_FORCING_MISSING
-
-
-# ---------------------------------------------------------------------------
 # H3 per-tick bound + deferred_remainder (spec §6.1 row 3)
 # ---------------------------------------------------------------------------
 
@@ -2563,8 +518,6 @@ def test_a2_full_runner_refuses_when_per_cycle_forcing_tuples_have_gap(
 def test_per_tick_bound_selects_at_most_bound_and_defers_remainder(
     tmp_path: Path,
 ) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, per_tick_bound=3, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", f"chk-{i:02d}", delta_days=60 - i)
@@ -2592,8 +545,6 @@ def test_per_tick_bound_selects_at_most_bound_and_defers_remainder(
 
 def test_freed_bytes_measured_before_drop(tmp_path: Path) -> None:
     """H4: measure call for chunk X precedes drop call for chunk X (per-chunk)."""
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
@@ -2624,8 +575,6 @@ def test_freed_bytes_measured_before_drop(tmp_path: Path) -> None:
 
 
 def test_per_chunk_drop_failure_refuses_whole_tick(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
@@ -2656,8 +605,6 @@ def test_per_chunk_drop_failure_refuses_whole_tick(tmp_path: Path) -> None:
 
 def test_chunk_at_boundary_is_included_in_eligible(tmp_path: Path) -> None:
     """H7: chunk whose range_end == cutoff has all row times < cutoff → drop-eligible."""
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     # boundary chunk: range_end == cutoff exactly
     boundary = _chunk("hydro", "river_timeseries", "chk-boundary", delta_days=_DROP_WINDOW_DAYS)
@@ -2675,158 +622,11 @@ def test_default_fetch_filter_at_boundary_predicate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# H8 freshness gates at boundary + past
-# ---------------------------------------------------------------------------
-
-
-def test_completeness_freshness_at_boundary_passes(tmp_path: Path) -> None:
-    # generated_at exactly at the age-limit boundary — must still pass.
-    generated_at = _NOW - timedelta(hours=26)
-    _write_json(tmp_path / "completeness.json", _completeness_receipt(generated_at=generated_at))
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path, enforce=True)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "enforced"
-
-
-def test_completeness_freshness_past_boundary_refuses(tmp_path: Path) -> None:
-    generated_at = _NOW - timedelta(hours=27)
-    _write_json(tmp_path / "completeness.json", _completeness_receipt(generated_at=generated_at))
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
-
-
-def test_drill_freshness_at_boundary_passes(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(generated_at=_NOW - timedelta(days=30)),
-    )
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "enforced"
-
-
-def test_drill_freshness_past_boundary_refuses(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(generated_at=_NOW - timedelta(days=31)),
-    )
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_STALE
-
-
-# ---------------------------------------------------------------------------
-# H9 salvage_backed_windows derivation
-# ---------------------------------------------------------------------------
-
-
-def test_salvage_backed_windows_derived_from_completeness_db_export(
-    tmp_path: Path,
-) -> None:
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-a"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=90)),
-                    "end": _iso(_NOW - timedelta(days=85)),
-                },
-                "coverage": "db-export",
-                "verdict": "complete",
-            },
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-b"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=90)),
-                    "end": _iso(_NOW - timedelta(days=85)),
-                },
-                "coverage": "db-export",
-                "verdict": "complete",
-            },
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-c"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=80)),
-                    "end": _iso(_NOW - timedelta(days=75)),
-                },
-                "coverage": "db-export",
-                "verdict": "complete",
-            },
-        ]
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    drill = _drill_receipt(
-        db_export_window=(_NOW - timedelta(days=95), _NOW - timedelta(days=70)),
-    )
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path, enforce=True)
-    # Two chunks, one covering days 90-83 and another covering days 80-73,
-    # so the drop window spans day 90 through day 73 and overlaps both
-    # completeness subject windows.
-    chunks = [
-        _chunk("hydro", "river_timeseries", "chk-a", delta_days=83, duration_days=7),
-        _chunk("hydro", "river_timeseries", "chk-b", delta_days=73, duration_days=7),
-    ]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "enforced"
-    windows = receipt["salvage_backed_windows"]
-    # Deduped (fv-a and fv-b share the same window) and sorted ascending.
-    assert windows == [
-        {
-            "start": _iso(_NOW - timedelta(days=90)),
-            "end": _iso(_NOW - timedelta(days=85)),
-        },
-        {
-            "start": _iso(_NOW - timedelta(days=80)),
-            "end": _iso(_NOW - timedelta(days=75)),
-        },
-    ]
-
-
-def test_salvage_backed_windows_empty_without_db_export_subject(tmp_path: Path) -> None:
-    """H9: no db-export subject → empty array (schema-conformant)."""
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["salvage_backed_windows"] == []
-
-
-# ---------------------------------------------------------------------------
 # H17 zero-eligible enforce
 # ---------------------------------------------------------------------------
 
 
 def test_zero_eligible_enforce_produces_empty_enforced_receipt(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     stub = _StubRunner([])
     receipt = retention.run_retention(
@@ -2846,8 +646,6 @@ def test_zero_eligible_enforce_produces_empty_enforced_receipt(tmp_path: Path) -
 
 
 def test_dry_run_receipt_lists_candidates_and_defers(tmp_path: Path) -> None:
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, per_tick_bound=2, enforce=False)
     chunks = [
         _chunk("hydro", "river_timeseries", f"chk-{i}", delta_days=60 - i) for i in range(4)
@@ -2867,48 +665,6 @@ def test_dry_run_receipt_lists_candidates_and_defers(tmp_path: Path) -> None:
         "_timescaledb_internal.chk-3",
     ]
     # Dry-run never calls drop.
-    assert not any(c[0] == "drop" for c in stub.calls)
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_dry_run_evaluates_gates_before_dryrun_branch(tmp_path: Path) -> None:
-    """Behavior lock for runbook §8.5 claim: gates ARE evaluated in dry-run.
-
-    Same-class:byte-identity-drift closure (R2 fix, mirrors #854 R2 discipline
-    extension). Runbook §8.5 states: "Gates ARE evaluated in dry-run mode —
-    a dry-run invocation that would refuse still emits a `refused` receipt
-    (`mode=enforce` per the schema `oneOf`) so operators see the exact
-    refusal reason before ever running enforce."
-
-    A refactor moving gate checks after the dry-run branch would produce a
-    dry-run receipt for a stale completeness input, silently invalidating
-    the §8.5 claim. This test locks the order: with a stale completeness
-    receipt (age > default 26 h) AND ``enforce=False``, the runner MUST
-    surface the completeness-stale refusal (mode=enforce per schema oneOf),
-    NOT emit a dry-run receipt.
-    """
-    stale_completeness = _completeness_receipt(generated_at=_NOW - timedelta(hours=27))
-    _write_json(tmp_path / "completeness.json", stale_completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    # enforce=False → dry-run branch would fire if gates were skipped.
-    config = _build_config(tmp_path, enforce=False)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    # Gate refusal fires BEFORE the dry-run branch — no candidate_chunks
-    # emitted; refused receipt carries mode=enforce per schema oneOf pin.
-    assert receipt["outcome"] == "refused"
-    assert receipt["mode"] == "enforce"
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
-    # Dry-run never calls drop (baseline invariant preserved).
     assert not any(c[0] == "drop" for c in stub.calls)
     jsonschema.validate(receipt, _load_schema())
 
@@ -4131,107 +1887,9 @@ def test_measure_warning_byte_identical_with_runbook() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_completeness_receipt_rejects_malformed_subject_window(tmp_path: Path) -> None:
-    """RF-F1 R2 fix: loader ENFORCES format:date-time via _RECEIPT_FORMAT_CHECKER.
-
-    Silent-False fallback in _subject_overlaps_drop would skip a gap subject
-    with malformed window; loader-side FormatChecker refuses the receipt
-    entirely so a bad-shape completeness receipt cannot masquerade as
-    "no in-window subjects" and quietly reach the drop phase.
-
-    Deviation record: schema violation is surfaced via existing
-    CODE_COMPLETENESS_RECEIPT_MISSING code (no new SCHEMA_INVALID wire
-    code) — matches the pre-existing loader contract that groups
-    "receipt is not usable" causes under the missing code.
-    """
-    receipt = _completeness_receipt()
-    receipt["windows"][0]["window"]["start"] = "not-a-datetime"
-    completeness_path = tmp_path / "completeness.json"
-    _write_json(completeness_path, receipt)
-    with pytest.raises(retention.ReceiptGateError) as excinfo:
-        retention.load_completeness_receipt(completeness_path)
-    assert excinfo.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
-
-
-def test_load_completeness_receipt_rejects_malformed_generated_at(tmp_path: Path) -> None:
-    """RF-F1 R2 fix (symmetric): malformed top-level generated_at is refused
-    at load. Without FormatChecker, jsonschema would treat ``format`` as
-    informational and let the loader return a receipt with an unparseable
-    timestamp, which would then be caught as STALE downstream — the wrong
-    wire code for a shape defect.
-    """
-    receipt = _completeness_receipt()
-    receipt["generated_at"] = "not-a-datetime"
-    completeness_path = tmp_path / "completeness.json"
-    _write_json(completeness_path, receipt)
-    with pytest.raises(retention.ReceiptGateError) as excinfo:
-        retention.load_completeness_receipt(completeness_path)
-    assert excinfo.value.code == retention.CODE_COMPLETENESS_RECEIPT_MISSING
-
-
-def test_load_drill_receipt_rejects_malformed_coverage_window(tmp_path: Path) -> None:
-    """RF-F1 R2 fix (drill mirror): loader ENFORCES format:date-time on
-    drill coverage tuples via _RECEIPT_FORMAT_CHECKER. Silent-False
-    fallback in _tuples_cover_window would drop the malformed tuple and
-    could silently emit a spurious DRILL_COVERAGE_<source>_MISSING (or
-    worse, pass a UNION check that no longer reflects the receipt shape).
-    """
-    drill = _drill_receipt()
-    # First coverage tuple → malformed start.
-    assert drill["coverage"], "drill fixture must ship coverage tuples"
-    drill["coverage"][0]["window"]["start"] = "not-a-datetime"
-    drill_path = tmp_path / "drill.json"
-    _write_json(drill_path, drill)
-    with pytest.raises(retention.ReceiptGateError) as excinfo:
-        retention.load_drill_receipt(drill_path)
-    assert excinfo.value.code == retention.CODE_DRILL_RECEIPT_MISSING
-
-
-def test_load_drill_receipt_rejects_malformed_generated_at(tmp_path: Path) -> None:
-    """RF-F1 R2 fix (drill mirror, symmetric to completeness generated_at)."""
-    drill = _drill_receipt()
-    drill["generated_at"] = "not-a-datetime"
-    drill_path = tmp_path / "drill.json"
-    _write_json(drill_path, drill)
-    with pytest.raises(retention.ReceiptGateError) as excinfo:
-        retention.load_drill_receipt(drill_path)
-    assert excinfo.value.code == retention.CODE_DRILL_RECEIPT_MISSING
-
-
 # ---------------------------------------------------------------------------
 # F1-fix — negative-age freshness guard (defensive against clock skew)
 # ---------------------------------------------------------------------------
-
-
-def test_completeness_receipt_future_dated_refuses_with_stale(tmp_path: Path) -> None:
-    """F1-fix: a completeness receipt whose ``generated_at`` is IN THE
-    FUTURE (clock skew or misconfigured emitter) MUST NOT be treated as
-    fresh. Reuse STALE per H8 discipline (no new wire code).
-    """
-    future_completeness = _completeness_receipt(generated_at=_NOW + timedelta(minutes=5))
-    _write_json(tmp_path / "completeness.json", future_completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
-
-
-def test_drill_receipt_future_dated_refuses_with_stale(tmp_path: Path) -> None:
-    """F1-fix: drill receipt future-dated → STALE (symmetric with completeness)."""
-    future_drill = _drill_receipt(generated_at=_NOW + timedelta(minutes=5))
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", future_drill)
-    config = _build_config(tmp_path, enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)])
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["outcome"] == "refused"
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_RECEIPT_STALE
 
 
 # ---------------------------------------------------------------------------
@@ -4253,8 +1911,6 @@ def test_metadata_table_row_counts_unchanged_under_enforce(
     """
     if os.environ.get("NHMS_RUN_INTEGRATION") != "1":
         pytest.skip("NHMS_RUN_INTEGRATION not set")
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", "chk-r", delta_days=60),
@@ -4364,10 +2020,6 @@ def test_env_example_lists_all_h13_keys() -> None:
         "DATABASE_URL",
         "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS",
         "NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND",
-        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
-        "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
-        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS",
-        "NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS",
         "NODE27_TIMESERIES_RETENTION_RECEIPT_PATH",
         "NODE27_TIMESERIES_RETENTION_LOCK_PATH",
         "NODE27_TIMESERIES_RETENTION_ENFORCE",
@@ -4377,199 +2029,9 @@ def test_env_example_lists_all_h13_keys() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Refusal priority — completeness bounds before drill missing (spot-check).
-# ---------------------------------------------------------------------------
-
-
-def test_completeness_bounds_refuses_before_drill_missing(tmp_path: Path) -> None:
-    """Refusal-order pin from brief: completeness bounds → gap → pending → drill missing → …
-
-    A missing drill receipt + insufficient completeness bounds MUST surface
-    the completeness bounds code (higher priority), not the drill missing.
-    """
-    completeness = _completeness_receipt(
-        bounds_start=_NOW - timedelta(days=40),
-        bounds_end=_NOW - timedelta(days=32),
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    config.drill_receipt_path.unlink()  # drill missing
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=80)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
-
-
-# ---------------------------------------------------------------------------
-# E1-fix — additional refusal precedence pairs (runbook §8.2 priority chain).
-# ---------------------------------------------------------------------------
-
-
-def test_completeness_stale_refuses_before_drill_missing(tmp_path: Path) -> None:
-    """STALE > DRILL_MISSING per §8.2 chain."""
-    stale = _completeness_receipt(generated_at=_NOW - timedelta(hours=27))
-    _write_json(tmp_path / "completeness.json", stale)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
-    config = _build_config(tmp_path)
-    config.drill_receipt_path.unlink()  # drill missing
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=60)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_STALE
-
-
-def test_completeness_gap_refuses_before_drill_stale(tmp_path: Path) -> None:
-    """GAP > DRILL_STALE per §8.2 chain."""
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "runs",
-                "subject": {"run_id": "run-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=63)),
-                },
-                "coverage": "none",
-                "verdict": "gap",
-            }
-        ]
-    )
-    stale_drill = _drill_receipt(generated_at=_NOW - timedelta(days=45))
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", stale_drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW
-
-
-def test_completeness_pending_refuses_before_drill_fail(tmp_path: Path) -> None:
-    """PENDING > DRILL_FAIL per §8.2 chain."""
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=63)),
-                },
-                "coverage": "hot-object-store",
-                "verdict": "pending-archive",
-            }
-        ]
-    )
-    failed_drill = _drill_receipt(verdict="FAIL")
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", failed_drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW
-
-
-def test_completeness_bounds_refuses_before_drill_coverage_missing(tmp_path: Path) -> None:
-    """BOUNDS > DRILL_COVERAGE_* per §8.2 chain."""
-    completeness = _completeness_receipt(
-        bounds_start=_NOW - timedelta(days=40),
-        bounds_end=_NOW - timedelta(days=32),
-    )
-    # Drill missing forcing coverage entirely — lower-priority code.
-    drill_missing_forcing = _drill_receipt(forcing_tuples=[])
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", drill_missing_forcing)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=80)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
-
-
-def test_drill_derivation_window_refuses_before_drill_coverage_missing(tmp_path: Path) -> None:
-    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COVERAGE_* per §8.2 chain (#1207).
-
-    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
-    inside the `[72 d, 65 d]` drop window) AND missing its forcing coverage
-    leg entirely. The derivation-window guard outranks every coverage leg, so
-    no coverage-union evidence from a run that never judged this span is
-    consulted — the surfaced code is the window code, not FORCING_MISSING.
-    """
-    narrowed_drill = _drill_receipt(forcing_tuples=[])
-    narrowed_drill["salvage_derivation"] = _salvage_derivation(
-        {
-            "start": _iso(_NOW - timedelta(days=70)),
-            "end": _iso(_NOW - timedelta(days=67)),
-        }
-    )
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", narrowed_drill)
-    config = _build_config(tmp_path)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=65)]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
-
-
-def test_drill_derivation_window_refuses_before_snapshot_unbound(tmp_path: Path) -> None:
-    """DRILL_DERIVATION_WINDOW_TOO_NARROW > DRILL_COMPLETENESS_SNAPSHOT_UNBOUND
-    per §8.2 chain (#1207 before #1220), at the receipt surface.
-
-    The drill is BOTH narrowed (`salvage_derivation.drop_window` sits strictly
-    inside the `[74 d, 60 d]` drop window) AND unbound (the gate-time
-    completeness receipt gained a db-export/complete subject the drill's
-    recorded universe never contained). The containment guard wins — and it
-    has to: the recorded universe is unfiltered, so binding only implies
-    "restore-verified" once containment holds (design D5-(d)).
-    """
-    drop_start = _NOW - timedelta(days=74)
-    drop_end = _NOW - timedelta(days=60)
-    completeness = _completeness_receipt(
-        subjects=[
-            _db_export_subject(drop_start, drop_end, version="fv-salvage-a"),
-            _db_export_subject(
-                _NOW - timedelta(days=70), _NOW - timedelta(days=65), version="fv-salvage-b"
-            ),
-        ]
-    )
-    drill = _drill_receipt(db_export_tuples=_db_export_tuples(drop_start, drop_end))
-    drill["salvage_derivation"] = _bound_salvage_derivation(
-        drop_window=_win(_NOW - timedelta(days=70), _NOW - timedelta(days=68)),
-        db_export_windows=[_win(drop_start, drop_end)],
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", drill)
-    config = _build_config(tmp_path)
-    chunks = [
-        _chunk(
-            "met", "forcing_station_timeseries", "chk-narrow-unbound", delta_days=60, duration_days=14
-        )
-    ]
-    stub = _StubRunner(chunks)
-    receipt = retention.run_retention(
-        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
-    )
-    assert receipt["refusal_reason"] == retention.CODE_DRILL_DERIVATION_WINDOW_TOO_NARROW
-
-
-# ---------------------------------------------------------------------------
 # G F2 — H7 straddling chunk: range_start < cutoff < range_end NOT included.
 # G F3 — Mixed-compressed: eligible list contains compressed + uncompressed.
-# G Schema C1 — jsonschema validation on 8 uncovered receipt shapes.
+# G Schema C1 — jsonschema validation on every surviving refused shape.
 # G Schema C2 — FormatChecker on salvage_backed_windows date-time.
 # ---------------------------------------------------------------------------
 
@@ -4588,23 +2050,14 @@ def test_chunk_straddling_cutoff_is_not_eligible() -> None:
     # therefore never sees straddling chunks in ``eligible[]``.
 
 
-def test_retention_cutoff_uses_display_watermark_but_gate_freshness_uses_wall_clock(
+def test_retention_cutoff_uses_display_watermark_not_the_wall_clock(
     tmp_path: Path,
 ) -> None:
+    """The drop cutoff is derived from the display watermark passed in as
+    ``reference_time``; ``generated_at`` still stamps the wall clock.
+    """
     wall_time = datetime(2026, 7, 22, 0, tzinfo=UTC)
     reference_time = datetime(2026, 7, 11, 12, tzinfo=UTC)
-    _write_json(
-        tmp_path / "completeness.json",
-        _completeness_receipt(
-            generated_at=wall_time - timedelta(hours=1),
-            bounds_start=reference_time - timedelta(days=365),
-            bounds_end=reference_time,
-        ),
-    )
-    _write_json(
-        tmp_path / "drill.json",
-        _drill_receipt(generated_at=wall_time - timedelta(days=1)),
-    )
     config = _build_config(tmp_path)
     stub = _StubRunner([])
 
@@ -4630,8 +2083,6 @@ def test_mixed_compressed_and_uncompressed_chunks_both_drop(tmp_path: Path) -> N
     compression sibling: compressed chunks older than 14 d ARE retention
     targets (see H3 comment in ``_CHUNK_QUERY``).
     """
-    _write_json(tmp_path / "completeness.json", _completeness_receipt())
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     config = _build_config(tmp_path, enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", "chk-compressed", delta_days=60, is_compressed=True),
@@ -4652,20 +2103,19 @@ def test_mixed_compressed_and_uncompressed_chunks_both_drop(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "wire_code",
     [
-        retention.CODE_COMPLETENESS_RECEIPT_MISSING,
-        retention.CODE_COMPLETENESS_RECEIPT_STALE,
-        retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
-        retention.CODE_COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW,
-        retention.CODE_COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW,
-        retention.CODE_DRILL_RECEIPT_MISSING,
-        retention.CODE_DRILL_RECEIPT_STALE,
-        retention.CODE_DRILL_RECEIPT_FAIL,
+        retention.CODE_RETENTION_CONFIG_INVALID,
+        retention.CODE_RETENTION_CONCURRENT_INVOCATION,
+        retention.CODE_RETENTION_DROP_FAILED,
+        retention.CODE_RETENTION_UNCAUGHT_ERROR,
     ],
 )
 def test_refused_receipt_shape_validates_against_schema(wire_code: str) -> None:
-    """G Schema C1: refused receipt (one of 8 wire codes) is schema-conformant."""
+    """G Schema C1: a refused receipt for each surviving wire code is
+    schema-conformant and self-describes the `disabled` deletion authority.
+    """
     receipt = retention.build_receipt("refused", _NOW, refusal_reason=wire_code)
     jsonschema.validate(receipt, _load_schema())
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
 
 
 def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> None:
@@ -4680,7 +2130,12 @@ def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> No
         "generated_at": _iso(_NOW),
         "mode": "enforce",
         "outcome": "enforced",
-        "archive_gate": {"mode": "enabled"},
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": (
+                "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
+            ),
+        },
         "dropped_chunks": [],
         "deferred_remainder": [],
         "salvage_backed_windows": [{"start": "not-a-datetime", "end": _iso(_NOW)}],
@@ -4696,7 +2151,12 @@ def test_enforced_receipt_generated_at_datetime_format_enforced() -> None:
         "generated_at": "not-a-datetime",
         "mode": "enforce",
         "outcome": "enforced",
-        "archive_gate": {"mode": "enabled"},
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": (
+                "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
+            ),
+        },
         "dropped_chunks": [],
         "deferred_remainder": [],
         "salvage_backed_windows": [],
@@ -4706,13 +2166,15 @@ def test_enforced_receipt_generated_at_datetime_format_enforced() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #1369 — explicit archive-gate disabled mode (ADR 0002 Revision 2026-08-11)
+# #1369/#1370 — the archive gate is `disabled` and nothing else
+# (ADR 0002 Revision 2026-08-11)
 #
-# Three orthogonal axes: gate mode (enabled/disabled) x dry-run/enforce x
-# outcome branch. The pins below are written against the fixture's own
-# strings (env key, enum values, ADR reference constant), never echoed from
-# the module, so a rename in the runner cannot silently drag the oracle
-# along.
+# Two orthogonal axes remain: dry-run/enforce x outcome branch. The gate mode
+# is a constant: `disabled` is the only accepted value, and the `enabled` mode
+# retired with the archive lane (#1370). The pins below are written against
+# the fixture's own strings (env key, enum value, ADR reference constant),
+# never echoed from the module, so a rename in the runner cannot silently drag
+# the oracle along.
 # ---------------------------------------------------------------------------
 
 
@@ -4723,25 +2185,13 @@ _ADR_REFERENCE = "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2
 _ADR_PATH_ANCHOR = "docs/adr/0002-node27-timeseries-hot-cold-tiering.md"
 _ADR_REVISION_ANCHOR = "Revision 2026-08-11"
 
-# The thirteen archive-family wire codes. In disabled mode none of them is
-# reachable; the four runner-own codes remain reachable.
-_ARCHIVE_FAMILY_CODES = frozenset(
-    {
-        "COMPLETENESS_RECEIPT_MISSING",
-        "COMPLETENESS_RECEIPT_STALE",
-        "COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT",
-        "COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW",
-        "COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW",
-        "DRILL_RECEIPT_MISSING",
-        "DRILL_RECEIPT_STALE",
-        "DRILL_RECEIPT_FAIL",
-        "DRILL_DERIVATION_WINDOW_TOO_NARROW",
-        "DRILL_COVERAGE_FORCING_MISSING",
-        "DRILL_COVERAGE_RUNS_MISSING",
-        "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND",
-        "DRILL_COVERAGE_DB_EXPORT_MISSING",
-    }
-)
+# #1370 diagnostics contract: refusing an unset / `enabled` / bogus gate value
+# must name the retirement authority AND tell the operator what to set. Both
+# fragments are spelled literally here — they are the operator-facing text the
+# spec scenario pins, not an echo of the runner's f-string.
+_RETIREMENT_DIAGNOSTIC = "archive lane permanently retired (ADR 0002 Revision 2026-08-11)"
+_EXPLICIT_DISABLED_INSTRUCTION = f"set {_ARCHIVE_GATE_ENV_KEY}=disabled"
+
 _RUNNER_OWN_CODES = frozenset(
     {
         "RETENTION_CONFIG_INVALID",
@@ -4752,52 +2202,41 @@ _RUNNER_OWN_CODES = frozenset(
 )
 
 
-def test_archive_family_partition_covers_wire_codes_exactly() -> None:
-    """The 13/4 split is a partition of WIRE_CODES — no code escapes the
-    reachability matrix below by being absent from both halves.
+def test_wire_codes_are_exactly_the_four_runner_own_codes() -> None:
+    """#1370: after the archive family retired, `WIRE_CODES` is the runner's
+    own refusal vocabulary and nothing else.
     """
-    assert len(_ARCHIVE_FAMILY_CODES) == 13
-    assert len(_RUNNER_OWN_CODES) == 4
-    assert _ARCHIVE_FAMILY_CODES.isdisjoint(_RUNNER_OWN_CODES)
-    assert _ARCHIVE_FAMILY_CODES | _RUNNER_OWN_CODES == retention.WIRE_CODES
+    assert retention.WIRE_CODES == _RUNNER_OWN_CODES
 
 
-def _disabled_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
-    """Env for disabled mode with BOTH archive receipt path vars absent."""
-    base: dict[str, str | None] = {
-        _ARCHIVE_GATE_ENV_KEY: "disabled",
-        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": None,
-        "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": None,
-    }
-    base.update(overrides)
-    return _base_env(tmp_path, **base)
-
-
-# --- tasks 2.1: D1 mode parse table ---------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        pytest.param(None, "enabled", id="unset-defaults-enabled"),
-        pytest.param("enabled", "enabled", id="enabled"),
-        pytest.param("disabled", "disabled", id="disabled"),
-        pytest.param("  disabled  ", "disabled", id="disabled-surrounding-spaces"),
-        pytest.param("\tenabled\n", "enabled", id="enabled-surrounding-tabs"),
-        pytest.param("DISABLED", "disabled", id="disabled-uppercase"),
-        pytest.param("Enabled", "enabled", id="enabled-mixed-case"),
-    ],
-)
-def test_archive_gate_env_parse_table(tmp_path: Path, raw: str | None, expected: str) -> None:
-    """D1: unset → enabled; strip+lower must land inside the enum."""
-    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
-    config = retention.config_from_args(_args(), env)
-    assert config.archive_gate == expected
+# --- D1 mode parse table (#1370: `disabled` or refuse) --------------------
 
 
 @pytest.mark.parametrize(
     "raw",
     [
+        pytest.param("disabled", id="disabled"),
+        pytest.param("  disabled  ", id="disabled-surrounding-spaces"),
+        pytest.param("\tdisabled\n", id="disabled-surrounding-tabs"),
+        pytest.param("DISABLED", id="disabled-uppercase"),
+        pytest.param("Disabled", id="disabled-mixed-case"),
+    ],
+)
+def test_archive_gate_env_parse_table_accepts_only_disabled(tmp_path: Path, raw: str) -> None:
+    """D1: strip+lower must equal ``disabled``; every accepted spelling of it
+    resolves to the one surviving mode.
+    """
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
+    config = retention.config_from_args(_args(), env)
+    assert config.archive_gate == "disabled"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(None, id="unset"),
+        pytest.param("enabled", id="retired-enabled"),
+        pytest.param("\tEnabled\n", id="retired-enabled-mixed-case"),
         pytest.param("", id="empty-string"),
         pytest.param("   ", id="whitespace-only"),
         pytest.param("disable", id="typo-disable"),
@@ -4808,22 +2247,43 @@ def test_archive_gate_env_parse_table(tmp_path: Path, raw: str | None, expected:
         pytest.param("enabled disabled", id="both"),
     ],
 )
-def test_archive_gate_invalid_env_value_fails_closed(tmp_path: Path, raw: str) -> None:
-    """D1: three-value risk switch — anything outside the enum must explode.
+def test_archive_gate_anything_but_disabled_is_config_invalid(
+    tmp_path: Path, raw: str | None
+) -> None:
+    """D1: the archive lane is retired, so `disabled` is the only mode.
 
-    No truthiness fallback (that is the ``--enforce`` precedent and it is
-    deliberately NOT reused here).
+    Unset is refused too — the fail-closed direction is preserved (an unset
+    variable never silently deletes), it just refuses as config-invalid now
+    instead of running an archive gate that can never be satisfied.
     """
     env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
-    with pytest.raises(retention.RetentionConfigError, match=_ARCHIVE_GATE_ENV_KEY):
+    with pytest.raises(retention.RetentionConfigError) as error:
         retention.config_from_args(_args(), env)
+    message = str(error.value)
+    assert _ARCHIVE_GATE_ENV_KEY in message
+    assert _RETIREMENT_DIAGNOSTIC in message
+    assert _EXPLICIT_DISABLED_INSTRUCTION in message
 
 
-def test_main_invalid_archive_gate_exits_two_without_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(None, id="unset"),
+        pytest.param("enabled", id="retired-enabled"),
+        pytest.param("disable", id="typo-disable"),
+    ],
+)
+def test_main_non_disabled_archive_gate_exits_two_without_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: str | None,
 ) -> None:
-    """D1 end-to-end: exit 2, RETENTION_CONFIG_INVALID on stderr, NO receipt."""
-    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: "disable"})
+    """D1 end-to-end: exit 2, RETENTION_CONFIG_INVALID on stderr, NO receipt,
+    and the diagnostics carry the retirement authority + the instruction.
+    """
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
+    monkeypatch.delenv(_ARCHIVE_GATE_ENV_KEY, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
@@ -4835,26 +2295,35 @@ def test_main_invalid_archive_gate_exits_two_without_receipt(
     payload = json.loads(capsys.readouterr().err.strip())
     assert payload["code"] == retention.CODE_RETENTION_CONFIG_INVALID
     assert _ARCHIVE_GATE_ENV_KEY in payload["reason"]
+    assert _RETIREMENT_DIAGNOSTIC in payload["reason"]
+    assert _EXPLICIT_DISABLED_INSTRUCTION in payload["reason"]
 
 
-@pytest.mark.parametrize(
-    ("env_value", "cli_value", "expected"),
-    [
-        pytest.param("enabled", "disabled", "disabled", id="cli-disabled-beats-env-enabled"),
-        pytest.param("disabled", "enabled", "enabled", id="cli-enabled-beats-env-disabled"),
-        pytest.param(None, "disabled", "disabled", id="cli-disabled-without-env"),
-    ],
-)
-def test_archive_gate_cli_overrides_env(
-    tmp_path: Path, env_value: str | None, cli_value: str, expected: str
-) -> None:
+def test_archive_gate_cli_disabled_beats_a_retired_env_value(tmp_path: Path) -> None:
     """CLI wins over env, matching the ``--enforce`` precedent."""
-    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: env_value})
-    config = retention.config_from_args(_args(archive_gate=cli_value), env)
-    assert config.archive_gate == expected
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: "enabled"})
+    config = retention.config_from_args(_args(archive_gate="disabled"), env)
+    assert config.archive_gate == "disabled"
 
 
-def test_parser_archive_gate_choices_are_the_enum() -> None:
+def test_archive_gate_cli_enabled_is_refused_even_over_a_disabled_env(
+    tmp_path: Path,
+) -> None:
+    """The CLI cannot resurrect the retired mode: `--archive-gate enabled`
+    parses (argparse choices keep both values so the refusal carries the wire
+    code and the ADR text) and is then refused by the resolver.
+    """
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: "disabled"})
+    with pytest.raises(retention.RetentionConfigError) as error:
+        retention.config_from_args(_args(archive_gate="enabled"), env)
+    assert _RETIREMENT_DIAGNOSTIC in str(error.value)
+
+
+def test_parser_archive_gate_choices_keep_both_values(tmp_path: Path) -> None:
+    """`enabled` stays an argparse choice on purpose: rejecting it in argparse
+    would emit a bare usage error with no wire code and no ADR citation. The
+    single refusal path is ``_resolve_archive_gate``.
+    """
     parser = retention._parser()
     assert parser.parse_args([]).archive_gate is None
     assert parser.parse_args(["--archive-gate", "disabled"]).archive_gate == "disabled"
@@ -4863,61 +2332,55 @@ def test_parser_archive_gate_choices_are_the_enum() -> None:
         parser.parse_args(["--archive-gate", "disable"])
 
 
-# --- tasks 2.2: D4 conditional path requirement (both directions) ---------
+# --- the retired gate machinery is gone -----------------------------------
 
 
 @pytest.mark.parametrize(
-    "missing_key",
+    "symbol",
+    [
+        "load_completeness_receipt",
+        "load_drill_receipt",
+        "check_completeness_gate",
+        "check_drill_gate",
+        "derive_salvage_backed_windows",
+        "ReceiptGateError",
+    ],
+)
+def test_retired_gate_machinery_is_absent_from_the_module(symbol: str) -> None:
+    """#1370: the loaders and both gate adjudications no longer exist."""
+    assert not hasattr(retention, symbol)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "completeness_receipt_path",
+        "drill_receipt_path",
+        "completeness_max_age_hours",
+        "drill_max_age_days",
+    ],
+)
+def test_retired_config_fields_are_gone(tmp_path: Path, field_name: str) -> None:
+    config = retention.config_from_args(_args(), _base_env(tmp_path))
+    assert not hasattr(config, field_name)
+
+
+@pytest.mark.parametrize(
+    "env_key",
     [
         "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
         "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
+        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS",
+        "NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS",
     ],
 )
-@pytest.mark.parametrize(
-    "gate", [pytest.param(None, id="gate-unset"), pytest.param("enabled", id="gate-enabled")]
-)
-def test_archive_gate_enabled_still_requires_both_archive_paths(
-    tmp_path: Path, missing_key: str, gate: str | None
-) -> None:
-    """D4 direction 1: the enabled side is NOT relaxed by this change."""
-    env = _base_env(tmp_path, **{missing_key: None, _ARCHIVE_GATE_ENV_KEY: gate})
-    with pytest.raises(retention.RetentionConfigError, match=missing_key):
-        retention.config_from_args(_args(), env)
-
-
-def test_archive_gate_disabled_makes_both_archive_paths_optional(tmp_path: Path) -> None:
-    """D4 direction 2: disabled + both path vars absent parses to ``None``.
-
-    ``_resolve_path(..., required=False)`` raises by construction, so the
-    only correct implementation is to NOT resolve these two paths at all.
+def test_retired_env_keys_are_ignored_not_required(tmp_path: Path, env_key: str) -> None:
+    """A box that still carries a retired key in its env file keeps working:
+    the runner never reads it, and never demands it either.
     """
-    config = retention.config_from_args(_args(), _disabled_env(tmp_path))
-    assert config.archive_gate == "disabled"
-    assert config.completeness_receipt_path is None
-    assert config.drill_receipt_path is None
-
-
-def test_archive_gate_disabled_ignores_paths_pointing_at_missing_files(
-    tmp_path: Path,
-) -> None:
-    """Given-but-unread proof: the two env vars name files that do not exist
-    and the tick still succeeds (an enabled-mode tick would refuse with
-    ``COMPLETENESS_RECEIPT_MISSING``).
-    """
-    ghost_completeness = tmp_path / "ghost" / "completeness.json"
-    ghost_drill = tmp_path / "ghost" / "drill.json"
-    assert not ghost_completeness.exists() and not ghost_drill.exists()
-    env = _base_env(
-        tmp_path,
-        **{
-            _ARCHIVE_GATE_ENV_KEY: "disabled",
-            "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": str(ghost_completeness),
-            "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": str(ghost_drill),
-        },
-    )
+    env = _base_env(tmp_path, **{env_key: "/leftover/value"})
     config = retention.config_from_args(_args(), env)
-    assert config.completeness_receipt_path is None
-    assert config.drill_receipt_path is None
+    assert config.archive_gate == "disabled"
 
     stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
     receipt = retention.run_retention(
@@ -4927,34 +2390,8 @@ def test_archive_gate_disabled_ignores_paths_pointing_at_missing_files(
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
     )
-
     assert receipt["outcome"] == "dry-run"
     assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
-
-
-def test_run_retention_disabled_never_reads_a_configured_receipt_path(
-    tmp_path: Path,
-) -> None:
-    """Even when the config object still carries archive paths (hand-built or
-    left over), disabled mode must not open them.
-    """
-    config = _build_config(
-        tmp_path,
-        archive_gate="disabled",
-        completeness_receipt_path=tmp_path / "does-not-exist-completeness.json",
-        drill_receipt_path=tmp_path / "does-not-exist-drill.json",
-    )
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert receipt["outcome"] == "dry-run"
 
 
 # --- tasks 2.3: D2 behavior -----------------------------------------------
@@ -4992,13 +2429,7 @@ def test_disabled_enforce_drops_and_records_authorization(tmp_path: Path) -> Non
     the receipt records the authorization, with ``salvage_backed_windows``
     pinned to the empty list (no archive endorsement exists).
     """
-    config = _build_config(
-        tmp_path,
-        archive_gate="disabled",
-        enforce=True,
-        completeness_receipt_path=None,
-        drill_receipt_path=None,
-    )
+    config = _build_config(tmp_path, archive_gate="disabled", enforce=True)
     chunks = [
         _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
         _chunk("met", "forcing_station_timeseries", "chk-b", delta_days=61),
@@ -5026,176 +2457,39 @@ def test_disabled_enforce_drops_and_records_authorization(tmp_path: Path) -> Non
     jsonschema.validate(receipt, _load_schema())
 
 
-def test_disabled_enforce_salvage_windows_empty_even_with_db_export_subjects(
-    tmp_path: Path,
-) -> None:
-    """The completeness receipt on disk carries db-export subjects that WOULD
-    derive salvage-backed windows in enabled mode; disabled mode never looks.
+def test_boundary_partial_chunk_is_a_drop_candidate(tmp_path: Path) -> None:
+    """Spec scenario: a chunk that straddles what used to be the inventory
+    coverage boundary is a drop candidate — the completeness-bounds deferral
+    retired with the archive lane (runbook §8.5).
+
+    The two chunks below are the exact fixture the retired bounds partition
+    split: `chk-partial` began before a `_NOW - 65 d` coverage start,
+    `chk-covered` lay wholly inside it. Both are now candidates.
     """
-    completeness = _completeness_receipt(
-        subjects=[
-            {
-                "lane": "forcing",
-                "subject": {"forcing_version_id": "fv-1"},
-                "window": {
-                    "start": _iso(_NOW - timedelta(days=70)),
-                    "end": _iso(_NOW - timedelta(days=50)),
-                },
-                "coverage": "db-export",
-                "verdict": "complete",
-            }
-        ]
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    config = _build_config(tmp_path, archive_gate="disabled", enforce=True)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert receipt["outcome"] == "enforced"
-    assert receipt["salvage_backed_windows"] == []
-
-
-def test_boundary_partial_chunk_becomes_candidate_when_gate_disabled(
-    tmp_path: Path,
-) -> None:
-    """Documented semantic change (design D2 consumer 2): the chunk that
-    enabled mode bounds-defers is a drop candidate in disabled mode. Both
-    modes run against the SAME fixture so the delta is the mode, nothing else.
-    """
-    completeness = _completeness_receipt(
-        bounds_start=_NOW - timedelta(days=65),
-        bounds_end=_NOW,
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    _write_json(tmp_path / "drill.json", _drill_receipt())
     partial = _chunk("hydro", "river_timeseries", "chk-partial", delta_days=60, duration_days=7)
     covered = _chunk("hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7)
 
-    enabled_receipt = retention.run_retention(
+    receipt = retention.run_retention(
         _build_config(tmp_path, per_tick_bound=5),
         _NOW,
         fetch_chunks=_StubRunner([partial, covered]).fetch,
     )
-    disabled_receipt = retention.run_retention(
-        _build_config(tmp_path, per_tick_bound=5, archive_gate="disabled"),
-        _NOW,
-        fetch_chunks=_StubRunner([partial, covered]).fetch,
-    )
 
-    assert enabled_receipt["candidate_chunks"] == [covered.qualified_name]
-    assert enabled_receipt["deferred_remainder"] == [partial.qualified_name]
-    assert disabled_receipt["candidate_chunks"] == [
+    assert receipt["candidate_chunks"] == [
         partial.qualified_name,
         covered.qualified_name,
     ]
-    assert disabled_receipt["deferred_remainder"] == []
-    jsonschema.validate(disabled_receipt, _load_schema())
-
-
-def test_bounds_insufficient_refusal_is_unreachable_when_gate_disabled(
-    tmp_path: Path,
-) -> None:
-    """Same fixture that refuses BOUNDS_INSUFFICIENT in enabled mode runs
-    clean in disabled mode (that refusal is an archive-family code).
-    """
-    completeness = _completeness_receipt(
-        bounds_start=_NOW - timedelta(days=40),
-        bounds_end=_NOW - timedelta(days=32),
-    )
-    _write_json(tmp_path / "completeness.json", completeness)
-    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=80, duration_days=7)]
-
-    enabled_receipt = retention.run_retention(
-        _build_config(tmp_path), _NOW, fetch_chunks=_StubRunner(chunks).fetch
-    )
-    disabled_receipt = retention.run_retention(
-        _build_config(tmp_path, archive_gate="disabled"),
-        _NOW,
-        fetch_chunks=_StubRunner(chunks).fetch,
-    )
-
-    assert (
-        enabled_receipt["refusal_reason"]
-        == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
-    )
-    assert disabled_receipt["outcome"] == "dry-run"
-    assert disabled_receipt["candidate_chunks"] == ["_timescaledb_internal.chk-old"]
-
-
-def test_enabled_mode_receipts_carry_mode_enabled_without_adr_reference(
-    tmp_path: Path,
-) -> None:
-    """Default (env unset) receipts self-describe as ``enabled`` and MUST NOT
-    cite the ADR revision — the citation is the disabled-mode authorization.
-    """
-    config = _build_config(tmp_path)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert config.archive_gate == "enabled"
-    assert receipt["archive_gate"] == {"mode": "enabled"}
-    assert "adr_reference" not in receipt["archive_gate"]
-
-
-# --- tasks 2.4: unreachability of the archive family ----------------------
-
-
-_ARCHIVE_GATE_FUNCTIONS = (
-    "load_completeness_receipt",
-    "load_drill_receipt",
-    "check_completeness_gate",
-    "check_drill_gate",
-)
-
-
-def _forbid_archive_gate_functions(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in _ARCHIVE_GATE_FUNCTIONS:
-
-        def _boom(*args: Any, __name: str = name, **kwargs: Any) -> Any:
-            raise AssertionError(f"{__name} must not run in disabled mode")
-
-        monkeypatch.setattr(retention, name, _boom)
-
-
-@pytest.mark.parametrize("enforce", [False, True], ids=["dry-run", "enforce"])
-def test_disabled_mode_never_calls_the_archive_gate_functions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
-) -> None:
-    _forbid_archive_gate_functions(monkeypatch)
-    config = _build_config(tmp_path, archive_gate="disabled", enforce=enforce)
-    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
-
-    receipt = retention.run_retention(
-        config,
-        _NOW,
-        fetch_chunks=stub.fetch,
-        measure_chunk_bytes=stub.measure,
-        drop_chunk=stub.drop,
-    )
-
-    assert receipt["outcome"] == ("enforced" if enforce else "dry-run")
-    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    assert receipt["deferred_remainder"] == []
     jsonschema.validate(receipt, _load_schema())
+
+
+# --- every refusal is one of the four runner-own codes --------------------
 
 
 def _assert_disabled_refusal(receipt: Mapping[str, Any]) -> None:
     assert receipt["outcome"] == "refused"
     prefix = str(receipt["refusal_reason"]).split(":", maxsplit=1)[0]
-    assert prefix not in _ARCHIVE_FAMILY_CODES, prefix
+    assert prefix not in _RETIRED_ARCHIVE_FAMILY_CODES, prefix
     assert prefix in _RUNNER_OWN_CODES, prefix
     assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
     jsonschema.validate(receipt, _load_schema())
@@ -5221,11 +2515,9 @@ def test_disabled_drop_failure_refusal_stays_runner_own(tmp_path: Path) -> None:
 def test_disabled_concurrent_invocation_refusal_carries_archive_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    env = _disabled_env(tmp_path)
+    env = _base_env(tmp_path)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
     lock_path = Path(env["NODE27_TIMESERIES_RETENTION_LOCK_PATH"])
     receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
@@ -5246,11 +2538,9 @@ def test_disabled_concurrent_invocation_refusal_carries_archive_gate(
 def test_disabled_uncaught_error_refusal_carries_archive_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    env = _disabled_env(tmp_path)
+    env = _base_env(tmp_path)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
 
     def _bang_fetch(
         config: retention.RetentionConfig, cutoff: datetime
@@ -5275,11 +2565,9 @@ def test_disabled_main_enforce_end_to_end_publishes_enforced_receipt(
     """Whole-entrypoint pin: env-only disabled config (no archive path vars),
     enforce on, receipt published and schema-valid.
     """
-    env = _disabled_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
-    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
     stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
 
     code = retention.main(
@@ -5460,6 +2748,12 @@ def test_runbook_8_5_documents_archive_gate_field_and_boundary_partial_change() 
 def test_env_example_warns_about_the_missing_archive_backstop() -> None:
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     assert re.search(rf"^#?{re.escape(_ARCHIVE_GATE_ENV_KEY)}=", text, flags=re.MULTILINE)
+    # The gate line must ship UNCOMMENTED and set to the only accepted value:
+    # a commented-out line leaves the key unset, which the runner refuses with
+    # RETENTION_CONFIG_INVALID (exit 2, no receipt) since #1370.
+    assert re.search(
+        rf"^{re.escape(_ARCHIVE_GATE_ENV_KEY)}=disabled$", text, flags=re.MULTILINE
+    )
     assert _ADR_PATH_ANCHOR in text
     assert _ADR_REVISION_ANCHOR in text
     assert "irreversible" in text.lower()

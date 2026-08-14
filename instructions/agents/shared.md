@@ -205,8 +205,9 @@ node-27 DB 数据文件**全部**位于 `pg_default`，即 `/home/nwm/nhms-pgdat
 容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit），三个 bind
 mount 缺一不可；重建流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3。DB 容量核查以
-`df -h /home` 为准；`df -h /data/GHDC` 只反映归档层（治理 receipt 的
-`archive_root` 块报 `/dev/md0` 余量，口径偏差见 issue #1290）。
+`df -h /home` 为准；`df -h /data/GHDC` 只反映归档层（归档车道已随
+#1370 永久退役，治理 receipt 不再有 `archive_root` 块；该块历史上报
+`/dev/md0` 余量，口径偏差记在 issue #1290）。
 
 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
 
