@@ -47,7 +47,18 @@ Design references (design.md #855 fixture pins H1-H17):
 - H12 statement timeouts: 60 s for catalog enumeration, 300 s per ``drop_chunks``.
 - H13 env prefix ``NODE27_TIMESERIES_RETENTION_*``.
 
-ADR 0002: retention gate IS the archive receipt gate — never bypassed.
+ADR 0002 (as revised 2026-08-11): the runner is dual-mode. Its DEFAULT
+(``NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE`` unset / ``enabled``) is the
+fail-closed archive-receipt gate described above — the retention gate IS the
+archive receipt gate. The archive lane was permanently retired after the
+``/dev/md0`` double-disk failure, so the ADR's "no deletion without archive
+receipt" invariant was explicitly amended: an operator may select the
+``disabled`` mode, in which the completeness/drill gates are neither loaded
+nor judged. That mode is deliberate and auditable, not a silent bypass —
+every receipt records the effective mode and a ``disabled`` receipt cites
+``docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11``
+(issue #1369). No wire code is added; in ``disabled`` mode the thirteen
+archive-family codes are simply unreachable.
 
 ADR 0001 display carve-out: no imports touching ``apps/api`` or
 ``apps/frontend``.
@@ -79,8 +90,23 @@ from packages.common.safe_fs import (
 )
 from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
 
-SCHEMA_VERSION = "1.0"
+# 1.1 (#1369): every receipt gained the required ``archive_gate`` object.
+# Historical 1.0 receipts are NEVER rewritten — see the receipts README for
+# the dual-version reading rule.
+SCHEMA_VERSION = "1.1"
 TOOL_VERSION = "node27-timeseries-retention/1"
+
+# #1369 archive-gate mode (ADR 0002 Revision 2026-08-11). Not a wire code and
+# not a refusal: it is the third behavioral axis next to dry-run/enforce.
+ARCHIVE_GATE_ENABLED = "enabled"
+ARCHIVE_GATE_DISABLED = "disabled"
+ARCHIVE_GATE_MODES: frozenset[str] = frozenset({ARCHIVE_GATE_ENABLED, ARCHIVE_GATE_DISABLED})
+ARCHIVE_GATE_ENV = "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE"
+# Pinned citation for the disabled mode's authorization. The receipt schema
+# repeats this as a ``const`` so a receipt cannot claim a vaguer source.
+ARCHIVE_GATE_ADR_REFERENCE = (
+    "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
+)
 
 # H10 canonical lock path — byte-identical with runbook §8 + `.example`.
 _DEFAULT_LOCK_PATH_STR = "/tmp/nhms-node27-timeseries-retention.lock"
@@ -198,18 +224,23 @@ class RetentionConfig:
 
     Every field is populated via :func:`config_from_args` from the H13 env
     catalogue plus CLI overrides. Defaults are pinned to H8/H10/H12/§Window.
+
+    ``completeness_receipt_path`` / ``drill_receipt_path`` are ``None`` in
+    ``archive_gate="disabled"`` mode (#1369): the archive lane is retired, so
+    requiring a path to a file that can never exist would be pseudo-config.
     """
 
     database_url: str
     window_days: int
     per_tick_bound: int
-    completeness_receipt_path: Path
-    drill_receipt_path: Path
+    completeness_receipt_path: Path | None
+    drill_receipt_path: Path | None
     completeness_max_age_hours: int
     drill_max_age_days: int
     receipt_path: Path
     lock_path: Path
     enforce: bool
+    archive_gate: str = ARCHIVE_GATE_ENABLED
 
 
 @dataclass(frozen=True)
@@ -301,6 +332,26 @@ def _resolve_path(
     return path
 
 
+def _resolve_archive_gate(args_value: str | None, env_value: str | None) -> str:
+    """Resolve the #1369 archive-gate mode (CLI wins, then env, then default).
+
+    Strict enum, deliberately NOT the ``--enforce`` truthiness precedent: this
+    is a three-value risk switch on a production delete path, so a typo
+    (``disable``, ``true``, ``1``, the empty string) MUST fail closed with
+    ``RETENTION_CONFIG_INVALID`` rather than silently resolve to a mode.
+    """
+    raw = args_value if args_value is not None else env_value
+    if raw is None:
+        return ARCHIVE_GATE_ENABLED
+    normalized = raw.strip().lower()
+    if normalized not in ARCHIVE_GATE_MODES:
+        raise RetentionConfigError(
+            f"{ARCHIVE_GATE_ENV} must be one of "
+            f"{sorted(ARCHIVE_GATE_MODES)} (unset = {ARCHIVE_GATE_ENABLED}), got {raw!r}"
+        )
+    return normalized
+
+
 def config_from_args(
     args: argparse.Namespace, env: Mapping[str, str] | None = None
 ) -> RetentionConfig:
@@ -309,6 +360,9 @@ def config_from_args(
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise RetentionConfigError("DATABASE_URL must be set")
+    archive_gate = _resolve_archive_gate(
+        getattr(args, "archive_gate", None), env.get(ARCHIVE_GATE_ENV)
+    )
     window_days = _optional_positive_int(
         env.get("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"),
         name="NODE27_TIMESERIES_RETENTION_WINDOW_DAYS",
@@ -329,16 +383,24 @@ def config_from_args(
         name="NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS",
         default=_DEFAULT_DRILL_MAX_AGE_DAYS,
     )
-    completeness_receipt_path = _resolve_path(
-        getattr(args, "completeness_receipt_path", None),
-        env.get("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH"),
-        name="NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
-    )
-    drill_receipt_path = _resolve_path(
-        getattr(args, "drill_receipt_path", None),
-        env.get("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH"),
-        name="NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
-    )
+    # D4 conditional requirement: the two archive receipt paths are required
+    # ONLY in enabled mode. In disabled mode they are not resolved at all —
+    # ``_resolve_path(..., required=False)`` raises by construction, so
+    # "optional" here means "never asked for", and any value the operator left
+    # in the env file is deliberately ignored (never opened).
+    completeness_receipt_path: Path | None = None
+    drill_receipt_path: Path | None = None
+    if archive_gate == ARCHIVE_GATE_ENABLED:
+        completeness_receipt_path = _resolve_path(
+            getattr(args, "completeness_receipt_path", None),
+            env.get("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH"),
+            name="NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
+        )
+        drill_receipt_path = _resolve_path(
+            getattr(args, "drill_receipt_path", None),
+            env.get("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH"),
+            name="NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
+        )
     receipt_path = _resolve_path(
         getattr(args, "receipt_path", None),
         env.get("NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"),
@@ -368,6 +430,7 @@ def config_from_args(
         receipt_path=receipt_path,
         lock_path=lock_path,
         enforce=enforce,
+        archive_gate=archive_gate,
     )
 
 
@@ -389,6 +452,18 @@ def _parser() -> argparse.ArgumentParser:
         dest="drill_receipt_path",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--archive-gate",
+        dest="archive_gate",
+        choices=[ARCHIVE_GATE_ENABLED, ARCHIVE_GATE_DISABLED],
+        default=None,
+        help=(
+            "archive-receipt gate mode; default (unset) is the fail-closed "
+            f"{ARCHIVE_GATE_ENABLED!r}. {ARCHIVE_GATE_DISABLED!r} skips both "
+            "archive gates under ADR 0002 Revision 2026-08-11 and DELETES "
+            "WITHOUT ANY ARCHIVE BACKSTOP"
+        ),
     )
     return parser
 
@@ -1283,6 +1358,20 @@ def _validate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     return receipt
 
 
+def _archive_gate_block(mode: str) -> dict[str, Any]:
+    """Build the required ``archive_gate`` object (#1369, schema 1.1).
+
+    ``disabled`` receipts carry the pinned ADR citation; ``enabled`` receipts
+    MUST NOT (the schema's nested ``oneOf`` rejects both mistakes).
+    """
+    if mode not in ARCHIVE_GATE_MODES:
+        raise ValueError(f"unknown archive gate mode: {mode!r}")
+    block: dict[str, Any] = {"mode": mode}
+    if mode == ARCHIVE_GATE_DISABLED:
+        block["adr_reference"] = ARCHIVE_GATE_ADR_REFERENCE
+    return block
+
+
 def build_receipt(
     outcome: str,
     generated_at: datetime,
@@ -1294,6 +1383,7 @@ def build_receipt(
     salvage_backed_windows: Sequence[Mapping[str, str]] = (),
     reference_time: datetime | None = None,
     window_days: int | None = None,
+    archive_gate: str = ARCHIVE_GATE_ENABLED,
 ) -> dict[str, Any]:
     """Assemble a schema-``oneOf``-conformant receipt.
 
@@ -1303,7 +1393,12 @@ def build_receipt(
     invocations that hit a refusal path — concurrent invocation, uncaught
     error, gate refusal — surface an ``enforce+refused`` receipt so
     operators see the wire code).
+
+    All three branches carry ``archive_gate`` (#1369) — a refused receipt
+    must self-describe the gate mode in force when it refused, or the audit
+    trail has a hole exactly where the deletion authority is questioned.
     """
+    gate_block = _archive_gate_block(archive_gate)
     if outcome == "dry-run":
         if refusal_reason is not None:
             raise ValueError("dry-run outcome cannot carry refusal_reason")
@@ -1312,6 +1407,7 @@ def build_receipt(
             "generated_at": _iso(generated_at),
             "mode": "dry-run",
             "outcome": "dry-run",
+            "archive_gate": gate_block,
             "candidate_chunks": list(candidate_chunks),
             "deferred_remainder": list(deferred_remainder),
         }
@@ -1330,6 +1426,7 @@ def build_receipt(
             "generated_at": _iso(generated_at),
             "mode": "enforce",
             "outcome": "refused",
+            "archive_gate": gate_block,
             "refusal_reason": refusal_reason,
         }
         if reference_time is not None and window_days is not None:
@@ -1347,6 +1444,7 @@ def build_receipt(
             "generated_at": _iso(generated_at),
             "mode": "enforce",
             "outcome": "enforced",
+            "archive_gate": gate_block,
             "dropped_chunks": [
                 {"name": item["name"], "freed_bytes": int(item["freed_bytes"])}
                 for item in dropped_chunks
@@ -1453,11 +1551,19 @@ def run_retention(
 
     Returns the schema-validated receipt dict; the caller is responsible for
     publication.
+
+    ``config.archive_gate`` is the third axis (#1369), orthogonal to
+    dry-run/enforce: in ``disabled`` mode the archive-side phases (1a/1b/2b
+    completeness, 1c/2c drill) are skipped entirely, together with the two
+    NON-gate consumers of the completeness object flagged below. Everything
+    else — lock, watermark reference time, retention window, per-tick bound,
+    measure-before-drop ordering, H5 fail-closed drop handling — is unchanged.
     """
     fetch_chunks = fetch_chunks or _default_fetch_chunks
     measure_chunk_bytes = measure_chunk_bytes or _default_measure_chunk_bytes
     drop_chunk = drop_chunk or _default_drop_chunk
     reference_time = (reference_time or now).astimezone(UTC)
+    gate_enabled = config.archive_gate == ARCHIVE_GATE_ENABLED
 
     def _build(outcome: str, **kwargs: Any) -> dict[str, Any]:
         return build_receipt(
@@ -1465,64 +1571,82 @@ def run_retention(
             now,
             reference_time=reference_time,
             window_days=config.window_days,
+            archive_gate=config.archive_gate,
             **kwargs,
         )
 
-    # Phase 1a: load completeness receipt (raises MISSING on IO/schema fail).
-    try:
-        completeness = load_completeness_receipt(config.completeness_receipt_path)
-    except ReceiptGateError as error:
-        return _build("refused", refusal_reason=error.code)
+    completeness: dict[str, Any] | None = None
+    if gate_enabled:
+        # Phase 1a: load completeness receipt (raises MISSING on IO/schema fail).
+        try:
+            completeness = load_completeness_receipt(config.completeness_receipt_path)
+        except ReceiptGateError as error:
+            return _build("refused", refusal_reason=error.code)
 
-    # Phase 1b: completeness freshness check runs BEFORE enumeration so a
-    # stale receipt does not cause a needless DB round-trip. Bounds / gap /
-    # pending checks require the drop window (post-enumeration).
-    stale_reasons = check_completeness_gate(
-        completeness, drop_window=None, max_age_hours=config.completeness_max_age_hours, now=now
-    )
-    if stale_reasons:
-        return _build("refused", refusal_reason=stale_reasons[0])
+        # Phase 1b: completeness freshness check runs BEFORE enumeration so a
+        # stale receipt does not cause a needless DB round-trip. Bounds / gap /
+        # pending checks require the drop window (post-enumeration).
+        stale_reasons = check_completeness_gate(
+            completeness,
+            drop_window=None,
+            max_age_hours=config.completeness_max_age_hours,
+            now=now,
+        )
+        if stale_reasons:
+            return _build("refused", refusal_reason=stale_reasons[0])
 
     # Phase 2a: enumerate chunks + compute drop window.
     cutoff = reference_time - timedelta(days=config.window_days)
     eligible = fetch_chunks(config, cutoff)
-    covered_eligible, _boundary_deferred = _partition_by_completeness_bounds(
-        eligible, completeness
-    )
-    if eligible and not covered_eligible:
-        return _build(
-            "refused",
-            refusal_reason=CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
+    if gate_enabled:
+        assert completeness is not None  # set above whenever the gate is on
+        covered_eligible, _boundary_deferred = _partition_by_completeness_bounds(
+            eligible, completeness
         )
+        if eligible and not covered_eligible:
+            return _build(
+                "refused",
+                refusal_reason=CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT,
+            )
+    else:
+        # Non-gate consumer 1 of the completeness object (#1369 design D2).
+        # With the archive lane retired there is no coverage_bounds object and
+        # therefore no "partially covered" notion at all, so boundary-partial
+        # chunks are NOT deferred here: in disabled mode they ARE dropped.
+        # That is a documented semantic change to the delete surface (runbook
+        # §8.5), not an oversight.
+        covered_eligible = list(eligible)
     drop_window = _drop_window_from_eligible(covered_eligible, cutoff)
 
-    # Phase 2b: rerun completeness gate against the concrete drop window
-    # (bounds / gap / pending — H1a + H1b).
-    reasons = check_completeness_gate(
-        completeness,
-        drop_window=drop_window,
-        max_age_hours=config.completeness_max_age_hours,
-        now=now,
-    )
-    if reasons:
-        return _build("refused", refusal_reason=reasons[0])
+    if gate_enabled:
+        assert completeness is not None
+        # Phase 2b: rerun completeness gate against the concrete drop window
+        # (bounds / gap / pending — H1a + H1b).
+        reasons = check_completeness_gate(
+            completeness,
+            drop_window=drop_window,
+            max_age_hours=config.completeness_max_age_hours,
+            now=now,
+        )
+        if reasons:
+            return _build("refused", refusal_reason=reasons[0])
 
-    # Phase 1c/2c: drill receipt (MISSING / STALE / FAIL / coverage). Loaded
-    # here so completeness bounds/gap/pending refusals fire first (matches
-    # brief's refusal-ordering table).
-    try:
-        drill = load_drill_receipt(config.drill_receipt_path)
-    except ReceiptGateError as error:
-        return _build("refused", refusal_reason=error.code)
-    drill_reasons = check_drill_gate(
-        drill,
-        completeness_receipt=completeness,
-        drop_window=drop_window,
-        max_age_days=config.drill_max_age_days,
-        now=now,
-    )
-    if drill_reasons:
-        return _build("refused", refusal_reason=drill_reasons[0])
+        # Phase 1c/2c: drill receipt (MISSING / STALE / FAIL / coverage). Loaded
+        # here so completeness bounds/gap/pending refusals fire first (matches
+        # brief's refusal-ordering table).
+        try:
+            drill = load_drill_receipt(config.drill_receipt_path)
+        except ReceiptGateError as error:
+            return _build("refused", refusal_reason=error.code)
+        drill_reasons = check_drill_gate(
+            drill,
+            completeness_receipt=completeness,
+            drop_window=drop_window,
+            max_age_days=config.drill_max_age_days,
+            now=now,
+        )
+        if drill_reasons:
+            return _build("refused", refusal_reason=drill_reasons[0])
 
     # Phase 3: apply H3 per-tick bound.
     selected = list(covered_eligible[: config.per_tick_bound])
@@ -1565,7 +1689,16 @@ def run_retention(
             }
         )
 
-    salvage_windows = derive_salvage_backed_windows(completeness, drop_window)
+    # Non-gate consumer 2 of the completeness object (#1369 design D2): with
+    # no completeness receipt there is no archive endorsement to record, so
+    # the schema-required list is explicitly empty — "nothing vouched for this
+    # deletion", stated in the receipt rather than left ambiguous.
+    salvage_windows: Sequence[Mapping[str, str]]
+    if gate_enabled:
+        assert completeness is not None
+        salvage_windows = derive_salvage_backed_windows(completeness, drop_window)
+    else:
+        salvage_windows = []
     return _build(
         "enforced",
         dropped_chunks=dropped,
@@ -1619,7 +1752,10 @@ def main(
     if lock_fd is None:
         try:
             receipt = build_receipt(
-                "refused", stamp, refusal_reason=CODE_RETENTION_CONCURRENT_INVOCATION
+                "refused",
+                stamp,
+                refusal_reason=CODE_RETENTION_CONCURRENT_INVOCATION,
+                archive_gate=config.archive_gate,
             )
             publish_receipt(config, receipt)
             _emit_stderr_diagnostic(receipt)
@@ -1664,7 +1800,9 @@ def main(
                 f"{CODE_RETENTION_UNCAUGHT_ERROR}:{type(error).__name__}: "
                 f"{_redact_error_text(error, config.database_url)}"
             )
-            receipt = build_receipt("refused", stamp, refusal_reason=reason)
+            receipt = build_receipt(
+                "refused", stamp, refusal_reason=reason, archive_gate=config.archive_gate
+            )
             try:
                 publish_receipt(config, receipt)
             except SafeFilesystemError as pub_error:

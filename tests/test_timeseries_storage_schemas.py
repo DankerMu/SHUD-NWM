@@ -721,12 +721,20 @@ def test_product_only_drill_pass_accepts_required_empty_selector_list(tmp_path: 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# #1369: schema 1.1 made ``archive_gate`` a required top-level object. These
+# hand-written documents carry it (mode ``enabled`` = the fail-closed default,
+# which must NOT cite the ADR) so each row still fails/passes for the reason it
+# was written to test, not because it is stuck on the pre-bump shape.
+_RETENTION_GATE_ENABLED = {"mode": "enabled"}
+
+
 def test_retention_refusal_requires_reason(tmp_path: Path) -> None:
     document = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:30:00Z",
         "mode": "enforce",
         "outcome": "refused",
+        "archive_gate": _RETENTION_GATE_ENABLED,
     }
 
     result = _validate_document(tmp_path, "timeseries_retention_receipt", document)
@@ -735,10 +743,11 @@ def test_retention_refusal_requires_reason(tmp_path: Path) -> None:
 
 def test_retention_refusal_with_reason_is_valid(tmp_path: Path) -> None:
     document = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:30:00Z",
         "mode": "enforce",
         "outcome": "refused",
+        "archive_gate": _RETENTION_GATE_ENABLED,
         "refusal_reason": "archive completeness receipt is stale",
     }
 
@@ -748,10 +757,11 @@ def test_retention_refusal_with_reason_is_valid(tmp_path: Path) -> None:
 
 def test_retention_dry_run_with_candidates_is_valid(tmp_path: Path) -> None:
     document = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:30:00Z",
         "mode": "dry-run",
         "outcome": "dry-run",
+        "archive_gate": _RETENTION_GATE_ENABLED,
         "candidate_chunks": ["_hyper_1_42_chunk"],
         "deferred_remainder": ["_hyper_1_43_chunk"],
     }
@@ -763,10 +773,11 @@ def test_retention_dry_run_with_candidates_is_valid(tmp_path: Path) -> None:
 @pytest.mark.parametrize("invalid_variant", ["missing-candidates", "carries-dropped-chunks"])
 def test_retention_dry_run_rejects_invalid_outcome_details(tmp_path: Path, invalid_variant: str) -> None:
     document = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "2026-07-11T12:30:00Z",
         "mode": "dry-run",
         "outcome": "dry-run",
+        "archive_gate": _RETENTION_GATE_ENABLED,
         "candidate_chunks": ["_hyper_1_42_chunk"],
         "deferred_remainder": [],
     }

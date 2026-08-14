@@ -2,6 +2,31 @@
 
 This directory holds committed live receipts from `scripts/node27_timeseries_retention.py` on node-27's primary Postgres (`127.0.0.1:55432`).
 
+## Receipt schema versions (dual-version reading)
+
+Every receipt committed here so far declares `schema_version: "1.0"`. The
+emitter moved to `1.1` in #1369, which added the required top-level
+`archive_gate` object; the `1.0` files in this directory are **not**
+back-filled and stay byte-unchanged as the historical record (the schema
+file itself only validates `1.1`, so validate an old receipt against the
+schema revision that produced it — `git log schemas/timeseries_retention_receipt.schema.json`).
+
+Reading rule:
+
+- **No `archive_gate` field / `schema_version: "1.0"`** — produced under the
+  pre-#1369 hard gate, i.e. both archive receipts were loaded and judged.
+  Everything the receipt says about candidates, deferrals and
+  `salvage_backed_windows` is archive-backed.
+- **`schema_version: "1.1"` with `archive_gate.mode = "enabled"`** — same
+  fail-closed semantics, now stated explicitly.
+- **`schema_version: "1.1"` with `archive_gate.mode = "disabled"`** — the
+  archive gates were skipped under
+  `docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11`
+  (carried verbatim in `adr_reference`). Such a receipt records an
+  irreversible deletion with no archive backstop: `salvage_backed_windows`
+  is always `[]`, and boundary-partial chunks are candidates rather than
+  deferrals (runbook §8.5).
+
 ## Receipts
 
 ### `refusal-completeness-missing-20260713T030936Z.json`
@@ -137,9 +162,14 @@ production (see #1072's reversibility warning).
 ## Steady-state gate behavior
 
 - `nhms-node27-timeseries-retention.timer` (OnCalendar 05:15 UTC
-  daily) is currently **disabled** — enabling it is a separate
-  operator decision, deferred until the operator has observed manual
-  runs; the enforce path also needs env `ENFORCE=1`, which stays `0`.
+  daily) was **disabled** through the runs recorded above — enabling it was
+  a separate operator decision, deferred until the operator had observed
+  manual runs; the enforce path also needs env `ENFORCE=1`, which stayed
+  `0`. That decision was taken on 2026-08-14 (issue #1369): the timer is
+  enabled at the same 05:15 UTC cadence with the archive gate `disabled`,
+  after a manual dry-run and a bounded manual enforce. The bullets below
+  describe the `enabled`-gate steady state and no longer apply once the
+  gate is `disabled` (there are no gate receipts to re-evaluate).
 - Each tick re-evaluates both gates: the completeness receipt must be
   <26h old (recurring audit timer refreshes daily) and the drill PASS
   receipt <30d old with coverage spanning the tick's drop window.

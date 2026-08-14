@@ -33,16 +33,44 @@ NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND=5
 NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS=26
 NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS=30
 
+# Archive-gate mode (issue #1369). Absent = "enabled" = the historical
+# fail-closed behavior: enforce is hard-gated on the two archive receipts
+# below. Strict enum — the value is stripped and lowercased and MUST then be
+# exactly "enabled" or "disabled"; anything else (including an empty
+# assignment, "disable", "true", "1") aborts the tick with
+# RETENTION_CONFIG_INVALID, exit 2, and NO receipt. There is deliberately no
+# truthiness fallback here.
+#
+# !!! DANGER — read before setting "disabled" !!!
+# "disabled" skips loading AND judging both archive gates. It is authorized
+# only by docs/adr/0002-node27-timeseries-hot-cold-tiering.md
+# Revision 2026-08-11 (the archive lane is permanently retired after the
+# /dev/md0 double-disk failure, so the two receipts can never be produced
+# again). In that mode:
+#   * chunks are dropped with NO ARCHIVE BACKSTOP — the deletion is
+#     IRREVERSIBLE, there is no restore lane, and no salvage object exists;
+#   * boundary-partial chunks are NO LONGER deferred (they become drop
+#     candidates — "partially covered" is meaningless without archive data);
+#   * the enforced receipt's salvage_backed_windows is always [];
+#   * every receipt records archive_gate.mode plus the ADR citation, so the
+#     mode is auditable rather than a silent bypass.
+# Rolling back means "stop deleting more" (remove this line, disable the
+# timer) — already-dropped chunks cannot be recovered.
+# CLI --archive-gate {enabled,disabled} overrides this variable.
+#NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled
+
 # Absolute path — archive-completeness receipt emitted by
 # scripts/node27_storage_inventory_audit.py. The retention gate consumes
 # this byte-for-byte (spec §Retention enforcement is hard-gated on archive
-# receipts).
+# receipts). REQUIRED when the archive gate is enabled (the default);
+# optional and never read when it is "disabled".
 NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
 # Absolute path — archive-rebuild-drill PASS receipt emitted by
 # scripts/node27_archive_rebuild_drill.py (issue #854 §5.2). Steady-state
 # retention requires this receipt to be fresh and to cover the drop window
-# per source (forcing / runs / db-export).
+# per source (forcing / runs / db-export). REQUIRED when the archive gate is
+# enabled (the default); optional and never read when it is "disabled".
 NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH=/home/nwm/node27-archive-rebuild-drill-logs/latest-pass-receipt.json
 
 # Absolute path — retention runner's own receipt (mode 0600, atomic).
