@@ -74,9 +74,17 @@ NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-i
 NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH=/home/nwm/node27-archive-rebuild-drill-logs/latest-pass-receipt.json
 
 # Absolute path — retention runner's own receipt (mode 0600, atomic).
-# The wrapper substitutes a per-tick timestamped filename by default; this
-# env override is honoured when set.
-NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_retention.json
+# LEAVE THIS UNSET under timer operation (keep the line commented). When it is
+# unset the wrapper substitutes a per-tick timestamped filename
+# (retention-<UTC>.json under the log root), so every tick keeps its own
+# receipt. Setting a FIXED path makes each daily tick atomically OVERWRITE the
+# previous receipt, destroying the per-tick audit trail of irreversible
+# deletions — the only record of which chunks were dropped when.
+# Consequence for manual runs: `python scripts/node27_timeseries_retention.py`
+# invoked directly (not via the wrapper) has no receipt path at all with this
+# unset, and refuses with RETENTION_CONFIG_INVALID, exit 2, no receipt. Pass an
+# explicit timestamped --receipt-path instead. See runbook §8.1 step 2 / §8.4.
+#NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=/home/nwm/node27-timeseries-retention-logs/retention-manual.json
 
 # H10 lock path — MUST match docs/runbooks/tier-node27-timeseries-storage.md
 # §8.1 install steps + §8.6 recovery step and scripts/node27_timeseries_retention.py
@@ -89,4 +97,12 @@ NODE27_TIMESERIES_RETENTION_LOCK_PATH=/tmp/nhms-node27-timeseries-retention.lock
 # older than the drop window). FIRST RUN MUST BE DRY-RUN — inspect the
 # receipt's candidate_chunks + deferred_remainder before flipping to
 # enforce. See runbook §8.4.
+#
+# !!! The --dry-run CLI flag does NOT override this variable !!!
+# Dry-run vs enforce is decided solely by --enforce / this variable; --dry-run
+# is never read. Once this line is uncommented (the steady state after the
+# timer is enabled), sourcing this file and running with --dry-run still
+# ENFORCES and irreversibly drops up to PER_TICK_BOUND chunks. Any manual
+# dry-run after that point MUST prefix the command with
+# NODE27_TIMESERIES_RETENTION_ENFORCE=0 (inline, after the source).
 #NODE27_TIMESERIES_RETENTION_ENFORCE=1

@@ -19,4 +19,4 @@ ADR revision 已显式修订核心不变式：**"no deletion without archive rec
 - 归档 lane 退役清理（mover/inventory-audit/drill 脚本与其测试的处置）——#1358 范围。
 - 压缩策略、display carve-out 窗口——ADR revision 明文不变。
 - timer OnCalendar 值变更——用户裁定沿用每日 05:15 UTC。
-- 归档 gate 判定函数（`check_completeness_gate`/`check_drill_gate`）自身语义——enabled 模式下逐字节不变，既有 spec requirement 全部保留。
+- 归档 gate 判定函数（`check_completeness_gate`/`check_drill_gate`）自身语义——enabled 模式下逐字节不变。注意：#855 pending fixture 的无条件 refuse / boundary-partial defer 两个 scenario 在 disabled 模式下被本 change 显式 supersede（delta 内有 supersession 句，挂账有归档顺序记录）；已归档进 `openspec/specs/` 的 requirement 全部保留。

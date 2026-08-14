@@ -2911,6 +2911,13 @@ commented placeholder; run it only after the two manual receipts in §8.4
    DDL). Do NOT share the audit env's `nhms_display_ro` role — retention
    requires DML privileges.
 
+   Leave `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` unset (commented out) in
+   the deployed env file: the wrapper then substitutes a per-tick timestamped
+   `retention-<UTC>.json` under the log root, whereas a fixed path makes every
+   daily tick atomically overwrite the previous receipt and destroys the
+   per-tick audit trail of irreversible deletions. Manual direct-`python`
+   runs consequently MUST pass an explicit `--receipt-path` (§8.4 step 2).
+
    Decide the archive-gate mode in the same edit. Leaving
    `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` unset keeps the fail-closed
    default, which cannot be satisfied any more (§7 banner: no new drill
@@ -2931,6 +2938,17 @@ commented placeholder; run it only after the two manual receipts in §8.4
    `~/.config/systemd/user/` from the checked-in
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
    cadence stays `OnCalendar=*-*-* 05:15:00 UTC` — do not retune it here.
+
+4. Verify the per-tick receipt rotation once a SECOND tick has run (wait for
+   the next 05:15 UTC firing or force one with
+   `systemctl --user start nhms-node27-timeseries-retention.service`): two
+   distinctly timestamped receipts MUST coexist in the log root. A single file
+   means the receipt-path env var is still set and each tick is overwriting the
+   previous audit record.
+
+   ```
+   ls -l ~/node27-timeseries-retention-logs/retention-*.json
+   ```
 
 #### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
 
@@ -2955,7 +2973,8 @@ mode with `ENFORCE=0` → manual dry-run receipt → **blast-radius inventory
 (the query below) over the full backlog**, reviewed against the LIVE
 `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
 manual tick (≤ per-tick bound) → `enable --now` the timer → capture
-`list-timers`. Until those live receipts are committed, treat the timer
+`list-timers` → after the second tick confirm two distinctly timestamped
+receipts coexist (step 4). Until those live receipts are committed, treat the timer
 state on the box as the authority and re-verify with
 `systemctl --user list-timers` before quoting it. Rolling back means
 stopping FURTHER deletion (drop the env line, disable the timer); chunks
@@ -2977,7 +2996,11 @@ which can only shrink its side, so the query stays a superset there).
 
 ```
 set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
-CUTOFF="$(jq -r '.cutoff // empty' "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH")"
+# DRYRUN_RECEIPT = the timestamped path passed to --receipt-path in §8.4
+# step 2. Do NOT reach for $NODE27_TIMESERIES_RETENTION_RECEIPT_PATH: that var
+# is deliberately unset in the deployed env file (§8.1 step 2).
+DRYRUN_RECEIPT=/home/nwm/node27-timeseries-retention-logs/retention-dryrun-<UTC>.json
+CUTOFF="$(jq -r '.cutoff // empty' "$DRYRUN_RECEIPT")"
 : "${CUTOFF:?dry-run receipt carries no cutoff — re-run the dry-run first}"
 
 docker exec nhms-db psql -U nhms -d nhms -P pager=off -c "
@@ -3054,7 +3077,11 @@ completeness-receipt codes plus the eight drill codes) can never be emitted,
 because neither archive receipt is loaded or judged. The runner's own four
 (`RETENTION_CONFIG_INVALID`, `RETENTION_CONCURRENT_INVOCATION`,
 `RETENTION_DROP_FAILED`, `RETENTION_UNCAUGHT_ERROR`) stay fully reachable in
-both modes, and every refused receipt still records which mode was in force.
+both modes. Three of them — `RETENTION_CONCURRENT_INVOCATION`,
+`RETENTION_DROP_FAILED`, `RETENTION_UNCAUGHT_ERROR` — publish a refused
+receipt that records which mode was in force. `RETENTION_CONFIG_INVALID` does
+not: it exits 2 BEFORE any receipt exists, so it never produces one and there
+is no `archive_gate` record of that tick.
 
 - `COMPLETENESS_RECEIPT_MISSING` — env-declared completeness receipt path
   missing, unreadable, or schema-invalid.
@@ -3247,13 +3274,32 @@ Two guardrails enforce this:
 cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
    /home/nwm/NWM/infra/env/node27-timeseries-retention.env
 chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
-# Fill DATABASE_URL (writer role), completeness/drill receipt paths,
-# receipt path, and (optionally) lock path override.
+# Fill DATABASE_URL (writer role) and (optionally) the lock path override.
+# The SAME edit decides NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE — see the two
+# branches under step 3.
+# BRANCH A ONLY: fill the completeness/drill receipt paths. In the `disabled`
+# branch both are unneeded and are never read, so leave them alone.
+# Leave NODE27_TIMESERIES_RETENTION_RECEIPT_PATH unset/commented: the wrapper
+# then writes a per-tick timestamped receipt, and the per-tick audit trail of
+# irreversible deletions survives (a fixed path is overwritten every tick).
 
-# 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder
+# 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder.
+# The runner REQUIRES a receipt path; with the env var deliberately unset (step
+# 1) a manual run must pass --receipt-path explicitly, or it aborts with
+# RETENTION_CONFIG_INVALID, exit 2, and no receipt. Use a timestamped filename
+# so manual runs never clobber each other or a timer tick's receipt.
+# The NODE27_TIMESERIES_RETENTION_ENFORCE=0 prefix is NOT decoration: the
+# --dry-run flag does NOT override the env. Once ENFORCE=1 is resident in the
+# deployed env file — the steady state after the timer is enabled (§8.1 step 3)
+# — an unprefixed run ENFORCES and irreversibly drops up to
+# NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND chunks. The inline assignment
+# comes AFTER the `source`, so it wins.
 set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
-uv run python scripts/node27_timeseries_retention.py --dry-run
-cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
+DRYRUN_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-dryrun-$(date -u +%Y%m%dT%H%M%SZ).json"
+NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
+  uv run python scripts/node27_timeseries_retention.py --dry-run \
+    --receipt-path "$DRYRUN_RECEIPT"
+jq . "$DRYRUN_RECEIPT"
 
 # 3. When ready to enforce, flip the env flag (or pass --enforce).
 # Enforce PRECONDITIONS — EXACTLY ONE of the two branches below applies,
@@ -3297,14 +3343,20 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 #  - There is NO archive backstop: the drop is irreversible and no restore
 #    lane exists. Review the dry-run's candidate_chunks against the LIVE
 #    NODE27_TIMESERIES_RETENTION_WINDOW_DAYS before enforcing, and keep the
-#    first enforce inside the per-tick bound.
+#    first enforce inside the per-tick bound. Resolve each candidate's owning
+#    hypertable, time range and bytes with the §8.1 blast-radius inventory
+#    query FIRST — candidate_chunks[] is bare chunk names and carries none of
+#    those three.
 #  - Consequences to expect in the receipt: archive_gate.mode="disabled"
 #    with the pinned adr_reference, salvage_backed_windows=[], and
 #    boundary-partial chunks appearing as candidates rather than deferred
 #    (§8.5).
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
-# pass --enforce on the CLI.
-uv run python scripts/node27_timeseries_retention.py --enforce
+# pass --enforce on the CLI. Same receipt-path rule as step 2: pass an explicit
+# timestamped --receipt-path, because the env var stays unset.
+ENFORCE_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-enforce-$(date -u +%Y%m%dT%H%M%SZ).json"
+uv run python scripts/node27_timeseries_retention.py --enforce \
+  --receipt-path "$ENFORCE_RECEIPT"
 ```
 
 Exit codes: `0` = dry-run / enforced (both are "success" outcomes; the
@@ -3351,9 +3403,11 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
   (`mode=enforce` per the schema `oneOf`) so operators see the exact
   refusal reason before ever running enforce. If gates pass, dry-run
   enumerates candidate chunks + deferred remainder without invoking
-  `drop_chunks`. The `--dry-run` CLI flag controls the DROP phase only;
-  gate evaluation is always run because it is the operator's oracle for
-  whether enforce is safe. (In `disabled` mode there are no archive gates
+  `drop_chunks`. Dry-run vs enforce is decided SOLELY by `--enforce` /
+  `NODE27_TIMESERIES_RETENTION_ENFORCE`; the `--dry-run` CLI flag controls
+  nothing — it is never read, so it cannot hold back an env that says
+  enforce (§8.4 step 2). Gate evaluation is run in either mode because it is
+  the operator's oracle for whether enforce is safe. (In `disabled` mode there are no archive gates
   left to evaluate, so a dry-run can only end as `dry-run` or as one of the
   runner's own refusals.)
 - `outcome=refused`: `mode=enforce`; `refusal_reason` is one of the codes
@@ -3449,11 +3503,13 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
    lines (`scripts/node27_timeseries_retention_once.sh:143,151`), each
    prefixed with a UTC ISO-8601 timestamp from the wrapper's `ts()`
-   (`scripts/node27_timeseries_retention_once.sh:23`). The receipt path in
-   those lines is NOT a tick key: the shipped env pins
-   `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` to one fixed file
-   (`infra/env/node27-timeseries-retention.example`), so every tick prints
-   the same path and the path ALONE cannot discriminate ticks. Correlate on
+   (`scripts/node27_timeseries_retention_once.sh:23`). Do NOT rely on the
+   receipt path in those lines as the tick key. Under the shipped
+   configuration `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` is left unset
+   (`infra/env/node27-timeseries-retention.example`), so the wrapper
+   substitutes a per-tick timestamped path and the paths do differ — but if
+   anyone has pinned a fixed path against that guidance, every tick prints
+   the same string and the path ALONE discriminates nothing. Correlate on
    time instead: pick the bracket whose `start summary=` timestamp and
    matching `done rc=` timestamp CONTAIN the receipt's `generated_at`
    (schema-required, `format: date-time`), and read only the lines between
@@ -3461,8 +3517,9 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    no receipt at all: a `start` with no matching `done rc=` (a tick still in
    flight, or a wrapper that died mid-tick), and a `done rc=2` tick — the
    config refusal of item 3, where `RETENTION_CONFIG_INVALID` publishes no
-   receipt and the file at the pinned path still belongs to some earlier
-   tick. Neither is the bracket to read; do NOT fall back to "the last
+   receipt at all, so the path that bracket announced names either nothing
+   or (under a pinned path) some earlier tick's file. Neither is the bracket
+   to read; do NOT fall back to "the last
    bracket in the file". Then require the hit's `chunk` field to name a
    chunk that appears in THIS receipt's `dropped_chunks[]`. A hit outside
    that bracket belongs to an earlier tick and says nothing about this

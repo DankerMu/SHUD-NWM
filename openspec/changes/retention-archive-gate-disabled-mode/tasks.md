@@ -23,9 +23,9 @@
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate retention-archive-gate-disabled-mode --strict --no-interactive`
 - [ ] 3.4 node-27 实机（merge 前，用户裁定 2026-08-14：**启用 timer 每日 05:15 UTC**）。**删除不可逆（归档 lane 已退役，无兜底）——回滚仅指停止后续删除（移除 env 变量 + disable timer），已删 chunk 无法恢复**。顺序硬约束：
-  1. env 文件置 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`、`ENFORCE=0` → 手动 tick → dry-run receipt（archive_gate.mode=disabled，candidate 清单落盘）
+  1. env 文件置 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`、`ENFORCE=0`、**receipt 路径变量留空/注释**（R5-2：固定路径会被每日 tick 原子覆盖；留空则 wrapper 生成 per-tick 时间戳文件；手动直跑 python 时必须显式 `--receipt-path <带时间戳路径>`，否则 config-invalid）→ 手动 tick → dry-run receipt（archive_gate.mode=disabled，candidate 清单落盘）
   2. 跑 §8.1 的逐 chunk 清单查询（round-1 F-E 补入：chunk 名/所属 hypertable/range_start/range_end/`chunks_detailed_size` 字节），覆盖 candidate + deferred_remainder 全量——**backlog 总条数与预估总字节先落 PR 证据**（`enable --now` 授权的是整个 backlog 以 ≤5 chunk/天磨完，不只是首刀）；做非循环交叉核验（清单查询按 receipt 自己的 cutoff 过滤，逐行核 range_end 是循环论证）：核对 receipt 的 `window_days`/`reference_time` 与实机 env 实值（runbook/README 记录现为 21d）及 display watermark 一致——window 配错会静默放宽每一行；确认首刀爆炸半径（≤5 chunk 的表名/时间范围/字节，含原 bounds-deferred 的 boundary-partial chunk）后 → `ENFORCE=1` → 手动 tick → enforced receipt（≤5 chunk，freed_bytes 记录，`salvage_backed_windows=[]`）
-  3. `systemctl --user daemon-reload && systemctl --user enable --now nhms-node27-timeseries-retention.timer` → `systemctl --user list-timers` 取证（NEXT 触发时刻在场）
+  3. `systemctl --user daemon-reload && systemctl --user enable --now nhms-node27-timeseries-retention.timer` → `systemctl --user list-timers` 取证（NEXT 触发时刻在场）。**R5-1 警示：env 常驻 `ENFORCE=1` 后，`--dry-run` flag 不覆盖 env（装饰性）——此后任何手动 dry-run 必须显式前缀 `NODE27_TIMESERIES_RETENTION_ENFORCE=0`**。**R5-2 验证项：等到（或手动触发）第二个 tick，`ls` receipt 目录确认两个不同时间戳的 receipt 并存（逐 tick 审计链成立）**
   4. 两 receipt + 清单查询输出 + timer 状态贴 PR 评论；**两份落地 receipt 补记进 receipts README `## Receipts` 列表**（round-1 F-C：否则 README `:7` 与 `:168-172` 自相矛盾）；落地若受阻，README 完成时态措辞必须在 merge 前改回"决策已记录、实机状态以 receipt 为准"
 - [ ] 3.5 CI 定向测试绿
 
@@ -33,3 +33,5 @@
 
 - 归档侧脚本（mover/inventory-audit/drill）及 `packages/common/storage.py` 跨读的处置 → #1358，不动。
 - ADR 0002 sub-issue 实现表（`:284-294`）无 #1369 行——范围外报告（ADR 本体本 change 不改写）。
+- **R5-3 spec 语料冲突（round-2 裁定，已双路处置）**：#855 pending fixture（`openspec/changes/tier-node27-timeseries-storage/specs/timeseries-db-retention/spec.md`）的 "Missing or stale gate receipts → MUST refuse" 与 "boundary-partial MUST remain intact" 两 scenario 被 disabled 模式证伪。本 change delta 已加 supersession 句（disabled 下本 requirement 优先，两 scenario 仅 enabled 下有效）；归档顺序义务：#855 归档时应为该两 scenario 补 `archive_gate=enabled` 前提。MODIFIED 路线经实证会使 `openspec archive` 硬中止（requirement 尚不在 `openspec/specs/`），不可用。
+- **R5-4.3（DEFER 报告项）**：#855 design fixture `:1922` 引用的 schema 行号 `:40-68` 在 master 即偏 3 行、本 diff 后再移 19 行；语义结论（三分支 oneOf、无 partial）仍成立；无行号新鲜度钉，不在本 PR 编辑他人 fixture。

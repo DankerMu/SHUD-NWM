@@ -30,6 +30,11 @@ SHALL bump to `1.1` and historical receipts SHALL remain byte-unchanged.
 No new wire code SHALL be added, and in `disabled` mode none of the
 thirteen archive-family codes (five `COMPLETENESS_*` plus eight `DRILL_*`)
 SHALL be reachable while the runner-own refusal codes remain reachable.
+When the mode is `disabled`, this requirement supersedes the unconditional
+refusal and boundary-partial-deferral scenarios of the pending
+`Retention enforcement is hard-gated on archive receipts` requirement
+(`tier-node27-timeseries-storage` change fixture, #855) — those scenarios
+retain force only while the gate is `enabled`.
 
 #### Scenario: Unset mode preserves today's fail-closed behavior byte-identically
 
@@ -37,7 +42,9 @@ SHALL be reachable while the runner-own refusal codes remain reachable.
   unset and no `--archive-gate` flag
 - **THEN** both archive gates SHALL be loaded and judged exactly as before
   this change, the archive receipt path variables SHALL remain required,
-  and the pre-change gate test suite SHALL pass unmodified
+  and the pre-change archive-gate adjudication tests SHALL pass unmodified
+  (the only pre-existing test edits anywhere in the change are the
+  schema-version/example syncs and the two format-negative repairs)
 
 #### Scenario: Disabled enforce deletes without archive receipts and records the authorization
 

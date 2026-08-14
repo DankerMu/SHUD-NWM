@@ -189,11 +189,30 @@ Env file at `/home/nwm/NWM/infra/env/node27-timeseries-retention.env`
 
 ```bash
 set -a && . /home/nwm/NWM/infra/env/node27-timeseries-retention.env && set +a
-export NODE27_TIMESERIES_RETENTION_RECEIPT_PATH="/home/nwm/node27-timeseries-retention-logs/$(basename ...).json"
+RECEIPT="/home/nwm/node27-timeseries-retention-logs/retention-dryrun-$(date -u +%Y%m%dT%H%M%SZ).json"
 cd /home/nwm/NWM-tier
-/home/nwm/.local/bin/uv run --frozen python scripts/node27_timeseries_retention.py --dry-run
+NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
+  /home/nwm/.local/bin/uv run --frozen python scripts/node27_timeseries_retention.py \
+    --dry-run --receipt-path "$RECEIPT"
 # rc=1, refusal_reason=COMPLETENESS_RECEIPT_MISSING
 ```
+
+Two things this block is not being cute about:
+
+- **The `--receipt-path` is mandatory.** The deployed env file leaves
+  `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` unset so the wrapper can write a
+  per-tick timestamped receipt (a fixed path would be overwritten by every
+  daily tick). A direct `python` invocation does not get that substitution, so
+  without an explicit path it aborts with `RETENTION_CONFIG_INVALID`, exit 2,
+  and no receipt. Use a timestamped filename so a manual run never clobbers a
+  timer tick's receipt.
+- **The `NODE27_TIMESERIES_RETENTION_ENFORCE=0` prefix is mandatory too.** The
+  `--dry-run` flag does NOT override the env — dry-run vs enforce is decided
+  solely by `--enforce` / the env variable. With `ENFORCE=1` resident in the
+  deployed env file (the steady state since the timer was enabled), an
+  unprefixed run enforces and irreversibly drops up to
+  `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks. The inline assignment is
+  placed after the `source`, so it wins.
 
 Runner invocation used `--dry-run` CLI flag; refused receipts always
 carry `mode=enforce` per schema `oneOf` pin (documented in runbook
