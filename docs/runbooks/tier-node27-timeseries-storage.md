@@ -3031,14 +3031,45 @@ commented placeholder; run it only after the two manual receipts in §8.4
 
       Any hit: comment the line out per step 2, then wait for / force another
       tick and re-check.
-   2. **No second wrapper tick has run yet.** Read `LAST` and `NEXT` from
-      `systemctl --user list-timers | grep nhms-node27-timeseries-retention`:
-      a blank/single `LAST` means the count is simply premature, not broken.
-      Wait for the next firing or force one (with the enforcing-tick caveat
-      above) before reading anything into the file count.
+   2. **Fewer than two receipt-producing wrapper ticks have run yet.**
+      `LAST` from `systemctl --user list-timers` names only the MOST RECENT
+      firing, so it can never tell you HOW MANY ticks ran — count them
+      directly. The wrapper appends exactly one
+      `node27-timeseries-retention: start summary=` line per tick to the
+      cumulative `retention.log`
+      (`scripts/node27_timeseries_retention_once.sh:143`; the bracket pairs
+      are described in §8.6 item 5), and manual wrapper invocations are
+      counted the same way as timer firings:
 
-   Only with the grep clean AND at least two wrapper ticks recorded does a
-   count below two indicate a real rotation defect.
+      ```
+      grep -c 'node27-timeseries-retention: start summary=' \
+        ~/node27-timeseries-retention-logs/retention.log
+      ```
+
+      Not every counted tick wrote a receipt, and one class of firing never
+      enters the count at all: a firing that lost the lock logs
+      `previous wrapper still active, skipping tick` with no `start` line.
+      From the counted brackets, subtract any `start` with no matching
+      `done rc=` (still in flight, or died mid-tick) and any `done rc=2`
+      bracket (the `RETENTION_CONFIG_INVALID` refusal, which publishes no
+      receipt). If `retention.log` has been rotated or truncated away, fall
+      back to `journalctl --user -u nhms-node27-timeseries-retention.service`,
+      which carries one invocation record per run of THAT UNIT — timer
+      firings plus `systemctl --user start` forced starts; a wrapper run
+      launched straight from a shell is not journalled under the unit.
+
+      With that corrected TICK count below two, the receipt count is simply
+      premature, not broken: wait for the next firing or force one (with the
+      enforcing-tick caveat above) before reading anything into the receipt
+      count. With the tick count at two or more, `LAST` is still useful
+      as a SECONDARY signal — a `LAST` newer than the newest
+      `retention-2*.json` (compare against that receipt's `generated_at`)
+      means the latest tick wrote nothing, which points back at rule-out 1 or
+      at an `rc=2` refusal rather than at prematurity.
+
+   Only with the rule-out 1 grep clean AND at least two receipt-producing
+   wrapper ticks counted in `retention.log` does a `retention-2*.json` count
+   below two indicate a real rotation defect.
 
 #### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
 
@@ -3613,8 +3644,17 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    terminal's stderr and the receipt at the explicit `--receipt-path`. So if
    the receipt under investigation came from a manual direct-`python` run, the
    grep above has nothing to find and its silence carries zero information:
-   read the terminal output you still have, or re-run through the wrapper. The
-   whole bracket procedure below applies to wrapper receipts only.
+   read the terminal output you still have — that is the whole diagnostic.
+   Do NOT re-run through the wrapper to manufacture a bracket. A wrapper
+   invocation is a live enforcing tick: with
+   `NODE27_TIMESERIES_RETENTION_ENFORCE=1` resident in the env file it
+   irreversibly drops up to `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND`
+   chunks, and a shell-prefixed `NODE27_TIMESERIES_RETENTION_ENFORCE=0` cannot
+   hold it back because the wrapper re-sources the env file with `set -a`
+   after the prefix applies (`scripts/node27_timeseries_retention_once.sh:52-58`),
+   so the file's value wins. It would also mint a NEW receipt rather than
+   diagnose the old one. The whole bracket procedure below applies to wrapper
+   receipts only.
 
    Scope the match to THIS tick before reading anything into it.
    `retention.log` is cumulative — the wrapper appends every tick to the same

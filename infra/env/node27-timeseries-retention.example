@@ -108,6 +108,12 @@ NODE27_TIMESERIES_RETENTION_LOCK_PATH=/tmp/nhms-node27-timeseries-retention.lock
 # is never read. Once this line is uncommented (the steady state after the
 # timer is enabled), sourcing this file and running with --dry-run still
 # ENFORCES and irreversibly drops up to PER_TICK_BOUND chunks. Any manual
-# dry-run after that point MUST prefix the command with
-# NODE27_TIMESERIES_RETENTION_ENFORCE=0 (inline, after the source).
+# dry-run after that point on the DIRECT-python lane
+# (uv run python scripts/node27_timeseries_retention.py) MUST prefix the
+# command with NODE27_TIMESERIES_RETENTION_ENFORCE=0 (inline, after the
+# source). The WRAPPER lane (scripts/node27_timeseries_retention_once.sh)
+# CANNOT be made safe that way: the wrapper re-sources THIS file with
+# `set -a` after the prefix has applied, so the file's value wins and the
+# tick enforces anyway. The only way to dry-run through the wrapper is to
+# set NODE27_TIMESERIES_RETENTION_ENFORCE=0 in this file itself.
 #NODE27_TIMESERIES_RETENTION_ENFORCE=1
