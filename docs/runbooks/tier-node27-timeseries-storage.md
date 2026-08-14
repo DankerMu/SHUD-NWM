@@ -2932,12 +2932,28 @@ commented placeholder; run it only after the two manual receipts in §8.4
    DDL). Do NOT share the audit env's `nhms_display_ro` role — retention
    requires DML privileges.
 
-   Leave `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` unset (commented out) in
-   the deployed env file: the wrapper then substitutes a per-tick timestamped
-   `retention-<UTC>.json` under the log root, whereas a fixed path makes every
-   daily tick atomically overwrite the previous receipt and destroys the
-   per-tick audit trail of irreversible deletions. Manual direct-`python`
-   runs consequently MUST pass an explicit `--receipt-path` (§8.4 step 2).
+   **Comment out `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` in the deployed
+   env file — that line is SET there today, so "leave it unset" would be a
+   no-op instruction.** The `.example` shipped that assignment UNCOMMENTED
+   until 2026-08-14 and the deployed copy was made from that older template;
+   the operator must actively comment the line out. Once it is commented the
+   wrapper substitutes a per-tick timestamped `retention-<UTC>.json` under the
+   log root, whereas a fixed path makes every daily tick atomically overwrite
+   the previous receipt and destroys the per-tick audit trail of irreversible
+   deletions. Verify — this grep MUST print nothing (exit 1):
+
+   ```
+   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' \
+     /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   ```
+
+   Keep both anchors. The leading `^` and the trailing `=` are what make the
+   check discriminating: an unanchored
+   `grep NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` still matches the commented
+   line (and the comment prose around it), so it prints hits either way and
+   proves nothing. Any output from the anchored form means the variable is
+   still live — fix it before enabling the timer. Manual direct-`python` runs
+   consequently MUST pass an explicit `--receipt-path` (§8.4 step 2).
 
    Decide the archive-gate mode in the same edit. Leaving
    `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` unset keeps the fail-closed
@@ -2960,6 +2976,14 @@ commented placeholder; run it only after the two manual receipts in §8.4
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
    cadence stays `OnCalendar=*-*-* 05:15:00 UTC` — do not retune it here.
 
+   **The timer lane obeys ONLY the env file's
+   `NODE27_TIMESERIES_RETENTION_ENFORCE` value**: every tick starts a fresh
+   process that sources that file, so CLI flags and shell-prefixed env vars
+   typed in any manual session have zero effect on timer ticks. Once
+   `NODE27_TIMESERIES_RETENTION_ENFORCE=1` is resident in the env file, every
+   scheduled firing enforces — there is no per-session way to hold it back
+   short of editing that file or disabling the timer.
+
 4. Verify the per-tick receipt rotation once a SECOND tick has run — wait for
    the next 05:15 UTC firing, or force one with
    `systemctl --user start nhms-node27-timeseries-retention.service`
@@ -2967,21 +2991,54 @@ commented placeholder; run it only after the two manual receipts in §8.4
    the env file it irreversibly drops up to
    `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks, same as a scheduled
    firing — it is not a no-op probe**). Two distinctly timestamped
-   WRAPPER-generated receipts MUST coexist in the log root. A single file
-   means the receipt-path env var is still set and each tick is overwriting the
-   previous audit record.
+   WRAPPER-generated receipts MUST coexist in the log root.
 
    Match only the wrapper's own filenames: it writes
    `retention-<UTC>.json` with `<UTC>` = `%Y%m%dT%H%M%SZ`, so the glob below
    pins the leading `2` of the year. The manual §8.4 receipts
-   (`retention-dryrun-<UTC>.json`, `retention-enforce-<UTC>.json`) do NOT
-   count toward the two and deliberately do not match — a bare
-   `retention-*.json` glob would be satisfied by those two alone, before the
-   timer has ticked even once, and the check could never fail.
+   (`retention-dryrun-<UTC>.json`, `retention-enforce-<UTC>.json`) never count
+   toward the two and deliberately do not match — a bare `retention-*.json`
+   glob would be satisfied by those two alone, before the timer has ticked
+   even once, and the check could never fail.
 
    ```
    ls -l ~/node27-timeseries-retention-logs/retention-2*.json
    ```
+
+   Read the listing in three states:
+
+   - **Two or more distinctly timestamped matches → PASS.** Rotation works:
+     each wrapper tick kept its own receipt.
+   - **Exactly one match → NOT a pass.** One wrapper tick has produced a
+     receipt; either the second tick has not happened yet, or it happened and
+     did not add a file.
+   - **Zero matches → NOT a pass.** No wrapper-named receipt exists at all —
+     which is also the visible signature of the fixed-path regression below,
+     since a pinned path is conventionally `retention-manual.json`-style and
+     does not match `retention-2*`.
+
+   Before concluding "rotation is broken" from either non-pass state, rule out
+   the two diagnosable causes, in this order:
+
+   1. **The receipt-path variable is still set** (step 2 skipped): every tick
+      atomically overwrites the one fixed file, so the per-tick audit trail is
+      gone. Check with the anchored grep, which must print nothing:
+
+      ```
+      grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' \
+        /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+      ```
+
+      Any hit: comment the line out per step 2, then wait for / force another
+      tick and re-check.
+   2. **No second wrapper tick has run yet.** Read `LAST` and `NEXT` from
+      `systemctl --user list-timers | grep nhms-node27-timeseries-retention`:
+      a blank/single `LAST` means the count is simply premature, not broken.
+      Wait for the next firing or force one (with the enforcing-tick caveat
+      above) before reading anything into the file count.
+
+   Only with the grep clean AND at least two wrapper ticks recorded does a
+   count below two indicate a real rotation defect.
 
 #### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
 
@@ -3030,8 +3087,10 @@ which can only shrink its side, so the query stays a superset there).
 ```
 set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
 # DRYRUN_RECEIPT = the timestamped path passed to --receipt-path in §8.4
-# step 2. Do NOT reach for $NODE27_TIMESERIES_RETENTION_RECEIPT_PATH: that var
-# is deliberately unset in the deployed env file (§8.1 step 2).
+# step 2. Do NOT reach for $NODE27_TIMESERIES_RETENTION_RECEIPT_PATH: that line
+# is commented out in the deployed env file (§8.1 step 2), so the var expands
+# to nothing — and if it does expand, step 2 was skipped and the path names a
+# single repeatedly-overwritten file, not this dry-run's receipt.
 DRYRUN_RECEIPT=/home/nwm/node27-timeseries-retention-logs/retention-dryrun-<UTC>.json
 CUTOFF="$(jq -r '.cutoff // empty' "$DRYRUN_RECEIPT")"
 : "${CUTOFF:?dry-run receipt carries no cutoff — re-run the dry-run first}"
@@ -3303,21 +3362,35 @@ Two guardrails enforce this:
 ### 8.4 How to run
 
 ```
-# 1. Prime env (once per node-27, then owned by operators)
-cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
-   /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+# 1. Prime env (once per node-27, then owned by operators).
+# FIRST-TIME INSTALL ONLY — the `cp` is guarded, exactly as in §8.1 step 2.
+# On node-27 the env file ALREADY EXISTS: edit it in place, never re-copy the
+# example over it. The example ships
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14 while the box runs 21, so an
+# overwrite silently reverts the live window 21 -> 14 and turns 7 more days of
+# data into deletion candidates — irreversibly, with no refusal to catch it
+# once the archive gate is `disabled`. Re-grep the window after ANY edit
+# (§8.1 step 2) and treat a surprise 14 as a stop-the-work event.
+test -e /home/nwm/NWM/infra/env/node27-timeseries-retention.env \
+  || cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+        /home/nwm/NWM/infra/env/node27-timeseries-retention.env
 chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
 # Fill DATABASE_URL (writer role) and (optionally) the lock path override.
 # The SAME edit decides NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE — see the two
 # branches under step 3.
 # BRANCH A ONLY: fill the completeness/drill receipt paths. In the `disabled`
 # branch both are unneeded and are never read, so leave them alone.
-# Leave NODE27_TIMESERIES_RETENTION_RECEIPT_PATH unset/commented: the wrapper
-# then writes a per-tick timestamped receipt, and the per-tick audit trail of
-# irreversible deletions survives (a fixed path is overwritten every tick).
+# COMMENT OUT NODE27_TIMESERIES_RETENTION_RECEIPT_PATH — on node-27 that line
+# is currently SET (the example shipped it uncommented until 2026-08-14), so it
+# has to be actively commented, not merely "left" alone. Verify with
+#   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <env file>
+# expecting ZERO matches (keep the ^ and = anchors — an unanchored grep matches
+# the commented line too and proves nothing). With it commented the wrapper
+# writes a per-tick timestamped receipt and the audit trail of irreversible
+# deletions survives; a fixed path is overwritten every tick.
 
 # 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder.
-# The runner REQUIRES a receipt path; with the env var deliberately unset (step
+# The runner REQUIRES a receipt path; with the env var commented out (step
 # 1) a manual run must pass --receipt-path explicitly, or it aborts with
 # RETENTION_CONFIG_INVALID, exit 2, and no receipt. Use a timestamped filename
 # so manual runs never clobber each other or a timer tick's receipt.
@@ -3386,7 +3459,7 @@ jq . "$DRYRUN_RECEIPT"
 #    (§8.5).
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
 # pass --enforce on the CLI. Same receipt-path rule as step 2: pass an explicit
-# timestamped --receipt-path, because the env var stays unset.
+# timestamped --receipt-path, because that env var stays commented out.
 ENFORCE_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-enforce-$(date -u +%Y%m%dT%H%M%SZ).json"
 uv run python scripts/node27_timeseries_retention.py --enforce \
   --receipt-path "$ENFORCE_RECEIPT"
@@ -3480,7 +3553,10 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    on refused); those chunks are already gone. To reconstruct what
    actually happened, cross-reference the wrapper's `retention.log`
    (per-chunk drop timings printed to stderr) with the current
-   `timescaledb_information.chunks` state before re-running enforce.
+   `timescaledb_information.chunks` state before re-running enforce. If the
+   refusal came from a manual direct-`python` run there is no `retention.log`
+   entry to cross-reference (item 5's scope note) — use that terminal's stderr
+   and the catalog state instead.
    Inspect the offending chunk (the refusal_reason suffix names it
    `<hypertable_schema>.<chunk_name>`). The cause text AFTER that chunk
    name is redacted (§8.2), so read it as an intent-preserving summary,
@@ -3528,6 +3604,18 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    grep 'freed_bytes measurement failed' /path/to/retention.log
    ```
 
+   **Scope first — `retention.log` brackets exist ONLY for wrapper-driven
+   ticks.** That is the timer lane plus any manual
+   `scripts/node27_timeseries_retention_once.sh` invocation. A direct
+   `uv run python scripts/node27_timeseries_retention.py` run (§8.4 steps 2-3)
+   writes NO `retention.log` entry at all — not a start bracket, not a done
+   bracket, not the measurement warning. Its only diagnostics are the invoking
+   terminal's stderr and the receipt at the explicit `--receipt-path`. So if
+   the receipt under investigation came from a manual direct-`python` run, the
+   grep above has nothing to find and its silence carries zero information:
+   read the terminal output you still have, or re-run through the wrapper. The
+   whole bracket procedure below applies to wrapper receipts only.
+
    Scope the match to THIS tick before reading anything into it.
    `retention.log` is cumulative — the wrapper appends every tick to the same
    file (`>>`) — so a bare `grep` also returns warnings from earlier runs.
@@ -3537,12 +3625,15 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    lines (`scripts/node27_timeseries_retention_once.sh:143,151`), each
    prefixed with a UTC ISO-8601 timestamp from the wrapper's `ts()`
    (`scripts/node27_timeseries_retention_once.sh:23`). Do NOT rely on the
-   receipt path in those lines as the tick key. Under the shipped
-   configuration `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` is left unset
-   (`infra/env/node27-timeseries-retention.example`), so the wrapper
-   substitutes a per-tick timestamped path and the paths do differ — but if
-   anyone has pinned a fixed path against that guidance, every tick prints
-   the same string and the path ALONE discriminates nothing. Correlate on
+   receipt path in those lines as the tick key. Under the required
+   configuration `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` is commented out
+   in the deployed env file (§8.1 step 2; the current
+   `infra/env/node27-timeseries-retention.example` also ships it commented),
+   so the wrapper substitutes a per-tick timestamped path and the paths do
+   differ — but if the line is still set (it was uncommented in env files
+   copied from the pre-2026-08-14 example) or anyone has pinned a fixed path
+   against that guidance, every tick prints the same string and the path ALONE
+   discriminates nothing. Correlate on
    time instead: pick the bracket whose `start summary=` timestamp and
    matching `done rc=` timestamp CONTAIN the receipt's `generated_at`
    (schema-required, `format: date-time`), and read only the lines between
@@ -3576,8 +3667,9 @@ therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
    `decompress_chunk` / manual replay holding an incompatible lock on the
    same hypertable until the 60 s statement timeout fires.
 
-   No in-bracket hit does NOT prove the 0 was measured — it leaves two
-   possibilities:
+   No in-bracket hit does NOT prove the 0 was measured — for a wrapper tick
+   (the only kind that has a bracket at all; see the scope note above) it
+   leaves two possibilities:
    (a) a real measurement of a small or empty chunk, or (b) the
    silent-coercion path, where `chunks_detailed_size` returned no row or a
    NULL `total_bytes` and the runner recorded 0 without emitting any

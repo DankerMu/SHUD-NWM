@@ -202,10 +202,14 @@ NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
 
 Two things this block is not being cute about:
 
-- **The `--receipt-path` is mandatory.** The deployed env file leaves
-  `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` unset so the wrapper can write a
-  per-tick timestamped receipt (a fixed path would be overwritten by every
-  daily tick). A direct `python` invocation does not get that substitution, so
+- **The `--receipt-path` is mandatory.** The deployed env file must have
+  `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` COMMENTED OUT — the line was
+  shipped uncommented by the pre-2026-08-14 example, so it has to be actively
+  commented and verified with
+  `grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <env file>` returning
+  nothing (runbook §8.1 step 2) — so that the wrapper can write a per-tick
+  timestamped receipt (a fixed path would be overwritten by every daily tick).
+  A direct `python` invocation does not get that substitution either way, so
   without an explicit path it aborts with `RETENTION_CONFIG_INVALID`, exit 2,
   and no receipt. Use a timestamped filename so a manual run never clobbers a
   timer tick's receipt.

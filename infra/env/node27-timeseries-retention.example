@@ -74,7 +74,12 @@ NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-i
 NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH=/home/nwm/node27-archive-rebuild-drill-logs/latest-pass-receipt.json
 
 # Absolute path — retention runner's own receipt (mode 0600, atomic).
-# LEAVE THIS UNSET under timer operation (keep the line commented). When it is
+# LEAVE THIS UNSET under timer operation (keep the line commented). NOTE for
+# already-deployed env files: this example shipped the assignment UNCOMMENTED
+# until 2026-08-14, so a deployed copy made before then HAS it set — comment it
+# out there and verify with
+#   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <deployed env file>
+# returning zero matches (runbook §8.1 step 2). When it is
 # unset the wrapper substitutes a per-tick timestamped filename
 # (retention-<UTC>.json under the log root), so every tick keeps its own
 # receipt. Setting a FIXED path makes each daily tick atomically OVERWRITE the
