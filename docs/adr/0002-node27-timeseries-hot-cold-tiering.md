@@ -363,8 +363,9 @@ on PR #1377 (2026-08-14)):
   (baseline Q7, all four predicates pushed into the pkey `Index Cond`), so the
   write path is not a consumer.
 - `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
-  strict prefix of the index above. No in-repo migration created it; it was
-  created out-of-band on node-27.
+  strict prefix of the index above; those 10,864 cumulative `idx_scan` are
+  **not** individually attributed to queries. No in-repo migration created it;
+  it was created out-of-band on node-27.
 
 ### Disposition
 
@@ -374,17 +375,22 @@ Both are dropped by
 the pre-merge live leg — will record the actual before/after). This is a
 **tradeoff, not a redundancy removal**: 162 GB of
 carrying cost weighed against 5,571 scans, with a real residual coverage loss
-on the two read shapes above. That loss is exactly what the pre-merge
-before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measures, over the in-repo query
-surfaces that name-match the dropped columns: any Seq Scan fallback or
-order-of-magnitude slowdown rolls the drop back by re-creating the index (the
-re-create DDL for both is preserved verbatim in that migration's comments).
+on the two read shapes above. The pre-merge before/after
+`EXPLAIN (ANALYZE, BUFFERS)` gate measures the before/after latency of those two
+**predicate shapes** — the gate's Q1/Q8 are single-table proxies, so real-query
+latency is **not** measured by the gate: any Seq Scan fallback or
+order-of-magnitude slowdown in the shape plans rolls the drop back by
+re-creating the index (the re-create DDL for both is preserved verbatim in that
+migration's comments).
 Re-creating the index is not by itself a durable rollback: as that migration's
 rollback-procedure note records, the build takes a `SHARE` lock on
 `hydro.river_timeseries` (blocking ingest writes), `CREATE INDEX CONCURRENTLY`
-on this hypertable is unverified in-repo, and 000049 must also be recorded in
-`public.schema_migrations` (or the file reverted) or the next unattended
-`migrate.py` run silently re-drops the rebuilt index. The
+on this hypertable is unverified in-repo, and the full filename
+`000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql` must
+also be recorded in `public.schema_migrations.version` (or the file reverted) —
+inserting the shorthand `000049` leaves `migrate.py` still treating the
+migration as unapplied and silently re-dropping the rebuilt index — or the next
+unattended `migrate.py` run silently re-drops the rebuilt index. The
 general lesson for this ADR: "cannot be pruned further" is a measurement, not a
 property — index redundancy claims expire and must be re-measured against
 growth, not carried forward.

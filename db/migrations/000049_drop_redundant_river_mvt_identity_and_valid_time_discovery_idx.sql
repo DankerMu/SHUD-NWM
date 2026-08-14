@@ -22,26 +22,32 @@
 -- not a consumer. So this drop is a measured TRADEOFF, not a redundancy removal. Live
 -- node-27 measurement 2026-08-14 (8 chunks aggregated): 162 GB of carrying cost for
 -- those 5,571 idx_scan, against 796,096,944 pkey scans over the same window. The residual
--- coverage loss on those two reads is real and their before/after latency is exactly what
--- the #1338 pre-merge EXPLAIN (ANALYZE, BUFFERS) gate measures; if it regresses, the
--- verbatim rollback below re-creates the index.
+-- coverage loss on those two reads is real; the #1338 pre-merge EXPLAIN (ANALYZE, BUFFERS)
+-- gate measures the before/after latency of these two PREDICATE SHAPES -- the gate's Q1/Q8
+-- are single-table proxies, so real-query latency is NOT measured by the gate. If the
+-- shape plans regress, the verbatim rollback below re-creates the index.
 -- ROLLBACK PROCEDURE (applies to both re-create blocks in this file): (i) the bare
 -- CREATE INDEX takes a SHARE lock on hydro.river_timeseries for the whole build -- the
 -- full ~162 GB here, ~4.6 GB for the discovery index below -- which blocks ingest writes
 -- (workers/output_parser) though not reads; (ii) whether CREATE INDEX CONCURRENTLY is
 -- accepted on this hypertable (TimescaleDB 2.10.2, compressed chunks present) is
 -- unverified in-repo -- verify on node-27 during the #1338 live leg before relying on it;
--- (iii) a durable rollback ALSO requires recording 000049 in public.schema_migrations (or
--- reverting this file), otherwise the next full migrate.py run (e.g. scripts/run_qhh_cycle.sh
--- invokes packages/common/migrate.py unattended) sees 000049 unapplied and silently
--- re-drops the rebuilt index -- IF EXISTS makes that re-drop succeed without error.
+-- (iii) a durable rollback ALSO requires recording the full filename
+-- '000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql' in
+-- public.schema_migrations.version (or reverting this file) -- inserting the shorthand
+-- '000049' leaves migrate.py still treating the migration as unapplied and silently
+-- re-dropping the rebuilt index; otherwise the next full migrate.py run
+-- (e.g. scripts/run_qhh_cycle.sh invokes packages/common/migrate.py unattended) sees
+-- 000049 unapplied and silently re-drops the rebuilt index -- IF EXISTS makes that
+-- re-drop succeed without error.
 -- Rollback (verbatim re-create, from 000019):
 --   CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id);
 DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx;
 
 -- The valid-time discovery index (run_id, variable, valid_time DESC) is a strict
 -- prefix of the index dropped above -- btree scans backwards, so the DESC direction
--- is not a distinction -- and measured 4663 MB for 10,864 idx_scan. Both in-repo
+-- is not a distinction -- and measured 4663 MB for 10,864 idx_scan; those 10,864
+-- cumulative idx_scan are NOT individually attributed to queries. Both in-repo
 -- discovery surfaces are expected to keep a working server -- an expectation the #1338
 -- pre-merge post-drop EXPLAIN gate confirms, not a receipt: valid_times_for_layer's
 -- named-identity branch (services/tiles/mvt.py) is an exact prefix match on the retained
@@ -57,7 +63,9 @@ DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx
 -- existed and this statement must replay as a no-op. The ROLLBACK PROCEDURE caveats
 -- recorded above apply here too: SHARE lock on hydro.river_timeseries for the ~4.6 GB
 -- build (blocks ingest writes), CONCURRENTLY unverified on this hypertable, and the
--- public.schema_migrations bookkeeping without which the next migrate.py run silently
+-- public.schema_migrations.version bookkeeping -- keyed on the full filename
+-- '000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql', not the
+-- shorthand '000049' -- without which the next migrate.py run silently
 -- re-drops the rebuilt index. Rollback (verbatim re-create,
 -- captured from pg_get_indexdef on node-27, 2026-08-14):
 --   CREATE INDEX river_timeseries_valid_time_discovery_idx ON hydro.river_timeseries USING btree (run_id, variable, valid_time DESC);

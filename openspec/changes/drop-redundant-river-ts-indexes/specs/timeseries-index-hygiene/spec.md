@@ -4,7 +4,7 @@
 
 ### Requirement: Redundant timeseries-index removal MUST be evidence-gated and replay-safe
 
-Dropping an index on a production timeseries hypertable SHALL be justified by live scan/size measurements (per-index `idx_scan` and `pg_total_relation_size` across all chunks), SHALL be verified by before/after `EXPLAIN (ANALYZE, BUFFERS)` captures of the in-repo query surfaces that name-match the dropped columns showing no plan regression, and SHALL record the reclaimed bytes. The migration SHALL use `DROP INDEX CONCURRENTLY IF EXISTS` so it neither blocks concurrent reads nor fails on databases where the index never existed (including indexes created out-of-band on production only). In-repo evidence statements that name a dropped index SHALL be realigned in the same change.
+Dropping an index on a production timeseries hypertable SHALL be justified by live scan/size measurements (per-index `idx_scan` and `pg_total_relation_size` across all chunks), SHALL be verified by before/after `EXPLAIN (ANALYZE, BUFFERS)` captures of the in-repo query surfaces that name-match the dropped columns — or of single-table predicate-shape proxies of those surfaces, provided the proxy relationship is recorded in the change's design (a proxy proves shape-index usage, not the real query's plan node type) showing no plan regression, and SHALL record the reclaimed bytes. The migration SHALL use `DROP INDEX CONCURRENTLY IF EXISTS` so it neither blocks concurrent reads nor fails on databases where the index never existed (including indexes created out-of-band on production only). In-repo evidence statements that name a dropped index SHALL be realigned in the same change.
 
 #### Scenario: evidence-backed drop
 
