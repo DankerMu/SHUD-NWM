@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 published-frontier stall alert every 30 minutes
+
+[Timer]
+OnCalendar=*:00/30
+Persistent=true
+Unit=nhms-node27-frontier-alert.service
+
+[Install]
+WantedBy=timers.target

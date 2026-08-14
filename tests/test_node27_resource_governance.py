@@ -136,6 +136,46 @@ def test_default_services_includes_timeseries_retention_units() -> None:
     assert expected.issubset(set(governance.DEFAULT_SERVICES))
 
 
+def test_default_services_includes_frontier_alert_units() -> None:
+    # #1368 registers the frontier stall alert service + timer so the
+    # governance audit receipt reflects their systemd state. The alerting lane
+    # is the thing that notices production stopped producing — a silently
+    # disabled timer must be visible in the governance oracle, not only in the
+    # alerter's own (equally silent) absence of mail.
+    expected = {
+        "nhms-node27-frontier-alert.service",
+        "nhms-node27-frontier-alert.timer",
+    }
+    assert expected.issubset(set(governance.DEFAULT_SERVICES))
+
+
+def test_collect_systemd_receipt_includes_frontier_alert_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1368 registration proven end-to-end through the collector (mocked
+    systemctl), not only via the DEFAULT_SERVICES tuple."""
+
+    def _fake_run_command(args, *, timeout: int = 20) -> dict:
+        return {
+            "status": "ok",
+            "return_code": 0,
+            "stdout": "Id=stub\nActiveState=active\nSubState=running\nResult=success\n",
+            "stderr": "",
+            "args": list(args),
+        }
+
+    monkeypatch.setattr(governance, "_run_command", _fake_run_command)
+    payload = governance.collect_systemd(governance.DEFAULT_SERVICES)
+    services = payload["services"]
+    for unit in (
+        "nhms-node27-frontier-alert.service",
+        "nhms-node27-frontier-alert.timer",
+    ):
+        assert unit in services
+        assert services[unit]["command"]["status"] == "ok"
+        assert services[unit]["properties"].get("Id") == "stub"
+
+
 def test_collect_systemd_receipt_includes_compression_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

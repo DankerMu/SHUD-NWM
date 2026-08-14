@@ -14,6 +14,8 @@
     "tests/test_forcing_producer.py",
     "scripts/node27_archive_rebuild_drill.py",
     "scripts/node27_timeseries_retention.py",
+    "scripts/node27_frontier_stall_alert.py",
+    "tests/test_node27_frontier_stall_alert.py",
     "tests/test_node27_archive_rebuild_drill.py",
     "tests/test_node27_timeseries_retention.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",

@@ -1,0 +1,27 @@
+[Unit]
+Description=NHMS node-27 published-frontier stall alert
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env
+# Lane-scoped sentinel: tells the wrapper the env file has already been read by
+# systemd, so it must NOT source it a second time under a different grammar.
+# It deliberately does not gate the wrapper's symlink/0600 refusal — that check
+# runs on every path. Lane-scoped (not DATABASE_URL) so another lane's exported
+# DSN in a debugging shell cannot silently suppress sourcing.
+Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-frontier-alert-logs
+ExecStart=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh
+StandardOutput=append:/home/nwm/node27-frontier-alert-logs/systemd.log
+StandardError=append:/home/nwm/node27-frontier-alert-logs/systemd.err
+# Bounded execution deadline (issue #1368 review round-1 B-C2). For
+# Type=oneshot the ENTIRE execution is the start phase, so TimeoutStartSec is
+# the only deadline that applies (RuntimeMaxSec governs the post-start runtime
+# a oneshot unit never has). The sibling node-27 units use TimeoutStartSec=0
+# because their ticks legitimately run for hours; this one has a seconds-scale
+# budget: connect 10 s + statement 30 s + sendmail 60 s per mail. 900 s is two
+# orders of margin over that and still well inside the 30 min timer cadence.
+# A monitoring lane that hangs must become a visible failed unit — a silently
+# wedged watchdog is exactly the 2026-08-12 geometry this lane exists to catch.
+TimeoutStartSec=900
