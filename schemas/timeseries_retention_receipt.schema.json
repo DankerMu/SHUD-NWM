@@ -3,15 +3,30 @@
   "title": "NHMS Timeseries Retention Receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "generated_at", "mode", "outcome"],
+  "required": ["schema_version", "generated_at", "mode", "outcome", "archive_gate"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "generated_at": {"type": "string", "format": "date-time"},
     "reference_time": {"type": "string", "format": "date-time"},
     "cutoff": {"type": "string", "format": "date-time"},
     "window_days": {"type": "integer", "minimum": 1},
     "mode": {"enum": ["dry-run", "enforce"]},
     "outcome": {"enum": ["dry-run", "refused", "enforced"]},
+    "archive_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["enabled", "disabled"]},
+        "adr_reference": {
+          "const": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
+        }
+      },
+      "oneOf": [
+        {"properties": {"mode": {"const": "enabled"}}, "not": {"required": ["adr_reference"]}},
+        {"properties": {"mode": {"const": "disabled"}}, "required": ["adr_reference"]}
+      ]
+    },
     "refusal_reason": {"type": "string", "minLength": 1},
     "candidate_chunks": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "dropped_chunks": {

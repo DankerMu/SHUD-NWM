@@ -81,6 +81,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "lock_path": None,
         "completeness_receipt_path": None,
         "drill_receipt_path": None,
+        "archive_gate": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -4370,6 +4371,7 @@ def test_env_example_lists_all_h13_keys() -> None:
         "NODE27_TIMESERIES_RETENTION_RECEIPT_PATH",
         "NODE27_TIMESERIES_RETENTION_LOCK_PATH",
         "NODE27_TIMESERIES_RETENTION_ENFORCE",
+        "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE",
     ):
         assert re.search(rf"^#?{re.escape(key)}=", text, flags=re.MULTILINE), f"missing {key}"
 
@@ -4674,10 +4676,11 @@ def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> No
     oracle as the emitter).
     """
     bad_receipt = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": _iso(_NOW),
         "mode": "enforce",
         "outcome": "enforced",
+        "archive_gate": {"mode": "enabled"},
         "dropped_chunks": [],
         "deferred_remainder": [],
         "salvage_backed_windows": [{"start": "not-a-datetime", "end": _iso(_NOW)}],
@@ -4689,13 +4692,783 @@ def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> No
 def test_enforced_receipt_generated_at_datetime_format_enforced() -> None:
     """G Schema C2 (symmetric): ``generated_at`` bad format is also caught."""
     bad_receipt = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": "not-a-datetime",
         "mode": "enforce",
         "outcome": "enforced",
+        "archive_gate": {"mode": "enabled"},
         "dropped_chunks": [],
         "deferred_remainder": [],
         "salvage_backed_windows": [],
     }
     with pytest.raises(jsonschema.ValidationError):
         retention._validate_receipt(bad_receipt)
+
+
+# ---------------------------------------------------------------------------
+# #1369 — explicit archive-gate disabled mode (ADR 0002 Revision 2026-08-11)
+#
+# Three orthogonal axes: gate mode (enabled/disabled) x dry-run/enforce x
+# outcome branch. The pins below are written against the fixture's own
+# strings (env key, enum values, ADR reference constant), never echoed from
+# the module, so a rename in the runner cannot silently drag the oracle
+# along.
+# ---------------------------------------------------------------------------
+
+
+_ARCHIVE_GATE_ENV_KEY = "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE"
+# Verbatim from docs/adr/0002-node27-timeseries-hot-cold-tiering.md
+# "Revision 2026-08-11 — archive lane retired; delete-without-archive authorized".
+_ADR_REFERENCE = "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"
+_ADR_PATH_ANCHOR = "docs/adr/0002-node27-timeseries-hot-cold-tiering.md"
+_ADR_REVISION_ANCHOR = "Revision 2026-08-11"
+
+# The thirteen archive-family wire codes. In disabled mode none of them is
+# reachable; the four runner-own codes remain reachable.
+_ARCHIVE_FAMILY_CODES = frozenset(
+    {
+        "COMPLETENESS_RECEIPT_MISSING",
+        "COMPLETENESS_RECEIPT_STALE",
+        "COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT",
+        "COMPLETENESS_RECEIPT_GAP_IN_DROP_WINDOW",
+        "COMPLETENESS_RECEIPT_PENDING_IN_DROP_WINDOW",
+        "DRILL_RECEIPT_MISSING",
+        "DRILL_RECEIPT_STALE",
+        "DRILL_RECEIPT_FAIL",
+        "DRILL_DERIVATION_WINDOW_TOO_NARROW",
+        "DRILL_COVERAGE_FORCING_MISSING",
+        "DRILL_COVERAGE_RUNS_MISSING",
+        "DRILL_COMPLETENESS_SNAPSHOT_UNBOUND",
+        "DRILL_COVERAGE_DB_EXPORT_MISSING",
+    }
+)
+_RUNNER_OWN_CODES = frozenset(
+    {
+        "RETENTION_CONFIG_INVALID",
+        "RETENTION_CONCURRENT_INVOCATION",
+        "RETENTION_DROP_FAILED",
+        "RETENTION_UNCAUGHT_ERROR",
+    }
+)
+
+
+def test_archive_family_partition_covers_wire_codes_exactly() -> None:
+    """The 13/4 split is a partition of WIRE_CODES — no code escapes the
+    reachability matrix below by being absent from both halves.
+    """
+    assert len(_ARCHIVE_FAMILY_CODES) == 13
+    assert len(_RUNNER_OWN_CODES) == 4
+    assert _ARCHIVE_FAMILY_CODES.isdisjoint(_RUNNER_OWN_CODES)
+    assert _ARCHIVE_FAMILY_CODES | _RUNNER_OWN_CODES == retention.WIRE_CODES
+
+
+def _disabled_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
+    """Env for disabled mode with BOTH archive receipt path vars absent."""
+    base: dict[str, str | None] = {
+        _ARCHIVE_GATE_ENV_KEY: "disabled",
+        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": None,
+        "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": None,
+    }
+    base.update(overrides)
+    return _base_env(tmp_path, **base)
+
+
+# --- tasks 2.1: D1 mode parse table ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(None, "enabled", id="unset-defaults-enabled"),
+        pytest.param("enabled", "enabled", id="enabled"),
+        pytest.param("disabled", "disabled", id="disabled"),
+        pytest.param("  disabled  ", "disabled", id="disabled-surrounding-spaces"),
+        pytest.param("\tenabled\n", "enabled", id="enabled-surrounding-tabs"),
+        pytest.param("DISABLED", "disabled", id="disabled-uppercase"),
+        pytest.param("Enabled", "enabled", id="enabled-mixed-case"),
+    ],
+)
+def test_archive_gate_env_parse_table(tmp_path: Path, raw: str | None, expected: str) -> None:
+    """D1: unset → enabled; strip+lower must land inside the enum."""
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
+    config = retention.config_from_args(_args(), env)
+    assert config.archive_gate == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param("   ", id="whitespace-only"),
+        pytest.param("disable", id="typo-disable"),
+        pytest.param("true", id="truthy-true"),
+        pytest.param("1", id="truthy-one"),
+        pytest.param("0", id="falsy-zero"),
+        pytest.param("off", id="off"),
+        pytest.param("enabled disabled", id="both"),
+    ],
+)
+def test_archive_gate_invalid_env_value_fails_closed(tmp_path: Path, raw: str) -> None:
+    """D1: three-value risk switch — anything outside the enum must explode.
+
+    No truthiness fallback (that is the ``--enforce`` precedent and it is
+    deliberately NOT reused here).
+    """
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: raw})
+    with pytest.raises(retention.RetentionConfigError, match=_ARCHIVE_GATE_ENV_KEY):
+        retention.config_from_args(_args(), env)
+
+
+def test_main_invalid_archive_gate_exits_two_without_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D1 end-to-end: exit 2, RETENTION_CONFIG_INVALID on stderr, NO receipt."""
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: "disable"})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+
+    code = retention.main(argv=[], now=_NOW)
+
+    assert code == 2
+    assert not receipt_path.exists()
+    payload = json.loads(capsys.readouterr().err.strip())
+    assert payload["code"] == retention.CODE_RETENTION_CONFIG_INVALID
+    assert _ARCHIVE_GATE_ENV_KEY in payload["reason"]
+
+
+@pytest.mark.parametrize(
+    ("env_value", "cli_value", "expected"),
+    [
+        pytest.param("enabled", "disabled", "disabled", id="cli-disabled-beats-env-enabled"),
+        pytest.param("disabled", "enabled", "enabled", id="cli-enabled-beats-env-disabled"),
+        pytest.param(None, "disabled", "disabled", id="cli-disabled-without-env"),
+    ],
+)
+def test_archive_gate_cli_overrides_env(
+    tmp_path: Path, env_value: str | None, cli_value: str, expected: str
+) -> None:
+    """CLI wins over env, matching the ``--enforce`` precedent."""
+    env = _base_env(tmp_path, **{_ARCHIVE_GATE_ENV_KEY: env_value})
+    config = retention.config_from_args(_args(archive_gate=cli_value), env)
+    assert config.archive_gate == expected
+
+
+def test_parser_archive_gate_choices_are_the_enum() -> None:
+    parser = retention._parser()
+    assert parser.parse_args([]).archive_gate is None
+    assert parser.parse_args(["--archive-gate", "disabled"]).archive_gate == "disabled"
+    assert parser.parse_args(["--archive-gate", "enabled"]).archive_gate == "enabled"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--archive-gate", "disable"])
+
+
+# --- tasks 2.2: D4 conditional path requirement (both directions) ---------
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH",
+        "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH",
+    ],
+)
+@pytest.mark.parametrize(
+    "gate", [pytest.param(None, id="gate-unset"), pytest.param("enabled", id="gate-enabled")]
+)
+def test_archive_gate_enabled_still_requires_both_archive_paths(
+    tmp_path: Path, missing_key: str, gate: str | None
+) -> None:
+    """D4 direction 1: the enabled side is NOT relaxed by this change."""
+    env = _base_env(tmp_path, **{missing_key: None, _ARCHIVE_GATE_ENV_KEY: gate})
+    with pytest.raises(retention.RetentionConfigError, match=missing_key):
+        retention.config_from_args(_args(), env)
+
+
+def test_archive_gate_disabled_makes_both_archive_paths_optional(tmp_path: Path) -> None:
+    """D4 direction 2: disabled + both path vars absent parses to ``None``.
+
+    ``_resolve_path(..., required=False)`` raises by construction, so the
+    only correct implementation is to NOT resolve these two paths at all.
+    """
+    config = retention.config_from_args(_args(), _disabled_env(tmp_path))
+    assert config.archive_gate == "disabled"
+    assert config.completeness_receipt_path is None
+    assert config.drill_receipt_path is None
+
+
+def test_archive_gate_disabled_ignores_paths_pointing_at_missing_files(
+    tmp_path: Path,
+) -> None:
+    """Given-but-unread proof: the two env vars name files that do not exist
+    and the tick still succeeds (an enabled-mode tick would refuse with
+    ``COMPLETENESS_RECEIPT_MISSING``).
+    """
+    ghost_completeness = tmp_path / "ghost" / "completeness.json"
+    ghost_drill = tmp_path / "ghost" / "drill.json"
+    assert not ghost_completeness.exists() and not ghost_drill.exists()
+    env = _base_env(
+        tmp_path,
+        **{
+            _ARCHIVE_GATE_ENV_KEY: "disabled",
+            "NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH": str(ghost_completeness),
+            "NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH": str(ghost_drill),
+        },
+    )
+    config = retention.config_from_args(_args(), env)
+    assert config.completeness_receipt_path is None
+    assert config.drill_receipt_path is None
+
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+
+
+def test_run_retention_disabled_never_reads_a_configured_receipt_path(
+    tmp_path: Path,
+) -> None:
+    """Even when the config object still carries archive paths (hand-built or
+    left over), disabled mode must not open them.
+    """
+    config = _build_config(
+        tmp_path,
+        archive_gate="disabled",
+        completeness_receipt_path=tmp_path / "does-not-exist-completeness.json",
+        drill_receipt_path=tmp_path / "does-not-exist-drill.json",
+    )
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+
+
+# --- tasks 2.3: D2 behavior -----------------------------------------------
+
+
+def test_disabled_dry_run_receipt_shape(tmp_path: Path) -> None:
+    config = _build_config(tmp_path, archive_gate="disabled", per_tick_bound=2)
+    chunks = [
+        _chunk("hydro", "river_timeseries", f"chk-{i}", delta_days=60 - i) for i in range(3)
+    ]
+    stub = _StubRunner(chunks)
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["mode"] == "dry-run"
+    assert receipt["candidate_chunks"] == [
+        "_timescaledb_internal.chk-0",
+        "_timescaledb_internal.chk-1",
+    ]
+    assert receipt["deferred_remainder"] == ["_timescaledb_internal.chk-2"]
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    assert not any(call[0] == "drop" for call in stub.calls)
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_disabled_enforce_drops_and_records_authorization(tmp_path: Path) -> None:
+    """Spec scenario: disabled + enforce deletes without archive receipts and
+    the receipt records the authorization, with ``salvage_backed_windows``
+    pinned to the empty list (no archive endorsement exists).
+    """
+    config = _build_config(
+        tmp_path,
+        archive_gate="disabled",
+        enforce=True,
+        completeness_receipt_path=None,
+        drill_receipt_path=None,
+    )
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("met", "forcing_station_timeseries", "chk-b", delta_days=61),
+    ]
+    stub = _StubRunner(chunks, measured={"_timescaledb_internal.chk-a": 7})
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "enforced"
+    assert [item["name"] for item in receipt["dropped_chunks"]] == [
+        "_timescaledb_internal.chk-a",
+        "_timescaledb_internal.chk-b",
+    ]
+    assert receipt["salvage_backed_windows"] == []
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    assert receipt["schema_version"] == "1.1"
+    # H4 ordering unchanged: measure precedes every drop.
+    assert [call[0] for call in stub.calls] == ["fetch", "measure", "drop", "drop"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_disabled_enforce_salvage_windows_empty_even_with_db_export_subjects(
+    tmp_path: Path,
+) -> None:
+    """The completeness receipt on disk carries db-export subjects that WOULD
+    derive salvage-backed windows in enabled mode; disabled mode never looks.
+    """
+    completeness = _completeness_receipt(
+        subjects=[
+            {
+                "lane": "forcing",
+                "subject": {"forcing_version_id": "fv-1"},
+                "window": {
+                    "start": _iso(_NOW - timedelta(days=70)),
+                    "end": _iso(_NOW - timedelta(days=50)),
+                },
+                "coverage": "db-export",
+                "verdict": "complete",
+            }
+        ]
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    config = _build_config(tmp_path, archive_gate="disabled", enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == "enforced"
+    assert receipt["salvage_backed_windows"] == []
+
+
+def test_boundary_partial_chunk_becomes_candidate_when_gate_disabled(
+    tmp_path: Path,
+) -> None:
+    """Documented semantic change (design D2 consumer 2): the chunk that
+    enabled mode bounds-defers is a drop candidate in disabled mode. Both
+    modes run against the SAME fixture so the delta is the mode, nothing else.
+    """
+    completeness = _completeness_receipt(
+        bounds_start=_NOW - timedelta(days=65),
+        bounds_end=_NOW,
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    _write_json(tmp_path / "drill.json", _drill_receipt())
+    partial = _chunk("hydro", "river_timeseries", "chk-partial", delta_days=60, duration_days=7)
+    covered = _chunk("hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7)
+
+    enabled_receipt = retention.run_retention(
+        _build_config(tmp_path, per_tick_bound=5),
+        _NOW,
+        fetch_chunks=_StubRunner([partial, covered]).fetch,
+    )
+    disabled_receipt = retention.run_retention(
+        _build_config(tmp_path, per_tick_bound=5, archive_gate="disabled"),
+        _NOW,
+        fetch_chunks=_StubRunner([partial, covered]).fetch,
+    )
+
+    assert enabled_receipt["candidate_chunks"] == [covered.qualified_name]
+    assert enabled_receipt["deferred_remainder"] == [partial.qualified_name]
+    assert disabled_receipt["candidate_chunks"] == [
+        partial.qualified_name,
+        covered.qualified_name,
+    ]
+    assert disabled_receipt["deferred_remainder"] == []
+    jsonschema.validate(disabled_receipt, _load_schema())
+
+
+def test_bounds_insufficient_refusal_is_unreachable_when_gate_disabled(
+    tmp_path: Path,
+) -> None:
+    """Same fixture that refuses BOUNDS_INSUFFICIENT in enabled mode runs
+    clean in disabled mode (that refusal is an archive-family code).
+    """
+    completeness = _completeness_receipt(
+        bounds_start=_NOW - timedelta(days=40),
+        bounds_end=_NOW - timedelta(days=32),
+    )
+    _write_json(tmp_path / "completeness.json", completeness)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-old", delta_days=80, duration_days=7)]
+
+    enabled_receipt = retention.run_retention(
+        _build_config(tmp_path), _NOW, fetch_chunks=_StubRunner(chunks).fetch
+    )
+    disabled_receipt = retention.run_retention(
+        _build_config(tmp_path, archive_gate="disabled"),
+        _NOW,
+        fetch_chunks=_StubRunner(chunks).fetch,
+    )
+
+    assert (
+        enabled_receipt["refusal_reason"]
+        == retention.CODE_COMPLETENESS_RECEIPT_BOUNDS_INSUFFICIENT
+    )
+    assert disabled_receipt["outcome"] == "dry-run"
+    assert disabled_receipt["candidate_chunks"] == ["_timescaledb_internal.chk-old"]
+
+
+def test_enabled_mode_receipts_carry_mode_enabled_without_adr_reference(
+    tmp_path: Path,
+) -> None:
+    """Default (env unset) receipts self-describe as ``enabled`` and MUST NOT
+    cite the ADR revision — the citation is the disabled-mode authorization.
+    """
+    config = _build_config(tmp_path)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert config.archive_gate == "enabled"
+    assert receipt["archive_gate"] == {"mode": "enabled"}
+    assert "adr_reference" not in receipt["archive_gate"]
+
+
+# --- tasks 2.4: unreachability of the archive family ----------------------
+
+
+_ARCHIVE_GATE_FUNCTIONS = (
+    "load_completeness_receipt",
+    "load_drill_receipt",
+    "check_completeness_gate",
+    "check_drill_gate",
+)
+
+
+def _forbid_archive_gate_functions(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _ARCHIVE_GATE_FUNCTIONS:
+
+        def _boom(*args: Any, __name: str = name, **kwargs: Any) -> Any:
+            raise AssertionError(f"{__name} must not run in disabled mode")
+
+        monkeypatch.setattr(retention, name, _boom)
+
+
+@pytest.mark.parametrize("enforce", [False, True], ids=["dry-run", "enforce"])
+def test_disabled_mode_never_calls_the_archive_gate_functions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
+) -> None:
+    _forbid_archive_gate_functions(monkeypatch)
+    config = _build_config(tmp_path, archive_gate="disabled", enforce=enforce)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert receipt["outcome"] == ("enforced" if enforce else "dry-run")
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def _assert_disabled_refusal(receipt: Mapping[str, Any]) -> None:
+    assert receipt["outcome"] == "refused"
+    prefix = str(receipt["refusal_reason"]).split(":", maxsplit=1)[0]
+    assert prefix not in _ARCHIVE_FAMILY_CODES, prefix
+    assert prefix in _RUNNER_OWN_CODES, prefix
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_disabled_drop_failure_refusal_stays_runner_own(tmp_path: Path) -> None:
+    config = _build_config(tmp_path, archive_gate="disabled", enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks, drop_error={"chk-a": RuntimeError("drop blew up")})
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    _assert_disabled_refusal(receipt)
+    assert receipt["refusal_reason"].startswith(retention.CODE_RETENTION_DROP_FAILED)
+
+
+def test_disabled_concurrent_invocation_refusal_carries_archive_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _disabled_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
+    lock_path = Path(env["NODE27_TIMESERIES_RETENTION_LOCK_PATH"])
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        code = retention.main(argv=[], now=_NOW)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert code == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["refusal_reason"] == retention.CODE_RETENTION_CONCURRENT_INVOCATION
+    _assert_disabled_refusal(receipt)
+    assert retention.CODE_RETENTION_CONCURRENT_INVOCATION in capsys.readouterr().err
+
+
+def test_disabled_uncaught_error_refusal_carries_archive_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _disabled_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
+
+    def _bang_fetch(
+        config: retention.RetentionConfig, cutoff: datetime
+    ) -> list[retention.ChunkRow]:
+        raise RuntimeError("catalog probe blew up")
+
+    code = retention.main(argv=[], now=_NOW, fetch_chunks=_bang_fetch)
+
+    assert code == 1
+    receipt = json.loads(
+        Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    )
+    _assert_disabled_refusal(receipt)
+    assert receipt["refusal_reason"].startswith(
+        f"{retention.CODE_RETENTION_UNCAUGHT_ERROR}:RuntimeError"
+    )
+
+
+def test_disabled_main_enforce_end_to_end_publishes_enforced_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whole-entrypoint pin: env-only disabled config (no archive path vars),
+    enforce on, receipt published and schema-valid.
+    """
+    env = _disabled_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH", raising=False)
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH", raising=False)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert code == 0
+    receipt = json.loads(
+        Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    )
+    assert receipt["outcome"] == "enforced"
+    assert receipt["salvage_backed_windows"] == []
+    assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    jsonschema.validate(receipt, _load_schema())
+
+
+# --- tasks 2.5: D3 schema pins --------------------------------------------
+
+
+def _enforced_document(**overrides: Any) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": "1.1",
+        "generated_at": _iso(_NOW),
+        "mode": "enforce",
+        "outcome": "enforced",
+        "archive_gate": {"mode": "disabled", "adr_reference": _ADR_REFERENCE},
+        "dropped_chunks": [],
+        "deferred_remainder": [],
+        "salvage_backed_windows": [],
+    }
+    document.update(overrides)
+    return document
+
+
+def test_schema_version_is_bumped_to_1_1() -> None:
+    schema = _load_schema()
+    assert schema["properties"]["schema_version"]["const"] == "1.1"
+    assert retention.SCHEMA_VERSION == "1.1"
+    assert "archive_gate" in schema["required"]
+
+
+def test_disabled_enforced_receipt_document_is_valid() -> None:
+    """Positive: disabled enforced with an empty salvage list validates."""
+    jsonschema.validate(_enforced_document(), _load_schema())
+    retention._validate_receipt(_enforced_document())
+
+
+@pytest.mark.parametrize(
+    ("label", "document"),
+    [
+        pytest.param(
+            "missing-archive-gate",
+            {k: v for k, v in _enforced_document().items() if k != "archive_gate"},
+            id="missing-archive-gate",
+        ),
+        pytest.param(
+            "disabled-without-adr",
+            _enforced_document(archive_gate={"mode": "disabled"}),
+            id="disabled-without-adr-reference",
+        ),
+        pytest.param(
+            "disabled-wrong-adr",
+            _enforced_document(
+                archive_gate={
+                    "mode": "disabled",
+                    "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md",
+                }
+            ),
+            id="disabled-non-const-adr-reference",
+        ),
+        pytest.param(
+            "enabled-with-adr",
+            _enforced_document(
+                archive_gate={"mode": "enabled", "adr_reference": _ADR_REFERENCE}
+            ),
+            id="enabled-carrying-adr-reference",
+        ),
+        pytest.param(
+            "unknown-mode",
+            _enforced_document(archive_gate={"mode": "bypassed"}),
+            id="mode-outside-enum",
+        ),
+        pytest.param(
+            "extra-key",
+            _enforced_document(
+                archive_gate={
+                    "mode": "disabled",
+                    "adr_reference": _ADR_REFERENCE,
+                    "note": "why not",
+                }
+            ),
+            id="archive-gate-extra-property",
+        ),
+        pytest.param(
+            "stale-schema-version",
+            _enforced_document(schema_version="1.0"),
+            id="schema-version-still-1-0",
+        ),
+    ],
+)
+def test_schema_rejects_unauditable_gate_records(label: str, document: dict[str, Any]) -> None:
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, _load_schema())
+
+
+def test_build_receipt_rejects_unknown_archive_gate_mode() -> None:
+    with pytest.raises(ValueError, match="archive gate"):
+        retention.build_receipt("dry-run", _NOW, archive_gate="bypassed")
+
+
+@pytest.mark.parametrize("outcome", ["dry-run", "refused", "enforced"])
+@pytest.mark.parametrize("gate", ["enabled", "disabled"])
+def test_build_receipt_carries_archive_gate_on_all_three_branches(
+    outcome: str, gate: str
+) -> None:
+    kwargs: dict[str, Any] = {"archive_gate": gate}
+    if outcome == "refused":
+        kwargs["refusal_reason"] = retention.CODE_RETENTION_UNCAUGHT_ERROR
+    receipt = retention.build_receipt(outcome, _NOW, **kwargs)
+    expected = {"mode": gate}
+    if gate == "disabled":
+        expected["adr_reference"] = _ADR_REFERENCE
+    assert receipt["archive_gate"] == expected
+    assert receipt["schema_version"] == "1.1"
+
+
+def test_shipped_receipt_example_matches_schema_1_1() -> None:
+    example = json.loads(
+        (_ROOT / "schemas/examples/timeseries_retention_receipt.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert example["schema_version"] == "1.1"
+    assert example["archive_gate"]["mode"] in {"enabled", "disabled"}
+    jsonschema.validate(example, _load_schema())
+
+
+# --- tasks 2.6: documentation byte anchors --------------------------------
+
+
+def _runbook_section(heading: str, next_heading: str) -> str:
+    text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(heading)
+    end = text.index(next_heading, start)
+    return text[start:end]
+
+
+def test_runbook_8_4_preconditions_cite_the_adr_revision() -> None:
+    """§8.4 must present disabled mode as an ADR-cited alternative to the
+    two-receipt preconditions — verbatim path + revision anchors.
+    """
+    section = _runbook_section("### 8.4 How to run", "### 8.5 Reading the receipt")
+    assert _ADR_PATH_ANCHOR in section
+    assert _ADR_REVISION_ANCHOR in section
+    assert _ARCHIVE_GATE_ENV_KEY in section
+
+
+def test_runbook_8_5_documents_archive_gate_field_and_boundary_partial_change() -> None:
+    """§8.5 must document the field AND the boundary-partial semantics change.
+
+    The field-name anchors alone are satisfied by a §8.5 that never says what
+    `disabled` mode does to boundary-partial chunks, so the spec THEN-clause's
+    §8.5 leg needs the semantic sentence pinned too: in `disabled` mode such
+    chunks are NOT deferred, they enter `candidate_chunks[]` and are dropped.
+    """
+    section = _runbook_section("### 8.5 Reading the receipt", "### 8.6 Recovery")
+    assert "archive_gate" in section
+    assert _ARCHIVE_GATE_ENV_KEY in section
+    assert "boundary-partial" in section
+    assert "NOT deferred" in section
+    assert "candidate_chunks" in section
+
+
+def test_env_example_warns_about_the_missing_archive_backstop() -> None:
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.search(rf"^#?{re.escape(_ARCHIVE_GATE_ENV_KEY)}=", text, flags=re.MULTILINE)
+    assert _ADR_PATH_ANCHOR in text
+    assert _ADR_REVISION_ANCHOR in text
+    assert "irreversible" in text.lower()
+
+
+def test_runbook_never_uses_the_bare_archive_gate_token() -> None:
+    """The reverse wire-code walk treats a bare ``RETENTION_ARCHIVE_GATE``
+    token as an orphan code; the env var must always appear fully qualified.
+    """
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    bare = re.findall(r"(?<![A-Z0-9_])RETENTION_ARCHIVE_GATE", runbook_text)
+    assert not bare, "runbook must spell the env key in full"

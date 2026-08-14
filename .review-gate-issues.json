@@ -949,6 +949,19 @@
           "rounds": 5
         }
       ]
+    },
+    "1369": {
+      "ceilingPrs": [
+        1379
+      ],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 1379,
+          "outcome": "closed",
+          "rounds": 5
+        }
+      ]
     }
   }
 }

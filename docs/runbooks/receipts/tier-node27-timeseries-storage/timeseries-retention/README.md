@@ -2,6 +2,31 @@
 
 This directory holds committed live receipts from `scripts/node27_timeseries_retention.py` on node-27's primary Postgres (`127.0.0.1:55432`).
 
+## Receipt schema versions (dual-version reading)
+
+Every receipt committed here so far declares `schema_version: "1.0"`. The
+emitter moved to `1.1` in #1369, which added the required top-level
+`archive_gate` object; the `1.0` files in this directory are **not**
+back-filled and stay byte-unchanged as the historical record (the schema
+file itself only validates `1.1`, so validate an old receipt against the
+schema revision that produced it — `git log schemas/timeseries_retention_receipt.schema.json`).
+
+Reading rule:
+
+- **No `archive_gate` field / `schema_version: "1.0"`** — produced under the
+  pre-#1369 hard gate, i.e. both archive receipts were loaded and judged.
+  Everything the receipt says about candidates, deferrals and
+  `salvage_backed_windows` is archive-backed.
+- **`schema_version: "1.1"` with `archive_gate.mode = "enabled"`** — same
+  fail-closed semantics, now stated explicitly.
+- **`schema_version: "1.1"` with `archive_gate.mode = "disabled"`** — the
+  archive gates were skipped under
+  `docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11`
+  (carried verbatim in `adr_reference`). Such a receipt records an
+  irreversible deletion with no archive backstop: `salvage_backed_windows`
+  is always `[]`, and boundary-partial chunks are candidates rather than
+  deferrals (runbook §8.5).
+
 ## Receipts
 
 ### `refusal-completeness-missing-20260713T030936Z.json`
@@ -134,12 +159,59 @@ db-export salvage objects sha256+row-count verified. The salvage
 `COPY FROM` and raw-source replay paths remain never-executed against
 production (see #1072's reversibility warning).
 
+### `retention-dryrun-20260814T095619Z.json`
+
+First `disabled`-gate landing receipt (issue #1369 bringup step, runbook
+§8.4 BRANCH B step 2). Manual direct-`python` dry-run with the
+`NODE27_TIMESERIES_RETENTION_ENFORCE=0` prefix and an explicit
+timestamped `--receipt-path`, after the deployed env file was switched to
+`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled` and its
+`NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` line was commented out
+(anchored grep verified zero hits).
+
+Result: `outcome=dry-run`, rc=0, schema `1.1`,
+`archive_gate.mode=disabled` with the pinned ADR 0002 Revision
+2026-08-11 `adr_reference`. `WINDOW_DAYS=21` (cutoff `2026-07-21T12Z`
+against watermark `reference_time 2026-08-11T12Z`). Five candidates plus
+one `deferred_remainder` (per-tick-bound overflow, not a bounds-defer) —
+the full backlog was 6 chunks / 1936 MB per the §8.1 blast-radius
+inventory, whose row set matched `candidate_chunks[] ∪
+deferred_remainder[]` name-for-name.
+
+### `retention-enforce-20260814T095746Z.json`
+
+First `disabled`-gate enforce (same bringup, §8.4 BRANCH B step 3):
+manual `--enforce` with explicit `--receipt-path` after flipping the env
+file to `NODE27_TIMESERIES_RETENTION_ENFORCE=1`. Result:
+`outcome=enforced`, rc=0, all five candidates dropped with per-chunk
+`freed_bytes` recorded (sum 1,660,198,912 bytes), and — the two
+documented `disabled`-mode consequences on record —
+`salvage_backed_windows: []` and no archive-receipt path read.
+
+### `retention-20260814T095802Z.json` / `retention-20260814T095832Z.json`
+
+The first two WRAPPER-generated receipts (timestamped filenames minted by
+the wrapper because the env receipt-path line is commented out),
+satisfying §8.1 step 4's rotation check: two distinctly timestamped
+`retention-2*.json` coexisting, `retention.log` start-bracket count 2.
+Tick 095802Z fired as the `enable --now` Persistent catch-up and dropped
+the remaining backlog chunk (`_hyper_1_11`, 369,524,736 bytes); tick
+095832Z was a forced `systemctl --user start` and enforced over an empty
+candidate set (`dropped=0` — backlog fully ground: 6/6 chunks,
+2,029,723,648 bytes total, byte-exact against the inventory `TOTAL` row).
+Timer left enabled, `NEXT` at 05:15 UTC daily.
+
 ## Steady-state gate behavior
 
 - `nhms-node27-timeseries-retention.timer` (OnCalendar 05:15 UTC
-  daily) is currently **disabled** — enabling it is a separate
-  operator decision, deferred until the operator has observed manual
-  runs; the enforce path also needs env `ENFORCE=1`, which stays `0`.
+  daily) was **disabled** through the runs recorded above — enabling it was
+  a separate operator decision, deferred until the operator had observed
+  manual runs; the enforce path also needs env `ENFORCE=1`, which stayed
+  `0`. That decision was taken on 2026-08-14 (issue #1369): the timer is
+  enabled at the same 05:15 UTC cadence with the archive gate `disabled`,
+  after a manual dry-run and a bounded manual enforce. The bullets below
+  describe the `enabled`-gate steady state and no longer apply once the
+  gate is `disabled` (there are no gate receipts to re-evaluate).
 - Each tick re-evaluates both gates: the completeness receipt must be
   <26h old (recurring audit timer refreshes daily) and the drill PASS
   receipt <30d old with coverage spanning the tick's drop window.
@@ -159,11 +231,37 @@ Env file at `/home/nwm/NWM/infra/env/node27-timeseries-retention.env`
 
 ```bash
 set -a && . /home/nwm/NWM/infra/env/node27-timeseries-retention.env && set +a
-export NODE27_TIMESERIES_RETENTION_RECEIPT_PATH="/home/nwm/node27-timeseries-retention-logs/$(basename ...).json"
+RECEIPT="/home/nwm/node27-timeseries-retention-logs/retention-dryrun-$(date -u +%Y%m%dT%H%M%SZ).json"
 cd /home/nwm/NWM-tier
-/home/nwm/.local/bin/uv run --frozen python scripts/node27_timeseries_retention.py --dry-run
-# rc=1, refusal_reason=COMPLETENESS_RECEIPT_MISSING
+NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
+  /home/nwm/.local/bin/uv run --frozen python scripts/node27_timeseries_retention.py \
+    --dry-run --receipt-path "$RECEIPT"
+# HISTORICAL 2026-07-13 result, under the then-enabled archive gate:
+#   rc=1, refusal_reason=COMPLETENESS_RECEIPT_MISSING
+# Under today's disabled-gate env the same command returns rc=0,
+# outcome=dry-run (archive_gate.mode=disabled) — the refusal is unreachable.
 ```
+
+Two things this block is not being cute about:
+
+- **The `--receipt-path` is mandatory.** The deployed env file must have
+  `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` COMMENTED OUT — the line was
+  shipped uncommented by the pre-2026-08-14 example, so it has to be actively
+  commented and verified with
+  `grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <env file>` returning
+  nothing (runbook §8.1 step 2) — so that the wrapper can write a per-tick
+  timestamped receipt (a fixed path would be overwritten by every daily tick).
+  A direct `python` invocation does not get that substitution either way, so
+  without an explicit path it aborts with `RETENTION_CONFIG_INVALID`, exit 2,
+  and no receipt. Use a timestamped filename so a manual run never clobbers a
+  timer tick's receipt.
+- **The `NODE27_TIMESERIES_RETENTION_ENFORCE=0` prefix is mandatory too.** The
+  `--dry-run` flag does NOT override the env — dry-run vs enforce is decided
+  solely by `--enforce` / the env variable. With `ENFORCE=1` resident in the
+  deployed env file (the steady state since the timer was enabled), an
+  unprefixed run enforces and irreversibly drops up to
+  `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks. The inline assignment is
+  placed after the `source`, so it wins.
 
 Runner invocation used `--dry-run` CLI flag; refused receipts always
 carry `mode=enforce` per schema `oneOf` pin (documented in runbook

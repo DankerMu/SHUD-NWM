@@ -33,22 +33,63 @@ NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND=5
 NODE27_TIMESERIES_RETENTION_COMPLETENESS_MAX_AGE_HOURS=26
 NODE27_TIMESERIES_RETENTION_DRILL_MAX_AGE_DAYS=30
 
+# Archive-gate mode (issue #1369). Absent = "enabled" = the historical
+# fail-closed behavior: enforce is hard-gated on the two archive receipts
+# below. Strict enum — the value is stripped and lowercased and MUST then be
+# exactly "enabled" or "disabled"; anything else (including an empty
+# assignment, "disable", "true", "1") aborts the tick with
+# RETENTION_CONFIG_INVALID, exit 2, and NO receipt. There is deliberately no
+# truthiness fallback here.
+#
+# !!! DANGER — read before setting "disabled" !!!
+# "disabled" skips loading AND judging both archive gates. It is authorized
+# only by docs/adr/0002-node27-timeseries-hot-cold-tiering.md
+# Revision 2026-08-11 (the archive lane is permanently retired after the
+# /dev/md0 double-disk failure, so the two receipts can never be produced
+# again). In that mode:
+#   * chunks are dropped with NO ARCHIVE BACKSTOP — the deletion is
+#     IRREVERSIBLE, there is no restore lane, and no salvage object exists;
+#   * boundary-partial chunks are NO LONGER deferred (they become drop
+#     candidates — "partially covered" is meaningless without archive data);
+#   * the enforced receipt's salvage_backed_windows is always [];
+#   * every receipt records archive_gate.mode plus the ADR citation, so the
+#     mode is auditable rather than a silent bypass.
+# Rolling back means "stop deleting more" (remove this line, disable the
+# timer) — already-dropped chunks cannot be recovered.
+# CLI --archive-gate {enabled,disabled} overrides this variable.
+#NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled
+
 # Absolute path — archive-completeness receipt emitted by
 # scripts/node27_storage_inventory_audit.py. The retention gate consumes
 # this byte-for-byte (spec §Retention enforcement is hard-gated on archive
-# receipts).
+# receipts). REQUIRED when the archive gate is enabled (the default);
+# optional and never read when it is "disabled".
 NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH=/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json
 
 # Absolute path — archive-rebuild-drill PASS receipt emitted by
 # scripts/node27_archive_rebuild_drill.py (issue #854 §5.2). Steady-state
 # retention requires this receipt to be fresh and to cover the drop window
-# per source (forcing / runs / db-export).
+# per source (forcing / runs / db-export). REQUIRED when the archive gate is
+# enabled (the default); optional and never read when it is "disabled".
 NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH=/home/nwm/node27-archive-rebuild-drill-logs/latest-pass-receipt.json
 
 # Absolute path — retention runner's own receipt (mode 0600, atomic).
-# The wrapper substitutes a per-tick timestamped filename by default; this
-# env override is honoured when set.
-NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_retention.json
+# LEAVE THIS UNSET under timer operation (keep the line commented). NOTE for
+# already-deployed env files: this example shipped the assignment UNCOMMENTED
+# until 2026-08-14, so a deployed copy made before then HAS it set — comment it
+# out there and verify with
+#   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <deployed env file>
+# returning zero matches (runbook §8.1 step 2). When it is
+# unset the wrapper substitutes a per-tick timestamped filename
+# (retention-<UTC>.json under the log root), so every tick keeps its own
+# receipt. Setting a FIXED path makes each daily tick atomically OVERWRITE the
+# previous receipt, destroying the per-tick audit trail of irreversible
+# deletions — the only record of which chunks were dropped when.
+# Consequence for manual runs: `python scripts/node27_timeseries_retention.py`
+# invoked directly (not via the wrapper) has no receipt path at all with this
+# unset, and refuses with RETENTION_CONFIG_INVALID, exit 2, no receipt. Pass an
+# explicit timestamped --receipt-path instead. See runbook §8.1 step 2 / §8.4.
+#NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=/home/nwm/node27-timeseries-retention-logs/retention-manual.json
 
 # H10 lock path — MUST match docs/runbooks/tier-node27-timeseries-storage.md
 # §8.1 install steps + §8.6 recovery step and scripts/node27_timeseries_retention.py
@@ -61,4 +102,18 @@ NODE27_TIMESERIES_RETENTION_LOCK_PATH=/tmp/nhms-node27-timeseries-retention.lock
 # older than the drop window). FIRST RUN MUST BE DRY-RUN — inspect the
 # receipt's candidate_chunks + deferred_remainder before flipping to
 # enforce. See runbook §8.4.
+#
+# !!! The --dry-run CLI flag does NOT override this variable !!!
+# Dry-run vs enforce is decided solely by --enforce / this variable; --dry-run
+# is never read. Once this line is uncommented (the steady state after the
+# timer is enabled), sourcing this file and running with --dry-run still
+# ENFORCES and irreversibly drops up to PER_TICK_BOUND chunks. Any manual
+# dry-run after that point on the DIRECT-python lane
+# (uv run python scripts/node27_timeseries_retention.py) MUST prefix the
+# command with NODE27_TIMESERIES_RETENTION_ENFORCE=0 (inline, after the
+# source). The WRAPPER lane (scripts/node27_timeseries_retention_once.sh)
+# CANNOT be made safe that way: the wrapper re-sources THIS file with
+# `set -a` after the prefix has applied, so the file's value wins and the
+# tick enforces anyway. The only way to dry-run through the wrapper is to
+# set NODE27_TIMESERIES_RETENTION_ENFORCE=0 in this file itself.
 #NODE27_TIMESERIES_RETENTION_ENFORCE=1

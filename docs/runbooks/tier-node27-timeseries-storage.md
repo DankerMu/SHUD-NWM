@@ -305,12 +305,27 @@ against the committed `.example` templates as of 2026-08-01:
   `docs/runbooks/receipts/tier-node27-timeseries-storage/product-archive/`.
 - **Compression per-tick bound is retuned live.** See §4 "Per-tick capacity
   (live state 2026-08-01)".
-- **DB retention timer is not enabled.** See §8.1 "Current bringup state".
+- **DB retention timer.** Not enabled as of the 2026-08-01 verification. The
+  2026-08-14 operator decision (issue #1369) enables it at the committed
+  05:15 UTC cadence with the archive gate `disabled`; until the live
+  receipts from that bringup are committed, verify the timer's real state on
+  the box. See §8.1 "Current bringup state".
 
 ## Timer cadence order (UTC)
 
 The four related timers are staggered so each receipt is fresh when the
-next tick runs:
+next tick runs.
+
+> **Staggering rationale is mode-dependent (#1369).** The ordering below
+> exists so the archive-completeness receipt is fresh when the retention
+> gate consults it. With the archive lane retired and retention running in
+> the ADR-authorized `disabled` mode, the retention tick consults no archive
+> receipt at all, so the audit→retention freshness dependency **does not
+> apply**; the retention timer's 05:15 UTC slot is then just a quiet-window
+> choice. The dependency returns verbatim if the gate is ever switched back
+> to `enabled`. Timers 1–2 are themselves part of the retired archive lane
+> (§7 banner) — check what is actually enabled on the box before relying on
+> this table.
 
 | Order | Timer                                        | OnCalendar         | Rationale |
 |-------|----------------------------------------------|--------------------|-----------|
@@ -320,6 +335,12 @@ next tick runs:
 | 4     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression runs after governance so the previous-day receipt is already captured. Enablement is task §4.5 (requires migration `000047` applied first). |
 
 ### Cadence vs. retention-receipt validity window (design D6)
+
+**Applies to `archive_gate = enabled` only (#1369).** In the `disabled`
+mode the retention runner never loads the completeness receipt, so there is
+no validity window to keep fresh and nothing below constrains the audit
+cadence. The paragraph is kept as-written because it is the contract that
+comes back the moment the gate is re-enabled.
 
 `#855` pins the retention runner's completeness-receipt validity
 window at 24 h. The storage inventory audit fires every 24 h with the audit
@@ -483,8 +504,12 @@ regression, and the two refusals surface differently:
   `refusal_reason=CONFIG_INVALID` over its production receipt path
   `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
   That file is the `#855` retention gate's completeness input, so every audit
-  tick on a drifted pair also starves the retention gate. Still fail-closed in
-  the safe direction: retention refuses and nothing is dropped.
+  tick on a drifted pair also starves the retention gate. That is fail-closed
+  in the safe direction — retention refuses and nothing is dropped — **only
+  while `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` is enabled (the default)**.
+  In the explicit archive-gate `disabled` mode (§8; ADR 0002
+  Revision 2026-08-11) retention loads no completeness receipt at all, so a
+  starved gate stops nothing and chunks keep being dropped.
 
 Clearing it is an operator decision with a real capacity trade-off, and there
 are exactly two exits — no warn-only mode exists, because a warning is the
@@ -940,6 +965,11 @@ section 6.2 of the retention runbook when authored) MAY drop
 salvage-covered windows only with this documented manual recovery path
 in place.
 
+**Carve-out (#1369):** under the archive-gate `disabled` mode (§8; ADR 0002
+Revision 2026-08-11) retention drops without consulting salvage coverage at
+all, and the `COPY FROM` procedure below has no salvage object to restore from
+because none was produced — see [§8.7](#87-salvage-backed-windows).
+
 The archive rebuild drill (#854) verifies salvage objects by checksum
 and manifest row-count parity — it does NOT reingest them.
 
@@ -1031,7 +1061,10 @@ Related documents:
   #855): retention MAY drop a salvage-covered window only if the
   manifest here validates and the checksum pre-check above succeeds.
   When #855 lands section 6.2, it MUST cross-link back to this section
-  3.2.
+  3.2. Carve-out (#1369): under the archive-gate `disabled` mode (§8;
+  ADR 0002 Revision 2026-08-11) retention drops without consulting salvage
+  coverage, and no salvage object exists for the dropped window — see
+  [§8.7](#87-salvage-backed-windows).
 
 ## 4. Hypertable compression
 
@@ -2352,6 +2385,20 @@ already live. The two do not overlap and neither relaxes the other.
 
 ## 7. Archive rebuild drill (`archive-rebuild-drill`)
 
+> **RETIRED LANE (2026-08-11).** The archive lane this section belongs to —
+> product-archive mover, the inventory audit's archive leg, db-export salvage,
+> and this rebuild drill against `/data/GHDC/nwm-archive` — is permanently
+> retired per
+> [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md)
+> **Revision 2026-08-11** (`/dev/md0` double-disk failure, array not rebuilt;
+> #1309/#1310/#1177/#1228 closed on that basis). **No new drill PASS receipt
+> is producible**, so the retention gate that consumes one can no longer be
+> satisfied in `enabled` mode. That is what the explicit
+> `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled` mode exists for
+> (§8.1/§8.4, issue #1369) — a deliberate and auditable mode, not a silent
+> bypass. Everything below is retained as the historical record of how the
+> drill worked and how to read the receipts already on disk.
+
 The drill (`scripts/node27_archive_rebuild_drill.py`, issue #854) proves that
 products archived by the mover and salvage objects published by
 `scripts/node27_db_export_salvage.py` are round-trippable back into an
@@ -2809,7 +2856,16 @@ width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
 rather than assuming the default. Enforce
 mode is hard-gated on TWO archive receipts and refuses fail-closed if
 either is missing, stale, or fails to cover the drop window (spec
-`timeseries-db-retention` and design D6 / D7). Compression state is
+`timeseries-db-retention` and design D6 / D7) — **unless the operator
+selects the explicit archive-gate `disabled` mode** (issue #1369), the one
+documented carve-out from that hard gate, authorized by
+[`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md)
+**Revision 2026-08-11** after the archive lane was permanently retired (§7
+banner). The default is unchanged and still fail-closed; the mode is
+recorded in every receipt's `archive_gate` object, so it is deliberate and
+auditable, not a silent bypass. See §8.4 for the preconditions of each
+branch and §8.5 for how the mode changes what the receipt means.
+Compression state is
 never a gate — compressed chunks older than the window are exactly the
 retention target (H3 divergence from #851).
 
@@ -2824,9 +2880,15 @@ Related documents:
 
 ### 8.1 Install (node-27, `nwm` user)
 
-Live enablement of the retention unit is a §6.3 follow-up (issue #856);
-this PR delivers the units + wrapper + tests, and the install steps below
-are prepared for the follow-up commit.
+Live enablement of the retention unit was originally a §6.3 follow-up
+(issue #856) and stayed deferred while the archive gates could still be
+satisfied. **Operator decision 2026-08-14 (issue #1369): the timer is
+enabled, running daily at 05:15 UTC** — the committed `OnCalendar` value is
+unchanged — with the archive gate set to `disabled` under
+[`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md)
+Revision 2026-08-11. Step 3 below is therefore a real step now, not a
+commented placeholder; run it only after the two manual receipts in §8.4
+(dry-run, then a bounded enforce) have been reviewed.
 
 1. Create the retention log directory (same shape as the compression
    sibling):
@@ -2835,50 +2897,292 @@ are prepared for the follow-up commit.
    mkdir -p ~/node27-timeseries-retention-logs
    ```
 
-2. Copy the env example into place and lock it down. The env file MUST be
+2. Put the env file in place and lock it down. The env file MUST be
    mode `0600` — the wrapper refuses otherwise
    (`ENV_FILE_MODE_UNSAFE`).
 
+   **First-time install only** — run the `cp` ONLY when
+   `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` does not exist
+   yet:
+
    ```
-   cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
-      /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   test -e /home/nwm/NWM/infra/env/node27-timeseries-retention.env \
+     || cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+           /home/nwm/NWM/infra/env/node27-timeseries-retention.env
    chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   ```
+
+   **If that env file already exists — and it DOES on node-27 — edit it in
+   place; do not re-copy the example.** The example ships
+   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` uncommented (the spec
+   default), while node-27 runs `21` (as of 2026-08-01 — see this runbook's
+   opening policy banner).
+   Re-copying therefore silently reverts the live window 21 → 14, and a
+   narrower window means an extra 7 days of data become deletion candidates
+   — irreversibly, with no refusal to catch it once the archive gate is
+   `disabled`. Verify the value after ANY edit and treat a surprise `14` as
+   a stop-the-bringup event:
+
+   ```
+   grep -n NODE27_TIMESERIES_RETENTION_WINDOW_DAYS \
+     /home/nwm/NWM/infra/env/node27-timeseries-retention.env
    ```
 
    Fill in `DATABASE_URL` with a writer role (retention runs `drop_chunks`
    DDL). Do NOT share the audit env's `nhms_display_ro` role — retention
    requires DML privileges.
 
-3. Register the two new units (§6.3 will `enable --now`; kept commented
-   here because §6.3 owns the first live enforce):
+   **Comment out `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` in the deployed
+   env file — that line is SET there today, so "leave it unset" would be a
+   no-op instruction.** The `.example` shipped that assignment UNCOMMENTED
+   until 2026-08-14 and the deployed copy was made from that older template;
+   the operator must actively comment the line out. Once it is commented the
+   wrapper substitutes a per-tick timestamped `retention-<UTC>.json` under the
+   log root, whereas a fixed path makes every daily tick atomically overwrite
+   the previous receipt and destroys the per-tick audit trail of irreversible
+   deletions. Verify — this grep MUST print nothing (exit 1):
+
+   ```
+   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' \
+     /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   ```
+
+   Keep both anchors. The leading `^` and the trailing `=` are what make the
+   check discriminating: an unanchored
+   `grep NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` still matches the commented
+   line (and the comment prose around it), so it prints hits either way and
+   proves nothing. Any output from the anchored form means the variable is
+   still live — fix it before enabling the timer. Manual direct-`python` runs
+   consequently MUST pass an explicit `--receipt-path` (§8.4 step 2).
+
+   Decide the archive-gate mode in the same edit. Leaving
+   `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` unset keeps the fail-closed
+   default, which cannot be satisfied any more (§7 banner: no new drill
+   receipt is producible). Setting it to `disabled` deletes with no archive
+   backstop — read the danger block in the `.example` first.
+
+3. Register the two units and enable the timer (per the 2026-08-14 operator
+   decision; do this AFTER the §8.4 manual dry-run + bounded enforce
+   receipts):
 
    ```
    systemctl --user daemon-reload
-   # systemctl --user enable --now nhms-node27-timeseries-retention.timer
+   systemctl --user enable --now nhms-node27-timeseries-retention.timer
+   systemctl --user list-timers | grep nhms-node27-timeseries-retention
    ```
 
    The service and timer files are installed under
    `~/.config/systemd/user/` from the checked-in
-   `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`.
+   `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
+   cadence stays `OnCalendar=*-*-* 05:15:00 UTC` — do not retune it here.
 
-#### Current bringup state (verified 2026-08-01)
+   **The timer lane obeys ONLY the env file's
+   `NODE27_TIMESERIES_RETENTION_ENFORCE` value**: every tick starts a fresh
+   process that sources that file, so CLI flags and shell-prefixed env vars
+   typed in any manual session have zero effect on timer ticks. Once
+   `NODE27_TIMESERIES_RETENTION_ENFORCE=1` is resident in the env file, every
+   scheduled firing enforces — there is no per-session way to hold it back
+   short of editing that file or disabling the timer.
 
-The retention timer has **never been enabled** on node-27. Verified on the
-box:
+4. Verify the per-tick receipt rotation once a SECOND tick has run — wait for
+   the next 05:15 UTC firing, or force one with
+   `systemctl --user start nhms-node27-timeseries-retention.service`
+   (**that forced start is a real enforcing tick: with `ENFORCE=1` resident in
+   the env file it irreversibly drops up to
+   `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks, same as a scheduled
+   firing — it is not a no-op probe**). Two distinctly timestamped
+   WRAPPER-generated receipts MUST coexist in the log root.
 
-- `nhms-node27-timeseries-retention.timer` is `disabled` and `inactive` —
-  step 3's `enable --now` line is still commented out in reality, not just in
+   Match only the wrapper's own filenames: it writes
+   `retention-<UTC>.json` with `<UTC>` = `%Y%m%dT%H%M%SZ`, so the glob below
+   pins the leading `2` of the year. The manual §8.4 receipts
+   (`retention-dryrun-<UTC>.json`, `retention-enforce-<UTC>.json`) never count
+   toward the two and deliberately do not match — a bare `retention-*.json`
+   glob would be satisfied by those two alone, before the timer has ticked
+   even once, and the check could never fail.
+
+   ```
+   ls -l ~/node27-timeseries-retention-logs/retention-2*.json
+   ```
+
+   Read the listing in three states:
+
+   - **Two or more distinctly timestamped matches → PASS.** Rotation works:
+     each wrapper tick kept its own receipt.
+   - **Exactly one match → NOT a pass.** One wrapper tick has produced a
+     receipt; either the second tick has not happened yet, or it happened and
+     did not add a file.
+   - **Zero matches → NOT a pass.** No wrapper-named receipt exists at all —
+     which is also the visible signature of the fixed-path regression below,
+     since a pinned path is conventionally `retention-manual.json`-style and
+     does not match `retention-2*`.
+
+   Before concluding "rotation is broken" from either non-pass state, rule out
+   the two diagnosable causes, in this order:
+
+   1. **The receipt-path variable is still set** (step 2 skipped): every tick
+      atomically overwrites the one fixed file, so the per-tick audit trail is
+      gone. Check with the anchored grep, which must print nothing:
+
+      ```
+      grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' \
+        /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+      ```
+
+      Any hit: comment the line out per step 2, then wait for / force another
+      tick and re-check.
+   2. **Fewer than two receipt-producing wrapper ticks have run yet.**
+      `LAST` from `systemctl --user list-timers` names only the MOST RECENT
+      firing, so it can never tell you HOW MANY ticks ran — count them
+      directly. The wrapper appends exactly one
+      `node27-timeseries-retention: start summary=` line per tick to the
+      cumulative `retention.log`
+      (`scripts/node27_timeseries_retention_once.sh:143`; the bracket pairs
+      are described in §8.6 item 5), and manual wrapper invocations are
+      counted the same way as timer firings:
+
+      ```
+      grep -c 'node27-timeseries-retention: start summary=' \
+        ~/node27-timeseries-retention-logs/retention.log
+      ```
+
+      Not every counted tick wrote a receipt, and one class of firing never
+      enters the count at all: a firing that lost the lock logs
+      `previous wrapper still active, skipping tick` with no `start` line.
+      From the counted brackets, subtract any `start` with no matching
+      `done rc=` (still in flight, or died mid-tick) and any `done rc=2`
+      bracket (the `RETENTION_CONFIG_INVALID` refusal, which publishes no
+      receipt). If `retention.log` has been rotated or truncated away, fall
+      back to `journalctl --user -u nhms-node27-timeseries-retention.service`,
+      which carries one invocation record per run of THAT UNIT — timer
+      firings plus `systemctl --user start` forced starts; a wrapper run
+      launched straight from a shell is not journalled under the unit.
+
+      With that corrected TICK count below two, the receipt count is simply
+      premature, not broken: wait for the next firing or force one (with the
+      enforcing-tick caveat above) before reading anything into the receipt
+      count. With the tick count at two or more, `LAST` is still useful
+      as a SECONDARY signal — a `LAST` newer than the newest
+      `retention-2*.json` (compare against that receipt's `generated_at`)
+      means the latest tick wrote nothing, which points back at rule-out 1 or
+      at an `rc=2` refusal rather than at prematurity.
+
+   Only with the rule-out 1 grep clean AND at least two receipt-producing
+   wrapper ticks counted in `retention.log` does a `retention-2*.json` count
+   below two indicate a real rotation defect.
+
+#### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
+
+Historical posture, kept because every receipt committed under
+`docs/runbooks/receipts/.../timeseries-retention/` predates the change:
+
+- `nhms-node27-timeseries-retention.timer` was `disabled` and `inactive` —
+  step 3's `enable --now` line was commented out in reality, not just in
   this runbook.
-- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` sets
+- Live `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` set
   `NODE27_TIMESERIES_RETENTION_ENFORCE=0` (grep the key; that file is
   gitignored and its line numbers drift).
 
-So the deployment is still at the #1071 Step B posture: refusal tests and
-dry-runs only, with no unattended `drop_chunks`. Nothing in this runbook
-implies the timer is running; if you need retention to actually free space,
-that is an explicit operator bringup step (enable the timer *and* flip
-`ENFORCE`), gated as always on the completeness + drill receipts covering the
-window.
+That was the #1071 Step B posture: refusal tests and dry-runs only, with no
+unattended `drop_chunks`, gated on the completeness + drill receipts covering
+the window.
+
+**Superseding decision (2026-08-14, issue #1369):** the archive lane is
+retired, so the gate is switched to `disabled` and the timer is enabled at
+its committed 05:15 UTC cadence. The bringup order is fixed: set the env
+mode with `ENFORCE=0` → manual dry-run receipt → **blast-radius inventory
+(the query below) over the full backlog**, reviewed against the LIVE
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
+manual tick (≤ per-tick bound) → `enable --now` the timer → capture
+`list-timers` → after the second tick confirm two distinctly timestamped
+receipts coexist (step 4). Until those live receipts are committed, treat the timer
+state on the box as the authority and re-verify with
+`systemctl --user list-timers` before quoting it. Rolling back means
+stopping FURTHER deletion (drop the env line, disable the timer); chunks
+already dropped in `disabled` mode are gone for good.
+
+#### Blast-radius inventory (bringup step 2, before `ENFORCE=1`)
+
+The dry-run receipt names chunks and nothing else: `candidate_chunks[]` and
+`deferred_remainder[]` are bare `<chunk_schema>.<chunk_name>` strings, so
+neither the owning hypertable, the time range, nor the bytes at stake are
+readable from the receipt. Resolve them with the read-only catalog query
+below before any `ENFORCE=1` tick. It re-uses the runner's own selection
+predicate — the same two target hypertables and the same non-strict
+`range_end <= cutoff` (H7) — anchored on the `cutoff` the dry-run receipt
+recorded, so in `disabled` mode its rows are exactly
+`candidate_chunks[] ∪ deferred_remainder[]` (in `enabled` mode the runner
+additionally intersects with the completeness receipt's `coverage_bounds`,
+which can only shrink its side, so the query stays a superset there).
+
+```
+set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
+# DRYRUN_RECEIPT = the timestamped path passed to --receipt-path in §8.4
+# step 2. Do NOT reach for $NODE27_TIMESERIES_RETENTION_RECEIPT_PATH: that line
+# is commented out in the deployed env file (§8.1 step 2), so the var expands
+# to nothing — and if it does expand, step 2 was skipped and the path names a
+# single repeatedly-overwritten file, not this dry-run's receipt.
+DRYRUN_RECEIPT=/home/nwm/node27-timeseries-retention-logs/retention-dryrun-<UTC>.json
+CUTOFF="$(jq -r '.cutoff // empty' "$DRYRUN_RECEIPT")"
+: "${CUTOFF:?dry-run receipt carries no cutoff — re-run the dry-run first}"
+
+docker exec nhms-db psql -U nhms -d nhms -P pager=off -c "
+  WITH sized AS (
+      SELECT chunk_schema, chunk_name, total_bytes
+        FROM chunks_detailed_size('hydro.river_timeseries')
+      UNION ALL
+      SELECT chunk_schema, chunk_name, total_bytes
+        FROM chunks_detailed_size('met.forcing_station_timeseries')
+  ), backlog AS (
+      SELECT format('%s.%s', c.chunk_schema, c.chunk_name) AS chunk,
+             format('%s.%s', c.hypertable_schema, c.hypertable_name) AS hypertable,
+             c.range_start, c.range_end, c.is_compressed,
+             COALESCE(s.total_bytes, 0)::bigint AS total_bytes
+        FROM timescaledb_information.chunks c
+        LEFT JOIN sized s
+          ON s.chunk_schema = c.chunk_schema
+         AND s.chunk_name = c.chunk_name
+       WHERE (c.hypertable_schema, c.hypertable_name) IN
+             (('hydro','river_timeseries'), ('met','forcing_station_timeseries'))
+         AND c.range_end <= '${CUTOFF}'::timestamptz
+  )
+  SELECT chunk, hypertable, range_start, range_end, is_compressed,
+         total_bytes, pg_size_pretty(total_bytes) AS size
+    FROM backlog
+  UNION ALL
+  SELECT format('TOTAL: %s chunks', count(*)), NULL::text,
+         NULL::timestamptz, NULL::timestamptz, NULL::boolean,
+         sum(total_bytes)::bigint, pg_size_pretty(sum(total_bytes))
+    FROM backlog
+   ORDER BY range_end NULLS LAST, chunk;"
+```
+
+Notes on reading it: `chunks_detailed_size(<hypertable>)` is the same public
+TimescaleDB function the runner uses for `freed_bytes` (H4), so its
+`total_bytes` includes a compressed chunk's compressed sibling and indexes —
+the `is_compressed` column is there so a large compressed chunk is not
+mistaken for a small one. The `LEFT JOIN` plus `COALESCE(...,0)` mirrors the
+runner's own coercion: a chunk the size function does not report shows `0`
+bytes rather than dropping out of the listing. The trailing `TOTAL:` row is
+the whole backlog, not this tick's cut.
+
+**Record in the PR evidence BEFORE `enable --now`:** the full backlog count
+(`candidate_chunks[]` + `deferred_remainder[]`, which equals the `TOTAL:`
+row's chunk count) and the query's estimated total bytes. Enabling the timer
+does not authorize only the first cut — it authorizes grinding the ENTIRE
+backlog away at up to `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks per
+daily tick (5 in the shipped env), unattended, with no archive backstop and
+no restore lane. The per-tick bound paces the deletion; it does not bound it.
+
+Cross-check the cutoff itself before trusting the listing: the query inherits
+the receipt's `cutoff` (= watermark − window), so a mis-set window silently
+widens every row here. Confirm the receipt's `window_days` equals the LIVE
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` in the env file — read it, never
+type a remembered number (§7.3 step 3 shows the extraction; node-27 ran 21 d
+as of 2026-08-01) — and that the receipt's `reference_time` is the display
+watermark, not a wall clock. Finally, note which listed chunks are the
+boundary-partial ones that `enabled` mode would have deferred (§8.5): in
+`disabled` mode they are candidates like any other.
 
 ### 8.2 Wire-format codes
 
@@ -2888,6 +3192,19 @@ are byte-identical across code (`scripts/node27_timeseries_retention.py`
 (`openspec/changes/tier-node27-timeseries-storage/design.md` #855 block),
 and the unit tests. Any addition / rename / removal MUST land in all four
 surfaces in the same commit.
+
+Archive-gate mode note (#1369): the `disabled` mode added **zero** codes —
+it is a mode, not a refusal. What it changes is reachability. With the gate
+disabled, the thirteen archive-family codes below (the five
+completeness-receipt codes plus the eight drill codes) can never be emitted,
+because neither archive receipt is loaded or judged. The runner's own four
+(`RETENTION_CONFIG_INVALID`, `RETENTION_CONCURRENT_INVOCATION`,
+`RETENTION_DROP_FAILED`, `RETENTION_UNCAUGHT_ERROR`) stay fully reachable in
+both modes. Three of them — `RETENTION_CONCURRENT_INVOCATION`,
+`RETENTION_DROP_FAILED`, `RETENTION_UNCAUGHT_ERROR` — publish a refused
+receipt that records which mode was in force. `RETENTION_CONFIG_INVALID` does
+not: it exits 2 BEFORE any receipt exists, so it never produces one and there
+is no `archive_gate` record of that tick.
 
 - `COMPLETENESS_RECEIPT_MISSING` — env-declared completeness receipt path
   missing, unreadable, or schema-invalid.
@@ -3076,20 +3393,56 @@ Two guardrails enforce this:
 ### 8.4 How to run
 
 ```
-# 1. Prime env (once per node-27, then owned by operators)
-cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
-   /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+# 1. Prime env (once per node-27, then owned by operators).
+# FIRST-TIME INSTALL ONLY — the `cp` is guarded, exactly as in §8.1 step 2.
+# On node-27 the env file ALREADY EXISTS: edit it in place, never re-copy the
+# example over it. The example ships
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14 while the box runs 21, so an
+# overwrite silently reverts the live window 21 -> 14 and turns 7 more days of
+# data into deletion candidates — irreversibly, with no refusal to catch it
+# once the archive gate is `disabled`. Re-grep the window after ANY edit
+# (§8.1 step 2) and treat a surprise 14 as a stop-the-work event.
+test -e /home/nwm/NWM/infra/env/node27-timeseries-retention.env \
+  || cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+        /home/nwm/NWM/infra/env/node27-timeseries-retention.env
 chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
-# Fill DATABASE_URL (writer role), completeness/drill receipt paths,
-# receipt path, and (optionally) lock path override.
+# Fill DATABASE_URL (writer role) and (optionally) the lock path override.
+# The SAME edit decides NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE — see the two
+# branches under step 3.
+# BRANCH A ONLY: fill the completeness/drill receipt paths. In the `disabled`
+# branch both are unneeded and are never read, so leave them alone.
+# COMMENT OUT NODE27_TIMESERIES_RETENTION_RECEIPT_PATH — on node-27 that line
+# is currently SET (the example shipped it uncommented until 2026-08-14), so it
+# has to be actively commented, not merely "left" alone. Verify with
+#   grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <env file>
+# expecting ZERO matches (keep the ^ and = anchors — an unanchored grep matches
+# the commented line too and proves nothing). With it commented the wrapper
+# writes a per-tick timestamped receipt and the audit trail of irreversible
+# deletions survives; a fixed path is overwritten every tick.
 
-# 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder
+# 2. First run MUST be dry-run — inspect candidate_chunks + deferred_remainder.
+# The runner REQUIRES a receipt path; with the env var commented out (step
+# 1) a manual run must pass --receipt-path explicitly, or it aborts with
+# RETENTION_CONFIG_INVALID, exit 2, and no receipt. Use a timestamped filename
+# so manual runs never clobber each other or a timer tick's receipt.
+# The NODE27_TIMESERIES_RETENTION_ENFORCE=0 prefix is NOT decoration: the
+# --dry-run flag does NOT override the env. Once ENFORCE=1 is resident in the
+# deployed env file — the steady state after the timer is enabled (§8.1 step 3)
+# — an unprefixed run ENFORCES and irreversibly drops up to
+# NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND chunks. The inline assignment
+# comes AFTER the `source`, so it wins.
 set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
-uv run python scripts/node27_timeseries_retention.py --dry-run
-cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
+DRYRUN_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-dryrun-$(date -u +%Y%m%dT%H%M%SZ).json"
+NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
+  uv run python scripts/node27_timeseries_retention.py --dry-run \
+    --receipt-path "$DRYRUN_RECEIPT"
+jq . "$DRYRUN_RECEIPT"
 
 # 3. When ready to enforce, flip the env flag (or pass --enforce).
-# Enforce PRECONDITIONS:
+# Enforce PRECONDITIONS — EXACTLY ONE of the two branches below applies,
+# selected by NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE (unset = branch A).
+#
+# BRANCH A — archive gate ENABLED (default, fail-closed):
 #  - Completeness receipt fresh AND covers the drop window with verdict=complete
 #    for every subject overlapping the drop window.
 #  - Drill receipt fresh AND verdict=PASS AND forcing-recovery+runs coverage
@@ -3107,9 +3460,40 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 #    db-export window means the drill must be rerun; daily completeness
 #    regeneration with an unchanged db-export universe does not.
 #    Receipts without that field are unaffected.
+#
+# BRANCH B — archive gate DISABLED (explicit, ADR-authorized):
+#  - Authorization: docs/adr/0002-node27-timeseries-hot-cold-tiering.md
+#    Revision 2026-08-11 amends this ADR's core invariant — "no deletion
+#    without archive receipt" no longer holds, because the archive lane is
+#    permanently retired and the two receipts above can never be produced
+#    again. Verbatim from that revision: "The change is deliberate and
+#    auditable, not a silent bypass: the retention runner keeps its
+#    fail-closed default and only skips the completeness/drill gates in an
+#    explicit gate-disabled mode whose receipt records the mode and cites
+#    this revision."
+#  - Set NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled in the env file
+#    (or pass --archive-gate disabled; the CLI wins). Any other value —
+#    including an empty assignment — is RETENTION_CONFIG_INVALID, exit 2,
+#    no receipt.
+#  - Neither archive receipt path variable is required, and neither is read
+#    even if left in the env file.
+#  - There is NO archive backstop: the drop is irreversible and no restore
+#    lane exists. Review the dry-run's candidate_chunks against the LIVE
+#    NODE27_TIMESERIES_RETENTION_WINDOW_DAYS before enforcing, and keep the
+#    first enforce inside the per-tick bound. Resolve each candidate's owning
+#    hypertable, time range and bytes with the §8.1 blast-radius inventory
+#    query FIRST — candidate_chunks[] is bare chunk names and carries none of
+#    those three.
+#  - Consequences to expect in the receipt: archive_gate.mode="disabled"
+#    with the pinned adr_reference, salvage_backed_windows=[], and
+#    boundary-partial chunks appearing as candidates rather than deferred
+#    (§8.5).
 # Either export NODE27_TIMESERIES_RETENTION_ENFORCE=1 in the env file or
-# pass --enforce on the CLI.
-uv run python scripts/node27_timeseries_retention.py --enforce
+# pass --enforce on the CLI. Same receipt-path rule as step 2: pass an explicit
+# timestamped --receipt-path, because that env var stays commented out.
+ENFORCE_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-enforce-$(date -u +%Y%m%dT%H%M%SZ).json"
+uv run python scripts/node27_timeseries_retention.py --enforce \
+  --receipt-path "$ENFORCE_RECEIPT"
 ```
 
 Exit codes: `0` = dry-run / enforced (both are "success" outcomes; the
@@ -3122,24 +3506,54 @@ refusal (missing / non-absolute / non-positive env; no receipt written).
 Receipts match `schemas/timeseries_retention_receipt.schema.json`
 (schema `oneOf` — exactly one of `dry-run` / `refused` / `enforced`).
 
+**Read `archive_gate` first — it decides what the rest of the receipt
+means.** Since schema `1.1` (#1369) every receipt, on all three outcome
+branches, carries:
+
+- `archive_gate.mode = "enabled"` — the fail-closed default; the two archive
+  gates were loaded and judged, and the field carries nothing else.
+- `archive_gate.mode = "disabled"` plus `adr_reference =
+  "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11"`
+  — the archive gates were skipped under that authorization. The reference
+  string is a schema `const`: a receipt cannot cite a vaguer source, and an
+  `enabled` receipt may not cite one at all.
+
+Receipts written before this change declare `schema_version = "1.0"` and
+have no `archive_gate` field; they are never rewritten. Absence of the field
+therefore reads as "produced under the pre-#1369 hard gate" (i.e. enabled).
+
 - `outcome=dry-run`: `mode=dry-run`; `candidate_chunks[]` lists chunks
   that WOULD be dropped up to the per-tick bound; `deferred_remainder[]`
   lists chunks beyond the bound plus any boundary-partial chunk whose
   physical range begins before the completeness receipt's coverage start.
   A boundary-partial chunk remains intact; later fully evidenced chunks use
   a lower-bounded + upper-bounded `drop_chunks` call so retirement cannot
-  cascade through it. Gates ARE evaluated in dry-run mode —
+  cascade through it. **In `archive_gate.mode = "disabled"` the
+  boundary-partial part of that sentence does not apply**: with no
+  completeness receipt there are no coverage bounds and no "partially
+  covered" notion, so such chunks are NOT deferred — they appear in
+  `candidate_chunks[]` and will be dropped. This is a deliberate,
+  documented widening of the delete surface in that mode
+  (`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE`); `deferred_remainder[]` then
+  contains only the beyond-the-bound chunks. Gates ARE evaluated in dry-run mode —
   a dry-run invocation that would refuse still emits a `refused` receipt
   (`mode=enforce` per the schema `oneOf`) so operators see the exact
   refusal reason before ever running enforce. If gates pass, dry-run
   enumerates candidate chunks + deferred remainder without invoking
-  `drop_chunks`. The `--dry-run` CLI flag controls the DROP phase only;
-  gate evaluation is always run because it is the operator's oracle for
-  whether enforce is safe.
+  `drop_chunks`. Dry-run vs enforce is decided SOLELY by `--enforce` /
+  `NODE27_TIMESERIES_RETENTION_ENFORCE`; the `--dry-run` CLI flag controls
+  nothing — it is never read, so it cannot hold back an env that says
+  enforce (§8.4 step 2). Gate evaluation is run in either mode because it is
+  the operator's oracle for whether enforce is safe. (In `disabled` mode there are no archive gates
+  left to evaluate, so a dry-run can only end as `dry-run` or as one of the
+  runner's own refusals.)
 - `outcome=refused`: `mode=enforce`; `refusal_reason` is one of the codes
   in §8.2. Nothing was dropped this tick. A `refused` receipt can be
   emitted by a `--dry-run` invocation too — the mode field always reads
-  `enforce` because the schema pins that pairing.
+  `enforce` because the schema pins that pairing. A refused receipt carries
+  `archive_gate` as well, so the audit trail records which mode was in force
+  at the moment of refusal; in `disabled` mode the reason is always one of
+  the runner's own four codes, never an archive-family one.
 - `outcome=enforced`: `mode=enforce`; `dropped_chunks[]` records each
   dropped chunk with its pre-drop `freed_bytes` (H4 — measured BEFORE
   `drop_chunks`); `deferred_remainder[]` records the beyond-bound
@@ -3148,6 +3562,8 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
   containment; see [§8.7](#87-salvage-backed-windows)). A verified
   db-export tuple also participates in the forcing recovery union for the
   same historical interval; it never fabricates a missing product archive.
+  In `disabled` mode that list is ALWAYS `[]` — see
+  [§8.7](#87-salvage-backed-windows) for what the empty list means there.
 
 ### 8.6 Recovery (post-fault operator playbook)
 
@@ -3168,7 +3584,10 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    on refused); those chunks are already gone. To reconstruct what
    actually happened, cross-reference the wrapper's `retention.log`
    (per-chunk drop timings printed to stderr) with the current
-   `timescaledb_information.chunks` state before re-running enforce.
+   `timescaledb_information.chunks` state before re-running enforce. If the
+   refusal came from a manual direct-`python` run there is no `retention.log`
+   entry to cross-reference (item 5's scope note) — use that terminal's stderr
+   and the catalog state instead.
    Inspect the offending chunk (the refusal_reason suffix names it
    `<hypertable_schema>.<chunk_name>`). The cause text AFTER that chunk
    name is redacted (§8.2), so read it as an intent-preserving summary,
@@ -3216,6 +3635,27 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    grep 'freed_bytes measurement failed' /path/to/retention.log
    ```
 
+   **Scope first — `retention.log` brackets exist ONLY for wrapper-driven
+   ticks.** That is the timer lane plus any manual
+   `scripts/node27_timeseries_retention_once.sh` invocation. A direct
+   `uv run python scripts/node27_timeseries_retention.py` run (§8.4 steps 2-3)
+   writes NO `retention.log` entry at all — not a start bracket, not a done
+   bracket, not the measurement warning. Its only diagnostics are the invoking
+   terminal's stderr and the receipt at the explicit `--receipt-path`. So if
+   the receipt under investigation came from a manual direct-`python` run, the
+   grep above has nothing to find and its silence carries zero information:
+   read the terminal output you still have — that is the whole diagnostic.
+   Do NOT re-run through the wrapper to manufacture a bracket. A wrapper
+   invocation is a live enforcing tick: with
+   `NODE27_TIMESERIES_RETENTION_ENFORCE=1` resident in the env file it
+   irreversibly drops up to `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND`
+   chunks, and a shell-prefixed `NODE27_TIMESERIES_RETENTION_ENFORCE=0` cannot
+   hold it back because the wrapper re-sources the env file with `set -a`
+   after the prefix applies (`scripts/node27_timeseries_retention_once.sh:52-58`),
+   so the file's value wins. It would also mint a NEW receipt rather than
+   diagnose the old one. The whole bracket procedure below applies to wrapper
+   receipts only.
+
    Scope the match to THIS tick before reading anything into it.
    `retention.log` is cumulative — the wrapper appends every tick to the same
    file (`>>`) — so a bare `grep` also returns warnings from earlier runs.
@@ -3224,11 +3664,16 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    `node27-timeseries-retention: done rc=<rc> ... summary=<receipt path>`
    lines (`scripts/node27_timeseries_retention_once.sh:143,151`), each
    prefixed with a UTC ISO-8601 timestamp from the wrapper's `ts()`
-   (`scripts/node27_timeseries_retention_once.sh:23`). The receipt path in
-   those lines is NOT a tick key: the shipped env pins
-   `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` to one fixed file
-   (`infra/env/node27-timeseries-retention.example`), so every tick prints
-   the same path and the path ALONE cannot discriminate ticks. Correlate on
+   (`scripts/node27_timeseries_retention_once.sh:23`). Do NOT rely on the
+   receipt path in those lines as the tick key. Under the required
+   configuration `NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` is commented out
+   in the deployed env file (§8.1 step 2; the current
+   `infra/env/node27-timeseries-retention.example` also ships it commented),
+   so the wrapper substitutes a per-tick timestamped path and the paths do
+   differ — but if the line is still set (it was uncommented in env files
+   copied from the pre-2026-08-14 example) or anyone has pinned a fixed path
+   against that guidance, every tick prints the same string and the path ALONE
+   discriminates nothing. Correlate on
    time instead: pick the bracket whose `start summary=` timestamp and
    matching `done rc=` timestamp CONTAIN the receipt's `generated_at`
    (schema-required, `format: date-time`), and read only the lines between
@@ -3236,8 +3681,9 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    no receipt at all: a `start` with no matching `done rc=` (a tick still in
    flight, or a wrapper that died mid-tick), and a `done rc=2` tick — the
    config refusal of item 3, where `RETENTION_CONFIG_INVALID` publishes no
-   receipt and the file at the pinned path still belongs to some earlier
-   tick. Neither is the bracket to read; do NOT fall back to "the last
+   receipt at all, so the path that bracket announced names either nothing
+   or (under a pinned path) some earlier tick's file. Neither is the bracket
+   to read; do NOT fall back to "the last
    bracket in the file". Then require the hit's `chunk` field to name a
    chunk that appears in THIS receipt's `dropped_chunks[]`. A hit outside
    that bracket belongs to an earlier tick and says nothing about this
@@ -3261,8 +3707,9 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    `decompress_chunk` / manual replay holding an incompatible lock on the
    same hypertable until the 60 s statement timeout fires.
 
-   No in-bracket hit does NOT prove the 0 was measured — it leaves two
-   possibilities:
+   No in-bracket hit does NOT prove the 0 was measured — for a wrapper tick
+   (the only kind that has a bracket at all; see the scope note above) it
+   leaves two possibilities:
    (a) a real measurement of a small or empty chunk, or (b) the
    silent-coercion path, where `chunks_detailed_size` returned no row or a
    NULL `total_bytes` and the runner recorded 0 without emitting any
@@ -3276,6 +3723,16 @@ Receipts match `schemas/timeseries_retention_receipt.schema.json`
    reconciled against a `pg_database_size` delta.
 
 ### 8.7 Salvage-backed windows
+
+Mode caveat first (#1369): with `archive_gate.mode = "disabled"` this list
+is **always empty**, and an empty list there is a positive statement, not an
+absence of information — it says *no archive evidence backed this deletion
+at all*. Everything in the rest of this section describes the `enabled`
+mode, where an empty list instead means "no db-export subject overlapped
+this drop window". Do not read a `disabled` receipt's `[]` as "all dropped
+data is product-archive covered": nothing is covered, and there is no
+recovery lane for any of it (§3.2 `COPY FROM` needs a salvage object that
+was never produced).
 
 `salvage_backed_windows[]` in an `enforced` receipt is derived only from
 the completeness receipt's subjects where `coverage=db-export` AND
@@ -3312,7 +3769,10 @@ anyway); compare the intervals by value, never by grep.
 
 All units are read-mostly (audit is read-only; mover's writes are already
 gated by ADR 0002 "no deletion without archive receipt"; retention only
-drops chunks after both gate receipts pass). Rollback is disabling the
+drops chunks after both gate receipts pass — **except in the archive-gate
+`disabled` mode**, where ADR 0002 Revision 2026-08-11 authorizes retention
+to drop chunks with no archive receipt at all, so disabling the retention
+timer stops FURTHER deletion and nothing more). Rollback is disabling the
 timers; the receipts stay on disk as historical evidence.
 
 ```
