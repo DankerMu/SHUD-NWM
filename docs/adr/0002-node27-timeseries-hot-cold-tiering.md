@@ -13,6 +13,10 @@ Layout amendment: 2026-07-26 (archive root moved off the `/home` hot
 filesystem to `/data/GHDC/nwm-archive`; see "Amendment (2026-07-26)" below,
 which supersedes Decision item 1's path wording)
 
+Context amendment: 2026-08-14 (the Context claim that the remaining
+`hydro.river_timeseries` index families "cannot be pruned further" is
+superseded by new measurements; see "Amendment (2026-08-14)" below)
+
 ## Status
 
 Accepted
@@ -314,3 +318,94 @@ completeness/drill gates in an explicit gate-disabled mode whose receipt
 records the mode and cites this revision. Implementation is tracked in
 issue #1369. The display carve-out window and the compression sections
 of this ADR are unchanged (compression was never a retention gate).
+
+## Amendment (2026-08-14): the river index families could be pruned further
+
+The Context above records, from the 2026-07-04 measurements, that
+`hydro.river_timeseries`'s "remaining index families are functional (pkey 30 GB,
+MVT identity lookup 32 GB) and cannot be pruned further". That forward-looking
+claim is **superseded by #1338**; the original Context text stays as written
+(it is an accurate record of what was measured in July), and the Status is
+unchanged — nothing in the Decision depended on the claim.
+
+### What the new measurement shows
+
+Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
+`hydro.river_timeseries` chunks; inventory in the #1338 pre-drop receipt posted
+on PR #1377 (2026-08-14)):
+
+- `river_timeseries_mvt_identity_lookup_idx`: **162 GB** (up from 32 GB in July)
+  for **5,571** `idx_scan`, against **796,096,944** `river_timeseries_pkey` scans
+  over the same window. Its column *set* is identical to the pkey's — only the
+  order differs — but the same set is not the same coverage: with `variable`
+  single-valued table-wide it behaves as `(run_id, valid_time, rnv, segid)`, a
+  run-scoped time prefix the pkey cannot offer (the pkey orders `rnv`/`segid`
+  ahead of `variable`/`valid_time`). The in-repo query shapes measured to use
+  this index are two reads — the #1338 pre-drop baseline Q1/Q8 shape captures:
+  the national-tile `typed_values` ts-access leg
+  (`services/tiles/mvt.py:603-651`) and the source-identity stats probe
+  (`mvt.py:530-553`) — both binding `run_id` + `variable` + `valid_time` +
+  `rnv` with **no** `basin_version_id`, a shape the retained
+  `..._mvt_selected_identity_valid_time_discovery_idx` cannot serve (its 2nd
+  column is `basin_version_id`); the 5,571 cumulative `idx_scan` are **not**
+  individually attributed to queries. Both baseline captures used this index,
+  but Q1 is a single-table shape proxy rather than the real query: the real
+  `typed_values` CTE projects `value`/`unit`/`quality_flag`/`basin_version_id`,
+  none of which this index carries, so the real query can never be index-only
+  on it (even the proxy's Index Only Scan reported `Heap Fetches: 216`). The
+  stats probe's real ts leg takes no payload columns, so index-only is feasible
+  there. The statically expected
+  post-drop successor for those two reads was the pkey (usable prefix `run_id` +
+  `rnv`, remaining predicates as in-index filters), and the post-drop receipt
+  (PR #1377 comments, 2026-08-14) **confirmed** it: both shapes fell to a
+  `river_timeseries_pkey` Index Only Scan — no Seq Scan fallback, no other
+  retained index picked up — at Q1 warm **10.4 ms** vs **2.5 ms** pre-drop
+  (a **4.2x** residual cost: the disclosed tradeoff, not an order-of-magnitude
+  regression) and Q8 **2.9 ms**. All other captured shapes' plans were unchanged
+  against the same-compression-state immediate pre-drop baseline. The ingest
+  window `DELETE` already planned on the pkey pre-drop
+  (baseline Q7, all four predicates pushed into the pkey `Index Cond`), so the
+  write path is not a consumer.
+- `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
+  strict prefix of the index above; those 10,864 cumulative `idx_scan` are
+  **not** individually attributed to queries. No in-repo migration created it;
+  it was created out-of-band on node-27.
+
+### Disposition
+
+Both are dropped by
+[`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`](../../db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql)
+(~167 GB at the 2026-08-14 05:29Z pre-drop baseline sizes; the node-27 apply
+receipt (PR #1377 comments, 2026-08-14) records the actual before/after:
+**293.6 GB → 193.2 GB, ~100 GB reclaimed**. The delta against the ~167 GB
+estimate is not a mis-measurement of either number — a compression drift
+between capture and apply had already dropped part of the chunk btrees, so the
+dated capture and the dated apply are each valid for their own moment, and the
+receipt records the drift). This is a
+**tradeoff, not a redundancy removal**: 162 GB of
+carrying cost weighed against 5,571 scans, with a real residual coverage loss
+on the two read shapes above — now priced at the 4.2x recorded there. The
+pre-merge before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measured the
+before/after latency of those two **predicate shapes** — the gate's Q1/Q8 are
+single-table proxies, so real-query latency was **not** measured by the gate.
+The rollback trigger was a Seq Scan fallback or an order-of-magnitude slowdown
+in the shape plans; the receipt showed neither (pkey Index Only Scan, 4.2x), so
+the drop stands. Should a later measurement cross that line, re-creating the
+index rolls it back (the re-create DDL for both is preserved verbatim in that
+migration's comments).
+Re-creating the index is not by itself a durable rollback: as that migration's
+rollback-procedure note records, the build takes a `SHARE` lock on
+`hydro.river_timeseries` (blocking ingest writes) and that lock is unavoidable —
+the #1338 live-leg pre-check (node-27, 2026-08-14) had
+`CREATE INDEX CONCURRENTLY` **rejected** on this hypertable
+(`ERROR: hypertables do not support concurrent index creation`, TimescaleDB
+2.10.2) while plain `CREATE INDEX` was accepted, so plain `CREATE INDEX` under a
+`SHARE` lock for the full build is the only rollback path — and the full filename
+`000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql` must
+also be recorded in `public.schema_migrations.version` (or the file reverted) —
+inserting the shorthand `000049` leaves `migrate.py` still treating the
+migration as unapplied and silently re-dropping the rebuilt index — or the next
+unattended `migrate.py` run silently re-drops the rebuilt index. The
+general lesson for this ADR: "cannot be pruned further" is a measurement, not a
+property — index redundancy claims expire and must be re-measured against
+growth, not carried forward.

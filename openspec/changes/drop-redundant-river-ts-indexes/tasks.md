@@ -1,0 +1,31 @@
+# Tasks: drop-redundant-river-ts-indexes（#1338）
+
+## 0. 前置实测（已完成）
+
+- [x] 0.1 node-27 read-only 六索引全量清单（尺寸/idx_scan/8 chunk 聚合）+ `valid_time_discovery_idx` 带外身份确认 + schema_migrations 漂移记录 → `.workplans/issue-1338/pre-inventory.md`
+
+## 1. 实现
+
+- [x] 1.1 `db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`：两条 `DROP INDEX CONCURRENTLY IF EXISTS`（D1 名字逐字），先例 000041/000042 文体 rationale 注释，含带外索引自证注释
+- [x] 1.2 `packages/common/forecast_store.py` `_qhh_latest_query_indexes()` 证据陈述对齐（D3），`tests/test_migrations.py` / `tests/test_forecast_api.py` 两钉同步；**承接者归因与措辞以 3.4 第 6 查询（`river_sample_rows`）post-drop EXPLAIN 实测定稿——3.4 已前移 merge 前（round-1 C4 裁决），故本项在 3.4 之后、merge 之前完成**（pre-drop 已实测：predrop-baseline Q6 显示该查询由保留的 000021 selected_identity discovery 索引服务、被删索引不在该计划中，故承接者归因是 pre-drop 实测而非静态推理；pkey 非承接者——可用前缀仅 2 列且不含 basin_version_id；3.4 post-drop EXPLAIN 复核计划不变后定稿）
+- [x] 1.3 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` 追加 supersession 注记（2026-08-14 实测 162 GB / 5,571 scans，被 #1338 依新证据 supersede；不改原正文段落）
+
+## 2. 测试
+
+- [x] 2.1 B1：000049 文本钉（存在、恰两条 DROP CONCURRENTLY IF EXISTS、目标名逐字、零保留集名、编号无冲突）；红证=文件缺失/名字打错时红
+- [x] 2.2 B2：证据对齐钉（forecast_store 不再陈述 mvt_identity_lookup；两既有钉改后仍断言实质内容）；红证=先跑旧断言对新 forecast_store 证红
+- [x] 2.3 B3：保留集既有迁移测试（含 `test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates`）不动仍绿
+
+## 3. Evidence Floor
+
+- [x] 3.1 `uv run pytest -q tests/test_migrations.py tests/test_forecast_api.py`
+- [x] 3.2 `uv run ruff check .`
+- [x] 3.3 `openspec validate drop-redundant-river-ts-indexes --strict --no-interactive`
+- [x] 3.4 node-27 实机（D2 手工 psql 路径；**merge 前执行**，前置条件 = round 复审 clean + CI 含 "SQL Migration Dry Run" 绿——round-1 C4 裁决：SQL 已由测试钉冻结、drop 可逆且回滚 DDL 在册、自动 migrate 通道（`scripts/run_qhh_cycle.sh:412` 等调 `migrate.py`）对已删索引系 `IF EXISTS` no-op 安全重放（**但回滚重建后该通道会静默再删——durable 回滚须以完整文件名 `000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql` 补记 `public.schema_migrations.version`（`migrate.py` 按文件名记账，写 `'000049'` 无效），见 000049 注释**）、AC2 对 merge 无排序要求），顺序硬约束：
+  1. pre-flight（F2/F4）：两索引 `pg_get_indexdef`（hypertable 级 + 至少一个 chunk 级）落盘 `.workplans/issue-1338/`；`timescaledb_information.chunks` 的 `is_compressed` 分布记录；**回滚可执行性预验（R5 note）：在带 compressed chunk 的该 hypertable 上（TimescaleDB 2.10.2），普通 `CREATE INDEX` 与 `CREATE INDEX CONCURRENTLY` 的接受性均仓内无先例——用一个廉价小索引做一次 CREATE/DROP 试验并记录结果，两者都被拒则回滚方案失效、终止不 drop**
+  2. pre-drop EXPLAIN（D4 **八**查询）+ 尺寸基线——**hypertable 上必须用 chunk 聚合/`hypertable_index_size()`，父表 `pg_total_relation_size` 恒近零会废掉 AC2**；`_hyper_3_32_chunk` 单列；**八查询 SQL 脚本原文保全于 `.workplans/issue-1338/predrop-queries.sql`（round-3 P2-3），post-drop 必须逐字节重用同一脚本以保证前后计划可比**
+  3. apply 000049：`screen`/`nohup` 内执行（F4：`DROP INDEX CONCURRENTLY` 中断可留 invalid 索引）→ 收尾 `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid OR NOT indisready` 必须为空，非空则普通 `DROP INDEX` 清理残留后重跑
+  4. 二次重放证幂等（`IF EXISTS` → no-op）
+  5. post-drop EXPLAIN + 尺寸对比 → D4 判定；记录进 `.workplans/issue-1338/` 与 PR 评论；**退化即按 000049 注释中的 CREATE 原文重建回滚并终止**
+- [x] 3.5 `/` 与 `/ops` node-27 live 验证正常（AC4，HTTP 200 + national tile 200/3297B 即 Q1 真实消费面出图），受理证据入 PR 评论
+- [x] 3.6 CI "SQL Migration Dry Run"（`db/**` 命中 database filter，from-zero 全链重放含 000049）绿——即 spec "replay on a database where the index never existed" scenario 的免费证据，PR body 点名

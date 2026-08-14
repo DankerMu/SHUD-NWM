@@ -3432,16 +3432,32 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "status": "covered_by_latest_product_basin_lookup_index",
             "columns": ["basin_id", "basin_version_id"],
         },
+        # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
+        # (#1338); the retained 000021 index named below is a PRE-DROP MEASUREMENT,
+        # not a static guess: baseline Q6 — a single-table shape capture of
+        # river_sample_rows' ts window predicates, whereas the real query joins
+        # candidate_runs with correlated bounds — recorded Index Scans on this index's
+        # chunk indexes already serving that shape pre-drop, which matches the river
+        # leg's predicates: run_id + basin_version_id + river_network_version_id +
+        # variable equality-bound with a valid_time range, an exact prefix of it. The
+        # dropped index does not appear in that plan at all, so the plan is expected
+        # unchanged post-drop. (Baseline provenance: the #1338 pre-drop EXPLAIN receipt
+        # posted on PR #1377, 2026-08-14.) The pkey is not the successor — it carries no
+        # basin_version_id and its third column river_segment_id is unbound, so its
+        # usable prefix stops at two columns. The post-drop EXPLAIN (receipt posted on
+        # PR #1377, 2026-08-14) confirmed the plan unchanged: the Q6 shape still scans
+        # this index's chunk indexes after migration 000049 dropped
+        # mvt_identity_lookup.
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_mvt_identity_lookup_idx",
-            "status": "covered_by_mvt_identity_lookup_index",
+            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+            "status": "covered_by_selected_identity_valid_time_discovery_index",
             "columns": [
                 "run_id",
-                "variable",
-                "valid_time",
+                "basin_version_id",
                 "river_network_version_id",
-                "river_segment_id",
+                "variable",
+                "valid_time DESC",
             ],
         },
         {

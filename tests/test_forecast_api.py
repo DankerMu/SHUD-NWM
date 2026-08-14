@@ -1732,10 +1732,32 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "river_timeseries_mvt_identity_lookup_idx",
+        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
     }
+    # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx; the river leg of
+    # the evidence payload must report the retained 000021 discovery index — the river
+    # window query's 4 equality binds plus valid_time range are an exact prefix of it,
+    # while the pkey (no basin_version_id, unbound river_segment_id at position 3) only
+    # yields a 2-column prefix. Confirmed by the #1338 post-drop EXPLAIN receipt (PR #1377,
+    # 2026-08-14): the Q6 shape still plans on this retained index after the drop.
+    assert [
+        item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"
+    ] == [
+        {
+            "table": "hydro.river_timeseries",
+            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+            "status": "covered_by_selected_identity_valid_time_discovery_index",
+            "columns": [
+                "run_id",
+                "basin_version_id",
+                "river_network_version_id",
+                "variable",
+                "valid_time DESC",
+            ],
+        }
+    ]
 
 def test_latest_qhh_no_candidate_full_404_still_raises() -> None:
     # 无任何候选时 latest-product 整体 404（既有契约不变）。

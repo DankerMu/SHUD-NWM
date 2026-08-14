@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+from packages.common.migrate import split_sql_statements
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
 
 EXPECTED_MIGRATIONS = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
@@ -250,6 +252,95 @@ def test_river_segment_stream_type_is_generated_and_indexed() -> None:
 
 
 
+DROP_REDUNDANT_RIVER_INDEX_MIGRATION = (
+    "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql"
+)
+DROPPED_RIVER_TIMESERIES_INDEXES = (
+    "hydro.river_timeseries_mvt_identity_lookup_idx",
+    "hydro.river_timeseries_valid_time_discovery_idx",
+)
+RETAINED_RIVER_TIMESERIES_INDEXES = (
+    "river_timeseries_pkey",
+    "river_ts_segment_time_idx",
+    "river_timeseries_valid_time_idx",
+    "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+)
+
+
+def test_drop_redundant_river_index_migration_drops_exactly_the_two_measured_indexes() -> None:
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration_name = DROP_REDUNDANT_RIVER_INDEX_MIGRATION
+
+    assert migration_name in migration_sql, (
+        f"{migration_name} must exist as the redundant-index drop migration for issue #1338"
+    )
+    assert migration_names.index("000048_river_segment_stream_type.sql") < migration_names.index(migration_name)
+    assert [name for name in migration_names if name.startswith("000049")] == [migration_name], (
+        "migration 000049 must be a single file with no duplicate numeric prefix"
+    )
+
+    migration = migration_sql[migration_name]
+
+    # Comment-stripped body: the migration is exactly two CONCURRENTLY drops, nothing
+    # else. Any extra statement (or a plain non-CONCURRENTLY drop, which would lock the
+    # display read path on a 162 GB hypertable index) fails here.
+    statements = [
+        line.strip()
+        for line in migration.splitlines()
+        if line.strip() and not line.lstrip().startswith("--")
+    ]
+    assert statements == [
+        f"DROP INDEX CONCURRENTLY IF EXISTS {index_name};" for index_name in DROPPED_RIVER_TIMESERIES_INDEXES
+    ], f"{migration_name} must drop exactly the two measured indexes, found: {statements}"
+
+    # Retained set (issue #1338 explicit keep-list) must never appear as a DROP target.
+    for retained_index in RETAINED_RIVER_TIMESERIES_INDEXES:
+        offending = [statement for statement in statements if retained_index in statement]
+        assert not offending, f"{migration_name} must not drop retained index {retained_index}: {offending}"
+
+
+def test_drop_redundant_river_index_migration_records_rollback_ddl_and_out_of_band_origin() -> None:
+    migration = dict(_migration_sql())[DROP_REDUNDANT_RIVER_INDEX_MIGRATION]
+    comment_body = "\n".join(line for line in migration.splitlines() if line.lstrip().startswith("--"))
+
+    # Drops are only reversible if the exact re-create DDL survives in the repo.
+    # river_timeseries_valid_time_discovery_idx has no in-repo CREATE at all (created
+    # out-of-band on node-27), so this comment is its only recorded definition.
+    assert (
+        "CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx "
+        "ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id);"
+        in comment_body
+    )
+    assert (
+        "CREATE INDEX river_timeseries_valid_time_discovery_idx "
+        "ON hydro.river_timeseries USING btree (run_id, variable, valid_time DESC);"
+        in comment_body
+    )
+    assert "out-of-band" in comment_body, (
+        "the migration must self-document that it drops an index no in-repo migration created"
+    )
+
+
+def test_drop_redundant_river_index_migration_never_executes_its_recorded_rollback_ddl() -> None:
+    # `split_sql_statements` is the splitter `packages.common.migrate` uses to apply
+    # migrations, so it is the authoritative statement oracle. The rollback DDL above
+    # lives inside `--` comments and carries its own semicolons; if the apply lane ever
+    # treated it as executable, applying 000049 would rebuild the 162 GB index it just
+    # dropped.
+    statements = split_sql_statements(
+        (MIGRATIONS_DIR / DROP_REDUNDANT_RIVER_INDEX_MIGRATION).read_text(encoding="utf-8")
+    )
+
+    assert len(statements) == 2, f"expected two executable statements, got {len(statements)}"
+    for statement in statements:
+        executable = "\n".join(
+            line for line in statement.splitlines() if not line.lstrip().startswith("--")
+        ).strip()
+        assert executable.startswith("DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_"), executable
+        assert "CREATE" not in executable.upper(), executable
+
+
 def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
     migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
     mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
@@ -367,9 +458,23 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "basin_version_qhh_latest_lookup_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
-        "river_timeseries_mvt_identity_lookup_idx",
     ):
         assert index_name in index_evidence_source
+
+    # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx, so the river leg
+    # of the evidence payload must name the retained 000021 index whose leading columns
+    # are an exact prefix match for the river window query (4 equality binds + a
+    # valid_time range) — not the pkey, whose usable prefix stops at two columns.
+    # Matched on the payload key/value pairs rather than a bare substring, so the drop
+    # rationale may keep naming the dropped index in a comment.
+    assert (
+        '"index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx"' in index_evidence_source
+    )
+    assert '"status": "covered_by_selected_identity_valid_time_discovery_index"' in index_evidence_source
+    assert '"index": "river_timeseries_mvt_identity_lookup_idx"' not in index_evidence_source
+    assert '"status": "covered_by_mvt_identity_lookup_index"' not in index_evidence_source
+    assert '"index": "river_timeseries_pkey"' not in index_evidence_source
+    assert '"status": "covered_by_primary_key_prefix"' not in index_evidence_source
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
