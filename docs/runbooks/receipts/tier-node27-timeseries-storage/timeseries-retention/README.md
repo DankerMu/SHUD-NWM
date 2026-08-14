@@ -194,7 +194,10 @@ cd /home/nwm/NWM-tier
 NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
   /home/nwm/.local/bin/uv run --frozen python scripts/node27_timeseries_retention.py \
     --dry-run --receipt-path "$RECEIPT"
-# rc=1, refusal_reason=COMPLETENESS_RECEIPT_MISSING
+# HISTORICAL 2026-07-13 result, under the then-enabled archive gate:
+#   rc=1, refusal_reason=COMPLETENESS_RECEIPT_MISSING
+# Under today's disabled-gate env the same command returns rc=0,
+# outcome=dry-run (archive_gate.mode=disabled) — the refusal is unreachable.
 ```
 
 Two things this block is not being cute about:

@@ -2897,14 +2897,35 @@ commented placeholder; run it only after the two manual receipts in §8.4
    mkdir -p ~/node27-timeseries-retention-logs
    ```
 
-2. Copy the env example into place and lock it down. The env file MUST be
+2. Put the env file in place and lock it down. The env file MUST be
    mode `0600` — the wrapper refuses otherwise
    (`ENV_FILE_MODE_UNSAFE`).
 
+   **First-time install only** — run the `cp` ONLY when
+   `/home/nwm/NWM/infra/env/node27-timeseries-retention.env` does not exist
+   yet:
+
    ```
-   cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
-      /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   test -e /home/nwm/NWM/infra/env/node27-timeseries-retention.env \
+     || cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
+           /home/nwm/NWM/infra/env/node27-timeseries-retention.env
    chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
+   ```
+
+   **If that env file already exists — and it DOES on node-27 — edit it in
+   place; do not re-copy the example.** The example ships
+   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` uncommented (the spec
+   default), while node-27 runs `21` (as of 2026-08-01 — see this runbook's
+   opening policy banner).
+   Re-copying therefore silently reverts the live window 21 → 14, and a
+   narrower window means an extra 7 days of data become deletion candidates
+   — irreversibly, with no refusal to catch it once the archive gate is
+   `disabled`. Verify the value after ANY edit and treat a surprise `14` as
+   a stop-the-bringup event:
+
+   ```
+   grep -n NODE27_TIMESERIES_RETENTION_WINDOW_DAYS \
+     /home/nwm/NWM/infra/env/node27-timeseries-retention.env
    ```
 
    Fill in `DATABASE_URL` with a writer role (retention runs `drop_chunks`
@@ -2939,15 +2960,27 @@ commented placeholder; run it only after the two manual receipts in §8.4
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
    cadence stays `OnCalendar=*-*-* 05:15:00 UTC` — do not retune it here.
 
-4. Verify the per-tick receipt rotation once a SECOND tick has run (wait for
-   the next 05:15 UTC firing or force one with
-   `systemctl --user start nhms-node27-timeseries-retention.service`): two
-   distinctly timestamped receipts MUST coexist in the log root. A single file
+4. Verify the per-tick receipt rotation once a SECOND tick has run — wait for
+   the next 05:15 UTC firing, or force one with
+   `systemctl --user start nhms-node27-timeseries-retention.service`
+   (**that forced start is a real enforcing tick: with `ENFORCE=1` resident in
+   the env file it irreversibly drops up to
+   `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks, same as a scheduled
+   firing — it is not a no-op probe**). Two distinctly timestamped
+   WRAPPER-generated receipts MUST coexist in the log root. A single file
    means the receipt-path env var is still set and each tick is overwriting the
    previous audit record.
 
+   Match only the wrapper's own filenames: it writes
+   `retention-<UTC>.json` with `<UTC>` = `%Y%m%dT%H%M%SZ`, so the glob below
+   pins the leading `2` of the year. The manual §8.4 receipts
+   (`retention-dryrun-<UTC>.json`, `retention-enforce-<UTC>.json`) do NOT
+   count toward the two and deliberately do not match — a bare
+   `retention-*.json` glob would be satisfied by those two alone, before the
+   timer has ticked even once, and the check could never fail.
+
    ```
-   ls -l ~/node27-timeseries-retention-logs/retention-*.json
+   ls -l ~/node27-timeseries-retention-logs/retention-2*.json
    ```
 
 #### Current bringup state (verified 2026-08-01, superseded 2026-08-14)
