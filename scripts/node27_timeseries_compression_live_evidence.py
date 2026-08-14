@@ -51,6 +51,7 @@ from packages.common.node27_container_contract import (
     CONTAINER_PG_RESTORE_REALPATH,
     SYSTEMD_UNSET_TIMESTAMP,
     container_dump_path_within_mount,
+    recurring_unit_idle_failure,
 )
 
 SCHEMA_VERSION = "3.0"
@@ -962,18 +963,36 @@ def _validate_checkpoint_artifacts(
     _validate_d3_catalog(catalog_raw, f"{label}.catalog document")
     recurring = _require_mapping(show.get("recurring"), f"{label}.systemd_show.recurring")
     replay = _require_mapping(show.get("replay"), f"{label}.systemd_show.replay")
-    if recurring != {
-        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
-        "ActiveState": "inactive",
-        "SubState": "dead",
-        "MainPID": 0,
-        "InvocationID": "",
-        # MEASURED: systemd renders the never-started unit's unset start
-        # timestamp as the literal "n/a" (not empty).
-        "ExecMainStartTimestamp": SYSTEMD_UNSET_TIMESTAMP,
-        "ExecMainStartTimestampMonotonic": 0,
-    }:
-        raise EvidenceError(f"{label} recurring compression unit is not canonically inactive")
+    # #1255: the recurring unit is GATED on the shared four-field
+    # current-activity + identity predicate only.  The three boot-history fields
+    # are evidence, not gate input -- but evidence the producer may not drop, and
+    # the whole-dict equality this replaced was the only thing pinning the key
+    # set.  The pin is therefore explicit now: exact keys, plus the types the
+    # three evidence fields are recorded in (a "0" string monotonic or a null
+    # InvocationID is malformed evidence, not a passing checkpoint).
+    _require_exact_keys(
+        recurring,
+        {
+            "FragmentPath",
+            "ActiveState",
+            "SubState",
+            "MainPID",
+            "InvocationID",
+            "ExecMainStartTimestamp",
+            "ExecMainStartTimestampMonotonic",
+        },
+        f"{label}.systemd_show.recurring",
+    )
+    if (
+        not isinstance(recurring["InvocationID"], str)
+        or not isinstance(recurring["ExecMainStartTimestamp"], str)
+        or not isinstance(recurring["ExecMainStartTimestampMonotonic"], int)
+        or isinstance(recurring["ExecMainStartTimestampMonotonic"], bool)
+    ):
+        raise EvidenceError(f"{label}.systemd_show.recurring boot-history evidence fields are malformed")
+    recurring_failure = recurring_unit_idle_failure(recurring)
+    if recurring_failure is not None:
+        raise EvidenceError(f"{label} {recurring_failure}")
     if (
         replay.get("FragmentPath") != "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression-replay.service"
         or replay.get("ActiveState") != "activating"

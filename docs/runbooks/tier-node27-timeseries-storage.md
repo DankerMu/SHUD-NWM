@@ -2153,13 +2153,21 @@ witnessed through a reserved never-existing unit
 (`nhms-external-contract-snapshot-witness-does-not-exist.service`), because the
 real recurring compression unit has run this boot (daily 04:25 UTC timer) and so
 renders a real timestamp. That witnesses systemd's *rendering* contract only —
-it does NOT witness the loaded-but-never-started whole-dict shape asserted at
-`scripts/node27_timeseries_compression_supervisor.py:1282-1293` and
-`scripts/node27_timeseries_compression_live_evidence.py:834-845`. A green
-`--check` therefore does NOT imply those two checkpoints pass. The fixture's
-`informational.recurring_unit` records the real unit's live
-ActiveState/SubState/ExecMainStartTimestamp as counter-evidence; that
-pre-existing consumer defect is tracked as its own issue.
+it says nothing about the live state of the recurring unit at any checkpoint, so
+a green `--check` still does NOT imply the mutation-window checkpoints pass.
+What the fixture's `informational.recurring_unit` counter-evidence (the real
+unit's live ActiveState/SubState/ExecMainStartTimestamp) used to expose was a
+consumer defect: both planes gated the window on a whole-dict equality that
+pinned the never-started rendering, so the first checkpoint after any timer tick
+aborted. **Resolved in `#1255`**: the gate is now the four-field
+current-activity/identity predicate `recurring_unit_idle_divergences`
+(`packages/common/node27_container_contract.py`), bound by
+`scripts/node27_timeseries_compression_supervisor.py` and
+`scripts/node27_timeseries_compression_live_evidence.py`. `InvocationID` and
+both `ExecMainStartTimestamp*` fields stay captured in the checkpoint show
+document as evidence (key set and types pinned verifier-side) and no longer
+gate — so an inactive/dead unit that ticked earlier this boot, exactly what
+`informational.recurring_unit` records, is now an admitted checkpoint.
 
 **Scheduling is operator-gated.** #1089 installs no timer and no GitHub Actions
 workflow. Until an operator schedules one (a weekly `--check` on the node is the

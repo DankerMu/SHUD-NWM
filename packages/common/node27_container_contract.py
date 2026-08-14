@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
+from typing import Any, Mapping
 
 # MEASURED on the real node-27 ``nhms-db`` container (image ref
 # ``timescale/timescaledb-ha:pg15-latest``, cited to
@@ -83,15 +84,19 @@ CONTAINER_PG_RESTORE_REALPATH = "/usr/share/postgresql-common/pg_wrapper"
 # ``PROBE_RECURRING_UNIT`` argv (snapshot script :180-184).  ``informational.*``
 # sits OUTSIDE the drift lock -- ``COMPARED_SECTIONS`` holds only
 # ``contract``/``host_context``, so these entries are dump-recorded diagnostics,
-# never compared, and carry no ``contract.*``-grade guarantee.  The runtime
-# consequence for the inactive-unit checkpoints below is tracked as #1255; this
-# record states the measured fact only.
-# Both planes REQUIRE this literal (they do not merely accept it): it is one
-# member of a whole-dict equality over the recurring unit's ``systemctl show``
-# properties -- scripts/node27_timeseries_compression_supervisor.py:1382-1393
-# and scripts/node27_timeseries_compression_live_evidence.py:953-964 -- while
-# the is-active side of each plane rejects it explicitly
-# (supervisor.py:1401-1404, live_evidence.py:971-978).
+# never compared, and carry no ``contract.*``-grade guarantee.  That measured
+# inactive-with-a-real-timestamp fact is what refuted the mutation-window
+# checkpoints' whole-dict equality; #1255 replaced it with the four-field
+# ``recurring_unit_idle_divergences`` predicate at the bottom of this module,
+# under which this literal is EVIDENCE the recurring gate no longer reads.
+# Where this literal is still load-bearing after #1255: the never-started
+# rendering hermetic fixtures reproduce in both planes' test suites, the
+# recurring show document's evidence typing (a real ``ExecMainStartTimestamp``
+# and this sentinel are both admissible strings there), and -- as an explicit
+# REJECTION, unchanged -- the is-active side of each plane, where a replay unit
+# claiming to be the active owner must carry a real timestamp
+# (scripts/node27_timeseries_compression_supervisor.py:1399-1402,
+# scripts/node27_timeseries_compression_live_evidence.py:1002-1006).
 # Source: packages/common/node27_external_contract_snapshot.json --
 # ``contract.systemd_unset_timestamp``, ``host_context.systemd_version``,
 # ``informational.recurring_unit`` + ``informational.measured_at``; witness
@@ -320,3 +325,90 @@ def container_dump_path_within_mount(value: str) -> bool:
     """
 
     return value.startswith(CONTAINER_DB_MOUNT_PREFIX) and ".." not in PurePosixPath(value).parts
+
+
+# REPO-SIDE PINNED CONTRACT (not a measured host value, issue #1255): the
+# mutation-window checkpoint's release predicate over the recurring compression
+# unit ``nhms-node27-timeseries-compression.service``.  It is a repo-side
+# decision drawn over a measurement, so it is NOT a fourth ``contract.*``
+# drift-checked constant (the snapshot alignment guard in
+# tests/test_node27_external_contract_snapshot.py counts exactly three).
+# The measurement it is drawn over, taken on the real node-27 host (read-only
+# ``systemctl --user show``, 2026-08-14, one tick after the daily
+# ``OnCalendar=*-*-* 04:25:00 UTC`` timer fired):
+# a unit that RAN EARLIER THIS BOOT and returned to idle reports
+# ``ActiveState=inactive SubState=dead MainPID=0`` with the canonical
+# ``FragmentPath``, while systemd RETAINS its boot history on the still-loaded
+# unit -- ``InvocationID=0d8bd46e8f634e0296d8cbf49a938231`` (non-empty) and
+# ``ExecMainStartTimestamp=Thu 2026-08-13 12:25:00 CST``
+# (``...Monotonic=1306766054421``).
+# DESIGN RULING of this plane (a decision, not a measurement): release depends
+# on CURRENT-ACTIVITY AND IDENTITY facts only -- the four fields below.  The
+# retained boot-history fields (``InvocationID``,
+# ``ExecMainStartTimestamp``/``...Monotonic``) are orthogonal to "is anything
+# compressing right now", so gating on them (as both planes did until #1255, via
+# a whole-dict equality that pinned the never-started rendering) makes the FIRST
+# checkpoint after any timer tick abort a window it had no reason to abort.
+# The four fields close the activity fact for THIS unit because it is
+# ``Type=oneshot`` without ``RemainAfterExit``
+# (``infra/systemd/nhms-node27-timeseries-compression.service``): while running
+# it is ``activating/start`` with a non-zero ``MainPID``, and every
+# ``deactivating``/``reloading``/``ExecStopPost`` geometry is caught by
+# ``ActiveState != "inactive"``.  A tick that arrives mid-window is a different
+# guard's job and stays where it was: the checkpoint journal window rejects any
+# recurring activation, and the DB write-privilege/relation-lock probes judge the
+# mutation surface itself.
+# Both planes bind this one predicate -- supervisor ``capture_checkpoint`` and
+# the live-evidence ``_validate_checkpoint_artifacts`` twin -- for the same
+# reason as every other value in this module: two independent copies of a
+# predicate is the issue-#1069 defect class.
+RECURRING_COMPRESSION_UNIT = "nhms-node27-timeseries-compression.service"
+RECURRING_COMPRESSION_UNIT_FRAGMENT_PATH = f"/home/nwm/.config/systemd/user/{RECURRING_COMPRESSION_UNIT}"
+RECURRING_UNIT_IDLE_EXPECTATIONS: dict[str, Any] = {
+    "FragmentPath": RECURRING_COMPRESSION_UNIT_FRAGMENT_PATH,
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "MainPID": 0,
+}
+
+
+def recurring_unit_idle_divergences(show: Mapping[str, Any]) -> list[str]:
+    """Name every gated field of ``show`` that diverges from the idle contract.
+
+    Empty list means "no current activity and the pinned identity", i.e. the
+    mutation window may proceed.  Types are compared as strictly as values: a
+    JSON ``true`` for ``MainPID`` must not satisfy ``MainPID == 0`` through
+    Python's ``bool``/``int`` equality, and a missing field (``None``) diverges
+    like any other wrong value.  Boot-history fields are deliberately absent
+    here; they are evidence, not gate input (see the block comment above).
+    """
+
+    return [
+        f"{field}={show.get(field)!r} (expected {expected!r})"
+        for field, expected in RECURRING_UNIT_IDLE_EXPECTATIONS.items()
+        if type(show.get(field)) is not type(expected) or show.get(field) != expected
+    ]
+
+
+def recurring_unit_idle_failure(show: Mapping[str, Any]) -> str | None:
+    """Return ``None`` when the recurring unit is idle, else a diagnosis line.
+
+    The two planes prepend their own label/error-type conventions to this text.
+    ``SubState="failed"`` gets its own sentence: a per-chunk timeout wall can
+    leave the unit ``failed/failed`` until the next tick or an operator
+    ``reset-failed`` (runbook §4.5), which is neither concurrent compression nor
+    an identity swap -- describing it as either sends the operator hunting a
+    running job that does not exist.
+    """
+
+    divergences = recurring_unit_idle_divergences(show)
+    if not divergences:
+        return None
+    detail = "; ".join(divergences)
+    if show.get("SubState") == "failed":
+        return (
+            "recurring compression unit is in the failed state from an earlier tick, not running: "
+            f"{detail} -- clear it with `systemctl --user reset-failed {RECURRING_COMPRESSION_UNIT}` "
+            "(runbook §4.5) before arming the window"
+        )
+    return f"recurring compression unit shows current activity or unexpected identity: {detail}"

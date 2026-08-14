@@ -52,6 +52,7 @@ from packages.common.node27_container_contract import (
     RECOVERY_TARGET_TABLE,
     SYSTEMD_UNSET_TIMESTAMP,
     container_dump_path_within_mount,
+    recurring_unit_idle_failure,
     validated_probe_target,
 )
 from packages.common.safe_fs import atomic_write_bytes_no_follow
@@ -1379,18 +1380,15 @@ def capture_checkpoint(
 
     recurring_show = unit_show("nhms-node27-timeseries-compression.service")
     replay_show = unit_show("nhms-node27-timeseries-compression-replay.service")
-    if recurring_show != {
-        "FragmentPath": ("/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service"),
-        "ActiveState": "inactive",
-        "SubState": "dead",
-        "MainPID": 0,
-        "InvocationID": "",
-        # MEASURED: systemd renders the never-started unit's unset start
-        # timestamp as the literal "n/a" (not empty).
-        "ExecMainStartTimestamp": SYSTEMD_UNSET_TIMESTAMP,
-        "ExecMainStartTimestampMonotonic": 0,
-    }:
-        raise SupervisorError("checkpoint recurring compression unit is not inactive")
+    # #1255: the release predicate is the shared four-field current-activity +
+    # identity contract.  InvocationID and the two start timestamps stay
+    # captured above as EVIDENCE but never gate: systemd retains them on the
+    # still-loaded unit after a timer tick, so gating on them (the whole-dict
+    # equality this replaced) aborted the first checkpoint of every window that
+    # followed a tick.
+    recurring_failure = recurring_unit_idle_failure(recurring_show)
+    if recurring_failure is not None:
+        raise SupervisorError(f"checkpoint {recurring_failure}")
     if (
         replay_show["FragmentPath"]
         != "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression-replay.service"

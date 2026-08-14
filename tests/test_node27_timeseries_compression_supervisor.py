@@ -1914,7 +1914,39 @@ def _psql_responses(*, activity: Any = None, locks: Any = None, catalog: Any = N
     ]
 
 
-def _systemctl_responses(invocation_id: str = PROBE_INVOCATION_ID, *, require_xdg: bool = True) -> list[dict[str, Any]]:
+# MEASURED node-27 contract (#1069 gap G6): a recurring unit that has never
+# started this boot reports an empty InvocationID and renders its unset start
+# timestamp as the literal "n/a", not empty.
+RECURRING_NEVER_STARTED_SHOW: dict[str, str] = {
+    "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "MainPID": "0",
+    "InvocationID": "",
+    "ExecMainStartTimestamp": supervisor.SYSTEMD_UNSET_TIMESTAMP,
+    "ExecMainStartTimestampMonotonic": "0",
+}
+
+# MEASURED node-27 contract (#1255, read-only `systemctl --user show` on
+# 2026-08-14, the day after the daily 04:25 UTC timer tick): the SAME unit after
+# a tick is idle by every activity/identity field, yet systemd RETAINS the boot
+# history on the still-loaded unit -- non-empty InvocationID plus real start
+# timestamps.  This is the steady state of the deployed timer, and the shape the
+# pre-#1255 whole-dict equality aborted every window on.
+RECURRING_RAN_THIS_BOOT_SHOW: dict[str, str] = {
+    **RECURRING_NEVER_STARTED_SHOW,
+    "InvocationID": "0d8bd46e8f634e0296d8cbf49a938231",
+    "ExecMainStartTimestamp": "Thu 2026-08-13 12:25:00 CST",
+    "ExecMainStartTimestampMonotonic": "1306766054421",
+}
+
+
+def _systemctl_responses(
+    invocation_id: str = PROBE_INVOCATION_ID,
+    *,
+    require_xdg: bool = True,
+    recurring_show: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     replay = "".join(
         line + "\n"
         for line in [
@@ -1928,19 +1960,7 @@ def _systemctl_responses(invocation_id: str = PROBE_INVOCATION_ID, *, require_xd
         ]
     )
     recurring = "".join(
-        line + "\n"
-        for line in [
-            "FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
-            "ActiveState=inactive",
-            "SubState=dead",
-            "MainPID=0",
-            "InvocationID=",
-            # MEASURED node-27 contract (#1069 gap G6): systemd renders the
-            # never-started recurring unit's unset start timestamp as literal
-            # "n/a", not empty.
-            f"ExecMainStartTimestamp={supervisor.SYSTEMD_UNSET_TIMESTAMP}",
-            "ExecMainStartTimestampMonotonic=0",
-        ]
+        f"{key}={value}\n" for key, value in (recurring_show or RECURRING_NEVER_STARTED_SHOW).items()
     )
     responses: list[dict[str, Any]] = []
     if require_xdg:
@@ -2494,6 +2514,147 @@ def test_producer_checkpoint_artifacts_satisfy_the_verifier(
     )
     assert result["journal_end_cursor"] == BOUNDARY_CURSOR
     assert result["replay_activation"]["MainPID"] == os.getpid()
+
+
+# --- #1255: the recurring-unit gate judges current activity, not boot history ---
+
+# The four GATED fields, one single-field deviation each on top of the measured
+# ran-this-boot base.  Single-field on purpose: a fixture that deviates several
+# at once cannot kill the deletion of any ONE field's check.
+RECURRING_GATED_DEVIATIONS = (
+    ("ActiveState", "activating", "'activating'"),
+    ("SubState", "failed", "'failed'"),
+    ("MainPID", "4242", "4242"),
+    (
+        "FragmentPath",
+        "/etc/systemd/user/nhms-node27-timeseries-compression.service",
+        "'/etc/systemd/user/nhms-node27-timeseries-compression.service'",
+    ),
+)
+
+
+def _capture_with_recurring(
+    probe_bin,
+    tmp_path: Path,
+    recurring_show: dict[str, str],
+    *,
+    slug: str = "run",
+) -> dict[str, Any]:
+    """Drive the REAL capture_checkpoint over one recurring-unit show rendering.
+
+    Each call gets its own work directory: checkpoint artifacts refuse to
+    overwrite an existing path, and the aborting cases still persist their
+    pre-gate database observations.
+    """
+
+    work = tmp_path / slug
+    work.mkdir()
+    probe_bin("psql", _psql_responses())
+    probe_bin("systemctl", _systemctl_responses(recurring_show=recurring_show))
+    probe_bin("journalctl", _journalctl_responses())
+    ledger_path = work / "ledger.jsonl"
+    with _ledger(ledger_path) as ledger:
+        supervisor.capture_checkpoint(
+            _checkpoint(),
+            wall=supervisor.HardWall.start(30),
+            ledger=ledger,
+            artifact_dir=work,
+            journal_cursor="s=stub;i=start;b=stub;m=0;t=0;x=0",
+            invocation_id=PROBE_INVOCATION_ID,
+        )
+    return json.loads(ledger_path.read_text().strip())
+
+
+def test_checkpoint_admits_the_recurring_unit_that_already_ran_this_boot(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #1255 core: on any day the 04:25 UTC timer has ticked, the idle unit still
+    # carries a retained InvocationID and real start timestamps.  The pre-fix
+    # whole-dict equality aborted exactly this shape -- the deployed steady state
+    # -- burning the first checkpoint of every authorized window.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    event = _capture_with_recurring(probe_bin, tmp_path, RECURRING_RAN_THIS_BOOT_SHOW, slug="ran-this-boot")
+    assert event["journal_end_cursor"] == BOUNDARY_CURSOR
+    recorded = json.loads(Path(event["systemd_show"]["artifact"]["path"]).read_text(encoding="utf-8"))
+    # Demoted to evidence, NOT dropped: all seven fields stay in the document.
+    assert recorded["recurring"] == {
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "MainPID": 0,
+        "InvocationID": "0d8bd46e8f634e0296d8cbf49a938231",
+        "ExecMainStartTimestamp": "Thu 2026-08-13 12:25:00 CST",
+        "ExecMainStartTimestampMonotonic": 1306766054421,
+    }
+
+
+@pytest.mark.parametrize(("field", "rendered", "observed"), RECURRING_GATED_DEVIATIONS)
+def test_checkpoint_rejects_one_deviating_recurring_field_and_names_it(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, rendered: str, observed: str
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    deviated = {**RECURRING_RAN_THIS_BOOT_SHOW, field: rendered}
+    with pytest.raises(supervisor.SupervisorError) as raised:
+        _capture_with_recurring(probe_bin, tmp_path, deviated, slug=f"deviating-{field}")
+    message = str(raised.value)
+    assert f"{field}={observed}" in message
+    if field == "SubState":
+        # A unit left failed by a per-chunk timeout wall (runbook §4.5) is
+        # neither concurrent compression nor an identity swap; the text must
+        # hand the operator the remedy instead of sending them hunting a job.
+        assert "not running" in message
+        assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
+    else:
+        assert "shows current activity or unexpected identity" in message
+
+
+def test_recurring_gate_is_field_for_field_identical_in_both_planes(
+    probe_bin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression lock for the issue-1069 defect class (one fact judged by two
+    # independently hard-coded planes, where a fix repairs one and rots the
+    # twin).  The show document is produced by the REAL supervisor collection
+    # logic -- never hand-authored -- and the REAL verifier must accept it; then
+    # each gated field is flipped and BOTH planes must refuse with the same
+    # diagnosis modulo their own error prefix.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
+    label = "supervisor checkpoint[0]"
+    event = _capture_with_recurring(probe_bin, tmp_path, RECURRING_RAN_THIS_BOOT_SHOW, slug="dual-plane")
+    result = evidence._validate_checkpoint_artifacts(
+        event,
+        label,
+        invocation_id=PROBE_INVOCATION_ID,
+        supervisor_pid=os.getpid(),
+    )
+    assert result["journal_end_cursor"] == BOUNDARY_CURSOR
+    produced_show = json.loads(Path(event["systemd_show"]["artifact"]["path"]).read_text(encoding="utf-8"))
+
+    for field, rendered, _observed in RECURRING_GATED_DEVIATIONS:
+        with pytest.raises(supervisor.SupervisorError) as producer_error:
+            _capture_with_recurring(
+                probe_bin,
+                tmp_path,
+                {**RECURRING_RAN_THIS_BOOT_SHOW, field: rendered},
+                slug=f"dual-plane-{field}",
+            )
+        flipped = json.loads(json.dumps(produced_show))
+        flipped["recurring"][field] = int(rendered) if field == "MainPID" else rendered
+        flipped_event = {
+            **event,
+            "systemd_show": supervisor._observed_ref(
+                tmp_path / f"dual-plane-{field}-show.json", supervisor._canonical(flipped)
+            ),
+        }
+        with pytest.raises(evidence.EvidenceError) as verifier_error:
+            evidence._validate_checkpoint_artifacts(
+                flipped_event,
+                label,
+                invocation_id=PROBE_INVOCATION_ID,
+                supervisor_pid=os.getpid(),
+            )
+        assert str(producer_error.value).removeprefix("checkpoint ") == str(verifier_error.value).removeprefix(
+            f"{label} "
+        )
 
 
 # --- resolve_container_pg_restore_identity ---------------------------------
