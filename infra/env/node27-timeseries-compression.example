@@ -19,10 +19,13 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
 # measured node-27 inputs under a DUAL constraint — throughput (bound x 1
 # tick/day vs the steady 2 terminal chunks/week) AND the whole-tick wrapper
 # wall below. It is a throughput ceiling, NOT the number of river-size chunks
-# one tick can actually redeem. Derivation, measured inputs and the conditions
-# that invalidate it: runbook section 4 "Per-tick capacity",
-# docs/runbooks/tier-node27-timeseries-storage.md. Backlog catch-up does not
-# use this value — see the per-tick hint below and runbook section 4.5.
+# one tick can actually redeem: 4 is the throughput target for the NORMAL
+# one-pair week only. The per-tick hint further below (=1) governs whenever
+# more than one river-size chunk could be eligible in a single tick — in that
+# state the hint OVERRIDES this value. Derivation, measured inputs and the
+# conditions that invalidate it (the backlog condition included): runbook
+# section 4 "Per-tick capacity" invalidation list and section 4.5,
+# docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 
 # --- Timeout budget chain (issue #1156) -------------------------------------

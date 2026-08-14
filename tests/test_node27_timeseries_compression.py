@@ -1595,15 +1595,13 @@ def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:
 
     The substring pins above cannot see this line — the only other
     `PER_TICK_BOUND=` occurrence in the template is the commented catch-up
-    hint (`=1`). Anchor the assignment line itself so a silent drift back to
-    the pre-#1237 `=5` fails CI. Derivation: runbook §4 "Per-tick capacity".
+    hint (`=1`). Pin the assignment line by UNIQUENESS, not by presence: a
+    bare search still passes when a second, contradicting assignment is
+    appended later in the file (the last one is what `set -a; . env` actually
+    exports). Derivation: runbook §4 "Per-tick capacity".
     """
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
-    assert re.search(
-        r"^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4$",
-        text,
-        flags=re.MULTILINE,
-    )
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["4"]
 
 
 def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:

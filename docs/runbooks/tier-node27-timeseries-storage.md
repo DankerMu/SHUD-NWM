@@ -252,10 +252,15 @@ against the committed `.example` templates as of 2026-08-01:
   the side that moved). Still read the live value off the box before quoting
   it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
 - **Compression chunk-selection lag.**
-  `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` was OBSERVED at `172800` on
-  2026-08-14 where the committed template ships `604800`; this is recorded as
-  an observation only — it is not a target value and #1237 neither judged nor
-  changed it.
+  `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
+  box (re-confirmed 2026-08-14) while the committed template ships `604800`
+  (7 days). This gap is a **recorded decision, not drift**: the 2026-08-07
+  short-lag regime taken after the md0 outage left `/home` carrying the whole
+  uncompressed steady state alone (backup `*.bak-lag7d-20260807`; rollback
+  condition = md0 recovery restoring a separate device for large chunks). The
+  regime, its peak-space arithmetic and the mandatory decompress-first rule
+  for outage recovery are §4.3.2.1 — read that section before touching the
+  value. #1237 neither judged nor changed the lag.
 - **DB retention timer.** Not enabled as of the 2026-08-01 verification;
   enabled on 2026-08-14 (issue #1369 operator decision) at the committed
   05:15 UTC daily cadence with the archive gate `disabled` — since #1370 the
@@ -304,11 +309,18 @@ template/live drift is resolved.
    UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
    `bound=4` buys 28 chunk-slots/week against an arrival of 2 — **14×
    headroom**.
-2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~300 s non-compress overhead ≤
+2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~380 s ≤
    NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`, the live
    default from `#1156`/`#1352`, no override installed). That wall bounds the
    **whole tick**, not one chunk, and the runner has no in-loop elapsed guard:
    overrunning it means the wrapper's `timeout` sends `TERM` mid-DDL.
+
+   The `380 s` is the **measured 2026-08-14 non-compress residual**: the
+   observed 1836 s tick minus the 1456 s the §4.5 estimator gives for that
+   tick's pair. Note that §4.5's own "roughly 300 seconds of non-compress
+   budget" is a *worst-case estimate* assembled from the per-leg timeout caps,
+   and the 2026-08-14 measurement already exceeds it — use `380 s` here, and
+   read the §4.5 number as an estimate the box has outgrown, not as a ceiling.
 
 Measured inputs (node-27, read-only, 2026-08-14 unless noted):
 
@@ -316,9 +328,13 @@ Measured inputs (node-27, read-only, 2026-08-14 unless noted):
   `chunk_time_interval` with aligned range boundaries
   (`timescaledb_information.dimensions`; census 5 river / 6 forcing chunks),
   so two terminal chunks become eligible on the **same day, once a week**. The
-  2026-08-14T04:25 tick receipt compressed exactly that pair in 30m36s
-  (≈1836 s), matching the §4.5 estimator's prediction of 1836 s for
-  230 GB + 12.7 GB.
+  2026-08-14T04:25 tick receipt compressed exactly that pair
+  (230 GB + 12.7 GB) in 30m36s — **1836 s measured**. The §4.5 estimator *as
+  written* is `GB × 6.0 s` with no overhead term and predicts 1456 s for that
+  pair, so the tick ran 380 s longer than the recipe. The `~380 s` residual in
+  the wall constraint above is **back-solved from this single observation**
+  (1836 − 1456); it is not an independent measurement of the non-compress
+  legs, and a second measured pair should be used to confirm or replace it.
 - **Backlog ceiling ≤6 chunks — CONDITIONAL, not physical.** The DB retention
   window bounds uncompressed stock at ≤3 per table, hence ≤6 for the lane. The
   window in force is the **live 21 days**, not the committed template's 14
@@ -330,7 +346,8 @@ Measured inputs (node-27, read-only, 2026-08-14 unless noted):
   be re-derived from the formula above.
 - **Per-chunk cost.** Steady-state `hydro.river_timeseries` chunks measure
   268–409 GB → 1608–2454 s each at ~6.0 s/GB (§4.5). Therefore `3 river + 1
-  forcing ≈ 5280–7818 s`, which **exceeds the 3900 s wall** outright.
+  forcing ≈ 3 × (1608…2454) + 76 + 380 = 5280–7818 s`, which **exceeds the
+  3900 s wall** outright.
 - **Live value was already 4**, so no operational change accompanies this
   decision.
 - **Chunk count is decoupled from ingest volume.** Chunks are cut on the time
@@ -360,6 +377,24 @@ other being the archive root sharing the hot filesystem — see
 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
 (2026-07-26)").
 
+**A backlog by itself invalidates the wall constraint — no config has to
+change.** Selection is table-major
+(`scripts/node27_timeseries_compression.py:396` orders by
+`hypertable_schema, hypertable_name, range_end`, so `hydro` sorts before
+`met` and **every** eligible river chunk is taken before any forcing chunk),
+so at `bound=4` any unattended tick holding **≥2 eligible river chunks** can
+overrun the 3900 s wall while every chunk is still inside the normal
+268–409 GB band: `2 river + 2 forcing` already exceeds it once river chunks
+reach ≥281 GB. Detection must not wait for the receipt: a wall-`TERM`ed tick
+writes **no receipt at all**, and `deferred` is empty in the receipts it does
+write, so "`deferred` is non-empty" is **not** a signal for this. The signal
+is the *state* — a tick would select ≥2 river chunks, i.e. roughly ≥1 week of
+missed ticks (a §4.5 stop+mask override window, a §4.3.2 decompress pause, or
+an outage), or the previous tick left no receipt / its unit went `failed`.
+**In that state, set `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` per
+§4.5 before restarting the timer**, and let the daily timer drain one chunk
+per tick.
+
 **Invalidation conditions.** Re-derive from the two constraints above when any
 of these change:
 
@@ -369,6 +404,10 @@ of these change:
   backlog ceiling premise).
 - The wrapper wall / timeout budget changes, including a temporary §4.5
   override window (moves the wall constraint).
+- **A backlog forms — ≥2 river chunks eligible in one tick** (paragraph
+  above). This one is a *state*, not a config change: it does not move the
+  derivation, it defeats the wall constraint at `bound=4` directly. Do not
+  re-derive — drop to `PER_TICK_BOUND=1` per §4.5 before the timer runs again.
 - Chunk boundaries de-align between the two hypertables. This spreads the two
   weekly terminals over different days and therefore **reduces** per-tick
   load — a safe direction, listed here only so it is not misread as a
@@ -1135,8 +1174,10 @@ prevent).
    **Before restarting that timer, check what else it will compress.** The
    runner is not a native TimescaleDB policy — `timescaledb_information.jobs`
    carries no compression job; it is the systemd timer, gated by
-   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (currently 604800 = 7 days) and
-   bounded to `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` chunks per tick.
+   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (live `172800` = 2 days since
+   the 2026-08-07 short-lag decision, §4.3.2.1; the committed template still
+   ships `604800` = 7 days — read the box, not the template) and bounded to
+   `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` chunks per tick.
    Every chunk whose `range_end` is older than the lag is a candidate, not
    just the one you decompressed. Because the write guard refuses **any**
    write overlapping a compressed chunk's range — including pure inserts of
