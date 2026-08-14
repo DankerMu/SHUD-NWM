@@ -11,8 +11,8 @@ their thirteen wire codes are gone; the archive gate is a required explicit
 - H3 per-tick bound + deferred_remainder.
 - H4 freed_bytes measured BEFORE drop (mock-ordering assertion).
 - H5 per-chunk drop failure → whole-tick refused (H5 fail-closed).
-- H6 wire codes byte-identical across code / runbook §8.2, and shrunk to the
-  four runner-own codes.
+- H6 wire codes byte-identical across code / runbook §8.2 / design #855, and
+  shrunk to the four runner-own codes.
 - H7 boundary predicate ``range_end <= cutoff``.
 - H10 _default_lock_path() byte-identity + zero-arg signature parity.
 - H11 governance registration (covered in test_node27_resource_governance.py).

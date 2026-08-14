@@ -1951,14 +1951,15 @@ listed like any other candidate: nothing defers them (§8.5).
 
 ### 8.2 Wire-format codes
 
-The runner emits structured refusal reasons on `outcome=refused`. Codes
-are byte-identical across three live surfaces: code
+The runner emits structured refusal reasons on `outcome=refused`. Codes are
+byte-identical across four surfaces: code
 (`scripts/node27_timeseries_retention.py` `WIRE_CODES` frozenset), this
-runbook §8.2, and the unit tests. Any addition / rename / removal MUST land
-in all three surfaces in the same commit. The #855 design fixture
-(`openspec/changes/tier-node27-timeseries-storage/design.md`) is frozen and
-read as history — it is explicitly OUTSIDE the byte-identity mandate and is
-never updated to match a code change.
+runbook §8.2, the unit tests, and the #855 design fixture
+(`openspec/changes/tier-node27-timeseries-storage/design.md`) — the
+forward-walk test reads that fixture too. Any addition / rename MUST land in
+all four surfaces in the same commit. Retirement is the one asymmetry:
+retired codes are NOT removed from the fixture. They stay there verbatim as
+frozen history and are absorbed into the reverse walk's allowlist instead.
 
 Historical note (#1370): the thirteen archive-family codes — five
 completeness-receipt codes and eight drill codes — were retired together with

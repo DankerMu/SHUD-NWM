@@ -125,9 +125,13 @@ TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(
 # H6 wire-format codes — byte-identical across:
 # * this module (``WIRE_CODES`` frozenset),
 # * ``docs/runbooks/tier-node27-timeseries-storage.md`` §8.2,
-# * ``tests/test_node27_timeseries_retention.py``.
-# Any addition / rename / removal MUST land in all three surfaces in the same
-# commit (same-class recurrence discipline from #854).
+# * ``tests/test_node27_timeseries_retention.py``,
+# * ``openspec/changes/tier-node27-timeseries-storage/design.md`` (#855) —
+#   the forward-walk test reads this fixture too.
+# Any addition / rename MUST land in all four surfaces in the same commit
+# (same-class recurrence discipline from #854). Retirement is the asymmetry:
+# retired codes stay verbatim in the #855 fixture and move to the reverse
+# walk's allowlist instead of being deleted from it.
 #
 # #1370: the thirteen archive-family codes (``COMPLETENESS_*`` x5,
 # ``DRILL_*`` x8) retired together with the archive lane and the ``enabled``
