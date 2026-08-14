@@ -2026,14 +2026,35 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
 
 shim 的退出码即投递事实：0 = 目的地提交服务器**同步**回了 250（stderr 留一行
 `SMTP-ACCEPTED host=... code=250 recipients=<n>`）；69 = 投递失败
-（`SMTP-FAILED stage=connect|login|send ...`，或部分收件人被拒的
+（`SMTP-FAILED stage=connect|ehlo|login|send ...`，或部分收件人被拒的
 `SMTP-PARTIAL-REFUSAL ...`）；64 = 配置/用法错（缺 `NHMS_SMTP_USER` /
-`NHMS_SMTP_PASS`、端口非法、正文无收件人）；70 = 内部故障兜底（整类 contained，
-永不吐 traceback）。全部非零都会被告警器当作发送失败记进 receipt 与 JSONL，下一
-tick 按 §10.5 的重试语义重来。socket 有 30s 超时，外层还有告警器的 60s 墙。
+`NHMS_SMTP_PASS`、端口非法、正文无收件人、From 与认证账号不一致）；70 = 内部故障
+兜底（整类 contained，永不吐 traceback）。全部非零都会被告警器当作发送失败记进
+receipt 与 JSONL，下一 tick 按 §10.5 的重试语义重来。socket 有 30s 超时（TLS 是
+**验证过的** `ssl.create_default_context()`——`SMTP_SSL` 的缺省 context 是
+`CERT_NONE` + 不校验主机名，那样授权码会递给任何应答方、250 也可被路径上伪造），
+外层还有告警器的 60s 墙。
 
 163 会拒绝 From 头与认证账号不一致的信，而 shim **不改** From 头——所以
-`NHMS_ALERT_EMAIL_FROM` 必须等于 `NHMS_SMTP_USER`（见 `.example`）。
+`NHMS_ALERT_EMAIL_FROM` 的**地址部分必须等于** `NHMS_SMTP_USER`（display-name
+形式 `NHMS Frontier Alert <账号地址>` 允许且推荐，比对只看 `<>` 里的地址；见
+`.example`）。不一致时 shim 在**连接之前**就退 64 并把两个地址都打印出来，不会每
+tick 去换一个 550。
+
+**成功也留证**：shim 那行 `SMTP-ACCEPTED ...` 会被告警器捕获进 receipt 与 JSONL 的
+`emails[].evidence`（DSN 打码后）。receipt 里 `sent=true` 而 `evidence` 为 `null`，
+说明发信通道不是本 shim（经典 sendmail 成功时不打印任何东西）——那正是 §10.7 那条
+"exit 0 什么都不证明"的几何。
+
+**正文含中文**（runbook 指引），所以 shim 会先 `EHLO`：服务器宣告 `8BITMIME` 就带
+`BODY=8BITMIME` 发原始 UTF-8，否则把正文重编码成 quoted-printable，**绝不**裸推
+8-bit（严格服务器会拒、宽松服务器会砍高位，把唯一一封告警变成乱码）。信头里的非
+ASCII（例如 From 的中文 display name）统一按 `=?utf-8?...?=` 出线，不会出现无人能
+渲染的 `=?unknown-8bit?...?=`。
+
+**不要在 `NHMS_ALERT_EMAIL_TO` 里配多个收件人**：一封信一个信封，只要有一个地址被
+拒，整次投递就算失败（exit 69）——已经收到的那位会在停摆期间每 30 min 收到一封重复
+告警。要分发就在邮箱侧做别名/转发，别在这里堆地址。
 
 ### 10.7 信号口径（认领的盲区，不是 bug）
 
@@ -2061,9 +2082,11 @@ ssh -p 32099 nwm@210.77.77.27
 cd /home/nwm/NWM
 cp infra/env/node27-frontier-alert.example infra/env/node27-frontier-alert.env
 chmod 600 infra/env/node27-frontier-alert.env
-# 填入只读角色 DSN（nhms_display_ro）、收件人，以及 §10.6 的 NHMS_SMTP_USER /
-# NHMS_SMTP_PASS（163 授权码，手工存入、绝不入库）；NHMS_ALERT_EMAIL_FROM 必须
-# 等于 NHMS_SMTP_USER。wrapper 在**任何**路径（systemd 或
+# 填入只读角色 DSN（nhms_display_ro）、收件人（**只填一个**，多收件人的部分拒收会
+# 让已收方每 30 min 重复收信，见 §10.6），以及 §10.6 的 NHMS_SMTP_USER /
+# NHMS_SMTP_PASS（163 授权码，手工存入、绝不入库）；NHMS_ALERT_EMAIL_FROM 的地址
+# 部分必须等于 NHMS_SMTP_USER（不一致 shim 退 64，零投递）。
+# wrapper 在**任何**路径（systemd 或
 # 手工）都拒绝符号链接 / 非 0600 的 env 文件——权限契约与"谁来 source"无关。
 bash -n infra/env/node27-frontier-alert.env   # 填完先过一遍语法（见下 env 语法警示）
 install -m 644 infra/systemd/nhms-node27-frontier-alert.service ~/.config/systemd/user/
@@ -2076,8 +2099,9 @@ tail -n 50 /home/nwm/node27-frontier-alert-logs/frontier-alert.log
 
 首 tick 是 bootstrap：**预期零邮件**，receipt 记 `baseline_established_at`。要验证
 真实投递，把 state 里的 `last_change_at` 人为回拨 5h，下一 tick 会真发一封
-stalled；投递验证必须三重——shim exit 0 + stderr 的 `SMTP-ACCEPTED ... code=250`
-（250 来自 smtp.163.com 提交服务器，同步）+ 收件箱人工确认，**不得只看 exit 0**
+stalled；投递验证必须三重——shim exit 0 + receipt/JSONL 里 `emails[].evidence` 的
+`SMTP-ACCEPTED ... code=250`（250 来自 smtp.163.com 提交服务器，同步；`evidence`
+为 `null` 说明根本没走这个 shim）+ 收件箱人工确认，**不得只看 exit 0**
 （用本机 sendmail 时 exit 0 什么都不证明，见 §10.7）。unit 已注册进 `scripts/node27_resource_governance.py`
 `DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态（timer 被人 disable
 掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。

@@ -11,20 +11,29 @@ appears in stdout or stderr.
 
 from __future__ import annotations
 
+import ast
+import email.policy
+import io
 import os
 import smtplib
+import ssl
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from email.generator import BytesGenerator
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from scripts import node27_frontier_smtp_sendmail as shim
+from scripts import node27_frontier_stall_alert as alerter
 
 PASSWORD = "AUTHCODE-do-not-log-9f2a"
 USER = "alerts@example.invalid"
+SENDER = f"NHMS Frontier Alert <{USER}>"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIM_PATH = REPO_ROOT / "scripts/node27_frontier_smtp_sendmail.py"
 
@@ -40,8 +49,16 @@ class _MustNotHappen(BaseException):
     violation and turn a real leak into a green test."""
 
 
+def _wire_bytes(message: Any) -> bytes:
+    """Exactly what ``smtplib.send_message`` would put on the wire."""
+
+    buffer = io.BytesIO()
+    BytesGenerator(buffer).flatten(message, linesep="\r\n")
+    return buffer.getvalue()
+
+
 class FakeSMTP:
-    """Records login/send_message/quit; raises or refuses on demand."""
+    """Records ehlo/login/send_message/quit; raises or refuses on demand."""
 
     def __init__(
         self,
@@ -49,21 +66,55 @@ class FakeSMTP:
         login_error: BaseException | None = None,
         send_error: BaseException | None = None,
         refused: dict[str, Any] | None = None,
+        extensions: Sequence[str] = ("8bitmime", "size"),
+        ehlo_code: int = 250,
+        ehlo_error: BaseException | None = None,
     ) -> None:
         self.login_error = login_error
         self.send_error = send_error
         self.refused = refused or {}
+        self.extensions = {name.lower() for name in extensions}
+        self.ehlo_code = ehlo_code
+        self.ehlo_error = ehlo_error
         self.logins: list[tuple[str, str]] = []
         self.sent: list[tuple[Any, str, list[str]]] = []
+        self.mail_options: list[tuple[str, ...]] = []
+        self.wire: list[bytes] = []
+        self.ehlo_calls = 0
+        self.helo_calls = 0
         self.quit_calls = 0
+
+    def ehlo(self, name: str = "") -> tuple[int, bytes]:
+        self.ehlo_calls += 1
+        if self.ehlo_error is not None:
+            raise self.ehlo_error
+        if self.ehlo_code != 250:
+            self.extensions = set()  # a non-ESMTP server advertises nothing
+        return self.ehlo_code, b"fake-smtp"
+
+    def helo(self, name: str = "") -> tuple[int, bytes]:
+        self.helo_calls += 1
+        return 250, b"fake-smtp"
+
+    def has_extn(self, opt: str) -> bool:
+        return opt.lower() in self.extensions
 
     def login(self, user: str, password: str) -> None:
         self.logins.append((user, password))
         if self.login_error is not None:
             raise self.login_error
 
-    def send_message(self, message: Any, *, from_addr: str, to_addrs: Sequence[str]) -> dict[str, Any]:
+    def send_message(
+        self,
+        message: Any,
+        *,
+        from_addr: str,
+        to_addrs: Sequence[str],
+        mail_options: Sequence[str] = (),
+    ) -> dict[str, Any]:
         self.sent.append((message, from_addr, list(to_addrs)))
+        self.mail_options.append(tuple(mail_options))
+        self.wire.append(_wire_bytes(message))
         if self.send_error is not None:
             raise self.send_error
         return dict(self.refused)
@@ -95,13 +146,14 @@ def _env(**overrides: str) -> dict[str, str]:
 
 def _message(
     *,
+    sender: str = SENDER,
     to: str = "ops@example.invalid",
     cc: str | None = None,
     bcc: str | None = None,
     body: str = "frontier stalled since 2026-08-13T00:00:00+00:00\n",
 ) -> bytes:
     headers = [
-        "From: NHMS Frontier Alert <nwm@node-27>",
+        f"From: {sender}",
         f"To: {to}",
     ]
     if cc is not None:
@@ -154,7 +206,7 @@ def test_happy_path_sends_once_with_authenticated_envelope(capsys: pytest.Captur
     # the From header is left exactly as the lane built it.
     assert from_addr == USER
     assert to_addrs == ["ops@example.invalid"]
-    assert message["From"] == "NHMS Frontier Alert <nwm@node-27>"
+    assert message["From"] == SENDER
     assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
     assert smtp.quit_calls == 1
 
@@ -222,7 +274,7 @@ def test_bad_port_is_a_config_error(port: str, capsys: pytest.CaptureFixture[str
 
 
 def test_message_without_recipients_never_connects(capsys: pytest.CaptureFixture[str]) -> None:
-    stdin = b"From: nwm@node-27\r\nSubject: orphan\r\n\r\nbody\r\n"
+    stdin = f"From: {USER}\r\nSubject: orphan\r\n\r\nbody\r\n".encode()
 
     rc = _run(["-t", "-i"], stdin, _env(), _exploding_factory())
 
@@ -423,12 +475,312 @@ def test_subprocess_without_credentials_exits_64_with_one_clean_line() -> None:
 
 def test_module_is_stdlib_only() -> None:
     """No third-party import may creep in: on node-27 the shim runs from the
-    systemd lane's environment, not from the repo venv."""
+    systemd lane's environment, not from the repo venv.
 
-    source = SHIM_PATH.read_text(encoding="utf-8")
-    imported = {
-        line.split()[1].split(".")[0]
-        for line in source.splitlines()
-        if line.startswith(("import ", "from ")) and "__future__" not in line
-    }
+    Parsed with ``ast`` rather than by line prefix: a lazy import inside a
+    function is indented, and the prefix scan waved every one of those through
+    — the exact shape a "just import requests where it is needed" edit takes.
+    """
+
+    tree = ast.parse(SHIM_PATH.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            # A relative import means the shim stopped being self-contained.
+            imported.add(node.module.split(".")[0] if node.level == 0 and node.module else ".")
+    imported.discard("__future__")
+
+    assert imported, "the ast scan found no imports at all — it stopped scanning"
     assert imported <= set(sys.stdlib_module_names), imported
+
+
+# ---------------------------------------------------------------------------
+# B30 — the shipped factory speaks VERIFIED TLS.
+# ---------------------------------------------------------------------------
+
+
+def test_b30_default_factory_uses_smtps_with_a_verifying_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``SMTP_SSL``'s default context is ``ssl._create_stdlib_context()``:
+    ``CERT_NONE`` + no hostname check. Under it the 163 authorization code goes
+    to whoever answers the connection and the synchronous 250 — the entire
+    evidence claim of this shim — is forgeable by anything on the path."""
+
+    recorded: dict[str, Any] = {}
+
+    class _RecordingSMTPSSL:
+        def __init__(self, host: str, port: int, *args: Any, **kwargs: Any) -> None:
+            recorded["args"] = (host, port, args)
+            recorded["kwargs"] = kwargs
+
+    def _plaintext_is_forbidden(*_args: Any, **_kwargs: Any):  # pragma: no cover - must not run
+        raise _MustNotHappen("the shim must not open a plaintext SMTP session")
+
+    monkeypatch.setattr(shim.smtplib, "SMTP_SSL", _RecordingSMTPSSL)
+    monkeypatch.setattr(shim.smtplib, "SMTP", _plaintext_is_forbidden)
+
+    shim.default_smtp_factory("smtp.163.com", 465, 30.0)
+
+    assert recorded["args"] == ("smtp.163.com", 465, ())
+    assert recorded["kwargs"]["timeout"] == 30.0
+    context = recorded["kwargs"]["context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_b30_the_default_factory_is_what_main_uses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pin above is only load-bearing if nothing else is wired in by
+    default: ``main`` without an injected factory must reach it."""
+
+    calls: list[tuple[str, int, float]] = []
+
+    def _factory_spy(host: str, port: int, timeout: float) -> FakeSMTP:
+        calls.append((host, port, timeout))
+        return FakeSMTP()
+
+    monkeypatch.setattr(shim, "default_smtp_factory", _factory_spy)
+
+    assert shim.main(["-t", "-i"], _message(), _env()) == 0
+    assert calls == [("smtp.163.com", 465, shim.SMTP_TIMEOUT_SEC)]
+
+
+# ---------------------------------------------------------------------------
+# B33 — From must be the authenticated account (fail closed, pre-connect).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        USER,
+        f"<{USER}>",
+        f"NHMS Frontier Alert <{USER}>",
+        f"NHMS Frontier Alert <{USER.upper()}>",  # domains are case-insensitive
+        f"前沿停摆告警 <{USER}>",  # non-ASCII display name is still just a display name
+    ],
+)
+def test_b33_from_whose_addr_spec_is_the_account_is_accepted(
+    sender: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    smtp = FakeSMTP()
+
+    rc = _run(["-t", "-i"], _message(sender=sender), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert len(smtp.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "NHMS Frontier Alert <nwm@node-27>",  # the derived default: never deliverable
+        "other@example.invalid",
+        "NHMS Frontier Alert <>",
+        "not-an-address",
+    ],
+)
+def test_b33_from_that_is_not_the_account_exits_64_without_connecting(
+    sender: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """163 refuses a From that differs from the authenticated account and the
+    shim never rewrites the header, so this misconfiguration is a permanent
+    stage=send failure — every 30 min, forever. Name both addresses once, at
+    config time, before any socket exists."""
+
+    rc = _run(["-t", "-i"], _message(sender=sender), _env(), _exploding_factory())
+
+    _, err = _output(capsys)
+    assert rc == 64
+    assert err.strip().count("\n") == 0
+    assert err.startswith("SMTP-CONFIG-ERROR ")
+    assert USER in err
+    assert "NHMS_ALERT_EMAIL_FROM" in err
+
+
+def test_b33_a_missing_from_header_exits_64_without_connecting(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stdin = b"To: ops@example.invalid\r\nSubject: no sender\r\n\r\nbody\r\n"
+
+    rc = _run(["-t", "-i"], stdin, _env(), _exploding_factory())
+
+    _, err = _output(capsys)
+    assert rc == 64
+    assert "no From header" in err
+
+
+# ---------------------------------------------------------------------------
+# B32 — the REAL lane message crosses the shim without raw 8-bit.
+# ---------------------------------------------------------------------------
+
+
+def _lane_message() -> bytes:
+    """The genuine article: ``build_message`` from the alerter, with the body
+    lines the stalled branch produces (Chinese runbook pointer + em dash),
+    encoded exactly the way ``default_sendmail_runner`` encodes it."""
+
+    config = alerter.config_from_env(
+        {
+            "DATABASE_URL": "postgresql://nhms_display_ro:pw@127.0.0.1:55432/nhms",
+            "NHMS_ALERT_EMAIL_TO": "ops@example.invalid",
+            "NHMS_ALERT_EMAIL_FROM": SENDER,
+        }
+    )
+    body_lines = [
+        "No directional frontier progress for 4h30m (threshold 4h).",
+        "Last observed change: 2026-08-13T00:00:00+00:00",
+        "",
+        "Current observation:",
+        "  - gfs: frontier=2026-08-12T18:00:00+00:00 cycles=40"
+        " latest_created=2026-08-12T23:30:00+00:00",
+        "",
+        "The stall clock keeps running across query failures — the alerter"
+        " never resets it in the operator's favour.",
+        "",
+        f"Runbook: {alerter.RUNBOOK_REFERENCE}",
+    ]
+    text = alerter.build_message(
+        config,
+        event=alerter.EVENT_STALLED,
+        subject="[NHMS] frontier-stalled: no progress for 4h30m",
+        now=datetime(2026, 8, 13, 4, 30, tzinfo=UTC),
+        body_lines=body_lines,
+    )
+    return text.encode("utf-8")
+
+
+def _split_wire(wire: bytes) -> tuple[bytes, bytes]:
+    headers, _sep, body = wire.partition(b"\r\n\r\n")
+    return headers, body
+
+
+def test_b32_lane_message_declares_8bitmime_when_the_server_offers_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    smtp = FakeSMTP(extensions=("8bitmime",))
+
+    rc = _run(["-t", "-i"], _lane_message(), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert smtp.ehlo_calls == 1 and smtp.helo_calls == 0
+    _message_obj, from_addr, to_addrs = smtp.sent[0]
+    assert from_addr == USER
+    assert to_addrs == ["ops@example.invalid"]
+    assert smtp.mail_options == [("BODY=8BITMIME",)]
+    headers, body = _split_wire(smtp.wire[0])
+    assert headers.isascii()
+    assert b"unknown-8bit" not in headers
+    assert alerter.RUNBOOK_REFERENCE.encode("utf-8") in body  # the 8-bit body IS declared
+    assert "SMTP-ACCEPTED" in err
+
+
+def test_b32_lane_message_is_reencoded_when_8bitmime_is_absent(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A server without the extension gets a 7-bit clean message with an
+    explicit CTE. Pushing the raw UTF-8 anyway is a protocol violation: strict
+    servers reject it, lenient ones strip the high bit and the operator's only
+    alert arrives as mojibake."""
+
+    smtp = FakeSMTP(extensions=())
+
+    rc = _run(["-t", "-i"], _lane_message(), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert smtp.mail_options == [()]
+    wire = smtp.wire[0]
+    assert wire.isascii(), "raw 8-bit pushed to a server that never advertised 8BITMIME"
+    assert b"unknown-8bit" not in wire
+    assert b"Content-Transfer-Encoding: quoted-printable" in wire
+    # And it is a re-encoding, not a mutilation: the Chinese survives the trip.
+    delivered = BytesParser(policy=email.policy.default).parsebytes(wire)
+    assert alerter.RUNBOOK_REFERENCE in delivered.get_content()
+    assert delivered["Subject"] == "[NHMS] frontier-stalled: no progress for 4h30m"
+
+
+def test_b32_non_ascii_headers_are_utf8_encoded_not_unknown_8bit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A raw 8-bit header byte parses as charset ``unknown-8bit`` and flattens
+    to ``=?unknown-8bit?b?...?=`` — a charset no client can render, made out of
+    plain UTF-8. Operator-set display names are the live path for this."""
+
+    smtp = FakeSMTP()
+    stdin = _message(sender=f"前沿停摆告警 <{USER}>", body="中文正文\n")
+
+    rc = _run(["-t", "-i"], stdin, _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    headers, _body = _split_wire(smtp.wire[0])
+    assert b"unknown-8bit" not in headers
+    assert b"=?utf-8?" in headers
+    delivered = BytesParser(policy=email.policy.default).parsebytes(smtp.wire[0])
+    assert str(delivered["From"]) == f"前沿停摆告警 <{USER}>"
+
+
+def test_b32_ascii_only_message_negotiates_nothing_extra(capsys: pytest.CaptureFixture[str]) -> None:
+    """No gratuitous BODY=8BITMIME on a message that does not need it."""
+
+    smtp = FakeSMTP()
+
+    rc = _run(["-t", "-i"], _message(), _env(), _factory(smtp, []))
+
+    _output(capsys)
+    assert rc == 0
+    assert smtp.mail_options == [()]
+    assert smtp.wire[0].isascii()
+
+
+def test_b32_undecodable_header_bytes_do_not_become_unknown_8bit_either(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-UTF-8 garbage in a header (the shape ``os.environ`` surrogateescape
+    can produce) must still leave through a declared charset, not crash and not
+    ``unknown-8bit``."""
+
+    smtp = FakeSMTP(extensions=())
+    stdin = (
+        b"From: NHMS \xff\xfe alert <alerts@example.invalid>\r\n"
+        b"To: ops@example.invalid\r\nSubject: s\r\n\r\nbody\xff\n"
+    )
+
+    rc = _run(["-t", "-i"], stdin, _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert b"unknown-8bit" not in smtp.wire[0]
+    assert smtp.wire[0].isascii()
+
+
+def test_b32_a_helo_only_server_still_gets_its_greeting(capsys: pytest.CaptureFixture[str]) -> None:
+    """``ehlo()`` records its response even when it fails, which switches off
+    smtplib's own HELO fallback inside ``send_message`` — so the explicit EHLO
+    added for extension detection must carry the fallback itself."""
+
+    smtp = FakeSMTP(ehlo_code=500, extensions=("8bitmime",))
+
+    rc = _run(["-t", "-i"], _lane_message(), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert smtp.helo_calls == 1
+    assert smtp.mail_options == [()]
+    assert smtp.wire[0].isascii()
+
+
+def test_b32_an_ehlo_failure_is_a_delivery_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    smtp = FakeSMTP(ehlo_error=smtplib.SMTPServerDisconnected("connection lost"))
+
+    rc = _run(["-t", "-i"], _lane_message(), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 69
+    assert "SMTP-FAILED stage=ehlo" in err
+    assert smtp.logins == []
+    assert smtp.quit_calls == 1

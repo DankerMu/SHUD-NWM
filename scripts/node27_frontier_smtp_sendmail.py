@@ -10,8 +10,12 @@ delivery. This shim replaces the binary — point ``NHMS_FRONTIER_SENDMAIL`` at
 it — and turns the acceptance into a SYNCHRONOUS 250 from the destination
 provider's submission server, printed as one ``SMTP-ACCEPTED`` evidence line.
 
-``scripts/node27_frontier_stall_alert.py`` is NOT modified: it still runs
-``<binary> -t -i`` with the RFC-822 message on stdin, exit 0 == sent.
+The lane's contract is unchanged: ``scripts/node27_frontier_stall_alert.py``
+still runs ``<binary> -t -i`` with the RFC-822 message on stdin, exit 0 ==
+sent. Its only concession to this shim is that a successful send now keeps the
+last stderr line — the ``SMTP-ACCEPTED`` evidence above — in the receipt and
+event log, so "the destination said 250" is provable from the deployed
+artifacts instead of dying in the pipe.
 
 Config is environment-only (``NHMS_SMTP_HOST`` / ``PORT`` / ``USER`` /
 ``PASS``); credentials are never accepted on argv, and ``NHMS_SMTP_PASS`` is
@@ -28,11 +32,12 @@ from __future__ import annotations
 import email.policy
 import os
 import smtplib
+import ssl
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses
+from email.utils import getaddresses, parseaddr
 from typing import Any
 
 DEFAULT_HOST = "smtp.163.com"
@@ -58,7 +63,17 @@ def _oneline(value: object) -> str:
 
 
 def default_smtp_factory(host: str, port: int, timeout: float) -> Any:
-    return smtplib.SMTP_SSL(host, port, timeout=timeout)
+    """SMTPS with a VERIFIED TLS context.
+
+    ``smtplib.SMTP_SSL`` defaults to ``ssl._create_stdlib_context()``, i.e.
+    ``check_hostname=False`` / ``verify_mode=CERT_NONE``: the authorization code
+    would be handed to whatever answers the connection, and the synchronous 250
+    this whole shim exists to obtain could be forged by anything on the path.
+    ``ssl.create_default_context()`` (CERT_REQUIRED + hostname check) is what
+    makes "250 from the destination provider" mean anything.
+    """
+
+    return smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
 
 
 def parse_message(stdin_bytes: bytes) -> EmailMessage:
@@ -100,6 +115,87 @@ def _config(env: Mapping[str, str]) -> tuple[str, int, str, str]:
     return host, port, user, env["NHMS_SMTP_PASS"]
 
 
+def _check_sender(message: EmailMessage, user: str) -> None:
+    """Fail closed when the From header is not the authenticated account.
+
+    163 (and every other submission service worth using) refuses a From header
+    that differs from the account that authenticated, and this shim deliberately
+    does NOT rewrite the header — the operator's ``NHMS_ALERT_EMAIL_FROM`` owns
+    it. Detecting the mismatch here, before the socket exists, turns a recurring
+    stage=send 550 into one config error the operator can act on. Only the
+    address part is compared: ``NHMS Frontier Alert <acct@host>`` is the shipped
+    (and correct) shape. Never mentions the password.
+    """
+
+    raw = message.get("From")
+    if raw is None:
+        raise _UsageError(f"message has no From header: it must carry the authenticated account {user}")
+    _display, sender = parseaddr(str(raw))
+    if sender.lower() != user.lower():
+        raise _UsageError(
+            f"From header address {sender or '(unparseable)'} does not match the authenticated"
+            f" account {user}: point NHMS_ALERT_EMAIL_FROM at that address"
+            " (a display name in front of it is fine)"
+        )
+
+
+def _normalize_headers(message: EmailMessage) -> None:
+    """Re-set non-ASCII headers so they flatten as ``=?utf-8?...?=``.
+
+    A header parsed from raw 8-bit bytes carries an ``unknown-8bit`` charset,
+    and the generator then emits ``=?unknown-8bit?b?...?=`` on the wire — a
+    charset no client can render, produced from bytes that were plain UTF-8.
+    Re-assigning the decoded value makes the generator encode it as UTF-8.
+    """
+
+    items = [(name, str(value)) for name, value in message.items()]
+    if all(value.isascii() for _name, value in items):
+        return
+    for name in {name.lower() for name, _value in items}:
+        del message[name]
+    for name, value in items:
+        message[name] = value
+
+
+def _reencode_7bit(message: EmailMessage) -> None:
+    """Give every 8-bit part an explicit Content-Transfer-Encoding."""
+
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None or payload.isascii():
+            continue
+        maintype, subtype = part.get_content_maintype(), part.get_content_subtype()
+        if maintype == "text":
+            charset = part.get_content_charset() or "utf-8"
+            part.set_content(
+                payload.decode(charset, "replace"), subtype=subtype, charset="utf-8", cte="quoted-printable"
+            )
+        else:
+            part.set_content(payload, maintype=maintype, subtype=subtype, cte="base64")
+
+
+def _prepare_for_wire(message: EmailMessage, *, eightbit_ok: bool) -> tuple[str, ...]:
+    """Never push undeclared 8-bit bytes; return the MAIL FROM options to use.
+
+    Every mail this lane sends contains non-ASCII (the runbook pointer in the
+    body is Chinese). Raw 8-bit on a plain SMTP session is a protocol violation:
+    a strict server rejects it (visible), a lenient one strips the high bit
+    (mojibake in the operator's only alert). So: declare ``BODY=8BITMIME`` when
+    the server advertises the extension, otherwise re-encode the body with an
+    explicit CTE and stay 7-bit clean.
+    """
+
+    _normalize_headers(message)
+    if message.as_bytes().isascii():
+        return ()
+    if eightbit_ok:
+        return ("BODY=8BITMIME",)
+    _reencode_7bit(message)
+    return ()
+
+
 def _recipients(message: EmailMessage) -> list[str]:
     """All To/Cc/Bcc addresses, de-duplicated, order preserved."""
 
@@ -118,6 +214,7 @@ def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_f
     recipients = _recipients(message)
     if not recipients:
         raise _UsageError("no recipients: the message carries no To/Cc/Bcc address")
+    _check_sender(message, user)
     del message["Bcc"]  # blind carbon copy stays in the envelope, not on the wire
 
     stage = "connect"
@@ -129,13 +226,25 @@ def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_f
         return EXIT_UNAVAILABLE
     try:
         try:
+            stage = "ehlo"
+            # Explicit EHLO before AUTH: ``esmtp_features`` (8BITMIME) must be
+            # known before the body is prepared. ``ehlo()`` records its response
+            # even when it fails, which disables smtplib's own HELO fallback —
+            # so mirror that fallback here instead of losing it.
+            code, _greeting = smtp.ehlo()
+            if not 200 <= code <= 299:
+                smtp.helo()
             stage = "login"
             smtp.login(user, password)
             stage = "send"
+            mail_options = _prepare_for_wire(message, eightbit_ok=bool(smtp.has_extn("8bitmime")))
             # Envelope sender must be the authenticated account: 163 rejects a
             # mismatch. The From HEADER is left exactly as the lane built it —
-            # operator config (NHMS_ALERT_EMAIL_FROM) owns making them agree.
-            refused = smtp.send_message(message, from_addr=user, to_addrs=recipients)
+            # operator config (NHMS_ALERT_EMAIL_FROM) owns making them agree,
+            # and ``_check_sender`` already refused the config where they don't.
+            refused = smtp.send_message(
+                message, from_addr=user, to_addrs=recipients, mail_options=mail_options
+            )
         except OSError as error:
             print(f"SMTP-FAILED stage={stage} host={host} error={type(error).__name__}: {_oneline(error)}",
                   file=sys.stderr)
