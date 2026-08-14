@@ -470,7 +470,7 @@ def test_invalid_config_replaces_disjoint_known_safe_receipt(tmp_path: Path, mon
 
     assert compression.main([]) == 1
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == "2.0"
+    assert receipt["schema_version"] == "2.1"
     assert receipt["outcome"] == "failed"
     assert receipt["failure"] == {
         "stage": "config",
@@ -1143,7 +1143,7 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
         compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
-    assert receipt["schema_version"] == "2.0"
+    assert receipt["schema_version"] == "2.1"
     assert receipt["head_sha"] == compression._current_head_sha()
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
@@ -1181,6 +1181,10 @@ def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
     receipt["schema_version"] = "1.0"
+    # ``budget`` arrived with "2.1" (issue #1351) and is forbidden on a 1.0
+    # receipt, so the downgrade drops it. The compatibility claim under test —
+    # 1.0 receipts stay readable without ``head_sha`` — is unchanged.
+    receipt.pop("budget")
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -1260,6 +1264,329 @@ def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     ]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
+# Issue #1351: the effective budget chain is receipted, and raising the
+# per-chunk ceiling fails closed unless the per-tick bound is 1.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_BUDGET = {
+    "compress_timeout_ms": 3_600_000,
+    "wrapper_wall_seconds": 3_900,
+    "systemd_wall_seconds": 3_940,
+}
+_NON_DEFAULT_BUDGET = {
+    "compress_timeout_ms": 1_800_000,
+    "wrapper_wall_seconds": 1_900,
+    "systemd_wall_seconds": 1_940,
+}
+
+
+def _budget_env_override(budget: dict[str, int], *, per_tick_bound: str) -> dict[str, str]:
+    return {
+        "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": str(budget["compress_timeout_ms"]),
+        "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": str(budget["wrapper_wall_seconds"]),
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": str(budget["systemd_wall_seconds"]),
+        "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": per_tick_bound,
+    }
+
+
+def _three_config_receipts(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> list[dict]:
+    """The three config-bearing construction points, built from one config."""
+
+    config = compression.config_from_args(_args(enforce=True), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    return [
+        compression.build_receipt(
+            config,
+            now_utc=_NOW,
+            fetch_chunks=fake_fetch,
+            measure_chunk_bytes=fake_measure,
+            compress_chunk=fake_compress,
+        ),
+        compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="a" * 40),
+        compression.build_failed_receipt(config, now_utc=_NOW, stage="runner", head_sha="a" * 40),
+    ]
+
+
+def test_receipts_record_the_non_default_budget_actually_in_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) A tick run on operator-set budgets is byte-distinguishable from a
+    default-budget tick, at every construction point that has a config."""
+
+    env = _base_env(tmp_path, override=_budget_env_override(_NON_DEFAULT_BUDGET, per_tick_bound="1"))
+    receipts = _three_config_receipts(monkeypatch, env)
+    assert len(receipts) == 3
+    for receipt in receipts:
+        assert receipt["schema_version"] == "2.1"
+        assert receipt["budget"] == _NON_DEFAULT_BUDGET
+        assert receipt["budget"] != _DEFAULT_BUDGET
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_receipts_record_the_default_budget_when_nothing_is_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) Defaults are recorded as values, not as an absence."""
+
+    env = _base_env(tmp_path)
+    receipts = _three_config_receipts(monkeypatch, env)
+    for receipt in receipts:
+        assert receipt["schema_version"] == "2.1"
+        assert receipt["budget"] == _DEFAULT_BUDGET
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_config_tombstone_carries_no_budget_and_still_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) The one legal omission: no valid config ever existed on this path."""
+
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"outcome":"stale-clean"}\n', encoding="utf-8")
+    env = _base_env(tmp_path, override={"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "bad"})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert compression.main([]) == 1
+
+    tombstone = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert tombstone["schema_version"] == "2.1"
+    assert tombstone["outcome"] == "failed"
+    assert tombstone["failure"]["stage"] == "config"
+    assert "budget" not in tombstone
+    assert "per_tick_bound" not in tombstone
+    jsonschema.validate(tombstone, _load_schema())
+
+
+def test_config_stage_label_belongs_to_the_tombstone_call_site_only() -> None:
+    """The schema's budget exemption keys off ``failure.stage == "config"``.
+
+    ``build_failed_receipt`` always carries ``per_tick_bound`` so a hypothetical
+    ``stage="config"`` failure receipt would not be exempted (it is required to
+    carry ``budget``, and does) — but the exemption is only *meaningful* while
+    the label stays tombstone-exclusive. Pin that.
+    """
+
+    source = _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
+    occurrences = [match.start() for match in re.finditer(r'stage="config"', source)]
+    assert len(occurrences) == 1
+    prefix = source[: occurrences[0]]
+    assert prefix.rfind("_replace_early_stale_with_failure(") > prefix.rfind("build_failed_receipt(")
+
+
+def _budget_receipt(**overrides: object) -> dict:
+    receipt = _example_receipt()
+    receipt.update(overrides)
+    return receipt
+
+
+def test_schema_rejects_a_partial_budget_object() -> None:
+    """(d) all-or-nothing: every field of the chain, or the object is a lie."""
+
+    for missing in ("compress_timeout_ms", "wrapper_wall_seconds", "systemd_wall_seconds"):
+        receipt = _example_receipt()
+        del receipt["budget"][missing]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_an_unknown_budget_field() -> None:
+    receipt = _example_receipt()
+    receipt["budget"]["query_timeout_ms"] = 60_000
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+@pytest.mark.parametrize("legacy_version", ["1.0", "2.0"])
+def test_schema_rejects_budget_on_a_legacy_receipt(legacy_version: str) -> None:
+    """(d) A pre-#1351 version number can never carry post-#1351 evidence."""
+
+    receipt = _budget_receipt(schema_version=legacy_version)
+    if legacy_version == "1.0":
+        del receipt["head_sha"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+@pytest.mark.parametrize("legacy_version", ["1.0", "2.0"])
+def test_schema_accepts_a_legacy_receipt_without_budget(legacy_version: str) -> None:
+    """(d) Historical receipts stay verifiable under the updated schema."""
+
+    receipt = _budget_receipt(schema_version=legacy_version)
+    del receipt["budget"]
+    if legacy_version == "1.0":
+        del receipt["head_sha"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_rejects_a_2_1_receipt_without_budget() -> None:
+    """(d) Explicitly through Draft7Validator — the live-evidence consumer's
+    validator class — so the conditional block cannot rely on 2020-12-only
+    keywords that would silently no-op there."""
+
+    receipt = _example_receipt()
+    del receipt["budget"]
+    validator = jsonschema.Draft7Validator(_load_schema())
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(receipt)
+    assert any("budget" in error.message for error in validator.iter_errors(receipt))
+
+
+def test_schema_accepts_the_config_tombstone_shape_and_rejects_it_with_budget() -> None:
+    tombstone = {
+        "schema_version": "2.1",
+        "generated_at": "2026-07-15T12:00:00Z",
+        "now_utc": "2026-07-15T12:00:00Z",
+        "mode": "dry-run",
+        "outcome": "failed",
+        "provenance_state": "unavailable",
+        "failure": {"stage": "config", "mutation_state": "failed_before_mutation"},
+    }
+    jsonschema.validate(tombstone, _load_schema())
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**tombstone, "budget": dict(_DEFAULT_BUDGET)}, _load_schema())
+
+
+def test_schema_requires_budget_on_a_config_stage_failure_that_has_a_config() -> None:
+    """The exemption is a double discriminator, not a bare stage label.
+
+    A ``stage == "config"`` receipt that still carries ``per_tick_bound`` had a
+    config, so it must carry ``budget`` — and does not fall into a
+    schema-invalid trap for carrying it.
+    """
+
+    failed = {
+        "schema_version": "2.1",
+        "provenance_state": "unavailable",
+        "generated_at": "2026-07-15T12:00:00Z",
+        "now_utc": "2026-07-15T12:00:00Z",
+        "lag_seconds": 604800,
+        "per_tick_bound": 1,
+        "budget": dict(_DEFAULT_BUDGET),
+        "mode": "dry-run",
+        "outcome": "failed",
+        "selected": [],
+        "deferred": [],
+        "skipped": [],
+        "per_table_totals": {
+            "hydro.river_timeseries": {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0},
+            "met.forcing_station_timeseries": {"before_bytes": 0, "after_bytes": None, "chunks_compressed": 0},
+        },
+        "failure": {"stage": "config", "mutation_state": "failed_before_mutation"},
+    }
+    jsonschema.validate(failed, _load_schema())
+    without_budget = {key: value for key, value in failed.items() if key != "budget"}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(without_budget, _load_schema())
+
+
+def test_schema_still_requires_head_sha_on_a_2_1_non_failed_receipt() -> None:
+    """The version bump must not weaken the provenance pin it inherited."""
+
+    receipt = _example_receipt()
+    del receipt["head_sha"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+def test_raising_the_compress_timeout_without_dropping_the_bound_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """(e) The §4.5 catch-up recipe is enforced, not merely documented."""
+
+    env = _base_env(
+        tmp_path,
+        override=_budget_env_override(
+            {
+                "compress_timeout_ms": compression._DEFAULT_COMPRESS_TIMEOUT_MS + 1,
+                "wrapper_wall_seconds": 7_500,
+                "systemd_wall_seconds": 7_540,
+            },
+            per_tick_bound="4",
+        ),
+    )
+    with pytest.raises(compression.CompressionConfigError) as excinfo:
+        compression.config_from_args(_args(), env)
+    message = str(excinfo.value)
+    assert "§4.5" in message
+    assert "PER_TICK_BOUND=1" in message
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    connect_calls, _statements = _install_fake_psycopg2(monkeypatch)
+    assert compression.main(["--enforce"]) != 0
+    assert connect_calls == []
+    diagnostic = json.loads(capsys.readouterr().err.strip())
+    assert diagnostic["status"] == "failed"
+    assert "§4.5" in diagnostic["reason"]
+
+
+@pytest.mark.parametrize(
+    ("compress_timeout_ms", "wrapper", "systemd", "bound"),
+    [
+        # Raised ceiling with the catch-up bound: the sanctioned combination.
+        (7_200_000, 7_500, 7_540, "1"),
+        # Default ceiling with the #1237 capacity bound: the normal régime.
+        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 3_940, "4"),
+        # Below the default with a high bound: leg 3 only guards raising.
+        (1_800_000, 1_900, 1_940, "4"),
+    ],
+)
+def test_legal_timeout_bound_combinations_still_construct(
+    tmp_path: Path, compress_timeout_ms: int, wrapper: int, systemd: int, bound: str
+) -> None:
+    env = _base_env(
+        tmp_path,
+        override=_budget_env_override(
+            {
+                "compress_timeout_ms": compress_timeout_ms,
+                "wrapper_wall_seconds": wrapper,
+                "systemd_wall_seconds": systemd,
+            },
+            per_tick_bound=bound,
+        ),
+    )
+    config = compression.config_from_args(_args(), env)
+    assert config.compress_timeout_ms == compress_timeout_ms
+    assert config.per_tick_bound == int(bound)
+
+
+def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) -> None:
+    """(e) The deployed combination, read out of the template rather than out
+    of the runner's own constants.
+
+    ``_DEFAULT_COMPRESS_TIMEOUT_MS`` is the threshold AND has been retuned once
+    (#1352). A future lowering would keep every constant-based assertion green
+    while the template's literal timeout became a "raised" one and node-27's
+    ``PER_TICK_BOUND=4`` tick started failing closed. The template is the
+    deployment source, so pin the template's own numbers.
+    """
+
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+
+    def _literal(name: str) -> str:
+        matches = re.findall(rf"(?m)^{name}=(\d+)$", text)
+        assert len(matches) == 1, (name, matches)
+        return matches[0]
+
+    override = {
+        f"NODE27_TIMESERIES_COMPRESSION_{name}": _literal(f"NODE27_TIMESERIES_COMPRESSION_{name}")
+        for name in (
+            "COMPRESS_TIMEOUT_MS",
+            "WRAPPER_WALL_SECONDS",
+            "SYSTEMD_WALL_SECONDS",
+            "PER_TICK_BOUND",
+        )
+    }
+    config = compression.config_from_args(_args(), _base_env(tmp_path, override=override))
+    assert config.compress_timeout_ms == int(override["NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS"])
+    assert config.per_tick_bound == int(override["NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"])
 
 
 # ---------------------------------------------------------------------------

@@ -6843,3 +6843,69 @@ def test_no_gate_module_retains_an_inline_container_mount_prefix_check() -> None
     # Single SOURCE, not merely a single spelling: both planes hold the one function
     # object the contract module exports, so there is no second copy to drift.
     assert supervisor.container_dump_path_within_mount is evidence.container_dump_path_within_mount
+
+
+# ---------------------------------------------------------------------------
+# Issue #1351: the runner's receipts gained a `budget` block at schema_version
+# "2.1". The consumer TOLERATES the new shape through the schema file it
+# already loads; it derives nothing from it, and the two frozen archival
+# contracts below stay frozen.
+# ---------------------------------------------------------------------------
+
+
+def test_load_receipt_accepts_a_2_1_receipt_carrying_budget(tmp_path: Path) -> None:
+    """The structural gate follows the schema file — no verifier edit needed.
+
+    Deliberately exercises `_load_receipt` alone rather than `verify_bundle`:
+    the bundle gate pins `schema_version == "2.0"` because the #1069 bundle it
+    verifies is a frozen historical capture, and that pin is not this issue's
+    to relax.
+    """
+
+    receipt = {
+        **_receipt(enforce=False),
+        "schema_version": "2.1",
+        "budget": {
+            "compress_timeout_ms": 3_600_000,
+            "wrapper_wall_seconds": 3_900,
+            "systemd_wall_seconds": 3_940,
+        },
+    }
+    ref = _json_ref(tmp_path, "receipt-2.1.json", receipt)
+
+    loaded_ref, loaded = evidence._load_receipt(ref, "dry-run receipt", RECEIPT_SCHEMA)
+
+    assert loaded_ref["sha256"] == ref["sha256"]
+    assert loaded["schema_version"] == "2.1"
+    assert loaded["budget"]["compress_timeout_ms"] == 3_600_000
+
+    half = copy.deepcopy(receipt)
+    del half["budget"]["systemd_wall_seconds"]
+    with pytest.raises(evidence.EvidenceError):
+        evidence._load_receipt(_json_ref(tmp_path, "receipt-half.json", half), "dry-run receipt", RECEIPT_SCHEMA)
+
+
+def test_expected_timeout_seconds_stays_a_frozen_literal() -> None:
+    """#1351 added the wall to the receipt; this expectation must NOT follow it.
+
+    Deriving the archival expectation from a receipt field (or from the
+    runner's operator-configurable default) would re-validate historical
+    bundles against whatever the current configuration happens to be.
+    """
+
+    assert evidence.EXPECTED_TIMEOUT_SECONDS == 900
+    source = (ROOT / "scripts/node27_timeseries_compression_live_evidence.py").read_text(encoding="utf-8")
+    definitions = [
+        line for line in source.splitlines() if line.startswith("EXPECTED_TIMEOUT_SECONDS")
+    ]
+    assert definitions == ["EXPECTED_TIMEOUT_SECONDS = 900"]
+    assert "receipt" not in definitions[0]
+    assert "budget" not in definitions[0]
+
+
+def test_verify_bundle_keeps_the_frozen_2_0_semantic_pin() -> None:
+    """The bundle gate must not be "helpfully" widened to accept "2.1"."""
+
+    source = (ROOT / "scripts/node27_timeseries_compression_live_evidence.py").read_text(encoding="utf-8")
+    assert 'dry["schema_version"] != "2.0"' in source
+    assert 'enforce["schema_version"] != "2.0"' in source
