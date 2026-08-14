@@ -918,7 +918,13 @@
     "1368": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1371,
+          "outcome": "descoped",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
