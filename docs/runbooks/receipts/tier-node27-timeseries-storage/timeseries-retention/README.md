@@ -159,6 +159,48 @@ db-export salvage objects sha256+row-count verified. The salvage
 `COPY FROM` and raw-source replay paths remain never-executed against
 production (see #1072's reversibility warning).
 
+### `retention-dryrun-20260814T095619Z.json`
+
+First `disabled`-gate landing receipt (issue #1369 bringup step, runbook
+§8.4 BRANCH B step 2). Manual direct-`python` dry-run with the
+`NODE27_TIMESERIES_RETENTION_ENFORCE=0` prefix and an explicit
+timestamped `--receipt-path`, after the deployed env file was switched to
+`NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled` and its
+`NODE27_TIMESERIES_RETENTION_RECEIPT_PATH` line was commented out
+(anchored grep verified zero hits).
+
+Result: `outcome=dry-run`, rc=0, schema `1.1`,
+`archive_gate.mode=disabled` with the pinned ADR 0002 Revision
+2026-08-11 `adr_reference`. `WINDOW_DAYS=21` (cutoff `2026-07-21T12Z`
+against watermark `reference_time 2026-08-11T12Z`). Five candidates plus
+one `deferred_remainder` (per-tick-bound overflow, not a bounds-defer) —
+the full backlog was 6 chunks / 1936 MB per the §8.1 blast-radius
+inventory, whose row set matched `candidate_chunks[] ∪
+deferred_remainder[]` name-for-name.
+
+### `retention-enforce-20260814T095746Z.json`
+
+First `disabled`-gate enforce (same bringup, §8.4 BRANCH B step 3):
+manual `--enforce` with explicit `--receipt-path` after flipping the env
+file to `NODE27_TIMESERIES_RETENTION_ENFORCE=1`. Result:
+`outcome=enforced`, rc=0, all five candidates dropped with per-chunk
+`freed_bytes` recorded (sum 1,660,198,912 bytes), and — the two
+documented `disabled`-mode consequences on record —
+`salvage_backed_windows: []` and no archive-receipt path read.
+
+### `retention-20260814T095802Z.json` / `retention-20260814T095832Z.json`
+
+The first two WRAPPER-generated receipts (timestamped filenames minted by
+the wrapper because the env receipt-path line is commented out),
+satisfying §8.1 step 4's rotation check: two distinctly timestamped
+`retention-2*.json` coexisting, `retention.log` start-bracket count 2.
+Tick 095802Z fired as the `enable --now` Persistent catch-up and dropped
+the remaining backlog chunk (`_hyper_1_11`, 369,524,736 bytes); tick
+095832Z was a forced `systemctl --user start` and enforced over an empty
+candidate set (`dropped=0` — backlog fully ground: 6/6 chunks,
+2,029,723,648 bytes total, byte-exact against the inventory `TOTAL` row).
+Timer left enabled, `NEXT` at 05:15 UTC daily.
+
 ## Steady-state gate behavior
 
 - `nhms-node27-timeseries-retention.timer` (OnCalendar 05:15 UTC

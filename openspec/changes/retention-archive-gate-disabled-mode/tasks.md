@@ -22,12 +22,12 @@
 - [x] 3.1 `uv run pytest -q tests/test_node27_timeseries_retention.py tests/test_timeseries_storage_schemas.py`
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate retention-archive-gate-disabled-mode --strict --no-interactive`
-- [ ] 3.4 node-27 实机（merge 前，用户裁定 2026-08-14：**启用 timer 每日 05:15 UTC**）。**删除不可逆（归档 lane 已退役，无兜底）——回滚仅指停止后续删除（移除 env 变量 + disable timer），已删 chunk 无法恢复**。顺序硬约束：
+- [x] 3.4 node-27 实机（merge 前，用户裁定 2026-08-14：**启用 timer 每日 05:15 UTC**）。**删除不可逆（归档 lane 已退役，无兜底）——回滚仅指停止后续删除（移除 env 变量 + disable timer），已删 chunk 无法恢复**。顺序硬约束：
   1. env 文件置 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`、`ENFORCE=0`、**注释掉 receipt 路径变量行——注意实机 env 该行当前是设定状态（模板历史上未注释发货），"保持留空"是无操作指令，必须主动注释**，改完用 `grep -n '^NODE27_TIMESERIES_RETENTION_RECEIPT_PATH=' <env文件>` 确认零命中（R5-2/R7-1：固定路径会被每日 tick 原子覆盖；注释后 wrapper 生成 per-tick 时间戳文件；手动直跑 python 时必须显式 `--receipt-path <带时间戳路径>`，否则 config-invalid）→ 手动 tick → dry-run receipt（archive_gate.mode=disabled，candidate 清单落盘）
   2. 跑 §8.1 的逐 chunk 清单查询（round-1 F-E 补入：chunk 名/所属 hypertable/range_start/range_end/`chunks_detailed_size` 字节），覆盖 candidate + deferred_remainder 全量——**backlog 总条数与预估总字节先落 PR 证据**（`enable --now` 授权的是整个 backlog 以 ≤5 chunk/天磨完，不只是首刀）；做非循环交叉核验（清单查询按 receipt 自己的 cutoff 过滤，逐行核 range_end 是循环论证）：核对 receipt 的 `window_days`/`reference_time` 与实机 env 实值（runbook/README 记录现为 21d）及 display watermark 一致——window 配错会静默放宽每一行；确认首刀爆炸半径（≤5 chunk 的表名/时间范围/字节，含原 bounds-deferred 的 boundary-partial chunk）后 → `ENFORCE=1` → 手动 tick → enforced receipt（≤5 chunk，freed_bytes 记录，`salvage_backed_windows=[]`）
   3. `systemctl --user daemon-reload && systemctl --user enable --now nhms-node27-timeseries-retention.timer` → `systemctl --user list-timers` 取证（NEXT 触发时刻在场）。**R5-1 警示：env 常驻 `ENFORCE=1` 后，`--dry-run` flag 不覆盖 env（装饰性）——此后任何手动 dry-run 必须显式前缀 `NODE27_TIMESERIES_RETENTION_ENFORCE=0`**。**R5-2 验证项（R6-1 修订口径）：等到（或手动触发——注意强制 tick 在 ENFORCE=1 常驻下是又一次 ≤5 chunk 的不可逆删除，在已授权 backlog 包络内但须知情）第二个 wrapper tick，`ls` 只看 wrapper 命名形态 `retention-2*.json`（`retention-dryrun-*`/`retention-enforce-*` 是手动 receipt、不算数）确认两个不同时间戳的 wrapper receipt 并存**（0/1 命中的三态判读——先 grep 复核 receipt 路径变量是否仍设定、再看 `list-timers` 的 LAST/NEXT 排除"第二次 tick 尚未发生"——见 runbook §8.1 step 4）
   4. 两 receipt + 清单查询输出 + timer 状态贴 PR 评论；**两份落地 receipt 补记进 receipts README `## Receipts` 列表**（round-1 F-C：否则 README `:7` 与 `:168-172` 自相矛盾）；落地若受阻，README 完成时态措辞必须在 merge 前改回"决策已记录、实机状态以 receipt 为准"
-- [ ] 3.5 CI 定向测试绿
+- [x] 3.5 CI 定向测试绿（merge 前以 PR 最终 run 结论为准）
 
 ## 偏离与范围外挂账
 
