@@ -15,6 +15,7 @@ import re
 import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -1682,15 +1683,16 @@ def test_b21_example_is_syntax_clean_with_every_assignment_uncommented(tmp_path:
     result = subprocess.run(["bash", "-n", str(candidate)], capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    # Guard against a vacuous pass: the uncommenting must actually have
-    # activated the commented sender example (the line most likely to be a
-    # shell redirect if someone drops the quotes).
-    activated = [
-        line
-        for line in candidate.read_text(encoding="utf-8").splitlines()
-        if line.startswith("NHMS_ALERT_EMAIL_FROM=")
-    ]
-    assert activated == ['NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <nwm@node-27>"']
+    # Guard against a vacuous pass: the sender line — the one most likely to be
+    # a shell redirect if someone drops the quotes around ``<addr>`` — must be
+    # present and quoted. It now ships ACTIVE (the derived nwm@<hostname>
+    # default is not the authenticated account, which the shim refuses at
+    # config time), so it is asserted on the SHIPPED file, not just on the
+    # uncommented variant.
+    shipped = _EXAMPLE_PATH.read_text(encoding="utf-8").splitlines()
+    active_sender = [line for line in shipped if line.startswith("NHMS_ALERT_EMAIL_FROM=")]
+    assert active_sender == ['NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <alerts@example.com>"']
+    assert not [line for line in shipped if line.startswith("#NHMS_ALERT_EMAIL_FROM")]
 
 
 def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Path) -> None:
@@ -1720,9 +1722,158 @@ def test_b21_example_values_mean_the_same_thing_to_bash_and_systemd(tmp_path: Pa
 
     # And the shipped values are accepted by the runner's own parser.
     config = alerter.config_from_env(expected)
-    assert config.email_from == "NHMS Frontier Alert <nwm@node-27>"
+    assert config.email_from == "NHMS Frontier Alert <alerts@example.com>"
     assert config.stall_hours == 4.0
-    assert config.sendmail_path == "/usr/sbin/sendmail"
+    # The shipped channel is the authenticated SMTP shim, NOT node-27's local
+    # /usr/sbin/sendmail: that postfix is null-routed (default_transport =
+    # error) and exits 0 on mail it then asynchronously bounces (observed
+    # 2026-08-13), which the alerter would record as a delivered alert.
+    assert config.sendmail_path == "/home/nwm/NWM/scripts/node27_frontier_smtp_sendmail.py"
+    assert "NHMS_SMTP_USER" in expected and "NHMS_SMTP_PASS" in expected
+    # And the shipped From is deliverable through that shim: the shim fails
+    # closed (exit 64, nothing connected) unless the From addr-spec IS the
+    # authenticated account, so an .example whose two values disagree would
+    # ship a factory config that can never send a single alert.
+    assert parseaddr(expected["NHMS_ALERT_EMAIL_FROM"])[1] == expected["NHMS_SMTP_USER"]
+
+
+# ---------------------------------------------------------------------------
+# B31 — a successful send carries the channel's evidence line into the record.
+# ---------------------------------------------------------------------------
+
+
+def _talking_sendmail_binary(tmp_path: Path, *, stderr_text: str, exit_code: int = 0) -> Path:
+    """A real executable standing in for the SMTP shim, so the REAL
+    ``default_sendmail_runner`` is exercised: it prints its evidence (or its
+    failure) on stderr exactly the way the shim does."""
+
+    binary = tmp_path / "fake-shim-sendmail"
+    binary.write_text(
+        "#!/bin/sh\ncat >/dev/null\n"
+        f"printf '%b' \"{stderr_text}\" >&2\n"  # %b so \\n in the text is a real newline
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o700)
+    return binary
+
+
+def _stalled_tick_with_binary(tmp_path: Path, binary: Path) -> tuple[alerter.AlertConfig, dict[str, Any]]:
+    env = _env(tmp_path, NHMS_FRONTIER_SENDMAIL=str(binary))
+    config = alerter.config_from_env(env)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+    receipt = alerter.run_tick(
+        config,
+        now=T0 + timedelta(hours=4),
+        observe=_provider(snapshot),
+        sendmail_runner=None,  # the REAL runner, real subprocess, real stderr
+        dry_run=False,
+    )
+    return config, receipt
+
+
+def test_b31_shim_acceptance_line_reaches_receipt_events_and_state(tmp_path: Path) -> None:
+    """Without this, a delivery the destination synchronously accepted (250)
+    and the null-routed-postfix era's fictitious exit 0 produce byte-identical
+    receipts — the evidence the shim exists to create never leaves the pipe."""
+
+    evidence = "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+    binary = _talking_sendmail_binary(tmp_path, stderr_text=evidence)
+
+    config, receipt = _stalled_tick_with_binary(tmp_path, binary)
+
+    assert receipt["emails"][0]["sent"] is True
+    assert receipt["emails"][0]["returncode"] == 0
+    assert receipt["emails"][0]["error"] is None
+    assert receipt["emails"][0]["evidence"] == evidence
+
+    on_disk = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert on_disk["emails"][0]["evidence"] == evidence
+
+    events = [json.loads(line) for line in config.events_path.read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["evidence"] == evidence
+    assert events[-1]["sent"] is True
+
+
+def test_b31_a_silent_sendmail_records_no_evidence(tmp_path: Path) -> None:
+    """Classic ``/usr/sbin/sendmail`` prints nothing on success: the field stays
+    None instead of inventing an empty-string "proof"."""
+
+    binary = _talking_sendmail_binary(tmp_path, stderr_text="")
+
+    config, receipt = _stalled_tick_with_binary(tmp_path, binary)
+
+    assert receipt["emails"][0]["sent"] is True
+    assert receipt["emails"][0]["evidence"] is None
+    events = [json.loads(line) for line in config.events_path.read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["evidence"] is None
+
+
+def test_b31_only_the_last_non_empty_stderr_line_is_kept(tmp_path: Path) -> None:
+    """A chatty channel (``-v``) must not paste a transcript into every record;
+    the evidence line is the last thing the shim prints."""
+
+    binary = _talking_sendmail_binary(
+        tmp_path,
+        stderr_text="connect: smtp.163.com\\nEHLO ...\\n"
+        "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1\\n\\n",
+    )
+
+    _config_unused, receipt = _stalled_tick_with_binary(tmp_path, binary)
+
+    assert receipt["emails"][0]["evidence"] == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+
+
+def test_b31_evidence_goes_through_the_dsn_redaction_chokepoint(tmp_path: Path) -> None:
+    """The channel's stderr is untrusted text on the same outlet as ``error``:
+    it must not be the one path that carries the DSN into the receipt."""
+
+    binary = _talking_sendmail_binary(tmp_path, stderr_text=f"SMTP-ACCEPTED via {DSN} code=250")
+
+    config, receipt = _stalled_tick_with_binary(tmp_path, binary)
+
+    assert DSN_PASSWORD not in json.dumps(receipt)
+    assert DSN_PASSWORD not in config.receipt_path.read_text(encoding="utf-8")
+    assert DSN_PASSWORD not in config.events_path.read_text(encoding="utf-8")
+    assert "SMTP-ACCEPTED" in receipt["emails"][0]["evidence"]
+
+
+def test_b31_failure_branch_is_unchanged(tmp_path: Path) -> None:
+    """Regression fence around the one line that was allowed to change: a
+    non-zero exit still yields the stderr as ``error``, the same returncode, a
+    failed send, no evidence — and the alert stays owed."""
+
+    binary = _talking_sendmail_binary(
+        tmp_path, stderr_text="SMTP-FAILED stage=login host=smtp.163.com", exit_code=69
+    )
+
+    config, receipt = _stalled_tick_with_binary(tmp_path, binary)
+
+    assert receipt["emails"][0]["sent"] is False
+    assert receipt["emails"][0]["returncode"] == 69
+    assert receipt["emails"][0]["error"] == "SMTP-FAILED stage=login host=smtp.163.com"
+    assert receipt["emails"][0]["evidence"] is None
+    assert receipt["send_failures"] == 1
+    assert receipt["status"] == "degraded"
+    state = _read_state(config)
+    assert state.alert_active is True
+    assert state.last_alert_at is None
+
+
+def test_b31_dry_run_records_keep_the_same_shape(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    snapshot = _baseline_snapshot()
+    _bootstrap(config, snapshot)
+    sendmail = FakeSendmail()
+
+    receipt = _tick(
+        config, now=T0 + timedelta(hours=4), snapshot=snapshot, sendmail=sendmail, dry_run=True
+    )
+
+    assert sendmail.calls == []
+    assert receipt["emails"][0]["dry_run"] is True
+    assert receipt["emails"][0]["evidence"] is None
 
 
 # ---------------------------------------------------------------------------

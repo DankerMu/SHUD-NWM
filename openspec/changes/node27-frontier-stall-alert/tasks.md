@@ -78,13 +78,38 @@
 - [x] 2T.1 B27：`NHMS_ALERT_EMAIL_TO` 含 surrogate 字节（`"ops\udcc4@example.com"`）→ 该 tick 不逃逸：send 失败落 receipt/degraded_pending、state 照写、下 tick 照跑（对照 pre-fix：FRONTIER_ALERT_UNCAUGHT_ERROR 冻结循环）
 - [x] 2T.2 B28：legacy 标量 state（含已置钟）→ `last_degraded_alert_by_kind == {}`；budget 跨越 → 恰一封 observability-unavailable（probe B 几何断言 1 非 0）
 
+## 1U. Live-receipt 期通道改判（本机 postfix 空路由 → 认证 SMTP shim）
+
+- [x] 1U.1 实测判因：bootstrap tick 零邮件 ✓、拨钟 5h 触发 ✓、sendmail exit 0 ✓，但 mail log `dsn=5.0.0 status=bounced relay=none`——node-27 postfix `default_transport = error`（刻意空路由），非 163 拒收；按 issue 预案停下重新拍板，用户拍板认证 SMTP shim
+- [x] 1U.2 `scripts/node27_frontier_smtp_sendmail.py`：stdlib-only sendmail 兼容 shim（`-t -i`、stdin 读信、`SMTP_SSL` 认证直投、凭据仅经 `NHMS_SMTP_USER/PASS` env、成功落 `SMTP-ACCEPTED` 证据行、失败整类收容 exit 70、口令零泄漏）；`.example` 增 SMTP 段；runbook §10 通道与盲区收口改口
+
+## 2U. 通道改判回归锚
+
+- [x] 2U.1 B29：shim 单测（fake SMTP 注入）——`-t` 收件人提取/Bcc 剥离、缺凭据 exit 64 不连网、认证失败 exit 69 且口令绝不出现在任何输出、整类收容 exit 70、subprocess 入口线
+
+## 1V. PR#1371 round-5 裁决修复（#1373 子 PR；1×P1 + 1×P2 + 4×P3）
+
+- [x] 1V.1 **P1** F1 CONFIRMED：`default_smtp_factory` 补 `context=ssl.create_default_context()`（实测缺省 `ssl._create_stdlib_context()` = `check_hostname=False`/`CERT_NONE`——授权码在未验证隧道递出且 250 可被路径上攻击者伪造）
+- [x] 1V.2 **P2** F3 CONFIRMED：lane `default_sendmail_runner` 成功分支捕获 stderr 尾行入 SendResult/outbox 记录（现状成功分支丢弃 `completed.stderr`，`SMTP-ACCEPTED` 证据行生产路径不可观测，receipt 与空路由时代逐字节相同；verifier 裁定 runbook 手工管道措辞不构成 remedy）——lane 侧唯一允许触碰点
+- [x] 1V.3 **P3** F2 PLAUSIBLE：shim 加 From↔`NHMS_SMTP_USER` 地址部分一致性校验（display-name 形式取 addr-spec 比对，不匹配 exit 64 config error）；`.example` 出厂态 `NHMS_ALERT_EMAIL_FROM` 解注释为激活行；runbook "必须等于"措辞改"地址部分相等"
+- [x] 1V.4 **P3** F4 PLAUSIBLE：8-bit 正文（`RUNBOOK_REFERENCE` 中文使每封必含）按 `has_extn('8bitmime')` 协商 `BODY=8BITMIME` **且对每个 8-bit part 声明 `Content-Transfer-Encoding: 8bit`**（RFC 6152 信封+part 两半；round-1 R1 red-first 补钉，已编码 part 保留自身 CTE），服务器不支持时回落显式 CTE（quoted-printable/base64 重编码）——绝不裸推 8-bit
+- [x] 1V.5 **P3** F6 CONFIRMED：oracle 收口——真实 lane `build_message` 输出穿 shim 的回归（兼作 F4 锚）+ `default_smtp_factory` 钉（verified context/SMTP_SSL/timeout，变异明文 SMTP 必红）
+- [x] 1V.6 **P3** F5 CONFIRMED-DEFER 收编：`.example`/runbook 加"勿配多收件人"警示（部分拒收 → exit 69 → 已收方 30min 重复风暴；69-over-0 方向符合 over-report 契约不改语义）
+
+## 2V. 裁决修复回归锚
+
+- [x] 2V.1 B30：factory 钉（context.verify_mode==CERT_REQUIRED ∧ check_hostname ∧ SMTP_SSL ∧ timeout）；变异去 context/换明文 SMTP → 红
+- [x] 2V.2 B31：lane 成功发送 → outbox/receipt 记录含 shim 证据行尾巴（`SMTP-ACCEPTED` 可从部署路径取证）；失败分支既有行为不回归
+- [x] 2V.3 B32：真实 `build_message`（含中文 runbook 引用 + em dash）输出穿 shim → 收件人/信封正确、8BITMIME 或 CTE 路径断言、`=?unknown-8bit?` 不出现在出线信头
+- [x] 2V.4 B33：From≠认证账号（含 display-name 形式匹配/不匹配两例）→ exit 64 不连网；匹配 → 放行
+
 ## 3. Evidence Floor
 
 - [x] 3.1 `uv run pytest -q tests/test_node27_frontier_stall_alert.py tests/test_node27_resource_governance.py` 全绿（治理注册是唯一触碰的既有代码点，其钉子测试随迁）
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate node27-frontier-stall-alert --strict --no-interactive`
-- [ ] 3.4 node-27 live receipt（四步，全记录进 `.workplans/issue-1368/`）：
+- [x] 3.4 node-27 live receipt（四步；完成于 PR #1374 @ 47b4edd6，证据存 PR 评论 + `.workplans/`）——2026-08-14 实录：timer 装载 ✓；真实 status 分布 + bootstrap 零邮件 + `baseline_established_at`（2026-08-13，PR #1371 期）✓；拨钟 5h → 恰一封 stalled，**三重投递验证**：shim exit 0 + receipt/JSONL `evidence: "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"`（目的方同步 250）+ 收件箱人工确认**在收件箱非垃圾箱** ✓；operator 随即裁定生产阈值 48h（单日 cycle 稳态，runbook §10.3）。首轮本机 postfix 通道 bounce 实录保留为盲区证据（1U.1）：
   - timer/service 装载（`systemctl --user list-timers` 含 frontier-alert）
   - 真实 DB 查询成功一 tick（先跑 `SELECT status, count(*) FROM hydro.hydro_run GROUP BY 1` 记录真实 status 分布佐证 D1 集合选择；receipt 含真实 per-source 快照；首 tick 为 bootstrap——预期**零邮件**、记 `baseline_established_at`）
-  - **真实邮件投递**：sendmail exit 0 + mail log 远端 250 + `mumzy1995@163.com` 收件箱人工确认（三重，不得只验 exit 0；163 拒收则按 issue 预案停下重新拍板）
+  - **真实邮件投递**（通道改判后口径）：shim exit 0 + `SMTP-ACCEPTED`（250 由 smtp.163.com 提交服务器同步返回）+ `mumzy1995@163.com` 收件箱人工确认（三重，不得只验 exit 0；163 拒收则按 issue 预案停下重新拍板）。首轮本机 postfix 通道的 exit-0-后异步-bounce 实录保留为盲区证据
   - 拨钟触发：state 的 `last_change_at` 人为回拨 5h → 下一 tick 真实触发一封 stalled 邮件

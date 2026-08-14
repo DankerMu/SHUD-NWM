@@ -890,6 +890,13 @@ def release_lock(fd: int | None) -> None:
 class SendResult:
     returncode: int
     error: str | None = None
+    #: Last stderr line of a SUCCESSFUL send, verbatim (redacted downstream).
+    #: The authenticated SMTP shim prints one ``SMTP-ACCEPTED host=... code=250
+    #: recipients=<n>`` line there; keeping it makes the difference between "the
+    #: destination synchronously accepted" and the null-routed-postfix era's
+    #: meaningless exit 0 visible in the receipt. ``None`` for a classic
+    #: sendmail, which prints nothing.
+    evidence: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -935,7 +942,11 @@ def default_sendmail_runner(argv: list[str], message: str) -> SendResult:
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", "replace").strip()
         return SendResult(returncode=completed.returncode, error=stderr or "sendmail exited non-zero")
-    return SendResult(returncode=0)
+    # Success still carries evidence: the shim's SMTP-ACCEPTED line is the only
+    # proof the destination said 250, and dropping it made a real delivery
+    # byte-identical to the null-routed era's fictitious one.
+    accepted = [line.strip() for line in completed.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+    return SendResult(returncode=0, evidence=accepted[-1] if accepted else None)
 
 
 def build_message(
@@ -1026,7 +1037,9 @@ class _Outbox:
             "at": _iso_or_none(self.now),
         }
         if self.dry_run:
-            record.update({"sent": False, "dry_run": True, "returncode": None, "error": None})
+            record.update(
+                {"sent": False, "dry_run": True, "returncode": None, "error": None, "evidence": None}
+            )
             self.records.append(record)
             return False
         try:
@@ -1043,8 +1056,20 @@ class _Outbox:
         error = None
         if result.error:
             error = _redact_error_text(result.error, self.config.database_url)
+        evidence = None
+        if result.evidence:
+            # Same chokepoint as ``error``: the delivery channel's own output is
+            # operator-supplied text that must never carry the DSN into the
+            # receipt/JSONL.
+            evidence = _redact_error_text(result.evidence, self.config.database_url)
         record.update(
-            {"sent": result.ok, "dry_run": False, "returncode": result.returncode, "error": error}
+            {
+                "sent": result.ok,
+                "dry_run": False,
+                "returncode": result.returncode,
+                "error": error,
+                "evidence": evidence,
+            }
         )
         self.records.append(record)
         return result.ok
@@ -1442,6 +1467,7 @@ def run_tick(
                     "sent": record["sent"],
                     "returncode": record["returncode"],
                     "error": record["error"],
+                    "evidence": record["evidence"],
                 }
                 for record in outbox.records
             ],
