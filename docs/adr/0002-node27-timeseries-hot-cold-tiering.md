@@ -375,7 +375,7 @@ on PR #1377 (2026-08-14)):
 
 Both are dropped by
 [`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql`](../../db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql)
-(~167 GB at the sizes measured when the ticket was written; the node-27 apply
+(~167 GB at the 2026-08-14 05:29Z pre-drop baseline sizes; the node-27 apply
 receipt (PR #1377 comments, 2026-08-14) records the actual before/after:
 **293.6 GB → 193.2 GB, ~100 GB reclaimed**. The delta against the ~167 GB
 estimate is not a mis-measurement of either number — a compression drift
