@@ -51,6 +51,9 @@ EXIT_INTERNAL = 70
 
 SmtpFactory = Callable[[str, int, float], Any]
 
+# CTEs that already put 7-bit clean bytes on the wire, whatever the payload is.
+_SEVEN_BIT_CTES = frozenset({"base64", "quoted-printable"})
+
 
 class _UsageError(Exception):
     """Bad argv / bad env / no recipients — nothing was connected to."""
@@ -176,21 +179,50 @@ def _reencode_7bit(message: EmailMessage) -> None:
             part.set_content(payload, maintype=maintype, subtype=subtype, cte="base64")
 
 
+def _declare_8bit(message: EmailMessage) -> None:
+    """Give every 8-bit part the ``8bit`` CTE that RFC 6152 requires.
+
+    ``BODY=8BITMIME`` on MAIL FROM declares the TRANSPORT only. Per RFC 2045 an
+    ABSENT Content-Transfer-Encoding means ``7bit``, so a part carrying raw UTF-8
+    with no CTE header tells the receiver "these bytes are 7-bit" while they
+    demonstrably are not: a conforming gateway is entitled to strip the high bit
+    and the operator's only alert arrives as mojibake. Unlike ``_reencode_7bit``
+    this adds the declaration ONLY — the payload bytes cross byte-identical,
+    which is the entire point of taking the 8BITMIME branch.
+    """
+
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None or payload.isascii():
+            continue
+        if (part.get("Content-Transfer-Encoding") or "").strip().lower() in _SEVEN_BIT_CTES:
+            # Already encoded 7-bit clean on the wire (the decoded payload being
+            # 8-bit is exactly what base64/QP exist for). Its declaration is
+            # already true; overwriting it with ``8bit`` would corrupt the part.
+            continue
+        del part["Content-Transfer-Encoding"]
+        part["Content-Transfer-Encoding"] = "8bit"
+
+
 def _prepare_for_wire(message: EmailMessage, *, eightbit_ok: bool) -> tuple[str, ...]:
     """Never push undeclared 8-bit bytes; return the MAIL FROM options to use.
 
     Every mail this lane sends contains non-ASCII (the runbook pointer in the
     body is Chinese). Raw 8-bit on a plain SMTP session is a protocol violation:
     a strict server rejects it (visible), a lenient one strips the high bit
-    (mojibake in the operator's only alert). So: declare ``BODY=8BITMIME`` when
-    the server advertises the extension, otherwise re-encode the body with an
-    explicit CTE and stay 7-bit clean.
+    (mojibake in the operator's only alert). So: when the server advertises the
+    extension, declare ``BODY=8BITMIME`` on the envelope AND ``8bit`` on each
+    8-bit part (both halves are required — see ``_declare_8bit``); otherwise
+    re-encode the body with an explicit CTE and stay 7-bit clean.
     """
 
     _normalize_headers(message)
     if message.as_bytes().isascii():
         return ()
     if eightbit_ok:
+        _declare_8bit(message)
         return ("BODY=8BITMIME",)
     _reencode_7bit(message)
     return ()

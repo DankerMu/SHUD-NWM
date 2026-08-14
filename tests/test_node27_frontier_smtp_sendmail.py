@@ -12,6 +12,7 @@ appears in stdout or stderr.
 from __future__ import annotations
 
 import ast
+import base64
 import email.policy
 import io
 import os
@@ -675,6 +676,17 @@ def test_b32_lane_message_declares_8bitmime_when_the_server_offers_it(
     assert headers.isascii()
     assert b"unknown-8bit" not in headers
     assert alerter.RUNBOOK_REFERENCE.encode("utf-8") in body  # the 8-bit body IS declared
+    # BODY=8BITMIME is the ENVELOPE half of the declaration. The part still needs
+    # its own Content-Transfer-Encoding: RFC 2045 says an absent CTE means 7bit,
+    # so raw UTF-8 with no CTE tells the receiver "these bytes are 7bit" while
+    # they demonstrably are not — a conforming gateway may then strip the high
+    # bit and the operator's only alert arrives as mojibake (RFC 6152 requires
+    # the 8bit declaration).
+    assert b"Content-Transfer-Encoding: 8bit" in headers
+    assert headers.count(b"Content-Transfer-Encoding:") == 1  # declared once, not appended
+    # And declaring it must NOT re-encode: on this branch the 8-bit bytes cross
+    # byte-identical (only the line separator is normalised to CRLF).
+    assert body == _lane_message().partition(b"\r\n\r\n")[2].replace(b"\n", b"\r\n")
     assert "SMTP-ACCEPTED" in err
 
 
@@ -701,6 +713,49 @@ def test_b32_lane_message_is_reencoded_when_8bitmime_is_absent(
     delivered = BytesParser(policy=email.policy.default).parsebytes(wire)
     assert alerter.RUNBOOK_REFERENCE in delivered.get_content()
     assert delivered["Subject"] == "[NHMS] frontier-stalled: no progress for 4h30m"
+
+
+def test_b32_an_already_encoded_part_keeps_its_own_cte_on_the_8bitmime_branch(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 8bit declaration is for parts that actually put 8-bit bytes on the
+    wire. A base64 part's DECODED payload is 8-bit by construction while its
+    wire bytes are ASCII — relabelling it ``8bit`` would tell the receiver to
+    read base64 text as raw content, i.e. corrupt the part to fix nothing."""
+
+    attachment = base64.b64encode("中文附件".encode()).decode("ascii")
+    stdin = (
+        f"From: {SENDER}\r\n"
+        "To: ops@example.invalid\r\n"
+        "Subject: mixed\r\n"
+        "MIME-Version: 1.0\r\n"
+        'Content-Type: multipart/mixed; boundary="B"\r\n'
+        "\r\n"
+        "--B\r\n"
+        'Content-Type: text/plain; charset="utf-8"\r\n'
+        "\r\n"
+        "中文正文\r\n"
+        "--B\r\n"
+        'Content-Type: application/octet-stream; name="a.bin"\r\n'
+        "Content-Transfer-Encoding: base64\r\n"
+        "\r\n"
+        f"{attachment}\r\n"
+        "--B--\r\n"
+    ).encode("utf-8")
+
+    smtp = FakeSMTP(extensions=("8bitmime",))
+    rc = _run(["-t", "-i"], stdin, _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert smtp.mail_options == [("BODY=8BITMIME",)]
+    wire = smtp.wire[0]
+    assert wire.count(b"Content-Transfer-Encoding: base64") == 1
+    assert wire.count(b"Content-Transfer-Encoding: 8bit") == 1  # the text part only
+    delivered = BytesParser(policy=email.policy.default).parsebytes(wire)
+    text_part, bin_part = delivered.get_payload()
+    assert text_part.get_content() == "中文正文"  # the CRLF before the boundary is the boundary's
+    assert bin_part.get_payload(decode=True).decode("utf-8") == "中文附件"
 
 
 def test_b32_non_ascii_headers_are_utf8_encoded_not_unknown_8bit(
