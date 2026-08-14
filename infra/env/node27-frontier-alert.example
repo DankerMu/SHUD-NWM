@@ -64,6 +64,10 @@ NHMS_ALERT_EMAIL_FROM="NHMS Frontier Alert <alerts@example.com>"
 # of frontier / distinct-cycle count / latest arrival) and is NEVER compared
 # against wall-clock lag — while backfilling, the frontier is legitimately
 # days behind.
+# Threshold rule: no-progress alarm must exceed the production cycle cadence,
+# or the steady state itself alarms daily. 4 fits backfill (multiple cycles/day,
+# incident-era floor); steady state at ONE cycle/day needs ~2x cadence — node-27
+# runs 48 (operator ruling 2026-08-14, recorded in runbook section 10.3).
 NHMS_FRONTIER_STALL_HOURS=4
 
 # Resend window in hours while a stall persists. Default 6 (one stall = one
