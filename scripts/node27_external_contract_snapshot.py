@@ -96,14 +96,15 @@ DB_NAME = "nhms"
 # deterministic witness of the rendering contract.
 #
 # LIMITATION (issue #1089, fixture review P1-2): this witnesses systemd's
-# RENDERING contract only.  It does NOT witness the loaded-but-never-started
-# whole-dict shape that
-# `scripts/node27_timeseries_compression_supervisor.py:1282-1293` and
-# `scripts/node27_timeseries_compression_live_evidence.py:834-845` assert by
-# dict equality.  A green `--check` therefore does NOT imply those two
-# checkpoints pass -- today they demonstrably would not, because the recurring
-# unit has run this boot.  That pre-existing consumer defect is tracked
-# separately and is out of this tool's scope.
+# RENDERING contract only.  It says nothing about the recurring unit's live
+# state, so a green `--check` still does NOT imply the mutation-window
+# checkpoints pass.  What it used to imply is gone: those two checkpoints
+# asserted a loaded-but-never-started whole-dict shape that this very tool's
+# `informational.recurring_unit` refuted, and #1255 replaced that assertion with
+# the four-field current-activity/identity predicate
+# `recurring_unit_idle_divergences`
+# (`packages/common/node27_container_contract.py`), under which a unit that
+# ticked earlier this boot is admitted.
 RESERVED_WITNESS_UNIT = "nhms-external-contract-snapshot-witness-does-not-exist.service"
 RECURRING_UNIT = "nhms-node27-timeseries-compression.service"
 

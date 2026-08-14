@@ -4423,6 +4423,213 @@ def test_round3_current_activation_identity_is_complete_and_pid_bound(
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1255 -- the recurring-unit gate judges current activity, not boot
+# history, and the boot-history fields it stopped gating on stay pinned as
+# evidence.
+# --------------------------------------------------------------------------- #
+
+# MEASURED on node-27 2026-08-14 (read-only `systemctl --user show`, the day
+# after the daily 04:25 UTC timer tick): a unit that RAN THIS BOOT and returned
+# to idle keeps a non-empty InvocationID and real start timestamps while every
+# activity/identity field reads canonically idle.  `_bundle` still emits the
+# never-started rendering ("n/a" + empty InvocationID), so both measured forms
+# are exercised.
+RECURRING_RAN_THIS_BOOT = {
+    "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "MainPID": 0,
+    "InvocationID": "0d8bd46e8f634e0296d8cbf49a938231",
+    "ExecMainStartTimestamp": "Thu 2026-08-13 12:25:00 CST",
+    "ExecMainStartTimestampMonotonic": 1306766054421,
+}
+
+
+def _rewrite_recurring_show(
+    bundle: dict[str, Any],
+    tmp_path: Path,
+    recurring: dict[str, Any],
+    *,
+    serial: str,
+    first_only: bool = False,
+) -> None:
+    """Re-render the recurring half of every (or the first) checkpoint's show doc."""
+
+    events = [json.loads(line) for line in Path(bundle["execution"]["ledger"]["path"]).read_text().splitlines()]
+    checkpoints = [event for event in events if event["event_type"] == "checkpoint"]
+    for index, event in enumerate(checkpoints[:1] if first_only else checkpoints):
+        show = _read_ref(event["systemd_show"]["artifact"])
+        show["recurring"] = recurring
+        _rewrite_checkpoint_json(tmp_path, event, "systemd_show", show, f"{serial}-{index}")
+    _replace_execution_events(bundle, events, tmp_path / f"{serial}-ledger.jsonl")
+
+
+def test_recurring_unit_gate_accepts_the_unit_that_already_ran_this_boot(tmp_path: Path) -> None:
+    # #1255 core: the deployed timer makes "never started this boot" permanently
+    # false, so the pre-fix whole-dict equality rejected the steady state itself.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(bundle, tmp_path, RECURRING_RAN_THIS_BOOT, serial="ran-this-boot")
+    evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_recurring_unit_gate_still_accepts_the_never_started_form(tmp_path: Path) -> None:
+    # The narrower predicate must not have traded one over-fit for another: a
+    # bundle regenerated on a host where the unit never started this boot ("n/a"
+    # + empty InvocationID) still verifies.
+    bundle = _bundle(tmp_path)
+    never_started = {
+        **RECURRING_RAN_THIS_BOOT,
+        "InvocationID": "",
+        "ExecMainStartTimestamp": evidence.SYSTEMD_UNSET_TIMESTAMP,
+        "ExecMainStartTimestampMonotonic": 0,
+    }
+    _rewrite_recurring_show(bundle, tmp_path, never_started, serial="never-started")
+    evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "observed"),
+    [
+        ("ActiveState", "activating", "'activating'"),
+        ("SubState", "failed", "'failed'"),
+        ("MainPID", 4242, "4242"),
+        # JSON `true`/`false` for MainPID: Python's bool/int equality would let
+        # `False == 0` pass a value-only check, so the predicate compares types
+        # as strictly as values.  LIVE-PLANE ONLY by construction -- the
+        # supervisor reads MainPID out of real `systemctl show` stdout through
+        # `int()`, so no bool can reach its gate, while a hand-edited evidence
+        # document can carry one.
+        ("MainPID", False, "False"),
+        (
+            "FragmentPath",
+            "/etc/systemd/user/nhms-node27-timeseries-compression.service",
+            "'/etc/systemd/user/nhms-node27-timeseries-compression.service'",
+        ),
+    ],
+)
+def test_recurring_unit_gate_rejects_one_deviating_field_and_names_it(
+    tmp_path: Path, field: str, value: Any, observed: str
+) -> None:
+    # One gated field deviating ALONE on top of the accepted ran-this-boot base:
+    # deleting any single field's check leaves its own parameter red.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(
+        bundle,
+        tmp_path,
+        {**RECURRING_RAN_THIS_BOOT, field: value},
+        serial=f"deviating-{field}",
+        first_only=True,
+    )
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert f"{field}={observed}" in message
+    if field == "SubState":
+        # A unit left failed by the per-chunk timeout wall (runbook §4.5) is
+        # neither concurrent compression nor an identity swap.
+        assert "not running" in message
+        assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
+    else:
+        assert "shows current activity or unexpected identity" in message
+
+
+def test_recurring_failed_sentence_is_not_claimed_over_a_polluted_document(tmp_path: Path) -> None:
+    # `SubState == "failed"` alone must not buy the "not running" headline plus
+    # the reset-failed remedy: this document names ANOTHER unit's fragment, is
+    # ActiveState=active and carries a live MainPID.  "Not running" would be a
+    # lie about it and `reset-failed` on the pinned name the wrong remedy, so
+    # the generic current-activity/identity sentence is the honest one.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(
+        bundle,
+        tmp_path,
+        {
+            **RECURRING_RAN_THIS_BOOT,
+            "FragmentPath": "/etc/systemd/user/nhms-node27-timeseries-compression.service",
+            "ActiveState": "active",
+            "SubState": "failed",
+            "MainPID": 4242,
+        },
+        serial="polluted-failed",
+        first_only=True,
+    )
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert "shows current activity or unexpected identity" in message
+    assert "MainPID=4242" in message
+    assert "not running" not in message
+    assert "reset-failed" not in message
+
+
+def test_recurring_failed_sentence_covers_the_real_wall_trip_geometry(tmp_path: Path) -> None:
+    # The converse of the pollution guard above, and the shape systemd really
+    # leaves after the per-chunk timeout wall (runbook §4.5): `ActiveState` and
+    # `SubState` BOTH `failed`, MainPID cleared, the pinned fragment intact.
+    # The single-field parametrization can only reach `SubState=failed` over an
+    # `inactive` base, so this is the only guard keeping the remedy sentence
+    # attached to the geometry the operator will actually meet.
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(
+        bundle,
+        tmp_path,
+        {**RECURRING_RAN_THIS_BOOT, "ActiveState": "failed", "SubState": "failed"},
+        serial="wall-tripped-failed",
+        first_only=True,
+    )
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert "ActiveState='failed'" in message
+    assert "SubState='failed'" in message
+    assert "not running" in message
+    assert "systemctl --user reset-failed nhms-node27-timeseries-compression.service" in message
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("drop-invocation-id", "keys differ"),
+        ("drop-timestamp", "keys differ"),
+        ("drop-monotonic", "keys differ"),
+        ("extra-field", "keys differ"),
+        ("null-invocation-id", "boot-history evidence fields are malformed"),
+        ("numeric-timestamp", "boot-history evidence fields are malformed"),
+        ("string-monotonic", "boot-history evidence fields are malformed"),
+        ("boolean-monotonic", "boot-history evidence fields are malformed"),
+    ],
+)
+def test_recurring_boot_history_evidence_is_pinned_even_though_it_never_gates(
+    tmp_path: Path, mutation: str, expected: str
+) -> None:
+    # Demoting the boot-history fields out of the gate must not demote them out
+    # of the evidence: dropping or mistyping any of them is malformed evidence,
+    # not a passing checkpoint.  (The whole-dict equality was the only key-set
+    # pin before #1255; this is its explicit replacement.)
+    recurring = dict(RECURRING_RAN_THIS_BOOT)
+    if mutation == "drop-invocation-id":
+        recurring.pop("InvocationID")
+    elif mutation == "drop-timestamp":
+        recurring.pop("ExecMainStartTimestamp")
+    elif mutation == "drop-monotonic":
+        recurring.pop("ExecMainStartTimestampMonotonic")
+    elif mutation == "extra-field":
+        recurring["LoadState"] = "loaded"
+    elif mutation == "null-invocation-id":
+        recurring["InvocationID"] = None
+    elif mutation == "numeric-timestamp":
+        recurring["ExecMainStartTimestamp"] = 1306766054421
+    elif mutation == "string-monotonic":
+        recurring["ExecMainStartTimestampMonotonic"] = "1306766054421"
+    else:
+        recurring["ExecMainStartTimestampMonotonic"] = True
+    bundle = _bundle(tmp_path)
+    _rewrite_recurring_show(bundle, tmp_path, recurring, serial=mutation, first_only=True)
+    with pytest.raises(evidence.EvidenceError, match=expected):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
 @pytest.mark.parametrize(
     ("capture_kind", "started_at", "finished_at"),
     [

@@ -2106,7 +2106,7 @@ uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$
 
 `systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
 unset the probe exits non-zero with "Failed to connect to bus"
-(`scripts/node27_timeseries_compression_supervisor.py:176-183`) and the check
+(`scripts/node27_timeseries_compression_supervisor.py:187-194`) and the check
 reports a probe-execution failure — that is a broken probe, not a verdict about
 the host. Fix the environment and rerun.
 
@@ -2153,13 +2153,21 @@ witnessed through a reserved never-existing unit
 (`nhms-external-contract-snapshot-witness-does-not-exist.service`), because the
 real recurring compression unit has run this boot (daily 04:25 UTC timer) and so
 renders a real timestamp. That witnesses systemd's *rendering* contract only —
-it does NOT witness the loaded-but-never-started whole-dict shape asserted at
-`scripts/node27_timeseries_compression_supervisor.py:1282-1293` and
-`scripts/node27_timeseries_compression_live_evidence.py:834-845`. A green
-`--check` therefore does NOT imply those two checkpoints pass. The fixture's
-`informational.recurring_unit` records the real unit's live
-ActiveState/SubState/ExecMainStartTimestamp as counter-evidence; that
-pre-existing consumer defect is tracked as its own issue.
+it says nothing about the live state of the recurring unit at any checkpoint, so
+a green `--check` still does NOT imply the mutation-window checkpoints pass.
+What the fixture's `informational.recurring_unit` counter-evidence (the real
+unit's live ActiveState/SubState/ExecMainStartTimestamp) used to expose was a
+consumer defect: both planes gated the window on a whole-dict equality that
+pinned the never-started rendering, so the first checkpoint after any timer tick
+aborted. **Resolved in `#1255`**: the gate is now the four-field
+current-activity/identity predicate `recurring_unit_idle_divergences`
+(`packages/common/node27_container_contract.py`), bound by
+`scripts/node27_timeseries_compression_supervisor.py` and
+`scripts/node27_timeseries_compression_live_evidence.py`. `InvocationID` and
+both `ExecMainStartTimestamp*` fields stay captured in the checkpoint show
+document as evidence (key set and types pinned verifier-side) and no longer
+gate — so an inactive/dead unit that ticked earlier this boot, exactly what
+`informational.recurring_unit` records, is now an admitted checkpoint.
 
 **Scheduling is operator-gated.** #1089 installs no timer and no GitHub Actions
 workflow. Until an operator schedules one (a weekly `--check` on the node is the
@@ -2318,6 +2326,24 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 A manual silent-window `SET statement_timeout = 0; SELECT compress_chunk(...)`
 is the **last resort**, not the procedure: it produces no receipt, no
 provenance and no bounded lock, and it is what this section exists to avoid.
+
+**What a wall leaves behind, and how to clear it.** Whichever of the three
+walls trips — the `statement_timeout` on the DDL, the real systemd
+`TimeoutStartSec` taking `TERM` mid-DDL, or `/usr/bin/timeout` inside
+`scripts/node27_timeseries_compression_once.sh` — the tick exits nonzero, and
+because `nhms-node27-timeseries-compression.service` is `Type=oneshot` with no
+`Restart=`, the unit is left `failed/failed` with `MainPID=0`. It stays that way
+until the next timer tick overwrites the state, or until an operator runs
+`systemctl --user reset-failed nhms-node27-timeseries-compression.service`. That
+is a *residue*, not a running job: the mutation-window checkpoint gate (the
+replay supervisor of §4.0.2 and the §4.0.1 live-evidence twin, which bind one
+shared predicate) refuses such a window with a dedicated message that says the
+unit is failed from an earlier tick, not running, and names that `reset-failed`
+as the remedy. This does **not** conflict
+with the "do not `reset-failed` to manufacture a clean state" rule in §4.0
+step 4: that rule guards the ADJACENT `nhms-node27-autopipe.service` during the
+gated first-enforce evidence capture, where the failed state is itself the
+evidence being preserved — a different unit in a different phase.
 
 **Scope vs §4.0 step 9.** The blanket "do not call `compress_chunk` manually"
 in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
