@@ -14,11 +14,11 @@
 
 ## 3. Evidence Floor
 
-- [ ] 3.1 D1 容量推导原始数据入 PR（AC-1）：chunk census（dimensions/chunks/compression_stats 查询输出）、2026-08-14 enforce receipt 摘要、2026-07-26 人工压缩时长日志行；**注明 AC-1 字面的"近 30 天每日新增 chunk 数"由 chunk-width 结构性论证（7 d 时间维切分 → 到达率恒 2/周）有意替代，属更强证据而非缺证**
+- [x] 3.1 D1 容量推导原始数据入 PR（AC-1）：chunk census（dimensions/chunks/compression_stats 查询输出）、2026-08-14 enforce receipt 摘要、2026-07-26 人工压缩时长日志行；**注明 AC-1 字面的"近 30 天每日新增 chunk 数"由 chunk-width 结构性论证（7 d 时间维切分 → 到达率恒 2/周）有意替代，属更强证据而非缺证**
 - [x] 3.2 `uv run pytest -q tests/test_node27_timeseries_compression.py` + `uv run ruff check .` 绿（AC-6）
 - [x] 3.3 `openspec validate compression-per-tick-capacity-target --strict --no-interactive` 过
-- [ ] 3.4 node-27 实机（merge 前）：预检 `grep -n '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=' env` == 4（AC-3 前提，实机零改动）→ **D3 修正版三步取证**（source env 后用 CLI `--receipt-path <scratch>` 压过 env、不加 `--enforce`、lock 沿用生产路径）→ scratch receipt 证 `per_tick_bound==4`，clean 语义由 2026-08-14 enforce receipt 承载（dry-run outcome 恒 clean 不入判据）→ 凭据 grep 核后双证入 PR 评论
-- [ ] 3.5 CI 定向测试绿
+- [x] 3.4 node-27 实机（merge 前）：预检 `grep -n '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=' env` == 4（AC-3 前提，实机零改动）→ **D3 修正版三步取证**（source env 后用 CLI `--receipt-path <scratch>` 压过 env、不加 `--enforce`、lock 沿用生产路径）→ scratch receipt 证 `per_tick_bound==4`，clean 语义由 2026-08-14 enforce receipt 承载（dry-run outcome 恒 clean 不入判据）→ 凭据 grep 核后双证入 PR 评论
+- [x] 3.5 CI 定向测试绿（run 31834507130：Unit Tests 1m05s pass 定向实跑；证据均在 PR #1385 body/评论）
 
 ## 偏离与范围外挂账
 
