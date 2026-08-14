@@ -25,4 +25,4 @@
 - [x] 3.1 `uv run pytest -q tests/test_node27_timeseries_compression_supervisor.py tests/test_node27_timeseries_compression_live_evidence.py`
 - [x] 3.2 `uv run ruff check .`
 - [x] 3.3 `openspec validate fix-checkpoint-recurring-unit-predicate --strict --no-interactive`
-- [ ] 3.4 node-27 read-only receipt：timer 已 tick 当天采七字段，新谓词判定通过 + 旧整体等值判定失败（修复前后对照；0.1 已采的这组值即素材，merge 前用最终代码重放一次），记录进 `.workplans/issue-1255/` 与 PR 评论
+- [x] 3.4 node-27 read-only receipt：timer 已 tick 当天采七字段，新谓词判定通过 + 旧整体等值判定失败（修复前后对照；0.1 已采的这组值即素材，merge 前用最终代码重放一次），记录进 `.workplans/issue-1255/` 与 PR 评论
