@@ -2,15 +2,20 @@
 -- river_segment_id) carries the same column SET as the primary key, but same set is not
 -- same coverage: with `variable` single-valued table-wide it behaves as
 -- (run_id, valid_time, rnv, segid) -- a run-scoped time prefix the pkey cannot offer,
--- because the pkey orders rnv/segid ahead of variable/valid_time. Its 5,571 idx_scan
--- show the planner does pick it: the ingest window DELETE
--- (workers/output_parser/parser.py:745-755) binds run_id + rnv + variable + a valid_time
--- range, a 3-column window here against a 2-column pkey prefix. So this drop is a
--- measured TRADEOFF, not a redundancy removal. Live node-27 measurement 2026-08-14
--- (8 chunks aggregated): 162 GB of carrying cost for those 5,571 idx_scan, against
--- 796,096,944 pkey scans over the same window. The residual coverage loss is real and is
--- exactly what the #1338 pre-merge before/after EXPLAIN (ANALYZE, BUFFERS) gate measures;
--- if it regresses, the verbatim rollback below re-creates the index.
+-- because the pkey orders rnv/segid ahead of variable/valid_time. The measured consumers
+-- of its 5,571 idx_scan are reads: the #1338 pre-drop baseline shows the national-tile
+-- typed_values access (services/tiles/mvt.py:603-651) and the source-identity stats probe
+-- (mvt.py:530-553) served by Index Only Scans here, both binding run_id + variable +
+-- valid_time + rnv with NO basin_version_id, which the retained selected_identity index
+-- cannot serve (its 2nd column is basin_version_id); post-drop they fall back to the pkey
+-- (usable prefix run_id + rnv, remaining predicates as in-index filters). The ingest
+-- window DELETE already planned on the pkey pre-drop (baseline Q7), so the write path is
+-- not a consumer. So this drop is a measured TRADEOFF, not a redundancy removal. Live
+-- node-27 measurement 2026-08-14 (8 chunks aggregated): 162 GB of carrying cost for
+-- those 5,571 idx_scan, against 796,096,944 pkey scans over the same window. The residual
+-- coverage loss on those two reads is real and their before/after latency is exactly what
+-- the #1338 pre-merge EXPLAIN (ANALYZE, BUFFERS) gate measures; if it regresses, the
+-- verbatim rollback below re-creates the index.
 -- Rollback (verbatim re-create, from 000019):
 --   CREATE INDEX IF NOT EXISTS river_timeseries_mvt_identity_lookup_idx ON hydro.river_timeseries (run_id, variable, valid_time, river_network_version_id, river_segment_id);
 DROP INDEX CONCURRENTLY IF EXISTS hydro.river_timeseries_mvt_identity_lookup_idx;

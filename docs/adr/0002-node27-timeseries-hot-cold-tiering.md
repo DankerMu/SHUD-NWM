@@ -339,11 +339,17 @@ Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
   order differs — but the same set is not the same coverage: with `variable`
   single-valued table-wide it behaves as `(run_id, valid_time, rnv, segid)`, a
   run-scoped time prefix the pkey cannot offer (the pkey orders `rnv`/`segid`
-  ahead of `variable`/`valid_time`). Those 5,571 scans are evidence the planner
-  sometimes picks it — the ingest window `DELETE`
-  (`workers/output_parser/parser.py:745-755`) binds `run_id` + `rnv` +
-  `variable` + a `valid_time` range, a 3-column window on this index against a
-  2-column pkey prefix.
+  ahead of `variable`/`valid_time`). The measured consumers of those 5,571 scans
+  are reads: the #1338 pre-drop baseline shows the national-tile `typed_values`
+  access (`services/tiles/mvt.py:603-651`) and the source-identity stats probe
+  (`mvt.py:530-553`) served by Index Only Scans on this index, both binding
+  `run_id` + `variable` + `valid_time` + `rnv` with **no** `basin_version_id` —
+  a shape the retained `..._mvt_selected_identity_valid_time_discovery_idx`
+  cannot serve (its 2nd column is `basin_version_id`). Post-drop they fall back
+  to the pkey (usable prefix `run_id` + `rnv`, remaining predicates as in-index
+  filters). The ingest window `DELETE` already planned on the pkey pre-drop
+  (baseline Q7, all four predicates pushed into the pkey `Index Cond`), so the
+  write path is not a consumer.
 - `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a
   strict prefix of the index above. No in-repo migration created it; it was
   created out-of-band on node-27.
@@ -356,7 +362,7 @@ Both are dropped by
 the pre-merge live leg — will record the actual before/after). This is a
 **tradeoff, not a redundancy removal**: 162 GB of
 carrying cost weighed against 5,571 scans, with a real residual coverage loss
-on the run-scoped time-window shapes above. That loss is exactly what the pre-merge
+on the two read shapes above. That loss is exactly what the pre-merge
 before/after `EXPLAIN (ANALYZE, BUFFERS)` gate measures, over the in-repo query
 surfaces that name-match the dropped columns: any Seq Scan fallback or
 order-of-magnitude slowdown rolls the drop back by re-creating the index (the

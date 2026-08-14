@@ -34,7 +34,7 @@
 
 - issue 说"不做任何 schema 或代码适配"，PR Boundary 限 `db/migrations/`。但 `_qhh_latest_query_indexes()` 是**证据自述函数**（introspection metadata，不在任何查询执行路径上）：删索引后不改，仓库将自述"该查询由 mvt_identity_lookup 覆盖"——与本 change 自己的迁移直接矛盾。
 - 裁定：改**恰好这一处**状态陈述（`covered_by_mvt_identity_lookup_index` → 实测承接者的如实陈述，列元组同步）+ 两处测试钉同步。不碰任何执行路径代码。此为偏离记录第 1 条，PR body 显式声明（注：`query_indexes` 是公开 API 响应字段 `openapi/nhms.v1.yaml:3407-3428`，`index`/`status` 为无 enum 自由字符串、前端不渲染，改值不破契约——PR body 写明）。
-- 预期承接索引 = pkey（列集合相同；`variable` 单值使中缀列过滤零代价）——由 **D4 第 6 条（`river_sample_rows`）的 node-27 post-drop EXPLAIN 证实**；若实测承接者不是 pkey，按实测改陈述（陈述跟实测走，不跟推断走）。1.2 的最终措辞在 3.4（已前移 merge 前）实测后定稿、merge 前提交；在 receipt 产出前 forecast_store 注释必须用 pending 措辞，不得以肯定语气记载未产出的证据。
+- 承接索引（pre-drop 实测已定，round-2 修正）：`river_sample_rows` **已由保留的 `mvt_selected_identity_valid_time_discovery_idx` 服务**（predrop-baseline Q6，被删索引不在计划中）——pkey 不是承接者（无 `basin_version_id`，可用前缀止于 2 列）。post-drop EXPLAIN（D4 第 6 条）验证该计划不变即定稿。1.2 的最终措辞在 3.4（已前移 merge 前）实测后定稿、merge 前提交；在 receipt 产出前 forecast_store 注释必须用 pending 措辞，不得以肯定语气记载未产出的证据。
 
 ### D4 — EXPLAIN 取证查询集（AC3）
 
@@ -46,10 +46,10 @@
 4. `services/tiles/mvt.py` hydro 层 basin/segment tile CTE（`:454-474`）。
 5. `apps/api/routes/hydro_display.py` `_require_hydro_mvt_source_identity`（`:749-769`，邻接面基线记录）。
 6. **（F1）**`packages/common/forecast_store.py:1633-1650` `river_sample_rows`（qhh-latest display product 主路径）——谓词 `(run_id, …, variable, valid_time BETWEEN)` 正是被删 `mvt_identity_lookup_idx` 的三列前缀形态，D3 的"pkey 承接"陈述**由这条的 post-drop EXPLAIN 实测决定**，不得推断。
-7. **（F3）**`workers/output_parser/parser.py:745-755` ingest 窗口 `DELETE` 谓词（对已存在 run 的窗口做只读 `EXPLAIN`，不真删）——被删索引上是 3 列前缀精确窗口，pkey 只吃 2 列前缀，写路径退化必须与 display 同权重进 abort 判定；`parser.py:688-694` 的 "stays on the pkey prefix" 注释只关于探针，不覆盖 DELETE。
+7. **（F3）**`workers/output_parser/parser.py:745-755` ingest 窗口 `DELETE` 谓词（对已存在 run 的窗口做只读 `EXPLAIN`，不真删）——**pre-drop 实测（baseline Q7）已在 pkey 上、四谓词全推入 Index Cond，写路径非被删索引消费面**；保留在判定集作廉价回归锚。
 8. **（F3）**`services/tiles/mvt.py:530-553` `source_identity_stats_sql`（national identity 探针）。
 
-判定：**八条**无一退化为 Seq Scan；关键路径（1/3/6/7）执行时间无数量级劣化。**若出现退化：立即重建被删索引回滚（可逆性即回滚方案），change 终止并回 upstream**。
+判定：**八条**无一退化为 Seq Scan，且**八条全部**执行时间无数量级劣化——其中 **1 与 8 是被删索引的实测消费面**（predrop-baseline Q1/Q8 Index Only Scan），是 post-drop 退化风险的焦点；3/6/7 的 pre-drop 计划本就在保留索引/pkey 上（Q3=valid_time_idx、Q6=selected_identity、Q7=pkey），作廉价回归锚保留在判定集内。**若出现退化：立即重建被删索引回滚（可逆性即回滚方案），change 终止并回 upstream**。
 
 ### D5 — 测试形态（B 锚）
 
