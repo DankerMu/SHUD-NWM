@@ -321,6 +321,11 @@ template/live drift is resolved.
    budget" is a *worst-case estimate* assembled from the per-leg timeout caps,
    and the 2026-08-14 measurement already exceeds it — use `380 s` here, and
    read the §4.5 number as an estimate the box has outgrown, not as a ceiling.
+   Part of the residual also scales with chunk *count* (§4.5's enumeration
+   includes per-chunk legs — a size measurement before **and** after each
+   compress), so treat `380 s` as a floor for ticks selecting more than the
+   measured pair, and the `≥281 GB` onset threshold below as correspondingly
+   optimistic.
 
 Measured inputs (node-27, read-only, 2026-08-14 unless noted):
 
@@ -390,7 +395,14 @@ writes **no receipt at all**, and `deferred` is empty in the receipts it does
 write, so "`deferred` is non-empty" is **not** a signal for this. The signal
 is the *state* — a tick would select ≥2 river chunks, i.e. roughly ≥1 week of
 missed ticks (a §4.5 stop+mask override window, a §4.3.2 decompress pause, or
-an outage), or the previous tick left no receipt / its unit went `failed`.
+an outage). What an operator can actually check: the unit went `failed`
+(`systemctl status` / `journalctl`; `rc=124` is the wall `TERM` — this is the
+authority), **or** the receipt at
+`NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH` is **stale** — its `generated_at`
+predates the last timer trigger (`systemctl --user list-timers`). Receipt
+*absence* is not a checkable signal: the path is a single shared file each
+tick overwrites in place (see the §4.0 shared-receipt note below), so a
+`TERM`ed tick leaves the previous clean receipt sitting at the path.
 **In that state, set `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` per
 §4.5 before restarting the timer**, and let the daily timer drain one chunk
 per tick.
