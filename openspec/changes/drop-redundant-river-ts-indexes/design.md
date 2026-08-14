@@ -12,7 +12,7 @@
 - harness：`packages/common/migrate.py` 全局 autocommit、无事务包裹（`:161`），`CONCURRENTLY` 天然可行；`schema_migrations(version, applied_at)` 记账跳过。
 - node-27 记账漂移：schema_migrations 止于 `000045`；`000046-48` 生效未记账（000047 系 runbook 手工双跑先例）。
 - 仓内引用面：`packages/common/forecast_store.py:3420-3446` `_qhh_latest_query_indexes()` 陈述 `covered_by_mvt_identity_lookup_index`，被 `tests/test_migrations.py:370` 与 `tests/test_forecast_api.py:1735` 钉住；`tests/test_migrations.py:253-283` 钉的是 `mvt_selected_identity_valid_time_discovery_idx`（保留集，不受影响）。
-- ADR 0002 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md:29-30` "cannot be pruned further"（ADR Date: 2026-07-03；该句在 **Context** 的 2026-07-04 实测段，非任何 Decision 依赖项）。
+- ADR 0002 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md:33-34` "cannot be pruned further"（ADR Date: 2026-07-03；该句在 **Context** 的 2026-07-04 实测段，非任何 Decision 依赖项）。
 
 ## 决策
 
@@ -45,7 +45,7 @@
 3. `services/tiles/mvt.py` `valid_times_for_layer` 无 basin 分支（`:1236-1242`，列匹配被删 `valid_time_discovery_idx`，删后承接者取证）。
 4. `services/tiles/mvt.py` hydro 层 basin/segment tile CTE（`:454-474`）。
 5. `apps/api/routes/hydro_display.py` `_require_hydro_mvt_source_identity`（`:749-769`，邻接面基线记录）。
-6. **（F1）**`packages/common/forecast_store.py:1633-1650` `river_sample_rows`（qhh-latest display product 主路径）——谓词 `(run_id, …, variable, valid_time BETWEEN)` 正是被删 `mvt_identity_lookup_idx` 的三列前缀形态，D3 的"pkey 承接"陈述**由这条的 post-drop EXPLAIN 实测决定**，不得推断。
+6. **（F1）**`packages/common/forecast_store.py:1633-1650` `river_sample_rows`（qhh-latest display product 主路径）——谓词 `(run_id, …, variable, valid_time BETWEEN)` 正是被删 `mvt_identity_lookup_idx` 的三列前缀形态，D3 的承接者陈述（selected_identity，pre-drop Q6 实测、被删索引不在计划中；pkey 非承接者）**由这条的 post-drop EXPLAIN 复核后定稿**，不得推断定稿。
 7. **（F3）**`workers/output_parser/parser.py:745-755` ingest 窗口 `DELETE` 谓词（对已存在 run 的窗口做只读 `EXPLAIN`，不真删）——**pre-drop 实测（baseline Q7）已在 pkey 上、四谓词全推入 Index Cond，写路径非被删索引消费面**；保留在判定集作廉价回归锚。
 8. **（F3）**`services/tiles/mvt.py:530-553` `source_identity_stats_sql`（national identity 探针）。
 

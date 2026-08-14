@@ -3433,15 +3433,18 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "columns": ["basin_id", "basin_version_id"],
         },
         # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
-        # (#1338). The naming below is the PRE-RECEIPT static-analysis expectation,
-        # not a measured plan: the river leg (see river_sample_rows) equality-binds
-        # run_id + basin_version_id + river_network_version_id + variable with a
-        # valid_time range, which is an exact prefix of the retained 000021 index
-        # named here. The pkey is not the successor — it carries no
+        # (#1338); the retained 000021 index named below is a PRE-DROP MEASUREMENT,
+        # not a static guess: baseline Q6 (river_sample_rows window query, see
+        # .workplans/issue-1338/predrop-baseline.txt) recorded Index Scans on this
+        # index's chunk indexes already serving the river leg pre-drop, which matches
+        # that query's shape — run_id + basin_version_id + river_network_version_id +
+        # variable equality-bound with a valid_time range, an exact prefix of it. The
+        # dropped index does not appear in that plan at all, so the plan is expected
+        # unchanged post-drop. The pkey is not the successor — it carries no
         # basin_version_id and its third column river_segment_id is unbound, so its
-        # usable prefix stops at two columns. No post-drop EXPLAIN receipt exists
-        # yet; the #1338 pre-merge live leg (post-drop EXPLAIN of the river window
-        # query) finalizes these values, and measurement wins over inference.
+        # usable prefix stops at two columns. Only the post-drop confirmation is
+        # pending: the #1338 pre-merge live leg re-runs the same query after the drop
+        # and finalizes these values, and measurement wins over inference.
         {
             "table": "hydro.river_timeseries",
             "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",

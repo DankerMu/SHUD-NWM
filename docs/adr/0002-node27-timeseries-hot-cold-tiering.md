@@ -345,9 +345,12 @@ Live node-27 measurement 2026-08-14 (read-only, aggregated across all 8
   (`mvt.py:530-553`) served by Index Only Scans on this index, both binding
   `run_id` + `variable` + `valid_time` + `rnv` with **no** `basin_version_id` —
   a shape the retained `..._mvt_selected_identity_valid_time_discovery_idx`
-  cannot serve (its 2nd column is `basin_version_id`). Post-drop they fall back
-  to the pkey (usable prefix `run_id` + `rnv`, remaining predicates as in-index
-  filters). The ingest window `DELETE` already planned on the pkey pre-drop
+  cannot serve (its 2nd column is `basin_version_id`). The statically expected
+  post-drop successor for those two reads is the pkey (usable prefix `run_id` +
+  `rnv`, remaining predicates as in-index filters), but that is a pre-receipt
+  prediction, not a measurement: the other retained indexes stay live
+  candidates, and the pre-merge post-drop `EXPLAIN` gate determines the actual
+  plan. The ingest window `DELETE` already planned on the pkey pre-drop
   (baseline Q7, all four predicates pushed into the pkey `Index Cond`), so the
   write path is not a consumer.
 - `river_timeseries_valid_time_discovery_idx`: 4663 MB for 10,864 `idx_scan`, a

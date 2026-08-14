@@ -7,8 +7,11 @@
 -- typed_values access (services/tiles/mvt.py:603-651) and the source-identity stats probe
 -- (mvt.py:530-553) served by Index Only Scans here, both binding run_id + variable +
 -- valid_time + rnv with NO basin_version_id, which the retained selected_identity index
--- cannot serve (its 2nd column is basin_version_id); post-drop they fall back to the pkey
--- (usable prefix run_id + rnv, remaining predicates as in-index filters). The ingest
+-- cannot serve (its 2nd column is basin_version_id). The statically expected post-drop
+-- successor for those two reads is the pkey (usable prefix run_id + rnv, remaining
+-- predicates as in-index filters), but that is a pre-receipt prediction, not a
+-- measurement: the other retained indexes stay live candidates, and the #1338 pre-merge
+-- post-drop EXPLAIN gate determines the actual plan. The ingest
 -- window DELETE already planned on the pkey pre-drop (baseline Q7), so the write path is
 -- not a consumer. So this drop is a measured TRADEOFF, not a redundancy removal. Live
 -- node-27 measurement 2026-08-14 (8 chunks aggregated): 162 GB of carrying cost for
