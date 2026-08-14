@@ -504,8 +504,12 @@ regression, and the two refusals surface differently:
   `refusal_reason=CONFIG_INVALID` over its production receipt path
   `/home/nwm/node27-storage-inventory-audit-logs/completeness-receipt.json`.
   That file is the `#855` retention gate's completeness input, so every audit
-  tick on a drifted pair also starves the retention gate. Still fail-closed in
-  the safe direction: retention refuses and nothing is dropped.
+  tick on a drifted pair also starves the retention gate. That is fail-closed
+  in the safe direction — retention refuses and nothing is dropped — **only
+  while `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE` is enabled (the default)**.
+  In the explicit archive-gate `disabled` mode (§8; ADR 0002
+  Revision 2026-08-11) retention loads no completeness receipt at all, so a
+  starved gate stops nothing and chunks keep being dropped.
 
 Clearing it is an operator decision with a real capacity trade-off, and there
 are exactly two exits — no warn-only mode exists, because a warning is the
@@ -961,6 +965,11 @@ section 6.2 of the retention runbook when authored) MAY drop
 salvage-covered windows only with this documented manual recovery path
 in place.
 
+**Carve-out (#1369):** under the archive-gate `disabled` mode (§8; ADR 0002
+Revision 2026-08-11) retention drops without consulting salvage coverage at
+all, and the `COPY FROM` procedure below has no salvage object to restore from
+because none was produced — see [§8.7](#87-salvage-backed-windows).
+
 The archive rebuild drill (#854) verifies salvage objects by checksum
 and manifest row-count parity — it does NOT reingest them.
 
@@ -1052,7 +1061,10 @@ Related documents:
   #855): retention MAY drop a salvage-covered window only if the
   manifest here validates and the checksum pre-check above succeeds.
   When #855 lands section 6.2, it MUST cross-link back to this section
-  3.2.
+  3.2. Carve-out (#1369): under the archive-gate `disabled` mode (§8;
+  ADR 0002 Revision 2026-08-11) retention drops without consulting salvage
+  coverage, and no salvage object exists for the dropped window — see
+  [§8.7](#87-salvage-backed-windows).
 
 ## 4. Hypertable compression
 
@@ -2939,14 +2951,92 @@ the window.
 **Superseding decision (2026-08-14, issue #1369):** the archive lane is
 retired, so the gate is switched to `disabled` and the timer is enabled at
 its committed 05:15 UTC cadence. The bringup order is fixed: set the env
-mode with `ENFORCE=0` → manual dry-run receipt → review the candidate list
-against the LIVE `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
+mode with `ENFORCE=0` → manual dry-run receipt → **blast-radius inventory
+(the query below) over the full backlog**, reviewed against the LIVE
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
 manual tick (≤ per-tick bound) → `enable --now` the timer → capture
 `list-timers`. Until those live receipts are committed, treat the timer
 state on the box as the authority and re-verify with
 `systemctl --user list-timers` before quoting it. Rolling back means
 stopping FURTHER deletion (drop the env line, disable the timer); chunks
 already dropped in `disabled` mode are gone for good.
+
+#### Blast-radius inventory (bringup step 2, before `ENFORCE=1`)
+
+The dry-run receipt names chunks and nothing else: `candidate_chunks[]` and
+`deferred_remainder[]` are bare `<chunk_schema>.<chunk_name>` strings, so
+neither the owning hypertable, the time range, nor the bytes at stake are
+readable from the receipt. Resolve them with the read-only catalog query
+below before any `ENFORCE=1` tick. It re-uses the runner's own selection
+predicate — the same two target hypertables and the same non-strict
+`range_end <= cutoff` (H7) — anchored on the `cutoff` the dry-run receipt
+recorded, so in `disabled` mode its rows are exactly
+`candidate_chunks[] ∪ deferred_remainder[]` (in `enabled` mode the runner
+additionally intersects with the completeness receipt's `coverage_bounds`,
+which can only shrink its side, so the query stays a superset there).
+
+```
+set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
+CUTOFF="$(jq -r '.cutoff // empty' "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH")"
+: "${CUTOFF:?dry-run receipt carries no cutoff — re-run the dry-run first}"
+
+docker exec nhms-db psql -U nhms -d nhms -P pager=off -c "
+  WITH sized AS (
+      SELECT chunk_schema, chunk_name, total_bytes
+        FROM chunks_detailed_size('hydro.river_timeseries')
+      UNION ALL
+      SELECT chunk_schema, chunk_name, total_bytes
+        FROM chunks_detailed_size('met.forcing_station_timeseries')
+  ), backlog AS (
+      SELECT format('%s.%s', c.chunk_schema, c.chunk_name) AS chunk,
+             format('%s.%s', c.hypertable_schema, c.hypertable_name) AS hypertable,
+             c.range_start, c.range_end, c.is_compressed,
+             COALESCE(s.total_bytes, 0)::bigint AS total_bytes
+        FROM timescaledb_information.chunks c
+        LEFT JOIN sized s
+          ON s.chunk_schema = c.chunk_schema
+         AND s.chunk_name = c.chunk_name
+       WHERE (c.hypertable_schema, c.hypertable_name) IN
+             (('hydro','river_timeseries'), ('met','forcing_station_timeseries'))
+         AND c.range_end <= '${CUTOFF}'::timestamptz
+  )
+  SELECT chunk, hypertable, range_start, range_end, is_compressed,
+         total_bytes, pg_size_pretty(total_bytes) AS size
+    FROM backlog
+  UNION ALL
+  SELECT format('TOTAL: %s chunks', count(*)), NULL::text,
+         NULL::timestamptz, NULL::timestamptz, NULL::boolean,
+         sum(total_bytes)::bigint, pg_size_pretty(sum(total_bytes))
+    FROM backlog
+   ORDER BY range_end NULLS LAST, chunk;"
+```
+
+Notes on reading it: `chunks_detailed_size(<hypertable>)` is the same public
+TimescaleDB function the runner uses for `freed_bytes` (H4), so its
+`total_bytes` includes a compressed chunk's compressed sibling and indexes —
+the `is_compressed` column is there so a large compressed chunk is not
+mistaken for a small one. The `LEFT JOIN` plus `COALESCE(...,0)` mirrors the
+runner's own coercion: a chunk the size function does not report shows `0`
+bytes rather than dropping out of the listing. The trailing `TOTAL:` row is
+the whole backlog, not this tick's cut.
+
+**Record in the PR evidence BEFORE `enable --now`:** the full backlog count
+(`candidate_chunks[]` + `deferred_remainder[]`, which equals the `TOTAL:`
+row's chunk count) and the query's estimated total bytes. Enabling the timer
+does not authorize only the first cut — it authorizes grinding the ENTIRE
+backlog away at up to `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` chunks per
+daily tick (5 in the shipped env), unattended, with no archive backstop and
+no restore lane. The per-tick bound paces the deletion; it does not bound it.
+
+Cross-check the cutoff itself before trusting the listing: the query inherits
+the receipt's `cutoff` (= watermark − window), so a mis-set window silently
+widens every row here. Confirm the receipt's `window_days` equals the LIVE
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` in the env file — read it, never
+type a remembered number (§7.3 step 3 shows the extraction; node-27 ran 21 d
+as of 2026-08-01) — and that the receipt's `reference_time` is the display
+watermark, not a wall clock. Finally, note which listed chunks are the
+boundary-partial ones that `enabled` mode would have deferred (§8.5): in
+`disabled` mode they are candidates like any other.
 
 ### 8.2 Wire-format codes
 
@@ -3170,6 +3260,7 @@ cat "$NODE27_TIMESERIES_RETENTION_RECEIPT_PATH" | jq .
 # selected by NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE (unset = branch A).
 #
 # BRANCH A — archive gate ENABLED (default, fail-closed):
+#  - Completeness receipt fresh AND covers the drop window with verdict=complete
 #    for every subject overlapping the drop window.
 #  - Drill receipt fresh AND verdict=PASS AND forcing-recovery+runs coverage
 #    tuples span the drop window. The forcing-recovery union accepts verified

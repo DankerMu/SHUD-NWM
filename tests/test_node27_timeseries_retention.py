@@ -5442,9 +5442,19 @@ def test_runbook_8_4_preconditions_cite_the_adr_revision() -> None:
 
 
 def test_runbook_8_5_documents_archive_gate_field_and_boundary_partial_change() -> None:
+    """§8.5 must document the field AND the boundary-partial semantics change.
+
+    The field-name anchors alone are satisfied by a §8.5 that never says what
+    `disabled` mode does to boundary-partial chunks, so the spec THEN-clause's
+    §8.5 leg needs the semantic sentence pinned too: in `disabled` mode such
+    chunks are NOT deferred, they enter `candidate_chunks[]` and are dropped.
+    """
     section = _runbook_section("### 8.5 Reading the receipt", "### 8.6 Recovery")
     assert "archive_gate" in section
     assert _ARCHIVE_GATE_ENV_KEY in section
+    assert "boundary-partial" in section
+    assert "NOT deferred" in section
+    assert "candidate_chunks" in section
 
 
 def test_env_example_warns_about_the_missing_archive_backstop() -> None:

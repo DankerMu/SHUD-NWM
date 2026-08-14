@@ -24,9 +24,9 @@
 - [x] 3.3 `openspec validate retention-archive-gate-disabled-mode --strict --no-interactive`
 - [ ] 3.4 node-27 实机（merge 前，用户裁定 2026-08-14：**启用 timer 每日 05:15 UTC**）。**删除不可逆（归档 lane 已退役，无兜底）——回滚仅指停止后续删除（移除 env 变量 + disable timer），已删 chunk 无法恢复**。顺序硬约束：
   1. env 文件置 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`、`ENFORCE=0` → 手动 tick → dry-run receipt（archive_gate.mode=disabled，candidate 清单落盘）
-  2. 审 candidate 清单——以**实机实际 `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`（runbook/README 记录现为 21d，以 env 文件实值为准）**核对每个 candidate 的 range_end 均早于 watermark−window；确认首刀爆炸半径（≤5 chunk 的表名/时间范围/预估字节）后 → `ENFORCE=1` → 手动 tick → enforced receipt（≤5 chunk，freed_bytes 记录，`salvage_backed_windows=[]`）
+  2. 跑 §8.1 的逐 chunk 清单查询（round-1 F-E 补入：chunk 名/所属 hypertable/range_start/range_end/`chunks_detailed_size` 字节），覆盖 candidate + deferred_remainder 全量——**backlog 总条数与预估总字节先落 PR 证据**（`enable --now` 授权的是整个 backlog 以 ≤5 chunk/天磨完，不只是首刀）；做非循环交叉核验（清单查询按 receipt 自己的 cutoff 过滤，逐行核 range_end 是循环论证）：核对 receipt 的 `window_days`/`reference_time` 与实机 env 实值（runbook/README 记录现为 21d）及 display watermark 一致——window 配错会静默放宽每一行；确认首刀爆炸半径（≤5 chunk 的表名/时间范围/字节，含原 bounds-deferred 的 boundary-partial chunk）后 → `ENFORCE=1` → 手动 tick → enforced receipt（≤5 chunk，freed_bytes 记录，`salvage_backed_windows=[]`）
   3. `systemctl --user daemon-reload && systemctl --user enable --now nhms-node27-timeseries-retention.timer` → `systemctl --user list-timers` 取证（NEXT 触发时刻在场）
-  4. 两 receipt + timer 状态贴 PR 评论
+  4. 两 receipt + 清单查询输出 + timer 状态贴 PR 评论；**两份落地 receipt 补记进 receipts README `## Receipts` 列表**（round-1 F-C：否则 README `:7` 与 `:168-172` 自相矛盾）；落地若受阻，README 完成时态措辞必须在 merge 前改回"决策已记录、实机状态以 receipt 为准"
 - [ ] 3.5 CI 定向测试绿
 
 ## 偏离与范围外挂账
