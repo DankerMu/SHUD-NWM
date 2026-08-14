@@ -396,7 +396,7 @@ write, so "`deferred` is non-empty" is **not** a signal for this. The signal
 is the *state* — a tick would select ≥2 river chunks, i.e. roughly ≥1 week of
 missed ticks (a §4.5 stop+mask override window, a §4.3.2 decompress pause, or
 an outage). What an operator can actually check: the unit went `failed`
-(`systemctl status` / `journalctl`; `rc=124` is the wall `TERM` — this is the
+(`systemctl --user status` / `journalctl --user -u`; `rc=124` is the wall `TERM` — this is the
 authority), **or** the receipt at
 `NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH` is **stale** — its `generated_at`
 predates the last timer trigger (`systemctl --user list-timers`). Receipt
