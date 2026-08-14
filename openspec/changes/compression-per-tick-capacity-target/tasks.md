@@ -24,6 +24,6 @@
 
 - issue 兄弟登记表更新：唯一存活兄弟为 retention per-tick bound；product_archive/db_export_salvage 已随 #1370 退役。
 - issue 两处陈旧前提（explorer 核实）：runbook 指针早已是 #1237（非 #1156）；PR #1236 已合并——fixture 按现状执行，不按 issue 原文。
-- LAG_SECONDS / RECEIPT_PATH 实机漂移：登记不处理（Non-Goals）；LAG 604800→172800 的**行为面后果**（7 d chunk 配 2 d lag 使回填窗口实质压缩 5 天，write guard 拒绝与已压缩 range 重叠的写入）超出登记价值，交 issue-scribe 独立立案（复审越界升级 2）。
+- LAG_SECONDS / RECEIPT_PATH 实机漂移：登记不处理（Non-Goals）。**C4 裁定修正**：live 172800 不是"无记录漂移"——runbook §4.3.2.1 (:1167-1181) 已记 2026-08-07 审慎决策（含备份文件名与 md0 回调条件），其行为面后果（超 2 d 的 ingest 中断须先 decompress）同段已逐字记载——**去重后不另立案**，runbook 登记句指向 §4.3.2.1。
 - **DOC_STATUS 分歧登记（复审 P2-5）**：active change `openspec/changes/tier-node27-timeseries-storage/design.md:546` 写 `PER_TICK_BOUND (default 5)`，模板改 4 后该行陈旧——照 #1352 判例不改写他变更设计文档，在此登记分歧；该 change 归档时随其处理。
 - **capability spec 超时默认值失配**（复审越界升级 1，pre-existing）：`openspec/specs/hypertable-compression/spec.md:707,712` 仍写 840000/900/940，代码已是 3600000/3900/3940（#1352 改，从未落 OpenSpec 制品）——交 issue-scribe 独立立案，本 change 的 spec delta 不顺手改（避免混入他人 requirement 语义）。

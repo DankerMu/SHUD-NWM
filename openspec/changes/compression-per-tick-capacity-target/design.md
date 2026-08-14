@@ -14,14 +14,14 @@
 
 1. **到达率**：`timescaledb_information.dimensions` 两热表 chunk 区间均 7 天且边界对齐（census：river 5 chunk / forcing 6 chunk，range 边界同为周三 00:00 UTC 系）→ 稳态每周同一天到期 **2 个终态 chunk**（2026-08-14T04:25 tick receipt 实证：恰好压了这一对）。
 2. **backlog 上界（条件性，非"物理"）**：retention 窗口约束每表未压 chunk 存量 ≤3 → 全库可积压 ≤6。**前提三条显式记**：(a) 窗口 21 d 取自 **live** env（committed 模板 `infra/env/node27-timeseries-retention.example` 写 `=14`，漂移已记 runbook :38-40，本 issue 不处理不判定）；(b) retention timer **2026-08-14 才启用**（#1369），census 仍高于 21d/7d 稳态应有的 ~4/表，收敛尚未观测到；(c) timer 停用或窗口调整时该上界消失，本推导须按公式重推。
-3. **时间预算（双约束的墙侧）**：#1156 预算链 live 无 override → 代码默认生效：`WRAPPER_WALL_SECONDS=3900`（`scripts/node27_timeseries_compression.py:115-116`），且这是**整 tick 墙不是单 chunk 墙**（`:102-105` 注释、spec :707 末句、runbook §4.5 表格三处同源），runner 循环内无 elapsed 守卫，超墙 = wrapper `timeout` TERM 打断 DDL。按 runbook §4.5 估时配方（6.0 s/GB + ~300 s 开销）复核实测：本周对 chunk（230GB+12.7GB）估 1836 s ≈ 实测 30m36s ✓；稳态 river chunk 268-409 GB 单个 1608-2454 s → **3 river + 1 forcing ≈ 5280-7818 s，远超 3900 s 墙**。
+3. **时间预算（双约束的墙侧）**：#1156 预算链 live 无 override → 代码默认生效：`WRAPPER_WALL_SECONDS=3900`（`scripts/node27_timeseries_compression.py:115-116`），且这是**整 tick 墙不是单 chunk 墙**（`:102-105` 注释、spec :707 末句、runbook §4.5 表格三处同源），runner 循环内无 elapsed 守卫，超墙 = wrapper `timeout` TERM 打断 DDL。估时口径（复审 C2 裁定后的诚实版）：§4.5 估时配方 as-written 是 `GB × 6.0 s`（**不含开销项**），对本周对 chunk（230GB+12.7GB）给 1456 s；实测 30m36s = 1836 s，**反解非压缩残差 ~380 s**（1836−1456；§4.5 :1548 自称的 ~300 s worst-case 已被实测超出，注脚记）。据 6.0 s/GB + 380 s 残差：稳态 river chunk 268-409 GB 单个 1608-2454 s（压缩项）→ **3 river + 1 forcing ≈ 5280-7818 s，远超 3900 s 墙**。**backlog 即墙约束的失效条件**：选择是 table-major（`:396`，river 全排 forcing 前），任何 ≥2 个 river chunk 同时 eligible 的无人值守 tick 在稳态带内可超墙（2R+2F 在 R≥281 GB 超）；超墙 tick 不写 receipt、unit 落 failed——有效检测信号是"单 tick 选中 ≥2 river / 上一 tick 无 receipt / unit failed"，处置 = 重启 timer 前先按 §4.5 置 bound=1。此判据与失效清单一并写入 runbook §4。
 4. **live 现值即 4** → 实机零改动，"统一"只发生在模板侧（5→4）。
 5. **结构性事实（AC-5 主论据）**：chunk 按时间维切（7 d），**终态 chunk 个数对 ingest 体量不敏感**——ingest 翻倍只让 chunk 变大不变多，增长压力全部落在 per-chunk timeout 预算（#1156 的领域），不落在 per-tick bound 上。
 
 **容量关系是双约束**，runbook §4 重写必须两条都写并显式交叉引用 §4.5：
 
 - 吞吐约束：`bound × 1 tick/day ≥ 稳态到达 2 chunk/week`（bound=4 → 14× 余量）。
-- 墙约束：`Σ(选中 chunk GB × 6.0 s) + ~300 s ≤ WRAPPER_WALL_SECONDS(3900)` —— river 尺寸下**单 tick 实际可兑现 ≤ ~2 chunk**。
+- 墙约束：`Σ(选中 chunk GB × 6.0 s) + ~380 s（2026-08-14 实测残差）≤ WRAPPER_WALL_SECONDS(3900)` —— river 尺寸下**单 tick 实际可兑现 ≤ ~2 chunk**；失效清单必须含"backlog（≥2 river 同时 eligible）"一条（C1 裁定）。
 
 **结论改写**：bound=4 是吞吐余量上限，**不是单 tick 可兑现容量**；稳态周对 chunk（1 river + 1 forcing ≈ 1836 s）在墙内一 tick 完成；灾后追赶不依赖 bound 值本身，按 §4.5 配方执行（bound=1 + 抬墙 override），6-chunk 最大 backlog 的真实收敛 ≥3 tick 且须走 §4.5，不写"2 tick 收敛"。
 
