@@ -100,6 +100,96 @@ def _station_variable_filter_tokens(values: Sequence[str] | str | None) -> list[
     return tokens
 
 
+# The candidate_runs CTE body of the authoritative latest-product fallback.
+# Held as ONE module-level template because the fallback runs it twice — once as
+# the cheap scalar header prefetch, once inside the heavy coverage statement.
+# Hand-copying it into a second string is exactly the drift this issue is about,
+# so both statements build their CTE from here via
+# ``_qhh_latest_candidate_runs_sql``. Named placeholders (the fallback binds a
+# dict); the fast path keeps its own positional copy (its shape is unchanged).
+_QHH_LATEST_CANDIDATE_RUNS_SQL = """
+                SELECT
+                    h.run_id,
+                    h.run_type,
+                    h.scenario_id,
+                    h.model_id,
+                    h.basin_version_id,
+                    h.forcing_version_id,
+                    h.source_id,
+                    h.cycle_time,
+                    h.start_time AS run_start_time,
+                    h.end_time AS run_end_time,
+                    h.status,
+                    h.created_at AS run_created_at,
+                    h.updated_at AS run_updated_at,
+                    mi.river_network_version_id,
+                    mi.basin_version_id AS model_basin_version_id,
+                    bv.basin_id,
+                    rnv.basin_version_id AS river_network_basin_version_id,
+                    COALESCE(
+                        CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_river_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_river_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'segment_count')::integer END,
+                        rnv.segment_count
+                    ) AS expected_segment_count,
+                    fv.forcing_version_id AS fv_forcing_version_id,
+                    fv.model_id AS forcing_model_id,
+                    fv.source_id AS forcing_source_id,
+                    fv.cycle_time AS forcing_cycle_time,
+                    fv.start_time AS forcing_start_time,
+                    fv.end_time AS forcing_end_time,
+                    fv.station_count AS expected_station_count,
+                    fv.checksum AS forcing_checksum,
+                    GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
+                    LEAST(
+                        h.end_time,
+                        fv.end_time,
+                        h.cycle_time + (%(horizon)s * INTERVAL '1 hour')
+                    ) AS display_end_time
+                FROM hydro.hydro_run h
+                JOIN core.basin_version bv
+                  ON bv.basin_version_id = h.basin_version_id
+                LEFT JOIN core.model_instance mi
+                  ON mi.model_id = h.model_id
+                LEFT JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = mi.river_network_version_id
+                LEFT JOIN met.forcing_version fv
+                  ON fv.forcing_version_id = h.forcing_version_id
+                WHERE bv.basin_id = %(basin_id)s
+                  AND h.run_type = 'forecast'
+                  AND h.status IN ('succeeded', 'parsed', 'published')
+                  AND LOWER(h.source_id) = LOWER(%(source_id)s)
+                  {identity_sql}{scan_pin_sql}
+                  AND h.cycle_time IS NOT NULL
+                ORDER BY h.cycle_time DESC, h.run_id DESC
+                LIMIT %(candidate_limit)s
+"""
+
+_QHH_LATEST_SCAN_RUN_ID_PIN_SQL = "\n                  AND h.run_id = %(scan_run_id)s"
+
+
+def _qhh_latest_candidate_runs_sql(*, identity_sql: str, pin_scan_run_id: bool) -> str:
+    """Render the shared candidate_runs CTE body.
+
+    ``pin_scan_run_id`` adds the heavy statement's literal ``run_id`` predicate:
+    it hands the planner a constant for the hydro_run access path and structurally
+    guarantees the bound ``scan_*`` scalars describe the very candidate being
+    served. Only sound because the candidate limit is 1 (see
+    ``QHH_LATEST_SEARCH_LIMIT``).
+    """
+    return _QHH_LATEST_CANDIDATE_RUNS_SQL.format(
+        identity_sql=identity_sql,
+        scan_pin_sql=_QHH_LATEST_SCAN_RUN_ID_PIN_SQL if pin_scan_run_id else "",
+    )
+
+
 @dataclass(frozen=True)
 class PsycopgForecastStore:
     database_url: str
@@ -1238,73 +1328,70 @@ class PsycopgForecastStore:
             covered = [candidate.pop("coverage_present", False) for candidate in candidates]
             if all(covered):
                 return candidates
+        # Authoritative CTE fallback, in the pushdown shape proven by
+        # packages/common/display_coverage.py (_SCAN_HEADER_SQL / _refresh): the
+        # planner cannot push the candidate_runs join equalities or the
+        # correlated window columns into the hypertable chunk scans, so a single
+        # statement seq-scans met.forcing_station_timeseries and
+        # hydro.river_timeseries end to end. Instead prefetch the (at most one,
+        # see QHH_LATEST_SEARCH_LIMIT) candidate's scalar identity and display
+        # window with a header statement built from the SAME candidate SQL, then
+        # bind those scalars as literal scan predicates.
+        #
+        # Both statements run inside this store's REPEATABLE READ readonly
+        # transaction, i.e. on one snapshot: an empty header means the old
+        # single-statement fallback would have produced no rows either, so the
+        # heavy statement is skipped instead of scanning for nothing.
+        identity_sql_named, identity_params_named = _qhh_latest_strict_identity_sql(identity, named=True)
+        parameters: dict[str, Any] = {
+            "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
+            "basin_id": basin_id,
+            "source_id": source_id,
+            "candidate_limit": candidate_limit,
+            "variables": list(MVP_STATION_VARIABLES),
+            "variable_count": len(MVP_STATION_VARIABLES),
+            **identity_params_named,
+        }
+        header_candidate_runs_sql = _qhh_latest_candidate_runs_sql(
+            identity_sql=identity_sql_named,
+            pin_scan_run_id=False,
+        )
+        headers = self._fetch_all(
+            cursor,
+            f"""
+            WITH candidate_runs AS ({header_candidate_runs_sql}            )
+            SELECT
+                run_id,
+                forcing_version_id,
+                basin_version_id,
+                river_network_version_id,
+                LOWER(source_id) AS source_id_lower,
+                display_start_time,
+                display_end_time
+            FROM candidate_runs
+            """,
+            parameters,
+        )
+        if not headers:
+            return []
+        header = headers[0]
+        parameters.update(
+            scan_run_id=header["run_id"],
+            scan_forcing_version_id=header["forcing_version_id"],
+            scan_basin_version_id=header["basin_version_id"],
+            scan_river_network_version_id=header["river_network_version_id"],
+            scan_source_id_lower=header["source_id_lower"],
+            scan_display_start=header["display_start_time"],
+            scan_display_end=header["display_end_time"],
+        )
+        pinned_candidate_runs_sql = _qhh_latest_candidate_runs_sql(
+            identity_sql=identity_sql_named,
+            pin_scan_run_id=True,
+        )
         return self._fetch_all(
             cursor,
             f"""
-            WITH candidate_runs AS (
-                SELECT
-                    h.run_id,
-                    h.run_type,
-                    h.scenario_id,
-                    h.model_id,
-                    h.basin_version_id,
-                    h.forcing_version_id,
-                    h.source_id,
-                    h.cycle_time,
-                    h.start_time AS run_start_time,
-                    h.end_time AS run_end_time,
-                    h.status,
-                    h.created_at AS run_created_at,
-                    h.updated_at AS run_updated_at,
-                    mi.river_network_version_id,
-                    mi.basin_version_id AS model_basin_version_id,
-                    bv.basin_id,
-                    rnv.basin_version_id AS river_network_basin_version_id,
-                    COALESCE(
-                        CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
-                            THEN (mi.resource_profile->>'output_segment_count')::integer END,
-                        CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
-                            THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
-                        CASE WHEN mi.resource_profile->>'shud_output_river_count' ~ '^[0-9]+$'
-                            THEN (mi.resource_profile->>'shud_output_river_count')::integer END,
-                        CASE WHEN mi.resource_profile->'output_river'->>'output_segment_count' ~ '^[0-9]+$'
-                            THEN (mi.resource_profile->'output_river'->>'output_segment_count')::integer END,
-                        CASE WHEN mi.resource_profile->'output_river'->>'segment_count' ~ '^[0-9]+$'
-                            THEN (mi.resource_profile->'output_river'->>'segment_count')::integer END,
-                        rnv.segment_count
-                    ) AS expected_segment_count,
-                    fv.forcing_version_id AS fv_forcing_version_id,
-                    fv.model_id AS forcing_model_id,
-                    fv.source_id AS forcing_source_id,
-                    fv.cycle_time AS forcing_cycle_time,
-                    fv.start_time AS forcing_start_time,
-                    fv.end_time AS forcing_end_time,
-                    fv.station_count AS expected_station_count,
-                    fv.checksum AS forcing_checksum,
-                    GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
-                    LEAST(
-                        h.end_time,
-                        fv.end_time,
-                        h.cycle_time + (%s * INTERVAL '1 hour')
-                    ) AS display_end_time
-                FROM hydro.hydro_run h
-                JOIN core.basin_version bv
-                  ON bv.basin_version_id = h.basin_version_id
-                LEFT JOIN core.model_instance mi
-                  ON mi.model_id = h.model_id
-                LEFT JOIN core.river_network_version rnv
-                  ON rnv.river_network_version_id = mi.river_network_version_id
-                LEFT JOIN met.forcing_version fv
-                  ON fv.forcing_version_id = h.forcing_version_id
-                WHERE bv.basin_id = %s
-                  AND h.run_type = 'forecast'
-                  AND h.status IN ('succeeded', 'parsed', 'published')
-                  AND LOWER(h.source_id) = LOWER(%s)
-                  {identity_sql}
-                  AND h.cycle_time IS NOT NULL
-                ORDER BY h.cycle_time DESC, h.run_id DESC
-                LIMIT %s
-            ),
+            WITH candidate_runs AS ({pinned_candidate_runs_sql}            ),
             station_sample_rows AS (
                 SELECT
                     cr.run_id,
@@ -1325,9 +1412,19 @@ class PsycopgForecastStore:
                   ON cr.forcing_version_id = fst.forcing_version_id
                  AND fst.basin_version_id = cr.basin_version_id
                  AND LOWER(fst.source_id) = LOWER(cr.source_id)
-                WHERE fst.variable = ANY(%s)
+                WHERE fst.variable = ANY(%(variables)s)
                   AND fst.valid_time >= cr.display_start_time
                   AND fst.valid_time <= cr.display_end_time
+                  AND (%(scan_forcing_version_id)s IS NULL
+                       OR fst.forcing_version_id = %(scan_forcing_version_id)s)
+                  AND (%(scan_basin_version_id)s IS NULL
+                       OR fst.basin_version_id = %(scan_basin_version_id)s)
+                  AND (%(scan_source_id_lower)s IS NULL
+                       OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
+                  AND (%(scan_display_start)s IS NULL
+                       OR fst.valid_time >= %(scan_display_start)s)
+                  AND (%(scan_display_end)s IS NULL
+                       OR fst.valid_time <= %(scan_display_end)s)
                   AND EXISTS (
                       SELECT 1
                       FROM met.interp_weight iw
@@ -1448,7 +1545,7 @@ class PsycopgForecastStore:
                     basin_version_id,
                     station_source_id,
                     valid_time
-                HAVING COUNT(DISTINCT variable) = %s
+                HAVING COUNT(DISTINCT variable) = %(variable_count)s
             ),
             station_identity_rollup AS (
                 SELECT
@@ -1633,6 +1730,15 @@ class PsycopgForecastStore:
                 WHERE rt.variable = 'q_down'
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
+                  AND (%(scan_run_id)s IS NULL OR rt.run_id = %(scan_run_id)s)
+                  AND (%(scan_basin_version_id)s IS NULL
+                       OR rt.basin_version_id = %(scan_basin_version_id)s)
+                  AND (%(scan_river_network_version_id)s IS NULL
+                       OR rt.river_network_version_id = %(scan_river_network_version_id)s)
+                  AND (%(scan_display_start)s IS NULL
+                       OR rt.valid_time >= %(scan_display_start)s)
+                  AND (%(scan_display_end)s IS NULL
+                       OR rt.valid_time <= %(scan_display_end)s)
             ),
             river_identity_coverage AS (
                 SELECT
@@ -1742,15 +1848,7 @@ class PsycopgForecastStore:
              AND hc.river_network_version_id = cr.river_network_version_id
             ORDER BY cr.cycle_time DESC, cr.run_id DESC
             """,
-            (
-                QHH_LATEST_EXPECTED_HORIZON_HOURS,
-                basin_id,
-                source_id,
-                *identity_params,
-                candidate_limit,
-                list(MVP_STATION_VARIABLES),
-                len(MVP_STATION_VARIABLES),
-            ),
+            parameters,
         )
 
     def _fetch_latest_qhh_display_candidates_fast(
@@ -2312,8 +2410,17 @@ class PsycopgForecastStore:
         rows = self._fetch_all(cursor, statement, parameters)
         return rows[0] if rows else None
 
-    def _fetch_all(self, cursor: Any, statement: str, parameters: Sequence[Any]) -> list[dict[str, Any]]:
-        cursor.execute(statement, tuple(parameters))
+    def _fetch_all(
+        self,
+        cursor: Any,
+        statement: str,
+        parameters: Mapping[str, Any] | Sequence[Any],
+    ) -> list[dict[str, Any]]:
+        # psycopg2 fills %s from a sequence and %(name)s from a mapping. A
+        # Mapping must be handed over untouched: tuple() would degrade it to a
+        # tuple of key NAMES and every named placeholder would break.
+        bound = parameters if isinstance(parameters, Mapping) else tuple(parameters)
+        cursor.execute(statement, bound)
         return [dict(row) for row in cursor.fetchall()]
 
     def _attach_forcing_lineage(self, cursor: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2701,15 +2808,42 @@ def _parse_qhh_latest_cycle_time(value: datetime | str | None) -> datetime:
         ) from error
 
 
-def _qhh_latest_strict_identity_sql(identity: _QhhLatestStrictIdentity | None) -> tuple[str, tuple[Any, ...]]:
-    if identity is None:
-        return "", ()
-    return (
+_QHH_LATEST_STRICT_IDENTITY_SQL = """
+                  AND h.run_id = {run_id}
+                  AND h.cycle_time = {cycle_time}
+                  AND h.model_id = {model_id}
         """
-                  AND h.run_id = %s
-                  AND h.cycle_time = %s
-                  AND h.model_id = %s
-        """,
+
+
+def _qhh_latest_strict_identity_sql(
+    identity: _QhhLatestStrictIdentity | None,
+    *,
+    named: bool = False,
+) -> tuple[str, tuple[Any, ...] | dict[str, Any]]:
+    """Strict-identity predicates plus their parameters.
+
+    One SQL template, two placeholder styles: the positional default for the
+    fast path and the unavailable-context query, ``named=True`` for the
+    pushdown fallback, whose two statements bind a dict. Copying the template
+    per style is how the two drift apart, so it stays single-sourced.
+    """
+    if identity is None:
+        return "", ({} if named else ())
+    if named:
+        return (
+            _QHH_LATEST_STRICT_IDENTITY_SQL.format(
+                run_id="%(identity_run_id)s",
+                cycle_time="%(identity_cycle_time)s",
+                model_id="%(identity_model_id)s",
+            ),
+            {
+                "identity_run_id": identity.run_id,
+                "identity_cycle_time": identity.cycle_time,
+                "identity_model_id": identity.model_id,
+            },
+        )
+    return (
+        _QHH_LATEST_STRICT_IDENTITY_SQL.format(run_id="%s", cycle_time="%s", model_id="%s"),
         (identity.run_id, identity.cycle_time, identity.model_id),
     )
 
