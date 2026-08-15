@@ -1,10 +1,10 @@
 """Unit tests for the node-27 river identity backfill runner (issue #1339).
 
-The database is faked at the CURSOR boundary — the same seam
-``tests/test_node27_timeseries_compression.py`` uses — so batch planning,
-re-entrancy, the duration wall, the two chunk-level skips, the fail-closed
-shortfall split, receipt schema conformance and the flock mutex are all
-exercised without a live TimescaleDB.
+Batch planning, cursor re-entrancy, the duration wall, the two chunk-level
+skips, the per-batch write guard and the fail-closed shortfall split, all
+driven through the cursor-level fakes in ``tests/river_identity_backfill_fakes``.
+Receipt/schema/lock/config coverage lives in
+``tests/test_node27_river_identity_backfill_receipt.py``.
 
 What this module deliberately does NOT claim: anything about TimescaleDB
 compression semantics. Those are pinned by the integration module against
@@ -14,177 +14,31 @@ production oracle is 2.10.2.
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
-import os
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import jsonschema
 import pytest
 
 from scripts import node27_river_identity_backfill as backfill
-
-_ROOT = Path(__file__).resolve().parents[1]
-_SCHEMA_PATH = _ROOT / "schemas/river_identity_backfill_receipt.schema.json"
-_RUNNER_SOURCE_PATH = _ROOT / "scripts/node27_river_identity_backfill.py"
-_MIGRATION_PATH = _ROOT / "db/migrations/000050_river_identity_normalization.sql"
-
-_NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
-_LAG = 604_800  # 7 days, the compression lane's default
-
-
-def _load_schema() -> dict[str, Any]:
-    return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
-
-
-def _args(**overrides: object) -> argparse.Namespace:
-    defaults: dict[str, object] = {
-        "enforce": False,
-        "probe": False,
-        "final_sweep": False,
-        "receipt_path": None,
-        "lock_path": None,
-    }
-    defaults.update(overrides)
-    return argparse.Namespace(**defaults)
-
-
-def _env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
-    env: dict[str, str] = {
-        "DATABASE_URL": "postgresql://user:secretpw@127.0.0.1:55432/nhms",
-        "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": str(_LAG),
-        "NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH": str(tmp_path / "receipt.json"),
-        "NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH": str(tmp_path / "runner.lock"),
-    }
-    for key, value in overrides.items():
-        if value is None:
-            env.pop(key, None)
-        else:
-            env[key] = value
-    return env
-
-
-def _config(tmp_path: Path, **overrides: Any) -> backfill.BackfillConfig:
-    base = backfill.config_from_args(
-        _args(**{k: v for k, v in overrides.items() if k in {"enforce", "probe", "final_sweep"}}),
-        _env(tmp_path),
-    )
-    replacements = {k: v for k, v in overrides.items() if k not in {"enforce", "probe", "final_sweep"}}
-    if not replacements:
-        return base
-    import dataclasses
-
-    return dataclasses.replace(base, **replacements)
-
-
-def _chunk(
-    name: str,
-    *,
-    days_old: float,
-    compressed: bool = False,
-    pages: int = 10,
-    total_bytes: int = 8192 * 10,
-) -> backfill.ChunkRow:
-    end = _NOW - timedelta(days=days_old)
-    return backfill.ChunkRow(
-        chunk_schema="_timescaledb_internal",
-        chunk_name=name,
-        range_start=end - timedelta(days=7),
-        range_end=end,
-        is_compressed=compressed,
-        total_bytes=total_bytes,
-        relpages=pages,
-        pages_planned=pages,
-        approx_rows=pages * 80,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
-
-
-class _QueryCancelled(Exception):
-    """Stand-in for psycopg2's QueryCanceled (SQLSTATE 57014)."""
-
-    pgcode = "57014"
-
-    def __str__(self) -> str:  # pragma: no cover - message shape only
-        return "canceling statement due to statement timeout"
-
-
-class _FakeCursor:
-    """Cursor that answers by SQL-substring match and records every call."""
-
-    def __init__(self, connection: "_FakeConnection") -> None:
-        self.connection = connection
-        self._result: Any = None
-        self._rows: list[Any] = []
-        self.rowcount = -1
-
-    def __enter__(self) -> "_FakeCursor":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return None
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.connection.executions.append((sql, params))
-        for matcher, handler in self.connection.handlers:
-            if matcher in sql:
-                outcome = handler(sql, params)
-                if isinstance(outcome, Exception):
-                    raise outcome
-                if isinstance(outcome, dict):
-                    self._result = outcome.get("fetchone")
-                    self._rows = outcome.get("fetchall", [])
-                    self.rowcount = int(outcome.get("rowcount", -1))
-                else:
-                    self._result = (outcome,)
-                    self._rows = []
-                    self.rowcount = -1
-                return
-        self._result = None
-        self._rows = []
-        self.rowcount = -1
-
-    def fetchone(self) -> Any:
-        return self._result
-
-    def fetchall(self) -> list[Any]:
-        return self._rows
-
-    def close(self) -> None:
-        return None
-
-
-class _FakeConnection:
-    def __init__(self, handlers: list[tuple[str, Any]]) -> None:
-        self.handlers = handlers
-        self.executions: list[tuple[str, Any]] = []
-        self.commits = 0
-        self.rollbacks = 0
-        self.closed = False
-
-    def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self)
-
-    def commit(self) -> None:
-        self.commits += 1
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
-
-    def close(self) -> None:
-        self.closed = True
-
-
-def _statements(connection: _FakeConnection, needle: str) -> list[tuple[str, Any]]:
-    return [call for call in connection.executions if needle in call[0]]
-
+from tests.river_identity_backfill_fakes import (
+    LAG,
+    MIGRATION_PATH,
+    NOW,
+    RUNNER_SOURCE_PATH,
+    UNCOMPRESSED_GUARD,
+    FakeConnection,
+    QueryCancelled,
+    chunk,
+    config,
+    env,
+    inventory_row,
+    statements,
+)
+from tests.river_identity_backfill_fakes import (
+    args as _args,
+)
 
 # ---------------------------------------------------------------------------
 # 1. Batch planner (ctid block ranges)
@@ -262,22 +116,141 @@ def test_update_joins_enum_labels_instead_of_casting_the_text_column() -> None:
 
 
 def test_second_complete_pass_reports_zero_changed_rows() -> None:
-    chunk = _chunk("c1", days_old=30, pages=4)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30, pages=4)
+    connection = FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
+            UNCOMPRESSED_GUARD,
             (backfill._PENDING_COUNT_SQL.strip()[:40], lambda s, p: {"fetchone": (0,)}),
             ("SELECT count(*)\nFROM ONLY", lambda s, p: {"fetchone": (0,)}),
         ]
     )
-    config = _config(Path("/tmp"), enforce=True)
-    budget = [config.max_batches]
+    settings = config(Path("/tmp"), enforce=True)
 
-    descriptor = backfill.process_chunk(connection, chunk, config, cursor_budget=budget)
+    descriptor = backfill.process_chunk(
+        connection, target, settings, cursor_budget=[settings.max_batches]
+    )
 
     assert descriptor["state"] == "skipped_no_pending"
     assert descriptor["updated_rows"] == 0
-    assert _statements(connection, "UPDATE ONLY") == []
+    assert statements(connection, "UPDATE ONLY") == []
+
+
+# ---------------------------------------------------------------------------
+# 2b. The persisted block cursor is READ BACK, not just written
+# ---------------------------------------------------------------------------
+
+
+def _fresh_connection(*, candidates: int = 4, updated: int = 4) -> FakeConnection:
+    return FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": updated}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (candidates,)}),
+        ]
+    )
+
+
+def _first_update_range(connection: FakeConnection) -> tuple[str, str]:
+    sql, params = statements(connection, "UPDATE ONLY")[0]
+    return params["first_page_tid"], params["last_page_tid"]
+
+
+def test_enforce_resumes_from_the_page_the_previous_receipt_recorded() -> None:
+    """The production path must CONSUME the cursor, not merely publish it.
+
+    A write-only cursor makes the per-invocation budget a permanent stall: each
+    run re-scans the finished prefix with zero-candidate batches, burns the
+    whole budget on them, and still reports a clean deferral.
+    """
+    target = chunk("c1", days_old=30, pages=100)
+    connection = _fresh_connection()
+    settings = config(Path("/tmp"), enforce=True, batch_pages=10, max_batches=1, batch_sleep_ms=0)
+
+    descriptor = backfill.process_chunk(
+        connection, target, settings, cursor_budget=[1], first_page=60
+    )
+
+    assert descriptor["resumed_from_page"] == 60
+    assert _first_update_range(connection) == ("(60,0)", "(70,0)")
+    # Only the remaining pages were planned, not all ten batches.
+    assert descriptor["batches_planned"] == 4
+
+
+def test_a_stale_cursor_that_plans_nothing_is_discarded_in_favour_of_a_rescan() -> None:
+    """The sentinel outranks the cursor. A cursor past the end of a chunk that
+    still holds NULL rows would strand them forever."""
+    target = chunk("c1", days_old=30, pages=8)
+    connection = _fresh_connection()
+    settings = config(Path("/tmp"), enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0)
+
+    descriptor = backfill.process_chunk(
+        connection, target, settings, cursor_budget=[10], first_page=999
+    )
+
+    assert descriptor["resumed_from_page"] == 0
+    assert _first_update_range(connection) == ("(0,0)", "(4,0)")
+
+
+def test_build_receipt_feeds_the_previous_receipts_cursor_into_the_plan(tmp_path: Path) -> None:
+    target = chunk("c1", days_old=30, pages=100)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": backfill.SCHEMA_VERSION,
+                "cursor": {target.key: 80},
+            }
+        ),
+        encoding="utf-8",
+    )
+    connection = FakeConnection(
+        [
+            ("pg_total_relation_size", lambda s, p: {"fetchall": [inventory_row(target)]}),
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": 4}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (4,)}),
+        ]
+    )
+
+    receipt = backfill.build_receipt(
+        config(tmp_path, enforce=True, batch_pages=10, max_batches=1, batch_sleep_ms=0),
+        now_utc=NOW,
+        connect=lambda _url: connection,
+        head_sha="0" * 40,
+        timer_state={"observed": True, "is_active": "inactive", "is_enabled": "masked",
+                     "unavailable_reason": None},
+    )
+
+    assert receipt["chunks"][0]["resumed_from_page"] == 80
+    assert _first_update_range(connection) == ("(80,0)", "(90,0)")
+    assert receipt["cursor"][target.key] == 90
+
+
+def test_persisted_cursor_is_discarded_when_the_receipt_is_unusable(tmp_path: Path) -> None:
+    """Anything unrecognised degrades to a full rescan (slow, still correct)
+    rather than to a guess (fast, possibly stranding rows)."""
+    path = tmp_path / "receipt.json"
+
+    assert backfill.load_persisted_cursor(path) == {}
+
+    path.write_text("{not json", encoding="utf-8")
+    assert backfill.load_persisted_cursor(path) == {}
+
+    path.write_text(json.dumps({"schema_version": "9.9", "cursor": {"a.b": 5}}), encoding="utf-8")
+    assert backfill.load_persisted_cursor(path) == {}
+
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": backfill.SCHEMA_VERSION,
+                "cursor": {"a.b": 5, "c.d": -1, "e.f": "12", "g.h": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert backfill.load_persisted_cursor(path) == {"a.b": 5}
 
 
 # ---------------------------------------------------------------------------
@@ -287,57 +260,93 @@ def test_second_complete_pass_reports_zero_changed_rows() -> None:
 
 def test_duration_wall_is_enforced_by_the_server_not_a_client_stopwatch() -> None:
     """A client-side timer cannot stop a statement that already holds row locks."""
-    chunk = _chunk("c1", days_old=30)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
         [
             ("SELECT count(*)", lambda s, p: {"fetchone": (5,)}),
             ("UPDATE ONLY", lambda s, p: {"rowcount": 5}),
         ]
     )
     with connection.cursor() as cursor:
-        backfill.execute_batch(cursor, chunk, first_page=0, last_page=4, duration_wall_ms=7777)
+        backfill.execute_batch(cursor, target, first_page=0, last_page=4, duration_wall_ms=7777)
 
     assert ("SET LOCAL statement_timeout = 7777", None) in connection.executions
 
 
-def test_cancelled_batch_is_retried_once_at_half_the_range() -> None:
-    chunk = _chunk("c1", days_old=30)
+def test_cancelled_batch_is_retried_once_at_half_the_range_and_returns_the_remainder() -> None:
+    target = chunk("c1", days_old=30)
     attempts: list[tuple[str, str]] = []
 
     def update_handler(sql: str, params: Any) -> Any:
         attempts.append((params["first_page_tid"], params["last_page_tid"]))
         if len(attempts) == 1:
-            return _QueryCancelled()
+            return QueryCancelled()
         return {"rowcount": 3}
 
-    connection = _FakeConnection(
+    connection = FakeConnection(
         [
+            UNCOMPRESSED_GUARD,
             ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
             ("UPDATE ONLY", update_handler),
         ]
     )
-    config = _config(Path("/tmp"), enforce=True)
+    settings = config(Path("/tmp"), enforce=True)
 
-    outcome, halved = backfill._run_one_batch_with_retry(connection, chunk, config, 0, 100)
+    outcome, halved, remainder = backfill._run_one_batch_with_retry(
+        connection, target, settings, 0, 100
+    )
 
     assert halved == 1
     assert attempts == [("(0,0)", "(100,0)"), ("(0,0)", "(50,0)")]
     assert outcome.last_page == 50
+    # The half that was NOT run must come back for re-queueing. Returning only
+    # the first half silently abandons pages [50,100) and still reports clean.
+    assert remainder == (50, 100)
     assert connection.rollbacks == 1
 
 
-def test_second_cancellation_stops_fail_closed_instead_of_retrying_forever() -> None:
-    chunk = _chunk("c1", days_old=30)
-    connection = _FakeConnection(
+def test_the_unrun_half_of_a_halved_batch_is_actually_executed_afterwards() -> None:
+    """R3 in the shape that matters: the range hole must be closed by the loop,
+    not merely reported by the helper."""
+    target = chunk("c1", days_old=30, pages=8)
+    ranges: list[tuple[str, str]] = []
+
+    def update_handler(sql: str, params: Any) -> Any:
+        ranges.append((params["first_page_tid"], params["last_page_tid"]))
+        if len(ranges) == 1:
+            return QueryCancelled()
+        return {"rowcount": 1}
+
+    connection = FakeConnection(
         [
-            ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
-            ("UPDATE ONLY", lambda s, p: _QueryCancelled()),
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", update_handler),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (1,)}),
         ]
     )
-    config = _config(Path("/tmp"), enforce=True)
+    settings = config(Path("/tmp"), enforce=True, batch_pages=8, max_batches=10, batch_sleep_ms=0)
+
+    descriptor = backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    assert ranges == [("(0,0)", "(8,0)"), ("(0,0)", "(4,0)"), ("(4,0)", "(8,0)")]
+    assert descriptor["next_page"] == 8
+    assert descriptor["state"] == "processed"
+
+
+def test_second_cancellation_stops_fail_closed_instead_of_retrying_forever() -> None:
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
+            ("UPDATE ONLY", lambda s, p: QueryCancelled()),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True)
 
     with pytest.raises(backfill.BackfillStop) as excinfo:
-        backfill._run_one_batch_with_retry(connection, chunk, config, 0, 100)
+        backfill._run_one_batch_with_retry(connection, target, settings, 0, 100)
 
     assert excinfo.value.stage == "duration_wall"
     assert excinfo.value.detail["first_page"] == 0
@@ -345,17 +354,18 @@ def test_second_cancellation_stops_fail_closed_instead_of_retrying_forever() -> 
 
 
 def test_single_page_range_cannot_be_halved_and_stops_immediately() -> None:
-    chunk = _chunk("c1", days_old=30)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
         [
+            UNCOMPRESSED_GUARD,
             ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
-            ("UPDATE ONLY", lambda s, p: _QueryCancelled()),
+            ("UPDATE ONLY", lambda s, p: QueryCancelled()),
         ]
     )
-    config = _config(Path("/tmp"), enforce=True)
+    settings = config(Path("/tmp"), enforce=True)
 
     with pytest.raises(backfill.BackfillStop) as excinfo:
-        backfill._run_one_batch_with_retry(connection, chunk, config, 7, 8)
+        backfill._run_one_batch_with_retry(connection, target, settings, 7, 8)
 
     assert excinfo.value.stage == "duration_wall"
     assert "cannot be halved further" in excinfo.value.reason
@@ -367,12 +377,12 @@ def test_single_page_range_cannot_be_halved_and_stops_immediately() -> None:
 
 
 def test_compressed_chunks_are_skipped_and_active_chunks_are_skipped_for_different_reasons() -> None:
-    compressed = _chunk("compressed", days_old=30, compressed=True)
-    terminal = _chunk("terminal", days_old=30)
-    active = _chunk("active", days_old=0)
+    compressed = chunk("compressed", days_old=30, compressed=True)
+    terminal = chunk("terminal", days_old=30)
+    active = chunk("active", days_old=0)
 
     eligible, skipped = backfill.classify_chunks(
-        [compressed, terminal, active], now_utc=_NOW, lag_seconds=_LAG, final_sweep=False
+        [compressed, terminal, active], now_utc=NOW, lag_seconds=LAG, final_sweep=False
     )
 
     assert eligible == [terminal]
@@ -384,11 +394,11 @@ def test_compressed_chunks_are_skipped_and_active_chunks_are_skipped_for_differe
 
 def test_final_sweep_relaxes_only_the_active_rule_never_the_compressed_one() -> None:
     """No flag makes DML against compressed storage legal on TimescaleDB 2.10."""
-    compressed = _chunk("compressed", days_old=0, compressed=True)
-    active = _chunk("active", days_old=0)
+    compressed = chunk("compressed", days_old=0, compressed=True)
+    active = chunk("active", days_old=0)
 
     eligible, skipped = backfill.classify_chunks(
-        [compressed, active], now_utc=_NOW, lag_seconds=_LAG, final_sweep=True
+        [compressed, active], now_utc=NOW, lag_seconds=LAG, final_sweep=True
     )
 
     assert eligible == [active]
@@ -396,22 +406,22 @@ def test_final_sweep_relaxes_only_the_active_rule_never_the_compressed_one() -> 
 
 
 def test_active_criterion_is_the_compression_lanes_range_end_lag_rule() -> None:
-    lagged = _chunk("terminal", days_old=8)
-    inside = _chunk("active", days_old=6)
+    lagged = chunk("terminal", days_old=8)
+    inside = chunk("active", days_old=6)
 
-    assert not backfill.is_active_chunk(lagged, now_utc=_NOW, lag_seconds=_LAG)
-    assert backfill.is_active_chunk(inside, now_utc=_NOW, lag_seconds=_LAG)
+    assert not backfill.is_active_chunk(lagged, now_utc=NOW, lag_seconds=LAG)
+    assert backfill.is_active_chunk(inside, now_utc=NOW, lag_seconds=LAG)
 
 
 def test_lag_falls_back_to_the_compression_lane_variable_so_the_lanes_cannot_drift(
     tmp_path: Path,
 ) -> None:
-    config = backfill.config_from_args(_args(), _env(tmp_path))
-    assert config.lag_seconds == _LAG
+    settings = backfill.config_from_args(_args(), env(tmp_path))
+    assert settings.lag_seconds == LAG
 
     overridden = backfill.config_from_args(
         _args(),
-        _env(tmp_path, NODE27_RIVER_IDENTITY_BACKFILL_LAG_SECONDS="60"),
+        env(tmp_path, NODE27_RIVER_IDENTITY_BACKFILL_LAG_SECONDS="60"),
     )
     assert overridden.lag_seconds == 60
 
@@ -419,7 +429,7 @@ def test_lag_falls_back_to_the_compression_lane_variable_so_the_lanes_cannot_dri
 def test_missing_lag_configuration_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(backfill.BackfillConfigError, match="lag seconds must be set"):
         backfill.config_from_args(
-            _args(), _env(tmp_path, NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=None)
+            _args(), env(tmp_path, NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=None)
         )
 
 
@@ -427,18 +437,51 @@ def test_process_chunk_consults_the_shared_write_guard_before_any_update() -> No
     """Guard first, always — a stale inventory is exactly how a compressed
     chunk sneaks into a batch (the compression timer may have fired between
     discovery and now)."""
-    chunk = _chunk("c1", days_old=30, pages=4)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30, pages=4)
+    connection = FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (True,)}),
+            ("SELECT is_compressed FROM timescaledb_information.chunks",
+             lambda s, p: {"fetchone": (True,)}),
         ]
     )
-    config = _config(Path("/tmp"), enforce=True)
+    settings = config(Path("/tmp"), enforce=True)
 
     with pytest.raises(backfill.CompressedChunkWriteError):
-        backfill.process_chunk(connection, chunk, config, cursor_budget=[10])
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
 
-    assert _statements(connection, "UPDATE ONLY") == []
+    assert statements(connection, "UPDATE ONLY") == []
+
+
+def test_the_write_guard_runs_inside_every_batch_transaction_before_the_update() -> None:
+    """The guard's contract requires it to share the UPDATE's transaction.
+
+    A single pre-loop check that is then rolled back satisfies "we called the
+    guard" and nothing else: the compression timer can fire between that check
+    and any later batch, and the batch cursor would never notice.
+    """
+    target = chunk("c1", days_old=30, pages=12)
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": 2}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (2,)}),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0)
+
+    backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    order = [
+        "guard" if "SELECT is_compressed FROM timescaledb_information.chunks" in sql
+        else "update"
+        for sql, _params in connection.executions
+        if "SELECT is_compressed FROM timescaledb_information.chunks" in sql
+        or "UPDATE ONLY" in sql
+    ]
+    # One pre-loop planning guard, then guard-then-update for each of the
+    # three batches — never an UPDATE that no guard immediately preceded.
+    assert order == ["guard", "guard", "update", "guard", "update", "guard", "update"]
 
 
 def test_runner_imports_the_chunk_guard_from_the_shared_module_not_a_local_copy() -> None:
@@ -448,7 +491,7 @@ def test_runner_imports_the_chunk_guard_from_the_shared_module_not_a_local_copy(
 
     assert backfill.assert_chunk_uncompressed is canonical
 
-    tree = ast.parse(_RUNNER_SOURCE_PATH.read_text(encoding="utf-8"))
+    tree = ast.parse(RUNNER_SOURCE_PATH.read_text(encoding="utf-8"))
     imported_from_guard = {
         alias.name
         for node in ast.walk(tree)
@@ -461,7 +504,7 @@ def test_runner_imports_the_chunk_guard_from_the_shared_module_not_a_local_copy(
     # The runner reads is_compressed once, for the receipt inventory. It must
     # never make the pre-write DECISION from its own predicate: the only
     # `is_compressed = ...` filter in the repo belongs to the shared guard.
-    source = _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
+    source = RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
     assert "is_compressed = true" not in source.lower()
 
 
@@ -471,9 +514,9 @@ def test_runner_imports_the_chunk_guard_from_the_shared_module_not_a_local_copy(
 
 
 def _shortfall_connection(*, candidates: int, updated: int, unmatched: int, unmappable: int):
-    return _FakeConnection(
+    return FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
+            UNCOMPRESSED_GUARD,
             ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
             (
                 "NOT EXISTS (SELECT 1 FROM hydro.hydro_run",
@@ -487,12 +530,12 @@ def _shortfall_connection(*, candidates: int, updated: int, unmatched: int, unma
 
 
 def test_shortfall_stops_the_run_and_names_both_causes_separately() -> None:
-    chunk = _chunk("c1", days_old=30, pages=4)
+    target = chunk("c1", days_old=30, pages=4)
     connection = _shortfall_connection(candidates=100, updated=91, unmatched=6, unmappable=3)
-    config = _config(Path("/tmp"), enforce=True)
+    settings = config(Path("/tmp"), enforce=True)
 
     with pytest.raises(backfill.BackfillStop) as excinfo:
-        backfill.process_chunk(connection, chunk, config, cursor_budget=[10])
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
 
     stop = excinfo.value
     assert stop.stage == "shortfall"
@@ -504,23 +547,67 @@ def test_shortfall_stops_the_run_and_names_both_causes_separately() -> None:
     assert connection.commits == 0
 
 
+def test_a_stop_mid_chunk_keeps_the_committed_batches_accounting() -> None:
+    """Batches 1..N-1 really did commit. Reporting the chunk as a blank
+    'stopped' descriptor — zero batches, zero rows, pending_rows 0 — would hide
+    both the work done and the work left."""
+    target = chunk("c1", days_old=30, pages=12)
+    calls: list[int] = []
+
+    def update_handler(sql: str, params: Any) -> Any:
+        calls.append(len(calls))
+        # Third batch under-updates: 2 candidates, 1 written.
+        return {"rowcount": 1 if len(calls) == 3 else 2}
+
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("NOT EXISTS (SELECT 1 FROM hydro.hydro_run", lambda s, p: {"fetchone": (1,)}),
+            ("NOT IN (SELECT unnest", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", update_handler),
+            # Single-line form => the pending recount; the multi-line
+            # "SELECT count(*)\nFROM ONLY" form => a per-batch candidate count.
+            ("SELECT count(*) FROM ONLY", lambda s, p: {"fetchone": (7,)}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (2,)}),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    descriptor = excinfo.value.descriptor
+    assert descriptor is not None
+    assert descriptor["state"] == "stopped"
+    assert descriptor["batches_run"] == 3
+    assert descriptor["updated_rows"] == 5  # 2 + 2 committed, 1 rolled back
+    assert descriptor["candidate_rows"] == 6
+    assert descriptor["unmatched_rows"] == 1
+    assert descriptor["pending_rows"] == 7  # recounted, not hard-coded to zero
+    assert descriptor["batches_planned"] == 3
+    # The rolled-back range must be retried on re-entry, not stepped over.
+    assert descriptor["next_page"] == 8
+    assert connection.commits == 2
+
+
 def test_no_shortfall_skips_the_diagnostic_queries_entirely() -> None:
-    chunk = _chunk("c1", days_old=30)
+    target = chunk("c1", days_old=30)
     connection = _shortfall_connection(candidates=10, updated=10, unmatched=0, unmappable=0)
 
     with connection.cursor() as cursor:
         outcome = backfill.execute_batch(
-            cursor, chunk, first_page=0, last_page=4, duration_wall_ms=30_000
+            cursor, target, first_page=0, last_page=4, duration_wall_ms=30_000
         )
 
     assert outcome.shortfall == 0
-    assert _statements(connection, "NOT EXISTS (SELECT 1 FROM hydro.hydro_run") == []
+    assert statements(connection, "NOT EXISTS (SELECT 1 FROM hydro.hydro_run") == []
 
 
 def test_equality_audit_uses_the_same_predicate_as_the_verify_function() -> None:
     """The runner receipt and the SQL verify function must agree, or an
     operator gets two different answers to the same pre-cutover question."""
-    migration = _MIGRATION_PATH.read_text(encoding="utf-8")
+    migration = MIGRATION_PATH.read_text(encoding="utf-8")
     for leg in (
         "t.variable_e::text IS DISTINCT FROM t.variable",
         "t.unit_e::text IS DISTINCT FROM t.unit",
@@ -535,17 +622,43 @@ def test_equality_audit_uses_the_same_predicate_as_the_verify_function() -> None
 # ---------------------------------------------------------------------------
 
 
+def test_quiescence_discards_the_cached_stats_snapshot_between_the_two_samples() -> None:
+    """Without this the gate is unconditionally true.
+
+    PostgreSQL 15 caches ``pg_stat_*`` for the whole transaction
+    (``stats_fetch_consistency = cache``), so two samples on one connection
+    return identical numbers however busy the writer is. Asserting only on the
+    arithmetic (feeding two different values into a fake) cannot catch that —
+    the mechanism itself has to be pinned.
+    """
+    target = chunk("active", days_old=0)
+    connection = FakeConnection([("pg_stat_all_tables", lambda s, p: {"fetchone": (1000,)})])
+
+    with connection.cursor() as cursor:
+        backfill.assert_ingest_quiescent(
+            cursor, target, quiescence_seconds=1, sleep=lambda _s: None
+        )
+
+    executed = [sql for sql, _params in connection.executions]
+    samples = [i for i, sql in enumerate(executed) if "pg_stat_all_tables" in sql]
+    clears = [i for i, sql in enumerate(executed) if "pg_stat_clear_snapshot()" in sql]
+
+    assert len(samples) == 2
+    assert len(clears) == 1
+    assert samples[0] < clears[0] < samples[1]
+
+
 def test_final_sweep_refuses_while_write_counters_are_still_moving() -> None:
-    chunk = _chunk("active", days_old=0)
+    target = chunk("active", days_old=0)
     samples = iter([1000, 1007])
-    connection = _FakeConnection(
+    connection = FakeConnection(
         [("pg_stat_all_tables", lambda s, p: {"fetchone": (next(samples),)})]
     )
 
     with connection.cursor() as cursor:
         with pytest.raises(backfill.BackfillStop) as excinfo:
             backfill.assert_ingest_quiescent(
-                cursor, chunk, quiescence_seconds=1, sleep=lambda _s: None
+                cursor, target, quiescence_seconds=1, sleep=lambda _s: None
             )
 
     assert excinfo.value.stage == "ingest_not_quiescent"
@@ -553,11 +666,13 @@ def test_final_sweep_refuses_while_write_counters_are_still_moving() -> None:
 
 
 def test_final_sweep_proceeds_when_the_write_counters_are_frozen() -> None:
-    chunk = _chunk("active", days_old=0)
-    connection = _FakeConnection([("pg_stat_all_tables", lambda s, p: {"fetchone": (42,)})])
+    target = chunk("active", days_old=0)
+    connection = FakeConnection([("pg_stat_all_tables", lambda s, p: {"fetchone": (42,)})])
 
     with connection.cursor() as cursor:
-        backfill.assert_ingest_quiescent(cursor, chunk, quiescence_seconds=1, sleep=lambda _s: None)
+        backfill.assert_ingest_quiescent(
+            cursor, target, quiescence_seconds=1, sleep=lambda _s: None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -566,41 +681,41 @@ def test_final_sweep_proceeds_when_the_write_counters_are_frozen() -> None:
 
 
 def test_dry_run_plans_batches_but_issues_no_update() -> None:
-    chunk = _chunk("c1", days_old=30, pages=9)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30, pages=9)
+    connection = FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
+            UNCOMPRESSED_GUARD,
             ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
             ("SELECT count(*)", lambda s, p: {"fetchone": (700,)}),
         ]
     )
-    config = _config(Path("/tmp"), enforce=False)
+    settings = config(Path("/tmp"), enforce=False)
 
-    descriptor = backfill.process_chunk(connection, chunk, config, cursor_budget=[10])
+    descriptor = backfill.process_chunk(connection, target, settings, cursor_budget=[10])
 
     assert descriptor["state"] == "planned"
     assert descriptor["pending_rows"] == 700
     assert descriptor["batches_planned"] == 1
-    assert _statements(connection, "UPDATE ONLY") == []
+    assert statements(connection, "UPDATE ONLY") == []
     assert connection.commits == 0
 
 
 def test_probe_runs_a_real_update_then_always_rolls_back() -> None:
-    chunk = _chunk("c1", days_old=30, pages=4)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30, pages=4)
+    connection = FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
+            UNCOMPRESSED_GUARD,
             ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
             ("pg_locks", lambda s, p: {"fetchall": [("relation", "RowExclusiveLock", True, "c1")]}),
             ("UPDATE ONLY", lambda s, p: {"rowcount": 55}),
             ("SELECT count(*)", lambda s, p: {"fetchone": (55,)}),
         ]
     )
-    config = _config(Path("/tmp"), probe=True)
+    settings = config(Path("/tmp"), probe=True)
 
-    descriptor = backfill.process_chunk(connection, chunk, config, cursor_budget=[10])
+    descriptor = backfill.process_chunk(connection, target, settings, cursor_budget=[10])
 
-    assert _statements(connection, "UPDATE ONLY")
+    assert statements(connection, "UPDATE ONLY")
     assert descriptor["probe"]["rolled_back"] is True
     assert descriptor["probe"]["updated_rows"] == 55
     assert descriptor["probe"]["lock_waits"] == [
@@ -611,19 +726,19 @@ def test_probe_runs_a_real_update_then_always_rolls_back() -> None:
 
 
 def test_probe_rolls_back_even_when_the_batch_raises() -> None:
-    chunk = _chunk("c1", days_old=30, pages=4)
-    connection = _FakeConnection(
+    target = chunk("c1", days_old=30, pages=4)
+    connection = FakeConnection(
         [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
+            UNCOMPRESSED_GUARD,
             ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
             ("UPDATE ONLY", lambda s, p: RuntimeError("boom")),
             ("SELECT count(*)", lambda s, p: {"fetchone": (55,)}),
         ]
     )
-    config = _config(Path("/tmp"), probe=True)
+    settings = config(Path("/tmp"), probe=True)
 
     with pytest.raises(RuntimeError):
-        backfill.process_chunk(connection, chunk, config, cursor_budget=[10])
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
 
     assert connection.rollbacks >= 1
     assert connection.commits == 0
@@ -631,270 +746,4 @@ def test_probe_rolls_back_even_when_the_batch_raises() -> None:
 
 def test_enforce_and_probe_are_mutually_exclusive(tmp_path: Path) -> None:
     with pytest.raises(backfill.BackfillConfigError, match="mutually exclusive"):
-        backfill.config_from_args(_args(enforce=True, probe=True), _env(tmp_path))
-
-
-# ---------------------------------------------------------------------------
-# 8. Receipt: schema conformance and bounded budget
-# ---------------------------------------------------------------------------
-
-
-def _build_receipt(tmp_path: Path, chunks: list[backfill.ChunkRow], **cfg: Any) -> dict[str, Any]:
-    connection = _FakeConnection(
-        [
-            (
-                # Unique to _CHUNK_INVENTORY_SQL; must be matched before the
-                # guard's own timescaledb_information.chunks lookup below.
-                "pg_total_relation_size",
-                lambda s, p: {"fetchall": [_inventory_row(c) for c in chunks]},
-            ),
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
-            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
-            ("SELECT count(*)", lambda s, p: {"fetchone": (0,)}),
-        ]
-    )
-    return backfill.build_receipt(
-        _config(tmp_path, **cfg),
-        now_utc=_NOW,
-        connect=lambda _url: connection,
-        head_sha="0" * 40,
-        timer_state={"observed": True, "is_active": "inactive", "is_enabled": "masked",
-                     "unavailable_reason": None},
-    )
-
-
-def _inventory_row(chunk: backfill.ChunkRow) -> dict[str, Any]:
-    return {
-        "chunk_schema": chunk.chunk_schema,
-        "chunk_name": chunk.chunk_name,
-        "range_start": chunk.range_start,
-        "range_end": chunk.range_end,
-        "is_compressed": chunk.is_compressed,
-        "total_bytes": chunk.total_bytes,
-        "relpages": chunk.relpages,
-        "pages_planned": chunk.pages_planned,
-        "approx_rows": chunk.approx_rows,
-    }
-
-
-def test_dry_run_receipt_validates_against_the_published_schema(tmp_path: Path) -> None:
-    receipt = _build_receipt(
-        tmp_path,
-        [_chunk("terminal", days_old=30), _chunk("frozen", days_old=30, compressed=True),
-         _chunk("active", days_old=0)],
-    )
-
-    jsonschema.validate(receipt, _load_schema())
-    assert receipt["outcome"] == "clean"
-    assert receipt["mode"] == "dry-run"
-    assert receipt["totals"]["updated_rows"] == 0
-    assert receipt["totals"]["chunks_skipped_compressed"] == 1
-    assert receipt["totals"]["chunks_skipped_active"] == 1
-
-
-def test_receipt_records_the_compression_timer_state(tmp_path: Path) -> None:
-    """D6: an enforce window that left the timer running is a recoverable-only-
-    by-decompressing-200GB mistake. The receipt has to show which it was."""
-    receipt = _build_receipt(tmp_path, [_chunk("terminal", days_old=30)])
-
-    assert receipt["compression_timer"]["is_enabled"] == "masked"
-
-
-def test_receipt_reports_bloat_against_measured_disk_headroom(tmp_path: Path) -> None:
-    receipt = _build_receipt(tmp_path, [_chunk("terminal", days_old=30, total_bytes=4096)])
-
-    disk = receipt["disk"]
-    assert disk["estimated_bloat_bytes"] == 4096
-    assert disk["mount"] == "/home"
-    assert disk["headroom_sufficient"] in {True, False, None}
-
-
-def test_refused_lock_receipt_carries_no_chunk_inventory(tmp_path: Path) -> None:
-    receipt = backfill.build_refused_lock_receipt(
-        _config(tmp_path), now_utc=_NOW, head_sha="a" * 40
-    )
-
-    jsonschema.validate(receipt, _load_schema())
-    assert receipt["outcome"] == "refused_lock"
-    assert receipt["chunks"] == []
-    assert receipt["cursor"] == {}
-
-
-def test_failed_receipt_without_provenance_omits_head_sha(tmp_path: Path) -> None:
-    receipt = backfill.build_failed_receipt(
-        _config(tmp_path), now_utc=_NOW, stage="runner", head_sha=None
-    )
-
-    jsonschema.validate(receipt, _load_schema())
-    assert receipt["provenance_state"] == "unavailable"
-    assert "head_sha" not in receipt
-
-
-def test_schema_rejects_a_stopped_receipt_that_hides_why_it_stopped() -> None:
-    """A halted run that looks like a finished run is the failure this schema
-    rule exists to prevent."""
-    bad = {
-        "schema_version": "1.0",
-        "generated_at": "2026-08-15T12:00:00Z",
-        "mode": "enforce",
-        "outcome": "stopped",
-    }
-
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(bad, _load_schema())
-
-
-def test_schema_rejects_a_dry_run_that_claims_to_have_updated_rows() -> None:
-    bad = {
-        "schema_version": "1.0",
-        "head_sha": "0" * 40,
-        "generated_at": "2026-08-15T12:00:00Z",
-        "now_utc": "2026-08-15T12:00:00Z",
-        "hypertable": "hydro.river_timeseries",
-        "mode": "dry-run",
-        "outcome": "clean",
-        "bounds": {
-            "batch_pages": 1,
-            "duration_wall_ms": 1000,
-            "batch_sleep_ms": 0,
-            "max_batches": 1,
-            "lag_seconds": 1,
-        },
-        "totals": {
-            "candidate_rows": 5,
-            "updated_rows": 5,
-            "pending_rows": 0,
-            "batches_run": 1,
-            "batches_halved": 0,
-            "unmatched_rows": 0,
-            "unmappable_rows": 0,
-            "chunks_skipped_compressed": 0,
-            "chunks_skipped_active": 0,
-        },
-    }
-
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(bad, _load_schema())
-
-
-def test_per_invocation_batch_budget_defers_the_remainder(tmp_path: Path) -> None:
-    chunk = _chunk("c1", days_old=30, pages=100)
-    connection = _FakeConnection(
-        [
-            ("timescaledb_information.chunks", lambda s, p: {"fetchone": (False,)}),
-            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
-            ("UPDATE ONLY", lambda s, p: {"rowcount": 4}),
-            ("SELECT count(*)", lambda s, p: {"fetchone": (4,)}),
-        ]
-    )
-    config = _config(tmp_path, enforce=True, batch_pages=10, max_batches=2, batch_sleep_ms=0)
-
-    descriptor = backfill.process_chunk(connection, chunk, config, cursor_budget=[2])
-
-    assert descriptor["batches_run"] == 2
-    assert descriptor["state"] == "deferred"
-    assert descriptor["next_page"] == 20
-
-
-# ---------------------------------------------------------------------------
-# 9. flock single-instance mutex
-# ---------------------------------------------------------------------------
-
-
-def test_second_holder_is_refused_the_lock(tmp_path: Path) -> None:
-    lock_path = tmp_path / "runner.lock"
-
-    first = backfill.acquire_lock(lock_path)
-    assert first is not None
-    try:
-        assert backfill.acquire_lock(lock_path) is None
-    finally:
-        os.close(first)
-
-    # Released: a later invocation gets it.
-    third = backfill.acquire_lock(lock_path)
-    assert third is not None
-    os.close(third)
-
-
-def test_lock_file_is_created_mode_0600(tmp_path: Path) -> None:
-    lock_path = tmp_path / "runner.lock"
-    fd = backfill.acquire_lock(lock_path)
-    try:
-        assert oct(lock_path.stat().st_mode & 0o777) == "0o600"
-    finally:
-        os.close(fd)
-
-
-def test_lock_path_must_be_absolute(tmp_path: Path) -> None:
-    with pytest.raises(backfill.BackfillConfigError):
-        backfill.acquire_lock(Path("relative.lock"))
-
-
-def test_contended_lock_publishes_a_refusal_receipt_and_touches_no_database(
-    tmp_path: Path,
-) -> None:
-    env = _env(tmp_path)
-    for key, value in env.items():
-        os.environ[key] = value
-    holder = backfill.acquire_lock(tmp_path / "runner.lock")
-    assert holder is not None
-
-    def _explode(_url: str) -> Any:  # pragma: no cover - must never run
-        raise AssertionError("lock contention must be decided before any DB call")
-
-    try:
-        exit_code = backfill.main([], now_utc=_NOW, connect=_explode)
-    finally:
-        os.close(holder)
-        for key in env:
-            os.environ.pop(key, None)
-
-    assert exit_code == 0
-    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
-    jsonschema.validate(receipt, _load_schema())
-    assert receipt["outcome"] == "refused_lock"
-
-
-# ---------------------------------------------------------------------------
-# 10. Config fail-closed
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "override,expected",
-    [
-        ({"NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH": None}, "receipt path must be set"),
-        ({"NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH": "relative.json"}, "must be absolute"),
-        ({"NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH": None}, "lock path must be set"),
-        ({"DATABASE_URL": None}, "DATABASE_URL must be set"),
-        ({"NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES": "0"}, "must be >= 1"),
-        ({"NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS": "10"}, "must be >= 1000"),
-    ],
-)
-def test_config_fails_closed_on_bad_shape(
-    tmp_path: Path, override: dict[str, str | None], expected: str
-) -> None:
-    with pytest.raises(backfill.BackfillConfigError, match=expected):
-        backfill.config_from_args(_args(), _env(tmp_path, **override))
-
-
-def test_receipt_and_lock_paths_must_be_disjoint(tmp_path: Path) -> None:
-    shared = str(tmp_path / "same.json")
-    with pytest.raises(backfill.BackfillConfigError):
-        backfill.config_from_args(
-            _args(),
-            _env(
-                tmp_path,
-                NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH=shared,
-                NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH=shared,
-            ),
-        )
-
-
-def test_stderr_diagnostics_never_leak_the_dsn_password(capsys: pytest.CaptureFixture[str]) -> None:
-    backfill._emit("failed", "boom", dsn="postgresql://user:secretpw@127.0.0.1:55432/nhms")
-
-    captured = capsys.readouterr().err
-    assert "secretpw" not in captured
-    assert "127.0.0.1:55432" in captured
+        backfill.config_from_args(_args(enforce=True, probe=True), env(tmp_path))

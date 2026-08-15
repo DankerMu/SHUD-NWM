@@ -149,6 +149,21 @@ def _seed_facts(connection: Any, *, normalized: bool) -> None:
         )
 
 
+_MIGRATION_000050 = "000050_river_identity_normalization.sql"
+
+
+def _forget_migration(database_url: str, version: str) -> None:
+    """Drop one row from the applied-migrations ledger so it replays for real."""
+    connection = psycopg2.connect(database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM public.schema_migrations WHERE version = %s", (version,))
+            assert cursor.rowcount == 1, f"{version} was never recorded as applied"
+    finally:
+        connection.close()
+
+
 @pytest.fixture()
 def migrated(throwaway_database_url: str) -> Any:
     apply_migrations_from_zero(throwaway_database_url)
@@ -165,7 +180,15 @@ def migrated(throwaway_database_url: str) -> Any:
 def test_migration_chain_replays_idempotently_and_creates_each_object_once(
     throwaway_database_url: str,
 ) -> None:
+    """000050's SQL is executed TWICE, not skipped the second time.
+
+    ``apply_migrations_from_zero`` consults ``schema_migrations`` first, so a
+    plain second call re-executes nothing and would prove idempotency by
+    running zero statements. Forgetting the ledger entry for 000050 is what
+    makes the replay real.
+    """
     apply_migrations_from_zero(throwaway_database_url)
+    _forget_migration(throwaway_database_url, _MIGRATION_000050)
     apply_migrations_from_zero(throwaway_database_url)
     connection = _connect(throwaway_database_url)
     try:
@@ -384,14 +407,15 @@ def test_backfill_fills_every_row_and_a_second_pass_changes_nothing(
         connection.close()
 
 
-def test_backfill_resumes_after_interruption_without_redoing_finished_rows(
+def test_backfill_resumes_after_interruption_with_the_cursor_discarded(
     throwaway_database_url: str, tmp_path: Any
 ) -> None:
-    """Interrupt via the batch budget, then resume with the cursor discarded.
+    """Interrupt via the batch budget, then resume with the cursor thrown away.
 
     Losing the persisted cursor must degrade to a full rescan with an identical
     result, because the NULL sentinel — not the cursor — is what makes the
-    UPDATE idempotent.
+    UPDATE idempotent. The second invocation writes to a different receipt
+    path, so it genuinely starts with no cursor at all.
     """
     apply_migrations_from_zero(throwaway_database_url)
     connection = _connect(throwaway_database_url)
@@ -408,14 +432,66 @@ def test_backfill_resumes_after_interruption_without_redoing_finished_rows(
         done_after_first = partial["totals"]["updated_rows"]
         assert 0 < done_after_first < total, partial
 
-        # Fresh invocation, no cursor carried over (a new receipt path).
-        resumed = _run_backfill(throwaway_database_url, tmp_path)
+        cursorless = tmp_path / "no-cursor"
+        cursorless.mkdir()
+        resumed = _run_backfill(throwaway_database_url, cursorless)
         assert resumed["outcome"] == "clean"
+        assert resumed["chunks"][0]["resumed_from_page"] == 0
         assert _scalar(
             connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key IS NULL"
         ) == 0
         # It only touched what was still NULL — no double-application.
         assert resumed["totals"]["updated_rows"] == total - done_after_first
+    finally:
+        connection.close()
+
+
+def test_a_budget_capped_backfill_makes_progress_on_every_invocation(
+    throwaway_database_url: str, tmp_path: Any
+) -> None:
+    """The cursor must be CONSUMED, not just published.
+
+    Every invocation here runs with a budget of one batch and shares one
+    receipt path, which is how the runner is actually scheduled. If the cursor
+    is write-only, invocation 2 onwards re-scans the finished prefix, spends
+    its single batch on zero candidates, and the run stalls forever at the
+    first batch's worth of rows — reporting ``clean``/``deferred``/exit 0 the
+    whole time.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_facts(connection, normalized=False)
+        total = _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries")
+
+        remaining = total
+        progress: list[int] = []
+        cursors: list[dict[str, Any]] = []
+        for _ in range(60):
+            receipt = _run_backfill(
+                throwaway_database_url,
+                tmp_path,
+                NODE27_RIVER_IDENTITY_BACKFILL_MAX_BATCHES="1",
+            )
+            assert receipt["outcome"] == "clean", receipt
+            progress.append(receipt["totals"]["updated_rows"])
+            cursors.append(receipt["cursor"])
+            remaining = _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries WHERE run_key IS NULL",
+            )
+            if remaining == 0:
+                break
+
+        assert remaining == 0, (
+            f"stalled at {remaining} NULL rows after {len(progress)} single-batch "
+            f"invocations; per-invocation updates={progress}, cursors={cursors[-3:]}"
+        )
+        assert len(progress) > 1, "the fixture is too small to exercise re-entry"
+        # No row was ever written twice: the per-invocation totals partition
+        # the table exactly.
+        assert sum(progress) == total
     finally:
         connection.close()
 

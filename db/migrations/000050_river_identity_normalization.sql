@@ -227,10 +227,17 @@ END $$;
 -- 4. Stage one of the switch: read-only verification (never called from here)
 -- ---------------------------------------------------------------------------
 --
--- Runs outside any maintenance window. It is a full scan of a 249 GB table and
--- takes no locks beyond ACCESS SHARE, which is the entire point: the three
--- counts an operator needs before committing to a window are produced while
--- the system is still serving traffic.
+-- Runs outside any maintenance window. It is ONE full scan of a 249 GB table
+-- and takes no locks beyond ACCESS SHARE, which is the entire point: the three
+-- families of counts an operator needs before committing to a window are
+-- produced while the system is still serving traffic.
+--
+-- "One" is load-bearing. The obvious shape -- eight independent
+-- `(SELECT count(*) ... WHERE <col> IS NULL)` subqueries -- is eight separate
+-- heap scans of 249 GB, and a correlated scalar subquery for the
+-- basin_version leg would run ~460M times on top of that. Aggregate FILTERs
+-- over a single scan, plus one LEFT JOIN against a primary key, produce the
+-- identical numbers for a fraction of the I/O.
 --
 -- The equality-audit count uses the same predicate as the backfill runner's
 -- receipt counter. It detects rows whose text columns drifted away from their
@@ -256,51 +263,72 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $verify$
+  -- The join is written with parenthesised ON-conditions on purpose: the
+  -- migration lint in tests/test_migrations.py reads `ON <schema>.<table>` as
+  -- an index/table reference, and `ON (a.b = c.d)` keeps it out of that
+  -- pattern without changing the plan.
+  --
+  -- basin_version_id is core.basin_version's PRIMARY KEY, so the LEFT JOIN
+  -- matches at most one row and is exactly equivalent to the correlated
+  -- scalar subquery it replaces: an unmatched fact row yields
+  -- bv.basin_version_key IS NULL, which IS DISTINCT FROM treats the same way.
   SELECT
-    (SELECT count(*) FROM hydro.river_timeseries),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE run_key IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE river_network_version_key IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE basin_version_key IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE river_segment_key IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE variable_e IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE unit_e IS NULL),
-    (SELECT count(*) FROM hydro.river_timeseries WHERE quality_flag_e IS NULL),
-    (SELECT count(*)
-       FROM hydro.river_timeseries AS t
-       WHERE t.run_key IS NOT NULL
-         AND (
-              t.variable_e::text IS DISTINCT FROM t.variable
-           OR t.unit_e::text IS DISTINCT FROM t.unit
-           OR t.quality_flag_e::text IS DISTINCT FROM t.quality_flag
-           OR t.basin_version_key IS DISTINCT FROM (
-                SELECT bv.basin_version_key
-                FROM core.basin_version AS bv
-                WHERE bv.basin_version_id = t.basin_version_id
-              )
-         )),
+    count(*),
+    count(*) FILTER (WHERE t.run_key IS NULL),
+    count(*) FILTER (WHERE t.river_network_version_key IS NULL),
+    count(*) FILTER (WHERE t.basin_version_key IS NULL),
+    count(*) FILTER (WHERE t.river_segment_key IS NULL),
+    count(*) FILTER (WHERE t.variable_e IS NULL),
+    count(*) FILTER (WHERE t.unit_e IS NULL),
+    count(*) FILTER (WHERE t.quality_flag_e IS NULL),
+    count(*) FILTER (
+      WHERE t.run_key IS NOT NULL
+        AND (
+             t.variable_e::text IS DISTINCT FROM t.variable
+          OR t.unit_e::text IS DISTINCT FROM t.unit
+          OR t.quality_flag_e::text IS DISTINCT FROM t.quality_flag
+          OR t.basin_version_key IS DISTINCT FROM bv.basin_version_key
+        )
+    ),
     (SELECT count(*)
        FROM timescaledb_information.chunks AS c
        WHERE c.hypertable_schema = 'hydro'
          AND c.hypertable_name = 'river_timeseries'
-         AND c.is_compressed);
+         AND c.is_compressed)
+  FROM hydro.river_timeseries AS t
+  LEFT JOIN core.basin_version AS bv
+    ON (bv.basin_version_id = t.basin_version_id);
 $verify$;
 
 COMMENT ON FUNCTION hydro.verify_river_identity_normalization() IS
   'Read-only pre-cutover gate for issue #1339. All three families of counts '
   '(seven NULL counts, equality-audit divergence, compressed chunks) must be '
-  'zero before hydro.cutover_river_identity_normalization() is invoked. Full '
-  'scan, ACCESS SHARE only, safe to run against a live serving database.';
+  'zero before hydro.cutover_river_identity_normalization() is invoked. One '
+  'full scan, ACCESS SHARE only, safe to run against a live serving database.';
 
 -- ---------------------------------------------------------------------------
 -- 5. Stage two of the switch: the cutover (never called from here)
 -- ---------------------------------------------------------------------------
 --
--- One transaction. Every statement below was measured to work in this exact
--- order on node-27 (probe log step d-6), and the whole chain was then measured
--- to work inside a single plpgsql function and inside an explicit
--- BEGIN/COMMIT, with an aborted attempt leaving the catalog byte-for-byte
--- unchanged. That rollback fidelity is what makes a single function safe here:
--- there is no half-cut-over state to clean up.
+-- One transaction. Evidence, separated by source because the two are not
+-- interchangeable:
+--
+--   * probe log step d-6 (node-27 throwaway, statement-by-statement in
+--     autocommit) measured that disabling compression, dropping the text
+--     foreign key, the seven CHECK/VALIDATE/SET NOT NULL triples, and the
+--     compression round trip all work in this order. It did NOT cover the
+--     primary-key statement below (d-6's step 6 was a CREATE UNIQUE INDEX),
+--     nor the plpgsql wrapper, nor any rollback.
+--   * The single-transaction property -- this exact chain inside one plpgsql
+--     function, and an aborted call leaving the catalog byte-for-byte
+--     unchanged -- is pinned by the node-27 throwaway integration run
+--     (tasks 2.8) and by
+--     tests/test_river_identity_normalization_integration.py, whose
+--     negative-path test snapshots the catalog before and after a failing
+--     call and asserts equality.
+--
+-- That rollback fidelity is what makes a single function safe here: there is
+-- no half-cut-over state to clean up.
 --
 -- Why there is no cheap "prepare outside the window" stage: with
 -- `timescaledb.compress = true` in force, TimescaleDB 2.10.2 rejects
@@ -321,8 +349,8 @@ COMMENT ON FUNCTION hydro.verify_river_identity_normalization() IS
 -- The zero-NULL gate is `VALIDATE CONSTRAINT`, not a counting query. A single
 -- NULL anywhere in the seven columns makes VALIDATE raise, which aborts the
 -- function's transaction and reverts everything -- fail-closed by
--- construction rather than by a check that could be forgotten. Measured
--- negative path: raises
+-- construction rather than by a check that could be forgotten. Negative path
+-- as exercised by the integration test named above: raises
 -- `check constraint "..." of relation "_hyper_N_M_chunk" is violated by some
 -- row`, after which compression, the text FK, and the old primary key are all
 -- still in place and no CHECK constraint is left behind.

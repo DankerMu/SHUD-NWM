@@ -165,8 +165,17 @@
         "relpages": {"type": "integer", "minimum": 0},
         "pages_planned": {"type": "integer", "minimum": 0},
         "approx_rows": {"type": "integer", "minimum": 0},
-        "pending_rows": {"type": "integer", "minimum": 0},
+        "pending_rows": {
+          "description": "Rows still carrying the NULL sentinel in this chunk. null means NOT MEASURED (a skipped chunk is never counted); 0 is a real measurement and must not be fabricated for chunks the runner never looked at.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
         "batches_planned": {"type": "integer", "minimum": 0},
+        "resumed_from_page": {
+          "description": "Heap page this invocation started from, taken from the previous receipt's cursor. 0 means a full scan of the chunk.",
+          "type": "integer",
+          "minimum": 0
+        },
         "batches_run": {"type": "integer", "minimum": 0},
         "batches_halved": {"type": "integer", "minimum": 0},
         "candidate_rows": {"type": "integer", "minimum": 0},
@@ -242,12 +251,11 @@
       "required": ["stage", "reason"],
       "properties": {
         "stage": {
+          "description": "Only the stages the runner can actually emit. Budget exhaustion is not a stop (it is chunk state 'deferred') and the compression timer is observed, not enforced, so neither has a stage here.",
           "enum": [
             "shortfall",
             "duration_wall",
-            "ingest_not_quiescent",
-            "max_batches",
-            "compression_timer_active"
+            "ingest_not_quiescent"
           ]
         },
         "reason": {"type": "string", "minLength": 1},

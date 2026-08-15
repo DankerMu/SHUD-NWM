@@ -1973,9 +1973,11 @@ Ordered sequence — do not reorder:
 2. **`--final-sweep`** to fill the last chunk. It asserts write quiescence
    first and refuses if anything is still writing.
 3. **`verify`** — read-only, no locks, run it before committing to the window:
+
    ```sql
    SELECT * FROM hydro.verify_river_identity_normalization();
    ```
+
    All ten counts must be zero except `rows_total`. A non-zero
    `equality_audit_divergent` means the ingest writer's `ON CONFLICT DO UPDATE`
    branch refreshed text columns after the surrogate columns were filled; fix it
@@ -1989,9 +1991,11 @@ Ordered sequence — do not reorder:
    build needs. Compressed chunks accumulate over time, so this requirement
    only grows — this is an argument for doing it sooner rather than later.
 5. **Cutover**, one transaction:
+
    ```sql
    SELECT hydro.cutover_river_identity_normalization();
    ```
+
    It refuses if any chunk is still compressed. Inside, in order: disable
    compression → drop the text foreign key → seven `CHECK ... NOT VALID` +
    `VALIDATE` + `SET NOT NULL` → drop the old primary key → add the integer
@@ -2013,15 +2017,28 @@ than extrapolating linearly from that figure.
 **Abort / rollback.** If the transaction fails at any point — most likely at
 `VALIDATE` if a NULL slipped through — everything reverts. The table is left
 exactly as it was before the call: `compress = true`, zero compressed chunks,
-old primary key and text foreign key intact, no leftover check constraints
-(measured). Recovery is simply to recompress with the compression runner. There
-is no half-cut-over state and no compensating action to write.
+old primary key and text foreign key intact, no leftover check constraints.
+That rollback fidelity is pinned by the node-27 throwaway integration test
+(`tests/test_river_identity_normalization_integration.py`, negative path:
+catalog snapshot before == after), not by the probe log — the probe ran
+statement-by-statement in autocommit and never exercised an abort. Recovery is
+simply to recompress with the compression runner. There is no half-cut-over
+state and no compensating action to write.
 
 **Precondition checklist before opening the window:**
 
 - [ ] Write-path `ON CONFLICT` target adapted to the new primary key (this is
       the follow-up issue's work — the cutover changes the conflict target, and
       `workers/output_parser/parser.py` still names the text columns).
+- [ ] Display **read** path switched to the integer keys, or a covering index
+      on the text columns built to replace the dropped primary key. 000049
+      measured that the old text primary key is the *only* index serving the
+      MVT and stats-probe shapes ("no Seq Scan fallback"), and
+      `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py` and
+      `packages/common/forecast_store.py` still filter on the text columns.
+      Cutting over without this turns every display query into a sequential
+      scan of a 249 GB table. Belongs to the same follow-up switch issue as the
+      write-path item above.
 - [ ] Ingest paused and confirmed quiescent.
 - [ ] `verify` returns zeros.
 - [ ] Disk headroom recomputed for full decompression + index build + sort.

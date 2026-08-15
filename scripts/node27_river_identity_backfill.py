@@ -123,6 +123,10 @@ class BackfillStop(RuntimeError):
         self.stage = stage
         self.reason = reason
         self.detail = {key: value for key, value in detail.items() if value is not None}
+        # Set by _finalize_stopped_chunk when the halt happened mid-chunk, so
+        # the receipt can report what the chunk had already committed instead
+        # of a blank replacement descriptor.
+        self.descriptor: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +275,15 @@ FROM pg_stat_all_tables
 WHERE relid = (quote_ident(%(chunk_schema)s) || '.' || quote_ident(%(chunk_name)s))::regclass
 """
 
+# PostgreSQL 15 caches the statistics it hands to `pg_stat_*` for the rest of
+# the transaction (`stats_fetch_consistency = cache`, the default). Two samples
+# taken from one transaction therefore return byte-identical numbers no matter
+# how busy the writer is -- which would make the quiescence gate below an
+# unconditional pass, i.e. worse than no gate at all, because it reads like
+# proof. Discarding the cached snapshot between the samples is what makes the
+# second read a genuinely new observation.
+_STAT_SNAPSHOT_RESET_SQL = "SELECT pg_stat_clear_snapshot()"
+
 _LOCK_WAIT_SQL = """
 SELECT l.locktype, l.mode, l.granted, COALESCE(c.relname, '') AS relname
 FROM pg_locks AS l
@@ -370,6 +383,44 @@ def plan_batches(total_pages: int, batch_pages: int, *, first_page: int = 0) -> 
         (page, min(page + batch_pages, total_pages))
         for page in range(first_page, total_pages, batch_pages)
     ]
+
+
+def load_persisted_cursor(receipt_path: Path) -> dict[str, int]:
+    """Read the previous invocation's block cursor back out of its own receipt.
+
+    The receipt IS the persisted cursor -- there is deliberately no second
+    state file to keep in sync with it. Writing the cursor and never reading it
+    is what turns the per-invocation batch budget into a permanent stall: every
+    run re-scans the already-backfilled prefix, spends the whole budget on
+    zero-candidate batches, and reports a clean deferral while making no
+    progress at all.
+
+    A missing, unreadable, or foreign-schema receipt degrades to an empty
+    cursor -- a full rescan, which the NULL sentinel makes identical in outcome
+    and merely slower. The asymmetry is deliberate: a wrong cursor could strand
+    rows, so anything unrecognised is discarded rather than guessed at.
+    """
+    try:
+        raw = receipt_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(document, Mapping):
+        return {}
+    if document.get("schema_version") != SCHEMA_VERSION:
+        return {}
+    persisted = document.get("cursor")
+    if not isinstance(persisted, Mapping) or len(persisted) > _MAX_CHUNKS:
+        return {}
+    resume: dict[str, int] = {}
+    for key, value in persisted.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            continue
+        resume[str(key)] = value
+    return resume
 
 
 def is_active_chunk(chunk: ChunkRow, *, now_utc: datetime, lag_seconds: int) -> bool:
@@ -796,9 +847,15 @@ def assert_ingest_quiescent(
     samples again. Any movement means ingest is still running, which is the one
     condition under which touching the active chunk is guaranteed to contend
     with the writer and never converge.
+
+    The ``pg_stat_clear_snapshot()`` between the samples is load-bearing, not
+    hygiene: without it PostgreSQL serves the second read from the
+    transaction's cached statistics snapshot and the two numbers are equal by
+    construction. See :data:`_STAT_SNAPSHOT_RESET_SQL`.
     """
     before = sample_write_activity(cursor, chunk)
     sleep(float(quiescence_seconds))
+    cursor.execute(_STAT_SNAPSHOT_RESET_SQL)
     after = sample_write_activity(cursor, chunk)
     if after != before:
         raise BackfillStop(
@@ -899,6 +956,13 @@ def _blank_totals() -> dict[str, Any]:
 
 
 def _chunk_descriptor(chunk: ChunkRow, state: str, **extra: Any) -> dict[str, Any]:
+    """Descriptor skeleton. ``pending_rows`` defaults to NULL, not zero.
+
+    A skipped chunk is never counted, so reporting ``0`` for it would be a
+    fabricated measurement -- and specifically the one an operator would read
+    as "this compressed chunk has nothing left to do". ``null`` says "not
+    measured", which is the truth.
+    """
     descriptor: dict[str, Any] = {
         "chunk_schema": chunk.chunk_schema,
         "chunk_name": chunk.chunk_name,
@@ -910,7 +974,7 @@ def _chunk_descriptor(chunk: ChunkRow, state: str, **extra: Any) -> dict[str, An
         "relpages": chunk.relpages,
         "pages_planned": chunk.pages_planned,
         "approx_rows": chunk.approx_rows,
-        "pending_rows": 0,
+        "pending_rows": None,
         "batches_planned": 0,
         "estimated_bloat_bytes": int(chunk.total_bytes * _BLOAT_FACTOR),
     }
@@ -924,6 +988,7 @@ def process_chunk(
     config: BackfillConfig,
     *,
     cursor_budget: list[int],
+    first_page: int = 0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Plan and (when enforcing) execute the backfill of one uncompressed chunk.
@@ -932,6 +997,11 @@ def process_chunk(
     a committed batch stays committed, and a killed process leaves no partial
     batch behind. The persisted block cursor is an optimisation on top of that,
     never the correctness mechanism — the ``run_key IS NULL`` sentinel is.
+
+    ``first_page`` is that optimisation: the page the previous invocation's
+    receipt says to resume from. It only ever narrows the plan, and it is
+    discarded outright if it would narrow the plan to nothing while the
+    sentinel still finds rows.
     """
     with connection.cursor() as cursor:
         # Chunk-level compressed assertion via the SHARED guard. Belt and
@@ -948,12 +1018,20 @@ def process_chunk(
         divergent = equality_audit(cursor, chunk)
     connection.rollback()
 
-    batches = plan_batches(chunk.pages_planned, config.batch_pages)
+    batches = plan_batches(chunk.pages_planned, config.batch_pages, first_page=first_page)
+    if pending > 0 and not batches and first_page > 0:
+        # A stale cursor that plans nothing while the sentinel still finds rows
+        # would strand those rows forever. The sentinel wins every time: throw
+        # the cursor away and rescan the whole chunk.
+        first_page = 0
+        batches = plan_batches(chunk.pages_planned, config.batch_pages)
+
     descriptor = _chunk_descriptor(
         chunk,
         "planned",
         pending_rows=pending,
         batches_planned=len(batches),
+        resumed_from_page=first_page,
         equality_audit_divergent=divergent,
         batches_run=0,
         batches_halved=0,
@@ -1034,48 +1112,62 @@ def _run_enforce(
 ) -> dict[str, Any]:
     started = time.monotonic()
     pending_ranges = list(batches)
-    while pending_ranges:
-        if cursor_budget[0] <= 0:
-            descriptor["state"] = "deferred"
-            descriptor["skip_reason"] = "per-invocation batch budget exhausted"
-            break
-        first_page, last_page = pending_ranges.pop(0)
-        outcome, halved = _run_one_batch_with_retry(connection, chunk, config, first_page, last_page)
-        cursor_budget[0] -= 1
-        descriptor["batches_run"] += 1
-        descriptor["batches_halved"] += halved
-        descriptor["candidate_rows"] += outcome.candidate_rows
-        descriptor["updated_rows"] += outcome.updated_rows
-        descriptor["next_page"] = outcome.last_page
-
-        if outcome.shortfall > 0:
-            connection.rollback()
-            descriptor["state"] = "stopped"
-            descriptor["unmatched_rows"] += outcome.unmatched_rows
-            descriptor["unmappable_rows"] += outcome.unmappable_rows
-            descriptor["duration_ms"] = round((time.monotonic() - started) * 1000.0, 3)
-            raise BackfillStop(
-                "shortfall",
-                (
-                    f"{chunk.key} pages [{outcome.first_page},{outcome.last_page}): "
-                    f"{outcome.candidate_rows} sentinel candidate(s) but only "
-                    f"{outcome.updated_rows} updated -- {outcome.unmatched_rows} unresolvable "
-                    f"against the authority tables, {outcome.unmappable_rows} unmappable to an "
-                    "enum label. Refusing to record this as progress."
-                ),
-                chunk_schema=chunk.chunk_schema,
-                chunk_name=chunk.chunk_name,
-                first_page=outcome.first_page,
-                last_page=outcome.last_page,
-                candidate_rows=outcome.candidate_rows,
-                updated_rows=outcome.updated_rows,
-                unmatched_rows=outcome.unmatched_rows,
-                unmappable_rows=outcome.unmappable_rows,
+    try:
+        while pending_ranges:
+            if cursor_budget[0] <= 0:
+                descriptor["state"] = "deferred"
+                descriptor["skip_reason"] = "per-invocation batch budget exhausted"
+                break
+            first_page, last_page = pending_ranges.pop(0)
+            outcome, halved, remainder = _run_one_batch_with_retry(
+                connection, chunk, config, first_page, last_page
             )
+            if remainder is not None:
+                # The second half of a halved range is UNFINISHED work, not
+                # discarded work. Dropping it here would leave a hole the
+                # cursor then steps straight over, and the run would still
+                # report "processed".
+                pending_ranges.insert(0, remainder)
+            cursor_budget[0] -= 1
+            descriptor["batches_run"] += 1
+            descriptor["batches_halved"] += halved
+            descriptor["candidate_rows"] += outcome.candidate_rows
+            descriptor["updated_rows"] += outcome.updated_rows
+            descriptor["next_page"] = outcome.last_page
 
-        connection.commit()
-        if config.batch_sleep_ms:
-            sleep(config.batch_sleep_ms / 1000.0)
+            if outcome.shortfall > 0:
+                connection.rollback()
+                descriptor["unmatched_rows"] += outcome.unmatched_rows
+                descriptor["unmappable_rows"] += outcome.unmappable_rows
+                # The batch was rolled back, so re-entry must retry exactly
+                # this range. Leaving the cursor at its end would persist a
+                # step over rows that were never written.
+                descriptor["next_page"] = outcome.first_page
+                raise BackfillStop(
+                    "shortfall",
+                    (
+                        f"{chunk.key} pages [{outcome.first_page},{outcome.last_page}): "
+                        f"{outcome.candidate_rows} sentinel candidate(s) but only "
+                        f"{outcome.updated_rows} updated -- {outcome.unmatched_rows} unresolvable "
+                        f"against the authority tables, {outcome.unmappable_rows} unmappable to an "
+                        "enum label. Refusing to record this as progress."
+                    ),
+                    chunk_schema=chunk.chunk_schema,
+                    chunk_name=chunk.chunk_name,
+                    first_page=outcome.first_page,
+                    last_page=outcome.last_page,
+                    candidate_rows=outcome.candidate_rows,
+                    updated_rows=outcome.updated_rows,
+                    unmatched_rows=outcome.unmatched_rows,
+                    unmappable_rows=outcome.unmappable_rows,
+                )
+
+            connection.commit()
+            if config.batch_sleep_ms:
+                sleep(config.batch_sleep_ms / 1000.0)
+    except BackfillStop as stop:
+        _finalize_stopped_chunk(connection, chunk, descriptor, stop, started=started)
+        raise
 
     if descriptor["state"] == "planned":
         descriptor["state"] = "processed"
@@ -1088,13 +1180,78 @@ def _run_enforce(
     return descriptor
 
 
+def _finalize_stopped_chunk(
+    connection: Any,
+    chunk: ChunkRow,
+    descriptor: dict[str, Any],
+    stop: BackfillStop,
+    *,
+    started: float,
+) -> None:
+    """Mark the IN-FLIGHT descriptor stopped, keeping everything it accumulated.
+
+    Replacing it with a fresh descriptor would report zero batches, zero
+    updated rows and ``pending_rows = 0`` for a chunk that really did commit
+    work before the halt -- exactly the shape an operator reads as "nothing
+    happened here, nothing left to do". The counters below are the record of
+    committed batches, so they survive the stop; only the state changes.
+    """
+    descriptor["state"] = "stopped"
+    descriptor["skip_reason"] = stop.reason
+    descriptor["duration_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+    try:
+        with connection.cursor() as cursor:
+            descriptor["pending_rows"] = count_pending(cursor, chunk)
+        connection.rollback()
+    except Exception:
+        # The recount is diagnostics. If the connection is already unusable,
+        # keep the pre-run figure rather than masking the real stop reason
+        # behind a secondary error.
+        pass
+    stop.descriptor = descriptor
+
+
+def _guarded_batch(
+    connection: Any,
+    chunk: ChunkRow,
+    config: BackfillConfig,
+    first_page: int,
+    last_page: int,
+) -> BatchOutcome:
+    """One batch transaction: shared write guard first, then the UPDATE.
+
+    The guard's contract (``packages/common/timescale_write_guard.py``) is that
+    the cursor MUST share the transaction of the write it protects. A single
+    pre-loop check in a transaction that is then rolled back satisfies the
+    letter of "we called the guard" and none of its purpose: the compression
+    timer can fire between that check and any later batch. One catalog row per
+    batch against a 100k-row UPDATE is not a cost worth trading a stale
+    certification for.
+    """
+    with connection.cursor() as cursor:
+        assert_chunk_uncompressed(
+            cursor,
+            hypertable_schema=HYPERTABLE_SCHEMA,
+            hypertable_name=HYPERTABLE_NAME,
+            chunk_schema=chunk.chunk_schema,
+            chunk_name=chunk.chunk_name,
+        )
+        return execute_batch(
+            cursor,
+            chunk,
+            first_page=first_page,
+            last_page=last_page,
+            duration_wall_ms=config.duration_wall_ms,
+        )
+
+
 def _run_one_batch_with_retry(
     connection: Any,
     chunk: ChunkRow,
     config: BackfillConfig,
     first_page: int,
     last_page: int,
-) -> tuple[BatchOutcome, int]:
+) -> tuple[BatchOutcome, int, tuple[int, int] | None]:
     """Run a batch; on a duration-wall cancellation halve the RANGE once and retry.
 
     Halving the range is what distinguishes this from the rejected
@@ -1103,19 +1260,13 @@ def _run_one_batch_with_retry(
     means the per-page cost itself is beyond the wall, which is an operator
     decision (raise the wall, or lower batch_pages), not something to keep
     retrying against a live database.
+
+    Returns ``(outcome, halved, remainder)``. ``remainder`` is the half that
+    was NOT run and that the caller must re-queue; it is ``None`` whenever the
+    whole requested range completed.
     """
     try:
-        with connection.cursor() as cursor:
-            return (
-                execute_batch(
-                    cursor,
-                    chunk,
-                    first_page=first_page,
-                    last_page=last_page,
-                    duration_wall_ms=config.duration_wall_ms,
-                ),
-                0,
-            )
+        return _guarded_batch(connection, chunk, config, first_page, last_page), 0, None
     except BatchDurationExceeded:
         connection.rollback()
 
@@ -1133,17 +1284,11 @@ def _run_one_batch_with_retry(
             last_page=last_page,
         )
     try:
-        with connection.cursor() as cursor:
-            return (
-                execute_batch(
-                    cursor,
-                    chunk,
-                    first_page=first_page,
-                    last_page=midpoint,
-                    duration_wall_ms=config.duration_wall_ms,
-                ),
-                1,
-            )
+        return (
+            _guarded_batch(connection, chunk, config, first_page, midpoint),
+            1,
+            (midpoint, last_page),
+        )
     except BatchDurationExceeded as error:
         connection.rollback()
         raise BackfillStop(
@@ -1192,6 +1337,10 @@ def build_receipt(
         "cursor": {},
     }
 
+    # The previous invocation's receipt is the persisted cursor. Loading it is
+    # what makes the per-invocation batch budget a pause rather than a wall.
+    resume_cursor = load_persisted_cursor(config.receipt_path)
+
     connection = connect(config.database_url)
     try:
         with connection.cursor() as cursor:
@@ -1220,28 +1369,46 @@ def build_receipt(
 
         cursor_budget = [config.max_batches]
         stop: BackfillStop | None = None
+        # Carry each eligible chunk's resume point forward even if this
+        # invocation never reaches it (budget spent earlier in the list);
+        # dropping it would silently rewind that chunk to page 0 next time.
         for chunk in eligible:
-            if config.final_sweep and is_active_chunk(
-                chunk, now_utc=now_utc, lag_seconds=config.lag_seconds
-            ):
-                with connection.cursor() as cursor:
-                    assert_ingest_quiescent(
-                        cursor, chunk, quiescence_seconds=config.quiescence_seconds, sleep=sleep
-                    )
-                connection.rollback()
+            resumed = resume_cursor.get(chunk.key, 0)
+            if resumed:
+                receipt["cursor"][chunk.key] = resumed
+
+        for chunk in eligible:
             try:
+                # Inside the try: a refused final sweep is a STOP with a full
+                # inventory behind it, not an empty failure shell.
+                if config.final_sweep and is_active_chunk(
+                    chunk, now_utc=now_utc, lag_seconds=config.lag_seconds
+                ):
+                    with connection.cursor() as cursor:
+                        assert_ingest_quiescent(
+                            cursor, chunk, quiescence_seconds=config.quiescence_seconds, sleep=sleep
+                        )
+                    connection.rollback()
                 descriptor = process_chunk(
-                    connection, chunk, config, cursor_budget=cursor_budget, sleep=sleep
+                    connection,
+                    chunk,
+                    config,
+                    cursor_budget=cursor_budget,
+                    first_page=resume_cursor.get(chunk.key, 0),
+                    sleep=sleep,
                 )
             except BackfillStop as error:
                 stop = error
-                descriptor = _chunk_descriptor(chunk, "stopped", skip_reason=error.reason)
+                descriptor = error.descriptor or _chunk_descriptor(
+                    chunk, "stopped", skip_reason=error.reason
+                )
                 descriptors.append(descriptor)
+                _accumulate(totals, descriptor)
+                _persist_cursor(receipt, chunk, descriptor)
                 break
             descriptors.append(descriptor)
             _accumulate(totals, descriptor)
-            if descriptor.get("next_page") is not None:
-                receipt["cursor"][chunk.key] = int(descriptor["next_page"])
+            _persist_cursor(receipt, chunk, descriptor)
 
         receipt["chunks"] = descriptors
         if stop is not None:
@@ -1267,6 +1434,21 @@ _SKIP_REASONS = {
         "automatically once terminal, or explicitly via --final-sweep with ingest paused."
     ),
 }
+
+
+def _persist_cursor(
+    receipt: dict[str, Any], chunk: ChunkRow, descriptor: Mapping[str, Any]
+) -> None:
+    """Record where the next invocation should resume this chunk.
+
+    Safe on the stop paths too: the shortfall branch rewinds ``next_page`` to
+    the start of the rolled-back range, and a duration-wall halt leaves it at
+    the end of the last COMMITTED batch, so nothing that was not written can
+    be stepped over.
+    """
+    next_page = descriptor.get("next_page")
+    if next_page is not None:
+        receipt["cursor"][chunk.key] = int(next_page)
 
 
 def _accumulate(totals: dict[str, Any], descriptor: Mapping[str, Any]) -> None:
