@@ -13355,3 +13355,255 @@ def test_nested_retry_submission_failed_keeps_collapse_and_retry_semantics(tmp_p
     # No defer: the cycle ran to its normal terminal.
     assert result.status == "complete"
     assert next(stage for stage in result.stages if stage.stage == "forecast").status == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# #1312: the retry-decline arms mark master-row geometry permanently failed.
+# ---------------------------------------------------------------------------
+
+
+def _file_journal_failed_master(tmp_path: Path, *, error_code: str) -> tuple[Any, dict[str, Any]]:
+    """One real journal cohort master driven to a terminal FAILED projection."""
+
+    from tests.test_file_orchestration_journal import _terminally_failed_cohort_master
+
+    return _terminally_failed_cohort_master(tmp_path, error_code=error_code)
+
+
+def _permanently_failed_master_events(repository: Any, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    from tests.test_file_orchestration_journal import _permanently_failed_events
+
+    return _permanently_failed_events(repository, record)
+
+
+def _file_journal_retry_service(repository: Any, *, max_retries: int = 3) -> Any:
+    from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+
+    return FileJournalRetryService(repository, RetryConfig(max_retries=max_retries, backoff_schedule=[0]))
+
+
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "INVALID_MANIFEST"])
+def test_cycle_retry_decline_marks_the_master_row_permanently_failed(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    """#1312 seams 1 + 10: the production decline arm lands the mark.
+
+    ``_schedule_cycle_stage_retry`` short-circuits master rows whose failure is
+    not auto-retryable; before #1312 it returned ``None`` without marking, so
+    the persisted row stopped at ``status="failed"`` with no permanent-failure
+    signal at all.
+    """
+
+    repository, record = _file_journal_failed_master(tmp_path, error_code=error_code)
+    retry_service = _file_journal_retry_service(repository)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
+    result = _forecast_stage_run_result(str(record["job_id"]))
+
+    assert orchestrator._schedule_cycle_stage_retry(result, 1) is None
+
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert persisted["status"] == "permanently_failed"
+    assert persisted["error_code"] == error_code
+    assert persisted["matched_slurm_job_id"] == "17667"
+    events = _permanently_failed_master_events(repository, record)
+    assert len(events) == 1
+    assert (events[0]["status_from"], events[0]["status_to"]) == ("failed", "permanently_failed")
+    # The decline stays a decline: no auto retry, no new pipeline_job row.
+    cohort_master_ids = [
+        row["job_id"]
+        for row in repository.query_pipeline_jobs_by_cycle("gfs_2026072000")
+        if row.get("model_id") is None and row.get("stage") == "forecast"
+    ]
+    assert cohort_master_ids == [str(record["job_id"])]
+
+
+def test_cycle_retry_decline_without_journal_capability_does_not_mark_or_raise(tmp_path: Path) -> None:
+    """#1312 seam 3: the store-less ``RetryService`` shape is untouched.
+
+    It carries a same-named ``mark_permanently_failed`` that would explode on
+    its absent SQL store, so the mark is gated on the service SHAPE.
+    """
+
+    job_id = "job_cycle_gfs_2026050100_forecast_retry_65"
+    repository = FakeCycleRepository()
+    repository.jobs[job_id] = _db_free_forecast_master_record(job_id, retry_count=None)
+    retry_service = _DbFreeRetryGateService(max_retries=3)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
+
+    assert orchestrator._schedule_cycle_stage_retry(_forecast_stage_run_result(job_id), 1) is None
+
+    assert repository.jobs[job_id]["status"] == "failed"
+    assert repository.events == []
+
+
+def test_cycle_retry_decline_marks_an_exhausted_transient_master_row(tmp_path: Path) -> None:
+    """#1312 seam 7 (design D6): the exhausted-budget half of the decline arm.
+
+    A transient code with no budget left is the same permanent outcome the
+    non-master path already records, and the marked row then loses the
+    upstream-refresh resubmission path (design D7, accepted explicitly).
+    """
+
+    repository, record = _file_journal_failed_master(tmp_path, error_code="NODE_FAILURE")
+    retry_service = _file_journal_retry_service(repository, max_retries=0)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
+    result = _forecast_stage_run_result(str(record["job_id"]))
+
+    assert orchestrator._schedule_cycle_stage_retry(result, 1) is None
+
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert persisted["status"] == "permanently_failed"
+    assert len(_permanently_failed_master_events(repository, record)) == 1
+    assert (
+        ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+            persisted,
+            refreshed_upstream_finished_at=_dt("2027-01-01T00:00:00Z"),
+        )
+        is False
+    )
+
+
+def test_marked_master_rows_do_not_resurrect_via_upstream_refresh(tmp_path: Path) -> None:
+    """#1312 seam 8 (design D7): the mark closes the upstream-refresh path."""
+
+    repository, record = _file_journal_failed_master(tmp_path, error_code="OUT_OF_MEMORY")
+    refreshed_at = _dt("2027-01-01T00:00:00Z")
+    before_mark = repository.get_pipeline_job(str(record["job_id"]))
+    assert (
+        ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+            before_mark,
+            refreshed_upstream_finished_at=refreshed_at,
+        )
+        is True
+    )
+
+    _file_journal_retry_service(repository).mark_permanently_failed(before_mark)
+
+    after_mark = repository.get_pipeline_job(str(record["job_id"]))
+    assert after_mark["status"] == "permanently_failed"
+    assert (
+        ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+            after_mark,
+            refreshed_upstream_finished_at=refreshed_at,
+        )
+        is False
+    )
+
+
+class _OutOfMemoryForecastArrayClient(FakeCycleSlurmClient):
+    """Fake gateway whose forecast array tasks leave an OOM outcome receipt."""
+
+    def __init__(
+        self,
+        *,
+        object_store: LocalObjectStore,
+        run_ids: Sequence[str],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._object_store = object_store
+        self._run_ids = list(run_ids)
+
+    def submit_job_array(
+        self,
+        job_type: str,
+        *,
+        cycle_id: str,
+        stage_name: str,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        submitted = super().submit_job_array(
+            job_type,
+            cycle_id=cycle_id,
+            stage_name=stage_name,
+            tasks=tasks,
+            manifest=manifest,
+        )
+        if stage_name == "forecast":
+            for index, run_id in enumerate(self._run_ids):
+                _write_task_outcome_receipt(
+                    self._object_store,
+                    run_id,
+                    error_code="OUT_OF_MEMORY",
+                    slurm_job_id=str(submitted["job_id"]),
+                    array_task_id=index,
+                )
+        return submitted
+
+
+def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_passes(
+    tmp_path: Path,
+) -> None:
+    """#1312 seam 9 (design D9): end to end, and the mark survives pass two.
+
+    The second ``orchestrate_cycle`` re-projects the cohort; without projection
+    terminal stickiness the derived ``failed`` status would overwrite the mark
+    and the row would oscillate, one status-change event per pass.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    client = _OutOfMemoryForecastArrayClient(
+        object_store=object_store,
+        run_ids=[str(basin["run_id"]) for basin in basins],
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(
+        repository,
+        RetryConfig(max_retries=1, backoff_schedule=[0]),
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=retry_service,
+        object_store=object_store,
+    )
+
+    first = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    masters = [
+        row
+        for row in repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert first.status == "failed"
+    assert len(masters) == 1
+    master_id = str(masters[0]["job_id"])
+    marked = repository.get_pipeline_job(master_id)
+    assert marked["status"] == "permanently_failed"
+    assert marked["error_code"] == "OUT_OF_MEMORY"
+    events_after_first = _permanently_failed_master_events(repository, marked)
+    assert len(events_after_first) == 1
+
+    second = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    resumed = repository.get_pipeline_job(master_id)
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(master_id)
+    assert second.status == "failed"
+    assert resumed["status"] == "permanently_failed"
+    assert reopened["status"] == "permanently_failed"
+    assert len(_permanently_failed_master_events(repository, resumed)) == 1

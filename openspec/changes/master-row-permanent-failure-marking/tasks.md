@@ -1,0 +1,95 @@
+# Tasks: master-row-permanent-failure-marking (#1312)
+
+## Risk packs (considered)
+
+- Selected: terminal-state-semantics · idempotency · oracle-integrity ·
+  authority-surface（理由见 design "Risk packs"）。
+- Not selected: concurrency · performance · security · data-migration。
+
+## Tasks
+
+- [x] 0. 运行时探针（design D5/D9 复证，先于一切实现）：
+  - (a) 真实 `FileOrchestrationJournalRepository` 构造 typed-reserve master
+    行，**先断言** `accepted_submit_contract_is_current(row) and
+    accepted_submit_row_kind(row) == "master"`（round-2 Note-1，防假阴
+    性），再直调现 `mark_permanently_failed` → 复证
+    `file_journal_authority_transition_requires_typed_api` raise。
+  - (b) 同批复证 D9 抹回链：手工把 master 行写成 `permanently_failed`
+    后驱动第二趟 resume/projection → 观察是否被
+    `project_forecast_cohort_tasks` 抹回 `failed`。
+  - 两探针结果记入 PR 偏离记录；(a) 不 raise 或 (b) 不抹回 → 停下报告
+    orchestrator 重裁对应决策。
+- [x] 1. 新增 typed authority transition（design D5 精确形状）：
+  `mark_pipeline_job_permanently_failed`——只借 reject 的写序
+  （`_locked_cycle_write`/`_journal_record_for_write`/
+  `_validate_outgoing_record`/`_append_journal_records_unlocked`/
+  `_write_pipeline_job_direct_unlocked`）；源状态前置=终态失败子集
+  `{failed, submission_failed, partially_failed, reservation_lost}`，非法
+  源返回 stale 不 raise；accounting 元组
+  （reconciliation_decision/submit_outcome/matched_slurm_job_id）逐字段保
+  持；幂等前置以 job_id 重读持久行；事件
+  `event_type="permanently_failed"` + 真实 `status_from`，仅随真实翻转追
+  加。`:3240/:3251` 禁令不放宽。
+- [x] 2. `FileJournalRetryService.mark_permanently_failed`（`:6704`）：
+  master 行改走 task 1 API，且 master 分支**先按 job_id 重读持久行**再判
+  幂等（对 master 绕开 `:6705-6707` 快照闸，design D4/round-2 P2-E）；非
+  master 行为不变。
+- [x] 3. 调用方臂 `chain_forecast_orchestrator_cycle.py:195-197`：
+  capability 门控（`getattr(self.retry_service, "repository", None) is not
+  None`，design D2），落标后仍 `return None`；store-less/DB 形状零变化。
+- [x] 4. 休眠臂 `file_orchestration_journal.py:6607-6608`：False 臂经
+  `self.mark_permanently_failed` 落标后返回（design D3）。
+- [x] 5. cohort projection 终态粘性（design D9）：
+  `project_forecast_cohort_tasks`（`:2993-3021` master 写面）对 existing
+  `permanently_failed` 行保留状态、只更 projections/证据字段（与
+  `:3173-3175` defer 终态短路同构）；两个入口
+  （`chain_array_accounting.py:308-330`、`reconcile.py:1035-1050`）经同一
+  函数覆盖。
+- [x] 6. 测试（新增，既有测试零编辑；seam 编号对应 design）：
+  - seam 1 调用方臂：master 行 `OUT_OF_MEMORY` → None + 读回
+    `permanently_failed` + 单条事件（复用
+    `tests/test_orchestration_chain.py:1607-1634` builder 族，service 换
+    file-journal 形）。
+  - seam 2 休眠臂：`handle_failed_job` 直连结构性 master 行 → namespace
+    与持久行均 `permanently_failed` + 事件。
+  - seam 3 store-less 负向：`RetryService(None,…)` + master 行 → None、不
+    抛、零落标。
+  - seam 4 新 API 单测：终态失败源合法写入 + accounting 元组逐字段相等 +
+    `running` 源 → stale 零写入零事件 + `update_pipeline_job_status` 对
+    master 仍 raise。
+  - seam 5 幂等双向：stale 快照双驱动 → 事件计数 1；快照
+    `permanently_failed`/持久行 `failed` → 仍落标。
+  - seam 6 反向控制：master 行 `NODE_FAILURE`（低 retry_count）→ retry
+    identity 不变、零落标。
+  - seam 7 耗尽域：master 行 `NODE_FAILURE` + `retry_count >=
+    max_retries` → 落标 + upstream refresh 不重投（design D6）。
+  - seam 8 upstream-refresh：已落标行 + `refreshed_upstream_finished_at`
+    → 不重投。
+  - seam 9 e2e 两趟：OOM master 行（经 `_write_task_outcome_receipt`
+    `:1389` 注入，装配复用 `:8843-8853` 形）第一趟落标、第二趟后行仍
+    `permanently_failed`、事件计数仍 1、两趟均无 raise、PipelineResult
+    "failed"。
+  - seam 10 参数化：两臂各覆盖 `OUT_OF_MEMORY` + `INVALID_MANIFEST`。
+- [x] 7. 红证（design D8）：仅回退 caller 臂 → 仅 caller 测试红；仅回退
+  journal 臂 → 仅 journal 测试红；回退 D9 粘性 → seam 9 二趟 e2e 红。三
+  组 pytest 输出留存；`git stash list` 空核验。
+- [x] 8. 回归：`uv run pytest -q tests/test_retry.py
+  tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py
+  tests/test_production_scheduler.py` 全绿；`uv run ruff check .`；
+  `openspec validate master-row-permanent-failure-marking --strict
+  --no-interactive`。
+- [x] 9. 既有 anchor `tests/test_orchestration_chain.py:1637-1652` 原样通过
+  （只断 None 返回；不编辑不弱化）。
+
+## Required evidence (maps every selected pack)
+
+- terminal-state-semantics：seams 6/7/8/9 + task 8 全量回归（不增重投 +
+  D6/D7 裁决的减重投显式钉住 + D9 抹标振荡消除）。
+- idempotency：seam 5 双向 + task 1 幂等前置。
+- oracle-integrity：task 9 + task 7 三组红证（每面独立先红后绿）。
+- authority-surface：seam 4（前置/元组保持/禁令保持）+ task 5 粘性。
+
+## Non-goals
+
+见 design "Non-goals"（#1313 store-less 平面 / #1314 / DB 平面 / 手动重试
+路径 / 非 permanently_failed 终态的 projection 粘性语义）。

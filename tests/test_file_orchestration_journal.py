@@ -7733,3 +7733,387 @@ def test_hydro_run_row_records_initial_state_quality(tmp_path: Path) -> None:
 
     assert run["init_state_id"] is None
     assert run["quality"] == "packaged_calibrated_state"
+
+
+# ---------------------------------------------------------------------------
+# #1312: permanent-failure marking on file-journal master-row geometry.
+# ---------------------------------------------------------------------------
+
+
+_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID = "17667"
+
+
+def _cohort_task_projections(
+    record: Mapping[str, Any],
+    *,
+    outcome: str = "failed",
+    error_code: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **{key: member[key] for key in ("candidate_id", "run_id", "model_id", "array_task_id")},
+            "array_task_outcome": outcome,
+            "task_slurm_job_id": (
+                f"{_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID}_{member['array_task_id']}"
+            ),
+            "restart_stage": "forecast",
+            "native_shud_resubmitted": False,
+            "error_code": error_code,
+        }
+        for member in record["cohort_members"]
+    ]
+
+
+def _project_cohort_failure(
+    repository: Any,
+    record: Mapping[str, Any],
+    *,
+    error_code: str,
+) -> dict[str, int]:
+    return repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, error_code=error_code),
+        complete=True,
+        master_status="failed",
+        master_error_code=error_code,
+        reconciliation_decision="matched_bound",
+    )
+
+
+def _bind_cohort_master(repository: Any, record: Mapping[str, Any]) -> None:
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    commit = repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=1,
+        slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert commit.committed
+
+
+def _terminally_failed_cohort_master(
+    tmp_path: Path,
+    *,
+    error_code: str = "OUT_OF_MEMORY",
+    member_count: int = 2,
+) -> tuple[Any, dict[str, Any]]:
+    """One current-contract master driven to a real terminal FAILED projection."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=member_count)
+    _bind_cohort_master(repository, record)
+    _project_cohort_failure(repository, record, error_code=error_code)
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert persisted is not None
+    assert persisted["status"] == "failed"
+    return repository, record
+
+
+def _master_events(repository: Any, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source_id = journal_module._source_id_from_job(record)
+    cycle_time = journal_module._cycle_time_from_job(record)
+    rows = repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+    return [
+        dict(event)
+        for event in rows.pipeline_events
+        if str(event.get("entity_id") or "") == str(record["job_id"])
+    ]
+
+
+def _permanently_failed_events(repository: Any, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in _master_events(repository, record)
+        if str(event.get("event_type") or "") == "permanently_failed"
+    ]
+
+
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "INVALID_MANIFEST"])
+def test_master_row_declined_for_auto_retry_is_marked_permanently_failed(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    """#1312 seam 2 + seam 10: the dormant journal arm lands the mark itself.
+
+    ``handle_failed_job``'s master branch used to return the row untouched when
+    auto retry was declined, so the SHALL of ``job-retry-mechanism`` never held
+    on master-row geometry.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=error_code)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    handled = service.handle_failed_job(job)
+
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(str(record["job_id"]))
+    assert handled.job_id == str(record["job_id"])
+    assert handled.status == "permanently_failed"
+    assert persisted["status"] == "permanently_failed"
+    assert reopened["status"] == "permanently_failed"
+    assert persisted["error_code"] == error_code
+    events = _permanently_failed_events(repository, record)
+    assert len(events) == 1
+    assert events[0]["status_from"] == "failed"
+    assert events[0]["status_to"] == "permanently_failed"
+    assert events[0]["details"]["automatic_retry_stopped"] is True
+    assert events[0]["details"]["last_error"] == error_code
+
+
+def test_master_row_with_transient_code_and_budget_keeps_retry_identity(tmp_path: Path) -> None:
+    """#1312 seam 6: the reverse control — no mark on a retryable master row."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code="NODE_FAILURE")
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    handled = service.handle_failed_job(job)
+
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert handled.status == "pending"
+    assert handled.job_id != str(record["job_id"])
+    assert persisted["status"] == "failed"
+    assert _permanently_failed_events(repository, record) == []
+
+
+def test_master_row_with_exhausted_transient_budget_is_marked_permanently_failed(tmp_path: Path) -> None:
+    """#1312 seam 7 (design D6): the exhausted-budget half of the decline arm."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code="NODE_FAILURE")
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    job = dict(repository.get_pipeline_job(str(record["job_id"])))
+    job["retry_count"] = 2
+
+    handled = service.handle_failed_job(job)
+
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert persisted["status"] == "permanently_failed"
+    assert len(events) == 1
+    assert events[0]["details"]["failure"]["limit_exhausted"] is True
+
+
+def test_permanent_failure_transition_preserves_accepted_submit_accounting(tmp_path: Path) -> None:
+    """#1312 seam 4: the typed transition relabels, it does not re-account."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    before = repository.get_pipeline_job(str(record["job_id"]))
+
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="OUT_OF_MEMORY",
+        error_message="array tasks ran out of memory",
+        finished_at=_dt("2026-07-20T01:00:00Z"),
+        event_details={"automatic_retry_stopped": True},
+    )
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    assert result.outcome == "applied"
+    assert result.wrote is True
+    assert after["status"] == "permanently_failed"
+    for field in (
+        "reconciliation_decision",
+        "submit_outcome",
+        "matched_slurm_job_id",
+        "reconciliation_source",
+        "reconciliation_reason_class",
+        "identity_blocked_streak",
+        "candidate_projections",
+        "slurm_job_id",
+        "submission_attempt",
+        "cohort_digest",
+        "cohort_members",
+        "idempotency_key",
+    ):
+        assert after[field] == before[field], field
+    assert (
+        after["reconciliation_decision"],
+        after["submit_outcome"],
+        after["matched_slurm_job_id"],
+    ) == ("matched_bound", "accepted", _PERMANENT_FAILURE_MASTER_SLURM_JOB_ID)
+    assert after["error_code"] == "OUT_OF_MEMORY"
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+@pytest.mark.parametrize("live_status", ["reserved", "running"])
+def test_permanent_failure_transition_reports_stale_for_live_master_rows(
+    tmp_path: Path,
+    live_status: str,
+) -> None:
+    """#1312 seam 4: a non-terminal source is a stale caller, never an error."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    if live_status == "reserved":
+        assert repository.reserve_pipeline_job(dict(record)) is not None
+    else:
+        _bind_cohort_master(repository, record)
+        assert repository.transition_pipeline_job_runtime_status(
+            str(record["job_id"]),
+            "running",
+        ).committed
+    before = repository.get_pipeline_job(str(record["job_id"]))
+    events_before = _master_events(repository, record)
+
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="OUT_OF_MEMORY",
+    )
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    assert result.outcome == "stale"
+    assert result.committed is False
+    assert after == before
+    assert _master_events(repository, record) == events_before
+
+
+def test_permanent_failure_transition_declines_released_reservations(tmp_path: Path) -> None:
+    """#1312: a released reservation's evidence pins ``reservation_lost``.
+
+    ``identity_mismatch_released`` may only coexist with
+    ``status="reservation_lost"`` (``accepted_submit_identity`` invariant), so
+    the mark is declined as stale instead of corrupting the accounting tuple or
+    raising into the decline path.
+    """
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert repository.release_identity_blocked_reservation(
+        str(record["job_id"]),
+        accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    ) == 1
+    before = repository.get_pipeline_job(str(record["job_id"]))
+    assert before["status"] == "reservation_lost"
+
+    result = repository.mark_pipeline_job_permanently_failed(str(record["job_id"]))
+
+    assert result.outcome == "stale"
+    assert repository.get_pipeline_job(str(record["job_id"])) == before
+    assert _permanently_failed_events(repository, record) == []
+
+
+def test_permanent_failure_transition_marks_an_abandoned_reservation(tmp_path: Path) -> None:
+    """#1312 seam 4: ``reservation_lost`` is a legal permanent-failure source."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert repository.permit_pipeline_job_retry(
+        str(record["job_id"]),
+        accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+    ) == 1
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "reservation_lost"
+
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="INVALID_MANIFEST",
+    )
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    assert result.outcome == "applied"
+    assert after["status"] == "permanently_failed"
+    assert after["reconciliation_decision"] == "absence_retry_permitted"
+    events = _permanently_failed_events(repository, record)
+    assert len(events) == 1
+    assert events[0]["status_from"] == "reservation_lost"
+
+
+def test_generic_status_update_still_refuses_master_rows_after_the_typed_transition(
+    tmp_path: Path,
+) -> None:
+    """#1312 seam 4: the new API does not loosen the master write ban."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        repository.update_pipeline_job_status(
+            str(record["job_id"]),
+            "permanently_failed",
+        )
+
+    assert raised.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+
+
+def test_master_permanent_failure_marking_is_idempotent_against_stale_snapshots(
+    tmp_path: Path,
+) -> None:
+    """#1312 seam 5, direction A: a stale ``failed`` snapshot re-marks nothing."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = dict(repository.get_pipeline_job(str(record["job_id"])))
+
+    first = service.mark_permanently_failed(stale_snapshot)
+    second = service.mark_permanently_failed(stale_snapshot)
+    third = service.handle_failed_job(stale_snapshot)
+
+    assert first.status == "permanently_failed"
+    assert second.status == "permanently_failed"
+    assert third.status == "permanently_failed"
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "permanently_failed"
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+def test_master_permanent_failure_marking_ignores_a_stale_marked_snapshot(tmp_path: Path) -> None:
+    """#1312 seam 5, direction B: a snapshot claiming the mark cannot skip it.
+
+    The service-level snapshot gate would otherwise return early and leave the
+    persisted row on ``failed`` forever (design D4 / round-2 P2-E).
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    lying_snapshot = {
+        **repository.get_pipeline_job(str(record["job_id"])),
+        "status": "permanently_failed",
+    }
+
+    marked = service.mark_permanently_failed(lying_snapshot)
+
+    assert marked.status == "permanently_failed"
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "permanently_failed"
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+def test_cohort_projection_keeps_a_permanently_failed_master_sticky(tmp_path: Path) -> None:
+    """#1312 seam 9 core (design D9): the mark survives re-projection.
+
+    ``project_forecast_cohort_tasks`` derives ``master_status`` from the task
+    projections, so without terminal stickiness the next resume pass rewrote the
+    mark back to ``failed`` and oscillated with a fresh status-change event.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    service.mark_permanently_failed(repository.get_pipeline_job(str(record["job_id"])))
+    events_before = _master_events(repository, record)
+
+    counts = _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    assert after["status"] == "permanently_failed"
+    assert counts == {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+    assert _master_events(repository, record) == events_before
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+def test_cohort_projection_still_writes_terminal_status_for_unmarked_masters(tmp_path: Path) -> None:
+    """#1312: stickiness is scoped to ``permanently_failed`` (design non-goal)."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+
+    _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
+
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"

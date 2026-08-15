@@ -194,6 +194,13 @@ class ForecastOrchestratorCycleMixin:
         ):
             should_retry = getattr(self.retry_service, "should_auto_retry", None)
             if callable(should_retry) and not bool(should_retry(job)):
+                # Declining auto retry owns the permanent-failure mark (#1312).
+                # Gate on the SERVICE SHAPE, not on the method name: the
+                # store-less ``RetryService`` used by the db-free gate carries
+                # the same method but no persistence, and must keep returning
+                # None without marking and without raising.
+                if getattr(self.retry_service, "repository", None) is not None:
+                    self.retry_service.mark_permanently_failed(job)
                 return None
             # The next call to _submit_and_wait_cycle_stage owns creation of a
             # clean, versioned reservation using the then-current basin cohort.
