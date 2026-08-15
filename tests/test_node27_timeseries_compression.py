@@ -1453,6 +1453,28 @@ def test_schema_accepts_the_config_tombstone_shape_and_rejects_it_with_budget() 
         jsonschema.validate({**tombstone, "budget": dict(_DEFAULT_BUDGET)}, _load_schema())
 
 
+def test_schema_rejects_a_non_config_stage_failure_that_hides_budget_by_omitting_the_bound() -> None:
+    """The exemption needs BOTH discriminators — the stage label is load-bearing.
+
+    A failure past the config stage ran under a resolved budget, so omitting
+    ``per_tick_bound`` must not buy it a ``budget``-free receipt. Without the
+    ``failure.stage == "config"`` conjunct this shape validates and a real tick's
+    budget chain silently disappears from the audit trail.
+    """
+
+    hidden_budget = {
+        "schema_version": "2.1",
+        "provenance_state": "unavailable",
+        "generated_at": "2026-07-15T12:00:00Z",
+        "now_utc": "2026-07-15T12:00:00Z",
+        "mode": "dry-run",
+        "outcome": "failed",
+        "failure": {"stage": "freeze_head", "mutation_state": "failed_before_mutation"},
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(hidden_budget, _load_schema())
+
+
 def test_schema_requires_budget_on_a_config_stage_failure_that_has_a_config() -> None:
     """The exemption is a double discriminator, not a bare stage label.
 

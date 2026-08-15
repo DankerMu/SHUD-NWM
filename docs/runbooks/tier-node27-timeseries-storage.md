@@ -1585,18 +1585,33 @@ knob; nothing here changes them, and they do not follow this env file.
 |`NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|`WRAPPER_WALL_SECONDS + 40` or more (e.g. `5740`)|leg 2; a **declared** value — it must equal the drop-in you actually installed|`budget.systemd_wall_seconds`|
 |`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|leg 3: raising the timeout above `3600000` with a bound above `1` is refused outright; the invariant bounds ONE chunk's budget, so a second chunk in the same tick still dies on the wall|`per_tick_bound`|
 
-The runner refuses to open a database connection if either leg is violated, and
-the wrapper refuses to launch on a non-positive-integer wall. Both refusals are
-structured JSON on stderr.
+The runner refuses to open a database connection if any of the three legs is
+violated, and the wrapper refuses to launch on a non-positive-integer wall.
+Both refusals are structured JSON on stderr.
 
-**Every tick's receipt echoes what it actually ran with** (issue #1351, receipt
-`schema_version` `"2.1"`): the `budget` object plus `per_tick_bound` are the
-machine-checkable record of the four values above, so a catch-up tick and a
-default tick are distinguishable after the fact — read them, do not reconstruct
-them from the env file, which may already have been rolled back. The only
-receipt without a `budget` block is the config tombstone (`outcome: "failed"`,
-`failure.stage: "config"`), written when the configuration was refused and no
-budget was ever in force.
+**Every tick's receipt records the configuration that tick resolved** (issue
+`#1351`, receipt `schema_version` `"2.1"`): the `budget` object plus
+`per_tick_bound` are the record of the four values above, so a catch-up tick
+and a default tick are distinguishable after the fact — read them, do not
+reconstruct them from the env file, which may already have been rolled back.
+Read each field for what it is worth:
+
+- `budget.compress_timeout_ms` and `per_tick_bound` were **applied** by that
+  tick — the timeout as the per-chunk `SET statement_timeout`, the bound as the
+  selection cap.
+- `budget.wrapper_wall_seconds` is **parsed and invariant-checked** by the
+  Python, but enforced by `scripts/node27_timeseries_compression_once.sh`,
+  which reads its own copy of the variable; the receipt shows what the runner
+  read, not what `timeout` was actually given.
+- `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
+  read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
+  the receipt only proves what the env file declared. Check 2 below
+  (`systemctl show -p TimeoutStartUSec`) is the authoritative observation of
+  the installed unit wall.
+
+The only receipt without a `budget` block is the config tombstone
+(`outcome: "failed"`, `failure.stage: "config"`), written when the
+configuration was refused and no budget was ever in force.
 
 **Why `+60` is a floor and not a size.** Leg 1 is the *minimum* the runner will
 accept; it is not a measurement of what a tick costs outside `compress_chunk`.
@@ -1697,26 +1712,75 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    ```
 
    Both checks read the *intended* configuration. The third check reads what a
-   tick actually ran with: after the first default timer tick following the
-   cleanup, confirm its receipt echoes the default triple (issue #1351 —
-   this is the only machine-checkable proof the window is closed, and unlike
-   the two checks above it cannot be satisfied by an env file that no running
-   tick has picked up yet).
+   real tick **resolved**: after the first default timer tick following the
+   cleanup, confirm its receipt carries the default budget triple and bound
+   (issue #1351). Unlike the two checks above it cannot be satisfied by an env
+   file that no running tick has picked up yet — but read it for what it
+   proves: the runner-side effective `compress_timeout_ms` and
+   `per_tick_bound` were actually applied by that tick, while
+   `systemd_wall_seconds` is only the declaration that tick read. **Check 2
+   stays the authority on the installed unit wall**; check 3 does not replace
+   it.
+
+   Check 3 must establish *freshness before budget*, in that order. §4.5's own
+   window stopped and masked the timer, and both catch-up ticks wrote
+   per-invocation `--receipt-path` files, so the default path still holds the
+   **pre-window** receipt until a post-cleanup tick overwrites it in place. Nor
+   does absence rescue you: a wall-`TERM`ed first post-cleanup tick (the exact
+   shape env residue produces) writes no receipt at all and leaves the old
+   clean one sitting there — §4 "Per-tick capacity" owns that detection rule
+   and its staleness predicate (`generated_at` vs. the last timer trigger from
+   `systemctl --user list-timers`). Asserting the budget against that stale
+   file is a false pass.
 
    ```bash
-   # the newest default-path receipt must carry the default budget triple
-   /home/nwm/NWM/.venv/bin/python - <<'PY'
-   import json
+   # 1. read the last timer trigger — the same staleness predicate §4 uses
+   systemctl --user list-timers nhms-node27-timeseries-compression.timer
+   LAST_TRIGGER=2026-08-15T04:25:00Z   # the LAST column, as ISO-8601 UTC
+
+   # 2. the default-path receipt must be POST-trigger and carry the defaults
+   /home/nwm/NWM/.venv/bin/python - "$LAST_TRIGGER" <<'PY'
+   import json, sys
+   from datetime import datetime
+
+   trigger = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
    receipt = json.load(open("/home/nwm/NWM/artifacts/receipts/node27_timeseries_compression.json"))
+   version = receipt.get("schema_version")
+   print(version, receipt.get("generated_at"), receipt.get("outcome"),
+         receipt.get("budget"), receipt.get("per_tick_bound"))
+
+   # (1) is there a post-#1351 receipt here at all? Not a budget verdict.
+   assert version == "2.1", (
+       f"no post-#1351 default tick at this path yet (schema_version={version})"
+   )
+
+   # (2) freshness — a pre-window receipt says nothing about the cleanup.
+   generated_at = datetime.fromisoformat(receipt["generated_at"].replace("Z", "+00:00"))
+   assert generated_at >= trigger, (
+       "receipt predates cleanup — no post-cleanup default tick has run yet; "
+       "wait for the next 04:25 UTC tick"   # NOT a pass
+   )
+
+   # (3) only now does the budget describe the current configuration.
    budget = receipt.get("budget")
-   print(receipt["schema_version"], receipt["outcome"], budget, receipt.get("per_tick_bound"))
+   assert budget is not None, (
+       "config tombstone (failure.stage=config): the configuration was REFUSED "
+       "and no budget was ever in force — the env file is still broken"
+   )
    assert budget == {
        "compress_timeout_ms": 3600000,
        "wrapper_wall_seconds": 3900,
        "systemd_wall_seconds": 3940,
    }, "catch-up budget still in force"
+   assert receipt.get("per_tick_bound") == 4, "catch-up budget still in force"
    PY
    ```
+
+   Steps (1) and (2) fail with their own diagnosis on purpose: a `2.0` receipt
+   or a stale one is "no post-cleanup tick has run yet", **not** "the budget is
+   wrong" and **not** a pass. Re-run the check after the next 04:25 UTC tick;
+   if the unit went `failed` instead, that is §4's `rc=124` wall path, not a
+   budget question.
 
    Only delete `~/node27-compression-env.pre-catchup` after the `diff` is
    clean. A `git status`-clean worktree is *not* one of these three checks — the

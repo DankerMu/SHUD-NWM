@@ -100,8 +100,12 @@ example 是工程师复制模板，应反映 runner 实际产出形状（refused
 - `EXPECTED_TIMEOUT_SECONDS = 900` 字面量冻结 + `verify_bundle` `"2.0"` 语义钉
   :3564-3567 冻结（D3 双测试钉）。
 - budget-chain 既有两腿不变量测试群 :126-384 语义零改动（新腿是追加）。
-- env 模板 `infra/env/node27-timeseries-compression.example` **字节不动**（两个 pin 测试
-  :1570-1606 继续通过）。
+- env 模板 `infra/env/node27-timeseries-compression.example`：~~字节不动~~ **冻结解除
+  （round-1 C3 amendment）**——原冻结理由是保两个 pin 测试，但两钉均为 substring/唯一性
+  型，comment-only 追加不可能破钉，冻结保护的是空集；而 leg 3 落地后模板 :36-42 只列
+  两腿 + "either leg"、:81-86 把 bound=1 说成 hint，是本 PR 自己制造的矛盾（模板即
+  部署源）。允许 **comment-only** 刷新：补 leg 3、"either"→"any"、hint 改
+  "抬 timeout 时强制"；赋值行与既有钉住 substring 字节不动，两个 pin 测试必须原样通过。
 - tombstone "no config lies" 性质：payload 仍不含任何 config 派生值。
 - `_emit_stderr_diagnostic` payload keys 不变（本案不走备选的 journald 方案）。
 

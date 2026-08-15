@@ -50,10 +50,12 @@ failed receipt 仍 MUST 携带 `head_sha`（既有 provenance 钉随版本放宽
 
 #### Scenario: 抬墙未降 bound 被拒
 
-- **WHEN** env 设 `COMPRESS_TIMEOUT_MS=7200000` 且 `PER_TICK_BOUND=4`
-- **THEN** runner 在任何 DB 连接前以 `CompressionConfigError` 退出，文案含 §4.5 指针
+- **WHEN** env 设 `COMPRESS_TIMEOUT_MS=7200000`、`WRAPPER_WALL_SECONDS=7500`、
+  `SYSTEMD_WALL_SECONDS=7540`（外层两墙同步抬高——否则既有 leg 1 先拒）且 `PER_TICK_BOUND=4`
+- **THEN** runner 在任何 DB 连接前以 `CompressionConfigError`（leg 3）退出，文案含 §4.5 指针
 
 #### Scenario: 合法追赶组合与默认组合不受影响
 
-- **WHEN** env 设抬墙 + `PER_TICK_BOUND=1`，或默认 timeout + `PER_TICK_BOUND=4`
+- **WHEN** env 设抬 timeout + 外层两墙按 §4.5 配方同步抬高 + `PER_TICK_BOUND=1`
+  （如 7200000/7500/7540/1），或默认 timeout + `PER_TICK_BOUND=4`
 - **THEN** config 构造成功，既有 budget-chain 两腿不变量行为不变
