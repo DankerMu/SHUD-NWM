@@ -277,8 +277,16 @@ class E2ERepository:
         assert river_network_version_id == "rivnet_v1"
         return (RiverSegmentOrder("seg_0001", "rivnet_v1", 1),)
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: Any = None,
+        segment_keys: Any = None,
+    ) -> None:
         assert batch_size > 0
+        del run_identity, segment_keys
         run_ids = {row.run_id for row in rows}
         self.river_timeseries = [row for row in self.river_timeseries if row.run_id not in run_ids]
         self.river_timeseries.extend(rows)

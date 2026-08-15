@@ -8,6 +8,7 @@ from .parser import (
     PsycopgOutputParserRepository,
     RiverSegmentOrder,
     RiverTimeseriesRow,
+    RunIdentityKeys,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "PsycopgOutputParserRepository",
     "RiverSegmentOrder",
     "RiverTimeseriesRow",
+    "RunIdentityKeys",
 ]

@@ -40,6 +40,7 @@ from workers.forcing_producer.store import PsycopgForcingRepository
 from workers.output_parser.parser import (
     PsycopgOutputParserRepository,
     RiverTimeseriesRow,
+    RunIdentityKeys,
 )
 
 _CHUNKS_QUERY_MARKER = "timescaledb_information.chunks"
@@ -178,6 +179,23 @@ def _river_rows() -> tuple[RiverTimeseriesRow, ...]:
     )
 
 
+def _river_identity_kwargs() -> dict[str, Any]:
+    """Surrogate-key fixture for the dual-write signature (#1340).
+
+    ``upsert_river_timeseries`` fails the batch closed when a key is missing,
+    so every direct call here must supply them; nothing about the guard
+    assertions below changes because of it.
+    """
+    return {
+        "run_identity": RunIdentityKeys(
+            run_key=7,
+            river_network_version_key=8,
+            basin_version_key=9,
+        ),
+        "segment_keys": {row.river_segment_id: 100 + index for index, row in enumerate(_river_rows())},
+    }
+
+
 def _output_parser_repository(connection: _RecordingConnection) -> PsycopgOutputParserRepository:
     # PsycopgOutputParserRepository is a frozen dataclass; ``dataclasses.replace``
     # is the only supported way to bind a live connection.
@@ -212,7 +230,7 @@ def test_output_parser_guard_runs_before_delete_on_uncompressed_batch(
     _patch_parser_execute_values(monkeypatch)
     connection = _RecordingConnection()
     repository = _output_parser_repository(connection)
-    repository.upsert_river_timeseries(_river_rows(), batch_size=2)
+    repository.upsert_river_timeseries(_river_rows(), batch_size=2, **_river_identity_kwargs())
 
     guard_idx = _index_of_first(connection.executions, _CHUNKS_QUERY_MARKER)
     delete_idx = _index_of_first(connection.executions, "DELETE FROM hydro.river_timeseries")
@@ -230,7 +248,7 @@ def test_output_parser_guard_blocks_before_any_delete_on_compressed_chunk() -> N
     )
     repository = _output_parser_repository(connection)
     with pytest.raises(CompressedChunkWriteError) as exc_info:
-        repository.upsert_river_timeseries(_river_rows(), batch_size=2)
+        repository.upsert_river_timeseries(_river_rows(), batch_size=2, **_river_identity_kwargs())
     assert "_hyper_1_1_chunk" in str(exc_info.value)
     assert "hydro.river_timeseries" in str(exc_info.value)
     delete_idx = _index_of_first(connection.executions, "DELETE FROM hydro.river_timeseries")
@@ -245,7 +263,7 @@ def test_output_parser_uncompressed_delete_is_time_bounded(
     connection = _RecordingConnection()
     repository = _output_parser_repository(connection)
     rows = _river_rows()
-    repository.upsert_river_timeseries(rows, batch_size=len(rows))
+    repository.upsert_river_timeseries(rows, batch_size=len(rows), **_river_identity_kwargs())
 
     delete_calls = [
         (statement, params)
@@ -273,7 +291,7 @@ def test_output_parser_replacement_window_includes_existing_rows_before_guard(
     connection = _RecordingConnection(existing_river_window=(existing_min, existing_max))
     repository = _output_parser_repository(connection)
 
-    repository.upsert_river_timeseries(_river_rows(), batch_size=2)
+    repository.upsert_river_timeseries(_river_rows(), batch_size=2, **_river_identity_kwargs())
 
     guard_call = next(
         (statement, params)
