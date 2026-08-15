@@ -1570,7 +1570,8 @@ Exact-cycle missing-forcing regeneration (node-22 only):
                                               object_store_sidecar | absent
    state_evidence.forcing_provenance.tier_status = <sidecar tier detail, only
                                                     when source = absent>
-   state_evidence.forcing_provenance.probe_key   = <manifest object key that was
+   state_evidence.forcing_provenance.probe       = manifest | package_uri
+   state_evidence.forcing_provenance.probe_key   = <object key that was
                                                     actually probed>
    state_evidence.forcing_provenance.artifact_exists = true | false
    state_evidence.artifact_guard.unsafe_reason   = <why the probe refused the
@@ -1579,16 +1580,38 @@ Exact-cycle missing-forcing regeneration (node-22 only):
 
    - `tier_status` names which provenance tier failed, and routes the repair
      decision through the table in step 1.
-   - `probe_key` is the manifest object key the existence probe was actually
-     given (derived from this candidate's own identity). Compare it against
-     `manifest_uri`, which is only what the record *claimed*: a mismatch means
-     the record points somewhere other than this candidate's package.
+   - `probe` / `probe_key` name the object the existence probe was actually
+     given. On the journal/direct tiers (the recorded `forcing_package_uri`):
+     `probe = manifest` means the record held a package *prefix* (with or
+     without a trailing `/`) and the probe used the derived witness manifest
+     file key `<package prefix>/forcing_package.json`; `probe = package_uri`
+     means the record was already a valid file key and was probed verbatim. On
+     the `object_store_sidecar` tier `probe_key` is always derived from this
+     candidate's own identity — compare it against `manifest_uri`, which is only
+     what the record *claimed*: a mismatch means the record points somewhere
+     other than this candidate's package.
+   - `probe_key` is stamped *before* the probe runs. If
+     `artifact_guard.unsafe_reason` is `object_store_root_unconfigured` or
+     `artifact_probe_error`, that key was **not** probed at all —
+     `unsafe_reason` is the authoritative verdict, not `probe_key`.
    - `artifact_exists` says whether that probed manifest object was found;
      `false` on an `object_store_sidecar` source is a genuinely absent package,
      not a read failure.
    - `artifact_guard.unsafe_reason` says why the probe refused or could not use
-     the reference (unsafe path, invalid object key); `null` means the reference
-     was probeable and simply not found.
+     the reference; `null` means the reference was probeable and simply not
+     found ("probed, determined absent"). Route a non-null value by this table:
+
+   | `unsafe_reason` | Fault | Does an exact-cycle forcing rebuild fix it? |
+   |---|---|---|
+   | `null` | The probe ran and the package is genuinely absent | Yes — this is exactly what the rebuild repairs |
+   | `object_store_root_unconfigured` | Neither the candidate's `object_store_root` nor `OBJECT_STORE_ROOT` is set, so no probe ran | No — the remedy is configuration; fix it and let the next pass re-probe |
+   | `artifact_probe_error` | The object store refused the stat (symlinked witness leaf or ancestor, stale NFS handle, permissions) | No — a rebuild cannot clear a filesystem fault; fix the object/mount/permissions first |
+   | `invalid_local_artifact_path` / `local_artifact_path_outside_allowed_roots` / `local_artifact_path_unresolvable` | A local-path reference is unresolvable or outside the allowed roots | No — fix the path or `NHMS_SCHEDULER_ALLOWED_ROOTS` first |
+
+   A blocker with a non-null `unsafe_reason` is rejected by the authorized
+   repair channel as `forcing_artifact_reference_unsafe` (see the rejected
+   reasons below). That is deliberate: a rebuild cannot cure a configuration or
+   filesystem fault.
 
    `source = absent` with a config/identity/read-fault `tier_status`
    (`store_unconfigured`, `identity_incomplete`, a permission-class

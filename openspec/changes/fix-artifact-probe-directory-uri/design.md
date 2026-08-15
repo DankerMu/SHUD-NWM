@@ -22,17 +22,23 @@ chain + failure/recovery lane). Project profile: NHMS.
 
 ## Decisions
 
-### D1 — Directory-shape witness derivation lives at the forcing call site
+### D1 — Prefix-shape witness derivation lives at the forcing call site, keyed off validator admissibility (round-1 amendment)
 
-A directory-shaped object URI (after strip, non-local, ends with `/`) is never
-handed to the probe. The tier-1/2 forcing leg derives the witness manifest FILE
-key: `f"{uri.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"` — same
-construction as `_sidecar_manifest_probe_key`, extracted into one shared helper
-(e.g. `_package_manifest_probe_uri(uri)`) so the two tiers cannot drift; no
-hand-joined literals. The generic probe itself stays shape-agnostic: derivation
-is forcing-domain knowledge (the witness filename is the forcing producer's
-manifest), so it does not belong inside `_artifact_uri_missing_status`, which
-also serves copyback.
+A package-prefix-shaped object URI is never handed to the probe. The trigger is
+NOT the decorative trailing `/` (round-1 cand-05: the handoff lane normalizes
+it away — `workers/forcing_producer/file_store.py:678,762` via
+`normalize_key(...).strip("/")` — and `forcing_domain_handoff_apply.py:615`'s
+`rtrim` comparison proves both shapes coexist in `met.forcing_version`): a
+recorded object URI is prefix-shaped whenever `validate_object_path` does not
+admit it as a FILE key. The tier-1/2 forcing leg then derives the witness
+manifest FILE key: `f"{uri.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"`
+— same construction as `_sidecar_manifest_probe_key`, extracted into one shared
+helper (`_package_manifest_probe_uri(uri)`) so the two tiers cannot drift; no
+hand-joined literals. A recorded URI the validator already admits as a file key
+is probed as-is (`probe: "package_uri"`), never double-derived. The generic
+probe itself stays shape-agnostic: derivation is forcing-domain knowledge, so
+it does not belong inside `_artifact_uri_missing_status`, which also serves
+copyback.
 
 Rejected alternative: teaching `validate_object_path` / `LocalObjectStore` a
 `prefix_exists` notion — relaxes the repo-wide closed-world path validator,
@@ -61,9 +67,18 @@ return `(True, "object_store_root_unconfigured")` WITHOUT calling
   `unsafe_reason=None` = "probed, determined absent") — zero new evidence
   plumbing, satisfies the issue AC that bogus URIs are never silently deemed
   present.
-- Production (node-22) always configures `OBJECT_STORE_ROOT`
-  (`infra/env/compute.scheduler-provider-refresh.env.example`); the ruling only
-  bites test/dev deployments, loudly.
+- Production (node-22) cannot reach the probe without `OBJECT_STORE_ROOT`
+  (round-1 corrected citation): the db-free lane sets
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, which forces `require_runtime_roots`
+  (`scheduler_config.py:407-410`), and the runtime-roots preflight hard-requires
+  `object_store_root` with a `MISSING` blocker before any candidate decision
+  runs (`scheduler_runtime_roots.py:99-101,141,218`;
+  `scheduler_runtime.py:605-611` returns `preflight_blocked` pre-lock). The
+  ruling therefore only bites non-db-free/roots-not-required deployments
+  (dev/staging), loudly. The tracked
+  `infra/env/compute.scheduler-dbfree.env.example` predates this and still
+  lacks an `OBJECT_STORE_ROOT` entry — pre-existing template drift, routed as a
+  follow-up issue, not fixed here.
 
 `_object_manifest_is_missing` itself is left unchanged: its other callers
 (`_missing_raw_manifest_repair_evidence` `:992`, downstream twin `:1045`) probe
@@ -97,11 +112,20 @@ repair-eligible, and
 `test_repair_authorization_accepts_both_missing_forcing_blocker_pairs`
 (`tests/test_production_scheduler.py:9448`) must keep passing unweakened.
 
-### D4 — Non-goals
+### D4 — Non-goals and recorded residual (round-1 amendment)
 
-- The `except (OSError, ValueError): return True, None` lane keeps
-  `unsafe_reason=None` (making it distinguishable is not in the issue AC; the
-  derived-key change already removes the directory-shape `ValueError` source).
+- `ObjectStoreError` from the store probe is contained inside
+  `_artifact_uri_missing_status` as `(True, "artifact_probe_error")` (round-1
+  cand-01 ruling): fail-closed, distinguishable from both "probed, absent" and
+  "store unconfigured", never escapes the decision path, and — being non-null —
+  rejected by the repair gate (a rebuild cannot clear a filesystem fault).
+- Recorded residual (round-1 cand-06): the
+  `except (OSError, ValueError): return True, None` lane keeps
+  `unsafe_reason=None` for references the closed-world validator rejects even
+  after witness derivation. That verdict is honest at the repair boundary — a
+  rebuild re-records the reference, so repair IS an effective remedy for an
+  unresolvable recorded URI — and the spec delta's null-reason sentence is
+  scoped accordingly.
 - `#1367` redaction-placeholder guard on copyback, `#1203` write-side rows,
   local-path leg (`_local_artifact_path*`), node-27 lanes: untouched.
 

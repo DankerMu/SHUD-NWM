@@ -24,8 +24,13 @@ decision seam `_missing_upstream_forecast_artifact_evidence` (via
 - Resource limits / large input / discovery: not selected — `exists` probe
   only, no new reads.
 - Release / packaging / dependency compatibility: not selected — no deps.
-- Documentation / migration notes: not selected — behavior documented in spec
-  delta + code comments; no operator-facing doc change required by AC.
+- Documentation / migration notes: **selected** (round-1 re-selection, cand-07
+  — the PR introduces a new non-repairable blocker class and new
+  `probe`/`probe_key` semantics the operator routing table must know) —
+  `docs/runbooks/current-production-ops.md` artifact-guard section: journal/
+  direct-tier `probe`/`probe_key` semantics line, `object_store_root_unconfigured`
+  routing row (remedy = configuration, rebuild ineffective), `artifact_probe_error`
+  routing row (remedy = clear filesystem fault, rebuild ineffective).
 - Domain packs (forcing/time-series, geospatial, solver): not selected — no
   numerics/geometry; forcing surface touched only at the probe layer.
 
@@ -80,8 +85,23 @@ decision seam `_missing_upstream_forecast_artifact_evidence` (via
 - Sidecar-tier decisions unchanged (existing sidecar tests stay green
   untouched). [Legacy]
 - Commands: `uv run pytest -q tests/test_production_scheduler.py -k
-  missing_forcing` (baseline 36 passed, must not shrink), targeted new tests,
-  `uv run ruff check .`.
+  missing_forcing` (issue text said baseline 36; measured master baseline is
+  40 — the binding floor; 42 after round 0, must not shrink), targeted new
+  tests, `uv run ruff check .`.
+
+## Round-1 fix tasks (Phase 5/6)
+
+- [x] 7. Contain `ObjectStoreError` in `_artifact_uri_missing_status` object
+  branch as `(True, "artifact_probe_error")` (cand-01); tests: symlinked leaf +
+  monkeypatched raise at unit and decision seams, pass survives, repair gate
+  rejects.
+- [x] 8. Re-key derivation trigger off `validate_object_path` admissibility
+  (cand-05); tests: no-trailing-slash 5-seg shapes (bare + `s3://`) present →
+  not missing / absent → missing, and 6-seg file key never double-derived.
+- [x] 9. Narrow the copyback D3 comment to pattern-depth truth (cand-03).
+- [x] 10. De-vacuate `test_unattributed_cycle_marker_does_not_drive_a_manual_
+  retry_decision`: fixture + positive pin (cand-04).
+- [x] 11. Runbook amendments per re-selected Documentation pack (cand-07).
 
 ## Non-goals
 
