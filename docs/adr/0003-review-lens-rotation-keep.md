@@ -69,3 +69,11 @@ that would have shipped an inert fix (a 64 KiB sidecar read cap against
 1.6-2.0 MB production records) came from a rotated-in
 production-reachability lens, not from any core lens. Next revisit on
 maintainer override or a materially changed attribution ratio.
+
+## Revisit 2026-08-15 (post PR #1390 / issue #1365)
+
+Audit re-flagged DECIDABLE at 53 multi-round merged PRs, later-round
+catches core=2 vs rotated=171 (rotated share 98.8%). Direction unchanged
+and still overwhelming: **keep rotation** stands under the same
+autonomous default-keep rule. Next revisit on maintainer override or a
+materially changed attribution ratio.
