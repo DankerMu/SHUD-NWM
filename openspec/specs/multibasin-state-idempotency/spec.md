@@ -27,13 +27,19 @@ AND skips resubmission while the job remains active.
 
 ### Requirement: Resumable downstream failures
 
-The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily.
+The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily, subject to the permanence judgement of `job-retry-mechanism`: for a downstream failure whose genuinely recorded error code classifies as permanent, defaults non-transient under the unknown-code clause, or has exhausted its retry budget, the downstream-resume channel refuses to resume, and absent another legitimate channel claim (e.g. a genuinely changed model package) the candidate falls to the permanent-failure guard.
 
 #### Scenario: parse failed after SHUD success
 
-WHEN SHUD output exists and the hydro run status indicates SHUD completed but parse or display publication failed
+WHEN SHUD output exists and the hydro run status indicates SHUD completed but parse or display publication failed with a recorded transient error code within budget, or with no recorded error code (the reader-synthesized placeholder domain, outside its refused classifiers), and the state does not explicitly mark the failure permanent (top-level `permanent: true`)
 THEN retry starts from parse or publication
 AND does not rerun native SHUD unless configured to force rerun.
+
+#### Scenario: recorded non-transient downstream failure is guarded, not resumed
+
+WHEN SHUD output exists but the downstream failure carries a genuinely recorded error code that is non-transient (e.g. `OUTPUT_INCOMPLETE`), unknown and defaulted non-transient (e.g. a recorded `PARSE_FAILED`, `SLURM_JOB_FAILED`), or over its retry budget
+THEN the downstream-resume channel refuses to resume
+AND absent another legitimate channel claim (e.g. a genuinely changed model package under `job-retry-mechanism`) the candidate moves to the permanent-failure guard with automatic retry refused, where resumption requires an explicit operator retry action, consistent with the permanent failure guard scenario of this spec
 
 #### Scenario: source unavailable retry policy
 
@@ -73,3 +79,4 @@ WHEN the Slurm cancellation contract is unavailable, returns an error, or does n
 THEN the scheduler records cancellation proof-gap evidence in `ops.pipeline_event.details` or scheduler evidence
 AND preserves local job state instead of fabricating cancellation success
 AND does not submit replacement work in the same scheduler pass.
+
