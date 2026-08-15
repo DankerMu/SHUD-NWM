@@ -37,7 +37,13 @@ Fixture level: expanded. Repair intensity: high (fail-open→fail-closed 契约�
 strict `Path.resolve()` 在 ≤3.12 抛无 errno 的 RuntimeError（无法分流）——与
 #1344/#1346/#1349 的 D1 一致，不再重复论证。改造后三站点文件内不得再出现任何
 形式的 `Path.resolve()` 用于 allowed-roots 规范化（`_config_path_preserve_*`
-等 parent 级用法属 D5 评估面，不在此禁令内）。
+等 parent 级用法属 D5 评估面，不在此禁令内；round-2 评审补充豁免：
+`_resolve_config_path_for_mode` / `_optional_config_path_for_mode` db-free 臂
+（`scheduler_config.py:928-934`）的非 strict `resolve()` 系 #1347 change
+`config-layer-allowed-roots-errno` 明文 scope-out（其 proposal:33 / tasks:53
+"不动 `_resolve_config_path_for_mode`"）的既有形态，非本 change diff 所及，
+禁令对其不追溯——该 config 构造层 db-free twin 的 errno-split 路由至
+issue #1400 家族清查，不在本 change 修）。
 
 ### D2 — 站点 1 返回形状：新增配对函数，保留旧签名做纯读取面
 
@@ -52,13 +58,17 @@ blocker；payload/not_required 只要 roots 列表。裁定：
 - 两条 preflight 臂（`:21`/`:79`）改调配对函数，将 unsafe blockers `extend`
   进各自 blocker 列表（在 policy check 之前产出，顺序：unsafe blockers 先于
   policy MISSING blocker，与"根为何被丢"→"丢完后没根了"的因果一致）。
-- payload（`:184-188`）与 not_required（`:168`）继续调旧签名——它们展示的
-  `allowed_roots` 与 preflight 臂消费的是同一裁决结果（同一函数产物），证据面
-  天然一致。
+- payload（`:184-188`）**round-1 评审改裁（EC-1）**：原裁定"继续调旧签名、
+  同一函数产物天然一致"被评审驳倒——payload 内再调一次是第二次独立裁决，文件
+  系统竞态下其产物可与臂的第一次裁决相矛盾（自相矛盾证据面）。改为 payload 新
+  增 keyword-only `allowed_roots` 参数，两臂把裁决 #1 的 roots 线程化传入，
+  payload 不再自行裁决；计数测试钉住"每臂恰一次裁决"。not_required（`:168`）
+  维持调旧签名（该 payload 无 blocker 通道，单次调用即其唯一裁决，不构成二次
+  裁决面）。
 
 每个 preflight 臂各自调用一次配对函数（现状已是每臂独立调 `_scheduler_
-allowed_roots`，无新增调用成本量级；payload 内的第三次调用维持现状——KISS，
-不引入跨函数缓存）。
+allowed_roots`，无新增调用成本量级；payload 经参数复用臂的同一次裁决产物，
+不再有第三次调用——见上 EC-1 改裁）。
 
 Facade 注册（fixture-review 建议 4 的裁定，round-2 修正论据）：本文件兄弟函
 数的既有惯例是经 `_scheduler.*` forwarder 调用（`:21`/`:79` 即如此调旧符
