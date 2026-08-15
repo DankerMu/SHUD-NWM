@@ -63,11 +63,13 @@ availability/选中与否。候选态下界仍保留：防御候选经非 discov
 情形（min 恒 fail-safe）。第 3 级不再使用"本趟选中 cycle 的 min"（原稿措辞
 错误：backfill 每趟只选 1 个、legacy 选最近若干，都不是窗口下界）。
 
-**稳态漂移论证（fixture-review F1 修正，round-2 P1-1 再修）**：地板含两次
-floor 松弛，正确前置不变量是 `lookback_hours + cycle_lag_hours +
-2×max(source cycle interval) ≤ retention_days×24`。示例配置
+**稳态漂移论证（fixture-review F1 修正，round-2 P1-1 再修，PR round-1 I-2(b)
+实例化更正）**：地板含两次 floor 松弛，正确前置不变量是 `lookback_hours +
+cycle_lag_hours + 2×max(source cycle interval) ≤ retention_days×24`；interval
+由 `allowed_cycle_hours_utc` 网格决定——示例配置与 `scheduler.py:293` 默认均
+为 `0,12` 即 12h（非早期行文假设的 6h）。示例配置
 （`infra/env/compute.example:133,137,212`：lag=6、lookback=168、14d）满足
-（168+6+2×6=186 ≤ 336），此时窗口地板与全部候选源恒晚于 cutoff、`min` 恒取
+（168+6+2×12=198 ≤ 336），此时窗口地板与全部候选源恒晚于 cutoff、`min` 恒取
 cutoff——逐 key 零漂移。**边界与越界配置**
 （如 lookback=336+lag=6，或 `NHMS_RETENTION_DAYS` 被配小）下界早于 cutoff、
 豁免闸咬合：漂移方向恒为 **fail-safe（只多留、绝不多删）**，且每一项豁免带

@@ -640,7 +640,10 @@ def test_steady_state_plan_is_identical_key_for_key(tmp_path: Path) -> None:
     _seed_cycle(root, NOW - timedelta(days=20), run=True)
     _seed_cycle(root, NOW - timedelta(days=16))
     _seed_cycle(root, datetime(2026, 5, 19, 12, tzinfo=UTC))  # just past the cutoff
-    _seed_cycle(root, datetime(2026, 6, 1, 0, tzinfo=UTC))  # inside the window
+    # Inside the window, seeded on BOTH lanes: the run workspace is what makes
+    # the run-lane adjudication order observable (an in-window run dir sits above
+    # the bound, so a frontier-first order would relabel it).
+    _seed_cycle(root, datetime(2026, 6, 1, 0, tzinfo=UTC), run=True)
     cutoff = NOW - timedelta(days=14)
 
     scheduler = _frontier_scheduler(tmp_path, lookback_hours=168, cycle_lag_hours=6)
@@ -902,6 +905,7 @@ def test_no_derivable_bound_degrades_to_the_current_wall_clock_plan(tmp_path: Pa
     _seed_cycle(root, datetime(2026, 6, 1, 0, tzinfo=UTC))
     sourceless = _frontier_scheduler(tmp_path, sources=())
     bound, source = _active_lower_bound(sourceless, NOW)
+    assert (bound, source) == (None, None)
 
     def plan(active_lower_bound, active_lower_bound_source):
         return plan_retention(
@@ -917,7 +921,22 @@ def test_no_derivable_bound_degrades_to_the_current_wall_clock_plan(tmp_path: Pa
     assert plan(bound, source).planned == plan(None, None).planned
 
 
-def test_window_floor_matches_discovery_double_floor_formula(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("lookback_hours", "expected_bound"),
+    [
+        # A multiple of the 6h grid: floor(18:00Z - 168h) is already on the grid,
+        # so the OUTER floor is an identity here and cannot be observed.
+        (168, datetime(2026, 5, 26, 18, tzinfo=UTC)),
+        # NOT a multiple of the grid (nothing enforces one -- LOOKBACK_HOURS is a
+        # free int): 18:00Z - 170h = 05-26T16:00Z, which only the OUTER floor
+        # pulls down to 12:00Z. Dropping that floor would leave a 4h band at the
+        # bottom of the discovery window unprotected (deletion-side drift).
+        (170, datetime(2026, 5, 26, 12, tzinfo=UTC)),
+    ],
+)
+def test_window_floor_matches_discovery_double_floor_formula(
+    tmp_path: Path, lookback_hours: int, expected_bound: datetime
+) -> None:
     """[helper] The floor is discovery's, not the receipt's un-floored value.
 
     Independent oracle: run the real ``discover_cycles`` and capture the
@@ -926,7 +945,7 @@ def test_window_floor_matches_discovery_double_floor_formula(tmp_path: Path) -> 
     started_at = datetime(2026, 6, 3, 3, 17, tzinfo=UTC)
     scheduler = _frontier_scheduler(
         tmp_path,
-        lookback_hours=168,
+        lookback_hours=lookback_hours,
         cycle_lag_hours=6,
         adapters={"gfs": object()},
     )
@@ -941,14 +960,14 @@ def test_window_floor_matches_discovery_double_floor_formula(tmp_path: Path) -> 
 
     bound, source = _active_lower_bound(scheduler, started_at)
 
-    # hand-computed: floor(03:17 - 6h) = 06-02T18:00; floor(that - 168h)
-    assert bound == datetime(2026, 5, 26, 18, tzinfo=UTC)
+    # hand-computed: floor(03:17 - 6h) = 06-02T18:00; floor(that - lookback)
+    assert bound == expected_bound
     assert source == "window_floor"
     # and it is exactly what discovery itself used
     assert bound == captured["start_time"]
-    # the un-floored evidence value (started_at - lag - lookback) sits 3h17m
-    # later here: using it would leave that band unprotected.
-    assert bound < started_at - timedelta(hours=6) - timedelta(hours=168)
+    # the un-floored evidence value (started_at - lag - lookback) sits later
+    # here: using it would leave that band unprotected.
+    assert bound < started_at - timedelta(hours=6) - timedelta(hours=lookback_hours)
 
 
 def test_rounding_band_cycle_without_candidates_is_exempt(tmp_path: Path) -> None:

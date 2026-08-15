@@ -115,10 +115,28 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
 - [x] 6. 既有测试零回归：`uv run pytest -q tests/test_retention.py` 与
   `uv run pytest -q tests/test_production_scheduler.py -k retention` 全绿且断
   言不弱化；受签名影响的直接调用测试只允许解包/参数适配。
-- [ ] 7. 合并前路由（issue-scribe）：(a) pass 外删除面前沿口径 follow-up
-  （D5：`scripts/node27_raw_retention.py` + `cli.py cleanup` 同单）；(b)
-  node-22 live receipt rollout issue（D7，oracle-blocked，含实配反推核实
-  项）；(c) 双 run_id 解析器统一卫生债（D3）。
+- [x] 7. 合并前路由（issue-scribe）：(a) pass 外删除面前沿口径 follow-up
+  （D5：`scripts/node27_raw_retention.py` + `cli.py cleanup` 同单）→ #1407
+  （scribe 核实修正：node-27 脚本已有 display watermark 锚，但系上界水位非活
+  跃下界，缺口同形）；(b) node-22 live receipt rollout issue（D7，
+  oracle-blocked，含实配反推核实项）→ #1406；(c) 双 run_id 解析器统一卫生债
+  （D3）→ #1405（scribe 补充 B 类形状：runs/ 下非 run 目录含 10 位 token 被
+  宽松解析纳入删除面；cohort run 依赖宽松解析回收，收严须显式纳入）。
+
+## Round-1 fix tasks (Phase 5/6)
+
+- [x] 8. T-2：`tests/test_retention.py` 双重 floor 测试补 `lookback_hours=170`
+  用例（非网格整倍数），断言 `bound == datetime(2026,5,26,12,tzinfo=UTC) ==
+  captured["start_time"]`——钉住外层 floor（删除方向 4h 未保护带）。
+- [x] 9. T-4(c)：稳态 parity 测试给 in-window cycle 种 `run=True`，使 run 车
+  道判定顺序翻转经既有 `skipped` 相等 + `protected_count == 0` 断言变红；顺
+  带 T-1：退化测试补 `assert (bound, source) == (None, None)`。
+- [x] 10. I-1/I-2 文档行：`docs/runbooks/two-node-deployment-overview.md`
+  §8.2 retention 判据补前沿豁免一句（指向 `retention.skipped` 的
+  `pipeline_frontier_exempt` 与 `retention.frontier.protected_count`）；
+  `infra/env/compute.example` 两处更正——豁免明细在 `retention.skipped`（
+  frontier 块只有 bound/source/count）、不变量实例化按 12h 网格
+  `2×12=24 → 198 ≤ 336`。
 
 ## Required evidence (maps every selected pack)
 

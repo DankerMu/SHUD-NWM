@@ -33,9 +33,10 @@ object-store retention 的保留判据是纯墙钟年龄（`retention.py:323`
   量不再导致产出→删除自旋，改为表现为受控过度保留（receipt 可见）；不变量本
   身仍须保持。
 - 稳态零漂移：在 `lookback + lag + 2×max(source interval) ≤
-  retention_days×24` 前置不变量下（示例配置 168+6+12=186 ≤ 336 满足），下界
-  恒晚于 cutoff、`min` 取 cutoff，逐 key 计划与现状一致；越界配置下漂移方向
-  恒为 fail-safe（只多留、绝不多删）。
+  retention_days×24` 前置不变量下（interval 按 `allowed_cycle_hours_utc` 网格
+  `0,12` 即 12h；示例配置 168+6+24=198 ≤ 336 满足），下界恒晚于 cutoff、
+  `min` 取 cutoff，逐 key 计划与现状一致；越界配置下漂移方向恒为 fail-safe
+  （只多留、绝不多删）。
 
 ## Impact
 

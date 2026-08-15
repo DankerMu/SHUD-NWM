@@ -205,15 +205,19 @@ NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 # keep NHMS_RETENTION_DRY_RUN=true to inspect the plan, then set it false to
 # actually delete.
 # INVARIANT: NHMS_RETENTION_DAYS * 24 must stay > NHMS_SCHEDULER_LOOKBACK_HOURS
-# + NHMS_SCHEDULER_CYCLE_LAG_HOURS + 2 * (largest source cycle interval)
-# (currently 14*24=336 > 168+6+12=186 -- safe).
+# + NHMS_SCHEDULER_CYCLE_LAG_HOURS + 2 * (largest allowed cycle-hour gap)
+# (the grid shipped here is 0,12 -> 2*12=24; currently 14*24=336 > 168+6+24=198
+# -- safe).
 # Since issue #1307 the scheduler pass also exempts every cycle at or after the
 # pipeline's active lower bound, so violating the invariant no longer causes the
 # produce-then-delete spin (backfill rebuilding a cycle retention just deleted).
 # It now manifests as controlled over-retention -- extra disk held, never extra
-# deletion -- and every exempted entry is visible in the pass receipt's
-# retention.frontier block. The invariant should still be maintained: the
-# exemption is a safety net, not a licence to misconfigure the windows.
+# deletion -- and the pass receipt records it: retention.frontier carries
+# active_lower_bound/source/protected_count, and each exempted entry appears in
+# retention.skipped with reason pipeline_frontier_exempt (collapsed to
+# skipped_count once the receipt is size-compacted). The invariant should still
+# be maintained: the exemption is a safety net, not a licence to misconfigure
+# the windows.
 NHMS_RETENTION_ENABLED=true
 NHMS_RETENTION_DRY_RUN=false
 NHMS_RETENTION_DAYS=14
