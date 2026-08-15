@@ -13492,18 +13492,25 @@ def test_marked_master_rows_do_not_resurrect_via_upstream_refresh(tmp_path: Path
 
 
 class _OutOfMemoryForecastArrayClient(FakeCycleSlurmClient):
-    """Fake gateway whose forecast array tasks leave an OOM outcome receipt."""
+    """Fake gateway whose forecast array tasks leave an OOM outcome receipt.
+
+    ``oom_task_ids`` restricts the receipts to a subset of the array, which is
+    what a mixed-outcome cohort looks like on disk: only the tasks the fake
+    scheduler reports as ``failed`` carry a failure receipt.
+    """
 
     def __init__(
         self,
         *,
         object_store: LocalObjectStore,
         run_ids: Sequence[str],
+        oom_task_ids: Sequence[int] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._object_store = object_store
         self._run_ids = list(run_ids)
+        self._oom_task_ids = None if oom_task_ids is None else set(oom_task_ids)
 
     def submit_job_array(
         self,
@@ -13523,6 +13530,8 @@ class _OutOfMemoryForecastArrayClient(FakeCycleSlurmClient):
         )
         if stage_name == "forecast":
             for index, run_id in enumerate(self._run_ids):
+                if self._oom_task_ids is not None and index not in self._oom_task_ids:
+                    continue
                 _write_task_outcome_receipt(
                     self._object_store,
                     run_id,
@@ -13607,6 +13616,119 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     assert resumed["status"] == "permanently_failed"
     assert reopened["status"] == "permanently_failed"
     assert len(_permanently_failed_master_events(repository, resumed)) == 1
+
+
+def _forecast_cycle_row(repository: Any, cycle_time: datetime) -> dict[str, Any]:
+    """The durable ``forecast_cycle`` row a resume pass reads its terminal from."""
+
+    row = repository._cycle_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=None,
+    ).forecast_cycle
+    assert row is not None
+    return dict(row)
+
+
+def test_partially_failed_cohort_keeps_partial_advance_across_two_passes(tmp_path: Path) -> None:
+    """#1312 C-P1 (design D5/D6): the mark must not touch a partial cohort.
+
+    A mixed-outcome cohort projects its master to ``partially_failed`` and the
+    failed member's OOM reaches the mark through the nested partial-array-retry
+    decline exit.  Marking there is not a relabel, it is a semantic change: the
+    #1202 partial-advance contract says the succeeded members keep flowing
+    downstream, and a ``permanently_failed`` master flips the next pass's resume
+    from ``parsed_partial`` to ``failed_run``+``OUT_OF_MEMORY`` and skips every
+    downstream stage.  Both passes must therefore look exactly like the
+    pre-marking baseline.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_file_orchestration_journal import _master_events
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    client = _OutOfMemoryForecastArrayClient(
+        object_store=object_store,
+        run_ids=[str(basin["run_id"]) for basin in basins],
+        oom_task_ids=[1],
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=FileJournalRetryService(
+            repository,
+            RetryConfig(max_retries=1, backoff_schedule=[0]),
+        ),
+        object_store=object_store,
+    )
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+
+    first = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    masters = [
+        row
+        for row in repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert len(masters) == 1
+    master_id = str(masters[0]["job_id"])
+    first_stages = [(stage.stage, stage.status) for stage in first.stages]
+    # Pass one advances as a PARTIAL, not as the failure branch.
+    assert first.status == "parsed_partial"
+    assert first.status != "failed"
+    assert first_stages == [
+        ("forecast", "partially_failed"),
+        ("parse", "succeeded"),
+        ("state_save_qc", "succeeded"),
+        ("publish", "succeeded"),
+    ]
+    after_first = repository.get_pipeline_job(master_id)
+    assert after_first["status"] == "partially_failed"
+    assert _forecast_cycle_row(repository, cycle_time)["status"] == "parsed_partial"
+    assert _forecast_cycle_row(repository, cycle_time).get("error_code") is None
+
+    second = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    after_second = repository.get_pipeline_job(master_id)
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(master_id)
+    # Pass two resumes identically: same terminal status, same stage progression,
+    # no failure terminal written over the partial one.
+    assert second.status == first.status
+    assert [(stage.stage, stage.status) for stage in second.stages] == first_stages
+    assert after_second["status"] == "partially_failed"
+    assert reopened["status"] == "partially_failed"
+    durable_cycle = _forecast_cycle_row(repository, cycle_time)
+    assert durable_cycle["status"] == "parsed_partial"
+    assert durable_cycle.get("error_code") is None
+    # The mark never ran on either pass, and never failed to run either.
+    assert _permanently_failed_master_events(repository, after_second) == []
+    assert [
+        event
+        for event in _master_events(repository, after_second)
+        if event["event_type"] == "permanent_failure_mark_failed"
+    ] == []
 
 
 def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(tmp_path: Path) -> None:

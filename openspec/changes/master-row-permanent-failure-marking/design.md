@@ -59,7 +59,12 @@ PR round-1 C-1 修订：落标是 decline 臂上**新增的 2 记录 journal I/O
 `file_orchestration_journal.py:6607-6608` False 臂改为经
 `self.mark_permanently_failed` 落标后返回（返回形 `_file_retry_namespace`
 不变）。幂等按 D4。该臂生产 dormant，但短路条件将来收窄即唤醒，必须与
-D2 同判据且被单臂红证独立钉住（D8）。
+D2 同判据且被单臂红证独立钉住（D8）。**Phase-7 C-P2 补充**：spec delta
+的写失败韧性 THEN 承诺"the decline exits"（复数）都出运维信号——休眠臂
+的窄捕获回退不得静默，须在回退前 best-effort 追加与调用方臂同形的
+`permanent_failure_mark_failed` 事件（emission 自身不得抛），并有测试钉
+住该事件存在；不以收窄 spec 文本代偿（oracle-integrity：不为通过而弱化
+规格）。
 
 ### D5 — 新 typed authority transition 的精确形状（round-1 P1-1 + round-2 P1-B）
 
@@ -80,11 +85,21 @@ current-contract master 行在 `:3240-3244`（锁前）/`:3251-3255`（锁后）
 
 - reject 的前置（`status=="reserved"` + attempt 匹配 + slurm_job_id 未
   绑，`:2274-2288`）对落标目标（已绑定、已终态的 master）三条全反——不
-  迁移；本 API 的**源状态前置**（round-2 P2-D，PR round-1 C-2/R-1 裁决收
-  束）：合法源限定 `{failed, submission_failed, partially_failed}`，非法
-  源（`running`/`reserved`/`succeeded`/`cancelled`/`reservation_lost` 等）
-  返回 `stale` 不 raise、零写入零事件。**`reservation_lost` 整体移出源
-  集**（初版含之，PR round-1 裁决移除）：其两个已知子形都不该落标——
+  迁移；本 API 的**源状态前置**（round-2 P2-D，PR round-1 C-2/R-1 +
+  Phase-7 C-P1 裁决收束）：合法源限定 `{failed, submission_failed}`，非法
+  源（`running`/`reserved`/`succeeded`/`cancelled`/`partially_failed`/
+  `reservation_lost` 等）返回 `stale` 不 raise、零写入零事件。
+  **`partially_failed` 整体移出源集**（初版含之，Phase-7 终审 C-P1 裁决移
+  除，verifier 双侧运行时探针 CONFIRMED）：`partially_failed` master 唯一
+  能到达 decline 的入口是嵌套 partial-array-retry 调用点
+  （`chain_forecast_execution.py:547`；主 decline 臂 `:217` 的状态集不含
+  它），而 partial cohort 受 #1202 partial-advance 契约约束——成功 basin
+  继续走下游 stage。落标会使二趟 resume 经粘性 + projection-commit 白名
+  单把 cycle 终态从 `parsed_partial` 翻成 `failed_run`+error_code、下游
+  stage 整体跳过（pre-PR 对照探针实证）。partial cohort 的失败成员语义
+  是"部分失败、整体推进"，非"整职永久失败"；decline-不落标保持 #1202 契
+  约，与 reservation_lost 同属"整职非死局则不落标"原则。
+  **`reservation_lost` 整体移出源集**（初版含之，PR round-1 裁决移除）：其两个已知子形都不该落标——
   `identity_mismatch_released`（实施偏离 1 曾特判：
   `accepted_submit_identity.py:608` 禁止该 decision 与其它状态共存，落标
   必 raise 证据不变式错误）与 `absence_retry_permitted`（落标是单向门，
@@ -132,7 +147,11 @@ False 臂覆盖两个域：非瞬时码（含 unknown-code 默认非瞬时）**�
 `spec.md:153`（非瞬时立即标）与 "Max Retries Exhausted — Permanent
 Failure" requirement（耗尽标）——整臂恰好是两者的并集；(b) 非 master 行
 今天走 `:6619-6621` 对两个域同样落标，本裁决把 master 对齐到非 master，
-无新例外。随之而来的 upstream-refresh 语义变化见 D7。spec delta 的 WHEN
+无新例外。**Phase-7 C-P1 补充限定**：整臂落标沿 error-code 轴成立，但沿
+source-status 轴受 D5 源集约束——嵌套 partial-array-retry 出口
+（`chain_forecast_execution.py:547`）带来的 `partially_failed` 源经源集
+判据拒收（decline 照旧、零落标），保 #1202 partial-advance 契约；混合
+cohort 两趟 e2e 钉 pass-2 与 pre-PR 完全同构。随之而来的 upstream-refresh 语义变化见 D7。spec delta 的 WHEN
 显式列出耗尽域并援引 Max-Retries requirement。测试补耗尽域用例（master
 行 `NODE_FAILURE` + `retry_count >= max_retries` → 落标 + refresh 不重
 投）；低 retry_count 瞬时码反向控制照旧。

@@ -266,11 +266,20 @@ TERMINAL_PIPELINE_STATUSES = {
 #: shortcut), and its ``identity_mismatch_released`` sub-shape may not coexist
 #: with any other status at all (``accepted_submit_identity``).  Declining is
 #: the liveness-fail-safe direction.
+#:
+#: ``partially_failed`` is deliberately EXCLUDED for the same family of reason.
+#: A partially failed master's cohort keeps ADVANCING downstream under the
+#: #1202 partial-advance contract — its succeeded members are still owed the
+#: parse/state-save/publish stages — and the only decline entrance that can
+#: reach the mark with that status is the nested partial-array-retry exit
+#: (``chain_forecast_execution`` :547), not the main decline arm.  Marking it
+#: would flip the next pass's resume from ``parsed_partial`` to ``failed_run``
+#: with an error code and skip every downstream stage: "part of the cohort
+#: failed" is not "the whole job is permanently dead".
 PERMANENT_FAILURE_SOURCE_STATUSES = frozenset(
     {
         "failed",
         "submission_failed",
-        "partially_failed",
     }
 )
 _ACCEPTED_RUNTIME_TRANSITIONS = {
@@ -6740,10 +6749,13 @@ class FileJournalRetryService:
                 # is journal I/O on a formerly write-free decline, so a journal
                 # failure falls back to the pre-#1312 return value instead of
                 # raising through the caller (the mark is idempotent and the
-                # next pass re-lands it); the caller arm is guarded the same way.
+                # next pass re-lands it); the caller arm is guarded the same way,
+                # including the operator-visible signal the fallback leaves
+                # behind (#1312 C-P2 — the fallback must not be silent).
                 try:
                     return self.mark_permanently_failed(job)
-                except (OrchestratorError, FileOrchestrationJournalError):
+                except (OrchestratorError, FileOrchestrationJournalError) as error:
+                    self._record_permanent_failure_mark_failure(current, error)
                     return _file_retry_namespace(current)
             retry_job_id, retry_count = _next_current_master_retry_identity(current)
             return _file_retry_namespace(
@@ -6758,6 +6770,51 @@ class FileJournalRetryService:
         if self.should_auto_retry(job):
             return self.schedule_auto_retry(job)
         return self.mark_permanently_failed(job)
+
+    def _record_permanent_failure_mark_failure(
+        self,
+        current: Mapping[str, Any],
+        error: Exception,
+    ) -> None:
+        """Emit operator-visible evidence that a decline could not be marked.
+
+        Same shape as the orchestrator-cycle arm's signal
+        (``chain_forecast_orchestrator_cycle._record_permanent_failure_mark_failure``)
+        so both decline exits are observable through one event type.  The
+        emission is itself best effort: it exists to keep the fallback from
+        being silent, never to turn a correct decline into a raise.
+        """
+
+        insert_pipeline_event = getattr(self.repository, "insert_pipeline_event", None)
+        if not callable(insert_pipeline_event):
+            return
+        job_id = str(current.get("job_id") or "")
+        status = str(current.get("status") or "") or None
+        reason = str(
+            getattr(error, "error_code", None) or getattr(error, "reason", None) or type(error).__name__
+        )
+        try:
+            insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=job_id,
+                event_type="permanent_failure_mark_failed",
+                status_from=status,
+                status_to=status,
+                message=(
+                    "automatic retry declined but the permanent-failure mark could not be "
+                    f"written (reason={reason}); the row stays at status={status}."
+                ),
+                details={
+                    "pipeline_job_id": job_id,
+                    "reason": reason,
+                    "error_type": type(error).__name__,
+                    "field": getattr(error, "field", None),
+                    "retry_mark_pending": True,
+                },
+            )
+        except (OrchestratorError, FileOrchestrationJournalError):
+            # Evidence emission must never abort a correct decline decision.
+            pass
 
     def schedule_auto_retry(self, job: Any) -> SimpleNamespace:
         current = self.repository.get_pipeline_job(str(_file_retry_job_value(job, "job_id") or ""))

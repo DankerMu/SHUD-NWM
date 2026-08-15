@@ -24,8 +24,8 @@
   （`_locked_cycle_write`/`_journal_record_for_write`/
   `_validate_outgoing_record`/`_append_journal_records_unlocked`/
   `_write_pipeline_job_direct_unlocked`）；源状态前置=终态失败子集
-  `{failed, submission_failed, partially_failed}`（task 11 裁决后收窄：
-  `reservation_lost` 移出，见 design D5），非法
+  `{failed, submission_failed}`（task 11/14 裁决后两次收窄：
+  `reservation_lost`、`partially_failed` 移出，见 design D5），非法
   源返回 stale 不 raise；accounting 元组
   （reconciliation_decision/submit_outcome/matched_slurm_job_id）逐字段保
   持；幂等前置以 job_id 重读持久行；事件
@@ -98,7 +98,8 @@
   成死码一并删除；本 PR 自有的两条 reservation_lost 测试改为断言
   `stale` + 行不变 + 零事件 + reclaim 门仍开
   （`reclaim_pipeline_job_reservation` 仍可达）。
-- [x] 12. T-1（P2 FIX_NOW）：源状态域参数化——合法 ×3
+- [x] 12. T-1（P2 FIX_NOW，`partially_failed` 一侧随 task 14 翻到非法侧）：
+  源状态域参数化——合法 ×3
   （`failed`/`submission_failed`/`partially_failed`，各断 `applied` + 真实
   `status_from` + 事件计数 1；`submission_failed` 经
   `reject_pipeline_job_submit_attempt` 构造，`partially_failed` 经混合
@@ -110,6 +111,23 @@
   `permanently_failed`、accounting 元组不变、`permanently_failed` 事件计
   数仍 1（不得断 `total == 0`——写分支合法写 1 行 + 1 条 pf→pf
   `status_change`）。D9-revert 突变下必红。
+
+## Round-3 fix tasks (Phase 7 终审 + verifier CONFIRMED；retro-round3 纠正动作)
+
+- [x] 14. C-P1（P1 FIX_NOW）：`PERMANENT_FAILURE_SOURCE_STATUSES` 移除
+  `partially_failed`（源集收束为 `{failed, submission_failed}`，理由见
+  design D5——partial cohort 受 #1202 partial-advance 契约约束，落标使二
+  趟 resume 把 `parsed_partial` 翻成 `failed_run` 并跳过下游 stage）。测
+  试：(a) task 12 的 `partially_failed` 合法参数化翻到非法侧（stale + 整
+  行相等 + 零事件）；(b) 新增混合 cohort 两趟 e2e——2 basin、task0
+  succeeded / task1 `OUT_OF_MEMORY`，`orchestrate_cycle` 两趟，断言
+  pass-1 与 pass-2 的 PipelineResult / master 行状态（保持
+  `partially_failed`）/ 下游 stage 推进与 pre-PR 基线完全同构、全程零
+  `permanently_failed` 事件。
+- [x] 15. C-P2（P2 FIX_NOW）：休眠臂窄捕获回退前 best-effort 追加与调用方
+  臂同形的 `permanent_failure_mark_failed` 事件（emission 自身不得抛；不
+  以收窄 spec 文本代偿）；扩展既有休眠臂 raising-mark 测试断言该事件恰
+  1 条。
 
 ## Required evidence (maps every selected pack)
 

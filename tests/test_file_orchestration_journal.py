@@ -7999,6 +7999,11 @@ def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: P
     mark is new journal I/O on that path, so a journal write failure must
     degrade to exactly that pre-#1312 return value (the mark is idempotent and
     the next pass re-lands it) instead of escaping into the caller.
+
+    Degrading is not the same as going silent (C-P2): the spec's write-failure
+    THEN covers *every* decline exit, so this arm owes the same
+    ``permanent_failure_mark_failed`` operator signal the orchestrator-cycle arm
+    emits.
     """
 
     repository, record = _terminally_failed_cohort_master(tmp_path, error_code="OUT_OF_MEMORY")
@@ -8017,6 +8022,15 @@ def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: P
     del repository.mark_pipeline_job_permanently_failed
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
     assert _permanently_failed_events(repository, record) == []
+    mark_failures = [
+        event
+        for event in _master_events(repository, record)
+        if str(event.get("event_type") or "") == "permanent_failure_mark_failed"
+    ]
+    assert len(mark_failures) == 1
+    assert mark_failures[0]["details"]["reason"] == "file_journal_write_failed"
+    assert mark_failures[0]["details"]["retry_mark_pending"] is True
+    assert (mark_failures[0]["status_from"], mark_failures[0]["status_to"]) == ("failed", "failed")
 
 
 def test_master_row_with_transient_code_and_budget_keeps_retry_identity(tmp_path: Path) -> None:
@@ -8126,16 +8140,16 @@ def test_permanent_failure_transition_reports_stale_for_live_master_rows(
     assert _master_events(repository, record) == events_before
 
 
-@pytest.mark.parametrize("source_status", ["failed", "submission_failed", "partially_failed"])
+@pytest.mark.parametrize("source_status", ["failed", "submission_failed"])
 def test_permanent_failure_transition_marks_every_markable_failure_source(
     tmp_path: Path,
     source_status: str,
 ) -> None:
     """#1312 seam 4: the whole legal source domain, one real builder each.
 
-    ``failed`` alone would leave ``submission_failed``/``partially_failed``
-    unproven, so a narrowed source set would still pass the suite while
-    silently dropping two thirds of the terminal-failure domain.
+    ``failed`` alone would leave ``submission_failed`` unproven, so a narrowed
+    source set would still pass the suite while silently dropping half of the
+    terminal-failure domain.
     """
 
     repository, record = _cohort_master_in_status(tmp_path, source_status)
@@ -8158,7 +8172,7 @@ def test_permanent_failure_transition_marks_every_markable_failure_source(
     assert events[0]["status_to"] == "permanently_failed"
 
 
-@pytest.mark.parametrize("source_status", ["succeeded", "cancelled"])
+@pytest.mark.parametrize("source_status", ["succeeded", "cancelled", "partially_failed"])
 def test_permanent_failure_transition_declines_non_failure_terminal_sources(
     tmp_path: Path,
     source_status: str,
@@ -8167,6 +8181,9 @@ def test_permanent_failure_transition_declines_non_failure_terminal_sources(
 
     A widened source set would relabel a succeeded or cancelled master as
     permanently failed — a fabricated failure, not a recorded one.
+    ``partially_failed`` sits here too (C-P1): its cohort is still advancing
+    downstream under the #1202 partial-advance contract, so marking it would
+    convert a partial into a whole-job permanent failure.
     """
 
     repository, record = _cohort_master_in_status(tmp_path, source_status)

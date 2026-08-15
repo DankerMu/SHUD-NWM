@@ -18,10 +18,10 @@ geometry; it does not alter their code classification or budget semantics.
   unknown and defaulted non-transient, or transient with the retry budget
   exhausted
 - **THEN** if the row's persisted status is a markable failure source
-  (`failed`, `submission_failed`, `partially_failed`), it SHALL transition
+  (`failed`, `submission_failed`), it SHALL transition
   to `status="permanently_failed"` through a typed journal authority
-  transition, regardless of which decline exit ran (lost reservations are
-  carved out below)
+  transition, regardless of which decline exit ran (lost reservations and
+  partially failed cohorts are carved out below)
 - **THEN** the transition SHALL preserve the row's accepted-submit
   accounting evidence (reconciliation decision, submit outcome, matched
   Slurm job id) unchanged
@@ -59,10 +59,23 @@ geometry; it does not alter their code classification or budget semantics.
 
 - **WHEN** the typed permanent-failure transition is invoked on a master row
   whose persisted status is outside the markable set
-  `{failed, submission_failed, partially_failed}` (e.g. `running`,
-  `reserved`, `succeeded`, `cancelled`, `reservation_lost`)
+  `{failed, submission_failed}` (e.g. `running`, `reserved`, `succeeded`,
+  `cancelled`, `partially_failed`, `reservation_lost`)
 - **THEN** the row SHALL remain unchanged, no event SHALL be appended, and
   the call SHALL report a stale/no-op outcome rather than raising
+
+#### Scenario: Partially failed cohorts keep partial-advance semantics
+
+- **WHEN** a mixed-outcome forecast cohort projects its master row to
+  `partially_failed` and a failed member's error declines automatic retry
+  through the nested partial-array-retry exit (whether non-transient or
+  retry-budget exhausted)
+- **THEN** the master row SHALL NOT be marked `permanently_failed` — the
+  mark declines as stale with zero writes and zero events — and a subsequent
+  resume pass SHALL behave exactly as before marking existed: the cohort's
+  succeeded members keep advancing through downstream stages, the cycle's
+  terminal status stays the partial outcome, and no failure terminal is
+  written in place of the partial one
 
 #### Scenario: Lost reservations are not mark sources
 
