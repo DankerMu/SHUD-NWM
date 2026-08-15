@@ -13370,6 +13370,19 @@ def _file_journal_failed_master(tmp_path: Path, *, error_code: str) -> tuple[Any
     return _terminally_failed_cohort_master(tmp_path, error_code=error_code)
 
 
+def _file_journal_failed_master_at_attempt(
+    tmp_path: Path,
+    *,
+    error_code: str,
+    attempt: int,
+) -> tuple[Any, dict[str, Any]]:
+    """The same master, reserved under a production ``_retry_<n>`` identity."""
+
+    from tests.test_file_orchestration_journal import _retry_attempt_failed_cohort_master
+
+    return _retry_attempt_failed_cohort_master(tmp_path, error_code=error_code, attempt=attempt)
+
+
 def _permanently_failed_master_events(repository: Any, record: Mapping[str, Any]) -> list[dict[str, Any]]:
     from tests.test_file_orchestration_journal import _permanently_failed_events
 
@@ -13443,10 +13456,20 @@ def test_cycle_retry_decline_marks_an_exhausted_transient_master_row(tmp_path: P
     A transient code with no budget left is the same permanent outcome the
     non-master path already records, and the marked row then loses the
     upstream-refresh resubmission path (design D7, accepted explicitly).
+
+    "No budget left" is expressed the way production expresses it (#1312
+    round-4): the third attempt is a ``..._forecast_retry_2`` reservation whose
+    durable ``retry_count`` stays 0, and ``_retry_job_for_stage_result``
+    resolves the effective attempt from that id suffix — a ``max_retries=0``
+    budget would exhaust on attempt 0 and never exercise the suffix path.
     """
 
-    repository, record = _file_journal_failed_master(tmp_path, error_code="NODE_FAILURE")
-    retry_service = _file_journal_retry_service(repository, max_retries=0)
+    repository, record = _file_journal_failed_master_at_attempt(
+        tmp_path,
+        error_code="NODE_FAILURE",
+        attempt=2,
+    )
+    retry_service = _file_journal_retry_service(repository, max_retries=2)
     orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), retry_service=retry_service)
     result = _forecast_stage_run_result(str(record["job_id"]))
 
@@ -13545,11 +13568,21 @@ class _OutOfMemoryForecastArrayClient(FakeCycleSlurmClient):
 def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_passes(
     tmp_path: Path,
 ) -> None:
-    """#1312 seam 9 (design D9): end to end, and the mark survives pass two.
+    """#1312 seam 9 (design D9): the end-to-end invariants across two passes.
 
-    The second ``orchestrate_cycle`` re-projects the cohort; without projection
-    terminal stickiness the derived ``failed`` status would overwrite the mark
-    and the row would oscillate, one status-change event per pass.
+    What this pins is the *pass-level* contract: a real ``orchestrate_cycle``
+    lands the mark on pass one, a second pass over the same journal raises
+    nothing, the row is still ``permanently_failed`` when re-read from a freshly
+    opened repository, exactly one ``permanently_failed`` event exists, and both
+    passes return ``PipelineResult("failed")``.
+
+    What it does NOT pin is projection stickiness (design D9 deviation (b),
+    tasks.md:69): pass two finds the master already terminal and exits through
+    the resume defer branch, so ``project_forecast_cohort_tasks``' sticky line
+    is never reached and this test stays green under a sticky revert.  The red
+    proof for stickiness lives in the journal-level unit tests
+    (``test_cohort_projection_keeps_a_permanently_failed_master_sticky`` and its
+    write-through twin).
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -13616,6 +13649,107 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     assert resumed["status"] == "permanently_failed"
     assert reopened["status"] == "permanently_failed"
     assert len(_permanently_failed_master_events(repository, resumed)) == 1
+
+
+def test_a_failed_permanent_failure_mark_is_re_attempted_on_the_next_pass(tmp_path: Path) -> None:
+    """#1312 round-4 (e): the write-failure fallback's own promise, end to end.
+
+    The spec's write-failure THEN says the pass degrades *because* "the
+    idempotent mark is re-attempted on a later pass".  The unit tests pin the
+    degrade half (no raise, row unchanged, operator event); nothing pinned the
+    recovery half, so a fallback that quietly parked the row on ``failed``
+    forever would still have been green.
+
+    Pass one's mark raises and the row stays ``failed`` — which is exactly why
+    pass two does NOT take the already-terminal defer branch the sticky e2e
+    takes: it re-projects, re-declines, and re-marks.  The mark's idempotency
+    then has to hold across the two attempts: exactly one
+    ``permanently_failed`` event, not one per pass.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_file_orchestration_journal import _master_events
+
+    class _MarkFailsOnceJournalRepository(FileOrchestrationJournalRepository):
+        mark_attempts = 0
+
+        def mark_pipeline_job_permanently_failed(self, job_id: str, **kwargs: Any) -> Any:
+            type(self).mark_attempts += 1
+            if type(self).mark_attempts == 1:
+                raise OrchestratorError(
+                    "FILE_JOURNAL_WRITE_FAILED",
+                    "failed to append file orchestration journal records",
+                    {"job_id": job_id},
+                )
+            return super().mark_pipeline_job_permanently_failed(job_id, **kwargs)
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = _MarkFailsOnceJournalRepository(tmp_path / "journal")
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    client = _OutOfMemoryForecastArrayClient(
+        object_store=object_store,
+        run_ids=[str(basin["run_id"]) for basin in basins],
+        array_results_by_stage={"forecast": [["failed", "failed"], ["failed", "failed"]]},
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=FileJournalRetryService(
+            repository,
+            RetryConfig(max_retries=1, backoff_schedule=[0]),
+        ),
+        object_store=object_store,
+    )
+
+    first = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    masters = [
+        row
+        for row in repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert first.status == "failed"
+    assert len(masters) == 1
+    master_id = str(masters[0]["job_id"])
+    after_first = repository.get_pipeline_job(master_id)
+    assert repository.mark_attempts == 1
+    assert after_first["status"] == "failed"
+    assert _permanently_failed_master_events(repository, after_first) == []
+    mark_failures = [
+        event
+        for event in _master_events(repository, after_first)
+        if event["event_type"] == "permanent_failure_mark_failed"
+    ]
+    assert len(mark_failures) == 1
+
+    second = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    after_second = repository.get_pipeline_job(master_id)
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(master_id)
+    assert second.status == "failed"
+    assert repository.mark_attempts == 2
+    assert after_second["status"] == "permanently_failed"
+    assert reopened["status"] == "permanently_failed"
+    assert len(_permanently_failed_master_events(repository, after_second)) == 1
 
 
 def _forecast_cycle_row(repository: Any, cycle_time: datetime) -> dict[str, Any]:
@@ -13731,7 +13865,11 @@ def test_partially_failed_cohort_keeps_partial_advance_across_two_passes(tmp_pat
     ] == []
 
 
-def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_kind", ["orchestrator_error", "journal_error"])
+def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(
+    tmp_path: Path,
+    error_kind: str,
+) -> None:
     """#1312 C-1: a journal failure inside the mark may not hijack the cycle.
 
     The mark added two journal records to a decline path that was previously
@@ -13741,19 +13879,35 @@ def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(tmp_path:
     ``PipelineResult("failed")`` into a pass-level
     ``production_orchestration_failed``.  The decline must still land, the row
     must stay exactly where it was, and the miss must be visible to operators.
+
+    Both halves of the catch tuple are injected (#1312 round-4, mutant o2): the
+    typed mark raises ``OrchestratorError`` from the append/durability layer and
+    ``FileOrchestrationJournalError`` from its own record validators, so pinning
+    only one class leaves narrowing the tuple to the other one undetected.
     """
 
     from services.orchestrator.file_orchestration_journal import (
         FileJournalRetryService,
+        FileOrchestrationJournalError,
         FileOrchestrationJournalRepository,
+    )
+
+    expected_reason = (
+        "FILE_JOURNAL_WRITE_FAILED" if error_kind == "orchestrator_error" else "file_journal_write_failed"
     )
 
     class _MarkRefusingJournalRepository(FileOrchestrationJournalRepository):
         def mark_pipeline_job_permanently_failed(self, job_id: str, **kwargs: Any) -> Any:
-            raise OrchestratorError(
-                "FILE_JOURNAL_WRITE_FAILED",
-                "failed to append file orchestration journal records",
-                {"job_id": job_id},
+            if error_kind == "orchestrator_error":
+                raise OrchestratorError(
+                    "FILE_JOURNAL_WRITE_FAILED",
+                    "failed to append file orchestration journal records",
+                    {"job_id": job_id},
+                )
+            raise FileOrchestrationJournalError(
+                "file_journal_write_failed",
+                field="pipeline_job",
+                evidence={"job_id": job_id},
             )
 
     cycle = "2026050100"
@@ -13813,5 +13967,5 @@ def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(tmp_path:
         if event["event_type"] == "permanent_failure_mark_failed"
     ]
     assert len(mark_failures) == 1
-    assert mark_failures[0]["details"]["reason"] == "FILE_JOURNAL_WRITE_FAILED"
+    assert mark_failures[0]["details"]["reason"] == expected_reason
     assert mark_failures[0]["status_to"] == "failed"

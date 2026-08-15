@@ -4,11 +4,16 @@
 
 ### Requirement: Permanent-Failure Marking Covers Master-Row Geometry
 
-The permanent-failure mark required for non-transient failures and for exhausted retry budgets SHALL land on file-journal master-row geometry through every exit that declines automatic retry, with the same observable semantics as non-master rows, without weakening the journal's master-row write restrictions.
+The permanent-failure mark required for non-transient failures and for exhausted retry budgets SHALL land on file-journal master-row geometry through every exit that declines automatic retry for rows whose persisted status is a markable failure source (`failed`, `submission_failed`; carve-outs below), with the same observable semantics as non-master rows, without weakening the journal's master-row write restrictions.
 
 This extends the existing "Retry Guard — Non-Transient Error Exclusion" and
 "Max Retries Exhausted — Permanent Failure" requirements to master-row
-geometry; it does not alter their code classification or budget semantics.
+geometry; within the markable domain it does not alter their code
+classification or budget semantics. Two master-row shapes are not "failed
+jobs" in the sense of those base requirements and are carved out by
+scenarios below: `partially_failed` masters (the cohort retains partial
+success and stays governed by the partial-advance contract) and
+`reservation_lost` masters (reclaim-pending, not permanently failed).
 
 #### Scenario: Master row declined for auto-retry is marked permanently failed
 

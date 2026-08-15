@@ -7817,6 +7817,47 @@ def _terminally_failed_cohort_master(
     return repository, record
 
 
+def _retry_attempt_failed_cohort_master(
+    tmp_path: Path,
+    *,
+    error_code: str = "NODE_FAILURE",
+    attempt: int = 2,
+    member_count: int = 2,
+) -> tuple[Any, dict[str, Any]]:
+    """One terminal master whose attempt lives where production puts it: the job id.
+
+    A cohort master is never re-reserved in place — every retry mints a fresh
+    ``<base>_retry_<n>`` reservation whose durable ``retry_count`` stays 0 (the
+    journal's clean-reservation invariant), so the effective attempt is only
+    recoverable from the id suffix.  That is exactly why the chain recomputes it
+    with ``effective_retry_attempt`` before handing the job to the retry service
+    (``chain_forecast_execution._retry_job_for_stage_result``).  Building the row
+    this way keeps the exhausted-budget tests on a geometry the journal can
+    actually persist instead of a hand-forced ``retry_count`` on a base-id row.
+
+    The reservation identity mirrors what the chain would derive for that job id:
+    ``_cycle_stage_idempotency_key`` appends the id suffix to the base key.
+    """
+
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+    from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, effective_retry_attempt
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=member_count)
+    suffix = f"{RETRY_JOB_ID_MARKER}{attempt}"
+    record["job_id"] = f"{record['job_id']}{suffix}"
+    record["idempotency_key"] = f"{record['idempotency_key']}:{suffix.lstrip('_')}"
+    record["slurm_comment"] = f"nhms_idem:{record['idempotency_key']}"
+    record["cohort_digest"] = forecast_cohort_digest(record)
+    _bind_cohort_master(repository, record)
+    _project_cohort_failure(repository, record, error_code=error_code)
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert persisted is not None
+    assert persisted["status"] == "failed"
+    assert int(persisted.get("retry_count") or 0) == 0
+    assert effective_retry_attempt(persisted["job_id"], persisted.get("retry_count")) == attempt
+    return repository, record
+
+
 def _submission_failed_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
     """One master rejected at submit time, i.e. persisted ``submission_failed``."""
 
@@ -7992,7 +8033,11 @@ def test_master_row_declined_for_auto_retry_is_marked_permanently_failed(
     assert events[0]["details"]["last_error"] == error_code
 
 
-def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_kind", ["orchestrator_error", "journal_error"])
+def test_master_row_decline_survives_a_failed_permanent_failure_mark(
+    tmp_path: Path,
+    error_kind: str,
+) -> None:
     """#1312 C-1, dormant arm: a journal failure falls back, it does not raise.
 
     ``handle_failed_job`` used to return the row untouched on a decline; the
@@ -8004,11 +8049,26 @@ def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: P
     THEN covers *every* decline exit, so this arm owes the same
     ``permanent_failure_mark_failed`` operator signal the orchestrator-cycle arm
     emits.
+
+    Both halves of the catch tuple are injected (#1312 round-4, mutant o1): the
+    journal's write sequence raises ``FileOrchestrationJournalError`` from its
+    own validators but ``OrchestratorError`` from the append/durability layer
+    (``_ensure_root_unlocked``), so pinning only one class leaves narrowing the
+    tuple to the other one undetected.
     """
 
     repository, record = _terminally_failed_cohort_master(tmp_path, error_code="OUT_OF_MEMORY")
+    expected_reason = (
+        "FILE_JOURNAL_WRITE_FAILED" if error_kind == "orchestrator_error" else "file_journal_write_failed"
+    )
 
     def _refuse(job_id: str, **_kwargs: Any) -> Any:
+        if error_kind == "orchestrator_error":
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "failed to append file orchestration journal records",
+                {"job_id": job_id},
+            )
         raise FileOrchestrationJournalError("file_journal_write_failed", field=job_id)
 
     repository.mark_pipeline_job_permanently_failed = _refuse  # type: ignore[method-assign]
@@ -8028,7 +8088,7 @@ def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: P
         if str(event.get("event_type") or "") == "permanent_failure_mark_failed"
     ]
     assert len(mark_failures) == 1
-    assert mark_failures[0]["details"]["reason"] == "file_journal_write_failed"
+    assert mark_failures[0]["details"]["reason"] == expected_reason
     assert mark_failures[0]["details"]["retry_mark_pending"] is True
     assert (mark_failures[0]["status_from"], mark_failures[0]["status_to"]) == ("failed", "failed")
 
@@ -8050,12 +8110,33 @@ def test_master_row_with_transient_code_and_budget_keeps_retry_identity(tmp_path
 
 
 def test_master_row_with_exhausted_transient_budget_is_marked_permanently_failed(tmp_path: Path) -> None:
-    """#1312 seam 7 (design D6): the exhausted-budget half of the decline arm."""
+    """#1312 seam 7 (design D6): the exhausted-budget half of the decline arm.
 
-    repository, record = _terminally_failed_cohort_master(tmp_path, error_code="NODE_FAILURE")
+    Production geometry, not a forced counter: the third attempt of a cohort
+    master is a ``..._forecast_retry_2`` reservation whose durable
+    ``retry_count`` is still 0, and the caller resolves the effective attempt
+    from the id suffix with ``effective_retry_attempt`` before handing the job
+    over (``chain_forecast_execution._retry_job_for_stage_result``).  Stamping
+    ``retry_count=2`` onto a base-id master would exercise a row shape the
+    journal never writes.
+    """
+
+    from services.orchestrator.retry_identity import effective_retry_attempt
+
+    repository, record = _retry_attempt_failed_cohort_master(
+        tmp_path,
+        error_code="NODE_FAILURE",
+        attempt=2,
+    )
     service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
-    job = dict(repository.get_pipeline_job(str(record["job_id"])))
-    job["retry_count"] = 2
+    persisted_before = repository.get_pipeline_job(str(record["job_id"]))
+    job = {
+        **persisted_before,
+        "retry_count": effective_retry_attempt(
+            persisted_before["job_id"],
+            persisted_before.get("retry_count"),
+        ),
+    }
 
     handled = service.handle_failed_job(job)
 
@@ -8063,6 +8144,8 @@ def test_master_row_with_exhausted_transient_budget_is_marked_permanently_failed
     events = _permanently_failed_events(repository, record)
     assert handled.status == "permanently_failed"
     assert persisted["status"] == "permanently_failed"
+    # The mark relabels; it never writes the caller's resolved attempt back.
+    assert int(persisted.get("retry_count") or 0) == 0
     assert len(events) == 1
     assert events[0]["details"]["failure"]["limit_exhausted"] is True
 
@@ -8304,7 +8387,14 @@ def test_generic_status_update_still_refuses_master_rows_after_the_typed_transit
 def test_master_permanent_failure_marking_is_idempotent_against_stale_snapshots(
     tmp_path: Path,
 ) -> None:
-    """#1312 seam 5, direction A: a stale ``failed`` snapshot re-marks nothing."""
+    """#1312 seam 5, direction A: a stale ``failed`` snapshot re-marks nothing.
+
+    The service returns a namespace either way, so the re-drive is also pinned
+    at the typed-API level (#1312 round-4, mutant i): a second mark on an
+    already-marked row must report ``idempotent``/committed, not ``stale``.
+    Dropping the idempotent short-circuit keeps the row and the event count
+    correct — it only degrades the outcome an operator/caller reads back.
+    """
 
     repository, record = _terminally_failed_cohort_master(tmp_path)
     service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
@@ -8313,10 +8403,19 @@ def test_master_permanent_failure_marking_is_idempotent_against_stale_snapshots(
     first = service.mark_permanently_failed(stale_snapshot)
     second = service.mark_permanently_failed(stale_snapshot)
     third = service.handle_failed_job(stale_snapshot)
+    re_marked = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="OUT_OF_MEMORY",
+        error_message="array tasks ran out of memory",
+    )
 
     assert first.status == "permanently_failed"
     assert second.status == "permanently_failed"
     assert third.status == "permanently_failed"
+    assert re_marked.outcome == "idempotent"
+    assert re_marked.committed is True
+    assert re_marked.wrote is False
+    assert re_marked.row is not None and re_marked.row["status"] == "permanently_failed"
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "permanently_failed"
     assert len(_permanently_failed_events(repository, record)) == 1
 

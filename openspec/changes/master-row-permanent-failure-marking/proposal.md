@@ -52,6 +52,12 @@
 - 规格 delta：在 `job-retry-mechanism` ADD Requirement，把 master-row 落标
   /单事件幂等/upstream-refresh 不复活（round-1 P2-3 裁决）/store-less 形
   状豁免显式钉进 spec。
+- 落标源集两次收窄（评审裁决，design D5）：`reservation_lost`（PR round-1
+  C-2——reclaim-pending，落标关死两扇按字面状态判定的恢复门）与
+  `partially_failed`（Phase-7 C-P1——partial cohort 受 #1202
+  partial-advance 契约约束，落标使二趟 resume 把 partial 终态翻成硬失败）
+  均移出，spec delta 各有 carve-out 场景钉住；写失败韧性双臂运维信号
+  （round-1 C-1 / Phase-7 C-P2）。
 
 ## Impact
 

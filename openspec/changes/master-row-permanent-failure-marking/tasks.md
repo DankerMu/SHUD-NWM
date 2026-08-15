@@ -129,6 +129,22 @@
   以收窄 spec 文本代偿）；扩展既有休眠臂 raising-mark 测试断言该事件恰
   1 条。
 
+## Round-4 fix tasks (post-gate 预算轮；coverage 类必修 + fixture 文字)
+
+- [x] F16. spec delta requirement 首句限定 markable 源 + 前言记两条
+  carve-out（round-4 spec-lens P2；orchestrator 直改）；proposal.md What
+  Changes 补源集两次收窄记录。
+- [x] 16. 覆盖收口（round-4 test-lens，变异体 o1/o2/i 存活实证）：
+  (a) 两条写失败测试把注入异常类参数化为
+  `OrchestratorError`/`FileOrchestrationJournalError` 双类（杀 o1/o2——
+  每臂 catch tuple 两半均钉）；(b) 幂等重驱动断言补
+  `result.outcome == "idempotent"` + `committed is True`（杀 i）；
+  (c) 耗尽域两测试改用生产几何 `..._retry_N` job id（durable
+  retry_count 恒 0，有效 attempt 来自 id 后缀）；(d) 两趟 e2e docstring
+  改为其真钉不变式（两趟无 raise + 标持久 + 事件计数 1，粘性红证归
+  journal 级单测）；(e) 可选 ride-along：写失败后二趟重落标 e2e（钉
+  spec "re-attempted on a later pass" 子句）。
+
 ## Required evidence (maps every selected pack)
 
 - terminal-state-semantics：seams 6/7/8/9 + task 8 全量回归（不增重投 +
