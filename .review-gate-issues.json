@@ -962,6 +962,41 @@
           "rounds": 5
         }
       ]
+    },
+    "1370": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1381,
+          "outcome": "closed",
+          "rounds": 3
+        }
+      ]
+    },
+    "1237": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1385,
+          "outcome": "closed",
+          "rounds": 3
+        }
+      ]
+    },
+    "1351": {
+      "ceilingPrs": [
+        1388
+      ],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1388,
+          "outcome": "descoped",
+          "rounds": 5
+        }
+      ]
     }
   }
 }

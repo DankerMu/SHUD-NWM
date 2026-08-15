@@ -43,10 +43,10 @@
 
 ## 4. node-27 证据（零实机改动）
 
-- [ ] 4.1 pre-merge：live env 非敏感 key grep（四个 key 中预期仅 `_PER_TICK_BOUND` 命中；
+- [x] 4.1 pre-merge：live env 非敏感 key grep（四个 key 中预期仅 `_PER_TICK_BOUND` 命中；
       三个预算 key **0 命中即是证据**——未设置 ⇒ 走代码默认 ⇒ (d) 腿不拒 live 组合）。
       2026-08-14 已实测：key 名单无预算三键。
-- [ ] 4.2 pre-merge：分支代码（临时 detached worktree）D3 三步法产 scratch dry-run receipt，
+- [x] 4.2 pre-merge：分支代码（临时 detached worktree）D3 三步法产 scratch dry-run receipt，
       `--receipt-path` 与 lock 路径**双 scratch 覆写**（`--lock-path` flag 或 source 后
       re-export env——防撞生产锁：timer tick 撞上会向生产路径发 refused_lock receipt，P3-3）；
       断言含 `budget` 三字段 == 生效默认值、`schema_version == "2.1"`；
@@ -60,12 +60,12 @@
 
 ## 6. Post-merge（orchestrator 收尾链义务，owner=orchestrator）
 
-- [ ] 6.1 在 #1386 追评：spec :713 "receipt schema identical" 句因本变更第二次失真
+- [x] 6.1 在 #1386 追评：spec :713 "receipt schema identical" 句因本变更第二次失真
       （2.1+budget），需随 #1386 的默认值修正一并改写（design Non-Goals P2-5 移交落地）；
       追评同时点名归档后同一 capability 文件内 :707 "840000 ms" 与新 requirement
       "默认值（3600000 ms）" 的数值并置矛盾（round-1 C2），以及 :707 "either leg" /
       两腿式不变量定义与新 leg 3 的术语漂移（round-2 N4——按术语漂移措辞，非"要求为假"）。
-- [ ] 6.2 round-1 B3 路由：历史 receipt 目录 glob 校验测试（3 行级）——merge 后交
+- [x] 6.2 round-1 B3 路由（已立案 #1389）：历史 receipt 目录 glob 校验测试（3 行级）——merge 后交
       issue-scribe 或并入下一压缩车道 issue（deferred，当前四文件已手工验证 valid）。
 
 ## Evidence Floor
