@@ -50,9 +50,11 @@ decision seam `_missing_upstream_forecast_artifact_evidence` (via
   directory URI fixture + configured-root scenarios; update the `:89-95`
   coincidence comment; adjust tests that leaned on root-unconfigured fail-open
   (configure root, never weaken assertions); update the exact-equality
-  journal-tier `forcing_provenance` assertions (`:9550`, `:9700`, `:9828`) to
-  include the new `probe`/`probe_key` keys — extended, never relaxed to subset
-  checks.
+  journal-tier `forcing_provenance` assertions to include the new
+  `probe`/`probe_key` keys — extended, never relaxed to subset checks. (Of the
+  three anchors listed at fixture time, `:9550` was the journal-tier one; the
+  `:9700`/`:9828` dicts turned out to be sidecar `source=absent` payloads and
+  were correctly left untouched.)
 - [x] 6. Repair-authorization interaction (D5): tests for root-unconfigured
   blocker rejected as `forcing_artifact_reference_unsafe`, and the
   configured-root probed-absent pair staying repair-eligible
