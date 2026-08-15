@@ -34,5 +34,5 @@
 
 ## 4. 交付记录
 
-- [ ] 4.1 PR body 记录路线裁定（A）与被否路线 tradeoff（issue AC-1；引 design D1）
-- [ ] 4.2 node-27 零实机变更声明（verifier 纯逻辑，无部署面）
+- [x] 4.1 PR body 记录路线裁定（A）与被否路线 tradeoff（issue AC-1；引 design D1）
+- [x] 4.2 node-27 零实机变更声明（verifier 纯逻辑，无部署面）

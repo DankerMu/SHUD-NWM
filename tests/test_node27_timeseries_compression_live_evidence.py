@@ -5481,6 +5481,12 @@ def test_verifier_rejects_run_plan_capture_carrying_docker_seam(tmp_path: Path) 
     message = str(excinfo.value)
     assert "--self-test-docker-seam" in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+    # DIRECTION pin (#1266): the seam scan runs BEFORE the closed-world pair grammar and
+    # is not subsumed by it.  A seam token is also "not a registered capture option paired
+    # with a value", so a later reordering that let the grammar swallow it would still
+    # refuse the bundle -- with the wrong attribution, silently retiring the #1250 wording.
+    assert _UNREGISTERED_TOKEN_WORDING not in message
+    assert _SEPARATOR_WORDING not in message
 
 
 def test_verifier_rejects_run_plan_capture_carrying_free_bytes_seam(tmp_path: Path) -> None:
@@ -5497,6 +5503,11 @@ def test_verifier_rejects_run_plan_capture_carrying_free_bytes_seam(tmp_path: Pa
     message = str(excinfo.value)
     assert "--self-test-free-bytes" in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+    # DIRECTION pin (#1266): seam scan first, pair grammar second -- see the docker-seam
+    # test above.  This pair is doubly at risk of being subsumed: it is a well-formed
+    # flag/value PAIR, so only the seam scan's precedence keeps its attribution.
+    assert _UNREGISTERED_TOKEN_WORDING not in message
+    assert _SEPARATOR_WORDING not in message
 
 
 def test_capture_cli_hidden_flags_are_all_self_test_seams() -> None:
@@ -5532,6 +5543,11 @@ def test_verifier_rejects_unregistered_self_test_prefix_token(tmp_path: Path) ->
     message = str(excinfo.value)
     assert "--self-test-unregistered-probe" in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+    # DIRECTION pin (#1266): the never-registered probe token is precisely what the
+    # closed-world grammar would ALSO refuse, so this is where subsumption would be least
+    # visible -- the seam PREFIX rule must own it, not the grammar.
+    assert _UNREGISTERED_TOKEN_WORDING not in message
+    assert _SEPARATOR_WORDING not in message
 
 
 # --------------------------------------------------------------------------- #
@@ -6159,6 +6175,11 @@ def test_verifier_rejects_a_capture_argv_carrying_a_help_early_exit_token(
     assert _ABBREVIATION_WORDING not in message
     assert _EVIDENCE_DIR_GATE_WORDING not in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+    # DIRECTION pin (#1266): the help scan runs BEFORE the closed-world pair grammar and
+    # is not subsumed by it.  Every token in this family is also outside the grammar's
+    # registered flag set, so without this the grammar could quietly take the family over
+    # and the #1263 wording would stop being exercised by anything.
+    assert _UNREGISTERED_TOKEN_WORDING not in message
 
 
 def test_verifier_rejects_a_help_token_placed_between_the_pinned_bindings(tmp_path: Path) -> None:
@@ -6181,6 +6202,10 @@ def test_verifier_rejects_a_help_token_placed_between_the_pinned_bindings(tmp_pa
     message = str(excinfo.value)
     assert "--help" in message
     assert _CAPTURE_EQUALITY_ERROR not in message
+    # DIRECTION pin (#1266): mid-argv is where subsumption would bite first -- a `--help`
+    # sitting in FLAG position is exactly the shape the pair grammar judges, so only the
+    # help scan's precedence keeps this refusal attributed to the help family.
+    assert _UNREGISTERED_TOKEN_WORDING not in message
 
 
 def test_capture_cli_registers_no_business_flag_in_the_help_rejection_domain() -> None:
@@ -6652,6 +6677,31 @@ def test_capture_grammar_flag_set_equals_the_capture_cli_registered_surface() ->
     assert len(set(evidence.REGISTERED_CAPTURE_FLAGS)) == len(evidence.REGISTERED_CAPTURE_FLAGS)
     assert not set(evidence.REGISTERED_CAPTURE_FLAGS) & seams
     assert seams == {"--self-test-free-bytes", "--self-test-docker-seam"}
+    # Premise pinned: the capture CLI's surface is PURELY OPTIONAL -- it registers no
+    # positional argument.  The set derivation above reads `option_strings` only, so a
+    # positional (whose `option_strings` is empty) is invisible to every assertion above;
+    # adding one would keep them all green while flipping a trailing `-- /tmp/whatever`
+    # from exit 2 to a clean parse, making the separator refusal's "registers no
+    # positional argument" claim factually false at the moment it is printed.
+    assert all(action.option_strings for action in parser._actions)
+    # Premise pinned: every flag the grammar admits consumes EXACTLY ONE value.  The pair
+    # grammar advances two tokens per registered flag, so a registered flag that took zero
+    # values (`store_true`/`store_const`) or two (`nargs=2`) would desynchronize the
+    # verifier's pairing from the producer's actual parsing -- a legitimate production
+    # spelling refused, or an illegitimate one admitted.  `-h`/`--help` and the two seams
+    # are exempt by design: they are refused BEFORE the grammar runs, and
+    # `--self-test-docker-seam` is deliberately a `store_true`.
+    arity_pinned = 0
+    for action in parser._actions:
+        if not set(action.option_strings) & set(evidence.REGISTERED_CAPTURE_FLAGS):
+            continue
+        arity_pinned += 1
+        assert action.nargs is None, action.option_strings
+        # `_StoreTrueAction` subclasses `_StoreConstAction`, so this one check covers both
+        # zero-value spellings regardless of which one a future edit reaches for.
+        assert not isinstance(action, argparse._StoreConstAction), action.option_strings
+    # Non-vacuity: the loop really visited every registered flag, not a subset.
+    assert arity_pinned == len(evidence.REGISTERED_CAPTURE_FLAGS)
 
 
 def test_argv_option_values_stops_scanning_at_the_options_terminator() -> None:

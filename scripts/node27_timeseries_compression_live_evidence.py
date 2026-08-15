@@ -188,6 +188,11 @@ PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database", "--
 # plus argparse's auto `-h`/`--help` pair plus the seam-prefixed flags must equal the
 # parser's whole registered surface) instead of being silently followed.
 #
+# Structural premise this grammar rests on, made explicit rather than left implied: every
+# flag listed below consumes EXACTLY ONE value in the real parser, which is what makes
+# "advance two tokens per registered flag" the same pairing the producer performs.  Pinned
+# by the arity assertions in the same drift test.
+#
 # The `--self-test-*` seam flags are deliberately EXCLUDED even though the real parser
 # registers them: the seam scan refuses them before the grammar runs, and giving them
 # standing in the grammar's allow-set would state the opposite of what #1250 decided.
