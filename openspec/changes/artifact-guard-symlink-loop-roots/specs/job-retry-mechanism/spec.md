@@ -12,8 +12,13 @@ at a not-yet-created directory or an unmounted share). This admission is
 deliberately errno-scoped, not loop-free: a root whose strict resolution hits
 a missing component before any loop (such as a `<missing>/../<loop>` form)
 stays admitted even though the admitted base still contains the loop — a
-known, recorded residual whose verdicts follow the admitted-root clauses
-below, never the root-fault reason. A root that fails
+known, recorded residual. Such a root never raises the root-fault reason (it
+is admitted, so no root fault is flagged); the resulting verdicts depend on
+how the probed path itself normalizes: a path that also normalizes through
+the ENOENT fallback and lands under the phantom base keeps the admitted-root
+null-reason verdict, a path that resolves straight into the loop reports
+`local_artifact_path_unresolvable`, and a path outside the base reports
+`local_artifact_path_outside_allowed_roots`. A root that fails
 for any other reason (a symlink loop, a permission fault) is excluded from the
 containment bases, and when the probed artifact is not contained by any
 remaining resolvable root the guard SHALL report the artifact missing with the
@@ -22,9 +27,10 @@ and therefore refused by the operator-authorized repair channel under the same
 doctrine as `artifact_probe_error`: a rebuild cannot clear a filesystem fault.
 The existing reasons keep their meanings, with root faults taking priority:
 `local_artifact_path_outside_allowed_roots` is reserved for a candidate whose
-every configured root resolved successfully and whose path is genuinely
-outside them, and `local_artifact_path_unresolvable` for a probed path that
-itself fails resolution while every configured root resolved — whenever any
+every configured root normalized successfully (resolved, or `ENOENT`-admitted
+as above) and whose path is genuinely outside them, and
+`local_artifact_path_unresolvable` for a probed path that itself fails
+resolution while every configured root normalized successfully — whenever any
 configured root is unresolvable and no resolvable root contains the path, the
 root fault reason wins, so root faults and path faults stay distinguishable.
 On this local leg, an "absent" verdict with a null unsafe reason SHALL arise
@@ -64,8 +70,8 @@ so the two legs read as a matched pair.
 - **WHEN** the guard evaluates an artifact path under one of the resolvable
   roots
 - **THEN** containment succeeds exactly as before this change — the
-  not-yet-created root stays admitted via lexical normalization and the loop
-  root does not poison the verdict; on a candidate whose every configured
+  not-yet-created root stays admitted via non-strict realpath normalization
+  and the loop root does not poison the verdict; on a candidate whose every configured
   root resolves successfully, an artifact genuinely outside all of them still
   reports `local_artifact_path_outside_allowed_roots`
 

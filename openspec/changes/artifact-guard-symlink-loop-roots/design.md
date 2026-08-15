@@ -85,8 +85,8 @@ def _realpath_or_none(text: str) -> Path | None:
 | 5b | OK | root 列表本来为空（全未配置/全空串） | — | `(True, "local_artifact_path_outside_allowed_roots")` | 现行 `bool(roots)==False` 行为**不改**（现网常见路径，回归钉） |
 | 6 | path 自身不可规范化（ELOOP 等） | **无 root 故障（含 roots 为空）** | — | `(True, "local_artifact_path_unresolvable")` | 既有 reason 保留「path 问题」语义（root 问题走 #4，两类可区分） |
 
-**判序限定（round-1 review B2）**：实现判序为 root 故障 → path 故障 →
-收容/空 roots；「roots 为空 × path 自身不可规范化」落行 #6
+**判序限定（round-1 review B2，round-2 C3 更正）**：实现判序为可解析
+root 收容成功 → root 故障 → path 故障 → outside/空 roots；「roots 为空 × path 自身不可规范化」落行 #6
 （`local_artifact_path_unresolvable`），**不**落行 5b——行 5b 仅在 path
 规范化成功时到达。这是相对 master 的行为变化：master 该组合在 ≤3.12 整
 链抛 RuntimeError，3.13+ 报 `outside_allowed_roots`；HEAD 报 path 口味
@@ -106,9 +106,13 @@ reason」——若只丢弃，产物落在坏 root 之外时会退化成
 
 已知残留（与 `scheduler_preflight.py:539-543` 同一裁决，记录不修）：
 `"<不存在>/../<loop>"` 形态 root 经 ENOENT 臂非 strict realpath admit 后
-成为 phantom containment base（不再抛，仅词法收容判定）；其 verdict 走
-admitted-root 行（#1/#3），不走 root-fault reason——spec delta 已加同款
-carve-out（round-1 review A1）。
+成为**仍带环的** phantom containment base；该 root 本身永不触发
+root-fault reason（`any_root_unresolvable` 不置位），此后 verdict 由产物
+自身规范化结果决定，三出口均可达：产物路径同走 ENOENT 臂落 base 之下 →
+行 #1/#3（null reason）；产物直接穿环（自身 strict ELOOP → None）→ 行
+#6 `local_artifact_path_unresolvable`；产物在外 → 行 #2
+`local_artifact_path_outside_allowed_roots`——spec delta 同款 carve-out
+（round-1 A1，round-2 C1 三出口更正）。
 
 非 ELOOP 的其余 errno（EACCES/ESTALE/ENOTDIR）同样落 root-unresolvable
 臂——超出 symlink 环的 fail-closed 行为变化，issue 推荐臂已授权
@@ -181,10 +185,16 @@ except（备选臂的止血形）——宽兜底会把未来新缺陷静默降�
 1. root 环 → 不抛（≤3.12 崩溃臂红转绿）。
 2. root 环 + 产物在环外 → `local_artifact_root_unresolvable`（3.13+ 误报
    `outside_allowed_roots` 臂红转绿）。
+2b. 非 ENOENT errno root（EACCES 实证用例；ESTALE/ENOTDIR 走同一 errno
+   分流臂）→ 同 root-fault 出口（round-1 B4；spec 场景 2 GIVEN
+   「permission fault」的唯一见证）。
 3. root 环 + 产物在环下 → 同 reason 非空（3.13+ `(True, None)` 喂
    rebuild 臂红转绿）。
 4. ENOENT root 词法 admitted（既有语义回归钉）。
 5. 好+坏混合 roots：好 root 收容不受污染（D2 #3）。
+5b. 三类 root 共存（可解析 + ENOENT-admitted + 环）互不污染：good 下
+   `(False, None)`、admitted 下 `(True, None)`（round-1 B3；spec 场景 3
+   复合 GIVEN 的见证用例）。
 6. 真「根可解析产物在外」仍 `outside_allowed_roots`（reason 收严后语义
    钉）。
 7. path 自身环（roots 全可解析）→ `local_artifact_path_unresolvable`
@@ -230,7 +240,7 @@ except（备选臂的止血形）——宽兜底会把未来新缺陷静默降�
 
 - oracle-integrity：D4 单元矩阵 + D6 三组红证 + e2e 判别断言。
 - spec-compliance：spec delta 四场景 ↔ seams（场景 1↔seam 1/8、场景
-  2↔seam 2/3/9、场景 3↔seam 4/5/6、场景 4↔seam 7）+ runbook 路由表条
+  2↔seam 2/2b/3/9、场景 3↔seam 4/5/5b/6、场景 4↔seam 7）+ runbook 路由表条
   目（closure check 观察更正：场景 4 是 path-fault = seam 7，seam 9 归
   场景 2 末句）。
 - terminal-state-semantics：D2 完整出口表逐行测试 + D3 规范化面无抛点

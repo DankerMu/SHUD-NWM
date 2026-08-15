@@ -12840,8 +12840,9 @@ def _artifact_guard_geometry(tmp_path: Path) -> dict[str, Path]:
         ),
         # D2 #6, ordering carve-out: NO root configured CROSSED WITH a path that
         # itself cannot be normalized lands on row #6, not on row 5b.  The exits
-        # are decided root fault -> path fault -> containment/empty-roots, so 5b
-        # is only reachable once the path normalized.  This is a behaviour change
+        # are decided containment-by-a-resolvable-root -> root fault -> path
+        # fault -> outside/empty-roots, so 5b is only reachable once the path
+        # normalized.  This is a behaviour change
         # against master, where the same combination raised RuntimeError through
         # the whole chain on <=3.12 and reported
         # ``local_artifact_path_outside_allowed_roots`` on 3.13+; both verdicts
