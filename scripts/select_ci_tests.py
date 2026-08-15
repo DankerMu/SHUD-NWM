@@ -384,6 +384,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # The cron wrapper is a shell script, not a backend python path, so the
+        # core-smoke fallback never arms for it; without this rule a
+        # wrapper-only PR selects nothing and CI degrades to --collect-only.
+        "scripts/node27_autopipe_cron.sh",
+        ("tests/test_node27_autopipeline_preflight.py",),
+    ),
+    PathTestRule(
         "scripts/governance/audit_repo_entropy.py",
         ("tests/test_entropy_audit_script.py",),
     ),

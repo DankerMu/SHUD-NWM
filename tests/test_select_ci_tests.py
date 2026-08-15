@@ -211,6 +211,20 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
+def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -> None:
+    # scripts/node27_autopipe_cron.sh is a shell script, so it is not a backend
+    # python path and the core-smoke fallback never arms for it. Before its
+    # explicit rule a wrapper-only PR selected nothing at all and CI degraded to
+    # --collect-only, even though the wrapper is covered by real assertions in
+    # tests/test_node27_autopipeline_preflight.py.
+    assert Path("scripts/node27_autopipe_cron.sh").exists()
+
+    selected = select_tests(["scripts/node27_autopipe_cron.sh"], repo_root=Path("."))
+
+    assert selected == ["tests/test_node27_autopipeline_preflight.py"]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
 def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback() -> None:
     selected = select_tests(
         [
