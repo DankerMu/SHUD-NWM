@@ -24,7 +24,8 @@
   （`_locked_cycle_write`/`_journal_record_for_write`/
   `_validate_outgoing_record`/`_append_journal_records_unlocked`/
   `_write_pipeline_job_direct_unlocked`）；源状态前置=终态失败子集
-  `{failed, submission_failed, partially_failed, reservation_lost}`，非法
+  `{failed, submission_failed, partially_failed}`（task 11 裁决后收窄：
+  `reservation_lost` 移出，见 design D5），非法
   源返回 stale 不 raise；accounting 元组
   （reconciliation_decision/submit_outcome/matched_slurm_job_id）逐字段保
   持；幂等前置以 job_id 重读持久行；事件
