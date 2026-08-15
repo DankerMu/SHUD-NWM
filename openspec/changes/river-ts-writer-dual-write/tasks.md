@@ -40,7 +40,8 @@
       回填 runner 共存（旧形态行才是哨兵候选）；seed y_stage/m 分支
       （design D7.2）
 - [x] 2.3 `uv run pytest -q` 定向（output_parser + write_guard_wired +
-      seed 相关，`-m "not integration"` 55 passed）全绿；`uv run ruff
+      seed 相关，`-m "not integration"` 58 passed @6753550f，round-2
+      erratum：fix pass 新增 3 用例后刷新计数）全绿；`uv run ruff
       check .` 通过。e2e 腿如实改述（round-1 裁决）：`-m e2e` 两例
       pre-existing 红（GFS `.idx` fixture 漂移，净 master 同红，另行
       立单），但 m2 的 ERA5 腿在 fail 前已真实驱动 `parse_run` 走新
@@ -53,20 +54,20 @@
       `packages/common/timescale_write_guard.py` 零触碰；
       `RiverTimeseriesRow` 与 JSONL 产物零改动；文本列写入路径与
       DELETE-replace 谓词逐字节不变
-- [ ] 2.6 node-27：完整 cycle（实际 basin 集合如实记录）落库；**run 域
+- [x] 2.6 node-27：完整 cycle（实际 basin 集合如实记录）落库；**run 域
       定向查询**（`WHERE run_id = <本次>`）7 列零 NULL + 等值审计**前后
       差值为零**（评审 round-1 P2-7：全表 verify 函数含 4.6 亿未回填
       历史行，不能按字面"零背离"；全表函数一次=249GB 扫，receipt 用
       定向 SQL）（AC-1/AC-4）
-- [ ] 2.7 node-27：同 run 重解析 wall-clock 对比（旧 vs 新代码各一次，
+- [x] 2.7 node-27：同 run 重解析 wall-clock 对比（旧 vs 新代码各一次，
       rows_written 相同）记录于 PR 评论；**前置：选中 run 的 valid_time
       窗口全落未压缩 chunk，并记录 chunk 压缩状态**（AC-2，design D5
       偏离口径）
-- [ ] 2.8 node-27：定向真实 DB pytest（`-m integration` 本 change 子集）
+- [x] 2.8 node-27：定向真实 DB pytest（`-m integration` 本 change 子集）
 
 ## 3. 交付记录
 
-- [ ] 3.1 PR body：偏离记录（issue 5 文件收窄为 2 真实写者 + "维表
+- [x] 3.1 PR body：偏离记录（issue 5 文件收窄为 2 真实写者 + "维表
       upsert"按 #1339 现实重映射 + 吞吐对比口径 + 17→18 流域）+ AC 逐条
       覆盖声明
-- [ ] 3.2 PR body：node-27 cycle receipt 摘要 + 耗时对比数字
+- [x] 3.2 PR body：node-27 cycle receipt 摘要 + 耗时对比数字
