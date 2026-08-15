@@ -48,7 +48,7 @@ I/O 求得（fixture-review round-2 P1-1：地板必须按 discovery 同款公�
    `_floor_to_source_cycle_boundary(_floor_to_source_cycle_boundary(
    started_at - lag, sources) - lookback, sources)`
    （`scheduler_discovery.py:371-375` 逐字同构；floor 实现
-   `scheduler.py:443-460`，**网格来自配置 `allowed_cycle_hours_utc`**——
+   `scheduler.py:443-461`，**网格来自配置 `allowed_cycle_hours_utc`**——
    默认与示例配置均为 `0,12` 即 12h（`scheduler.py:293`、
    `compute.example:67`），`{0,6,12,18}` 仅是 kwarg 为 None 时的 gfs/IFS
    回退，生产 config 归一化后不可达（PR round-2 RC2-D1 更正）；ERA5-only

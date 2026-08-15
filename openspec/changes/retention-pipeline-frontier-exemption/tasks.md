@@ -109,7 +109,7 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
   - 豁免项形状：无 `size_bytes` 键（并以此佐证未做 `_dir_size`）；
   - 压缩存活（设计派生要求 D4，非 issue AC）：尺寸压缩后 `frontier` 块保留、skipped 明细照旧剥
     为计数（既有 pin 适配不弱化）。
-- [x] 5. `infra/env/compute.example:202-212` 注释按 D6 措辞改写：保留数值示
+- [x] 5. `infra/env/compute.example:202-220` 注释按 D6 措辞改写：保留数值示
   例与不变量本身，改述后果为"违反不再导致产出→删除自旋，表现为受控过度保留
   （receipt frontier 块可见）"。
 - [x] 6. 既有测试零回归：`uv run pytest -q tests/test_retention.py` 与

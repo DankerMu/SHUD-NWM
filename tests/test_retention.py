@@ -972,7 +972,8 @@ def test_window_floor_matches_discovery_double_floor_formula(
 
     bound, source = _active_lower_bound(scheduler, started_at)
 
-    # hand-computed: floor(03:17 - 6h) = 06-02T18:00; floor(that - lookback)
+    # hand-computed per case above: floor(started_at - lag) on the case grid,
+    # then floor(that - lookback) on the same grid
     assert bound == expected_bound
     assert source == "window_floor"
     # and it is exactly what discovery itself used
