@@ -32397,6 +32397,40 @@ def test_runtime_root_preflight_arms_report_unsafe_before_missing_when_all_roots
     assert preflight["checks"]["allowed_roots_policy"]["non_empty"] is False
 
 
+@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+) -> None:
+    """One arm invocation = one adjudication, and the payload reuses that product.
+
+    A second derivation inside the payload reads the filesystem again, so a
+    concurrent change between the two passes can publish a self-contradictory
+    payload: a blocker saying a root was dropped next to a top-level
+    `allowed_roots` that still lists it. Counting the adjudications pins the
+    single-pass property directly instead of trying to race it.
+    """
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop, tmp_path))
+    original_adjudicate = scheduler_module._scheduler_allowed_roots_and_blockers
+    adjudications: list[Any] = []
+
+    def counting_adjudicate(config_argument: Any) -> Any:
+        adjudications.append(config_argument)
+        return original_adjudicate(config_argument)
+
+    monkeypatch.setattr(scheduler_module, "_scheduler_allowed_roots_and_blockers", counting_adjudicate)
+
+    preflight = _runtime_root_preflight_arm(arm)(config)
+
+    assert len(adjudications) == 1
+    assert preflight["allowed_roots"] == preflight["checks"]["allowed_roots_policy"]["allowed_roots"]
+    assert preflight["allowed_roots"] == [str(tmp_path)]
+
+
 def test_storage_and_runtime_root_preflight_planes_agree_on_unsafe_allowed_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -32549,19 +32583,32 @@ def test_db_free_allowed_roots_admits_missing_root_in_canonical_form(
     tmp_path: Path,
     db_free_required: bool,
 ) -> None:
-    """ENOENT x both modes: canonical non-strict form, admitted, no blocker."""
+    """ENOENT x both modes: canonical non-strict form, admitted, no blocker.
 
-    missing = tmp_path / "not-created-yet"
-    assert _allowed_root_errno(missing) == errno.ENOENT
+    `<missing>/../<realdir>` is the discriminating shape: a bare missing leaf is
+    already its own canonical form, so it cannot tell "canonicalised" apart from
+    "passed through lexically". Here strict realpath still raises ENOENT while
+    the non-strict product folds the `..` back onto the real directory.
+    """
+
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    lexical_root = tmp_path / "gone" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+    assert canonical_root == Path(os.path.realpath(realdir))
+    assert _allowed_root_errno(lexical_root) == errno.ENOENT
 
     roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
         _AllowedRootsConfigStub(
-            allowed_storage_roots=(missing,),
+            allowed_storage_roots=(lexical_root,),
             scheduler_db_free_required=db_free_required,
         )
     )
 
-    assert roots == (Path(os.path.realpath(missing)),)
+    assert roots == (canonical_root,)
+    assert roots != (lexical_root,)
     assert blockers == []
 
 
@@ -32721,14 +32768,26 @@ def test_db_free_selector_allowed_roots_rejects_unresolvable_root(
 
 
 def test_db_free_selector_allowed_roots_admits_missing_root(tmp_path: Path) -> None:
-    """ENOENT is not "unresolvable": a merely missing root stays admitted."""
+    """ENOENT is not "unresolvable": a merely missing root stays admitted.
 
-    missing = tmp_path / "not-created-yet"
-    assert _allowed_root_errno(missing) == errno.ENOENT
+    `<missing>/../<realdir>` discriminates canonicalisation from lexical
+    pass-through, which a bare missing leaf cannot: it is already canonical, so
+    both candidate products coincide and the assertion goes blind.
+    """
 
-    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(missing))
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    lexical_root = tmp_path / "gone" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+    assert canonical_root == Path(os.path.realpath(realdir))
+    assert _allowed_root_errno(lexical_root) == errno.ENOENT
 
-    assert roots == (Path(os.path.realpath(missing)),)
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(lexical_root))
+
+    assert roots == (canonical_root,)
+    assert roots != (lexical_root,)
     assert rejected == []
 
 

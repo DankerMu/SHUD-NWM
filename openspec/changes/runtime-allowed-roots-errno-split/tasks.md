@@ -118,6 +118,18 @@ runtime-root preflight）——由 issue 复核命令
   `openspec validate runtime-allowed-roots-errno-split --strict
   --no-interactive`。
 
+## Round-1 fix tasks (Phase 5/6)
+
+- [x] 7. EC-1：两条 preflight 臂把裁决 #1 的 roots 经新 keyword 参数传入
+  `_scheduler_root_preflight_payload`（默认值保持向后兼容），payload 不再二次
+  裁决；测试钉住"payload 的 `allowed_roots` 与 `checks.allowed_roots_policy.
+  allowed_roots` 出自同一次裁决"（如对配对函数计数：一次臂调用 = 一次裁决）。
+- [x] 8. FT-2：站点 2/3 的 ENOENT 测试行换判别形 `<missing>/../<realdir>`
+  （canonical ≠ lexical 守卫断言，参照 :32300-32303 写法）；优先站点 3
+  （raw env 端到端可达），站点 2 同修（seam 契约保真）。
+- [x] 9. HY-1 顺带：`_db_free_allowed_roots` docstring 补一行保留理由
+  （D4 记录的读取面，当前无调用方）。
+
 ## Non-goals
 
 - `_optional_config_path`（#1347/PR #1349 已修，不触碰）；

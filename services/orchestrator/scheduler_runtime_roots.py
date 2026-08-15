@@ -66,7 +66,11 @@ def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
         if blocker is not None:
             blockers.append(blocker)
     return _scheduler._scheduler_root_preflight_payload(
-        config, checks, blockers, evidence_safe_paths=evidence_safe_paths
+        config,
+        checks,
+        blockers,
+        evidence_safe_paths=evidence_safe_paths,
+        allowed_roots=allowed_roots,
     )
 
 
@@ -157,7 +161,11 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
     if service_role_blocker is not None:
         blockers.append(service_role_blocker)
     return _scheduler._scheduler_root_preflight_payload(
-        config, checks, blockers, evidence_safe_paths=evidence_safe_paths
+        config,
+        checks,
+        blockers,
+        evidence_safe_paths=evidence_safe_paths,
+        allowed_roots=allowed_roots,
     )
 
 
@@ -177,16 +185,28 @@ def _scheduler_root_preflight_payload(
     blockers: Sequence[Mapping[str, Any]],
     *,
     evidence_safe_paths: bool = False,
+    allowed_roots: Sequence[Path] | None = None,
 ) -> dict[str, Any]:
+    """Render one preflight arm's verdict.
+
+    ``allowed_roots`` must be the very roots the arm adjudicated: re-deriving
+    them here would be a second adjudication whose product can diverge from the
+    first under filesystem races, yielding a self-contradictory payload (a
+    blocker saying a root was dropped next to a top-level ``allowed_roots`` that
+    still lists it). ``None`` keeps the historical self-derivation for callers
+    that have no adjudication of their own.
+    """
+
+    effective_roots = _scheduler._scheduler_allowed_roots(config) if allowed_roots is None else allowed_roots
     return {
         "status": "blocked" if blockers else "ready",
         "required": True,
         "blockers": [dict(blocker) for blocker in blockers],
         "checks": dict(checks),
         "allowed_roots": (
-            ["[local-path]" for _root in _scheduler._scheduler_allowed_roots(config)]
+            ["[local-path]" for _root in effective_roots]
             if evidence_safe_paths
-            else [str(root) for root in _scheduler._scheduler_allowed_roots(config)]
+            else [str(root) for root in effective_roots]
         ),
     }
 

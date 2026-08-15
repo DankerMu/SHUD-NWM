@@ -1058,7 +1058,11 @@ def _db_free_selector_text_is_db_like(value: Any) -> bool:
 
 
 def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
-    """Containment bases for the db-free lane (read-only view of the verdict)."""
+    """Containment bases for the db-free lane (read-only view of the verdict).
+
+    Retained per D4 as the roots-only reader view of the adjudication; it
+    currently has no callers -- the pair function is the live surface.
+    """
 
     return _db_free_allowed_roots_and_blockers(config)[0]
 

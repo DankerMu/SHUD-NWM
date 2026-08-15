@@ -115,7 +115,11 @@ payload **没有 blocker 通道**，只展示 `allowed_roots` 列表——今天
   的 D4（站点 2 数据库态臂 drop + blocker）负责封口。**永不以未捕获异常逃逸**。
 - 该配置下 blocker 责任面仍在 slurm storage preflight（`_slurm_preflight` 独
   立于 `require_runtime_roots` 运行，#1346 已修）：运维仍然收到
-  `SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH`。证据一致性在该态的形
+  `SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH`。**前提限定（round-1
+  EC-2 修正）**：此兜底只在 `slurm_execution_enabled=True` 的配置成立；两开关
+  同时关闭（均默认 False 的 db-backed dev/dry-run 形态，所有已文档化部署均开
+  slurm）下无任何平面记录该处置——该态没有 containment 消费者、payload 在
+  status != not_required 之外不进 evidence，属接受的残余而非契约违反。证据一致性在该态的形
   式：not_required payload 的 `allowed_roots` 与 slurm 平面的有效根集合同源
   同值，不再有"一边丢根一边展示环根"的矛盾。
 - **B8 tripwire 必须翻转**：其 docstring 明文 "When #1348 lands this test
@@ -226,7 +230,11 @@ Regression rows:
   是 "not ENOENT" 而非 "only ELOOP"。
 - ENOENT 根：两种运行态均纳入（非 strict 规范形），无 blocker——历史语义钉死。
 - `<missing>/../<loop>` 组合：strict 抛 ENOENT → 非 strict realpath 吸收，
-  纳入，无 blocker（#1332 round-1 组合路径）。
+  纳入，无 blocker（#1332 round-1 组合路径）。**限定（round-1 FT-1 修正）**：
+  该行只在 seam 输入面成立（站点 3 的 raw env 面端到端可达）；真实
+  `ProductionSchedulerConfig` 在构造期经 `_optional_config_path` 把该形态折叠
+  为裸 loop，db-backed 落 UNSAFE_PATH + 剔根（终态由裸 ELOOP db-backed 行钉
+  住），db-free 走 #831 词法臂。
 - 证据面一致性（主锚点）：同 config 同环根，slurm preflight 丢根+blocker 且
   runtime-root preflight 丢根+blocker，两个 `allowed_roots` 证据字段一致。
 - 掩码：数据库态 + repair_missing_forcing → UNSAFE_PATH blocker 的 path 为
