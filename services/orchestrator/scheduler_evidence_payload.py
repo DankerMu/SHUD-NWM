@@ -636,6 +636,10 @@ def _compact_retention(value: Any) -> Any:
             "forced_dry_run_reason",
             "retention_days",
             "freed_bytes",
+            # Issue #1307: the frontier block is a constant-size scalar block;
+            # keeping it verbatim means the exemption evidence survives the
+            # size compaction that strips the per-entry skipped detail.
+            "frontier",
         ),
     )
     counts = value.get("counts")

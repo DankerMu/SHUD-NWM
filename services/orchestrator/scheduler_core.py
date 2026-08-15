@@ -245,6 +245,8 @@ class ProductionScheduler:
         started_at: _scheduler.datetime,
         *,
         force_dry_run_reason: str | None = None,
+        active_lower_bound: _scheduler.datetime | None = None,
+        active_lower_bound_source: str | None = None,
     ) -> dict[str, _scheduler.Any]:
         from services.orchestrator import scheduler_runtime
 
@@ -252,6 +254,8 @@ class ProductionScheduler:
             self,
             started_at,
             force_dry_run_reason=force_dry_run_reason,
+            active_lower_bound=active_lower_bound,
+            active_lower_bound_source=active_lower_bound_source,
         )
 
     def _write_prelock_blocked_evidence(

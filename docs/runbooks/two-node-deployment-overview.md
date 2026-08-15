@@ -356,6 +356,11 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
   fail-loud（error_code=`CDO_MISSING`）。
 - 预报数据保留清理：`NHMS_RETENTION_ENABLED=true` 时每轮调度按 `cycle_time` 清理早于
   `NHMS_RETENTION_DAYS`（默认 14）的 raw 与计算中间态；published 产物与静态网格始终保留。
+  自 #1307 起删除判据是**合取**：除早于 cutoff 外，还须低于本趟 pass 的 pipeline 活跃下界
+  （仍在发现窗口内或在飞的 cycle 会被豁免）——被豁免的条目出现在 receipt 的
+  `retention.skipped` 中、reason=`pipeline_frontier_exempt`，数量见
+  `retention.frontier.protected_count`。故追赶期可能保留超过 `NHMS_RETENTION_DAYS`
+  的目录，方向恒为只多留、绝不多删。
   首次上线建议 `NHMS_RETENTION_DRY_RUN=true` 先看清理计划，确认后再设 false 真删。
 - 空间裁剪与网格基线：canonical/forcing 的网格是从 GRIB / `grid.json` 动态读取的，自动适应
   裁剪后的区域网格，无需改代码。但 `canonical/{source}/grid/{grid_id}/grid.json` 与

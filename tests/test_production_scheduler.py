@@ -14472,6 +14472,65 @@ def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_pat
     assert "/private" not in rendered
 
 
+def test_retention_bounded_evidence_preserves_frontier_block_while_stripping_skips() -> None:
+    """[#1307 D4] The frontier block is constant-size scalar evidence: it must
+    survive the compaction that strips per-entry skipped detail."""
+    payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_frontier")
+    payload["retention"] = {
+        "schema_version": "nhms.production_scheduler.retention.v1",
+        "status": "completed",
+        "enabled": True,
+        "dry_run": False,
+        "retention_days": 14,
+        "frontier": {
+            "active_lower_bound": "2026-05-07T06:00:00+00:00",
+            "source": "candidates",
+            "protected_count": 2,
+        },
+        "counts": {"planned": 1, "deleted": 1, "skipped": 2, "failed": 0},
+        "planned": [{"key": "raw/gfs/2026042100", "path": "/private/secret-token-planned"}],
+        "deleted": [{"key": "raw/gfs/2026042100", "path": "/private/secret-token-deleted"}],
+        "skipped": [
+            {
+                "key": "forcing/gfs/2026050706",
+                "path": "/private/secret-token-forcing",
+                "cycle_time": "2026-05-07T06:00:00Z",
+                "reason": "pipeline_frontier_exempt",
+            },
+            {
+                "key": "runs/fcst_gfs_2026050706_model_a",
+                "path": "/private/secret-token-run",
+                "cycle_time": "2026-05-07T06:00:00Z",
+                "reason": "pipeline_frontier_exempt",
+            },
+        ],
+        "failed": [],
+        "freed_bytes": 4096,
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_800,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 2_800
+    retention = bounded["retention"]
+    assert retention["frontier"] == {
+        "active_lower_bound": "2026-05-07T06:00:00+00:00",
+        "source": "candidates",
+        "protected_count": 2,
+    }
+    # the per-entry detail is still stripped to counts, and no path leaks
+    assert "skipped" not in retention
+    assert retention["skipped_count"] == 2
+    assert retention["planned_count"] == 1
+    assert "planned" not in retention
+    assert "secret-token" not in rendered
+    assert "/private" not in rendered
+
+
 def test_retention_bounded_evidence_compacts_paths_before_initial_fit() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_initial_fit")
     payload["retention"] = {
@@ -15220,6 +15279,93 @@ def test_pre_execution_evidence_block_forces_retention_dry_run_before_deletion(
         assert evidence["retention"]["forced_dry_run_reason"] == "evidence_preflight_blocked"
         assert evidence["retention"]["planned"]
         assert evidence["retention"]["deleted"] == []
+
+
+def test_run_once_retention_exempts_in_flight_cycle_and_still_collects_older_one(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """[#1307 AC1, pass level] The pass really computes and threads the bound.
+
+    lookback=336h + lag=6h against the 14-day retention window opens a 6h
+    ``[bound, cutoff)`` band starting at 2026-05-07T06:00Z, and the cycle this
+    pass is driving sits in it. Before this change the pass deleted, at its own
+    tail, the artifacts it had just produced (produce-then-delete spin); an
+    out-of-window cycle must still be collected in the same pass.
+    """
+    now = _dt("2026-05-21T12:00:00Z")
+    object_store_root = tmp_path / "object-store"
+    in_flight_cycle = "2026050706"
+    collectable_cycle = "2026042100"
+
+    def _cycle_keys(cycle: str) -> set[str]:
+        return {
+            f"raw/gfs/{cycle}",
+            f"canonical/gfs/{cycle}",
+            f"forcing/gfs/{cycle}",
+            f"runs/fcst_gfs_{cycle}_model_a",
+        }
+
+    for cycle in (in_flight_cycle, collectable_cycle):
+        for prefix in ("raw", "canonical", "forcing"):
+            payload_path = object_store_root / prefix / "gfs" / cycle / "payload.nc"
+            payload_path.parent.mkdir(parents=True)
+            payload_path.write_text("payload\n", encoding="utf-8")
+        run_dir = object_store_root / "runs" / f"fcst_gfs_{cycle}_model_a"
+        run_dir.mkdir(parents=True)
+        (run_dir / "shud_stdout.log").write_text("SHUD start\n", encoding="utf-8")
+        (run_dir / "shud_stderr.log").write_text("STATE_CHECKPOINTS_MISSING\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(
+            tmp_path,
+            now=now,
+            dry_run=False,
+            object_store_root=object_store_root,
+            lookback_hours=336,
+            cycle_lag_hours=6,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-07T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert [candidate["cycle_time_utc"] for candidate in result.evidence["candidates"]] == [
+        "2026-05-07T06:00:00Z"
+    ]
+    retention = result.evidence["retention"]
+    assert retention["status"] == "completed"
+    assert retention["dry_run"] is False, "the pass must be doing real deletion for this to bite"
+    frontier = retention["frontier"]
+    assert frontier["active_lower_bound"] is not None
+    assert datetime.fromisoformat(frontier["active_lower_bound"]) == _dt("2026-05-07T06:00:00Z")
+    assert frontier["source"] in {"candidates", "skipped_in_flight", "window_floor"}
+    assert frontier["protected_count"] == 4
+
+    exempt = {
+        entry["key"] for entry in retention["skipped"] if entry["reason"] == "pipeline_frontier_exempt"
+    }
+    planned = {entry["key"] for entry in retention["planned"]}
+    deleted = {entry["key"] for entry in retention["deleted"]}
+    assert _cycle_keys(in_flight_cycle) <= exempt
+    assert not _cycle_keys(in_flight_cycle) & (planned | deleted)
+    # physical: the cycle under production survives its own pass
+    assert (object_store_root / "forcing" / "gfs" / in_flight_cycle).is_dir()
+    assert (
+        object_store_root / "runs" / f"fcst_gfs_{in_flight_cycle}_model_a" / "shud_stderr.log"
+    ).read_text(encoding="utf-8") == "STATE_CHECKPOINTS_MISSING\n"
+    # ... and the out-of-window cycle is still collected by the same pass
+    assert _cycle_keys(collectable_cycle) <= deleted
+    assert not (object_store_root / "raw" / "gfs" / collectable_cycle).exists()
+    assert not (object_store_root / "runs" / f"fcst_gfs_{collectable_cycle}_model_a").exists()
 
 
 def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target(
