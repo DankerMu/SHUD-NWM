@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from errno import ENOENT
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1526,13 +1527,22 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_relative", text)
             )
             continue
+        # Strict resolution + errno split: non-strict resolution stopped raising
+        # on symlink loops in CPython 3.13+ and strict Path.resolve() raises an
+        # errno-less RuntimeError on <=3.12, so this rejection only becomes
+        # reachable through os.path.realpath(..., strict=True). ENOENT is not
+        # unresolvable -- a merely missing root keeps the admitted semantics.
         try:
-            resolved = root.resolve(strict=False)
-        except OSError:
-            rejected.append(
-                _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text)
-            )
-            continue
+            resolved = Path(os.path.realpath(root, strict=True))
+        except OSError as error:
+            if getattr(error, "errno", None) != ENOENT:
+                rejected.append(
+                    _runtime_root_rejection(
+                        "scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text
+                    )
+                )
+                continue
+            resolved = Path(os.path.realpath(root))
         if resolved not in roots:
             roots.append(resolved)
     return tuple(roots), rejected

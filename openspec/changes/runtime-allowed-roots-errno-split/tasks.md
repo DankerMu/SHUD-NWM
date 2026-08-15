@@ -42,28 +42,28 @@ runtime-root preflight）——由 issue 复核命令
 
 ## Tasks
 
-- [ ] 1. 站点 1：新增 `_scheduler_allowed_roots_and_blockers`（D2/D3 三臂裁
+- [x] 1. 站点 1：新增 `_scheduler_allowed_roots_and_blockers`（D2/D3 三臂裁
   决，含掩码纪律），`_scheduler_allowed_roots` 降级为 `[0]` 读取面；两条
   preflight 臂解包并 extend blockers（顺序：unsafe 先于 policy MISSING）；
   `:457` 裸 raise 删除；全文件 allowed-roots 用途零 `Path.resolve()`。
-- [ ] 2. 站点 2：改为配对函数 `_db_free_allowed_roots_and_blockers`（D4
+- [x] 2. 站点 2：改为配对函数 `_db_free_allowed_roots_and_blockers`（D4
   round-2），旧名 = `[0]` 读取面，唯一调用点 `scheduler_config.py:738` 解包
   并 extend blockers；ENOENT → 非 strict realpath 纳入；非 ENOENT ×
   db-free → #831 词法臂逐字保留；非 ENOENT × 数据库态 repair-authority
   lane → 剔除 + `_db_free_blocker("db_free_allowed_root_unsafe", ...)`。
-- [ ] 3. 站点 3：retry.py `:1529-1535` strict realpath + errno 分流，
+- [x] 3. 站点 3：retry.py `:1529-1535` strict realpath + errno 分流，
   `db_free_allowed_root_unresolvable` 死码复活。
-- [ ] 4. facade 注册与消费方封闭性：新配对函数登记
+- [x] 4. facade 注册与消费方封闭性：新配对函数登记
   `scheduler_candidate_runtime.py` FORWARDER_NAMES/赋值区/EXPORTS 三处 +
   `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` 补行（D2）；
   `grep -rn "_scheduler_allowed_roots\b"` 全仓核对旧符号调用点无漏改。
-- [ ] 4b. B8 tripwire 翻转（D6，必做交接）：
+- [x] 4b. B8 tripwire 翻转（D6，必做交接）：
   `test_scheduler_root_preflight_still_raises_on_preexisting_loop_allowed_root`
   按其 docstring 契约改为修后结构化断言（不抛、status=not_required、
   `allowed_roots` 不含环根），移除 `skipif(>=3.13)`，改名去掉
   "still_raises"；同步更新 B1 测试 docstring 的 tripwire 交叉引用
   （`tests/test_production_scheduler.py:31754-31756`）。
-- [ ] 5. 测试（`tests/test_production_scheduler.py`）：
+- [x] 5. 测试（`tests/test_production_scheduler.py`）：
   - 站点 1 单元 seam：环根（真实 symlink 环）/ENOTDIR/ENOENT/
     `<missing>/../<loop>` 四形状 × 数据库态/db-free 两运行态的
     `(roots, blockers)` 裁决表；
@@ -85,7 +85,7 @@ runtime-root preflight）——由 issue 复核命令
   - 站点 3：环根/ENOTDIR → rejection 真实触发（附修前死码红证：判据回退后该
     测试必红）；ENOENT → 纳入；
   - 版本不敏感性：全部用真实故障形状 + errno 断言，无版本分支 mock。
-- [ ] 6. 既有测试零回归：`-k "preflight or allowed_root"` 全绿且断言不弱化
+- [x] 6. 既有测试零回归：`-k "preflight or allowed_root"` 全绿且断言不弱化
   ——**唯一授权例外是 B8 tripwire（任务 4b）**，其翻转是该测试自身 docstring
   写明的交接义务，非回归；受 D2 签名影响的直接调用测试只允许解包适配。
 

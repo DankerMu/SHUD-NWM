@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
-from errno import EACCES, ELOOP, ENOTDIR, EPERM
+from errno import EACCES, ELOOP, ENOENT, ENOTDIR, EPERM
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
         getattr(config, "db_free_required", False)
         or getattr(config, "repair_missing_forcing", False)
     )
-    allowed_roots = _scheduler._scheduler_allowed_roots(config)
+    allowed_roots, allowed_roots_unsafe_blockers = _scheduler._scheduler_allowed_roots_and_blockers(config)
     allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
         config,
         allowed_roots,
@@ -27,7 +27,8 @@ def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
     enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
     checks["allowed_roots_policy"] = allowed_roots_check
-    blockers: list[dict[str, Any]] = []
+    # Cause before consequence: "this root was dropped" precedes "no root left".
+    blockers: list[dict[str, Any]] = list(allowed_roots_unsafe_blockers)
     if allowed_roots_blocker is not None:
         blockers.append(allowed_roots_blocker)
     workspace_root_preflight_path = config._workspace_root_preflight_path
@@ -76,7 +77,7 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
         getattr(config, "db_free_required", False)
         or getattr(config, "repair_missing_forcing", False)
     )
-    allowed_roots = _scheduler._scheduler_allowed_roots(config)
+    allowed_roots, allowed_roots_unsafe_blockers = _scheduler._scheduler_allowed_roots_and_blockers(config)
     allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
         config,
         allowed_roots,
@@ -85,7 +86,8 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
     enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
     checks["allowed_roots_policy"] = allowed_roots_check
-    blockers: list[dict[str, Any]] = []
+    # Cause before consequence: "this root was dropped" precedes "no root left".
+    blockers: list[dict[str, Any]] = list(allowed_roots_unsafe_blockers)
     if allowed_roots_blocker is not None:
         blockers.append(allowed_roots_blocker)
     workspace_root_preflight_path = config._workspace_root_preflight_path
@@ -446,21 +448,66 @@ def _scheduler_allowed_roots_policy_check(
 
 
 def _scheduler_allowed_roots(config: Any) -> tuple[Path, ...]:
+    """Effective approved containment bases (read-only view of the adjudication).
+
+    The verdict itself lives in ``_scheduler_allowed_roots_and_blockers``; this
+    signature is kept for the payload/not-required evidence surfaces, which show
+    the same product without owning a blocker channel.
+    """
+
+    return _scheduler._scheduler_allowed_roots_and_blockers(config)[0]
+
+
+def _scheduler_allowed_roots_and_blockers(config: Any) -> tuple[tuple[Path, ...], list[dict[str, Any]]]:
+    """Adjudicate the configured allowed storage roots and report unsafe ones.
+
+    Strict resolution + errno split, the same paradigm as
+    ``_preflight_allowed_roots``: a symlink loop no longer raises from
+    non-strict resolution on CPython 3.13+, and strict ``Path.resolve()`` raises
+    an errno-less ``RuntimeError`` on <=3.12, so the verdict has to come from
+    the kernel errno of ``os.path.realpath(..., strict=True)``. ENOENT is NOT
+    unsafe: a merely missing root (not created yet, NFS not mounted) keeps the
+    historical "admitted" semantics on both runtime modes and never produces a
+    blocker. Any other errno is tolerated lexically on db-free runtimes (PR #831)
+    and, on database-backed runtimes, drops the root from the effective allowed
+    roots so it can never serve as a phantom containment base, with a structured
+    ``SCHEDULER_ROOT_ALLOWED_ROOTS_<REASON>`` blocker explaining why.
+    """
+
+    db_free_required = bool(getattr(config, "db_free_required", False))
+    evidence_safe_paths = bool(db_free_required or getattr(config, "repair_missing_forcing", False))
     roots: list[Path] = []
+    blockers: list[dict[str, Any]] = []
     for value in config.allowed_storage_roots:
         if value in (None, ""):
             continue
+        expanded = Path(value).expanduser()
         try:
-            root = Path(value).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
-            if not bool(getattr(config, "db_free_required", False)):
-                raise
-            root = Path(value).expanduser()
-            if not root.is_absolute():
-                root = Path.cwd() / root
+            root = Path(os.path.realpath(expanded, strict=True))
+        except OSError as error:
+            if getattr(error, "errno", None) == ENOENT:
+                # Non-strict os.path.realpath() never raises on 3.11-3.14 and
+                # reproduces the historical non-strict Path.resolve() product,
+                # including `<missing>/../<loop>` shapes.
+                root = Path(os.path.realpath(expanded))
+            elif db_free_required:
+                # PR #831 lexical-fallback tolerance, kept verbatim: on db-free
+                # runtimes an unresolvable root is legitimate configuration.
+                root = expanded
+                if not root.is_absolute():
+                    root = Path.cwd() / root
+            else:
+                blockers.append(
+                    _scheduler._scheduler_root_blocker(
+                        "allowed_roots",
+                        _scheduler._scheduler_root_os_error_reason(error),
+                        "[local-path]" if evidence_safe_paths else str(expanded),
+                    )
+                )
+                continue
         if root not in roots:
             roots.append(root)
-    return tuple(roots)
+    return tuple(roots), blockers
 
 
 def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
