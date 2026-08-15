@@ -57,6 +57,22 @@ _REMEDY_NON_CAUSAL_CODES = frozenset({"OUT_OF_MEMORY"})  # 码臂必须保留，
 def _remedy_permits_permanent_failure(failure, *, remedy) -> bool
 ```
 
+**Round-1 复审重裁（V1-C1 CONFIRMED）——码臂按 remedy 分表**：上面草绘的
+单一共享码集不足。classifier 走私论证对 policy 三码
+（POLICY_BLOCKED/PERMISSION_DENIED/TEMPLATE_NOT_ALLOWED）与对 OOM 完全同
+构——state 带 `classifier: "unknown_failure"`（或大小写变体
+`Policy_Blocked`，classifier 臂不 normalize）即可绕过双臂重获
+`automatic_retry_allowed: True`（复审 end-to-end 实测）。但共享码集不能
+直接扩：`changed_model_package` 的码臂扩进 policy 三码会违反 scenario 6
+"零语义变化"验收线（refresh 通道对 TEMPLATE_NOT_ALLOWED 的合法认领正是
+seam 9 第一路径）。**终形：码臂与 classifier 臂同构分表**——
+`raw_input_reingestion → {OUT_OF_MEMORY, POLICY_BLOCKED,
+PERMISSION_DENIED, TEMPLATE_NOT_ALLOWED}`、`changed_model_package →
+{OUT_OF_MEMORY}`（#1161 逐字）。码臂 `.upper()` 比较即同时封死 casing
+走私形（classifier 臂保持现比较不动——normalize 会在 refresh 通道引入
+零变化线外的行为差）。测试矩阵补 policy 三码 × classifier-override 走私
+anchor（raw 几何红、refresh+changed-package 仍绿）。
+
 **判据按 classifier ∪ code 双臂拒**（round-2 NEW-1）：classifier 是
 state 可控透传键（`_failure_policy_payload:107-109` 允许覆写 +
 identity-filter 白名单 `:183/:598` 保留）——与表现面 3 的 `retryable`
@@ -155,16 +171,24 @@ STATE_SAVE_QC,PUBLISH,COPYBACK}_FAILED` 无一命中旧码黑名单，码臂在�
   （round-2 NEW-4 更正：`map_slurm_error_code:144-152` 仅四路映射、其余
   兜底 `SLURM_JOB_FAILED` 且确定性混入瞬时故障——不存在"瞬时病必写瞬时
   码"的既有约定；丰富该映射/给 `SLURM_JOB_FAILED` 定分类路由 follow-up
-  issue，task 9）。
+  issue，task 9——已落地为 #1419）。
 - 无记录码（合成 `{STAGE}_FAILED` 占位）：resume 不变（scope 裁决记录：
   该族不受 :166-171 约束；若未来要求收紧须另立 issue——tasks task 9 记
   录路由）。
+- **Round-1 复审已知角落（V1-C2 CONFIRMED-DEFER，路由 follow-up）**：
+  `code_recorded` 以全扫描面定义意味着"当前失败 job 无码 + state 残留历
+  史码（已恢复早期 stage 的 error_code、auto-retry event 的
+  `previous_error`）"的候选会被路由进记录域拒 resume（master 旧黑名单会
+  resume）。该扫描面语义为本 design 自钦定（上段 + D4b #3/#4 清全扫描面
+  指令），故按 fixture 层缺口路由 follow-up issue 裁决"code_recorded 应
+  指失败 job 自身的码还是 state 任意处的码"，本 PR 不改——已落地为
+  #1420。
 
 ### D4b — 九条现绿测试逐条重判（round-1 P1-2；tasks task 5 的完整清单）
 
 | # | 测试（test_production_scheduler.py） | 裁决 |
 |---|---|---|
-| 1 | `:12333` `test_copyback_source_local_path_inside_allowed_roots_can_resume`（记录 PARSE_FAILED） | 钉现状。改断 `permanent_failure_guard`；allowed-roots 语义由**新增瞬时码平行 anchor 承重**（该判定只在 planned_retry 存在时评估 `:354-355`，拒收后根本不执行——平行 anchor 是唯一钉子，两个 root 几何各一条：OBJECT_STORE_ROOT 内 + NHMS_OBJECT_STORE_COPYBACK_ROOT） |
+| 1 | `:12333` `test_copyback_source_local_path_inside_allowed_roots_can_resume`（记录 PARSE_FAILED） | 钉现状。改断 `permanent_failure_guard`；allowed-roots 语义由**新增瞬时码平行 anchor 承重**（两个 root 几何各一条：OBJECT_STORE_ROOT 内 + NHMS_OBJECT_STORE_COPYBACK_ROOT）。**Round-1 复审更正（V3-C1 CONFIRMED）**：初版理由"该判定只在 planned_retry 存在时评估、拒收后根本不执行"事实错误——guard 在 blocked 路径经 `_missing_forcing_block()`（decision.py:352-360，传 `_failure_retry()` 非空 planned_retry）同样完整评估 allowed-roots 判定并产出 blocker；5 条既有 copyback 测试（`:9874`/`:12248`×2/`:12296`/`:12483`，PARSE_FAILED/PUBLISH_FAILED fixture）因此静默迁移到 guard 分支后仍绿，resume 路径的 guard 调用点（decision.py:277-289）失去全部钉子。**补救裁决**：新增一条瞬时码负向 anchor（NODE_FAILURE + copyback source 在 allowed roots 外 → `blocked/missing_copyback_source`），钉 resume 路径 guard；并修正 `:12367-12369` 测试注释中复制的同一错误理由 |
 | 2 | `:12370` copyback_env_root 同族 | 同 #1 |
 | 3 | `:17994` `..._parse_failure_after_shud_success_restarts_at_parse_without_native_rerun`（记录 FAILED_PARSE + 顶层 retryable True，D4+D5 联合命中） | 需求形命名但与 spec :166-171 冲突，spec 胜。改写为合成占位码形保留"restart at parse 不重跑 native"原主题——**清码须覆盖 `_state_error_code` 全扫描面**（顶层 + `pipeline_jobs`（`:18017` job_parse 带码）+ hydro_run/events，round-2 NEW-3），并去顶层 retryable |
 | 4 | `:18058` `test_db_shaped_downstream_failure...[state_save_qc-Q_DOWN_DISPLAY_NOT_READY-unknown_failure]` | 需求形命名但直接违反 unknown-default MUST NOT，spec 胜。该参数化半边改断 guard；补合成占位码半边保留"无 retryable flag 也能 restart"原主题（同样清全扫描面：`:18078-18085` 参数化 job 带码） |
@@ -188,7 +212,13 @@ STATE_SAVE_QC,PUBLISH,COPYBACK}_FAILED` 无一命中旧码黑名单，码臂在�
   道经 shared refusal 咨询）。
 - 瞬时记录码 / 预算内：全通道行为不变。
 - 健康/运行中候选零新计算（判据在通道结构门之后）。
-- 手动重试路径不受影响。
+- 手动重试路径**决策不变**（`decision`/`reason`/`retry_policy` 硬编码不
+  动）；精化（round-1 V1-C3）：manual evidence payload 里的
+  `failure.retryable` 随 D5 收窄同步变化（非瞬时码 + 顶层
+  `retryable: True` 的 state 由 True 变 False）——该字段无消费者读取，
+  属记录在案的证据字段变化，不是路径行为变化。另：D5 新条件在
+  `classify_failure` 的不变量（retryable ⟹ ¬permanent，retry.py:139-143）
+  下是防御性恒真分支——保留它防的是未来分类器演化，非当前可达路径。
 - raw-manifest 修复 remedy 在生产**不退役**（D2 重裁的核心约束）。
 
 ## D7 — seams under test

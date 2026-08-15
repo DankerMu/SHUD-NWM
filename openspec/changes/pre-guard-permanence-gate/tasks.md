@@ -66,7 +66,10 @@
 - [x] 9. AC 对照自审：issue #1313 六条 AC 逐条映射（AC-1 的 recompute
   exempt 与合成占位码域作为记录在案偏离/路由写入 PR body）；archive 侧
   `align-oom-retry-classification` tasks 5.0(b)(c)(e) 引用本 issue 号核
-  对。
+  对。**Follow-up 路由（round-1 复审后落地）**：#1419
+  （map_slurm_error_code 兜底分类，design D4 NEW-4 承诺）· #1420
+  （code_recorded 全扫描面历史码分域裁决，V1-C2）· #1418（AC-1 钉测
+  AST/行为级硬化，V3-C2）。
 
 ## Required evidence (maps every selected pack)
 

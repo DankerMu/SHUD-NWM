@@ -49,7 +49,9 @@ identity-filter 白名单承认的透传键（`scheduler_state_identity_filter.p
 ## Impact
 
 - Affected specs: `job-retry-mechanism`（ADDED Requirement "Pre-Guard
-  Evidence Channels Consult Permanence"）。
+  Evidence Channels Consult Permanence"）；`multibasin-state-idempotency`
+  （MODIFIED Requirement "Resumable downstream failures"——记录码域收窄到
+  permanence 判据之下，round-1 复审 V2-C2 补齐，先例 #1323）。
 - Affected code: `services/orchestrator/scheduler_state_failure.py`（共享
   判据 + 四通道接线）· `services/orchestrator/scheduler_state_decision.py`
   （无结构变更预期；若梯序注释需更新则随行）。

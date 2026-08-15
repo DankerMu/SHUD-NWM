@@ -4,20 +4,41 @@
 
 ### Requirement: Pre-Guard Evidence Channels Consult Permanence
 
-Every db-free decision-ladder evidence channel that can emit an automatic-retry decision before the permanent-failure guard SHALL consult a single shared permanence judgement before overwriting a permanent failure classification, scoped to failures whose state carries a genuinely recorded error code, and SHALL refuse the overwrite when the failure's classification proves the channel's remedy cannot address the cause.
+Every db-free decision-ladder evidence channel that can emit an automatic-retry decision before the permanent-failure guard SHALL consult a single shared permanence judgement before overwriting a permanent failure classification, and SHALL refuse the overwrite when the failure's classification proves the channel's remedy cannot address the cause.
 
 The permanent-failure guard remains consulted at emitting return points
-(never as an unconditional pre-pass). Reader-synthesized placeholder codes
-(defaults fabricated when the state records no error code) are not evidence
-under the unknown-code clause and keep their existing behavior, including
-the existing classifier-based refusals. This requirement carves out an
-explicit exception to "Retry Guard — Non-Transient Error Exclusion" for the
-output-absence recompute geometry, ruled in #1161 and preserved here: when
-durable forecast output is absent, the recompute channel may schedule an
-automatic restart from the forecast stage for its approved code set
-(including `OUT_OF_MEMORY`) — this is a deliberate, recorded exception to
-that clause's blanket prohibition, not a reinterpretation of it. Manual-retry
-paths are out of scope.
+(never as an unconditional pre-pass). The recorded-code scoping governs the
+downstream-resume channel's unknown-code clause only: reader-synthesized
+placeholder codes (defaults fabricated when the state records no error code)
+are not evidence under that clause and keep their existing behavior,
+including the existing classifier-based refusals; the raw-manifest and
+model-package channels consult the judgement for every permanent
+classification, recorded code or not.
+
+This requirement carves out deliberate, recorded exceptions to "Retry
+Guard — Non-Transient Error Exclusion" (and, where noted, to the
+unknown-code default and max-retries clauses) for three geometries whose
+structural evidence proves the remedy causal — these are recorded
+exceptions to those clauses' blanket prohibitions, not reinterpretations:
+
+- **Output-absence recompute** (ruled in #1161): when durable forecast
+  output is absent, the recompute channel may schedule an automatic restart
+  from the forecast stage for its approved code set (including
+  `OUT_OF_MEMORY`).
+- **Raw-manifest repair and post-repair downstream retry**: when the
+  geometry itself evidences an input defect (a manifest probed missing
+  after a previously successful download, or a repair download newer than
+  the failure), the channels may re-emit their repair/retry decisions for
+  input-defect codes (e.g. `INVALID_MANIFEST`) and unknown-default codes
+  (e.g. `SLURM_JOB_FAILED`), including with an exhausted retry budget.
+- **Model-package refresh** (ruled in #1161): when the model package
+  genuinely changed, the refresh channel may claim codes outside its own
+  refusal set (e.g. `TEMPLATE_NOT_ALLOWED`), because the changed package is
+  itself the causal remedy for policy/template rejections.
+
+Manual-retry paths are out of scope: their emitted decision, reason, and
+retry policy are unchanged (the `failure.retryable` evidence field narrows
+with the shared classification).
 
 #### Scenario: Raw-manifest repair channels refuse remedy-non-causal permanent codes
 
@@ -51,7 +72,9 @@ paths are out of scope.
   exhausted
 - **THEN** the downstream-resume channel SHALL NOT emit a resume decision;
   a recorded transient code within budget SHALL keep the existing resume
-  behavior
+  behavior unless the state explicitly marks the failure permanent
+  (top-level `permanent: true`, which forces permanence — see the top-level
+  key scenario below)
 
 #### Scenario: Synthesized placeholder codes keep existing downstream behavior
 

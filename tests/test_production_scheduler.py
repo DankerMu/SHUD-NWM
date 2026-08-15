@@ -12364,9 +12364,12 @@ def test_copyback_source_local_path_inside_allowed_roots_recorded_permanent_code
     # #1313: a RECORDED PARSE_FAILED is an unknown-default non-transient code, so
     # the downstream-resume channel must refuse it and the ladder must land on the
     # permanent-failure guard -- the allowed-roots copyback geometry does not
-    # relicense an automatic retry.  The allowed-roots semantics themselves are
-    # pinned by the transient-code parallel anchor below (the copyback root check
-    # only runs while a planned retry exists, i.e. never on this path).
+    # relicense an automatic retry.  Note this path DOES still evaluate the
+    # artifact guard, but at the guard branch's own re-derivation
+    # (``_missing_forcing_block()``), not at the resume-path invocation: since the
+    # five permanent-code copyback tests migrated to that branch, the resume-path
+    # guard call is pinned only by the transient-code anchors below (#1313 D4b #1,
+    # round-1 V3-C1).
     object_store_root = tmp_path / "object-store"
     copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
     copyback_source.parent.mkdir(parents=True)
@@ -12478,6 +12481,45 @@ def test_copyback_source_local_path_inside_copyback_env_root_can_resume(
     assert decision is not None
     assert decision.action == "retry"
     assert decision.reason == "resume_downstream_after_durable_shud"
+
+
+def test_copyback_source_outside_allowed_roots_blocks_transient_code_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1313 D4b #1 (round-1 V3-C1): the NEGATIVE half of the transient-code
+    # anchors, and the only test pinning the RESUME-path artifact-guard call
+    # (``scheduler_state_decision.py`` :277-289).  The five pre-existing copyback
+    # tests all record permanent codes and therefore now exercise the guard at the
+    # permanent-branch re-derivation instead; with a transient code the planned
+    # retry is the downstream resume, so a copyback source outside every allowed
+    # root must turn that resume into a blocker rather than resuming.
+    object_store_root = tmp_path / "object-store"
+    workspace_root = tmp_path / "workspace"
+    object_store_root.mkdir()
+    copyback_source = workspace_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = _copyback_downstream_failure_state(
+        candidate,
+        identity,
+        copyback_source=copyback_source,
+        error_code="NODE_FAILURE",
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "missing_copyback_source"
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_MISSING"
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
+    assert decision.evidence["artifact_guard"]["planned_retry_decision"] == "retry_downstream"
+    assert decision.evidence["artifact_guard"]["planned_retry_reason"] == "resume_downstream_after_durable_shud"
 
 
 def test_copyback_source_workspace_local_path_blocks_even_when_file_exists(
@@ -20118,6 +20160,20 @@ def test_remedy_judgement_permits_codes_it_cannot_disprove(
         ("raw_input_reingestion", "unknown_failure", "OUT_OF_MEMORY", False),
         ("changed_model_package", "unknown_failure", "OUT_OF_MEMORY", False),
         ("raw_input_reingestion", "unknown_failure", "out_of_memory", False),
+        # #1313 round-1 V1-C1: the code arm is PER REMEDY, mirroring the
+        # classifier table.  The raw-input row refuses the policy codes even when
+        # the classifier is overridden away from ``policy_blocked`` (and in any
+        # casing, since the code arm compares uppercased)...
+        ("raw_input_reingestion", "unknown_failure", "POLICY_BLOCKED", False),
+        ("raw_input_reingestion", "unknown_failure", "PERMISSION_DENIED", False),
+        ("raw_input_reingestion", "unknown_failure", "TEMPLATE_NOT_ALLOWED", False),
+        ("raw_input_reingestion", "Policy_Blocked", "template_not_allowed", False),
+        # ...while ``changed_model_package`` keeps the #1161 code list verbatim:
+        # it must NOT gain the policy codes on either arm (scenario 6 zero
+        # semantic change), so the same smuggle shape stays PERMITTED there.
+        ("changed_model_package", "unknown_failure", "POLICY_BLOCKED", True),
+        ("changed_model_package", "unknown_failure", "PERMISSION_DENIED", True),
+        ("changed_model_package", "unknown_failure", "TEMPLATE_NOT_ALLOWED", True),
     ],
 )
 def test_remedy_judgement_refusal_matrix(
@@ -20157,6 +20213,61 @@ def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifes
     assert decision.evidence["failure"]["reason_code"] == "OUT_OF_MEMORY"
 
 
+@pytest.mark.parametrize("error_code", ["POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"])
+def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+) -> None:
+    # Seam 12, end to end for the PER-REMEDY code arm (#1313 round-1 V1-C1).  The
+    # smuggle shape is identical to the OOM one above: overriding ``classifier``
+    # to ``unknown_failure`` bypasses the classifier arm, so before the code arm
+    # was split per remedy these three codes regained
+    # ``automatic_retry_allowed: True`` through the raw-manifest channels.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code=error_code,
+        extra={"classifier": "unknown_failure"},
+    )
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["failure"]["reason_code"] == error_code
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+@pytest.mark.parametrize("repaired", [False, True])
+def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_manifest_channels(
+    monkeypatch: pytest.MonkeyPatch,
+    repaired: bool,
+) -> None:
+    # The classifier arm deliberately does NOT normalize casing (normalizing it
+    # would change refresh-channel behaviour outside the zero-change line), so a
+    # ``Policy_Blocked`` override also walks past it.  The code arm's ``.upper()``
+    # comparison is what closes this shape, on both raw-manifest channels.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="TEMPLATE_NOT_ALLOWED",
+        repaired=repaired,
+        extra={"classifier": "Policy_Blocked"},
+    )
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == "Policy_Blocked"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
 def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -> None:
     # Design D6 / task 1 acceptance line: the shared judgement is the ONLY place
     # a permanent-code refusal list lives.  The deleted downstream blacklist used
@@ -20168,7 +20279,22 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     ):
         assert retired_literal not in source
     assert source.count("_REMEDY_NON_CAUSAL_CODES = ") == 1
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODES == frozenset({"OUT_OF_MEMORY"})
+    # Both arms are per-remedy tables over the SAME two rows (#1313 round-1
+    # V1-C1); the ``changed_model_package`` row is the #1161 list verbatim on both
+    # arms, which is what keeps the refresh channel at zero semantic change.
+    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODE_TABLE == {
+        "raw_input_reingestion": frozenset(
+            {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+        ),
+        "changed_model_package": frozenset({"OUT_OF_MEMORY"}),
+    }
+    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIER_TABLE == {
+        "raw_input_reingestion": frozenset({"resource_configuration", "policy_blocked"}),
+        "changed_model_package": frozenset({"resource_configuration"}),
+    }
+    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODES == frozenset(
+        {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+    )
     assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
         {"resource_configuration", "policy_blocked"}
     )

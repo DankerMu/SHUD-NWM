@@ -117,19 +117,42 @@ _REMEDY_NON_CAUSAL_CLASSIFIERS = frozenset(
 #: state-overridable transit key: ``_failure_policy_payload`` honours an explicit
 #: ``classifier`` / ``failure_classifier`` on the state, and the identity filter
 #: whitelists it, so a state carrying ``classifier: "unknown_failure"`` together
-#: with ``error_code: OUT_OF_MEMORY`` would walk straight past a classifier-only
-#: judge.  ``_model_package_refresh_retry_evidence`` has carried both arms since
-#: #1161 for exactly this reason; neither arm may be dropped.
-_REMEDY_NON_CAUSAL_CODES = frozenset({"OUT_OF_MEMORY"})
-#: ``changed_model_package`` keeps the #1161 refusal list verbatim (zero semantic
-#: change is the acceptance line, #1313 D2): a refreshed package genuinely can
-#: clear a policy/template rejection -- the template ships inside the package --
-#: so that remedy is not proven non-causal for the ``policy_blocked`` class the
-#: way an input re-ingestion is.
+#: with a remedy-non-causal ``error_code`` would walk straight past a
+#: classifier-only judge.  ``_model_package_refresh_retry_evidence`` has carried
+#: both arms since #1161 for exactly this reason; neither arm may be dropped.
+#:
+#: The code arm is therefore shaped as the SAME per-remedy table as the
+#: classifier arm (#1313 round-1 V1-C1): the smuggle argument is identical for
+#: the policy codes and for OOM, so an arm that only listed OOM left
+#: ``classifier: "unknown_failure"`` (and the casing variant ``Policy_Blocked``,
+#: which the classifier arm does not normalize) as a live bypass for
+#: POLICY_BLOCKED / PERMISSION_DENIED / TEMPLATE_NOT_ALLOWED.  The comparison is
+#: ``.upper()``, which closes the casing shape on the code side too.
+_REMEDY_NON_CAUSAL_CODES = frozenset(
+    {
+        "OUT_OF_MEMORY",
+        "POLICY_BLOCKED",
+        "PERMISSION_DENIED",
+        "TEMPLATE_NOT_ALLOWED",
+    }
+)
+#: ``changed_model_package`` keeps the #1161 refusal lists verbatim on BOTH arms
+#: (zero semantic change is the acceptance line, #1313 D2): a refreshed package
+#: genuinely can clear a policy/template rejection -- the template ships inside
+#: the package -- so that remedy is not proven non-causal for the
+#: ``policy_blocked`` class the way an input re-ingestion is.  Widening either of
+#: these two sets would break that acceptance line.
 _CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS = frozenset({"resource_configuration"})
+_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES = frozenset({"OUT_OF_MEMORY"})
+#: Unlisted remedies fall back to the strictest (raw-input) row: a judge asked
+#: about a remedy nobody declared refuses rather than relicenses.
 _REMEDY_NON_CAUSAL_CLASSIFIER_TABLE: dict[str, frozenset[str]] = {
     "raw_input_reingestion": _REMEDY_NON_CAUSAL_CLASSIFIERS,
     "changed_model_package": _CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS,
+}
+_REMEDY_NON_CAUSAL_CODE_TABLE: dict[str, frozenset[str]] = {
+    "raw_input_reingestion": _REMEDY_NON_CAUSAL_CODES,
+    "changed_model_package": _CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES,
 }
 
 
@@ -147,7 +170,8 @@ def _remedy_permits_permanent_failure(failure: Mapping[str, Any], *, remedy: str
     classifiers = _REMEDY_NON_CAUSAL_CLASSIFIER_TABLE.get(remedy, _REMEDY_NON_CAUSAL_CLASSIFIERS)
     if str(failure.get("classifier") or "") in classifiers:
         return False
-    if str(failure.get("reason_code") or "").upper() in _REMEDY_NON_CAUSAL_CODES:
+    codes = _REMEDY_NON_CAUSAL_CODE_TABLE.get(remedy, _REMEDY_NON_CAUSAL_CODES)
+    if str(failure.get("reason_code") or "").upper() in codes:
         return False
     return True
 
@@ -1467,8 +1491,10 @@ def _model_package_refresh_retry_evidence(
     # A model-package refresh compares only the package shas and restarts the same
     # failed stage — it is not a memory-sizing remedy, so an out-of-memory failure
     # must not borrow this override to regain automatic retry (#1161).  Both arms
-    # (classifier and code) now live in the shared judgement source; the refusal
-    # set for this remedy is unchanged (#1313 D2).
+    # (classifier and code) now live in the shared judgement source; this remedy's
+    # row on BOTH arms is the #1161 list verbatim, i.e. zero semantic change
+    # (#1313 D2) — in particular it does NOT pick up the policy codes the
+    # raw-input row refuses.
     if not _remedy_permits_permanent_failure(failure, remedy="changed_model_package"):
         return None
     prior = state.get("run_manifest_model_package")
