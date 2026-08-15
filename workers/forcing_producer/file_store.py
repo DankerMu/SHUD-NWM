@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -28,6 +29,11 @@ from packages.common.forcing_domain_handoff import (
 )
 from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.shud_forcing_contract import (
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+    SHUD_FORCING_INDEX_MEMBERS,
+    SHUD_FORCING_ROLE,
+)
 from packages.common.source_identity import normalize_source_id
 from workers.canonical_converter.converter import unit_for_standard_variable
 from workers.forcing_producer.direct_grid_contract import (
@@ -819,6 +825,9 @@ class FileForcingRepository:
         manifest_stations = _manifest_station_order(package_manifest)
         ordered_ids = [station_id for station_id in manifest_stations if station_id in station_ids]
         ordered_ids.extend(sorted(station_ids - set(ordered_ids)))
+        # Provenance label for every station of this package: the station-index
+        # member this package actually declares (resolved once, not per station).
+        source_member = _station_index_member_basename(package_manifest)
 
         station_rows: list[dict[str, Any]] = []
         for station_id in ordered_ids:
@@ -840,7 +849,8 @@ class FileForcingRepository:
             forcing_filename = manifest_station.get("forcing_filename")
             if forcing_filename:
                 properties.setdefault("forcing_filename", forcing_filename)
-            properties.setdefault("source", "qhh.tsd.forc")
+            if source_member is not None:
+                properties.setdefault("source", source_member)
             properties.setdefault("basin_id", basin_id)
             properties.setdefault("basin_version_id", basin_version_id)
             properties.setdefault("model_id", model_id)
@@ -1188,6 +1198,45 @@ def _manifest_station_order(package_manifest: Mapping[str, Any]) -> dict[str, Ma
         elif isinstance(item, str) and item.strip():
             stations[item.strip()] = {"station_id": item.strip(), "shud_forcing_index": index}
     return stations
+
+
+def _station_index_member_basename(package_manifest: Mapping[str, Any]) -> str | None:
+    """Return the basename of the station-index member this package declares.
+
+    Station handoff provenance (`properties_json.source`) records the member the
+    package *actually* carries instead of a hard-coded basin slug (issue #1359):
+    a canonical package yields ``stations.tsd.forc``, a historical replay package
+    yields ``qhh.tsd.forc`` — truthfully, because that member exists there.
+
+    Selection mirrors the producer's manifest shape (`producer.py` shud file
+    entries): an entry qualifies only when its ``role`` is the SHUD forcing-index
+    role **and** its ``relative_path`` is an accepted member. Role alone is not
+    narrow enough; membership alone would not survive a role drift. Non-Mapping
+    elements are skipped exactly like `_manifest_station_order` does — a
+    provenance label must never escalate into an exception that aborts a
+    production write. Returns ``None`` when nothing resolves, so the caller can
+    omit the key rather than fabricate a value.
+    """
+
+    raw_files = package_manifest.get("files")
+    if not isinstance(raw_files, list):
+        return None
+    members: list[str] = []
+    for entry in raw_files:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("role") != SHUD_FORCING_ROLE:
+            continue
+        relative_path = entry.get("relative_path")
+        if relative_path in SHUD_FORCING_INDEX_MEMBERS:
+            members.append(str(relative_path))
+    if not members:
+        return None
+    # A package declaring both members is pathological but readable: prefer the
+    # canonical one (same "named-one-else-canonical" preference the
+    # non-direct-grid member resolution already uses).
+    member = CANONICAL_SHUD_FORCING_INDEX_MEMBER if CANONICAL_SHUD_FORCING_INDEX_MEMBER in members else members[0]
+    return posixpath.basename(member)
 
 
 def _float_value(value: Any) -> float | None:

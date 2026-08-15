@@ -21,6 +21,7 @@ from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_BASENAME,
     CANONICAL_SHUD_FORCING_INDEX_MEMBER,
     LEGACY_SHUD_FORCING_INDEX_BASENAME,
+    LEGACY_SHUD_FORCING_INDEX_MEMBER,
     SHUD_FORCING_ROLE,
 )
 from workers.forcing_producer import (
@@ -822,6 +823,25 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
                 "elevation_m": 3000.0,
             }
         ],
+        # Producer-shaped `files` list (`producer.py` shud_file_entries): the
+        # station-index member carries the SHUD forcing role, the per-station
+        # CSV members carry the csv role. Station provenance (#1359) is derived
+        # from this list, so the handoff test needs it to exercise the real
+        # resolution path.
+        "files": [
+            {
+                "role": SHUD_FORCING_ROLE,
+                "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+                "uri": store.uri_for_key(f"{package_key}/{CANONICAL_SHUD_FORCING_INDEX_MEMBER}"),
+                "checksum": sha256_bytes(b"stations-index-stub"),
+            },
+            {
+                "role": "shud_forcing_csv",
+                "relative_path": "shud/X100.00Y38.00.csv",
+                "uri": store.uri_for_key(f"{package_key}/shud/X100.00Y38.00.csv"),
+                "checksum": sha256_bytes(b"station-csv-stub"),
+            },
+        ],
         "lineage": {"grid_id": "grid_a"},
     }
     package_content = json.dumps(package_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -903,6 +923,9 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
         "met.interp_weight": 1,
     }
     assert parsed["parsed"]["met.met_station"][0]["station_id"] == "qhh_forc_001"
+    # #1359: station provenance names the station-index member that actually
+    # exists in this package (canonical), not a hard-coded basin slug.
+    assert parsed["parsed"]["met.met_station"][0]["properties_json"]["source"] == "stations.tsd.forc"
     parsed_timeseries = parsed["parsed"]["met.forcing_station_timeseries"]
     assert [row["native_resolution"] for row in parsed_timeseries] == ["3h", "3h", "3h", "6h"]
     handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
@@ -920,6 +943,234 @@ def test_file_forcing_repository_finalize_writes_forcing_domain_handoff(tmp_path
             "native_resolution": "6h",
         },
     ]
+
+
+# --- #1359: station handoff provenance names the resolved index member -----
+
+
+def _bare_file_repository() -> FileForcingRepository:
+    """A bare `FileForcingRepository` shell for direct `_handoff_station_rows` calls.
+
+    Same pattern as the file-plane handoff test in
+    `tests/test_direct_grid_variant_registration.py`: bypass the dataclass
+    `__init__` (which demands an object store) because the method under test
+    only reads `self._stations_by_basin_version`.
+    """
+
+    repo = object.__new__(FileForcingRepository)
+    object.__setattr__(repo, "object_store", None)
+    object.__setattr__(repo, "registry_manifest", None)
+    object.__setattr__(repo, "_registry_cache", None)
+    object.__setattr__(repo, "_model_manifest_cache", {})
+    object.__setattr__(repo, "_stations_by_basin_version", {})
+    object.__setattr__(repo, "_weights_by_scope", {})
+    object.__setattr__(repo, "_forcing_versions", {})
+    object.__setattr__(repo, "_forcing_components", {})
+    object.__setattr__(repo, "_forcing_timeseries_summary", {})
+    object.__setattr__(repo, "_forcing_timeseries_rows", {})
+    return repo
+
+
+_PROVENANCE_BASIN_ID = "basin_b"
+_PROVENANCE_BASIN_VERSION_ID = "basin_b_v1"
+_PROVENANCE_STATION_ID = "basin_b_forc_007"
+_PROVENANCE_FORCING_FILENAME = "X101.50Y30.25.csv"
+#: Marker meaning "omit the `files` key entirely" (distinct from `files: None`).
+_MISSING_FILES_SENTINEL = object()
+
+
+def _provenance_manifest(files: Any = _MISSING_FILES_SENTINEL) -> dict[str, Any]:
+    """Package manifest carrying one station plus an optional producer-shaped `files` list."""
+
+    manifest: dict[str, Any] = {
+        "station_order": [
+            {
+                "station_id": _PROVENANCE_STATION_ID,
+                "shud_forcing_index": 1,
+                "forcing_filename": _PROVENANCE_FORCING_FILENAME,
+                "longitude": 101.5,
+                "latitude": 30.25,
+                "elevation_m": 1200.0,
+            }
+        ]
+    }
+    if files is not _MISSING_FILES_SENTINEL:
+        manifest["files"] = files
+    return manifest
+
+
+def _index_member_entry(relative_path: str) -> dict[str, str]:
+    """Producer-shaped manifest entry for a station-index member."""
+
+    return {
+        "role": SHUD_FORCING_ROLE,
+        "relative_path": relative_path,
+        "uri": f"s3://nhms/forcing/{_PROVENANCE_BASIN_ID}/{relative_path}",
+        "checksum": sha256_bytes(relative_path.encode("utf-8")),
+    }
+
+
+def _station_csv_entry() -> dict[str, str]:
+    """Producer-shaped manifest entry for a per-station forcing CSV member."""
+
+    relative_path = f"shud/{_PROVENANCE_FORCING_FILENAME}"
+    return {
+        "role": "shud_forcing_csv",
+        "relative_path": relative_path,
+        "uri": f"s3://nhms/forcing/{_PROVENANCE_BASIN_ID}/{relative_path}",
+        "checksum": sha256_bytes(relative_path.encode("utf-8")),
+    }
+
+
+def _handoff_station_properties(
+    package_manifest: Mapping[str, Any],
+    *,
+    stations: tuple[MetStation, ...] = (),
+) -> dict[str, Any]:
+    """Run the file-plane station handoff and return the single emitted row's properties."""
+
+    repo = _bare_file_repository()
+    if stations:
+        repo._stations_by_basin_version[_PROVENANCE_BASIN_VERSION_ID] = stations
+    row = ForcingTimeseriesRow(
+        forcing_version_id="fv-1359",
+        basin_version_id=_PROVENANCE_BASIN_VERSION_ID,
+        station_id=_PROVENANCE_STATION_ID,
+        valid_time=datetime(2026, 6, 20, 12, tzinfo=UTC),
+        source_id="gfs",
+        variable="PRCP",
+        value=0.0,
+        unit="kg m-2 s-1",
+        native_resolution="1h",
+    )
+    emitted = repo._handoff_station_rows(
+        record={
+            "forcing_version_id": "fv-1359",
+            "source_id": "gfs",
+            "cycle_time": row.valid_time,
+            "model_id": "basin_b_shud",
+        },
+        package_manifest=package_manifest,
+        rows=[row],
+        basin_id=_PROVENANCE_BASIN_ID,
+        basin_version_id=_PROVENANCE_BASIN_VERSION_ID,
+        model_id="basin_b_shud",
+    )
+    assert len(emitted) == 1
+    return emitted[0]["properties_json"]
+
+
+def test_station_provenance_uses_canonical_index_member_basename() -> None:
+    """Canonical package -> `source` is the canonical member basename, for any basin."""
+
+    properties = _handoff_station_properties(
+        _provenance_manifest([_index_member_entry(CANONICAL_SHUD_FORCING_INDEX_MEMBER), _station_csv_entry()])
+    )
+
+    assert properties["source"] == "stations.tsd.forc"
+    # Adjacent provenance keys keep their manifest-derived values (unchanged
+    # semantics next to the edited setdefault).
+    assert properties["shud_forcing_index"] == 1
+    assert properties["forcing_filename"] == _PROVENANCE_FORCING_FILENAME
+
+
+def test_station_provenance_uses_legacy_index_member_basename_for_replay_package() -> None:
+    """Legacy replay package -> `source` is the legacy basename, which now truly exists."""
+
+    properties = _handoff_station_properties(
+        _provenance_manifest([_index_member_entry(LEGACY_SHUD_FORCING_INDEX_MEMBER), _station_csv_entry()])
+    )
+
+    assert properties["source"] == "qhh.tsd.forc"
+
+
+@pytest.mark.parametrize(
+    ("case", "files"),
+    [
+        ("no_index_member", [_station_csv_entry()]),
+        ("empty_files", []),
+        ("files_missing", _MISSING_FILES_SENTINEL),
+        ("files_mapping", {"role": SHUD_FORCING_ROLE, "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER}),
+        ("files_string", CANONICAL_SHUD_FORCING_INDEX_MEMBER),
+        ("files_none", None),
+        (
+            "role_without_membership",
+            [{"role": SHUD_FORCING_ROLE, "relative_path": "shud/other.tsd.forc"}],
+        ),
+        (
+            "membership_without_role",
+            [{"role": "shud_forcing_csv", "relative_path": CANONICAL_SHUD_FORCING_INDEX_MEMBER}],
+        ),
+        (
+            "entry_without_relative_path",
+            [{"role": SHUD_FORCING_ROLE, "uri": "s3://nhms/forcing/basin_b/shud/stations.tsd.forc"}],
+        ),
+    ],
+)
+def test_station_provenance_absent_when_index_member_unresolvable(case: str, files: Any) -> None:
+    """Unresolvable member -> no `source` key at all (absence beats fabrication)."""
+
+    properties = _handoff_station_properties(_provenance_manifest(files))
+
+    assert "source" not in properties, case
+    # The rest of the handoff row is unaffected.
+    assert properties["forcing_filename"] == _PROVENANCE_FORCING_FILENAME
+
+
+def test_station_provenance_skips_non_mapping_file_entries_without_raising() -> None:
+    """Junk `files` elements are skipped, not dereferenced: handoff completes, `source` absent."""
+
+    properties = _handoff_station_properties(
+        _provenance_manifest([CANONICAL_SHUD_FORCING_INDEX_MEMBER, None, 42, ["shud", "stations.tsd.forc"]])
+    )
+
+    assert "source" not in properties
+
+
+def test_station_provenance_preserves_pre_existing_source() -> None:
+    """A station that already carries `source` (bootstrap real assets) is never overwritten."""
+
+    station = MetStation(
+        _PROVENANCE_STATION_ID,
+        _PROVENANCE_BASIN_VERSION_ID,
+        101.5,
+        30.25,
+        1200.0,
+        "forcing_proxy",
+        station_name="Basin B real-asset station",
+        properties_json={"source": "basin_b_observed.csv"},
+    )
+
+    properties = _handoff_station_properties(
+        _provenance_manifest([_index_member_entry(CANONICAL_SHUD_FORCING_INDEX_MEMBER)]),
+        stations=(station,),
+    )
+
+    assert properties["source"] == "basin_b_observed.csv"
+
+
+def test_station_provenance_prefers_canonical_member_when_both_declared() -> None:
+    """Pathological package declaring both members -> canonical wins, order-independent."""
+
+    legacy_first = _handoff_station_properties(
+        _provenance_manifest(
+            [
+                _index_member_entry(LEGACY_SHUD_FORCING_INDEX_MEMBER),
+                _index_member_entry(CANONICAL_SHUD_FORCING_INDEX_MEMBER),
+            ]
+        )
+    )
+    canonical_first = _handoff_station_properties(
+        _provenance_manifest(
+            [
+                _index_member_entry(CANONICAL_SHUD_FORCING_INDEX_MEMBER),
+                _index_member_entry(LEGACY_SHUD_FORCING_INDEX_MEMBER),
+            ]
+        )
+    )
+
+    assert legacy_first["source"] == "stations.tsd.forc"
+    assert canonical_first["source"] == "stations.tsd.forc"
 
 
 def test_idw_weights_are_normalized_for_station() -> None:
