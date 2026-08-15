@@ -138,6 +138,18 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
   frontier 块只有 bound/source/count）、不变量实例化按 12h 网格
   `2×12=24 → 198 ≤ 336`。
 
+## Round-2 fix tasks (Phase 6.5)
+
+- [x] 11. RC2-T1：`tests/test_retention.py` 窗口地板测试补 `(0,12)` 网格用例
+  （参数化列表加网格轴，`allowed_cycle_hours_utc=(0,12)` + lookback=170，期望
+  `bound == datetime(2026,5,26,0,tzinfo=UTC)`）——杀掉重算侧丢
+  `allowed_cycle_hours_utc` kwarg 回退 `{0,6,12,18}` 的突变体（突变体下实测
+  红：05-26T12:00Z ≠ 00:00Z，删除方向 +12h 漂移；原 42+10 套件放行该突变体）。
+- [x] 12. RC2-D1 兄弟项：`scheduler_runtime.py:1871` 注释里的
+  "a 6-48h unprotected band" 改为按 shipped `0,12` 网格"up to 2 grid
+  intervals (24h on the shipped 0,12 grid)"——与 fixture RC2-D1 更正
+  同口径（fixture 本体由 orchestrator 已改）。
+
 ## Required evidence (maps every selected pack)
 
 - 追赶期 C 老于 cutoff + bound ≤ C → 豁免 + `pipeline_frontier_exempt` +

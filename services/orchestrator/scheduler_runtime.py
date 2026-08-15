@@ -1868,7 +1868,8 @@ def _retention_discovery_window_floor(self, started_at: datetime) -> datetime | 
     371-375``) rather than the evidence block's ``cycle_window.start_time_utc``
     (``scheduler_evidence.py:213-214``), which is *not* floored and therefore
     sits up to two source-cycle intervals later than the real window bottom —
-    using it would leave a 6-48h unprotected band at the bottom of the window.
+    using it would leave an unprotected band of up to 2 grid intervals (24h on
+    the shipped 0,12 grid) at the bottom of the window.
 
     Returns None when the config declares no sources: there is then no source
     cycle grid to floor against, so no window bound is derivable.

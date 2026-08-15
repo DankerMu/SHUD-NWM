@@ -473,6 +473,7 @@ def _frontier_scheduler(
     cycle_lag_hours: int = 6,
     sources: tuple[str, ...] = ("gfs",),
     adapters: dict | None = None,
+    allowed_cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18),
 ):
     """Scheduler whose discovery knobs are pinned (not inherited from env)."""
     from services.orchestrator.scheduler import (
@@ -484,7 +485,7 @@ def _frontier_scheduler(
     config = ProductionSchedulerConfig(
         workspace_root=str(tmp_path / "ws"),
         sources=sources,
-        allowed_cycle_hours_utc=(0, 6, 12, 18),
+        allowed_cycle_hours_utc=allowed_cycle_hours_utc,
         lookback_hours=lookback_hours,
         cycle_lag_hours=cycle_lag_hours,
     )
@@ -922,20 +923,30 @@ def test_no_derivable_bound_degrades_to_the_current_wall_clock_plan(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("lookback_hours", "expected_bound"),
+    ("lookback_hours", "allowed_cycle_hours_utc", "expected_bound"),
     [
         # A multiple of the 6h grid: floor(18:00Z - 168h) is already on the grid,
         # so the OUTER floor is an identity here and cannot be observed.
-        (168, datetime(2026, 5, 26, 18, tzinfo=UTC)),
+        (168, (0, 6, 12, 18), datetime(2026, 5, 26, 18, tzinfo=UTC)),
         # NOT a multiple of the grid (nothing enforces one -- LOOKBACK_HOURS is a
         # free int): 18:00Z - 170h = 05-26T16:00Z, which only the OUTER floor
         # pulls down to 12:00Z. Dropping that floor would leave a 4h band at the
         # bottom of the discovery window unprotected (deletion-side drift).
-        (170, datetime(2026, 5, 26, 12, tzinfo=UTC)),
+        (170, (0, 6, 12, 18), datetime(2026, 5, 26, 12, tzinfo=UTC)),
+        # A NON-default grid (the shipped 0,12 one): floor(03:17 - 6h) = 12:00Z,
+        # 12:00Z - 170h = 05-26T10:00Z, floored onto {0,12} -> 05-26T00:00Z.
+        # Recomputing without the config's allowed_cycle_hours_utc would fall
+        # back to the gfs default {0,6,12,18} and yield 05-26T12:00Z -- a bound
+        # 12h too high, i.e. a band discovery still reaches into but retention
+        # would already consider collectable.
+        (170, (0, 12), datetime(2026, 5, 26, 0, tzinfo=UTC)),
     ],
 )
 def test_window_floor_matches_discovery_double_floor_formula(
-    tmp_path: Path, lookback_hours: int, expected_bound: datetime
+    tmp_path: Path,
+    lookback_hours: int,
+    allowed_cycle_hours_utc: tuple[int, ...],
+    expected_bound: datetime,
 ) -> None:
     """[helper] The floor is discovery's, not the receipt's un-floored value.
 
@@ -948,6 +959,7 @@ def test_window_floor_matches_discovery_double_floor_formula(
         lookback_hours=lookback_hours,
         cycle_lag_hours=6,
         adapters={"gfs": object()},
+        allowed_cycle_hours_utc=allowed_cycle_hours_utc,
     )
     captured: dict[str, datetime] = {}
 

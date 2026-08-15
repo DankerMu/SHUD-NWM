@@ -48,10 +48,14 @@ I/O 求得（fixture-review round-2 P1-1：地板必须按 discovery 同款公�
    `_floor_to_source_cycle_boundary(_floor_to_source_cycle_boundary(
    started_at - lag, sources) - lookback, sources)`
    （`scheduler_discovery.py:371-375` 逐字同构；floor 实现
-   `scheduler.py:443-460`，gfs/IFS 小时集 {0,6,12,18}，ERA5-only 按天；
-   sources wiring 参照 `scheduler_core.py:506`）。**不得**取 evidence 块的
-   `cycle_window.start_time_utc`（无取整，比真实下界晚最多 2 个 source
-   interval，会在窗口底部留一条 6-48h 未保护带——round-2 P1-1）。
+   `scheduler.py:443-460`，**网格来自配置 `allowed_cycle_hours_utc`**——
+   默认与示例配置均为 `0,12` 即 12h（`scheduler.py:293`、
+   `compute.example:67`），`{0,6,12,18}` 仅是 kwarg 为 None 时的 gfs/IFS
+   回退，生产 config 归一化后不可达（PR round-2 RC2-D1 更正）；ERA5-only
+   按天；sources 与网格 wiring 参照 `scheduler_core.py:510-512`，重算侧必
+   须同样透传网格 kwarg（RC2-T1 钉住）。**不得**取 evidence 块的
+   `cycle_window.start_time_utc`（无取整，比真实下界晚最多 2 个网格间隔，
+   12h 网格下即最多 24h 未保护带——round-2 P1-1，带宽按 RC2-D1 更正）。
 
 三源全不可得（无窗口且无候选态）→ `None`，纯墙钟——与现状一致。
 
@@ -68,7 +72,7 @@ availability/选中与否。候选态下界仍保留：防御候选经非 discov
 cycle_lag_hours + 2×max(source cycle interval) ≤ retention_days×24`；interval
 由 `allowed_cycle_hours_utc` 网格决定——示例配置与 `scheduler.py:293` 默认均
 为 `0,12` 即 12h（非早期行文假设的 6h）。示例配置
-（`infra/env/compute.example:133,137,212`：lag=6、lookback=168、14d）满足
+（`infra/env/compute.example:133,137,223`：lag=6、lookback=168、14d）满足
 （168+6+2×12=198 ≤ 336），此时窗口地板与全部候选源恒晚于 cutoff、`min` 恒取
 cutoff——逐 key 零漂移。**边界与越界配置**
 （如 lookback=336+lag=6，或 `NHMS_RETENTION_DAYS` 被配小）下界早于 cutoff、
@@ -146,7 +150,7 @@ canonical 488 MB），每趟 NFS 全树 stat 纯属白烧。既有两类 skipped
 `source` 记产生 min 的类别（并列时按 candidates > skipped_in_flight >
 window_floor 优先记前者）。尺寸压缩（`scheduler_evidence_payload.py:626-650`
 `_compact_retention`）现状把 skipped 明细剥成 `skipped_count`；`frontier` 块
-是常数尺寸标量，加入 allowlist 原样保留（`_compact_mapping:713-716` 对
+是常数尺寸标量，加入 allowlist 原样保留（`_compact_mapping:717-720` 对
 allowlist 键透传）。schema_version 不升：`frontier` 是纯新增可选键，retention
 receipt 无 JSON Schema 约束（全仓仅 `retention.py:92` 与两处测试引用
 schema_version 字符串），旧消费者零破坏。
@@ -188,7 +192,7 @@ active_lower_bound=None)` / `scheduler_core.py` forwarder 透传——与
 `scheduler._run_retention(NOW)`，keyword-only 默认值零破坏）。下界计算放
 `scheduler_runtime.py` 私有 helper（消费 SchedulerCandidate/dict/窗口块），
 `retention.py` 保持 scheduler-agnostic 纯函数（只收 datetime）。
-`infra/env/compute.example:202-212` 注释改写措辞（对齐 F1）：不写"代码级已强
+`infra/env/compute.example:202-220` 注释改写措辞（对齐 F1）：不写"代码级已强
 制"，写"违反不变量不再导致产出→删除自旋，改为表现为受控过度保留（receipt 可
 见）——不变量仍须保持"。
 
