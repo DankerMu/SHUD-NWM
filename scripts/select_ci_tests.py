@@ -267,6 +267,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "services/tiles/mvt.py",
         (
             "tests/test_api_contract.py",
+            "tests/test_display_publish_status_only.py",
             "tests/test_migrations.py",
             "tests/test_openapi_drift.py",
         ),
@@ -295,6 +296,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            "tests/test_qhh_latest_fallback_pushdown.py",
         ),
     ),
     PathTestRule(
@@ -369,6 +371,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "scripts/run_qhh_continuous.py",
         ("tests/test_run_qhh_continuous.py",),
+    ),
+    PathTestRule(
+        # No same-name tests/test_node27_autopipeline.py exists, so without this
+        # rule the autopipe script falls through to the core-smoke fallback and
+        # none of its own suites run.
+        "scripts/node27_autopipeline.py",
+        (
+            "tests/test_node27_autopipeline_preflight.py",
+            "tests/test_node27_autopipeline_handoff.py",
+            "tests/test_display_publish_status_only.py",
+        ),
     ),
     PathTestRule(
         "scripts/governance/audit_repo_entropy.py",

@@ -72,27 +72,52 @@ def test_run_scoped_mvt_revision_rotates_on_publish_without_an_updated_at_bump()
     assert _run_source_version(_run_row("parsed")) == parsed_version
 
 
+def _slice(source: str, start_marker: str, end_marker: str) -> str:
+    start = source.index(start_marker)
+    end = source.index(end_marker)
+    assert start < end, f"{start_marker} no longer precedes {end_marker}"
+    return source[start:end]
+
+
 def test_national_digest_membership_shares_one_status_set_with_the_data_side_queries() -> None:
     mvt_source = MVT_SOURCE.read_text(encoding="utf-8")
-    digest_source = mvt_source[
-        mvt_source.index("def national_discharge_source_version") : mvt_source.index(
-            "def national_river_network_source_version"
-        )
-    ]
-    tile_sql_source = mvt_source[
-        mvt_source.index("def postgis_tile_sql") : mvt_source.index("def _national_source_digest")
-    ]
-    valid_times_source = mvt_source[
-        mvt_source.index("def national_discharge_valid_times") : mvt_source.index(
-            "def _valid_time_discovery"
-        )
-    ]
+    predicate = f"h.status IN ({DISPLAY_READY_STATUS_SET})"
+
+    digest_source = _slice(
+        mvt_source,
+        "def national_discharge_source_version",
+        "def national_river_network_source_version",
+    )
+    # Ends at the next function, NOT at `_national_source_digest` 350 lines later:
+    # a slice that swallows the digest helpers makes the data-side assertions
+    # below vacuous (they would be satisfied by the digest's own predicate).
+    tile_sql_source = _slice(mvt_source, "def postgis_tile_sql", "def _mvt_public_tile_columns")
+    valid_times_source = _slice(
+        mvt_source,
+        "def national_discharge_valid_times",
+        "def _valid_time_discovery",
+    )
+    assert "def national_discharge_source_version" not in tile_sql_source
+    assert "def _national_source_digest" not in tile_sql_source
 
     # The digest basis deliberately omits `status` (publish changes nothing the
     # national layer renders); that only holds while membership on both sides is
     # decided by the same three statuses.
     assert "h.updated_at" in digest_source
     assert '"status"' not in digest_source
-    for source in (digest_source, tile_sql_source, valid_times_source):
-        assert f"h.status IN ({DISPLAY_READY_STATUS_SET})" in source
+
+    # Counts, not mere containment: the tile SQL carries the predicate twice (the
+    # identity-stats EXISTS probe and the latest_runs CTE) and the whole module
+    # five times (those two, display_ready_run, the digest membership query, the
+    # national valid-time discovery). Deleting or loosening any single copy —
+    # or adding an unguarded sixth query — moves a count and reddens here.
+    assert tile_sql_source.count(predicate) == 2, (
+        "both national data-side queries in postgis_tile_sql must filter runs by the "
+        "display-ready status set the digest's membership query uses"
+    )
+    assert digest_source.count(predicate) == 1
+    assert valid_times_source.count(predicate) == 1
+    assert mvt_source.count(predicate) == 5
+
+    # And the set itself is shared: no query may quietly use a different one.
     assert set(re.findall(r"status IN \(([^)]*)\)", mvt_source)) == {DISPLAY_READY_STATUS_SET}

@@ -176,6 +176,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         "tests/test_list_search_contract.py",
         "tests/test_migrations.py",
         "tests/test_model_registry_list_basins.py",
+        "tests/test_qhh_latest_fallback_pushdown.py",
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -186,10 +187,28 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
 
     assert selected == [
         "tests/test_api_contract.py",
+        "tests/test_display_publish_status_only.py",
         "tests/test_migrations.py",
         "tests/test_openapi_drift.py",
     ]
     assert not fallback_only_tests & set(selected)
+
+
+def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:
+    # scripts/node27_autopipeline.py has no same-name tests/test_node27_autopipeline.py,
+    # so before its explicit rule it dropped into the core-smoke fallback and none
+    # of its own suites (preflight, handoff, publish status-only) ran on a PR that
+    # changed it.
+    assert not Path("tests/test_node27_autopipeline.py").exists()
+
+    selected = select_tests(["scripts/node27_autopipeline.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_display_publish_status_only.py",
+        "tests/test_node27_autopipeline_handoff.py",
+        "tests/test_node27_autopipeline_preflight.py",
+    ]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
 def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback() -> None:

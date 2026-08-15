@@ -14,6 +14,8 @@
   4. `services/production_closure/readonly_db_validation.py:406` `discover_display_identity()`：`ORDER BY updated_at DESC NULLS LAST, ...` 选代表性展示身份；
   5. `services/tiles/mvt.py:1126-1163` `national_discharge_source_version()`：digest basis 含 `h.updated_at`、**不含 `status`**，但其成员集与 national 数据侧查询同用三态过滤 `status IN ('succeeded','parsed','published')`（mvt.py:544/565/1117/1151/1298）；
   6. `apps/api/routes/pipeline.py:1485,1547 → :309-312`：hydro_run 的 `updated_at` 作为 pipeline 状态响应的用户可见 `updated_at` 字段。
+  7. **forecast API + 前端**（review round 1 补录；纯 grep 漏抓 `SELECT h.*` 星号投影）：`apps/api/routes/forecast.py:82-94+` `get_run`/`list_runs` → `forecast_store.py:717-742`/`:781-804`（`SELECT h.*`）→ `:3761` `_hydro_run_response` 原样透出 `updated_at`；前端 `apps/frontend/src/stores/overviewData.ts:371-373` 以 `updated_at ?? created_at` 做降序 tie-break，`overviewDataContracts.ts:437-442` `latestUpdate` / `:296-306` freshness reference（`validTime ?? updatedAt ?? cycleTime`）。
+  8. **orchestrator scheduler hydro truth time**（review round 1 补录）：`chain_repository_state.py:455-470` 的 candidate_state SELECT 投影 `updated_at`（**不投影** `finished_at`/`created_at`）→ `scheduler_state_identity_filter.py:705` `_first_state_datetime(hydro_run, "updated_at", ...)` 为 DB lane 下 hydro truth time 的唯一来源 → `:711` 与 pipeline failure 时刻比较 → `scheduler_state_decision.py:213-217` skip/terminal_hydro_success 判定；`'published'` ∈ `DURABLE_HYDRO_SUCCESS_STATUSES`（`scheduler_state_types.py:30`）。
 - `scripts/node27_autopipe_cron.sh`：单 flock（:185-189），整 tick 一对 START/END（:192、:232-233），三阶段（ingest :195-200 / backstop :214-219 / prewarm :224-230）各有起始行、无耗时；preflight rc=2 早退分支（:203-207）；:209-213 注释声称 backstop 兜底带外 seed。
 - 既有测试地雷：`tests/test_migrations.py:387` 对源码做**宽切片**（`_fetch_latest_qhh_display_candidates` 起点 → `_fetch_station_for_series` 终点，:400-404），区间同时含 fast path 与 unavailable-context——多数被断言的字符串在未改动函数里也存在，fallback 重构后该测试**大概率静默变空转而非变红**。
 
@@ -51,13 +53,15 @@
 
 **决策**：`_publish_display_runs` 的 UPDATE 改为 `SET status = 'published'`。`updated_at` 语义收敛为"run 数据/产物变更时间"：register、`mark_run_parsed`（数据真变了）照常 bump；status-only 的展示转换不 bump。
 
-**消费方逐条裁定**（清单见 Context，共 6 项）：
+**消费方逐条裁定**（清单见 Context，共 8 项；第 7/8 项为 review round 1 补录）：
 1. **stale 谓词**：`refreshed_at`（phase 2 refresh 时刻）> `updated_at`（parse 时刻）在 publish 后继续成立 → backstop 0 假 stale。谓词本身不改。
 2. **`_run_source_version`（run-scoped MVT）**：basis 已含 `status`，parsed→published 翻转本身更换摘要 → tile 缓存照常翻新。
 3. **`candidate_state()` tie-break**：旧行为下同 tick publish 的多 run 拿**同一个** `now()`（单条集合语句）——tie-break 本就在同 tick 内失效；新行为下 parse 时刻互异且与 publish 顺序同向，tie-break 反而更可辨。跨 tick 排序由 parse/publish 同向性保持不变。已 publish run 与"其后新 register 未 parse"的同 identity run 相比时胜者会换（新行为选最近一次尝试）——但该 tie-break 仅在 identity 回落分支生效（首键 `CASE WHEN run_id = %s THEN 0` 已把点名 run 顶前），且"最近尝试"语义更合理。裁定：无损，略优。
 4. **`discover_display_identity()`**：选"代表性展示身份"的工具查询，parse 时刻排序与 publish 时刻排序在生产节奏下同向（parse 与 publish 同 tick 内完成）；且它是 validation 工具、非展示正确性契约。裁定：可接受。
 5. **`national_discharge_source_version()`**：basis 不含 `status`，但**成员集与数据侧同用三态过滤（含 `parsed`）**——run 在 parse+coverage 时刻即进入 national 图层与 digest，publish 转换不改变该图层任何内容。旧 bump 在 publish 时转动 digest 是**虚假翻转**（内容未变、缓存被白 bust）；删除后 digest 只随真实内容变化（新 run 进 ranked 集合）转动。裁定：严格更优。前提（两侧 status 集合一致）以文本断言守卫。
 6. **pipeline API `updated_at` 字段**：用户可见语义从"最后 parse/publish 时刻"变为"最后数据变更时刻"，publish 不再推进。裁定：可接受，作为语义收敛在 PR 偏离记录与本 design 显式声明。
+7. **forecast API + 前端（`/api/v1/runs`、`/api/v1/runs/{run_id}`、overview 页）**：`updated_at` 原样透出且前端参与排序/新鲜度。裁定：可接受，同第 6 条语义收敛，三条无损理由——(a) 前端排序首键是 `cycle_time`（`overviewData.ts:365-369`），`updated_at` 仅同 cycle_time 的 tie-break，而旧行为下同 tick publish 是单条集合语句（同一个 `now()`），tie-break 本就退化（与第 3 条论证同构）；(b) freshness reference 优先 `validTime`（`overviewDataContracts.ts:298`），退化路径有 `cycle_time` 兜底；(c) parse→publish 在同一个 autopipe tick 内完成，位移分钟级，对 `staleAfterHours = 6` 判定无实质影响。无测试固化 publish-time 语义（`overviewData.test.ts:107` 仅 fixture 值）。PR 偏离记录同步扩到这两个端点。
+8. **scheduler `_terminal_hydro_truth_supersedes_failure`**：DB lane 下 `updated_at` 是 hydro truth time 的唯一来源（投影无 `finished_at`/`created_at` 回退），parse 时刻语义使"publish 之后记录的旧 failure"不再被 supersede（T_parse < T_fail < T_publish 场景由 skip 翻为 retry 分支）。裁定：**latent，不改代码**——生产 scheduler 是 DB-free 契约（`docs/runbooks/current-production-ops.md:32,50,129-135`：`NHMS_SCHEDULER_DB_FREE_REQUIRED=true`、无 `DATABASE_URL`、state backend=file，hydro_run 来自文件 journal 而非 node-27 PG；`infra/env/compute.scheduler-dbfree.env.example:10,22,36`），且 node-27 autopipeline 不写 `ops.pipeline_job`/journal——publish 写入的行与该读路径今天不在同一 state 平面，混合场景不可构造。若 DB-backed scheduler lane 复活，须先重审此条（已记为显式危害注记）。
 
 **失去的副作用（如实记录）**：旧 publish bump 附带一次"coverage 行存在但过时"的一次性自愈机会（refresh 成功后、publish 前发生的带外数据写入会被 backstop 补算一次）。新契约下：**任何变更 run 数据的写者必须自行 bump `updated_at`**（生产写者 `mark_run_parsed` 已如此）；不 bump 的带外写入在旧行为下也只有 publish 一瞬的偶然补算窗口，本就不是可依赖的机制。cron :209-213 的兜底注释若与此不符由实现同步措辞。真实 DB 集成用例记录"refresh 后带外写入（不 bump）→ backstop 是否可见"的实测结论进 receipt。
 
@@ -80,7 +84,7 @@
 | `test_migrations.py` 切片空转 | 断言重绑定到 candidate 常量 + 收窄切片 + 变异红证（D1 既有测试处置） |
 | publish 去 bump 后 run-scoped MVT 缓存不翻新 | `_run_source_version` basis 含 `status` 的断言测试（若无则补） |
 | national digest 前提（两侧 status 集合一致）漂移 | mvt.py 文本断言：digest 成员查询与数据侧查询共用同一三态集合 |
-| 有未知 `updated_at` 消费方 | Context 六项清单（grep + 迁移触发器核查）已闭；review 席位复核 |
+| 有未知 `updated_at` 消费方 | Context 八项清单（grep + 迁移触发器核查 + review round 1 补录）；**方法论注记**：纯文本 grep 对 `SELECT h.*` 星号投影与"投影列喂下游决策函数"两类读路径是盲的——第 7/8 项即为此盲区实例，由 review 席位以数据流追踪补齐并逐条裁定（结论：全部文档层收敛，无代码改动） |
 | 真实 DB 上 stale 语义回归 | node-27 真实 DB 集成测试：publish（新形状）后 `_stale_run_ids` 为空；变异对照：旧形状 publish → 非空 |
 | cron 改动破坏 tick | `bash -n` + node-27 实机一个 tick 的日志 receipt（三阶段 elapsed 行齐全） |
 
