@@ -1384,9 +1384,23 @@ def run_once(self) -> SchedulerPassResult:
                 retention_force_reason = "evidence_preflight_blocked"
             elif execution_boundary == "db_free_journal_write_blocked":
                 retention_force_reason = "db_free_journal_write_blocked"
+            # Issue #1307: retention must not delete what this very pass is
+            # still working on. The bound comes from the candidate state
+            # already in memory here plus the recomputed discovery window
+            # floor — no extra I/O, and ``None`` degrades to the old
+            # wall-clock-only criterion.
+            retention_bound, retention_bound_source = _retention_active_lower_bound(
+                self,
+                started_at,
+                candidates=candidates,
+                blocked_candidates=blocked_candidates,
+                skipped_candidates=skipped_candidates,
+            )
             evidence["retention"] = self._run_retention(
                 started_at,
                 force_dry_run_reason=retention_force_reason,
+                active_lower_bound=retention_bound,
+                active_lower_bound_source=retention_bound_source,
             )
             # Populate timing.pass BEFORE the write so the on-disk artifact
             # carries the block (Phase 4.5 C6). Use ``pass_status`` (pre-write
@@ -1777,11 +1791,164 @@ def _configured_slurm_bin_path() -> str:
         return ""
 
 
+#: Skip reasons that prove a cycle's work in this pass is *finished*. Only
+#: these let the frontier bound move past a skipped candidate; every other
+#: reason — ``active_slurm_job``, ``cancel_requested_active_slurm``,
+#: ``active_slurm_status_sync_deferred`` / ``_failed``,
+#: ``active_duplicate_pipeline``, and anything added after this list was
+#: written — counts as in-flight. Unknown reasons therefore protect rather
+#: than delete (issue #1307 design D1 fail-safe).
+_RETENTION_TERMINAL_SKIP_REASONS: frozenset[str] = frozenset(
+    {
+        "completed_duplicate_pipeline",
+        "terminal_hydro_success",
+        "terminal_completed_cycle",
+        "terminal_pipeline_success",
+        "duplicate_candidate_identity",
+    }
+)
+
+RETENTION_FRONTIER_SOURCE_CANDIDATES = "candidates"
+RETENTION_FRONTIER_SOURCE_SKIPPED = "skipped_in_flight"
+RETENTION_FRONTIER_SOURCE_WINDOW_FLOOR = "window_floor"
+
+
+def _retention_cycle_time(value: Any) -> datetime | None:
+    """Coerce a candidate/skip cycle time to UTC-aware, or None if unusable.
+
+    Selected and blocked candidates carry ``datetime`` (``cycle_time_utc``);
+    skipped candidates are already evidence dicts whose ``cycle_time`` is the
+    ``…Z`` string produced by ``_format_utc`` (``scheduler_types.py:105-106``).
+    An unparseable value yields None: the entry simply does not contribute to
+    the minimum, which never narrows the bound derived from the other sources.
+    """
+    if isinstance(value, datetime):
+        return _scheduler._ensure_utc(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            # py>=3.11 parses the trailing ``Z`` directly (pyproject requires
+            # >=3.11), so no manual suffix rewriting is needed.
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+        return _scheduler._ensure_utc(parsed)
+    return None
+
+
+def _retention_candidate_cycle_time(candidate: Any) -> datetime | None:
+    """Cycle time of a selected/blocked candidate (``SchedulerCandidate``)."""
+    if isinstance(candidate, Mapping):
+        return _retention_cycle_time(candidate.get("cycle_time_utc")) or _retention_cycle_time(
+            candidate.get("cycle_time")
+        )
+    return _retention_cycle_time(getattr(candidate, "cycle_time_utc", None))
+
+
+def _retention_skipped_cycle_time(entry: Any) -> datetime | None:
+    """Cycle time of a skipped candidate (an evidence mapping, string time)."""
+    if not isinstance(entry, Mapping):
+        return _retention_cycle_time(getattr(entry, "cycle_time_utc", None))
+    return _retention_cycle_time(entry.get("cycle_time")) or _retention_cycle_time(entry.get("cycle_time_utc"))
+
+
+def _retention_skip_reason(entry: Any) -> str:
+    reason = entry.get("reason") if isinstance(entry, Mapping) else getattr(entry, "reason", None)
+    return str(reason or "")
+
+
+def _retention_min_cycle_time(values: Sequence[datetime | None]) -> datetime | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
+def _retention_discovery_window_floor(self, started_at: datetime) -> datetime | None:
+    """Recompute the discovery window's true lower bound, zero extra I/O.
+
+    Uses discovery's own double-floor formula (``scheduler_discovery.py:
+    371-375``) rather than the evidence block's ``cycle_window.start_time_utc``
+    (``scheduler_evidence.py:213-214``), which is *not* floored and therefore
+    sits up to two source-cycle intervals later than the real window bottom —
+    using it would leave a 6-48h unprotected band at the bottom of the window.
+
+    Returns None when the config declares no sources: there is then no source
+    cycle grid to floor against, so no window bound is derivable.
+    """
+    config = self.config
+    sources = tuple(getattr(config, "sources", ()) or ())
+    if not sources:
+        return None
+    allowed_cycle_hours_utc = getattr(config, "allowed_cycle_hours_utc", None)
+
+    def floor(value: datetime) -> datetime:
+        return _scheduler._floor_to_source_cycle_boundary(
+            value,
+            sources,
+            allowed_cycle_hours_utc=allowed_cycle_hours_utc,
+        )
+
+    end_time = floor(_scheduler._ensure_utc(started_at) - timedelta(hours=int(config.cycle_lag_hours)))
+    return floor(end_time - timedelta(hours=int(config.lookback_hours)))
+
+
+def _retention_active_lower_bound(
+    self,
+    started_at: datetime,
+    *,
+    candidates: Sequence[Any] = (),
+    blocked_candidates: Sequence[Any] = (),
+    skipped_candidates: Sequence[Any] = (),
+) -> tuple[datetime | None, str | None]:
+    """Compute this pass's active lower bound for retention (issue #1307 D1).
+
+    Minimum of three in-memory sources — no I/O, no journal query:
+
+    1. ``candidates`` ∪ ``blocked_candidates`` cycle times (work selected or
+       blocked in this pass);
+    2. ``skipped_candidates`` cycle times, terminal reasons excluded;
+    3. the discovery window floor, which also covers cycles that produced no
+       candidate at all (upstream archive rolled off ⇒ ``available=False`` ⇒ no
+       candidate/blocked/skipped entry, ``scheduler_discovery.py:492-500``).
+
+    Returns ``(bound, source)``; ties record the earlier source in that order.
+    ``(None, None)`` means no bound is derivable and retention stays on the
+    pure wall-clock criterion.
+    """
+    candidate_bound = _retention_min_cycle_time(
+        [
+            _retention_candidate_cycle_time(candidate)
+            for candidate in (*tuple(candidates), *tuple(blocked_candidates))
+        ]
+    )
+    skipped_bound = _retention_min_cycle_time(
+        [
+            _retention_skipped_cycle_time(entry)
+            for entry in skipped_candidates
+            if _retention_skip_reason(entry) not in _RETENTION_TERMINAL_SKIP_REASONS
+        ]
+    )
+    window_bound = _retention_discovery_window_floor(self, started_at)
+
+    bound: datetime | None = None
+    source: str | None = None
+    for candidate_source, value in (
+        (RETENTION_FRONTIER_SOURCE_CANDIDATES, candidate_bound),
+        (RETENTION_FRONTIER_SOURCE_SKIPPED, skipped_bound),
+        (RETENTION_FRONTIER_SOURCE_WINDOW_FLOOR, window_bound),
+    ):
+        if value is None:
+            continue
+        if bound is None or value < bound:
+            bound, source = value, candidate_source
+    return bound, source
+
+
 def _run_retention(
     self,
     started_at: datetime,
     *,
     force_dry_run_reason: str | None = None,
+    active_lower_bound: datetime | None = None,
+    active_lower_bound_source: str | None = None,
 ) -> dict[str, Any]:
     """Run forecast-data retention cleanup; never break the scheduling pass.
 
@@ -1792,6 +1959,10 @@ def _run_retention(
     aged artifacts even when the env enables real deletion. Evidence
     preflight failures and DB-free write blockers use the same boundary
     because they claim no production mutation has happened yet.
+
+    ``active_lower_bound`` (issue #1307) exempts cycles that are still in
+    flight from wall-clock deletion; the default ``None`` keeps the previous
+    behaviour for callers that have no pass context.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
@@ -1807,6 +1978,8 @@ def _run_retention(
             now=started_at,
             config=retention_config,
             published_artifact_root=self.config.published_artifact_root,
+            active_lower_bound=active_lower_bound,
+            active_lower_bound_source=active_lower_bound_source,
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}

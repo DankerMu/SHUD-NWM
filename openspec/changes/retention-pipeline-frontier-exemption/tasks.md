@@ -46,7 +46,7 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
 
 ## Tasks
 
-- [ ] 1. `retention.py`：`plan_retention` / `run_retention` 新增 keyword-only
+- [x] 1. `retention.py`：`plan_retention` / `run_retention` 新增 keyword-only
   `active_lower_bound: datetime | None = None`；cycle 目标与 run 目标统一按
   **两级判定顺序**：① `cycle_time >= cutoff` → skipped
   `within_retention_window`（现状）；② `bound 非 None 且 cycle_time >= bound`
@@ -55,7 +55,7 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
   `_dir_size`，被豁免目录零 rglob/stat）；③ 否则入选。
   `RetentionResult.to_dict()` 新增 `frontier` 块
   （active_lower_bound/source/protected_count，D4 形状）。
-- [ ] 2. `scheduler_runtime.py`：新增私有 helper 计算活跃下界，三源取 min：
+- [x] 2. `scheduler_runtime.py`：新增私有 helper 计算活跃下界，三源取 min：
   (a) candidates ∪ blocked_candidates 的 `cycle_time_utc`；(b)
   skipped_candidates 的 `cycle_time`（字符串，`fromisoformat` 解析规约 UTC，
   解析失败条目跳过），按终态排除法——排除集合
@@ -71,9 +71,9 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
   None}（并列取前者）。`:1387` 调用点与 `_run_retention`（`:1780-1818`）线程
   化传参；`scheduler_core.py:243-255` forwarder 透传——keyword-only 带默认，
   与 `force_dry_run_reason` 模式同构。
-- [ ] 3. `scheduler_evidence_payload.py` `_compact_retention`（`:626-650`）
+- [x] 3. `scheduler_evidence_payload.py` `_compact_retention`（`:626-650`）
   allowlist 补 `frontier` 标量块，压缩态原样保留。
-- [ ] 4. 测试（`tests/test_retention.py` 纯函数/集成 + `tests/
+- [x] 4. 测试（`tests/test_retention.py` 纯函数/集成 + `tests/
   test_production_scheduler.py` 压缩 pin）：
   - 追赶豁免（AC1）：cycle C 的 forcing/ + runs/ 老于 cutoff、bound ≤ C →
     不选中，skipped reason 为 `pipeline_frontier_exempt`（**与
@@ -109,10 +109,10 @@ helper（candidates/blocked ∪ skipped 终态排除法 ∪ 窗口地板三源 m
   - 豁免项形状：无 `size_bytes` 键（并以此佐证未做 `_dir_size`）；
   - 压缩存活（设计派生要求 D4，非 issue AC）：尺寸压缩后 `frontier` 块保留、skipped 明细照旧剥
     为计数（既有 pin 适配不弱化）。
-- [ ] 5. `infra/env/compute.example:202-212` 注释按 D6 措辞改写：保留数值示
+- [x] 5. `infra/env/compute.example:202-212` 注释按 D6 措辞改写：保留数值示
   例与不变量本身，改述后果为"违反不再导致产出→删除自旋，表现为受控过度保留
   （receipt frontier 块可见）"。
-- [ ] 6. 既有测试零回归：`uv run pytest -q tests/test_retention.py` 与
+- [x] 6. 既有测试零回归：`uv run pytest -q tests/test_retention.py` 与
   `uv run pytest -q tests/test_production_scheduler.py -k retention` 全绿且断
   言不弱化；受签名影响的直接调用测试只允许解包/参数适配。
 - [ ] 7. 合并前路由（issue-scribe）：(a) pass 外删除面前沿口径 follow-up
