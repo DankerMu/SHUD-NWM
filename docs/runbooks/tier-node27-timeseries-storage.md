@@ -1606,8 +1606,9 @@ Read each field for what it is worth:
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
   read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
   the receipt only proves what the env file declared. Check 2 below
-  (`systemctl show -p TimeoutStartUSec`) is the authoritative observation of
-  the installed unit wall.
+  (`systemctl show -p TimeoutStartUSec`) is the only step that queries the unit
+  manager for the installed wall — subject to the user-scope caveat recorded
+  with that check (issue `#1387`).
 
 The only receipt without a `budget` block is the config tombstone
 (`outcome: "failed"`, `failure.stage: "config"`), written when the
@@ -1701,9 +1702,14 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    Python leg-2 check against a declared 5740 and then hits the real 3940
    mid-DDL — and it re-arms the replay-lane hazard from step 2. **The catch-up
    is not finished while any override residue exists**; verify with all three
-   checks below — the two configuration checks first:
+   checks below — the two configuration checks first, and stamp `CLEANUP_AT`
+   as you start them:
 
    ```bash
+   # record the instant cleanup completed — check 3's freshness anchor.
+   # Write it down: check 3 runs after the next 04:25 UTC tick, likely in
+   # another shell session.
+   CLEANUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ); echo "$CLEANUP_AT"
    # env file byte-identical to the pre-window snapshot (no output = clean)
    diff ~/node27-compression-env.pre-catchup \
      /home/nwm/NWM/infra/env/node27-timeseries-compression.env
@@ -1718,9 +1724,13 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    file that no running tick has picked up yet — but read it for what it
    proves: the runner-side effective `compress_timeout_ms` and
    `per_tick_bound` were actually applied by that tick, while
-   `systemd_wall_seconds` is only the declaration that tick read. **Check 2
-   stays the authority on the installed unit wall**; check 3 does not replace
-   it.
+   `systemd_wall_seconds` is only the declaration that tick read. **Check 2 is
+   the only step that queries the unit manager for the installed wall**; check
+   3 does not replace it. Caveat: §4.5's check-2 and drop-in commands run
+   against the *system* manager while the unit is installed user-scope — that
+   scope mismatch is tracked in issue `#1387` and is not fixed here, so until
+   it lands read the real wall with `systemctl --user show -p
+   TimeoutStartUSec nhms-node27-timeseries-compression.service` semantics.
 
    Check 3 must establish *freshness before budget*, in that order. §4.5's own
    window stopped and masked the timer, and both catch-up ticks wrote
@@ -1728,22 +1738,34 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    **pre-window** receipt until a post-cleanup tick overwrites it in place. Nor
    does absence rescue you: a wall-`TERM`ed first post-cleanup tick (the exact
    shape env residue produces) writes no receipt at all and leaves the old
-   clean one sitting there — §4 "Per-tick capacity" owns that detection rule
-   and its staleness predicate (`generated_at` vs. the last timer trigger from
-   `systemctl --user list-timers`). Asserting the budget against that stale
-   file is a false pass.
+   clean one sitting there. Asserting the budget against that stale file is a
+   false pass.
+
+   The freshness anchor is `CLEANUP_AT` — the UTC instant you recorded when
+   cleanup completed — **not** the timer's LAST column. §4 "Per-tick capacity"
+   compares `generated_at` against the last trigger from
+   `systemctl --user list-timers`; that predicate answers a different question
+   and is unsound here, because this window masked the timer and `Persistent=true`
+   catches up only on a *missed elapse*, which a same-day window produces none
+   of. After the unmask the LAST column therefore still reports the
+   **pre-window** 04:25 trigger, and the untouched pre-window receipt
+   (`generated_at` 04:25:30 ≥ trigger 04:25:00, default budget) would pass
+   every branch with zero post-cleanup ticks having run. `generated_at >=
+   CLEANUP_AT` subsumes that comparison — cleanup necessarily completes after
+   the last pre-window trigger — so the `list-timers` read stays only as a
+   diagnostic: it tells you when the next tick is due.
 
    ```bash
-   # 1. read the last timer trigger — the same staleness predicate §4 uses
+   # 1. diagnostic only — when is the next default tick due? (NOT the anchor)
    systemctl --user list-timers nhms-node27-timeseries-compression.timer
-   LAST_TRIGGER=2026-08-15T04:25:00Z   # the LAST column, as ISO-8601 UTC
 
-   # 2. the default-path receipt must be POST-trigger and carry the defaults
-   /home/nwm/NWM/.venv/bin/python - "$LAST_TRIGGER" <<'PY'
+   # 2. the default-path receipt must be POST-CLEANUP and carry the defaults
+   CLEANUP_AT=2026-08-15T11:40:07Z   # as recorded at cleanup completion
+   /home/nwm/NWM/.venv/bin/python - "$CLEANUP_AT" <<'PY'
    import json, sys
    from datetime import datetime
 
-   trigger = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+   cleanup_at = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
    receipt = json.load(open("/home/nwm/NWM/artifacts/receipts/node27_timeseries_compression.json"))
    version = receipt.get("schema_version")
    print(version, receipt.get("generated_at"), receipt.get("outcome"),
@@ -1754,9 +1776,10 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
        f"no post-#1351 default tick at this path yet (schema_version={version})"
    )
 
-   # (2) freshness — a pre-window receipt says nothing about the cleanup.
+   # (2) freshness — only a receipt written after cleanup completed says
+   #     anything about the cleanup.
    generated_at = datetime.fromisoformat(receipt["generated_at"].replace("Z", "+00:00"))
-   assert generated_at >= trigger, (
+   assert generated_at >= cleanup_at, (
        "receipt predates cleanup — no post-cleanup default tick has run yet; "
        "wait for the next 04:25 UTC tick"   # NOT a pass
    )
@@ -1777,8 +1800,8 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    ```
 
    Steps (1) and (2) fail with their own diagnosis on purpose: a `2.0` receipt
-   or a stale one is "no post-cleanup tick has run yet", **not** "the budget is
-   wrong" and **not** a pass. Re-run the check after the next 04:25 UTC tick;
+   or one whose `generated_at` predates `CLEANUP_AT` is "no post-cleanup tick
+   has run yet", **not** "the budget is wrong" and **not** a pass. Re-run the check after the next 04:25 UTC tick;
    if the unit went `failed` instead, that is §4's `rc=124` wall path, not a
    budget question.
 
