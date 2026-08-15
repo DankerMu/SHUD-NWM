@@ -37,9 +37,13 @@ NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 #          <= WRAPPER_WALL_SECONDS
 #   leg 2: WRAPPER_WALL_SECONDS + 40 s kill-after margin
 #          <= SYSTEMD_WALL_SECONDS
+#   leg 3: raising COMPRESS_TIMEOUT_MS above the 3600000 default while
+#          PER_TICK_BOUND > 1 is refused outright, pre-connect. The invariant
+#          bounds ONE chunk's budget, so a raised per-chunk ceiling is only
+#          sound one chunk per tick (runbook section 4.5 catch-up recipe).
 #
-# The runner refuses to open a database connection if either leg is violated,
-# and the wrapper refuses to launch on a non-positive-integer wall. The
+# The runner refuses to open a database connection if any of the three legs is
+# violated, and the wrapper refuses to launch on a non-positive-integer wall. The
 # defaults clear leg 1 with real headroom (3600 + 300 = 3900) and satisfy
 # leg 2 exactly (3900 + 40 = 3940).
 #
@@ -78,12 +82,14 @@ NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900
 # The committed unit ships TimeoutStartSec=3940, matching the default below.
 NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=3940
 #
-# Per-tick hint: the invariant above bounds ONE chunk's budget, so a second
-# chunk in the same tick still dies on the wall. Wherever chunks approach the
-# per-chunk ceiling — which the 268-409 GB steady-state chunks of
-# hydro.river_timeseries do — set
-# NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 and let the daily timer drain
-# the backlog one chunk at a time.
+# Per-tick bound during a catch-up: MANDATORY, not a hint. The invariant above
+# bounds ONE chunk's budget, so a second chunk in the same tick still dies on
+# the wall — whenever you raise COMPRESS_TIMEOUT_MS above the 3600000 default,
+# NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 is required and leg 3 refuses
+# the configuration outright if you skip it. That is also the state you are in
+# wherever chunks approach the per-chunk ceiling — which the 268-409 GB
+# steady-state chunks of hydro.river_timeseries do: bound 1, and let the daily
+# timer drain the backlog one chunk at a time.
 # Full ordered procedure (drop-in first, timer stopped+masked, no replay in the
 # window, override removed FIRST on cleanup): runbook section 4.5
 # "大 chunk 追赶", docs/runbooks/tier-node27-timeseries-storage.md.

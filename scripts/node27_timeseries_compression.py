@@ -49,7 +49,7 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "2.1"
 TOOL_VERSION = "node27-timeseries-compression/2"
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -95,6 +95,10 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 #          — ``timeout --signal=TERM --kill-after=30s`` may need a further
 #            30 s to escalate to KILL, so the systemd wall must sit above the
 #            wrapper wall by that plus a 10 s epsilon.
+#   leg 3: compress_timeout_ms > _DEFAULT_COMPRESS_TIMEOUT_MS
+#          implies per_tick_bound == 1
+#          — raising the per-chunk ceiling is the runbook §4.5 catch-up
+#            manoeuvre, which is only sound one chunk at a time (issue #1351).
 # The defaults clear leg 1 with the 300 s of non-compress budget a real tick
 # needs (3600 + 300 = 3900, not the bare 3600 + 60 floor) and satisfy leg 2
 # exactly (3900 + 40 = 3940).
@@ -305,6 +309,19 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
             f"wrapper wall {wrapper_wall_seconds} s + {_SYSTEMD_MARGIN_SECONDS} s kill-after margin = "
             f"{leg_two} s exceeds declared "
             f"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS={systemd_wall_seconds}"
+        )
+    # Leg 3 (issue #1351): raising the per-chunk ceiling above the default is
+    # the §4.5 catch-up manoeuvre, and that recipe is only sound at bound 1 —
+    # the invariant above bounds ONE chunk's budget, so a second chunk in the
+    # same tick still dies on the wrapper wall. A timeout at or below the
+    # default is the normal régime and does not trigger this leg.
+    if compress_timeout_ms > _DEFAULT_COMPRESS_TIMEOUT_MS and per_tick_bound > 1:
+        raise CompressionConfigError(
+            "compression catch-up window violated (leg 3): "
+            f"NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS={compress_timeout_ms} exceeds the "
+            f"{_DEFAULT_COMPRESS_TIMEOUT_MS} ms default, which is the runbook §4.5 catch-up recipe "
+            "and requires NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1, got "
+            f"{per_tick_bound}"
         )
     if not lock_raw:
         raise CompressionConfigError("lock path must be set via --lock-path or NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
@@ -658,6 +675,24 @@ def _safe_failure(operation: str, error: Exception) -> str:
     return f"{operation} failed ({type(error).__name__})"
 
 
+def _budget(config: CompressionConfig) -> dict[str, int]:
+    """The three-layer budget chain actually in force for this invocation.
+
+    Issue #1351: these values became operator-configurable in #1156, so a
+    receipt that omits them cannot tell a catch-up tick (§4.5 override window)
+    apart from a default tick after the fact. Every receipt built from a real
+    ``CompressionConfig`` carries them; the config tombstone
+    (``_replace_early_stale_with_failure``) deliberately does not, because on
+    that path no valid config ever existed.
+    """
+
+    return {
+        "compress_timeout_ms": config.compress_timeout_ms,
+        "wrapper_wall_seconds": config.wrapper_wall_seconds,
+        "systemd_wall_seconds": config.systemd_wall_seconds,
+    }
+
+
 def build_receipt(
     config: CompressionConfig,
     *,
@@ -835,6 +870,7 @@ def build_receipt(
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
         "per_tick_bound": config.per_tick_bound,
+        "budget": _budget(config),
         "mode": "enforce" if config.enforce else "dry-run",
         "outcome": outcome,
         "selected": selected_descriptors,
@@ -869,6 +905,7 @@ def build_refused_lock_receipt(
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
         "per_tick_bound": config.per_tick_bound,
+        "budget": _budget(config),
         "mode": "enforce" if config.enforce else "dry-run",
         "outcome": "refused_lock",
         "selected": [],
@@ -896,12 +933,13 @@ def build_failed_receipt(
     """Build a non-secret terminal failure that replaces any stale success."""
 
     receipt: dict[str, Any] = {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "provenance_state": "bound" if head_sha is not None else "unavailable",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "lag_seconds": config.lag_seconds,
         "per_tick_bound": config.per_tick_bound,
+        "budget": _budget(config),
         "mode": "enforce" if config.enforce else "dry-run",
         "outcome": "failed",
         "selected": [],
@@ -986,10 +1024,17 @@ def _replace_early_stale_with_failure(
     now_utc: datetime,
     stage: str,
 ) -> None:
-    """Publish a schema-v2 provenance-unavailable tombstone without config lies."""
+    """Publish a schema-v2 provenance-unavailable tombstone without config lies.
+
+    No ``budget`` block here (issue #1351): this path only runs when
+    ``config_from_args`` refused, so there is no effective budget to record and
+    inventing one would be exactly the config lie this tombstone exists to
+    avoid. ``failure.stage == "config"`` plus the absent ``per_tick_bound`` is
+    the schema's discriminator for that single legal omission.
+    """
 
     payload = {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "mode": "enforce" if enforce else "dry-run",
