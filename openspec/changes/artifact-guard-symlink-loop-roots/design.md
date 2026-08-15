@@ -83,7 +83,14 @@ def _realpath_or_none(text: str) -> Path | None:
 | 4 | OK | 存在不可解析 root | 不在任何可解析 root 下 | `(True, "local_artifact_root_unresolvable")` | **新 reason**（AC-3）：非空 → 授权修复通道拒收（#1365 doctrine），运维路由「查 root 本身（环/权限），非查产物摆放」 |
 | 5a | OK | 配置非空但全部不可解析 | — | `(True, "local_artifact_root_unresolvable")` | #4 的极端形（`any_root_unresolvable` 为真） |
 | 5b | OK | root 列表本来为空（全未配置/全空串） | — | `(True, "local_artifact_path_outside_allowed_roots")` | 现行 `bool(roots)==False` 行为**不改**（现网常见路径，回归钉） |
-| 6 | path 自身不可规范化（ELOOP 等） | **全部可解析（无 root 故障）** | — | `(True, "local_artifact_path_unresolvable")` | 既有 reason 保留「path 问题」语义（root 问题走 #4，两类可区分） |
+| 6 | path 自身不可规范化（ELOOP 等） | **无 root 故障（含 roots 为空）** | — | `(True, "local_artifact_path_unresolvable")` | 既有 reason 保留「path 问题」语义（root 问题走 #4，两类可区分） |
+
+**判序限定（round-1 review B2）**：实现判序为 root 故障 → path 故障 →
+收容/空 roots；「roots 为空 × path 自身不可规范化」落行 #6
+（`local_artifact_path_unresolvable`），**不**落行 5b——行 5b 仅在 path
+规范化成功时到达。这是相对 master 的行为变化：master 该组合在 ≤3.12 整
+链抛 RuntimeError，3.13+ 报 `outside_allowed_roots`；HEAD 报 path 口味
+reason（两者均非空、修复通道同拒收，仅路由文案差异），参数化行钉住。
 
 **优先级规则（fixture review P1-1）**：`any_root_unresolvable` 为真时
 root reason 优先——同一输入可能同时命中 root 故障与 path 故障（产物在
@@ -98,8 +105,10 @@ reason」——若只丢弃，产物落在坏 root 之外时会退化成
 样保留）。tri-state 是消除两种误路由的最小结构。
 
 已知残留（与 `scheduler_preflight.py:539-543` 同一裁决，记录不修）：
-`"<不存在>/../<loop>"` 形态 root 经 ENOENT 臂词法 admit 后成为 phantom
-containment base（不再抛，仅词法收容判定）。
+`"<不存在>/../<loop>"` 形态 root 经 ENOENT 臂非 strict realpath admit 后
+成为 phantom containment base（不再抛，仅词法收容判定）；其 verdict 走
+admitted-root 行（#1/#3），不走 root-fault reason——spec delta 已加同款
+carve-out（round-1 review A1）。
 
 非 ELOOP 的其余 errno（EACCES/ESTALE/ENOTDIR）同样落 root-unresolvable
 臂——超出 symlink 环的 fail-closed 行为变化，issue 推荐臂已授权
@@ -108,14 +117,19 @@ containment base（不再抛，仅词法收容判定）。
 
 ## D3 — 逃逸链收口（AC-6）
 
-修复后 lane 内不存在可抛路径（`_realpath_or_none` 吞 OSError；
-`_path_is_relative_to` 纯词法只可能 ValueError 且已接），故 issue 证据 3
-的整链逃逸（`run_once` 中止、evidence 不落盘、`run_continuous` 退出）从
-根上消除。**不**在 `_artifact_uri_missing_status` local 腿加宽兜底
+修复后 lane 的**规范化面**无抛点（`_realpath_or_none` 吞 OSError；
+`_path_is_relative_to` 纯词法只可能 ValueError 且已接），issue 证据 3
+的整链逃逸（`run_once` 中止、evidence 不落盘、`run_continuous` 退出）在
+本 issue 的触发原语（`Path.resolve`）上根除。已知残留抛点（既存缺陷，
+不在本 diff 内，round-1 review 发现并已立单 **#1424**）：
+`scheduler_state_failure.py:1089` `_local_artifact_path` 的
+`Path(value).expanduser()` 对 `~<不存在用户>/...` 形态裸路径值两臂抛
+RuntimeError 穿透 `:1062`（`file://` 臂经 urlparse 剥离 netloc 不抛）。
+**不**在 `_artifact_uri_missing_status` local 腿加宽兜底
 except（备选臂的止血形）——宽兜底会把未来新缺陷静默降级为
 `local_artifact_path_unresolvable`，与 #1365「可区分证据」doctrine 相
-悖；本 design 以「lane 内无抛点」承接 AC，e2e 测试以真实环 root 跑
-`run_once` 级路径证明 pass 存续。
+悖；本 design 以「规范化面无抛点 + 残留抛点具名立单」承接 AC，e2e 测试
+以真实环 root 跑 `run_once` 级路径证明 pass 存续。
 
 ## D4 — 测试面
 
@@ -176,7 +190,10 @@ except（备选臂的止血形）——宽兜底会把未来新缺陷静默降�
 7. path 自身环（roots 全可解析）→ `local_artifact_path_unresolvable`
    （path/root 两类可区分；roots 有故障时 root reason 优先，见 D2 优先
    级规则）。
-8. e2e：pass 存续 + 邻座候选正常调度。
+8. e2e：pass 存续 + 邻座候选正常调度 + per-tick evidence 真实写出
+   （`result.artifact_path` 非 None 且落盘——round-1 review B1：counts
+   断言不蕴含写出，runtime `:1416-1428` 有 `artifact_path=None` 分支仍
+   返回完整 counts）。
 9. 修复通道拒收新 reason（forcing 腿，D4 #4）。
 10. `_path_is_relative_to` 纯词法（fixture review P3-2 更正测试形）：
     **源码断言**（函数体内无 `resolve`）+ **调用者级钉**（含 `..` 逃逸
@@ -216,5 +233,5 @@ except（备选臂的止血形）——宽兜底会把未来新缺陷静默降�
   2↔seam 2/3/9、场景 3↔seam 4/5/6、场景 4↔seam 7）+ runbook 路由表条
   目（closure check 观察更正：场景 4 是 path-fault = seam 7，seam 9 归
   场景 2 末句）。
-- terminal-state-semantics：D2 完整出口表逐行测试 + D3 无抛点承接 +
-  seam 8 pass 存续。
+- terminal-state-semantics：D2 完整出口表逐行测试 + D3 规范化面无抛点
+  （残留抛点 #1424 具名）承接 + seam 8 pass 存续。

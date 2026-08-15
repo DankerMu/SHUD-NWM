@@ -4,11 +4,16 @@
 
 ### Requirement: Local Artifact Allowed-Roots Normalization Survives Symlink Loops
 
-The failure-state local artifact guard SHALL normalize its containment bases (the candidate resource-profile artifact roots and their environment fallbacks) and the probed artifact path without relying on symlink-loop-unsafe resolution, SHALL return the same verdict on every supported CPython version, and SHALL never let a root- or path-resolution fault escape the decision path as an exception.
+The failure-state local artifact guard SHALL normalize its containment bases (the candidate resource-profile artifact roots and their environment fallbacks) and the probed artifact path without relying on symlink-loop-unsafe resolution, SHALL return the same verdict on every supported CPython version, and SHALL never let a fault inside that canonicalization (the strict-realpath normalization and its fallback) escape the decision path as an exception.
 
-A root that fails strict resolution because it does not yet exist keeps its
-existing admitted semantics via lexical normalization (a root may legitimately
-point at a not-yet-created directory or an unmounted share). A root that fails
+A root that fails strict resolution with `ENOENT` keeps its existing admitted
+semantics via non-strict realpath normalization (a root may legitimately point
+at a not-yet-created directory or an unmounted share). This admission is
+deliberately errno-scoped, not loop-free: a root whose strict resolution hits
+a missing component before any loop (such as a `<missing>/../<loop>` form)
+stays admitted even though the admitted base still contains the loop — a
+known, recorded residual whose verdicts follow the admitted-root clauses
+below, never the root-fault reason. A root that fails
 for any other reason (a symlink loop, a permission fault) is excluded from the
 containment bases, and when the probed artifact is not contained by any
 remaining resolvable root the guard SHALL report the artifact missing with the
@@ -23,7 +28,8 @@ itself fails resolution while every configured root resolved — whenever any
 configured root is unresolvable and no resolvable root contains the path, the
 root fault reason wins, so root faults and path faults stay distinguishable.
 On this local leg, an "absent" verdict with a null unsafe reason SHALL arise
-only from a path contained by a resolvable root that was actually probed for
+only from a path contained by a successfully normalized root (resolved, or
+`ENOENT`-admitted as above) after that path was actually probed for
 existence — the parallel of the object-branch null-reason clause, stated here
 so the two legs read as a matched pair.
 
@@ -39,7 +45,9 @@ so the two legs read as a matched pair.
 
 #### Scenario: Artifacts judged against a loop root carry the distinguishable root fault reason
 
-- **GIVEN** a candidate whose only configured artifact root is a symlink loop
+- **GIVEN** a candidate whose only configured artifact root fails strict
+  resolution with an errno other than `ENOENT` (a symlink loop reached before
+  any missing component, a permission fault)
 - **WHEN** the guard evaluates a local artifact path — whether lexically under
   or outside the loop root
 - **THEN** the artifact is reported missing with unsafe reason

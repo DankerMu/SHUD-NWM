@@ -12666,9 +12666,51 @@ def test_realpath_or_none_artifact_root_normalization_matrix(tmp_path: Path) -> 
     assert scheduler_state_failure_module._realpath_or_none(str(not_created_yet)) == Path(
         os.path.realpath(not_created_yet)
     )
-    # Any other errno (ELOOP here; EACCES/ESTALE/ENOTDIR identically) means the
-    # path cannot serve as a containment base -- and this must NOT raise.
+    # Any other errno means the path cannot serve as a containment base -- and
+    # this must NOT raise.  ELOOP here; the non-loop errno arm is witnessed for
+    # real (not asserted by comment) on EACCES in
+    # ``test_local_artifact_guard_eacces_root_is_unresolvable_not_a_containment_base``.
     assert scheduler_state_failure_module._realpath_or_none(str(loop)) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions, so EACCES cannot be provoked")
+def test_local_artifact_guard_eacces_root_is_unresolvable_not_a_containment_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The fail-closed arm is errno-scoped, not loop-scoped: #1402 D2 rules that
+    # every non-ENOENT errno (ELOOP, EACCES, ESTALE, ENOTDIR) lands on the same
+    # root-fault exit, which is the behaviour change the issue's recommended arm
+    # authorized and the runbook routes (an NFS ESTALE window looks exactly like
+    # this).  EACCES is the one non-loop errno provokable without a real NFS
+    # server, so it carries the whole class end to end here.
+    unreadable_parent = tmp_path / "unreadable-parent"
+    unreadable_parent.mkdir()
+    root = unreadable_parent / "object-store"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "summary.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}", encoding="utf-8")
+    unreadable_parent.chmod(0o000)
+    try:
+        # Independent oracle: the kernel really does refuse this canonicalization,
+        # with an errno other than ENOENT (so the admitted fallback is NOT taken).
+        with pytest.raises(OSError) as excinfo:
+            os.path.realpath(root, strict=True)
+        assert excinfo.value.errno == errno.EACCES
+
+        assert scheduler_state_failure_module._realpath_or_none(str(root)) is None
+
+        candidate = _artifact_guard_candidate(monkeypatch, object_store_root=root)
+        assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == ((), True)
+
+        assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(outside)) == (
+            True,
+            "local_artifact_root_unresolvable",
+        )
+    finally:
+        # Restore before pytest's tmp_path cleanup walks the tree.
+        unreadable_parent.chmod(0o700)
 
 
 def test_local_artifact_root_enoent_fallback_phantom_symlink_loop_residual(tmp_path: Path) -> None:
@@ -12796,6 +12838,21 @@ def _artifact_guard_geometry(tmp_path: Path) -> dict[str, Path]:
             "loop_artifact",
             (True, "local_artifact_path_unresolvable"),
         ),
+        # D2 #6, ordering carve-out: NO root configured CROSSED WITH a path that
+        # itself cannot be normalized lands on row #6, not on row 5b.  The exits
+        # are decided root fault -> path fault -> containment/empty-roots, so 5b
+        # is only reachable once the path normalized.  This is a behaviour change
+        # against master, where the same combination raised RuntimeError through
+        # the whole chain on <=3.12 and reported
+        # ``local_artifact_path_outside_allowed_roots`` on 3.13+; both verdicts
+        # are non-null and refused by the repair channel alike, so only the
+        # operator routing text moves -- pinned here so it cannot drift silently.
+        (
+            "6b_no_root_configured_and_path_itself_unresolvable",
+            (),
+            "loop_artifact",
+            (True, "local_artifact_path_unresolvable"),
+        ),
     ],
 )
 def test_local_artifact_guard_symlink_loop_exit_table(
@@ -12843,6 +12900,49 @@ def test_local_artifact_guard_root_fault_outranks_path_fault_under_a_loop_root(
         candidate,
         str(geometry["under_loop"]),
     ) == (True, "local_artifact_root_unresolvable")
+
+
+def test_local_artifact_guard_admitted_and_resolvable_roots_coexist_with_a_loop_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Spec scenario 3 in its full geometry: the three root classes configured on
+    # ONE candidate at the same time -- a resolvable existing root, a
+    # not-yet-created root (ENOENT-admitted, the object-store-first-start / NFS
+    # mount-race shape) and a symlink loop root.  Neither surviving root's
+    # containment verdict may be poisoned by the faulty third, and the admitted
+    # root must still yield the null-reason absent verdict (the rebuild channel
+    # legitimately clears a genuinely-not-yet-written artifact).
+    good = tmp_path / "good-root"
+    inside = good / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("{}", encoding="utf-8")
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    under_not_created_yet = not_created_yet / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    loop = _symlink_loop_dir(tmp_path, "three-root-loop")
+    candidate = _artifact_guard_candidate(
+        monkeypatch,
+        object_store_root=good,
+        copyback_root=not_created_yet,
+        object_store_copyback_root=loop,
+    )
+
+    # Both healthy roots survive as containment bases, and the fault is recorded
+    # on the flag rather than swallowed by the root list.
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == (
+        (Path(os.path.realpath(good)), Path(os.path.realpath(not_created_yet))),
+        True,
+    )
+    # (a) Under the resolvable root, the existing file is simply present: the
+    # loop root does not turn a healthy candidate into a blocker.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(inside)) == (False, None)
+    # (b) Under the ENOENT-admitted root, the historical semantics hold: absent
+    # with a NULL reason, i.e. still routed to the authorized repair channel and
+    # not to the root fault.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(under_not_created_yet)) == (
+        True,
+        None,
+    )
 
 
 def test_local_artifact_path_is_relative_to_is_lexical_with_normalization_at_the_caller(
@@ -12922,6 +13022,13 @@ def test_copyback_symlink_loop_root_blocks_one_candidate_and_the_pass_survives(
     assert [basin["model_id"] for call in orchestrator.calls for basin in call["basins"]] == ["model_b"]
     # And evidence for the pass exists at all (the abort produced none).
     assert result.evidence["counts"]["candidate_count"] == 2
+    # Spec scenario 1's last clause -- "per-tick evidence is still written" -- is
+    # about the ARTIFACT, not the in-memory counts: ``scheduler_runtime.py``
+    # (``:1417-1428``) has a live arm that swallows an evidence write failure and
+    # returns ``artifact_path=None`` with the counts fully populated, so the
+    # counts above cannot witness the write.  Assert the file exists on disk.
+    assert result.artifact_path is not None
+    assert result.artifact_path.exists()
 
 
 def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_channel(
@@ -12944,8 +13051,9 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     # The loop root is carried by the candidate's RESOURCE PROFILE rather than by
     # ``OBJECT_STORE_ROOT``: the env var also seeds ``ProductionSchedulerConfig``,
     # whose own unguarded ``path.resolve()`` (``scheduler_config.py:930``, a
-    # separate site outside this lane) would raise on <=3.12 before the scheduler
-    # is even constructed.  The guard reads both sources identically.
+    # separate site outside this lane, tracked as #1423) would raise on <=3.12
+    # before the scheduler is even constructed.  The guard reads both sources
+    # identically.
     profile = {
         **_missing_forcing_repair_direct_grid_profile(),
         "object_store_copyback_root": str(loop_root),
