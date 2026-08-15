@@ -138,9 +138,12 @@ ANCHORED_CAPTURE_OPTIONS = ("--kind", "--mutation-head-sha", "--schema-dump-cont
 #
 # Still deliberately absent, recorded: `--schema-dump-host`/`--schema-dump-container`
 # (legitimately parameterized data-file paths whose consuming pg_dump/docker COMMAND
-# identities are already exact-pinned on the command side).  The gate iterates this map;
-# it does not assert parser-viability of the whole argv, so unpinned options stay
-# unconstrained and unrequired.
+# identities are already exact-pinned on the command side).  The gate iterates this map,
+# so an option outside it stays unconstrained in VALUE and unrequired in presence -- but
+# no longer unconstrained in SHAPE: the closed-world pair grammar below
+# (`REGISTERED_CAPTURE_FLAGS`) requires every capture argv token to be a registered flag
+# or a non-`-`-leading value of one, so an argv the recorded producer's parser would
+# refuse outright (`--schema-dump-host -xh`) cannot back a PASS either.
 EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
     "--psql": "/usr/bin/psql",
     "--systemctl": "/usr/bin/systemctl",
@@ -173,6 +176,41 @@ EXPECTED_CAPTURE_TOOL_VALUES: Mapping[str, str] = {
 # equality still read the derived value.  Measured zero-collision fact (pinned by the
 # same structural test): `--evidence-dir` is the only registered `--e*` capture flag.
 PINNED_CAPTURE_VALUE_OPTIONS = (*EXPECTED_CAPTURE_TOOL_VALUES, "--database", "--evidence-dir")
+# The CLOSED WORLD the capture-argv pair grammar admits: every production flag the
+# capture CLI registers, in its exact full spelling.  The four per-token family scans
+# (seam / help / anchored abbreviation / pinned abbreviation) each refuse one KNOWN bad
+# shape; this tuple flips the posture on the surviving tokens -- anything not in it, at a
+# flag position, is refused, so no future exit-2 shape needs to be enumerated first.
+#
+# Restated LITERALS on purpose, NOT imported from `capture`/`plan_author` -- the same
+# non-derived-oracle posture recorded above.  Drift from the real parser reddens in
+# `test_capture_grammar_flag_set_equals_the_capture_cli_registered_surface` (this tuple
+# plus argparse's auto `-h`/`--help` pair plus the seam-prefixed flags must equal the
+# parser's whole registered surface) instead of being silently followed.
+#
+# The `--self-test-*` seam flags are deliberately EXCLUDED even though the real parser
+# registers them: the seam scan refuses them before the grammar runs, and giving them
+# standing in the grammar's allow-set would state the opposite of what #1250 decided.
+# Argparse's auto `-h`/`--help` are excluded for the same reason (the help scan owns
+# them), which is also why the drift test unions them back in rather than comparing bare.
+REGISTERED_CAPTURE_FLAGS = (
+    "--kind",
+    "--database",
+    "--mutation-head-sha",
+    "--repo",
+    "--container",
+    "--evidence-dir",
+    "--psql",
+    "--systemctl",
+    "--docker",
+    "--journalctl",
+    "--git",
+    "--schema-dump-host",
+    "--schema-dump-container",
+)
+# argparse's end-of-options separator.  Matched by EXACT equality, never as a prefix:
+# every registered flag above starts with `--` too.
+ARGPARSE_OPTIONS_TERMINATOR = "--"
 EXPECTED_REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 EXPECTED_REVIEWED_REMOTE_REF = "refs/remotes/origin/feat/issue-1069-live-compression"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -710,11 +748,21 @@ def _argv_option_values(argv: list[str], option: str) -> list[str]:
     they must be the same binding to the verifier: scanning only the pair form would let
     the `=` spelling dodge the equality check.  Positions are not pinned -- the producer
     puts its common options at a fixed offset today, but that layout is not a contract.
+
+    Scanning STOPS at the first bare `--`: to argparse everything after the separator is a
+    positional argument and binds no option, so counting a post-`--` `--psql /tmp/stub` as
+    a binding would give "binding" a different meaning here than the recorded producer's
+    parser has.  This is definition consistency, NOT a load-bearing defense -- the
+    position-independent `--` refusal in the capture gate stack fires before any caller of
+    this function reads an argv containing one.  It stays anyway as depth: whoever reorders
+    those gates in the future must not silently reopen the divergence.
     """
 
     values: list[str] = []
     index = 0
     while index < len(argv):
+        if argv[index] == ARGPARSE_OPTIONS_TERMINATOR:
+            break
         base, separator, inline = argv[index].partition("=")
         if base == option:
             if separator:
@@ -1176,6 +1224,36 @@ def _validate_supervisor_execution(
                 f"run plan capture[{index}] argv kind binding {capture_argv[2:4]} differs from its "
                 f"declared kind {kind}"
             )
+        # FIRST grammar gate, and deliberately the FIRST thing every value gate below sees:
+        # a bare argparse `--` separator, refused position-independently -- flag position
+        # and value position alike.  capture.py registers no positional argument, so a `--`
+        # makes whatever follows an unrecognized positional and the recorded producer exits
+        # 2 inside argparse having collected nothing; `plan_author` never emits one.
+        #
+        # The ORDERING is load-bearing, not stylistic.  `_argv_option_values` stops at the
+        # first `--` (argparse's own binding semantics), so a `--` left to be judged later
+        # would first HIDE every binding after it from the equality gates below: an argv
+        # like `--schema-dump-host -- --psql /tmp/stub` puts the separator in VALUE
+        # position, where a flag-position-only grammar consumes it as a harmless value,
+        # while the stop-at-`--` scan reads only the pinned `/usr/bin/psql` before it.  The
+        # trailing rebinding of the producer's tooling would then never be seen -- a net
+        # regression against a pure position-independent scan.  Refusing the token itself,
+        # before anything reads bindings, is what keeps the tool-value pins total.
+        #
+        # Safe to pre-pose ahead of the four per-token family scans further below: a bare
+        # `--` reaches none of them (the seam and both abbreviation arms require
+        # `len(base) >= 3`, the help arm requires a `-h` prefix or a `len >= 3` prefix of
+        # `--help`), so no established refusal wording is swallowed.  The argv INDEX is in
+        # the message on purpose: it is what distinguishes a trailing `-- /tmp/whatever`
+        # from an argv that moved otherwise-correct pairs behind a separator.
+        for terminator_index, token in enumerate(capture_argv):
+            if token == ARGPARSE_OPTIONS_TERMINATOR:
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv carries a bare {ARGPARSE_OPTIONS_TERMINATOR} "
+                    f"end-of-options separator at argv[{terminator_index}]: the recorded producer "
+                    f"registers no positional argument, so it would exit inside argparse, and every "
+                    f"option binding after the separator is invisible to the parser"
+                )
         # Position AND uniqueness: `--kind` binds last-wins in the producer's parser, so
         # the fixed-offset check above only pins the FIRST binding.  A second full
         # `--kind <other>` appended anywhere would leave argv[2:4] intact while the
@@ -1286,9 +1364,11 @@ def _validate_supervisor_execution(
             # The two arms do not overlap (`"--help".startswith("-h")` is False) and
             # `-h=x` normalizes to base `-h`, so the prefix covers it too.  Clusters that
             # merely CONTAIN `h` without leading with it (`-xh`) exit 2 inside argparse
-            # before any help action runs; they are a whole-argv parser-viability question,
-            # which this module deliberately does not answer (see the tool-value map's
-            # recorded boundary), so they stay outside this gate's declared scope.
+            # before any help action runs, so they are NOT this family's business -- and no
+            # longer anybody's blind spot either: the closed-world pair grammar right after
+            # this loop refuses them as unregistered flag-position tokens, with its own
+            # wording, so this family's message keeps claiming exactly what it can prove
+            # (an exit inside the help action) and nothing more.
             if base.startswith("-h") or (len(base) >= 3 and "--help".startswith(base)):
                 raise EvidenceError(
                     f"run plan capture[{index}] argv carries {token}, an argparse help "
@@ -1307,6 +1387,61 @@ def _validate_supervisor_execution(
                         f"run plan capture[{index}] argv carries {token}, an argparse abbreviation "
                         f"of {option} that would rebind the pinned capture tooling value"
                     )
+        # SECOND grammar gate: `argv[2:]` must consume left-to-right as a sequence of
+        # pairs -- a registered production flag in its exact full spelling (`--flag value`
+        # or `--flag=value`) followed by a value that does not begin with `-`.  Every
+        # gate above answers "is this KNOWN-bad token present?"; this one closes the
+        # complement, so the exit-2 family has no surviving members left to enumerate.
+        #
+        # Placed AFTER the four per-token family scans deliberately: a seam token, a help
+        # token and an abbreviation are all "unregistered tokens" too, so running the
+        # grammar first would swallow their established, more specific wordings.  The
+        # grammar only adjudicates what those scans let through.
+        #
+        # The closed world is safe because the sole legitimate author is
+        # `plan_author.build_run_plan`, which emits nothing but full-spelling pairs whose
+        # values are kind names, a database name, a 40-hex SHA or absolute paths -- never a
+        # `-`-leading token, never an `=` spelling, never a positional.  The positive
+        # control over all twelve authored argvs pins that.
+        position = 2
+        while position < len(capture_argv):
+            token = capture_argv[position]
+            base, separator, inline = token.partition("=")
+            if base not in REGISTERED_CAPTURE_FLAGS:
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv token {token} is not a registered capture "
+                    f"option paired with a value: the recorded producer's parser knows no such "
+                    f"option, so it would exit inside argparse without collecting this capture"
+                )
+            if separator:
+                value = inline
+                position += 1
+            else:
+                if position + 1 >= len(capture_argv):
+                    # Same refusal CLASS as the unregistered token above (one wording for
+                    # "this token does not open a completed pair"), with the diagnostic
+                    # tail that actually applies: the option is registered, it just binds
+                    # nothing.
+                    raise EvidenceError(
+                        f"run plan capture[{index}] argv token {token} is not a registered capture "
+                        f"option paired with a value: it ends the argv with no value bound, so the "
+                        f"recorded producer's parser would exit inside argparse demanding one"
+                    )
+                value = capture_argv[position + 1]
+                position += 2
+            # A `-`-leading VALUE is the exit-2 family's last survivor, and it survives
+            # precisely on the options whose values are deliberately unpinned
+            # (`--schema-dump-host -xh` is `expected one argument` to the real parser).
+            # The rule is stated identically for both spellings -- `--schema-dump-host=-xh`
+            # happens to be exit-0 legal to argparse, but no `plan_author` value starts
+            # with `-` in EITHER spelling, so the closed world takes the strict reading and
+            # leaves no fork between the two forms for an author to aim at.
+            if value.startswith("-"):
+                raise EvidenceError(
+                    f"run plan capture[{index}] argv binds {base} to {value}, a value beginning "
+                    f"with '-': the recorded producer's parser would read it as another option "
+                    f"and exit inside argparse without collecting this capture"
+                )
         if kind in planned_output_owners:
             raise EvidenceError("run plan output label has duplicate producers")
         planned_output_owners[kind] = (f"capture:{kind}", 0)

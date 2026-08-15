@@ -6403,6 +6403,279 @@ def test_verifier_rejects_an_evidence_dir_stranded_by_a_relocated_capture_output
 
 
 # --------------------------------------------------------------------------- #
+# #1266: the EXIT-2 early-exit family, the last shape class the anchor series left
+# verifying PASS.  `-xh`, `--evidence-dirx`, a trailing `-- /tmp/whatever` and a
+# perfectly correct `--evidence-dir <expected>` pair moved BEHIND a `--` all satisfied
+# every identity anchor, exactly-once binding, tool-value pin and per-token family
+# scan -- while the recorded producer would have exited 2 inside `parse_args` having
+# collected nothing.  Two gates close it: a position-independent `--` refusal pre-posed
+# ahead of the value gates, and a closed-world pair grammar after the family scans.
+# --------------------------------------------------------------------------- #
+
+# Distinguishing substrings of the three grammar refusal classes.  Each test below
+# asserts its own class present AND the other two absent, the same attribution
+# discipline the #1263 tests use -- a single gate that fired on everything would look
+# identical from the outside otherwise.
+_SEPARATOR_WORDING = "end-of-options separator at argv["
+# One class for both flag-position failures (unknown token, and a registered option
+# left unpaired at the end): the verifier gives them a shared class phrase with
+# different diagnostic tails, so this substring is the class and the tails are
+# asserted separately where they matter.
+_UNREGISTERED_TOKEN_WORDING = "is not a registered capture option paired with a value"
+_VALUE_POSITION_WORDING = "a value beginning with '-'"
+_HELP_EARLY_EXIT_WORDING = "an argparse help early-exit token"
+_GRAMMAR_REFUSAL_WORDINGS = {
+    "separator": _SEPARATOR_WORDING,
+    "unregistered": _UNREGISTERED_TOKEN_WORDING,
+    "value_position": _VALUE_POSITION_WORDING,
+}
+
+
+def _assert_grammar_refusal_class(message: str, expected: str) -> None:
+    """The refusal is THIS grammar class and none of the neighbouring ones.
+
+    The four established capture refusal families (seam, help, both abbreviation arms)
+    and the plan<->ledger equality binding are asserted absent too: every mutation below
+    is applied to BOTH argv sides, so a refusal quoting the equality would mean the gate
+    under test never ran.
+    """
+
+    assert _GRAMMAR_REFUSAL_WORDINGS[expected] in message, message
+    for name, wording in _GRAMMAR_REFUSAL_WORDINGS.items():
+        if name != expected:
+            assert wording not in message, message
+    assert _SEAM_TOKEN_WORDING not in message, message
+    assert _HELP_EARLY_EXIT_WORDING not in message, message
+    assert _ABBREVIATION_WORDING not in message, message
+    assert _EVIDENCE_DIR_GATE_WORDING not in message, message
+    assert _CAPTURE_EQUALITY_ERROR not in message, message
+
+
+def _plan_capture_argv(bundle: dict[str, Any], kind: str) -> list[str]:
+    """The plan-side capture argv as it stands, so index expectations stay derived."""
+
+    plan = _read_ref(bundle["execution"]["run_plan"])
+    return list(next(item for item in plan["captures"] if item["kind"] == kind)["argv"])
+
+
+def _refusal_message(bundle: dict[str, Any]) -> str:
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    return str(excinfo.value)
+
+
+def test_verifier_rejects_a_capture_argv_carrying_an_unregistered_short_cluster(
+    tmp_path: Path,
+) -> None:
+    """`-xh`: the issue's first measured shape, PASS-verifying until the pair grammar.
+
+    argparse reads a single-dash token as a cluster of short options; the capture CLI
+    registers none beyond the auto `-h`, so `-xh` is `unrecognized arguments`, exit 2,
+    zero snapshots.  The help family cannot own it (`-xh` does not lead with `-h`, so no
+    help action ever runs) and no abbreviation arm sees it -- it is refused as a
+    flag-position token the closed world does not contain.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=["-xh"])
+    message = _refusal_message(bundle)
+    assert "-xh" in message
+    _assert_grammar_refusal_class(message, "unregistered")
+    # The unknown-option tail, not the unpaired-option one: `-xh` is the LAST token, so a
+    # grammar that checked pairing before registration would misattribute it.
+    assert "knows no such option" in message
+
+
+def test_verifier_rejects_a_capture_argv_carrying_an_unregistered_long_option(
+    tmp_path: Path,
+) -> None:
+    """`--evidence-dirx`: a SUPERstring of a pinned option, so no abbreviation arm sees it.
+
+    The abbreviation closure refuses proper PREFIXES (`--ev`, `--e`); `--evidence-dirx`
+    goes the other way, and argparse refuses it as unrecognized -- exit 2 with the
+    relational `--evidence-dir` equality still perfectly satisfied by the real pair.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="catalog_before", tokens=["--evidence-dirx", str(tmp_path / "elsewhere")]
+    )
+    message = _refusal_message(bundle)
+    assert "--evidence-dirx" in message
+    _assert_grammar_refusal_class(message, "unregistered")
+
+
+def test_verifier_rejects_a_capture_argv_with_a_trailing_options_terminator(
+    tmp_path: Path,
+) -> None:
+    """A trailing `-- /tmp/whatever`: capture.py registers no positional, so exit 2.
+
+    The refusal names the token AND its argv index; the index is what tells this shape
+    apart from the moved-pair shape below, whose separator sits two tokens earlier.
+    """
+
+    bundle = _bundle(tmp_path)
+    argv = _plan_capture_argv(bundle, "catalog_before")
+    _inject_capture_seam(bundle, tmp_path, kind="catalog_before", tokens=["--", "/tmp/whatever"])
+    message = _refusal_message(bundle)
+    assert f"bare -- end-of-options separator at argv[{len(argv)}]" in message
+    # Distinguishable from the moved-pair placement, which reports two tokens earlier.
+    assert f"argv[{len(argv) - 2}]" not in message
+    _assert_grammar_refusal_class(message, "separator")
+
+
+def test_verifier_rejects_a_capture_argv_whose_correct_pair_hides_behind_the_terminator(
+    tmp_path: Path,
+) -> None:
+    """The ugliest shape: a perfectly correct `--evidence-dir <expected>` pair, moved.
+
+    Nothing about the pair is wrong -- it binds exactly the directory the relational gate
+    derives.  It is simply behind a `--`, where argparse binds nothing, so the recorded
+    producer exits 2 for a MISSING required option.  The pre-posed separator refusal fires
+    first: the evidence-dir gate must not be the one speaking here, because reading this
+    argv through the (stop-at-`--`) scanner would report the pair as absent and blame the
+    author for something they did bind.
+    """
+
+    bundle = _bundle(tmp_path)
+    argv = _plan_capture_argv(bundle, "catalog_before")
+    at = argv.index("--evidence-dir")
+    moved = [*argv[:at], *argv[at + 2 :], "--", *argv[at : at + 2]]
+    # Non-vacuity: the pair really is intact and really did move, so the refusal below is
+    # about its PLACEMENT and nothing else.
+    assert sorted(moved) == sorted([*argv, "--"])
+    assert moved[-2:] == argv[at : at + 2]
+    _replace_capture_argv(bundle, tmp_path, kind="catalog_before", argv=moved)
+    message = _refusal_message(bundle)
+    assert f"bare -- end-of-options separator at argv[{len(argv) - 2}]" in message
+    assert f"argv[{len(argv)}]" not in message
+    _assert_grammar_refusal_class(message, "separator")
+
+
+def test_verifier_rejects_a_dash_leading_value_on_an_unpinned_capture_option(
+    tmp_path: Path,
+) -> None:
+    """`--schema-dump-host -xh`: the exit-2 family's last survivor, by construction.
+
+    The two `--schema-dump-*` options are deliberately value-UNPINNED (their consuming
+    pg_dump/docker command identities are pinned on the command side), so no equality gate
+    inspects what they bind.  To the real parser this is `expected one argument`, exit 2;
+    without the value-position rule the pair grammar would have called it a legitimate
+    pair and waved the argv through.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(
+        bundle, tmp_path, kind="schema_dump_list", tokens=["--schema-dump-host", "-xh"]
+    )
+    message = _refusal_message(bundle)
+    # Both ends of the offending binding are named: which option, and what it was aimed at.
+    assert "--schema-dump-host" in message
+    assert "-xh" in message
+    _assert_grammar_refusal_class(message, "value_position")
+
+
+def test_verifier_rejects_a_value_position_terminator_that_would_blind_the_tool_pins(
+    tmp_path: Path,
+) -> None:
+    """P1 regression lock: a value-position `--` must not buy a free tool rebinding.
+
+    `--schema-dump-host -- --psql /tmp/stub` is the shape that makes the gate ORDER
+    load-bearing.  A flag-position-only grammar consumes the `--` as an (unpinned)
+    schema-dump value, while `_argv_option_values` stops scanning at it -- so the
+    exactly-once `--psql` equality would read only the pinned `/usr/bin/psql` before the
+    separator and never see the producer being re-pointed at a stub afterwards.  That is
+    strictly worse than the position-independent scan this module had before, which is
+    why the `--` refusal is pre-posed ahead of every value gate.
+    """
+
+    bundle = _bundle(tmp_path)
+    argv = _plan_capture_argv(bundle, "schema_dump_list")
+    tokens = ["--schema-dump-host", "--", "--psql", "/tmp/stub"]
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=tokens)
+    # The hazard itself, measured on the very argv under test: the option-value scanner
+    # alone reports the argv as still bound to the committed psql, so the ONLY thing
+    # standing between this bundle and a PASS is the pre-posed separator refusal.
+    assert evidence._argv_option_values([*argv, *tokens], "--psql") == ["/usr/bin/psql"]
+    assert "/tmp/stub" in [*argv, *tokens]
+    message = _refusal_message(bundle)
+    assert f"bare -- end-of-options separator at argv[{len(argv) + 1}]" in message
+    _assert_grammar_refusal_class(message, "separator")
+
+
+def test_verifier_rejects_a_capture_argv_ending_with_an_unpaired_registered_option(
+    tmp_path: Path,
+) -> None:
+    """A dangling registered flag is not a pair either -- same refusal class.
+
+    `--schema-dump-host` is used because it is the only registered family whose value no
+    equality gate pins: a dangling `--psql` would be caught by its exactly-once value
+    check long before the grammar, so it could not exercise this branch.
+    """
+
+    bundle = _bundle(tmp_path)
+    _inject_capture_seam(bundle, tmp_path, kind="schema_dump_list", tokens=["--schema-dump-host"])
+    message = _refusal_message(bundle)
+    assert "--schema-dump-host" in message
+    _assert_grammar_refusal_class(message, "unregistered")
+    # The unpaired tail, not the unknown-option one: this option IS registered.
+    assert "ends the argv with no value bound" in message
+    assert "knows no such option" not in message
+
+
+def test_capture_grammar_flag_set_equals_the_capture_cli_registered_surface() -> None:
+    """The structural premise the closed world stands on, pinned against the real parser.
+
+    The verifier restates its flag set as LITERALS rather than importing capture.py (the
+    module's non-derived-oracle posture), so nothing makes the two follow each other --
+    except this test.  Add a flag to the capture CLI without adding it here and the
+    grammar starts refusing a legitimate production spelling; delete one and the grammar
+    keeps admitting a token the producer no longer understands.  Either way it reddens
+    HERE, at the seam, instead of in a forensic verdict months later.
+
+    The union spells out exactly what the grammar deliberately does NOT admit: argparse's
+    auto `-h`/`--help` pair (owned by the help early-exit scan) and the `--self-test-*`
+    seams (owned by the #1250 seam scan) -- both refused BEFORE the grammar runs, so
+    granting them standing in its allow-set would state the opposite of what those gates
+    decided.
+    """
+
+    parser = _capture._parser()
+    registered = {option for action in parser._actions for option in action.option_strings}
+    seams = {option for option in registered if option.startswith(evidence.SELF_TEST_SEAM_PREFIX)}
+    assert set(evidence.REGISTERED_CAPTURE_FLAGS) | {"-h", "--help"} | seams == registered
+    # Measured surface today, so a change in either direction has to be conscious.
+    assert len(registered) == 17
+    assert len(evidence.REGISTERED_CAPTURE_FLAGS) == 13
+    # Non-vacuity: the tuple has no duplicates (a dupe would let the equality above hold
+    # with a missing flag) and grants no seam any standing.
+    assert len(set(evidence.REGISTERED_CAPTURE_FLAGS)) == len(evidence.REGISTERED_CAPTURE_FLAGS)
+    assert not set(evidence.REGISTERED_CAPTURE_FLAGS) & seams
+    assert seams == {"--self-test-free-bytes", "--self-test-docker-seam"}
+
+
+def test_argv_option_values_stops_scanning_at_the_options_terminator() -> None:
+    """`--` means "no more options" to argparse, so it must mean that here too.
+
+    Definition consistency, exercised directly rather than only through the gate stack:
+    a binding BEFORE the separator counts, an identical binding after it does not, in
+    both argparse spellings.  The match is exact equality -- every registered flag starts
+    with `--` as well, so a prefix test would stop the scan on the first real option.
+    """
+
+    assert evidence._argv_option_values(["--psql", "/usr/bin/psql", "--", "--psql", "/tmp/stub"], "--psql") == [
+        "/usr/bin/psql"
+    ]
+    assert evidence._argv_option_values(["--", "--psql", "/tmp/stub"], "--psql") == []
+    assert evidence._argv_option_values(
+        ["--psql=/usr/bin/psql", "--", "--psql=/tmp/stub"], "--psql"
+    ) == ["/usr/bin/psql"]
+    # Not a prefix rule: a real option is not a terminator, and neither is `--=x`.
+    assert evidence._argv_option_values(["--psql", "/usr/bin/psql"], "--psql") == ["/usr/bin/psql"]
+    assert evidence._argv_option_values(["--=x", "--psql", "/tmp/stub"], "--psql") == ["/tmp/stub"]
+
+
+# --------------------------------------------------------------------------- #
 # #1265: path canonicality is a PRODUCER-side precondition.  The verifier renders
 # ledger-side artifact refs through `str(Path(...))` but compares the plan side
 # VERBATIM, so a non-canonical `--root`/`--repo` used to author a perfectly
