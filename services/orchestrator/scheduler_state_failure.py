@@ -472,7 +472,29 @@ def _missing_upstream_forecast_artifact_evidence(
             forcing_provenance = {**forcing_provenance, "artifact_exists": True}
         else:
             forcing_provenance = _journal_forcing_provenance(state, forcing_uri)
-            forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_uri)
+            # Same ruling as the sidecar tier, now on the journal/direct tiers
+            # (#1365): the producer's ``forcing_package_uri`` is DIRECTORY-shaped,
+            # and the object-path validator rejects it, so probing it verbatim
+            # reported "missing" for every physically present production package.
+            # The probe object becomes the derived manifest FILE key; the blocker
+            # keeps the recorded package uri as ``artifact_uri`` (the derived key
+            # is evidence, never the artifact reference).
+            forcing_probe_uri = (
+                _package_manifest_probe_uri(forcing_uri)
+                if _is_directory_shaped_object_uri(forcing_uri)
+                else forcing_uri
+            )
+            if forcing_provenance is not None:
+                # Named unconditionally, mirroring the sidecar tier's evidence
+                # shape: an operator reading a blocker must be able to tell WHAT
+                # was probed without re-deriving it.  ``package_uri`` means the
+                # recorded reference was already a file key and was probed as-is.
+                forcing_provenance = {
+                    **forcing_provenance,
+                    "probe": "manifest" if forcing_probe_uri != forcing_uri else "package_uri",
+                    "probe_key": _evidence_safe(forcing_probe_uri),
+                }
+            forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_probe_uri)
             if forcing_missing:
                 return (
                     _artifact_blocker_evidence(
@@ -501,6 +523,15 @@ def _missing_upstream_forecast_artifact_evidence(
     )
     copyback_required = restart_stage in _COPYBACK_REQUIRED_RESTART_STAGES or _copyback_source_required(state)
     if copyback_uri not in (None, ""):
+        # #1365 D3: the copyback leg shares the probe, so the object branch's
+        # root-unconfigured fail-closed ruling
+        # (``unsafe_reason="object_store_root_unconfigured"``) applies to it
+        # identically.  The forcing tiers' directory-shape witness derivation does
+        # NOT: a copyback source directory has no canonical witness filename
+        # (``forcing_package.json`` is forcing-producer domain), and the repo has
+        # no production writer of ``copyback_source_uri`` to define one.  A
+        # directory-shaped copyback uri therefore stays fail-closed via the probe's
+        # ``ValueError`` leg rather than being probed at a fabricated witness key.
         copyback_missing, copyback_unsafe_reason = _artifact_uri_missing_status(candidate, copyback_uri)
     else:
         copyback_missing, copyback_unsafe_reason = True, None
@@ -709,7 +740,43 @@ def _sidecar_manifest_probe_key(sidecar_key_dir: str) -> str:
     object-path validator rejects.
     """
 
-    return f"{sidecar_key_dir.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+    return _package_manifest_probe_uri(sidecar_key_dir)
+
+
+def _package_manifest_probe_uri(package_uri: str) -> str:
+    """Join a forcing package prefix with the producer's manifest filename (#1365).
+
+    THE single derivation of a forcing package's witness object, shared by the
+    object-store sidecar tier (``_sidecar_manifest_probe_key``) and the
+    journal/direct tier so the two cannot drift.  Literally the producer's own
+    ``workers/forcing_producer/producer._package_manifest_uri`` construction with
+    the producer's default ``package_manifest_filename``
+    (``_FORCING_PACKAGE_MANIFEST_FILENAME``); no caller may hand-join the
+    manifest name.
+
+    Surrounding whitespace is stripped for the same reason the probe strips it:
+    a recorded uri with a trailing space would otherwise fabricate a key with an
+    empty path segment.
+    """
+
+    return f"{package_uri.strip().rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+
+
+def _is_directory_shaped_object_uri(value: str) -> bool:
+    """True for a non-local object uri that names a PREFIX, not a file key (#1365).
+
+    The forcing producer records ``forcing_package_uri`` as a directory uri
+    (``producer._directory_uri``: 5 canonical segments, trailing ``/``), which the
+    closed-world object-path validator rejects outright (it admits file keys only,
+    ``len(parts) > len(pattern.segments)``).  Handing one to the existence probe
+    swallows that ``ValueError`` into a false "missing" for a package that is
+    physically present, so the shape is detected here and the witness FILE key is
+    derived before probing.  Local paths are excluded: the local leg stats the
+    path itself and needs no witness object.
+    """
+
+    stripped = value.strip()
+    return bool(stripped) and stripped.endswith("/") and not _looks_like_local_uri_or_path(stripped)
 
 
 def _sidecar_recorded_manifest_uri(record: Mapping[str, Any]) -> str | None:
@@ -813,6 +880,17 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
     if not value:
         return True, None
     if value.startswith("s3://") or not _looks_like_local_uri_or_path(value):
+        if not _object_store_root_configured(candidate):
+            # #1365 D2: ``_object_manifest_is_missing`` fail-OPENS (``return
+            # False``) for ANY uri when no root is configured -- so a guard that
+            # cannot probe would vouch for the existence of even a bogus key.
+            # Fail closed instead, with a reason that keeps "no probe ran"
+            # distinguishable from "probed, determined absent"
+            # (``unsafe_reason=None``); same doctrine as the sidecar tier's
+            # ``store_unconfigured``.  ``_object_manifest_is_missing`` itself is
+            # left untouched: its raw-manifest repair-lane callers have different
+            # fail-open consequences and are out of scope.
+            return True, "object_store_root_unconfigured"
         try:
             return _object_manifest_is_missing(candidate, value), None
         except (OSError, ValueError):
@@ -826,6 +904,19 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
         return not path.exists(), None
     except (OSError, ValueError):
         return True, "local_artifact_path_unresolvable"
+
+
+def _object_store_root_configured(candidate: SchedulerCandidateLike) -> bool:
+    """Whether an object-store root exists for the probe to resolve keys against.
+
+    Reads exactly the two sources ``_object_manifest_is_missing`` itself reads,
+    in the same order, so the fail-closed pre-check and the probe can never
+    disagree about which store (if any) is in play.
+    """
+
+    resource_profile = getattr(candidate, "resource_profile", None)
+    profile_root = resource_profile.get("object_store_root") if isinstance(resource_profile, Mapping) else None
+    return (profile_root or os.getenv("OBJECT_STORE_ROOT")) not in (None, "")
 
 
 def _looks_like_local_uri_or_path(value: str) -> bool:
