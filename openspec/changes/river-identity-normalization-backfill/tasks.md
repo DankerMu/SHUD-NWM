@@ -61,15 +61,15 @@
       --no-interactive` 通过
 - [x] 2.6 diff 自证：000047 文件、parser.py、apps/services 查询路径、
       #1069 车道脚本零触碰；write guard 既有断言零改动
-- [ ] 2.7 node-27：000050 应用（加列语句计时记录）+ backfill dry-run +
+- [x] 2.7 node-27：000050 应用（加列语句计时记录）+ backfill dry-run +
       `--probe` receipt（逐 chunk 行数/字节/耗时/锁等待/膨胀预估与
       `/home` 余量/压缩与 active chunk 跳过清单/unmatched 计数；AC-3）
-- [ ] 2.8 node-27：throwaway 库 integration 子集（cutover positive path
+- [x] 2.8 node-27：throwaway 库 integration 子集（cutover positive path
       + 压缩往返）通过 + 定向真实 DB pytest
 
 ## 3. 交付记录
 
-- [ ] 3.1 PR body：D5 偏离记录（生产 cutover 路由 + "维表"按意图交付）+
+- [x] 3.1 PR body：D5 偏离记录（生产 cutover 路由 + "维表"按意图交付）+
       AC 逐条覆盖声明
-- [ ] 3.2 PR body：node-27 receipt 摘要 + 生产 enforce 全量回填与 cutover
+- [x] 3.2 PR body：node-27 receipt 摘要 + 生产 enforce 全量回填与 cutover
       的后续窗口声明
