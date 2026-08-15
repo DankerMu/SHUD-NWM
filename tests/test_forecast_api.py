@@ -573,14 +573,24 @@ class SqlCaptureCursor:
     def __init__(self, rows_by_statement: list[list[dict[str, Any]]]) -> None:
         self.rows_by_statement = rows_by_statement
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
+        self.header_executions: list[tuple[str, Any]] = []
         self._pending_regclass: dict[str, Any] | None = None
         self._pending_columns: list[dict[str, Any]] | None = None
+        self._pending_header: list[dict[str, Any]] | None = None
 
     def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
         probe = self._regclass_probe_result(statement)
         if probe is not None:
             # 探针不计入 executions：测试按下标/计数断言的是主查询序列。
             self._pending_regclass = probe
+            return
+        header = self._scan_header_rows(statement)
+        if header is not None:
+            # 同理：fallback 的 scan header 预取投影候选标量，不消费 rows_by_statement，
+            # 也不计入 executions（用 header_executions 单列，绑定契约由
+            # tests/test_qhh_latest_fallback_pushdown.py 实打实执行验证）。
+            self.header_executions.append((statement, parameters))
+            self._pending_header = header
             return
         self._pending_regclass = None
         self._pending_columns = None
@@ -595,7 +605,31 @@ class SqlCaptureCursor:
                 return {"reg": name}
         return {"reg": None}
 
+    def _scan_header_rows(self, statement: str) -> list[dict[str, Any]] | None:
+        if "LOWER(source_id) AS source_id_lower" not in statement or "FROM candidate_runs" not in statement:
+            return None
+        rows = self.rows_by_statement[0] if self.rows_by_statement else []
+        if not rows and self.rows_by_statement:
+            # header 与重查询合起来是"一次候选取数" = 一个 rows_by_statement 槽位。
+            # header 为空时重查询不执行，槽位由 header 消费；非空时留给重查询。
+            self.rows_by_statement.pop(0)
+        return [
+            {
+                "run_id": row.get("run_id"),
+                "forcing_version_id": row.get("forcing_version_id"),
+                "basin_version_id": row.get("basin_version_id"),
+                "river_network_version_id": row.get("river_network_version_id"),
+                "source_id_lower": str(row.get("source_id") or "").lower(),
+                "display_start_time": row.get("display_start_time"),
+                "display_end_time": row.get("display_end_time"),
+            }
+            for row in rows[:1]
+        ]
+
     def fetchall(self) -> list[dict[str, Any]]:
+        if self._pending_header is not None:
+            result, self._pending_header = self._pending_header, None
+            return result
         if self._pending_columns is not None:
             result, self._pending_columns = self._pending_columns, None
             return result
@@ -1791,9 +1825,12 @@ def test_latest_qhh_display_product_selects_heihe_basin_and_filters_sql_by_reque
     assert response["basin_id"] == "basins_heihe"
     assert response["run_id"] == "heihe_gfs_2026050700"
     assert response["status"] == "ready"
-    # SQL candidate query MUST filter by the requested basin (param index 1), not basins_qhh.
+    # SQL candidate query MUST filter by the requested basin, not basins_qhh —
+    # both in the scan header prefetch and in the heavy statement it feeds.
     _, parameters = store.cursor.executions[0]
-    assert parameters[1] == "basins_heihe"
+    assert parameters["basin_id"] == "basins_heihe"
+    _, header_parameters = store.cursor.header_executions[0]
+    assert header_parameters["basin_id"] == "basins_heihe"
 
 
 def test_latest_qhh_display_product_default_basin_is_qhh_backward_compatible() -> None:
@@ -1808,7 +1845,7 @@ def test_latest_qhh_display_product_default_basin_is_qhh_backward_compatible() -
     assert response["run_id"] == "qhh_gfs_2026050700"
     assert response["status"] == "ready"
     _, parameters = store.cursor.executions[0]
-    assert parameters[1] == "basins_qhh"
+    assert parameters["basin_id"] == "basins_qhh"
 
 
 def test_latest_qhh_display_product_m22_cross_plane_strict_call_without_basin_id_unchanged() -> None:
@@ -1839,7 +1876,7 @@ def test_latest_qhh_display_product_m22_cross_plane_strict_call_without_basin_id
     assert response["availability"]["ready"] is True
     _, parameters = store.cursor.executions[0]
     # Default basin param stays basins_qhh; strict identity predicates remain AND-combined.
-    assert parameters[1] == "basins_qhh"
+    assert parameters["basin_id"] == "basins_qhh"
 
 
 def test_latest_qhh_display_product_target_basin_no_run_returns_honest_unavailable() -> None:
@@ -1955,19 +1992,24 @@ def test_latest_qhh_display_product_strict_match_uses_all_identity_predicates() 
 
     statement, parameters = store.cursor.executions[0]
     candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
-    assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
-    assert "AND h.run_id = %s" in candidate_cte
-    assert "AND h.cycle_time = %s" in candidate_cte
-    assert "AND h.model_id = %s" in candidate_cte
-    assert parameters[:7] == (
-        QHH_LATEST_EXPECTED_HORIZON_HOURS,
-        "basins_qhh",
-        "GFS",
-        "qhh_gfs_2026050700",
-        cycle_time,
-        "basins_qhh_shud",
-        1,
-    )
+    assert "LOWER(h.source_id) = LOWER(%(source_id)s)" in candidate_cte
+    assert "AND h.run_id = %(identity_run_id)s" in candidate_cte
+    assert "AND h.cycle_time = %(identity_cycle_time)s" in candidate_cte
+    assert "AND h.model_id = %(identity_model_id)s" in candidate_cte
+    assert {key: parameters[key] for key in ("horizon", "basin_id", "source_id")} == {
+        "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basin_id": "basins_qhh",
+        "source_id": "GFS",
+    }
+    assert {key: parameters[key] for key in ("identity_run_id", "identity_cycle_time", "identity_model_id")} == {
+        "identity_run_id": "qhh_gfs_2026050700",
+        "identity_cycle_time": cycle_time,
+        "identity_model_id": "basins_qhh_shud",
+    }
+    assert parameters["candidate_limit"] == 1
+    header_statement, header_parameters = store.cursor.header_executions[0]
+    assert "AND h.run_id = %(identity_run_id)s" in header_statement
+    assert header_parameters["identity_run_id"] == "qhh_gfs_2026050700"
     assert response["run_id"] == "qhh_gfs_2026050700"
     assert response["cycle_time"] == "2026-05-07T00:00:00Z"
     assert response["model_id"] == "basins_qhh_shud"
@@ -2047,7 +2089,7 @@ def test_latest_qhh_display_product_strict_older_ready_run_does_not_return_newer
     )
 
     statement, _parameters = store.cursor.executions[0]
-    assert "AND h.run_id = %s" in statement
+    assert "AND h.run_id = %(identity_run_id)s" in statement
     assert response["run_id"] == "qhh_gfs_older_ready_2026050700"
     assert response["cycle_time"] == "2026-05-07T00:00:00Z"
 
@@ -2088,12 +2130,15 @@ def test_latest_qhh_display_product_strict_mismatch_returns_unavailable_without_
     assert requested_identity["run_id"] == kwargs["run_id"]
     assert requested_identity["model_id"] == kwargs["model_id"]
     assert requested_identity["cycle_time"] == str(kwargs["cycle_time"]).replace("+00:00", "Z")
-    assert len(store.cursor.executions) == 2
-    ready_statement, ready_parameters = store.cursor.executions[0]
-    context_statement, context_parameters = store.cursor.executions[1]
-    assert "AND h.run_id = %s" in ready_statement
+    # The strict candidate set is empty, so the scan header short-circuits the
+    # heavy statement: the only executed statement left is the context query.
+    assert len(store.cursor.executions) == 1
+    assert len(store.cursor.header_executions) == 1
+    ready_statement, ready_parameters = store.cursor.header_executions[0]
+    context_statement, context_parameters = store.cursor.executions[0]
+    assert "AND h.run_id = %(identity_run_id)s" in ready_statement
     assert "AND h.run_id = %s" in context_statement
-    assert ready_parameters[6] == 1
+    assert ready_parameters["candidate_limit"] == 1
     assert context_parameters[6] == 1
 
 
@@ -2197,7 +2242,7 @@ def test_latest_qhh_display_product_default_search_is_latest_candidate_only() ->
         store.latest_qhh_display_product("GFS")
 
     _statement, parameters = store.cursor.executions[0]
-    assert parameters[3] == QHH_LATEST_SEARCH_LIMIT
+    assert parameters["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
     assert error.value.details["candidate_count"] == 1
     assert error.value.details["reported_candidate_count"] == 1
     assert error.value.details["candidates"][0]["run_id"] == "qhh_gfs_2026060100"
@@ -2667,11 +2712,11 @@ def test_latest_qhh_display_product_caps_long_display_window_to_expected_horizon
 
     statement, parameters = store.cursor.executions[0]
     candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
-    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in candidate_cte
+    assert "h.cycle_time + (%(horizon)s * INTERVAL '1 hour')" in candidate_cte
     assert "LEAST(\n                        h.end_time," in candidate_cte
     assert "fst.valid_time <= cr.display_end_time" in statement
     assert "rt.valid_time <= cr.display_end_time" in statement
-    assert parameters[0] == QHH_LATEST_EXPECTED_HORIZON_HOURS
+    assert parameters["horizon"] == QHH_LATEST_EXPECTED_HORIZON_HOURS
     assert response["valid_time_end"] == "2026-05-14T00:00:00Z"
     assert response["available_horizon_hours"] == QHH_LATEST_EXPECTED_HORIZON_HOURS
     assert response["shorter_horizon"] is False
@@ -2684,13 +2729,13 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
 
     statement, parameters = store.cursor.executions[0]
     candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
-    assert "bv.basin_id = %s" in candidate_cte
-    assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
+    assert "bv.basin_id = %(basin_id)s" in candidate_cte
+    assert "LOWER(h.source_id) = LOWER(%(source_id)s)" in candidate_cte
     assert "h.status IN ('succeeded', 'parsed', 'published')" in candidate_cte
     assert "h.run_type = 'forecast'" in candidate_cte
     assert "h.cycle_time IS NOT NULL" in candidate_cte
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
-    assert "LIMIT %s" in candidate_cte
+    assert "LIMIT %(candidate_limit)s" in candidate_cte
     assert "FROM met.forcing_station_timeseries" not in candidate_cte
     assert "FROM hydro.river_timeseries" not in candidate_cte
     station_cte = statement[statement.index("station_sample_rows AS") : statement.index("river_sample_rows AS")]
@@ -2703,7 +2748,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "iw.station_id = fst.station_id" in station_cte
     assert "iw.variable = fst.variable" in station_cte
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in candidate_cte
-    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in candidate_cte
+    assert "h.cycle_time + (%(horizon)s * INTERVAL '1 hour')" in candidate_cte
     assert "fst.valid_time >= cr.display_start_time" in station_cte
     assert "fst.valid_time <= cr.display_end_time" in station_cte
     assert "station_identity_coverage AS" in station_cte
@@ -2720,7 +2765,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "cr.expected_station_count" in station_cte
     assert "station_count = expected_station_count" in station_cte
     assert "COUNT(DISTINCT variable) AS complete_variable_count" in station_cte
-    assert "HAVING COUNT(DISTINCT variable) = %s" in station_cte
+    assert "HAVING COUNT(DISTINCT variable) = %(variable_count)s" in station_cte
     assert "MIN(valid_time) AS valid_time_start" in station_cte
     assert "MAX(valid_time) AS valid_time_end" in station_cte
     assert "MIN(valid_time) AS station_valid_time_start" in station_cte
@@ -2747,14 +2792,21 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "segment_count = expected_segment_count" in hydro_cte
     assert "MIN(valid_time) AS river_valid_time_start" in hydro_cte
     assert "MAX(valid_time) AS river_valid_time_end" in hydro_cte
-    assert parameters == (
-        QHH_LATEST_EXPECTED_HORIZON_HOURS,
-        "basins_qhh",
-        "GFS",
-        QHH_LATEST_SEARCH_LIMIT,
-        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
-        6,
-    )
+    assert parameters == {
+        "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basin_id": "basins_qhh",
+        "source_id": "GFS",
+        "candidate_limit": QHH_LATEST_SEARCH_LIMIT,
+        "variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+        "variable_count": 6,
+        "scan_run_id": "qhh_gfs_2026050700",
+        "scan_forcing_version_id": "forc_qhh_gfs_2026050700_basins_qhh_shud",
+        "scan_basin_version_id": "basins_qhh_vbasins",
+        "scan_river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "scan_source_id_lower": "gfs",
+        "scan_display_start": _dt("2026-05-07T00:00:00Z"),
+        "scan_display_end": _dt("2026-05-14T00:00:00Z"),
+    }
     assert response["quality"]["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
     assert response["quality"]["search_limit"] == QHH_LATEST_SEARCH_LIMIT
     assert response["quality"]["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
@@ -2802,22 +2854,26 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
     with pytest.raises(ForecastStoreError) as error:
         store.latest_qhh_display_product("GFS")
 
-    ready_statement, ready_parameters = store.cursor.executions[0]
-    context_statement, context_parameters = store.cursor.executions[1]
+    # No ready candidate: the scan header answers that on its own and the heavy
+    # statement (the only one that touches the two hypertables) never runs, so
+    # the context query is the single executed statement.
+    ready_statement, ready_parameters = store.cursor.header_executions[0]
+    context_statement, context_parameters = store.cursor.executions[0]
+    assert len(store.cursor.executions) == 1
     assert "h.status IN ('succeeded', 'parsed', 'published')" in ready_statement
-    assert "FROM met.forcing_station_timeseries" in ready_statement
-    assert "FROM hydro.river_timeseries" in ready_statement
+    assert "FROM met.forcing_station_timeseries" not in ready_statement
+    assert "FROM hydro.river_timeseries" not in ready_statement
     assert "h.status NOT IN ('succeeded', 'parsed', 'published')" in context_statement
     assert "FROM met.forcing_station_timeseries" not in context_statement
     assert "FROM hydro.river_timeseries" not in context_statement
-    assert ready_parameters == (
-        QHH_LATEST_EXPECTED_HORIZON_HOURS,
-        "basins_qhh",
-        "GFS",
-        QHH_LATEST_SEARCH_LIMIT,
-        ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
-        6,
-    )
+    assert ready_parameters == {
+        "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basin_id": "basins_qhh",
+        "source_id": "GFS",
+        "candidate_limit": QHH_LATEST_SEARCH_LIMIT,
+        "variables": ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"],
+        "variable_count": 6,
+    }
     assert context_parameters == (
         QHH_LATEST_EXPECTED_HORIZON_HOURS,
         "basins_qhh",

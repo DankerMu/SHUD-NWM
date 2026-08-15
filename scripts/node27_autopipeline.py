@@ -1088,7 +1088,15 @@ def _publish_display_runs(database_url: str) -> int:
     publishes q_down products after parsed river_timeseries rows appear so the
     overlay registers without waiting for compute-side jobs. Idempotent
     (published runs and runs without timeseries are left untouched), matching the
-    ``_already_ingested_runs`` completeness predicate."""
+    ``_already_ingested_runs`` completeness predicate.
+
+    Status-only on purpose: ``updated_at`` means "run data changed" (register,
+    mark_run_parsed), and display coverage staleness is
+    ``coverage.refreshed_at < run.updated_at``. Bumping it here would re-stale
+    every run whose coverage phase 2 just refreshed, making the cron backstop
+    recompute each freshly published run for nothing. The MVT tile revision
+    still rotates on publish because its digest basis includes ``status``
+    (apps/api/routes/hydro_display.py ``_run_source_version``)."""
     conn = psycopg2.connect(database_url)
     try:
         with conn:
@@ -1096,7 +1104,7 @@ def _publish_display_runs(database_url: str) -> int:
                 cur.execute(
                     """
                     UPDATE hydro.hydro_run h
-                    SET status = 'published', updated_at = now()
+                    SET status = 'published'
                     WHERE h.status = 'parsed'
                       AND EXISTS (
                           SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id

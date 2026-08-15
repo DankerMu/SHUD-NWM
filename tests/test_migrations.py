@@ -397,8 +397,26 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
     ).read_text(encoding="utf-8")
-    query_source = store_source[
-        store_source.index("def _fetch_latest_qhh_display_candidates") : store_source.index(
+    # The candidate_runs CTE now lives in one module-level constant shared by the
+    # fallback's scan header and its heavy statement, so bind the candidate
+    # assertions to that constant and everything else to the fallback method
+    # ALONE (endpoint narrowed to the fast path's def). A slice that ran on to
+    # _fetch_station_for_series also covered the fast path and the
+    # unavailable-context query, where most of these literals exist too — it
+    # would have gone quietly green on a broken fallback.
+    candidate_source = store_source[
+        store_source.index("_QHH_LATEST_CANDIDATE_RUNS_SQL = ") : store_source.index(
+            "def _qhh_latest_candidate_runs_sql"
+        )
+    ]
+    fallback_source = store_source[
+        store_source.index("def _fetch_latest_qhh_display_candidates(") : store_source.index(
+            "def _fetch_latest_qhh_display_candidates_fast"
+        )
+    ]
+    query_source = candidate_source + fallback_source
+    context_source = store_source[
+        store_source.index("def _fetch_latest_qhh_display_unavailable_context") : store_source.index(
             "def _fetch_station_for_series"
         )
     ]
@@ -486,13 +504,13 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert '"index": "river_timeseries_pkey"' not in index_evidence_source
     assert '"status": "covered_by_primary_key_prefix"' not in index_evidence_source
 
-    assert "LOWER(h.source_id) = LOWER(%s)" in query_source
+    assert "LOWER(h.source_id) = LOWER(%(source_id)s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
     assert "h.status IN ('succeeded', 'parsed', 'published')" in query_source
-    assert "h.status NOT IN ('succeeded', 'parsed', 'published')" in query_source
+    assert "h.status NOT IN ('succeeded', 'parsed', 'published')" in context_source
     assert "h.cycle_time IS NOT NULL" in query_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
-    assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
+    assert "QHH_LATEST_CONTEXT_LIMIT" in context_source
     assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source
     assert "fst.basin_version_id = cr.basin_version_id" in query_source
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in query_source
@@ -512,7 +530,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "cr.expected_station_count" in query_source
     assert "station_count = expected_station_count" in query_source
     assert "COUNT(DISTINCT variable) AS complete_variable_count" in query_source
-    assert "HAVING COUNT(DISTINCT variable) = %s" in query_source
+    assert "HAVING COUNT(DISTINCT variable) = %(variable_count)s" in query_source
     assert "MIN(valid_time) AS valid_time_start" in query_source
     assert "MAX(valid_time) AS valid_time_end" in query_source
     assert "MIN(valid_time) AS station_valid_time_start" in query_source
@@ -536,7 +554,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "MIN(valid_time) AS river_valid_time_start" in query_source
     assert "MAX(valid_time) AS river_valid_time_end" in query_source
     assert "GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time" in query_source
-    assert "h.cycle_time + (%s * INTERVAL '1 hour')" in query_source
+    assert "h.cycle_time + (%(horizon)s * INTERVAL '1 hour')" in query_source
     assert "fst.valid_time >= cr.display_start_time" in query_source
     assert "fst.valid_time <= cr.display_end_time" in query_source
     assert "rt.valid_time >= cr.display_start_time" in query_source

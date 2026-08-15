@@ -192,6 +192,12 @@ echo "[$(ts)] autopipe: start" >> "$LOG"
 START=$(date +%s)
 
 cd "$REPO" || { echo "[$(ts)] autopipe: cannot cd $REPO" >> "$LOG"; exit 1; }
+# Phases stay serialized under the single tick lock (not split); each one only
+# reports its own elapsed_sec so a slow tick names its culprit instead of
+# leaving the whole-tick total to guesswork. One line per EXECUTED phase: a
+# skipped phase logs nothing, and the ingest line below is emitted before the
+# preflight rc=2 early exit because ingest did run.
+PHASE_START=$(date +%s)
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_autopipeline.py" \
   --object-store-root "${OBJECT_STORE_ROOT:-}" \
   --basins-root "${BASINS_ROOT:-}" \
@@ -199,6 +205,8 @@ cd "$REPO" || { echo "[$(ts)] autopipe: cannot cd $REPO" >> "$LOG"; exit 1; }
   --workers "${AUTOPIPE_RUN_WORKERS:-1}" \
   --exclude-basins "${AUTOPIPE_EXCLUDE_BASINS:-}" >> "$LOG" 2>&1
 RC=$?
+PHASE_END=$(date +%s)
+echo "[$(ts)] autopipe: phase=ingest elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"
 
 if [ "$RC" -eq 2 ]; then
   END=$(date +%s)
@@ -206,16 +214,23 @@ if [ "$RC" -eq 2 ]; then
   exit "$RC"
 fi
 
-# Backstop: materialize display coverage for any run still missing/stale it so
-# latest-product keeps the <1s fast path (per-run refresh is wired in the
-# autopipeline, but a run that failed mid-refresh, or coverage seeded out of
-# band, is healed here). Owned by Mission-4; we only invoke it. --skip-fresh
-# makes this cheap + resumable. Non-fatal: never masks the ingest exit code.
+# Backstop: materialize display coverage for any run still missing it, or whose
+# data changed after the last refresh, so latest-product keeps the <1s fast path
+# (per-run refresh is wired in the autopipeline; a run that failed mid-refresh,
+# or one that never got one, is healed here). Staleness is
+# `coverage.refreshed_at < run.updated_at`, and publish is a status-only
+# transition — `updated_at` marks DATA mutations (register, mark_run_parsed), so
+# a writer that changes run data without bumping it stays invisible to this
+# backstop. Owned by Mission-4; we only invoke it. --skip-fresh makes this cheap
+# + resumable. Non-fatal: never masks the ingest exit code.
 if [ -f "$REPO/scripts/node27_refresh_coverage.py" ]; then
   echo "[$(ts)] autopipe: coverage backstop (--all --skip-fresh)" >> "$LOG"
+  PHASE_START=$(date +%s)
   "$REPO/.venv/bin/python" "$REPO/scripts/node27_refresh_coverage.py" --all --skip-fresh \
     --workers "${AUTOPIPE_COVERAGE_WORKERS:-1}" >> "$LOG" 2>&1 \
     || echo "[$(ts)] autopipe: coverage backstop rc=$? (non-fatal)" >> "$LOG"
+  PHASE_END=$(date +%s)
+  echo "[$(ts)] autopipe: phase=coverage_backstop elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"
 fi
 
 # Warm the exact national overview working set after publish/coverage. This is
@@ -223,10 +238,13 @@ fi
 # ingest result, but the failure remains visible in the autopipe log.
 if [ "${AUTOPIPE_MVT_PREWARM_ENABLED:-1}" = "1" ] && [ -f "$REPO/scripts/node27_mvt_prewarm.py" ]; then
   echo "[$(ts)] autopipe: national MVT prewarm (z=${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5})" >> "$LOG"
+  PHASE_START=$(date +%s)
   "$REPO/.venv/bin/python" "$REPO/scripts/node27_mvt_prewarm.py" \
     --zooms "${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5}" \
     --workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}" >> "$LOG" 2>&1 \
     || echo "[$(ts)] autopipe: MVT prewarm rc=$? (non-fatal)" >> "$LOG"
+  PHASE_END=$(date +%s)
+  echo "[$(ts)] autopipe: phase=mvt_prewarm elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"
 fi
 
 END=$(date +%s)
