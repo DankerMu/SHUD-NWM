@@ -526,6 +526,12 @@ def test_backfill_stops_fail_closed_and_names_the_unresolvable_rows(
             "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = 'run-that-does-not-exist' "
             "AND run_key IS NOT NULL",
         ) == 0
+        # totals.updated_rows is a rows-in-the-table claim, checked against the
+        # table itself: the rolled-back batch must not appear in it.
+        persisted = _scalar(
+            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key IS NOT NULL"
+        )
+        assert receipt["totals"]["updated_rows"] == persisted
     finally:
         connection.close()
 

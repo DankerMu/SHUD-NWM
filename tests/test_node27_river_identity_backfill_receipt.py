@@ -109,7 +109,12 @@ def test_stop_stage_enum_contains_only_stages_the_runner_can_emit() -> None:
     schema = load_schema()
     stages = set(schema["$defs"]["stop"]["properties"]["stage"]["enum"])
 
-    assert stages == {"shortfall", "duration_wall", "ingest_not_quiescent"}
+    assert stages == {
+        "shortfall",
+        "duration_wall",
+        "ingest_not_quiescent",
+        "compressed_chunk_guard",
+    }
 
     source = Path(backfill.__file__).read_text(encoding="utf-8")
     for stage in stages:
@@ -259,6 +264,145 @@ def test_a_refused_final_sweep_is_a_stopped_receipt_not_an_empty_failure_shell(
     assert receipt["chunks"] and receipt["chunks"][0]["state"] == "stopped"
     assert receipt["chunks"][0]["pending_rows"] is None
     assert receipt["totals"]["updated_rows"] == 0
+
+
+def _stopping_connection(target: backfill.ChunkRow, *, guard: Any = None) -> FakeConnection:
+    """Three planned batches; the third under-updates and is rolled back."""
+    calls: list[int] = []
+
+    def update_handler(sql: str, params: Any) -> Any:
+        calls.append(len(calls))
+        return {"rowcount": 1 if len(calls) == 3 else 2}
+
+    return FakeConnection(
+        [
+            ("pg_total_relation_size", lambda s, p: {"fetchall": [inventory_row(target)]}),
+            guard or UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("NOT EXISTS (SELECT 1 FROM hydro.hydro_run", lambda s, p: {"fetchone": (1,)}),
+            ("NOT IN (SELECT unnest", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", update_handler),
+            ("SELECT count(*) FROM ONLY", lambda s, p: {"fetchone": (7,)}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (2,)}),
+        ]
+    )
+
+
+def test_a_shortfall_stopped_receipt_totals_only_the_rows_that_persisted(
+    tmp_path: Path,
+) -> None:
+    """totals.updated_rows is a rows-in-the-table claim.
+
+    Folding the rolled-back batch into it publishes rows that are not there,
+    and breaks the property the integration test relies on — that successive
+    invocations partition the table exactly.
+    """
+    target = chunk("c1", days_old=30, pages=12)
+    connection = _stopping_connection(target)
+
+    receipt = backfill.build_receipt(
+        config(tmp_path, enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0),
+        now_utc=NOW,
+        connect=lambda _url: connection,
+        head_sha="0" * 40,
+        timer_state=dict(_TIMER_STATE),
+    )
+
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "stopped"
+    assert receipt["stop"]["stage"] == "shortfall"
+    assert connection.commits == 2
+    assert receipt["totals"]["updated_rows"] == 4
+    assert receipt["totals"]["candidate_rows"] == 4
+    # Attempts, not commits — this is what the budget spent.
+    assert receipt["totals"]["batches_run"] == 3
+    # The failed batch is still fully described, just not counted as progress.
+    assert receipt["stop"]["updated_rows"] == 1
+    assert receipt["stop"]["candidate_rows"] == 2
+
+
+def test_a_guard_error_produces_a_stopped_receipt_not_a_bare_failure_shell(
+    tmp_path: Path,
+) -> None:
+    """A guard trip mid-chunk must not erase the invocation's own record.
+
+    build_failed_receipt keeps no chunks, no totals and no cursor, and stamps
+    mutation_state="failed_before_mutation" — three false statements once a
+    batch has committed.
+    """
+    target = chunk("c1", days_old=30, pages=12)
+    guard_calls: list[int] = []
+
+    def guard_handler(sql: str, params: Any) -> Any:
+        guard_calls.append(len(guard_calls))
+        return {"fetchone": (len(guard_calls) > 2,)}
+
+    connection = _stopping_connection(
+        target,
+        guard=("SELECT is_compressed FROM timescaledb_information.chunks", guard_handler),
+    )
+
+    receipt = backfill.build_receipt(
+        config(tmp_path, enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0),
+        now_utc=NOW,
+        connect=lambda _url: connection,
+        head_sha="0" * 40,
+        timer_state=dict(_TIMER_STATE),
+    )
+
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "stopped"
+    assert receipt["stop"]["stage"] == "compressed_chunk_guard"
+    assert "failure" not in receipt
+    assert receipt["chunks"][0]["state"] == "stopped"
+    assert receipt["totals"]["updated_rows"] == 2  # the one committed batch
+    assert receipt["cursor"][target.key] == 4  # resume where the guard tripped
+
+
+def test_a_lock_refusal_carries_the_previous_cursor_instead_of_wiping_it(
+    tmp_path: Path,
+) -> None:
+    """flock contention is a routine exit-0 event on overlapping ticks.
+
+    Publishing an empty cursor over a real one would rewind every chunk to
+    page 0 on the next run — a full 460M-row rescan caused by two timers
+    overlapping by a second.
+    """
+    settings = config(tmp_path)
+    prior = {
+        "schema_version": backfill.SCHEMA_VERSION,
+        "cursor": {"_timescaledb_internal._hyper_3_55": 4321},
+    }
+    settings.receipt_path.write_text(json.dumps(prior), encoding="utf-8")
+
+    receipt = backfill.build_refused_lock_receipt(settings, now_utc=NOW, head_sha="a" * 40)
+
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "refused_lock"
+    assert receipt["chunks"] == []
+    assert receipt["cursor"] == {"_timescaledb_internal._hyper_3_55": 4321}
+
+    # End to end: the refusal is published, and the cursor survives the round
+    # trip so the next invocation still resumes.
+    backfill.publish_receipt(settings, receipt)
+    assert backfill.load_persisted_cursor(settings.receipt_path) == {
+        "_timescaledb_internal._hyper_3_55": 4321
+    }
+
+
+def test_a_failed_receipt_deliberately_carries_no_cursor() -> None:
+    """Spec-blessed loss: after an unclassified crash the runner cannot vouch
+    for how far it got, and the NULL sentinel makes a full rescan identical in
+    outcome. Reconstructing a cursor here would be a guess dressed as state."""
+    receipt = backfill.build_failed_receipt(
+        None, now_utc=NOW, stage="runner", head_sha="0" * 40
+    )
+
+    jsonschema.validate(receipt, load_schema())
+    assert "cursor" not in receipt
+    assert "DELIBERATELY absent from a failed receipt" in (
+        load_schema()["properties"]["cursor"]["description"]
+    )
 
 
 # ---------------------------------------------------------------------------

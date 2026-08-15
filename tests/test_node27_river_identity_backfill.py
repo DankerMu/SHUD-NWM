@@ -484,6 +484,45 @@ def test_the_write_guard_runs_inside_every_batch_transaction_before_the_update()
     assert order == ["guard", "guard", "update", "guard", "update", "guard", "update"]
 
 
+def test_a_guard_error_between_batches_becomes_a_stop_that_keeps_its_accounting() -> None:
+    """The per-batch guard exists precisely to catch the compression timer
+    firing mid-chunk — i.e. AFTER batches have committed. Letting it out as a
+    bare exception discards the descriptor and stamps the run
+    "failed_before_mutation", which is false the moment one batch commits.
+    """
+    target = chunk("c1", days_old=30, pages=12)
+    guard_calls: list[int] = []
+
+    def guard_handler(sql: str, params: Any) -> Any:
+        guard_calls.append(len(guard_calls))
+        # Pre-loop check + batch 1 pass; the timer "fires" before batch 2.
+        return {"fetchone": (len(guard_calls) > 2,)}
+
+    connection = FakeConnection(
+        [
+            ("SELECT is_compressed FROM timescaledb_information.chunks", guard_handler),
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": 3}),
+            ("SELECT count(*) FROM ONLY", lambda s, p: {"fetchone": (9,)}),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    stop = excinfo.value
+    assert stop.stage == "compressed_chunk_guard"
+    assert isinstance(stop.__cause__, backfill.CompressedChunkWriteError)
+    descriptor = stop.descriptor
+    assert descriptor is not None
+    assert descriptor["state"] == "stopped"
+    assert descriptor["updated_rows"] == 3  # batch 1 committed and stays counted
+    assert descriptor["pending_rows"] == 9
+    assert connection.commits == 1
+
+
 def test_runner_imports_the_chunk_guard_from_the_shared_module_not_a_local_copy() -> None:
     """Design D5 (#851): the fourth production writer is held to the same rule
     as the three batch-window writers — no per-path guard reimplementation."""
@@ -550,7 +589,13 @@ def test_shortfall_stops_the_run_and_names_both_causes_separately() -> None:
 def test_a_stop_mid_chunk_keeps_the_committed_batches_accounting() -> None:
     """Batches 1..N-1 really did commit. Reporting the chunk as a blank
     'stopped' descriptor — zero batches, zero rows, pending_rows 0 — would hide
-    both the work done and the work left."""
+    both the work done and the work left.
+
+    The mirror-image error is counting the ROLLED-BACK batch: ``updated_rows``
+    is the rows-persisted contract the schema and the integration test's
+    per-invocation partition both rely on, so the failed batch contributes
+    nothing to it and is reported in ``stop.detail`` instead.
+    """
     target = chunk("c1", days_old=30, pages=12)
     calls: list[int] = []
 
@@ -580,12 +625,19 @@ def test_a_stop_mid_chunk_keeps_the_committed_batches_accounting() -> None:
     descriptor = excinfo.value.descriptor
     assert descriptor is not None
     assert descriptor["state"] == "stopped"
+    # Attempts, so it matches the budget consumed: 2 committed + 1 rolled back.
     assert descriptor["batches_run"] == 3
-    assert descriptor["updated_rows"] == 5  # 2 + 2 committed, 1 rolled back
-    assert descriptor["candidate_rows"] == 6
+    # Rows PERSISTED: 2 + 2. The third batch's single row was rolled back.
+    assert descriptor["updated_rows"] == 4
+    assert descriptor["updated_rows"] == connection.commits * 2
+    assert descriptor["candidate_rows"] == 4
     assert descriptor["unmatched_rows"] == 1
     assert descriptor["pending_rows"] == 7  # recounted, not hard-coded to zero
     assert descriptor["batches_planned"] == 3
+    # The rolled-back batch's own arithmetic is not lost, just kept out of the
+    # persisted-row counters.
+    assert excinfo.value.detail["candidate_rows"] == 2
+    assert excinfo.value.detail["updated_rows"] == 1
     # The rolled-back range must be retried on re-entry, not stepped over.
     assert descriptor["next_page"] == 8
     assert connection.commits == 2

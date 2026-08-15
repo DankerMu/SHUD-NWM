@@ -1128,12 +1128,14 @@ def _run_enforce(
                 # cursor then steps straight over, and the run would still
                 # report "processed".
                 pending_ranges.insert(0, remainder)
+            # batches_run and batches_halved count ATTEMPTS, and therefore
+            # mirror the per-invocation budget exactly (one decrement, one
+            # increment). The row counters below are different: they count what
+            # was PERSISTED, so they are accumulated only after the shortfall
+            # gate, i.e. only for a batch that goes on to commit.
             cursor_budget[0] -= 1
             descriptor["batches_run"] += 1
             descriptor["batches_halved"] += halved
-            descriptor["candidate_rows"] += outcome.candidate_rows
-            descriptor["updated_rows"] += outcome.updated_rows
-            descriptor["next_page"] = outcome.last_page
 
             if outcome.shortfall > 0:
                 connection.rollback()
@@ -1143,6 +1145,12 @@ def _run_enforce(
                 # this range. Leaving the cursor at its end would persist a
                 # step over rows that were never written.
                 descriptor["next_page"] = outcome.first_page
+                # Deliberately NOT folded into candidate_rows/updated_rows: the
+                # rollback means none of it was persisted, and counting it here
+                # would put rows into the receipt totals (and into the
+                # per-invocation partition the integration test asserts) that
+                # are not in the table. The full arithmetic of the failed batch
+                # is carried in stop.detail below.
                 raise BackfillStop(
                     "shortfall",
                     (
@@ -1162,12 +1170,35 @@ def _run_enforce(
                     unmappable_rows=outcome.unmappable_rows,
                 )
 
+            descriptor["candidate_rows"] += outcome.candidate_rows
+            descriptor["updated_rows"] += outcome.updated_rows
+            descriptor["next_page"] = outcome.last_page
             connection.commit()
             if config.batch_sleep_ms:
                 sleep(config.batch_sleep_ms / 1000.0)
     except BackfillStop as stop:
         _finalize_stopped_chunk(connection, chunk, descriptor, stop, started=started)
         raise
+    except (CompressedChunkWriteError, CompressedChunkGuardError) as error:
+        # The per-batch guard can fire mid-chunk, AFTER earlier batches have
+        # committed (the compression timer firing between two batches is
+        # exactly what it is there to catch). Letting it escape as a bare
+        # exception would replace the whole receipt -- descriptors, totals and
+        # cursor -- with a failure shell stamped "failed_before_mutation",
+        # which is false the moment one batch has committed. Convert it into
+        # an ordinary fail-closed stop so the run keeps its accounting.
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        stop = BackfillStop(
+            "compressed_chunk_guard",
+            f"{chunk.key}: {error}",
+            chunk_schema=chunk.chunk_schema,
+            chunk_name=chunk.chunk_name,
+        )
+        _finalize_stopped_chunk(connection, chunk, descriptor, stop, started=started)
+        raise stop from error
 
     if descriptor["state"] == "planned":
         descriptor["state"] = "processed"
@@ -1397,10 +1428,28 @@ def build_receipt(
                     first_page=resume_cursor.get(chunk.key, 0),
                     sleep=sleep,
                 )
-            except BackfillStop as error:
-                stop = error
-                descriptor = error.descriptor or _chunk_descriptor(
-                    chunk, "stopped", skip_reason=error.reason
+            except (
+                BackfillStop,
+                CompressedChunkWriteError,
+                CompressedChunkGuardError,
+            ) as error:
+                # A guard error from the PRE-LOOP check reaches here directly
+                # (the per-batch one is already converted inside _run_enforce).
+                # Either way it is a per-chunk fail-closed stop, not a reason
+                # to throw away the chunks, totals and cursor that earlier
+                # chunks in this invocation legitimately produced.
+                stop = (
+                    error
+                    if isinstance(error, BackfillStop)
+                    else BackfillStop(
+                        "compressed_chunk_guard",
+                        f"{chunk.key}: {error}",
+                        chunk_schema=chunk.chunk_schema,
+                        chunk_name=chunk.chunk_name,
+                    )
+                )
+                descriptor = stop.descriptor or _chunk_descriptor(
+                    chunk, "stopped", skip_reason=stop.reason
                 )
                 descriptors.append(descriptor)
                 _accumulate(totals, descriptor)
@@ -1480,6 +1529,12 @@ def build_refused_lock_receipt(
     Deliberately performs no discovery: lock ownership is the boundary before
     every database call. Publishing the refusal replaces any stale success so
     governance never reads a previous run's receipt as this run's outcome.
+
+    The one thing it does NOT replace is the block cursor. Publishing an empty
+    cursor over a real one would let a routine flock contention -- an exit-0,
+    nothing-happened event that can occur on any overlapping tick -- silently
+    rewind every chunk to page 0 on the next run. The cursor is carried
+    forward verbatim; the outcome is still ``refused_lock``.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1499,7 +1554,7 @@ def build_refused_lock_receipt(
         },
         "chunks": [],
         "totals": _blank_totals(),
-        "cursor": {},
+        "cursor": load_persisted_cursor(config.receipt_path),
     }
 
 
@@ -1511,6 +1566,15 @@ def build_failed_receipt(
     head_sha: str | None,
     mutation_state: str = "failed_before_mutation",
 ) -> dict[str, Any]:
+    """Minimal shell for a crash the runner could not classify.
+
+    It carries no ``cursor`` key, and that loss is intentional: after an
+    unclassified failure the runner cannot vouch for where it got to, and the
+    spec's fallback applies -- losing the block cursor degrades to a full
+    rescan with identical results, because the NULL sentinel is the actual
+    correctness guarantee. Reconstructing a cursor here would be a guess
+    dressed up as state.
+    """
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _iso(datetime.now(UTC)),
@@ -1589,9 +1653,19 @@ def main(
             _emit("stopped", error.reason, dsn=config.database_url)
             return 1
         except (CompressedChunkWriteError, CompressedChunkGuardError) as error:
+            # Backstop only: guard errors raised while a chunk is in flight are
+            # converted to a stopped receipt inside build_receipt. Anything
+            # reaching here fired outside the per-chunk loop, and once
+            # --enforce is on we cannot prove no batch committed.
             _try_publish(
                 config,
-                build_failed_receipt(config, now_utc=now, stage="write_guard", head_sha=head_sha),
+                build_failed_receipt(
+                    config,
+                    now_utc=now,
+                    stage="write_guard",
+                    head_sha=head_sha,
+                    mutation_state="indeterminate" if config.enforce else "failed_before_mutation",
+                ),
             )
             _emit("failed", str(error), dsn=config.database_url)
             return 1
