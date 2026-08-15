@@ -330,6 +330,14 @@ def _candidate_state_decision_evaluated(
     # Failure-state guard, consulted AT the emitting return points below (never as
     # an unconditional pre-pass): each branch is already gated by its own failure
     # condition, so healthy/running candidates never compute or reach it.
+    #
+    # The pre-guard evidence channels above do NOT bypass permanence (#1313): each
+    # one that can overwrite a permanent classification first consults the shared
+    # refusal judgement in ``scheduler_state_failure``
+    # (``_remedy_permits_permanent_failure`` for the raw-manifest and
+    # model-package remedies, the ``code_recorded`` domain split for the
+    # downstream resume), so a refused candidate falls THROUGH the rest of the
+    # ladder and lands here rather than leaving with an automatic retry.
     failure_retry_evidence: dict[str, Any] | None = None
     missing_forcing_evidence: dict[str, Any] | None = None
     missing_forcing_computed = False

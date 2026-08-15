@@ -3418,7 +3418,7 @@ def test_raw_manifest_reuse_overrides_residual_restart_stage(tmp_path: Path) -> 
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
                 "pipeline_status": "failed",
                 "failed_stage": "parse",
-                "error_code": "FAILED_PARSE",
+                "error_code": "NODE_FAILURE",
                 "retry_count": 1,
                 "retry_limit": 3,
             },
@@ -12330,24 +12330,20 @@ def test_copyback_source_file_uri_outside_allowed_roots_blocks_even_when_file_ex
     assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
 
 
-def test_copyback_source_local_path_inside_allowed_roots_can_resume(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    object_store_root = tmp_path / "object-store"
-    copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
-    copyback_source.parent.mkdir(parents=True)
-    copyback_source.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
-    candidate = _scheduler_candidate_fixture()
-    identity = _production_identity_fixture()
-    state = {
+def _copyback_downstream_failure_state(
+    candidate: Any,
+    identity: Mapping[str, str],
+    *,
+    copyback_source: Path,
+    error_code: str,
+) -> dict[str, Any]:
+    return {
         **identity,
         "candidate_id": candidate.candidate_id,
         "hydro_status": "failed",
         "pipeline_status": "failed",
         "failed_stage": "parse",
-        "error_code": "PARSE_FAILED",
+        "error_code": error_code,
         "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
         "copyback_source_uri": str(copyback_source),
         "pipeline_jobs": [
@@ -12360,6 +12356,61 @@ def test_copyback_source_local_path_inside_allowed_roots_can_resume(
         ],
     }
 
+
+def test_copyback_source_local_path_inside_allowed_roots_recorded_permanent_code_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1313: a RECORDED PARSE_FAILED is an unknown-default non-transient code, so
+    # the downstream-resume channel must refuse it and the ladder must land on the
+    # permanent-failure guard -- the allowed-roots copyback geometry does not
+    # relicense an automatic retry.  The allowed-roots semantics themselves are
+    # pinned by the transient-code parallel anchor below (the copyback root check
+    # only runs while a planned retry exists, i.e. never on this path).
+    object_store_root = tmp_path / "object-store"
+    copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = _copyback_downstream_failure_state(
+        candidate,
+        identity,
+        copyback_source=copyback_source,
+        error_code="PARSE_FAILED",
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def test_copyback_source_local_path_inside_allowed_roots_can_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Load-bearing anchor for the OBJECT_STORE_ROOT copyback geometry (#1313 D4b
+    # #1): a recorded TRANSIENT code keeps the resume, which is the only shape in
+    # which the allowed-roots decision is actually evaluated.
+    object_store_root = tmp_path / "object-store"
+    copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = _copyback_downstream_failure_state(
+        candidate,
+        identity,
+        copyback_source=copyback_source,
+        error_code="NODE_FAILURE",
+    )
+
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
     assert decision is not None
@@ -12367,10 +12418,11 @@ def test_copyback_source_local_path_inside_allowed_roots_can_resume(
     assert decision.reason == "resume_downstream_after_durable_shud"
 
 
-def test_copyback_source_local_path_inside_copyback_env_root_can_resume(
+def test_copyback_source_local_path_inside_copyback_env_root_recorded_permanent_code_blocks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # #1313: same refusal in the NHMS_OBJECT_STORE_COPYBACK_ROOT geometry.
     object_store_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-copyback"
     object_store_root.mkdir()
@@ -12381,24 +12433,45 @@ def test_copyback_source_local_path_inside_copyback_env_root_can_resume(
     monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()
-    state = {
-        **identity,
-        "candidate_id": candidate.candidate_id,
-        "hydro_status": "failed",
-        "pipeline_status": "failed",
-        "failed_stage": "parse",
-        "error_code": "PARSE_FAILED",
-        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
-        "copyback_source_uri": str(copyback_source),
-        "pipeline_jobs": [
-            {
-                **identity,
-                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
-                "status": "succeeded",
-                "stage": "forecast",
-            }
-        ],
-    }
+    state = _copyback_downstream_failure_state(
+        candidate,
+        identity,
+        copyback_source=copyback_source,
+        error_code="PARSE_FAILED",
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def test_copyback_source_local_path_inside_copyback_env_root_can_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Load-bearing anchor for the NHMS_OBJECT_STORE_COPYBACK_ROOT geometry (#1313
+    # D4b #2): a recorded TRANSIENT code keeps the resume, so the copyback root
+    # allowed-list is still exercised end to end.
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-copyback"
+    object_store_root.mkdir()
+    copyback_source = copyback_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = _copyback_downstream_failure_state(
+        candidate,
+        identity,
+        copyback_source=copyback_source,
+        error_code="NODE_FAILURE",
+    )
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
@@ -17994,6 +18067,13 @@ def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_p
 def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_without_native_rerun(
     tmp_path: Path,
 ) -> None:
+    # #1313 D4b #3: the theme ("restart at parse, never re-run native SHUD") is
+    # preserved on the SYNTHESIZED-PLACEHOLDER domain.  The state records no error
+    # code anywhere the reader scans (top level, hydro_run, pipeline_jobs, events),
+    # so the reader fabricates the ``PARSE_FAILED`` stage default -- a fabricated
+    # default is not evidence under the unknown-code clause and keeps the existing
+    # resume.  The former recorded ``FAILED_PARSE`` + top-level ``retryable: True``
+    # shape pinned exactly the two whitening surfaces this issue closes.
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
@@ -18013,15 +18093,12 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
                     "run_id": "fcst_gfs_2026052106_model_a",
                     "status": "failed",
                     "stage": "parse",
-                    "error_code": "FAILED_PARSE",
                     "retry_count": 1,
                 },
             ],
             "failed_stage": "parse",
-            "error_code": "FAILED_PARSE",
             "retry_count": 1,
             "retry_limit": 3,
-            "retryable": True,
         }
     )
     orchestrator = FakeProductionOrchestrator()
@@ -18043,6 +18120,10 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
     assert state["durable_shud_output_reused"] is True
     assert state["native_shud_resubmitted"] is False
     assert state["failure"]["classifier"] == "parse_failure"
+    # The classification rests on a fabricated default, not a recorded code.
+    assert scheduler_state_failure_module._state_error_code(active_repository.state) is None
+    assert state["failure"]["reason_code"] == "PARSE_FAILED"
+    assert "retryable" not in active_repository.state
     assert submitted_basin["restart_stage"] == "parse"
     assert submitted_basin["durable_shud_output_reused"] is True
     assert submitted_basin["native_shud_resubmitted"] is False
@@ -18055,12 +18136,16 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
         ("state_save_qc", "Q_DOWN_DISPLAY_NOT_READY", "unknown_failure"),
     ],
 )
-def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retryable_flag(
+def test_db_shaped_downstream_failure_with_recorded_unknown_code_blocks(
     tmp_path: Path,
     stage: str,
     error_code: str,
     expected_classifier: str,
 ) -> None:
+    # #1313 D4b #4: a DB-shaped state that genuinely records an unknown code
+    # defaults it non-transient, and the spec's unknown-code clause forbids the
+    # automatic resume it used to receive.  The ladder falls through to the
+    # permanent-failure guard.
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
@@ -18095,11 +18180,64 @@ def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retrya
 
     result = scheduler.run_once()
 
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert [item["reason"] for item in result.evidence["blocked_candidates"]] == ["permanent_failure_guard"]
+    state = result.evidence["blocked_candidates"][0]["state_evidence"]
+    assert state["decision"] == "permanent_failure"
+    assert state["failure"]["classifier"] == expected_classifier
+    assert state["failure"]["permanent"] is True
+    assert state["retry_policy"]["automatic_retry_allowed"] is False
+    assert state["manual_retry_required"] is True
+
+
+@pytest.mark.parametrize("stage", ["state_save_qc"])
+def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retryable_flag(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    # #1313 D4b #4 (theme half): "a DB-shaped downstream failure restarts even
+    # though the state carries no ``retryable`` flag" is preserved on the
+    # SYNTHESIZED-PLACEHOLDER domain -- no error code is recorded anywhere the
+    # reader scans, so it fabricates the stage default and the resume stands.
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "succeeded",
+            "durable_shud_output_exists": True,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            "pipeline_status": "failed",
+            "failed_stage": stage,
+            "retry_count": 1,
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    "job_id": f"job_{stage}",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "status": "failed",
+                    "stage": stage,
+                    "retry_count": 1,
+                }
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
     state = result.evidence["candidates"][0]["state_evidence"]
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert state["decision"] == "retry_downstream"
     assert state["restart_stage"] == stage
-    assert state["failure"]["classifier"] == expected_classifier
+    assert scheduler_state_failure_module._state_error_code(active_repository.state) is None
+    assert state["failure"]["reason_code"] == f"{stage.upper()}_FAILED"
     assert state["retry_policy"]["automatic_retry_allowed"] is True
     assert "retryable" not in active_repository.state
     assert submitted_basin["restart_stage"] == stage
@@ -18316,7 +18454,7 @@ def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_c
                 "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
                 "pipeline_status": "failed",
                 "failed_stage": "parse",
-                "error_code": "FAILED_PARSE",
+                "error_code": "NODE_FAILURE",
                 "retry_count": 1,
                 "retry_limit": 3,
             },
@@ -18355,7 +18493,7 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
             "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
             "pipeline_status": "failed",
             "failed_stage": "parse",
-            "error_code": "FAILED_PARSE",
+            "error_code": "NODE_FAILURE",
             "retry_count": 1,
             "retry_limit": 3,
         },
@@ -18365,7 +18503,7 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
             "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_b/output/",
             "pipeline_status": "failed",
             "failed_stage": "parse",
-            "error_code": "FAILED_PARSE",
+            "error_code": "NODE_FAILURE",
             "retry_count": 1,
             "retry_limit": 3,
         },
@@ -18464,7 +18602,7 @@ def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_pa
                         "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_b/output/",
                         "pipeline_status": "failed",
                         "failed_stage": "parse",
-                        "error_code": "FAILED_PARSE",
+                        "error_code": "NODE_FAILURE",
                         "retry_count": 1,
                         "retry_limit": 3,
                     },
@@ -19385,6 +19523,655 @@ def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: P
     assert state["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
     assert state["retry_policy"]["manual_retry_required"] is False
     assert orchestrator.calls
+
+
+# ---------------------------------------------------------------------------
+# #1313 -- pre-guard evidence channels consult a single shared permanence
+# judgement.  Seams 1-12 of the change design.
+# ---------------------------------------------------------------------------
+
+
+def _raw_manifest_geometry_state(
+    candidate: Any,
+    *,
+    error_code: str,
+    retry_count: int = 1,
+    retry_limit: int = 3,
+    repaired: bool = False,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """State matching the raw-manifest repair (or repaired-downstream) geometry.
+
+    ``repaired=False`` is channel (a): a manifest probed missing after a
+    previously successful download.  ``repaired=True`` is channel (b): a repair
+    download that finished AFTER the failed downstream job.
+    """
+
+    jobs: list[dict[str, Any]] = [
+        {
+            "job_id": "job_cycle_gfs_2026052106_download",
+            "run_id": "cycle_gfs_2026052106",
+            "cycle_id": candidate.cycle_id,
+            "status": "succeeded",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "finished_at": "2026-05-21T06:02:00Z",
+        },
+        {
+            "job_id": "job_cycle_gfs_2026052106_convert",
+            "run_id": "cycle_gfs_2026052106",
+            "cycle_id": candidate.cycle_id,
+            "status": "failed",
+            "stage": "convert",
+            "job_type": "convert_canonical",
+            "error_code": error_code,
+            "retry_count": retry_count,
+            "finished_at": "2026-05-21T06:03:00Z",
+        },
+    ]
+    if repaired:
+        jobs.append(
+            {
+                "job_id": "job_cycle_gfs_2026052106_download_retry_1",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": candidate.cycle_id,
+                "status": "succeeded",
+                "stage": "download",
+                "job_type": "download_source_cycle",
+                "finished_at": "2026-05-21T06:20:00Z",
+            }
+        )
+    return {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
+        "forecast_cycle": {
+            "cycle_id": candidate.cycle_id,
+            "source_id": candidate.source_id,
+            "cycle_time": candidate.cycle_time_utc,
+            "manifest_uri": f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}",
+        },
+        "pipeline_jobs": jobs,
+        "pipeline_status": "failed",
+        "failed_stage": "convert",
+        "error_code": error_code,
+        "retry_count": retry_count,
+        "retry_limit": retry_limit,
+        **(dict(extra) if extra else {}),
+    }
+
+
+def _raw_manifest_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: Any,
+    state: Mapping[str, Any],
+    *,
+    manifest_missing: bool,
+) -> Any:
+    monkeypatch.setattr(
+        scheduler_module,
+        "_object_manifest_is_missing",
+        lambda _candidate, _uri: manifest_missing,
+    )
+    return scheduler_module._candidate_state_decision(candidate, dict(state))
+
+
+# --- seam 1 / 3: raw-manifest channels refuse remedy-non-causal permanent codes
+
+
+#: The guard's own reason routing (``_permanent_reason``) is untouched by #1313:
+#: a ``policy_blocked`` classification keeps its dedicated reason, and an
+#: exhausted budget on a transient code keeps ``retry_limit_exhausted``.  Spelled
+#: out here so the refusal seams pin the reason they actually expect.
+_PERMANENT_GUARD_REASONS = {
+    "OUT_OF_MEMORY": "permanent_failure_guard",
+    "POLICY_BLOCKED": "policy_blocked",
+    "PERMISSION_DENIED": "policy_blocked",
+    "TEMPLATE_NOT_ALLOWED": "policy_blocked",
+}
+
+
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED"])
+@pytest.mark.parametrize("repaired", [False, True])
+def test_raw_manifest_channels_refuse_remedy_non_causal_permanent_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    repaired: bool,
+) -> None:
+    # Seams 1 and 3 (refusing half).  Re-ingesting raw input cannot resize a job's
+    # memory nor lift a policy denial, so neither raw-manifest channel may
+    # overwrite the permanent classification; the ladder lands on the guard.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code=error_code, repaired=repaired)
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == _PERMANENT_GUARD_REASONS[error_code]
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_classifier"),
+    [
+        ("SLURM_JOB_FAILED", "unknown_failure"),
+        ("INVALID_MANIFEST", "malformed_input"),
+        ("CONVERT_CANONICAL_FAILED", "unknown_failure"),
+    ],
+)
+def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    expected_classifier: str,
+) -> None:
+    # Seam 2, the discriminating anchor for the D2 ruling: the geometry itself
+    # (a manifest probed missing after a previously successful download) IS the
+    # causal evidence, so every permanent code that is not classified
+    # remedy-non-causal keeps the repair path.  The production remedy is not
+    # retired -- a judge built as an input-defect ALLOW-list would silently
+    # retire it, because `SLURM_JOB_FAILED` / `{JOB_TYPE}_{STATUS}` codes are what
+    # real writers emit.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code=error_code)
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "repair_missing_raw_manifest"
+    assert decision.evidence["raw_manifest_repair"]["manifest_exists"] is False
+    assert decision.evidence["failure"]["classifier"] == "recoverable_missing_raw_manifest"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert retry_module.failure_classifier(error_code) == expected_classifier
+
+
+def test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 3, open half (mirrors the end-to-end anchor
+    # ``test_repaired_raw_manifest_allows_stale_downstream_failure_retry``).
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", repaired=True)
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=False)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_downstream_after_raw_repair"
+    assert decision.evidence["raw_manifest_repair"]["manifest_exists"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+# --- seam 11: exhausted budget
+
+
+def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 11, channel (a) half: the causal open domain keeps its limit_exhausted
+    # exemption byte for byte (the compat anchor at the INVALID_MANIFEST shape
+    # pins the same thing end to end).
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_JOB_FAILED",
+        retry_count=3,
+        retry_limit=3,
+    )
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "repair_missing_raw_manifest"
+    assert decision.evidence["failure"]["limit_exhausted"] is False
+
+
+# --- seam 9: what happens AFTER a refusal -- the ladder tail, not a jump to guard
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 9, first tail path.  A policy/permission failure is remedy-non-causal
+    # for RE-INGESTING RAW INPUT, but a genuinely changed model package is a
+    # different remedy (the disallowed template ships inside the package), so the
+    # refresh channel may still claim the candidate under its #1161 semantics.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="TEMPLATE_NOT_ALLOWED",
+        extra={"run_manifest_model_package": _changed_model_package_prior()},
+    )
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_after_model_package_refresh"
+    assert decision.evidence["retry_policy"]["override_reason"] == "model_package_refresh"
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+def test_raw_manifest_refusal_without_package_change_falls_to_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 9, second tail path: no other channel has a claim, so the guard blocks.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code="TEMPLATE_NOT_ALLOWED")
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == _PERMANENT_GUARD_REASONS["TEMPLATE_NOT_ALLOWED"]
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+# --- seams 4-8: the downstream-resume channel and the top-level retryable key
+
+
+def _durable_downstream_failure_state(
+    candidate: Any,
+    *,
+    error_code: str | None,
+    retry_count: int = 1,
+    retry_limit: int = 3,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    identity = _production_identity_fixture()
+    failed_job: dict[str, Any] = {
+        **identity,
+        "job_id": "job_cycle_gfs_2026052106_parse_model_a",
+        "status": "failed",
+        "stage": "parse",
+        "retry_count": retry_count,
+    }
+    if error_code is not None:
+        failed_job["error_code"] = error_code
+    state: dict[str, Any] = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "succeeded",
+        "durable_shud_output_exists": True,
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "pipeline_status": "failed",
+        "failed_stage": "parse",
+        "retry_count": retry_count,
+        "retry_limit": retry_limit,
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            },
+            failed_job,
+        ],
+    }
+    if error_code is not None:
+        state["error_code"] = error_code
+    if extra:
+        state.update(extra)
+    return state
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        # Seam 4: recorded permanent / unknown-default-non-transient codes.
+        "PARSE_FAILED",
+        "OUTPUT_INCOMPLETE",
+        "SLURM_JOB_FAILED",
+        "Q_DOWN_DISPLAY_NOT_READY",
+        # Seam 5: the five codes the deleted blacklist named -- now implied by the
+        # permanence judgement rather than by a hand-maintained list.
+        "INVALID_MANIFEST",
+        "MANIFEST_SCHEMA_INVALID",
+        "MALFORMED_INPUT",
+        "OUT_OF_MEMORY",
+        "POLICY_BLOCKED",
+    ],
+)
+def test_downstream_resume_refuses_recorded_non_transient_codes(error_code: str) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(candidate, error_code=error_code)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == _PERMANENT_GUARD_REASONS.get(error_code, "permanent_failure_guard")
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["reason_code"] == error_code
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED"])
+def test_downstream_resume_keeps_recorded_transient_codes(error_code: str) -> None:
+    # Seam 4, complement: a recorded transient code within budget resumes exactly
+    # as before this change.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(candidate, error_code=error_code)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_downstream_after_durable_shud"
+    assert decision.evidence["restart_stage"] == "parse"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+def test_downstream_resume_refuses_recorded_transient_code_with_exhausted_budget() -> None:
+    # Seam 11, channel (c) half.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code="NODE_FAILURE",
+        retry_count=3,
+        retry_limit=3,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    # A transient code whose budget ran out keeps its dedicated guard reason.
+    assert decision.reason == "retry_limit_exhausted"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["limit_exhausted"] is True
+
+
+def test_downstream_resume_keeps_synthesized_placeholder_domain() -> None:
+    # Seam 6: no error code anywhere the reader scans -> the reader fabricates
+    # ``PARSE_FAILED``.  A fabricated default is not evidence under the spec's
+    # unknown-code clause, so this domain keeps its pre-#1313 resume.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(candidate, error_code=None)
+
+    assert scheduler_state_failure_module._state_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_downstream_after_durable_shud"
+    assert decision.evidence["failure"]["reason_code"] == "PARSE_FAILED"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+@pytest.mark.parametrize("classifier", ["malformed_input", "policy_blocked", "resource_configuration"])
+def test_downstream_resume_placeholder_domain_keeps_classifier_refusals(classifier: str) -> None:
+    # Seam 6, latent corner: the placeholder domain keeps the deleted blacklist's
+    # CLASSIFIER arm verbatim, so a state that overrides the classifier is refused
+    # exactly as before.  Dropping it would have loosened this corner.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code=None,
+        extra={"classifier": classifier},
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == ("policy_blocked" if classifier == "policy_blocked" else "permanent_failure_guard")
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["classifier"] == classifier
+
+
+def test_top_level_retryable_cannot_whiten_permanent_code() -> None:
+    # Seam 7, tightening half: the top-level ``retryable`` transit key no longer
+    # flips a permanent classification.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code="OUT_OF_MEMORY",
+        extra={"retryable": True},
+    )
+
+    failure = scheduler_state_failure_module._failure_policy_payload(state)
+    assert failure["permanent"] is True
+    assert failure["retryable"] is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def test_top_level_retryable_still_reasserts_retryable_classification() -> None:
+    # Seam 7, unchanged half: for a code whose classification is already
+    # retryable, the key behaves exactly as before.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code="NODE_FAILURE",
+        extra={"retryable": True},
+    )
+
+    failure = scheduler_state_failure_module._failure_policy_payload(state)
+    assert failure["retryable"] is True
+    assert failure["permanent"] is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "resume_downstream_after_durable_shud"
+
+
+def test_explicit_top_level_permanent_still_forces_permanence() -> None:
+    # Seam 7, reverse overwrite preserved verbatim.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code="NODE_FAILURE",
+        extra={"retryable": True, "permanent": True},
+    )
+
+    failure = scheduler_state_failure_module._failure_policy_payload(state)
+    assert failure["permanent"] is True
+    assert failure["retryable"] is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+
+
+def test_recorded_permanent_code_with_top_level_retryable_is_refused_by_both_surfaces() -> None:
+    # Seam 8, the interlock anchor.  Before this change these two whitening
+    # surfaces covered for each other: fixing only the downstream-resume judgement
+    # left the top-level key able to flip the classification first, and fixing only
+    # the top-level key left the resume channel's blacklist blind to
+    # ``FAILED_PARSE``.  This candidate is green only when BOTH are fixed.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_downstream_failure_state(
+        candidate,
+        error_code="FAILED_PARSE",
+        extra={"retryable": True},
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["failure"]["reason_code"] == "FAILED_PARSE"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+# --- seam 10: channels this change must NOT move
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "PARSE_TASK_FAILED", "SLURM_TIMEOUT"])
+def test_missing_forecast_output_recompute_channel_is_unchanged(error_code: str) -> None:
+    # Seam 10: the output-absence recompute channel declares ``remedy="exempt"``
+    # and is deliberately NOT wired to the shared judgement -- recomputing an
+    # ABSENT forecast output is not a same-configuration rerun of the failed
+    # stage.  Its approved code set (OUT_OF_MEMORY included) is unchanged.
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_out_of_memory_failure_state(failed_stage="state_save_qc", durable_shud_output_exists=False),
+        "error_code": error_code,
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "recompute_forecast_after_missing_output"
+    assert decision.evidence["restart_stage"] == "forecast"
+    assert decision.evidence["failure"]["classifier"] == "missing_forecast_output_recompute"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+def test_completed_upstream_stage_channel_never_sees_a_failure_state() -> None:
+    # Seam 10 / design D2b: the completed-upstream-stage channel excludes itself
+    # from failure states via ``_state_has_failure_signal``, which is why it needs
+    # no permanence consultation.  Pinned negatively so the exemption cannot rot.
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    completed_stage_evidence = {"restart_stage": "parse", "stage": "forecast", "status": "succeeded"}
+    healthy_state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "completed_stage_evidence": completed_stage_evidence,
+    }
+    failed_state = {**healthy_state, "pipeline_status": "failed", "error_code": "OUT_OF_MEMORY"}
+    base_evidence = {"candidate_id": candidate.candidate_id}
+
+    assert (
+        scheduler_state_failure_module._completed_upstream_stage_retry_evidence(
+            candidate, healthy_state, base_evidence
+        )
+        is not None
+    )
+    assert (
+        scheduler_state_failure_module._completed_upstream_stage_retry_evidence(
+            candidate, failed_state, base_evidence
+        )
+        is None
+    )
+
+
+# --- seam 12: the shared judgement's own unit matrix
+
+
+@pytest.mark.parametrize("remedy", ["raw_input_reingestion", "changed_model_package"])
+@pytest.mark.parametrize(
+    ("classifier", "reason_code"),
+    [
+        ("unknown_failure", "SLURM_JOB_FAILED"),
+        ("malformed_input", "INVALID_MANIFEST"),
+        ("parse_failure", "PARSE_FAILED"),
+        ("transient_slurm_runtime", "NODE_FAILURE"),
+    ],
+)
+def test_remedy_judgement_permits_codes_it_cannot_disprove(
+    remedy: str,
+    classifier: str,
+    reason_code: str,
+) -> None:
+    # Seam 12: the judge refuses ONLY classifications that PROVE the remedy
+    # irrelevant; everything else stays open for every remedy.
+    assert (
+        scheduler_state_failure_module._remedy_permits_permanent_failure(
+            {"classifier": classifier, "reason_code": reason_code},
+            remedy=remedy,
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("remedy", "classifier", "reason_code", "expected_permitted"),
+    [
+        # Resource-configuration is non-causal for BOTH remedies.
+        ("raw_input_reingestion", "resource_configuration", "OUT_OF_MEMORY", False),
+        ("changed_model_package", "resource_configuration", "OUT_OF_MEMORY", False),
+        # Policy/permission is non-causal for an input re-ingestion, but a changed
+        # model package can genuinely clear it (#1161 list preserved verbatim).
+        ("raw_input_reingestion", "policy_blocked", "TEMPLATE_NOT_ALLOWED", False),
+        ("raw_input_reingestion", "policy_blocked", "POLICY_BLOCKED", False),
+        ("raw_input_reingestion", "policy_blocked", "PERMISSION_DENIED", False),
+        ("changed_model_package", "policy_blocked", "TEMPLATE_NOT_ALLOWED", True),
+        # The CODE arm is independent of the classifier arm: ``classifier`` is a
+        # state-overridable transit key, so an OOM code smuggled under an
+        # ``unknown_failure`` classifier must still be refused.
+        ("raw_input_reingestion", "unknown_failure", "OUT_OF_MEMORY", False),
+        ("changed_model_package", "unknown_failure", "OUT_OF_MEMORY", False),
+        ("raw_input_reingestion", "unknown_failure", "out_of_memory", False),
+    ],
+)
+def test_remedy_judgement_refusal_matrix(
+    remedy: str,
+    classifier: str,
+    reason_code: str,
+    expected_permitted: bool,
+) -> None:
+    assert (
+        scheduler_state_failure_module._remedy_permits_permanent_failure(
+            {"classifier": classifier, "reason_code": reason_code},
+            remedy=remedy,
+        )
+        is expected_permitted
+    )
+
+
+def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifest_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 12 end to end: the code arm is load-bearing, not decorative.  A state
+    # that overrides ``classifier`` (an identity-filter whitelisted transit key)
+    # to ``unknown_failure`` while recording ``OUT_OF_MEMORY`` is still refused.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="OUT_OF_MEMORY",
+        extra={"classifier": "unknown_failure"},
+    )
+
+    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["failure"]["classifier"] == "unknown_failure"
+    assert decision.evidence["failure"]["reason_code"] == "OUT_OF_MEMORY"
+
+
+def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -> None:
+    # Design D6 / task 1 acceptance line: the shared judgement is the ONLY place
+    # a permanent-code refusal list lives.  The deleted downstream blacklist used
+    # to be the second one.
+    source = Path(scheduler_state_failure_module.__file__).read_text(encoding="utf-8")
+    for retired_literal in (
+        '"MANIFEST_SCHEMA_INVALID",\n        "MALFORMED_INPUT",',
+        '"INVALID_MANIFEST",\n        "MANIFEST_SCHEMA_INVALID",',
+    ):
+        assert retired_literal not in source
+    assert source.count("_REMEDY_NON_CAUSAL_CODES = ") == 1
+    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODES == frozenset({"OUT_OF_MEMORY"})
+    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
+        {"resource_configuration", "policy_blocked"}
+    )
 
 
 def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
