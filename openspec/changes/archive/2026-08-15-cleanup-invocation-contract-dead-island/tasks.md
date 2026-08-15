@@ -32,5 +32,5 @@
 
 ## 3. 交付记录
 
-- [ ] 3.1 PR body 记录方案裁决（A）与 B 的三条否决理由（issue AC-1；引 design D1）
-- [ ] 3.2 node-27 零实机变更声明（无 bundle 契约变化）
+- [x] 3.1 PR body 记录方案裁决（A）与 B 的三条否决理由（issue AC-1；引 design D1）
+- [x] 3.2 node-27 零实机变更声明（无 bundle 契约变化）

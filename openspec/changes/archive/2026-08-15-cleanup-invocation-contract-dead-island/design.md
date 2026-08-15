@@ -25,9 +25,10 @@ Must-preserve：
 即消除漂移源与伪 oracle 面。
 
 **B 否，三条独立理由**：
-1. 与已记录裁定冲突：#1261 在 capture argv 锚定注释里明文裁定 interpreter/
-   launcher 身份是 residual TRUST ROOT，闭合路线是 producer-side attestation
-   （"NOT a verifier gate"）。B 恰是把它做成 verifier gate 的路线，等于推翻
+1. 与已记录裁定冲突：#1261 在 capture argv 锚定注释里明文裁定 argv[0]
+   interpreter 与提供脚本的 repo checkout（capture lane 取证声明的 residual
+   TRUST ROOTS）的闭合路线是 producer-side attestation（"NOT a verifier
+   gate"）。B 恰是把它做成 verifier gate 的路线，等于推翻
    #1250-#1266 六个 PR 沿用的边界划分，而 issue 本身没有提出需要这条信任边界的
    新证据。
 2. 成本不对称：schema + bundle_author + supervisor + capture 全链 + node-27
