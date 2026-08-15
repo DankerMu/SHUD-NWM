@@ -93,6 +93,89 @@ def _cold_start_quarantined_failure(failure: Mapping[str, Any], prior_failure: s
     reason = prior_failure or failure.get("prior_failure_reason") or failure.get("reason_code")
     return str(reason or "").upper() == "COLD_START_QUARANTINED"
 
+#: #1313 D2 -- THE single permanence judgement source for the db-free decision
+#: ladder, shaped as a ``remedy category x classification`` table.  Every
+#: pre-guard evidence channel that is about to overwrite a permanent failure
+#: classification names the remedy it would apply; the judge refuses ONLY the
+#: classifications that PROVE that remedy cannot address the cause.
+#:
+#: Everything else stays open on purpose.  The geometry-gated channels have
+#: already established causality structurally (a raw manifest probed missing
+#: after a previously successful download; a repair download newer than the
+#: failed job), so unknown-default codes such as ``SLURM_JOB_FAILED`` and
+#: input-defect codes such as ``INVALID_MANIFEST`` keep their existing repair
+#: path -- the production repair remedy is NOT retired.
+_REMEDY_NON_CAUSAL_CLASSIFIERS = frozenset(
+    {
+        # OUT_OF_MEMORY: re-running the same ``memory_gb`` reproduces it.
+        "resource_configuration",
+        # POLICY_BLOCKED / PERMISSION_DENIED / TEMPLATE_NOT_ALLOWED (retry.py:183).
+        "policy_blocked",
+    }
+)
+#: The code arm is NOT foldable into the classifier arm.  ``classifier`` is a
+#: state-overridable transit key: ``_failure_policy_payload`` honours an explicit
+#: ``classifier`` / ``failure_classifier`` on the state, and the identity filter
+#: whitelists it, so a state carrying ``classifier: "unknown_failure"`` together
+#: with a remedy-non-causal ``error_code`` would walk straight past a
+#: classifier-only judge.  ``_model_package_refresh_retry_evidence`` has carried
+#: both arms since #1161 for exactly this reason; neither arm may be dropped.
+#:
+#: The code arm is therefore shaped as the SAME per-remedy table as the
+#: classifier arm (#1313 round-1 V1-C1): the smuggle argument is identical for
+#: the policy codes and for OOM, so an arm that only listed OOM left
+#: ``classifier: "unknown_failure"`` (and the casing variant ``Policy_Blocked``,
+#: which the classifier arm does not normalize) as a live bypass for
+#: POLICY_BLOCKED / PERMISSION_DENIED / TEMPLATE_NOT_ALLOWED.  The comparison is
+#: ``.upper()``, which closes the casing shape on the code side too.
+_REMEDY_NON_CAUSAL_CODES = frozenset(
+    {
+        "OUT_OF_MEMORY",
+        "POLICY_BLOCKED",
+        "PERMISSION_DENIED",
+        "TEMPLATE_NOT_ALLOWED",
+    }
+)
+#: ``changed_model_package`` keeps the #1161 refusal lists verbatim on BOTH arms
+#: (zero semantic change is the acceptance line, #1313 D2): a refreshed package
+#: genuinely can clear a policy/template rejection -- the template ships inside
+#: the package -- so that remedy is not proven non-causal for the
+#: ``policy_blocked`` class the way an input re-ingestion is.  Widening either of
+#: these two sets would break that acceptance line.
+_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS = frozenset({"resource_configuration"})
+_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES = frozenset({"OUT_OF_MEMORY"})
+#: Unlisted remedies fall back to the strictest (raw-input) row: a judge asked
+#: about a remedy nobody declared refuses rather than relicenses.
+_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE: dict[str, frozenset[str]] = {
+    "raw_input_reingestion": _REMEDY_NON_CAUSAL_CLASSIFIERS,
+    "changed_model_package": _CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS,
+}
+_REMEDY_NON_CAUSAL_CODE_TABLE: dict[str, frozenset[str]] = {
+    "raw_input_reingestion": _REMEDY_NON_CAUSAL_CODES,
+    "changed_model_package": _CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES,
+}
+
+
+def _remedy_permits_permanent_failure(failure: Mapping[str, Any], *, remedy: str) -> bool:
+    """Whether ``remedy`` may still be applied to an already-permanent failure.
+
+    ``True`` means "this classification does not prove the remedy irrelevant";
+    the calling channel keeps its existing behaviour.  ``False`` means the
+    channel must not emit a retry decision, and the ladder continues to the
+    remaining channels (a genuinely changed model package may still claim the
+    candidate) and, absent another legitimate claim, to the permanent-failure
+    guard.
+    """
+
+    classifiers = _REMEDY_NON_CAUSAL_CLASSIFIER_TABLE.get(remedy, _REMEDY_NON_CAUSAL_CLASSIFIERS)
+    if str(failure.get("classifier") or "") in classifiers:
+        return False
+    codes = _REMEDY_NON_CAUSAL_CODE_TABLE.get(remedy, _REMEDY_NON_CAUSAL_CODES)
+    if str(failure.get("reason_code") or "").upper() in codes:
+        return False
+    return True
+
+
 def _failure_policy_payload(
     state: Mapping[str, Any],
     *,
@@ -107,7 +190,11 @@ def _failure_policy_payload(
     explicit_classifier = state.get("failure_classifier") or state.get("classifier")
     if explicit_classifier not in (None, ""):
         classification["classifier"] = str(explicit_classifier)
-    if state.get("retryable") is True and not classification["limit_exhausted"]:
+    # #1313 D5: the top-level ``retryable`` key is a state-overridable transit key
+    # (identity-filter whitelisted, no production writer today).  It may only
+    # REASSERT a retryability the classification already grants -- it can never
+    # whiten a permanent code back into an automatic retry.
+    if state.get("retryable") is True and classification["retryable"]:
         classification["retryable"] = True
         classification["permanent"] = False
     if state.get("permanent") is True:
@@ -243,10 +330,16 @@ def _downstream_retry_evidence(
         return None
     if _force_native_shud_rerun(state):
         return None
+    # #1313 D4: the ``{STAGE}_FAILED`` default below is READER-SYNTHESIZED -- it is
+    # fabricated here when the state records no error code at all, and is therefore
+    # not evidence under the spec's unknown-code clause.  Whether the code the
+    # classification rests on was genuinely recorded decides which domain the
+    # downstream-resume judgement applies.
+    recorded_error_code = _state_error_code(state)
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
     if _cold_start_quarantined_failure(failure):
         return None
-    if _downstream_failure_restartable(failure):
+    if _downstream_failure_restartable(failure, code_recorded=recorded_error_code is not None):
         failure = {
             **failure,
             "retryable": True,
@@ -299,6 +392,11 @@ def _missing_forecast_output_recompute_evidence(
     if failed_stage not in _DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES:
         return None
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
+    # #1313 D2: this channel declares ``remedy="exempt"`` and deliberately does NOT
+    # consult the shared permanence judgement.  Recomputing an ABSENT forecast
+    # output is not a same-configuration rerun of the failed stage, so gating it on
+    # its own approved code set (which includes OUT_OF_MEMORY) is the standing
+    # ruling from #1161, carved out explicitly in the spec delta.
     reason_code = str(failure.get("reason_code") or "").upper()
     if reason_code not in _MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES and reason_code not in TRANSIENT_RETRY_REASON_CODES:
         return None
@@ -1058,21 +1156,33 @@ def _planned_retry_policy_value(
         return retry_policy.get(key)
     return default
 
-def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
+#: The placeholder domain's classifier arm, preserved VERBATIM from the blacklist
+#: this judgement replaced (#1313 D4).  The seven codes the reader can synthesize
+#: (``{CONVERT,FORCING,FORECAST,PARSE,STATE_SAVE_QC,PUBLISH,COPYBACK}_FAILED``)
+#: never hit the old code arm, so this classifier arm was the blacklist's only
+#: effective refusal surface there; dropping it would LOOSEN a latent corner (a
+#: state that explicitly overrides ``classifier`` to one of these three), which
+#: runs against this change's strictly-tightening direction.
+_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS = frozenset(
+    {"malformed_input", "policy_blocked", "resource_configuration"}
+)
+
+
+def _downstream_failure_restartable(failure: Mapping[str, Any], *, code_recorded: bool) -> bool:
+    """Whether a durable-SHUD downstream failure may resume its failed stage.
+
+    ``code_recorded`` splits the judgement by EVIDENCE SOURCE (#1313 D4).  A
+    genuinely recorded code is governed by the spec's permanence clause -- a
+    permanent or unknown-default-non-transient code refuses the resume, a
+    transient code keeps it.  A reader-synthesized ``{STAGE}_FAILED`` placeholder
+    is not evidence under that clause and keeps its pre-#1313 behaviour.
+    """
+
     if failure.get("limit_exhausted") is True:
         return False
-    if str(failure.get("classifier") or "") in {"malformed_input", "policy_blocked", "resource_configuration"}:
-        return False
-    reason_code = str(failure.get("reason_code") or "").upper()
-    if reason_code in {
-        "INVALID_MANIFEST",
-        "MANIFEST_SCHEMA_INVALID",
-        "MALFORMED_INPUT",
-        "OUT_OF_MEMORY",
-        "POLICY_BLOCKED",
-    }:
-        return False
-    return True
+    if not code_recorded:
+        return str(failure.get("classifier") or "") not in _DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS
+    return not failure.get("permanent")
 
 
 def _completed_upstream_stage_retry_evidence(
@@ -1140,6 +1250,13 @@ def _missing_raw_manifest_repair_evidence(
     if not _object_manifest_is_missing(candidate, str(manifest_uri)):
         return None
     failure = _failure_policy_payload(state)
+    # #1313 D3: consulted AFTER the structural gates above (so healthy/running
+    # candidates compute nothing new) and BEFORE the overwrite below.  Refusing
+    # here is a fall-through, not a jump to the guard: the ladder still offers the
+    # candidate to the model-package refresh channel, which may legitimately claim
+    # it when the package genuinely changed.
+    if failure["permanent"] and not _remedy_permits_permanent_failure(failure, remedy="raw_input_reingestion"):
+        return None
     failure = {
         **failure,
         "retryable": True,
@@ -1203,6 +1320,10 @@ def _repaired_raw_manifest_downstream_retry_evidence(
     if repair_time is not None and failed_time is not None and repair_time <= failed_time:
         return None
     failure = _failure_policy_payload(state)
+    # #1313 D3: same shared judgement, same remedy category as the repair channel
+    # above -- consulted after the structural gates, before the overwrite.
+    if failure["permanent"] and not _remedy_permits_permanent_failure(failure, remedy="raw_input_reingestion"):
+        return None
     failure = {
         **failure,
         "retryable": True,
@@ -1369,10 +1490,12 @@ def _model_package_refresh_retry_evidence(
         return None
     # A model-package refresh compares only the package shas and restarts the same
     # failed stage — it is not a memory-sizing remedy, so an out-of-memory failure
-    # must not borrow this override to regain automatic retry (#1161).
-    if str(failure.get("classifier") or "") == "resource_configuration":
-        return None
-    if str(failure.get("reason_code") or "").upper() == "OUT_OF_MEMORY":
+    # must not borrow this override to regain automatic retry (#1161).  Both arms
+    # (classifier and code) now live in the shared judgement source; this remedy's
+    # row on BOTH arms is the #1161 list verbatim, i.e. zero semantic change
+    # (#1313 D2) — in particular it does NOT pick up the policy codes the
+    # raw-input row refuses.
+    if not _remedy_permits_permanent_failure(failure, remedy="changed_model_package"):
         return None
     prior = state.get("run_manifest_model_package")
     if not isinstance(prior, Mapping):
