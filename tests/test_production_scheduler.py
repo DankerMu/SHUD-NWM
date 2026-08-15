@@ -89,10 +89,56 @@ _TEST_OBJECT_STORE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")).resolve() / "nh
 # Recorded forcing provenance for failure states whose subject is the retry state
 # machine rather than artifact provenance.  Since #1160 a forecast-stage failure
 # with NO recorded forcing URI is demoted to the stable missing-forcing blocker
-# (fail-closed by design); these fixtures record the URI they always implied.  No
-# ``OBJECT_STORE_ROOT`` is configured in these tests, so the recorded artifact
-# counts as existing and the guard correctly stands down.
+# (fail-closed by design); these fixtures record the URI they always implied.
+#
+# #1365: these fixtures used to lean on a DOUBLE coincidence -- a 6-segment FILE
+# key (which the closed-world object-path validator happens to accept, unlike the
+# 5-segment directory shape production actually records) AND no configured
+# ``OBJECT_STORE_ROOT`` (under which the probe used to fail OPEN and vouch for any
+# uri, bogus ones included).  Both legs are gone: the probe now fails CLOSED with
+# ``object_store_root_unconfigured`` when no root is configured, so every such
+# fixture must MATERIALIZE the package it claims via
+# ``recorded_forcing_package_present`` instead of assuming it.
 _RECORDED_FORCING_PACKAGE_URI = "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+#: ``raw/<source>/<compact cycle>/manifest.json`` for ``_scheduler_candidate_fixture``
+#: -- the key the untouched raw-manifest repair lane probes.
+_RECORDED_RAW_MANIFEST_URI = "raw/gfs/2026052106/manifest.json"
+
+
+def _seed_recorded_forcing_packages(
+    monkeypatch: pytest.MonkeyPatch,
+    object_store_root: Path,
+    *package_manifest_uris: str,
+    object_store_prefix: str = "",
+) -> LocalObjectStore:
+    """Configure a real object store that physically holds the recorded packages.
+
+    The retry-state-machine fixtures' subject is the retry decision, not artifact
+    provenance, so the package they record is made PRESENT rather than assumed
+    present by a fail-open quirk (#1365).  Only ``OBJECT_STORE_ROOT`` is exported:
+    the recorded uris normalize to the same keys with or without a configured
+    prefix, and these fixtures must not perturb any other env-driven behaviour.
+    """
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    store = LocalObjectStore(object_store_root, object_store_prefix)
+    for uri in package_manifest_uris:
+        store.write_bytes_atomic(
+            store.normalize_key(uri),
+            b'{"schema_version": "nhms.forcing_package.v1"}',
+        )
+    return store
+
+
+@pytest.fixture
+def recorded_forcing_package_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> LocalObjectStore:
+    """Materialize ``_RECORDED_FORCING_PACKAGE_URI`` in a configured object store."""
+
+    return _seed_recorded_forcing_packages(
+        monkeypatch,
+        tmp_path / "recorded-forcing-object-store",
+        _RECORDED_FORCING_PACKAGE_URI,
+    )
 
 
 def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> None:
@@ -2745,6 +2791,7 @@ def test_fresh_cycle_manual_retry_preserves_retry_state_and_reuses_raw_manifest(
     assert state_evidence["manual_retry"]["marker"] is True
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_path: Path) -> None:
     active_repository = FakeCandidateStateRepository(
         {
@@ -2809,6 +2856,7 @@ def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_p
     assert submitted_basin["restart_stage"] == "forecast"
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_candidate_scoped_retry_bypasses_active_pipeline_guard(tmp_path: Path) -> None:
     class ActiveCandidateStateRepository(FakeCandidateStateRepository):
         def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
@@ -5056,6 +5104,7 @@ def test_sibling_array_task_result_does_not_block_current_candidate(
     assert orchestrator.calls
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_nested_failed_task_identity_remains_available_when_failure_state_is_candidate_scoped() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
@@ -5103,6 +5152,7 @@ def test_nested_failed_task_identity_remains_available_when_failure_state_is_can
     assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_non_authoritative_task_results_do_not_populate_retry_task_identity() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
@@ -5322,8 +5372,16 @@ def test_foreign_model_cycle_marker_stays_unadopted_on_the_decision_path(attribu
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_unattributed_cycle_marker_does_not_drive_a_manual_retry_decision() -> None:
-    """End of the decision path: the unadopted marker must not become a manual retry."""
+    """End of the decision path: the unadopted marker must not become a manual retry.
+
+    The fixture materializes the recorded forcing package in a configured store
+    (#1365 round-1 cand-04): without it the artifact guard fails closed FIRST and
+    the decision is a missing-forcing blocker, so the manual-retry negative below
+    passes vacuously -- it never reaches the guarded seam.  The positive pin makes
+    that regression loud instead of silent.
+    """
 
     candidate = _scheduler_candidate_fixture()
     state = _decision_path_state(
@@ -5340,7 +5398,9 @@ def test_unattributed_cycle_marker_does_not_drive_a_manual_retry_decision() -> N
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    assert decision is None or decision.reason != "manual_retry_requested"
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.reason != "manual_retry_requested"
 
 
 @pytest.mark.parametrize(
@@ -8234,6 +8294,7 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
     assert result.evidence["skipped_candidates"] == []
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_non_authoritative_task_results_preserve_candidate_scoped_retry(
     tmp_path: Path,
 ) -> None:
@@ -9407,6 +9468,507 @@ def test_directory_shaped_package_uri_is_never_the_existence_probe_object(
     assert decision.action == "retry"
 
 
+# ---------------------------------------------------------------------------
+# #1365: the journal/direct (tier-1/2) forcing leg used to hand the probe the
+# recorded DIRECTORY-shaped package uri verbatim, so every production package on
+# a deployment with a configured object-store root was judged missing.
+# ---------------------------------------------------------------------------
+
+
+def _journal_tier_directory_package_state(candidate: Any, package_uri: str, *, tier: str = "journal") -> dict:
+    """Failure state whose journal-borne forcing uri is the DIRECTORY package uri.
+
+    No sidecar record is ever written for these fixtures, so the decision can only
+    have come from the journal/direct tier under test.
+    """
+
+    return _forecast_failure_state(
+        candidate,
+        forcing_version={
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": package_uri,
+            "forcing_version_source": tier,
+        },
+    )
+
+
+def _recorded_package_reference(package_uri: str, *, trailing_slash: bool) -> str:
+    """The two shapes the SAME package reference is recorded in (#1365 round-1).
+
+    The producer writes the trailing-``/`` directory uri
+    (``producer._directory_uri``); the handoff lane records a normalized copy of
+    the same reference with the slash stripped
+    (``forcing_producer/file_store.py`` ``normalize_key(...).strip("/")`` ->
+    ``uri_for_key``), and ``forcing_domain_handoff_apply``'s ``rtrim`` comparison
+    exists precisely because both shapes coexist in ``met.forcing_version``.  The
+    probe verdict must not depend on that one character.
+    """
+
+    assert package_uri.endswith("/")
+    return package_uri if trailing_slash else package_uri.rstrip("/")
+
+
+@pytest.mark.parametrize("trailing_slash", [True, False])
+@pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
+@pytest.mark.parametrize("tier", ["journal", "direct"])
+def test_journal_tier_present_directory_package_is_not_reported_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_store_prefix: str,
+    tier: str,
+    trailing_slash: bool,
+) -> None:
+    # #1365 AC-1 positive: the PRODUCTION geometry -- object-store root configured
+    # and the recorded ``forcing_package_uri`` in its canonical 5-segment package
+    # prefix shape -- with the package physically present.  The leg must probe the
+    # derived manifest FILE key and let recovery proceed, for the producer's
+    # trailing-``/`` shape AND the handoff lane's normalized no-slash copy of the
+    # same reference (round-1 cand-05), bare key and ``s3://`` form alike.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=object_store_prefix,
+    )
+    package["store"].write_bytes_atomic(package["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    package_uri = _recorded_package_reference(package["package_uri"], trailing_slash=trailing_slash)
+    # Independent oracle for the production shape: 5 path segments.
+    assert package_uri.removeprefix(object_store_prefix).strip("/").count("/") == 4
+    assert package_uri.endswith("/") is trailing_slash
+    # And the shape the probe used to be handed is genuinely unprobeable.
+    with pytest.raises(ValueError):
+        package["store"].resolve_path(package_uri)
+    expected_probe_key = f"{package_uri.rstrip('/')}/forcing_package.json"
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, package_uri, tier=tier),
+    )
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    assert decision.evidence.get("error_code") != "FORCING_PACKAGE_URI_MISSING"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": tier,
+        "package_uri": package_uri,
+        "probe": "manifest",
+        "probe_key": expected_probe_key,
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+
+@pytest.mark.parametrize("trailing_slash", [True, False])
+@pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
+def test_journal_tier_absent_directory_package_blocks_as_determined_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_store_prefix: str,
+    trailing_slash: bool,
+) -> None:
+    # #1365 AC-1 negative: same production geometry with the manifest ABSENT keeps
+    # the unchanged fail-closed blocker -- and it is a "probed, determined absent"
+    # verdict (null unsafe reason), with the RECORDED package uri as the artifact
+    # reference and the derived key carried as provenance only.  Both recorded
+    # shapes of the same reference must reach the identical verdict.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=object_store_prefix,
+    )
+    package_uri = _recorded_package_reference(package["package_uri"], trailing_slash=trailing_slash)
+    assert not (object_store_root / package["manifest_key"]).exists()
+    expected_probe_key = f"{package_uri.rstrip('/')}/forcing_package.json"
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, package_uri),
+    )
+
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=package_uri)
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] is None
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "journal",
+        "package_uri": package_uri,
+        "probe": "manifest",
+        "probe_key": expected_probe_key,
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+
+@pytest.mark.parametrize("manifest_present", [True, False])
+def test_file_shaped_package_uri_probe_behaviour_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    manifest_present: bool,
+) -> None:
+    # #1365 legacy pin: a 6-segment FILE key (what the sidecar tier derives and
+    # what the pre-#1365 fixtures recorded) is still probed verbatim -- present ->
+    # not missing, absent -> missing, both with a null unsafe reason.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    file_key = "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    assert file_key.count("/") == 5
+    if manifest_present:
+        LocalObjectStore(object_store_root, "").write_bytes_atomic(file_key, b"{}")
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, file_key) == (
+        not manifest_present,
+        None,
+    )
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, file_key),
+    )
+
+    assert decision is not None
+    if manifest_present:
+        assert decision.action == "retry"
+    else:
+        _assert_stable_missing_forcing_blocker(decision, artifact_uri=file_key)
+        assert decision.evidence["artifact_guard"]["unsafe_reason"] is None
+    assert decision.evidence["forcing_provenance"]["probe"] == "package_uri"
+    assert decision.evidence["forcing_provenance"]["probe_key"] == file_key
+
+
+@pytest.mark.parametrize(
+    "artifact_uri",
+    [
+        # The issue's explicit bogus reference: no probe may ever vouch for it.
+        "s3://nhms/totally/bogus/nonexistent.json",
+        "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/",
+        "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+        "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+    ],
+)
+def test_object_uri_probe_fails_closed_when_no_object_store_root_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_uri: str,
+) -> None:
+    # #1365 D2/AC-3: with no root configured the probe cannot resolve ANY key, so
+    # it must report missing with a distinguishable reason instead of the old
+    # ``_object_manifest_is_missing`` fail-open (which returned "present" for every
+    # uri, bogus ones included).
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    assert candidate.resource_profile.get("object_store_root") in (None, "")
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, artifact_uri) == (
+        True,
+        "object_store_root_unconfigured",
+    )
+    # The probe is never reached, so the underlying store helper is not consulted.
+    monkeypatch.setattr(
+        scheduler_state_failure_module,
+        "_object_manifest_is_missing",
+        lambda *_args, **_kwargs: pytest.fail("probe must not run without a configured root"),
+    )
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, artifact_uri) == (
+        True,
+        "object_store_root_unconfigured",
+    )
+
+
+def test_unconfigured_object_store_root_blocker_carries_the_unsafe_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1365 AC-3 at the decision seam: the blocker evidence lets an operator tell
+    # "no probe ran" from "probed, determined absent".
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    package_uri = "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/"
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, package_uri),
+    )
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=package_uri,
+        unsafe_reason="object_store_root_unconfigured",
+    )
+
+
+def test_object_probe_store_error_is_contained_with_its_own_unsafe_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1365 round-1 (cand-01) unit seam: ``LocalObjectStore.exists`` raises
+    # ``ObjectStoreError`` -- a ``RuntimeError`` subclass the probe's
+    # ``except (OSError, ValueError)`` leg does NOT cover -- for a symlinked probe
+    # target or a stale NFS handle.  The probe must contain it fail-closed with its
+    # own distinguishable reason instead of letting it escape the decision path.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+
+    def _raise_store_error(*_args: Any, **_kwargs: Any) -> bool:
+        raise ObjectStoreError("Failed to check object existence for forcing/...: unsafe path component")
+
+    monkeypatch.setattr(scheduler_state_failure_module, "_object_manifest_is_missing", _raise_store_error)
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
+    ) == (True, "artifact_probe_error")
+    # Distinguishable from both other outcomes on the same branch.
+    assert "artifact_probe_error" not in {None, "object_store_root_unconfigured"}
+
+
+def test_journal_tier_probe_store_error_blocks_fail_closed_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1365 round-1 (cand-01) decision + pass seam, in the real filesystem geometry:
+    # the recorded package uri is the production directory shape, the derived
+    # witness manifest leaf is a SYMLINK (the same shape an NFS ESTALE/EIO stat
+    # produces), so the store refuses the stat.  Before containment this
+    # ``ObjectStoreError`` escaped ``_candidate_state_decision`` and aborted the
+    # whole ``run_once`` pass -- no candidates, no evidence, repeating every pass
+    # until the filesystem fault cleared.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    package_uri = package["package_uri"]
+    real_manifest = tmp_path / "elsewhere-forcing_package.json"
+    real_manifest.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    manifest_path = object_store_root / package["manifest_key"]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.symlink_to(real_manifest)
+    # Pre-condition: the derived witness key is the one that faults, and it faults
+    # as ``ObjectStoreError`` rather than as absence.
+    with pytest.raises(ObjectStoreError):
+        package["store"].exists(package["manifest_key"])
+    state = _journal_tier_directory_package_state(candidate, package_uri)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=package_uri,
+        unsafe_reason="artifact_probe_error",
+    )
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "journal",
+        "package_uri": package_uri,
+        "probe": "manifest",
+        "probe_key": f"{package_uri.rstrip('/')}/forcing_package.json",
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert result.evidence["blocked_candidates"][0]["state_evidence"]["artifact_guard"]["unsafe_reason"] == (
+        "artifact_probe_error"
+    )
+    assert orchestrator.calls == []
+
+
+# A recorded reference whose authority holds a "[": ``urlparse`` rejects it with
+# ``ValueError: Invalid IPv6 URL``, which is the shape-classification fault leg.
+_MALFORMED_RECORDED_PACKAGE_URI = "s3://[/forcing/gfs/2026052106/basin_a_v1/model_a/"
+
+
+def test_malformed_recorded_package_uri_shape_classification_never_raises() -> None:
+    # #1365 round-1b unit seam: the witness-derivation trigger runs OUTSIDE the
+    # probe's own containment (it decides WHAT to probe), and the closed-world
+    # validator it consults is itself a RAISING surface.  Independent oracle
+    # first -- the raw validator really does raise on this recorded shape, so the
+    # containment under test is load-bearing rather than decorative:
+    from packages.common.storage import validate_object_path
+
+    with pytest.raises(ValueError):
+        validate_object_path(_MALFORMED_RECORDED_PACKAGE_URI)
+
+    # An unparseable reference is not a package prefix a witness can be derived
+    # for, so classification answers "probe it as recorded" instead of raising.
+    assert (
+        scheduler_state_failure_module._needs_package_manifest_witness(_MALFORMED_RECORDED_PACKAGE_URI) is False
+    )
+
+
+def test_malformed_recorded_package_uri_blocks_fail_closed_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1365 round-1b decision + pass seam: with the store configured, the
+    # malformed recorded uri reaches the probe as-is; the probe's own
+    # ``(OSError, ValueError)`` leg contains it into the D4 unresolvable-reference
+    # residual -- fail-closed "missing" with a NULL unsafe reason, which keeps the
+    # blocker repair-eligible (a rebuild re-records the reference).  Before the
+    # containment the classification raised and aborted the whole ``run_once``
+    # pass, exactly as the uncontained ``ObjectStoreError`` used to.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _journal_tier_directory_package_state(candidate, _MALFORMED_RECORDED_PACKAGE_URI)
+    # Pre-existing, unchanged by this fix: the evidence redactor's own url leg
+    # cannot parse this uri either and falls back to its marker, so the recorded
+    # reference reaches evidence as ``[redacted]``.  Named here (not hard-coded)
+    # so the assertions below stay honest about WHAT is being pinned.
+    from packages.common.redaction import REDACTION_MARKER
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=REDACTION_MARKER,
+        unsafe_reason=None,
+    )
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "journal",
+        "package_uri": REDACTION_MARKER,
+        "probe": "package_uri",
+        "probe_key": REDACTION_MARKER,
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert result.evidence["blocked_candidates"][0]["state_evidence"]["artifact_guard"]["unsafe_reason"] is None
+    assert orchestrator.calls == []
+
+
+def test_copyback_object_uri_without_object_store_root_blocks_with_the_unsafe_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1365 D3/AC-4: the copyback leg shares the probe, so it inherits the
+    # root-unconfigured fail-closed ruling verbatim (it is exempt only from the
+    # forcing-specific witness derivation, which has no canonical filename here).
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "failed",
+        "pipeline_status": "failed",
+        "failed_stage": "parse",
+        "error_code": "PARSE_FAILED",
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/summary.json",
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_copyback_source")
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_MISSING"
+    assert decision.evidence["artifact_guard"]["artifact_type"] == "copyback_source"
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] == "object_store_root_unconfigured"
+
+
+def test_package_manifest_probe_uri_is_the_single_producer_isomorphic_derivation() -> None:
+    # #1365 D1 anti-drift pin: BOTH tiers derive their witness key through one
+    # helper, and that helper is literally the producer's own construction.
+    from workers.forcing_producer.producer import ForcingProducerConfig, _package_manifest_uri
+
+    derive = scheduler_state_failure_module._package_manifest_probe_uri
+    # A recorded uri with surrounding whitespace must not fabricate an empty path
+    # segment (the probe strips before resolving, so the derivation must too).
+    assert derive("  s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/  ") == (
+        "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    )
+    for package_uri in (
+        "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/",
+        "forcing/gfs/2026052106/basin_a_v1/model_a/",
+        "forcing/gfs/2026052106/basin_a_v1/model_a",
+    ):
+        assert derive(package_uri) == _package_manifest_uri(
+            package_uri,
+            ForcingProducerConfig.package_manifest_filename,
+        )
+        # Same helper backs the sidecar tier, so the two can never drift apart.
+        assert scheduler_state_failure_module._sidecar_manifest_probe_key(package_uri) == derive(package_uri)
+    assert derive("s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/") == (
+        "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # #1365 round-1 (cand-05): the trigger is VALIDATOR ADMISSIBILITY, not the
+        # decorative trailing "/".  The producer writes the slash, the handoff lane
+        # normalizes it away, and both shapes name the same package prefix -- so
+        # both must derive the witness key.
+        ("s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/", True),
+        ("s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a", True),
+        ("forcing/gfs/2026052106/basin_a_v1/model_a/", True),
+        ("forcing/gfs/2026052106/basin_a_v1/model_a", True),
+        # File keys the validator admits are probed as-is, never double-derived.
+        ("s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json", False),
+        ("forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json", False),
+        # A deeper file key under the package prefix is still admitted as-is.
+        ("forcing/gfs/2026052106/basin_a_v1/model_a/shud/X100.00Y30.00.csv", False),
+        # Local shapes stay with the local leg, which stats the path itself.
+        ("/ghdc/data/nwm/object-store/forcing/gfs/2026052106/basin_a_v1/model_a/", False),
+        ("file:///ghdc/data/nwm/object-store/forcing/gfs/2026052106/basin_a_v1/model_a/", False),
+        ("~/object-store/forcing/gfs/2026052106/basin_a_v1/model_a/", False),
+        ("", False),
+    ],
+)
+def test_package_manifest_witness_trigger_is_validator_admissibility(value: str, expected: bool) -> None:
+    assert scheduler_state_failure_module._needs_package_manifest_witness(value) is expected
+    # Independent oracle: the trigger is exactly "the closed-world validator does
+    # not admit this non-local reference as a FILE key", re-derived here from
+    # ``validate_object_path`` itself rather than restated from the helper.
+    from packages.common.storage import validate_object_path
+
+    stripped = value.strip()
+    is_local = stripped.startswith(("file://", "/", "~"))
+    expected_from_validator = bool(stripped) and not is_local and not validate_object_path(stripped).valid
+    assert expected is expected_from_validator
+
+
 def test_forcing_sidecar_key_and_manifest_derivation_match_the_producer_write_side() -> None:
     # Task 1.4 anti-drift pin: the decision-side sidecar key and the manifest
     # fallback derivation are literally the producer's own constructions.
@@ -9550,6 +10112,10 @@ def test_decision_evidence_names_the_journal_forcing_provenance_tier(
     assert decision.evidence["forcing_provenance"] == {
         "source": tier,
         "package_uri": recorded_uri,
+        # #1365: the tier names WHAT it probed, mirroring the sidecar tier.  The
+        # recorded uri is already a manifest FILE key here, so it was probed as-is.
+        "probe": "package_uri",
+        "probe_key": recorded_uri,
         "forcing_version_id": candidate.forcing_version_id,
     }
 
@@ -10019,7 +10585,13 @@ def _state_with_forecast_retry_jobs(candidate: Any, jobs: list[dict[str, Any]]) 
         "candidate_id": candidate.candidate_id,
         "run_id": candidate.run_id,
         "forcing_version_id": candidate.forcing_version_id,
-        "forcing_package_uri": "s3://nhms/forcing/gfs/2026052106/model_a/package.json",
+        # Canonical recorded package (see ``_RECORDED_FORCING_PACKAGE_URI``): the
+        # old literal here was a 4-segment ``forcing/`` key the closed-world
+        # object-path validator rejects outright, which only ever "existed"
+        # because the probe fail-opened on an unconfigured root (#1365).  These
+        # states' subject is the retry budget, so they record a well-formed
+        # package that ``recorded_forcing_package_present`` materializes.
+        "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
         "pipeline_status": "failed",
         "failed_stage": "forecast",
         "error_code": "NODE_FAILURE",
@@ -10145,11 +10717,18 @@ def _cross_stage_retry_suffix_state(candidate: Any) -> dict[str, Any]:
     )
 
 
-def test_cross_stage_retry_suffix_does_not_exhaust_the_forecast_budget() -> None:
+def test_cross_stage_retry_suffix_does_not_exhaust_the_forecast_budget(
+    recorded_forcing_package_present: LocalObjectStore,
+) -> None:
     """Unchanged-behavior pin: green before AND after #1160 (no new kwarg used)."""
 
     from services.orchestrator import scheduler_state_failure
 
+    # This state also carries a succeeded download stage, so the (untouched,
+    # #1365-out-of-scope) raw-manifest repair lane probes the cycle manifest too;
+    # with a root now configured it must be present or that lane -- not the retry
+    # budget under test -- would decide the case.
+    recorded_forcing_package_present.write_bytes_atomic(_RECORDED_RAW_MANIFEST_URI, b"{}")
     candidate = _scheduler_candidate_fixture()
     state = _cross_stage_retry_suffix_state(candidate)
 
@@ -10287,9 +10866,14 @@ def test_cycle_scope_retry_count_does_not_exhaust_the_candidate_forecast_budget(
     assert failure["permanent"] is False
 
 
-def test_failed_forecast_after_exhausted_cycle_scope_download_still_retries() -> None:
+def test_failed_forecast_after_exhausted_cycle_scope_download_still_retries(
+    recorded_forcing_package_present: LocalObjectStore,
+) -> None:
     # Must-preserve: ``retry_failed_candidate`` remains the decision for failed
-    # candidates whose recorded upstream artifacts all exist.
+    # candidates whose recorded upstream artifacts all exist -- since #1365 "exist"
+    # means physically present, including the raw cycle manifest the (untouched)
+    # raw-manifest repair lane probes for this succeeded-download geometry.
+    recorded_forcing_package_present.write_bytes_atomic(_RECORDED_RAW_MANIFEST_URI, b"{}")
     candidate = _scheduler_candidate_fixture()
     state = _state_with_exhausted_cycle_scope_download(
         candidate,
@@ -10904,6 +11488,103 @@ def test_exact_cycle_missing_forcing_repair_rejects_non_direct_grid_candidate(
         "production_direct_grid_not_required"
     )
     assert result.evidence["counts"]["submitted_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("store_mode", "expected_status", "expected_reason", "expected_unsafe_reason"),
+    [
+        # #1365 D5: no root configured -> the probe never ran, so the blocker is
+        # "cannot determine".  An exact-cycle forcing rebuild cannot cure a missing
+        # ``OBJECT_STORE_ROOT``; the remedy is configuration, and the rejection says
+        # so.  Routing the operator to a rebuild here would be the same
+        # "repair is ineffective" trap the sidecar probe-error leg already avoids.
+        ("unconfigured", "rejected", "forcing_artifact_reference_unsafe", "object_store_root_unconfigured"),
+        # #1365 round-1 (cand-01): same ruling for a probe the store refused to run
+        # (symlinked witness leaf, stale NFS handle) -- a rebuild cannot clear a
+        # filesystem fault either, and the reason names which fault it was.
+        ("probe_error", "rejected", "forcing_artifact_reference_unsafe", "artifact_probe_error"),
+        # Paired positive: a probe that actually RAN and determined the package
+        # absent stays repair-eligible, exactly as before #1365.
+        ("configured_absent", "authorized", "exact_cycle_direct_grid_raw_manifest_ready", None),
+    ],
+)
+def test_missing_forcing_repair_gate_separates_unprobed_from_probed_absent_blockers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_mode: str,
+    expected_status: str,
+    expected_reason: str,
+    expected_unsafe_reason: str | None,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    raw_root = tmp_path / "nfs-raw-probe-gate"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    # The production directory shape #1365 is about, recorded by the journal.
+    package_uri = "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/"
+    if store_mode == "unconfigured":
+        monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    else:
+        # Configured but EMPTY: the probe runs against the derived manifest key and
+        # determines the package genuinely absent.
+        object_store_root = tmp_path / "probe-gate-object-store"
+        object_store_root.mkdir()
+        monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+        if store_mode == "probe_error":
+            # ... unless the derived witness leaf is a symlink, which the store
+            # refuses to stat (``ObjectStoreError``) instead of resolving.
+            witness_path = object_store_root / "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+            relocated = tmp_path / "elsewhere-forcing_package.json"
+            relocated.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+            witness_path.parent.mkdir(parents=True, exist_ok=True)
+            witness_path.symlink_to(relocated)
+            with pytest.raises(ObjectStoreError):
+                LocalObjectStore(object_store_root, "").exists(f"{package_uri.rstrip('/')}/forcing_package.json")
+    state = _missing_forcing_retry_state(
+        candidate,
+        raw_manifest=readiness,
+        forcing_package_uri=package_uri,
+    )
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=raw_root,
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("plan mode must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = (  # type: ignore[method-assign]
+        lambda *_args: _complete_missing_forcing_repair_warm_state()
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    if expected_status == "rejected":
+        entry = result.evidence["blocked_candidates"][0]
+        assert entry["reason"] == "missing_forcing_package_uri"
+    else:
+        entry = result.evidence["candidates"][0]
+    state_evidence = entry["state_evidence"]
+    # The blocker the gate saw is the same reason/classifier pair either way; only
+    # the probe verdict (``unsafe_reason``) differs.
+    assert state_evidence["artifact_guard"]["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert state_evidence["artifact_guard"]["artifact_uri"] == package_uri
+    assert state_evidence["artifact_guard"]["artifact_exists"] is False
+    assert state_evidence["artifact_guard"]["unsafe_reason"] == expected_unsafe_reason
+    repair = state_evidence["missing_forcing_repair"]
+    assert repair["status"] == expected_status
+    assert repair["reason"] == expected_reason
+    if expected_status == "rejected":
+        assert repair["unsafe_reason"] == expected_unsafe_reason
 
 
 def test_missing_forcing_repair_rejects_when_canonical_input_is_not_ready(
@@ -17872,6 +18553,7 @@ def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
 
 
 @pytest.mark.parametrize("error_code", ["NODE_FAILURE", "SLURM_RESERVATION_LOST"])
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
     error_code: str,
@@ -17910,6 +18592,7 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_candidate_state_out_of_memory_runtime_failure_requires_manual_retry(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
@@ -17966,6 +18649,7 @@ def _out_of_memory_failure_state(*, failed_stage: str, durable_shud_output_exist
     }
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_out_of_memory_downstream_failure_without_forecast_output_still_recomputes_forecast() -> None:
     candidate = _scheduler_candidate_fixture()
     state = _out_of_memory_failure_state(failed_stage="state_save_qc", durable_shud_output_exists=False)
@@ -17981,6 +18665,7 @@ def test_out_of_memory_downstream_failure_without_forecast_output_still_recomput
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_out_of_memory_failure_without_missing_output_geometry_requires_manual_retry() -> None:
     candidate = _scheduler_candidate_fixture()
     state = _out_of_memory_failure_state(failed_stage="forecast", durable_shud_output_exists=False)
@@ -18035,6 +18720,7 @@ def _changed_model_package_prior() -> dict[str, str]:
     }
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_out_of_memory_failure_with_changed_model_package_blocks_refresh_retry() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
@@ -18055,6 +18741,7 @@ def test_out_of_memory_failure_with_changed_model_package_blocks_refresh_retry()
     assert decision.evidence["manual_retry_required"] is True
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_invalid_manifest_failure_with_changed_model_package_keeps_refresh_retry() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
@@ -18075,6 +18762,7 @@ def test_invalid_manifest_failure_with_changed_model_package_keeps_refresh_retry
     assert decision.evidence["retry_policy"]["manual_retry_required"] is False
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
@@ -18237,6 +18925,7 @@ def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path
         ("SLURM_RESERVATION_LOST", "retry_limit_exhausted"),
     ],
 )
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     tmp_path: Path,
     error_code: str,
@@ -18276,6 +18965,7 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     assert orchestrator.calls == []
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhausted(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     model = _model(
@@ -18328,6 +19018,7 @@ def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhauste
     assert orchestrator.calls[0]["basins"][0]["model_package_uri"] == "s3://nhms/models/model_a/new-package/package/"
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     package_uri = "s3://nhms/models/model_a/package/"
@@ -18588,6 +19279,7 @@ def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preser
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_retry_limit(
     tmp_path: Path,
 ) -> None:
@@ -18898,6 +19590,7 @@ def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attemp
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplification(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
@@ -19187,6 +19880,7 @@ def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or
         ("running", "active_slurm_job"),
     ],
 )
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
     tmp_path: Path,
     latest_status: str,
@@ -19326,6 +20020,7 @@ def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp
         ("running", "active_slurm_job"),
     ],
 )
+@pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
     tmp_path: Path,
     latest_status: str,
@@ -33080,6 +33775,19 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
             for model in models
             if str(model["model_id"]) == str(failed_member["model_id"])
         )
+        recorded_forcing_package_uri = (
+            f"forcing/{source_id.lower()}/2026052106/"
+            f"{failed_member_basin_version_id}/{failed_member['model_id']}/forcing_package.json"
+        )
+        # #1365: the probe fails CLOSED without a configured object-store root, so
+        # the ``forcing_recorded=True`` arm must make the package physically
+        # present -- otherwise this arm would silently degrade into the very
+        # missing-forcing blocker the ``False`` arm exists to cover.
+        _seed_recorded_forcing_packages(
+            monkeypatch,
+            tmp_path / "recorded-forcing-object-store",
+            recorded_forcing_package_uri,
+        )
         _record_journal_forcing_provenance(
             root,
             source_id=source_id,
@@ -33093,10 +33801,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
             # the very thing this branch's ``forcing_recorded=True`` arm exists to
             # set up.  A plain key is what the DB-free producer records when no
             # object-store prefix is configured, and it survives the boundary.
-            forcing_package_uri=(
-                f"forcing/{source_id.lower()}/2026052106/"
-                f"{failed_member_basin_version_id}/{failed_member['model_id']}/forcing_package.json"
-            ),
+            forcing_package_uri=recorded_forcing_package_uri,
         )
 
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
@@ -34496,7 +35201,10 @@ def _reserve_wedged_identity_blocked_master(journal_root: Path) -> tuple[Any, di
     return repository, record
 
 
-def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Path) -> None:
+def test_identity_blocked_release_unwedges_pipeline_already_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """tasks 2.4 -- the released row leaves the active set, so submission unwedges."""
 
     from services.orchestrator import chain_runtime_utils
@@ -34513,12 +35221,19 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(tmp_path: Pat
     # journal read withholds s3-shaped uris behind ``[object-uri]``, and since
     # #1203 a withheld uri is not a probeable witness (round-1 C1), so an s3-shaped
     # fixture would leave this candidate blocked and the assertions vacuous again.
+    # #1365: "recorded AND existing" now means the package is physically there --
+    # the probe no longer fail-opens on an unconfigured object-store root.
     _record_journal_forcing_provenance(
         tmp_path / "journal",
         source_id="GFS",
         cycle_time=cycle_time,
         model_id="model_a",
         forcing_package_uri="forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
+    )
+    _seed_recorded_forcing_packages(
+        monkeypatch,
+        tmp_path / "recorded-forcing-object-store",
+        "forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
     )
     repository.upsert_pipeline_job(
         {
