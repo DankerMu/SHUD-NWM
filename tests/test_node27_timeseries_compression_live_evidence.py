@@ -249,18 +249,14 @@ def _invocation(
     kind: str,
     started_at: str,
     finished_at: str,
-    bindings: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "kind": kind,
-        "argv": evidence.INVOCATION_ARGV[kind],
         "timeout_seconds": 900,
         "started_at": started_at,
         "finished_at": finished_at,
         "exit_code": 0,
         "mutation_head_sha": HEAD,
-        "artifact_bindings": bindings,
-        **evidence._invocation_execution_identity(kind),
     }
 
 
@@ -793,10 +789,6 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             kind="recovery_decompress",
             started_at="2026-07-15T11:41:00Z",
             finished_at="2026-07-15T11:45:00Z",
-            bindings={
-                "receipt_sha256": recovery_receipt_ref["sha256"],
-                "target": IDENTITY,
-            },
         ),
     )
     catalog_first_ref = _json_ref(
@@ -829,10 +821,6 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             kind="migration_apply",
             started_at="2026-07-15T11:30:00Z",
             finished_at="2026-07-15T11:31:00Z",
-            bindings={
-                "migration_sha256": migration_ref["sha256"],
-                "catalog_sha256": catalog_first_ref["sha256"],
-            },
         ),
     )
     migration_second_invocation_ref = _json_ref(
@@ -842,10 +830,6 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             kind="migration_apply",
             started_at="2026-07-15T11:31:01Z",
             finished_at="2026-07-15T11:32:00Z",
-            bindings={
-                "migration_sha256": migration_ref["sha256"],
-                "catalog_sha256": catalog_second_ref["sha256"],
-            },
         ),
     )
     dry_ref = _json_ref(tmp_path, "dry.json", _receipt(enforce=False))
@@ -857,7 +841,6 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             kind="compression_dry_run",
             started_at="2026-07-15T11:59:50Z",
             finished_at="2026-07-15T12:00:00Z",
-            bindings={"receipt_sha256": dry_ref["sha256"]},
         ),
     )
     enforce_invocation_ref = _json_ref(
@@ -867,7 +850,6 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
             kind="compression_enforce",
             started_at="2026-07-15T12:00:25Z",
             finished_at="2026-07-15T12:05:01Z",
-            bindings={"receipt_sha256": enforce_ref["sha256"]},
         ),
     )
     catalog_post_ref = _json_ref(
@@ -2792,9 +2774,6 @@ def test_verifier_rejects_schema_valid_receipt_with_bad_arithmetic(tmp_path: Pat
     receipt = _receipt(enforce=True)
     receipt["per_table_totals"]["hydro.river_timeseries"]["before_bytes"] = 1
     bundle["receipts"]["enforce"] = _json_ref(tmp_path, "bad-enforce.json", receipt)
-    invocation = _read_ref(bundle["receipts"]["enforce_invocation"])
-    invocation["artifact_bindings"]["receipt_sha256"] = bundle["receipts"]["enforce"]["sha256"]
-    bundle["receipts"]["enforce_invocation"] = _json_ref(tmp_path, "bad-enforce-invocation.json", invocation)
     with pytest.raises(evidence.EvidenceError, match="arithmetic"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
@@ -3278,9 +3257,6 @@ def test_dry_run_totals_are_recomputed(tmp_path: Path) -> None:
     receipt = _read_ref(bundle["receipts"]["dry_run"])
     receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] = 1
     bundle["receipts"]["dry_run"] = _json_ref(tmp_path, "dry-bad-totals.json", receipt)
-    invocation = _read_ref(bundle["receipts"]["dry_run_invocation"])
-    invocation["artifact_bindings"]["receipt_sha256"] = bundle["receipts"]["dry_run"]["sha256"]
-    bundle["receipts"]["dry_run_invocation"] = _json_ref(tmp_path, "dry-bad-totals-invocation.json", invocation)
     with pytest.raises(evidence.EvidenceError, match="dry-run per_table_totals"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
