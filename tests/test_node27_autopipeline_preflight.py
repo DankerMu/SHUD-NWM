@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -1656,3 +1657,76 @@ def test_wrapper_preflight_blocked_rc2_skips_coverage_backstop(tmp_path: Path) -
     log_text = (log_root / "autopipe.log").read_text(encoding="utf-8")
     assert "coverage backstop" not in log_text
     assert "writer-secret" not in log_text
+    # One elapsed line per EXECUTED phase: ingest ran (and failed preflight),
+    # the two later phases never started.
+    assert "autopipe: phase=ingest elapsed_sec=" in log_text
+    assert "phase=coverage_backstop" not in log_text
+    assert "phase=mvt_prewarm" not in log_text
+
+
+def test_wrapper_logs_elapsed_seconds_for_every_executed_phase(tmp_path: Path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    for script in ("node27_autopipeline.py", "node27_refresh_coverage.py", "node27_mvt_prewarm.py"):
+        (scripts / script).write_text(f"# fake {script}\n", encoding="utf-8")
+    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_bin.chmod(0o755)
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://node27_writer:writer-secret@db.example/nhms",
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                "OBJECT_STORE_PREFIX=s3://nhms",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_flock.chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", str(WRAPPER)],
+        env={
+            **os.environ,
+            "NODE27_AUTOPIPE_REPO": str(fake_repo),
+            "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    log_lines = (log_root / "autopipe.log").read_text(encoding="utf-8").splitlines()
+    phases = [
+        line.split("phase=")[1].split(" ")[0]
+        for line in log_lines
+        if "autopipe: phase=" in line
+    ]
+    assert phases == ["ingest", "coverage_backstop", "mvt_prewarm"]
+    for line in log_lines:
+        if "autopipe: phase=" in line:
+            assert re.search(r"elapsed_sec=\d+$", line), line
+    # The whole-tick markers stay: per-phase timing is additive, not a swap.
+    assert any(line.endswith("autopipe: start") for line in log_lines)
+    assert any("autopipe: done rc=0 elapsed_sec=" in line for line in log_lines)
