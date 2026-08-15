@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from errno import ENOENT
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -1054,8 +1055,9 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
         path = _local_artifact_path(value)
         if path is None:
             return True, "invalid_local_artifact_path"
-        if not _local_artifact_path_is_allowed(candidate, path):
-            return True, "local_artifact_path_outside_allowed_roots"
+        allowed, containment_reason = _local_artifact_path_is_allowed(candidate, path)
+        if not allowed:
+            return True, containment_reason
         return not path.exists(), None
     except (OSError, ValueError):
         return True, "local_artifact_path_unresolvable"
@@ -1087,13 +1089,74 @@ def _local_artifact_path(value: str) -> Path | None:
     return Path(value).expanduser()
 
 
-def _local_artifact_path_is_allowed(candidate: SchedulerCandidateLike, path: Path) -> bool:
-    resolved = path.resolve(strict=False)
-    roots = _local_artifact_allowed_roots(candidate)
-    return bool(roots) and any(_path_is_relative_to(resolved, root) for root in roots)
+def _realpath_or_none(text: str) -> Path | None:
+    """Canonicalize ``text`` without a symlink-loop-unsafe ``Path.resolve()`` (#1402).
+
+    Same paradigm as ``scheduler_preflight.py::_preflight_allowed_roots``: strict
+    ``os.path.realpath`` + errno split, because neither form of
+    ``Path.resolve()`` states the truth on both supported arms -- non-strict does
+    not raise at all on CPython 3.13+ (a symlink loop is silently admitted as a
+    containment base) and raises an errno-LESS ``RuntimeError`` on <=3.12 (the
+    production interpreters), which no ``(OSError, ValueError)`` handler in this
+    lane catches, so it aborted the whole scheduler pass.
+
+    ``ENOENT`` keeps the historical admitted semantics: an artifact root may
+    legitimately name a not-yet-created directory or an unmounted share, and
+    non-strict ``os.path.realpath()`` never raises nor loops on any supported
+    version (it detects the cycle and returns the partially resolved path).  Any
+    other errno (ELOOP, EACCES, ESTALE, ENOTDIR) means the path cannot serve as a
+    trustworthy containment base and is reported as ``None`` -- the caller turns
+    that into a distinguishable fail-closed reason rather than a phantom root.
+    """
+
+    expanded = os.path.expanduser(text)
+    try:
+        return Path(os.path.realpath(expanded, strict=True))
+    except OSError as error:
+        if getattr(error, "errno", None) == ENOENT:
+            return Path(os.path.realpath(expanded))
+        return None
 
 
-def _local_artifact_allowed_roots(candidate: SchedulerCandidateLike) -> tuple[Path, ...]:
+def _local_artifact_path_is_allowed(candidate: SchedulerCandidateLike, path: Path) -> tuple[bool, str | None]:
+    """Whether ``path`` is contained by an allowed root, plus the refusal reason.
+
+    Tri-state (#1402 D2): a refusal distinguishes "the roots are fine and the
+    artifact is genuinely outside them" from "a root itself is unresolvable" and
+    from "the artifact path itself is unresolvable", because those three route
+    the operator to three different places.  Root faults win over path faults:
+    an artifact sitting UNDER a loop root fails strict resolution for the very
+    same reason the root does, and the root is the thing to fix.
+    """
+
+    resolved = _realpath_or_none(str(path))
+    roots, any_root_unresolvable = _local_artifact_allowed_roots(candidate)
+    if resolved is not None and roots and any(_path_is_relative_to(resolved, root) for root in roots):
+        # A resolvable root containing the artifact decides on its own; an
+        # unrelated bad root never poisons that verdict.
+        return True, None
+    if any_root_unresolvable:
+        # Non-null, so the operator-authorized repair channel refuses the
+        # resulting blocker (#1365 doctrine: a rebuild cannot clear a filesystem
+        # fault), and the runbook routes to the ROOT rather than to artifact
+        # placement.
+        return False, "local_artifact_root_unresolvable"
+    if resolved is None:
+        return False, "local_artifact_path_unresolvable"
+    # Includes the "no root configured at all" shape, whose historical
+    # outside-allowed-roots verdict is unchanged (#1402 D2 row 5b).
+    return False, "local_artifact_path_outside_allowed_roots"
+
+
+def _local_artifact_allowed_roots(candidate: SchedulerCandidateLike) -> tuple[tuple[Path, ...], bool]:
+    """The containment bases, plus whether any configured root was unresolvable.
+
+    The flag is what keeps a dropped root from degrading into
+    ``local_artifact_path_outside_allowed_roots`` (which would send the operator
+    to check artifact placement) or into a null-reason absent verdict (which
+    would feed the rebuild channel a fault a rebuild cannot clear).
+    """
+
     values: list[str] = []
     resource_profile = getattr(candidate, "resource_profile", {}) or {}
     if isinstance(resource_profile, Mapping):
@@ -1112,25 +1175,37 @@ def _local_artifact_allowed_roots(candidate: SchedulerCandidateLike) -> tuple[Pa
             values.append(value)
     roots: list[Path] = []
     seen: set[str] = set()
+    any_root_unresolvable = False
     for value in values:
         text = value.strip()
         if not text or "://" in text:
             continue
-        try:
-            root = Path(text).expanduser().resolve(strict=False)
-        except (OSError, ValueError):
+        root = _realpath_or_none(text)
+        if root is None:
+            any_root_unresolvable = True
             continue
         key = str(root)
         if key in seen:
             continue
         seen.add(key)
         roots.append(root)
-    return tuple(roots)
+    return tuple(roots), any_root_unresolvable
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:
+    """Purely LEXICAL containment -- both arguments are already canonicalized.
+
+    Deliberately does not resolve (#1402): its only caller feeds it
+    ``_realpath_or_none`` output, and re-resolving here re-opened the exact hole
+    this change closes -- an ENOENT-fallback root of the ``<missing>/../<loop>``
+    shape comes back still carrying the loop, and ``root.resolve(strict=False)``
+    then raises an errno-less ``RuntimeError`` on <=3.12 that ``except
+    ValueError`` cannot catch (the residual recorded at
+    ``scheduler_preflight.py:539-543``).
+    """
+
     try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        path.relative_to(root)
     except ValueError:
         return False
     return True
