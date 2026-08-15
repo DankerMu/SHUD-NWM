@@ -1089,7 +1089,13 @@
     "1312": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1411,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     }
   }
 }
