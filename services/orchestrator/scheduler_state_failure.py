@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.source_identity import normalize_source_id
+from packages.common.storage import validate_object_path
 from services.orchestrator.retry import classify_failure
 from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_state_common import (
@@ -51,6 +52,11 @@ from services.orchestrator.scheduler_state_types import (
 from workers.data_adapters.base import format_cycle_time
 
 _COPYBACK_REQUIRED_RESTART_STAGES = {"copyback"}
+#: ``unsafe_reason`` for a probe the object store refused to run (#1365 round-1):
+#: a symlinked/non-regular probe target, a stale or unreadable filesystem handle,
+#: an unsafe store root.  Compared against by the sidecar tier, so it is a
+#: cross-site contract rather than a local literal.
+_ARTIFACT_PROBE_ERROR_REASON = "artifact_probe_error"
 
 
 def _failed_stage(state: Mapping[str, Any]) -> str | None:
@@ -412,19 +418,17 @@ def _missing_upstream_forecast_artifact_evidence(
                 "probe_key": _evidence_safe(sidecar.manifest_probe_key),
                 "forcing_version_id": _evidence_safe(sidecar.forcing_version_id),
             }
-            try:
-                sidecar_missing, sidecar_unsafe_reason = _artifact_uri_missing_status(
-                    candidate,
-                    str(sidecar.manifest_probe_key),
-                )
-            except ObjectStoreError:
-                # ``LocalObjectStore.exists`` turns a ``SafeFilesystemError`` (a
-                # symlinked manifest leaf, an NFS ESTALE/EIO stat) into an
-                # ``ObjectStoreError``, a RuntimeError subclass the probe's own
-                # ``except (OSError, ValueError)`` does not cover.  Contain it here
-                # fail-closed: an unreadable probe is never a recovery, and never an
-                # escaping exception that aborts the whole scheduler pass (#1203
-                # round-1 V2-C1).  The probe itself stays unchanged.
+            sidecar_missing, sidecar_unsafe_reason = _artifact_uri_missing_status(
+                candidate,
+                str(sidecar.manifest_probe_key),
+            )
+            if sidecar_unsafe_reason == _ARTIFACT_PROBE_ERROR_REASON:
+                # The probe could not read its object (a symlinked manifest leaf, an
+                # NFS ESTALE/EIO stat).  Since #1365 round-1 the probe CONTAINS that
+                # fault itself (``_ARTIFACT_PROBE_ERROR_REASON``) instead of letting
+                # an ``ObjectStoreError`` escape and abort the whole scheduler pass,
+                # so this leg reads the contained reason rather than catching an
+                # exception -- and keeps this tier's richer evidence.
                 #
                 # An unreadable probe object is "cannot determine", NOT "package
                 # determined absent" (#1203 round-2 V5-C2): routing it to
@@ -472,7 +476,29 @@ def _missing_upstream_forecast_artifact_evidence(
             forcing_provenance = {**forcing_provenance, "artifact_exists": True}
         else:
             forcing_provenance = _journal_forcing_provenance(state, forcing_uri)
-            forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_uri)
+            # Same ruling as the sidecar tier, now on the journal/direct tiers
+            # (#1365): the producer's ``forcing_package_uri`` names a package
+            # PREFIX, which the object-path validator does not admit as a file key,
+            # so probing it verbatim reported "missing" for every physically present
+            # production package.  The probe object becomes the derived manifest
+            # FILE key; the blocker keeps the recorded package uri as
+            # ``artifact_uri`` (the derived key is evidence, never the reference).
+            forcing_probe_uri = (
+                _package_manifest_probe_uri(forcing_uri)
+                if _needs_package_manifest_witness(forcing_uri)
+                else forcing_uri
+            )
+            if forcing_provenance is not None:
+                # Named unconditionally, mirroring the sidecar tier's evidence
+                # shape: an operator reading a blocker must be able to tell WHAT
+                # was probed without re-deriving it.  ``package_uri`` means the
+                # recorded reference was already a file key and was probed as-is.
+                forcing_provenance = {
+                    **forcing_provenance,
+                    "probe": "manifest" if forcing_probe_uri != forcing_uri else "package_uri",
+                    "probe_key": _evidence_safe(forcing_probe_uri),
+                }
+            forcing_missing, forcing_unsafe_reason = _artifact_uri_missing_status(candidate, forcing_probe_uri)
             if forcing_missing:
                 return (
                     _artifact_blocker_evidence(
@@ -501,6 +527,21 @@ def _missing_upstream_forecast_artifact_evidence(
     )
     copyback_required = restart_stage in _COPYBACK_REQUIRED_RESTART_STAGES or _copyback_source_required(state)
     if copyback_uri not in (None, ""):
+        # #1365 D3: the copyback leg shares the probe, so the object branch's
+        # root-unconfigured fail-closed ruling
+        # (``unsafe_reason="object_store_root_unconfigured"``) applies to it
+        # identically.  The forcing tiers' package-prefix witness derivation does
+        # NOT: a copyback source directory has no canonical witness filename
+        # (``forcing_package.json`` is forcing-producer domain), and the repo has
+        # no production writer of ``copyback_source_uri`` to define one, so a
+        # fabricated witness key is not an option here.
+        #
+        # Exact consequence (round-1 cand-03): a copyback uri at the pattern's own
+        # depth (``runs/<run_id>/output/``) is refused by the validator and stays
+        # fail-closed via the probe's ``ValueError`` leg, but a DEEPER directory
+        # uri (``runs/<run_id>/output/<basin>/``) is admitted as a key and stats the
+        # directory itself as present.  That deeper-directory fail-open predates
+        # #1365 and is unchanged here -- it is routed as a separate follow-up.
         copyback_missing, copyback_unsafe_reason = _artifact_uri_missing_status(candidate, copyback_uri)
     else:
         copyback_missing, copyback_unsafe_reason = True, None
@@ -709,7 +750,70 @@ def _sidecar_manifest_probe_key(sidecar_key_dir: str) -> str:
     object-path validator rejects.
     """
 
-    return f"{sidecar_key_dir.rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+    return _package_manifest_probe_uri(sidecar_key_dir)
+
+
+def _package_manifest_probe_uri(package_uri: str) -> str:
+    """Join a forcing package prefix with the producer's manifest filename (#1365).
+
+    THE single derivation of a forcing package's witness object, shared by the
+    object-store sidecar tier (``_sidecar_manifest_probe_key``) and the
+    journal/direct tier so the two cannot drift.  Literally the producer's own
+    ``workers/forcing_producer/producer._package_manifest_uri`` construction with
+    the producer's default ``package_manifest_filename``
+    (``_FORCING_PACKAGE_MANIFEST_FILENAME``); no caller may hand-join the
+    manifest name.
+
+    Surrounding whitespace is stripped for the same reason the probe strips it:
+    a recorded uri with a trailing space would otherwise fabricate a key with an
+    empty path segment.
+    """
+
+    return f"{package_uri.strip().rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+
+
+def _needs_package_manifest_witness(value: str) -> bool:
+    """True when a recorded package reference must be probed via its witness (#1365).
+
+    The trigger is VALIDATOR ADMISSIBILITY, not a decorative trailing ``/``
+    (round-1 cand-05).  The forcing producer records ``forcing_package_uri`` as a
+    directory uri (``producer._directory_uri``: 5 canonical segments, trailing
+    ``/``), but the handoff lane stores a normalized copy of the SAME reference
+    with the slash stripped (``forcing_producer/file_store.py`` ``normalize_key``
+    ``.strip("/")``, and ``forcing_domain_handoff_apply``'s ``rtrim`` comparison
+    proves both shapes coexist in ``met.forcing_version``).  Both shapes name a
+    package prefix, and the closed-world object-path validator admits neither as a
+    FILE key (it requires ``len(parts) > len(pattern.segments)``), so handing
+    either to the existence probe swallows a ``ValueError`` into a false "missing"
+    for a physically present package.
+
+    A reference the validator DOES admit as a file key is probed as-is and never
+    double-derived.  Local paths are excluded: the local leg stats the path itself
+    and needs no witness object.  (The validator is consulted without the
+    deployment's ``OBJECT_STORE_PREFIX``, which is an ``s3://`` uri in every
+    tracked config and is therefore already stripped by the validator's own
+    ``urlparse``.)
+
+    The validator is itself a RAISING surface: it calls ``urlparse``, which
+    rejects a recorded uri whose authority holds a ``[`` with ``ValueError:
+    Invalid IPv6 URL``.  This classification runs OUTSIDE the probe's own
+    containment (it decides what to probe), so an escaping ``ValueError`` here
+    would abort the whole scheduler pass for every remaining candidate -- the
+    exact fault master contained inside the probe's ``(OSError, ValueError)``
+    leg.  An unparseable reference is not a package prefix we can derive a
+    witness for, so it is answered ``False`` and probed as recorded; the probe's
+    own ``ValueError`` leg then yields the fail-closed "missing" verdict with a
+    null unsafe reason, i.e. the D4 repair-eligible unresolvable-reference
+    residual (a rebuild re-records the reference and IS the remedy).
+    """
+
+    stripped = value.strip()
+    if not stripped or _looks_like_local_uri_or_path(stripped):
+        return False
+    try:
+        return not validate_object_path(stripped).valid
+    except ValueError:
+        return False
 
 
 def _sidecar_recorded_manifest_uri(record: Mapping[str, Any]) -> str | None:
@@ -813,9 +917,40 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
     if not value:
         return True, None
     if value.startswith("s3://") or not _looks_like_local_uri_or_path(value):
+        if not _object_store_root_configured(candidate):
+            # #1365 D2: ``_object_manifest_is_missing`` fail-OPENS (``return
+            # False``) for ANY uri when no root is configured -- so a guard that
+            # cannot probe would vouch for the existence of even a bogus key.
+            # Fail closed instead, with a reason that keeps "no probe ran"
+            # distinguishable from "probed, determined absent"
+            # (``unsafe_reason=None``); same doctrine as the sidecar tier's
+            # ``store_unconfigured``.  ``_object_manifest_is_missing`` itself is
+            # left untouched: its raw-manifest repair-lane callers have different
+            # fail-open consequences and are out of scope.
+            return True, "object_store_root_unconfigured"
         try:
             return _object_manifest_is_missing(candidate, value), None
+        except ObjectStoreError:
+            # #1365 round-1 (cand-01): ``LocalObjectStore.exists`` turns a
+            # ``SafeFilesystemError`` (a symlinked probe target or ancestor, an NFS
+            # ESTALE/EIO stat, an unsafe store root) into an ``ObjectStoreError`` --
+            # a ``RuntimeError`` subclass the ``(OSError, ValueError)`` leg below
+            # does NOT cover, so it used to escape the whole decision path and abort
+            # the scheduler pass for every remaining candidate.  Contain it HERE, so
+            # every caller of this probe (forcing tier-1/2, copyback, sidecar) is
+            # covered by one containment instead of per-call-site guards.
+            #
+            # The reason is distinguishable from both "probed, determined absent"
+            # (``None``) and "no store configured"
+            # (``object_store_root_unconfigured``): being non-null it is refused by
+            # the authorized repair channel, which is the correct routing -- an
+            # exact-cycle forcing rebuild cannot clear a filesystem fault.
+            return True, _ARTIFACT_PROBE_ERROR_REASON
         except (OSError, ValueError):
+            # Recorded reference the closed-world validator cannot resolve even
+            # after witness derivation (#1365 D4 recorded residual): "determined
+            # absent" with a null reason is honest at the repair boundary, because a
+            # rebuild re-records the reference and IS an effective remedy.
             return True, None
     try:
         path = _local_artifact_path(value)
@@ -826,6 +961,19 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
         return not path.exists(), None
     except (OSError, ValueError):
         return True, "local_artifact_path_unresolvable"
+
+
+def _object_store_root_configured(candidate: SchedulerCandidateLike) -> bool:
+    """Whether an object-store root exists for the probe to resolve keys against.
+
+    Reads exactly the two sources ``_object_manifest_is_missing`` itself reads,
+    in the same order, so the fail-closed pre-check and the probe can never
+    disagree about which store (if any) is in play.
+    """
+
+    resource_profile = getattr(candidate, "resource_profile", None)
+    profile_root = resource_profile.get("object_store_root") if isinstance(resource_profile, Mapping) else None
+    return (profile_root or os.getenv("OBJECT_STORE_ROOT")) not in (None, "")
 
 
 def _looks_like_local_uri_or_path(value: str) -> bool:

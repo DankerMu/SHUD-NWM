@@ -1,23 +1,6 @@
-# slurm-array-runner-integration Specification
+# slurm-array-runner-integration (delta)
 
-## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
-## Requirements
-### Requirement: Slurm-first heavy execution
-
-The production scheduler SHALL submit heavy download/canonical/forcing/SHUD/parse/publish work through the Slurm gateway by default when Slurm execution is enabled.
-
-#### Scenario: compute-node database preflight
-
-WHEN Slurm execution is enabled and `DATABASE_URL` points to localhost or is missing
-THEN the scheduler rejects submission before creating Slurm jobs
-AND records a preflight blocker explaining the required compute-node reachable database endpoint.
-
-#### Scenario: project-local runtime roots
-
-WHEN Slurm jobs are submitted
-THEN workspace, object-store, logs, ecCodes/runtime dependencies, and model artifacts resolve under configured project or production storage roots
-AND jobs do not write large artifacts to the system disk by default.
+## MODIFIED Requirements
 
 ### Requirement: Array-capable model stages
 
@@ -59,4 +42,3 @@ WHEN the scheduler submits through the real or mock Slurm gateway
 THEN the submitted job uses only an allowlisted sbatch template for the requested stage
 AND exported environment/config values are shell-safe, bounded, and redacted from evidence when sensitive
 AND secret leakage, shell metacharacter injection, and unrecognized template names are rejected before submission.
-

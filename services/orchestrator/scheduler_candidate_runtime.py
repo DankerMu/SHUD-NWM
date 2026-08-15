@@ -505,6 +505,7 @@ _SCHEDULER_RUNTIME_ROOTS_FORWARDER_NAMES = (
     "_scheduler_service_role_check",
     "_scheduler_allowed_roots_policy_check",
     "_scheduler_allowed_roots",
+    "_scheduler_allowed_roots_and_blockers",
     "_normalize_sources",
     "_confined_path",
     "_reject_blank_config_path",
@@ -543,6 +544,7 @@ _directory_is_writable = _scheduler_runtime_roots_forwarder("_directory_is_writa
 _scheduler_service_role_check = _scheduler_runtime_roots_forwarder("_scheduler_service_role_check")
 _scheduler_allowed_roots_policy_check = _scheduler_runtime_roots_forwarder("_scheduler_allowed_roots_policy_check")
 _scheduler_allowed_roots = _scheduler_runtime_roots_forwarder("_scheduler_allowed_roots")
+_scheduler_allowed_roots_and_blockers = _scheduler_runtime_roots_forwarder("_scheduler_allowed_roots_and_blockers")
 _normalize_sources = _scheduler_runtime_roots_forwarder("_normalize_sources")
 _confined_path = _scheduler_runtime_roots_forwarder("_confined_path")
 _reject_blank_config_path = _scheduler_runtime_roots_forwarder("_reject_blank_config_path")
@@ -842,6 +844,7 @@ EXPORTS = {
         "_resource_profile_evidence",
         "_root_evidence_item",
         "_scheduler_allowed_roots",
+        "_scheduler_allowed_roots_and_blockers",
         "_scheduler_allowed_roots_policy_check",
         "_scheduler_cancellation_status",
         "_scheduler_candidate_execution_evidence_forwarder",

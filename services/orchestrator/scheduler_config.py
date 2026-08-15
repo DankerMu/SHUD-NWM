@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from errno import ENOENT
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
@@ -735,7 +736,8 @@ class ProductionSchedulerConfig:
                 checks[env] = check
                 if blocker is not None:
                     blockers.append(blocker)
-        allowed_roots = _db_free_allowed_roots(self)
+        allowed_roots, allowed_roots_blockers = _db_free_allowed_roots_and_blockers(self)
+        blockers.extend(allowed_roots_blockers)
         if self.scheduler_db_free_required:
             for attr, env, kind in _DB_FREE_PATH_SPECS:
                 value = getattr(self, attr)
@@ -1056,19 +1058,59 @@ def _db_free_selector_text_is_db_like(value: Any) -> bool:
 
 
 def _db_free_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
+    """Containment bases for the db-free lane (read-only view of the verdict).
+
+    Retained per D4 as the roots-only reader view of the adjudication; it
+    currently has no callers -- the pair function is the live surface.
+    """
+
+    return _db_free_allowed_roots_and_blockers(config)[0]
+
+
+def _db_free_allowed_roots_and_blockers(
+    config: ProductionSchedulerConfig,
+) -> tuple[tuple[Path, ...], list[dict[str, Any]]]:
+    """Adjudicate this lane's containment bases and report unsafe ones.
+
+    Strict resolution + errno split, the same paradigm as the storage preflight:
+    non-strict resolution stopped raising on symlink loops in CPython 3.13+, and
+    strict ``Path.resolve()`` raises an errno-less ``RuntimeError`` on <=3.12.
+    ENOENT keeps the historical "admitted" semantics. Other errnos stay
+    lexically tolerated on db-free runtimes (PR #831), but this preflight also
+    runs on database-backed ``repair_missing_forcing`` passes, where it performs
+    real containment checks -- there the root is dropped and a blocker records
+    why, so an unresolvable root can never become a phantom containment base.
+    """
+
+    db_free_required = bool(config.scheduler_db_free_required)
     roots: list[Path] = []
+    blockers: list[dict[str, Any]] = []
     for value in config.allowed_storage_roots:
         if value in (None, ""):
             continue
+        expanded = _expanduser_for_mode(value, db_free_required=True)
         try:
-            root = _expanduser_for_mode(value, db_free_required=True).resolve(strict=False)
-        except (OSError, RuntimeError):
-            root = _expanduser_for_mode(value, db_free_required=True)
-            if not root.is_absolute():
-                root = Path.cwd() / root
+            root = Path(os.path.realpath(expanded, strict=True))
+        except OSError as error:
+            if getattr(error, "errno", None) == ENOENT:
+                root = Path(os.path.realpath(expanded))
+            elif db_free_required:
+                root = expanded
+                if not root.is_absolute():
+                    root = Path.cwd() / root
+            else:
+                blockers.append(
+                    _db_free_blocker(
+                        "db_free_allowed_root_unsafe",
+                        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+                        _scheduler._scheduler_root_os_error_reason(error).lower(),
+                        path=str(expanded),
+                    )
+                )
+                continue
         if root not in roots:
             roots.append(root)
-    return tuple(roots)
+    return tuple(roots), blockers
 
 
 def _db_free_path_identity(value: str | Path | None) -> Path | None:
