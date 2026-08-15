@@ -26,9 +26,15 @@ fail closed: the artifact is reported missing with the distinguishable unsafe
 reason `object_store_root_unconfigured`, and no object URI — existent or bogus
 — is ever silently reported as present. A store-side probe fault (a symlinked
 or non-regular probe target, a stale or unreadable filesystem handle) SHALL be
-contained fail-closed with its own distinguishable unsafe reason
-(`artifact_probe_error`) and SHALL never escape the decision path as an
-exception. An "absent" verdict with a null unsafe reason SHALL therefore arise
+contained fail-closed and SHALL never escape the decision path as an exception
+— this includes faults raised while classifying the recorded URI's shape, not
+only faults from the store probe itself. On the journal and direct tiers the
+contained fault carries its own distinguishable unsafe reason
+(`artifact_probe_error`); on the sidecar tier the same fault keeps that tier's
+established no-witness contract (`forcing_version_row_absent` with a
+`tier_status` read-fault detail, repair-eligible per the #1203 ruling — the
+`tier_status` field, not `unsafe_reason`, is what tells the operator the
+rebuild cannot clear it). An "absent" verdict with a null unsafe reason SHALL therefore arise
 only from (a) a probe that actually ran against a resolvable file key in a
 configured object store and determined absence, or (b) a recorded reference
 that the closed-world validator rejects as unresolvable even after witness
@@ -64,15 +70,18 @@ repair-eligible.
 
 #### Scenario: Store-side probe faults are contained fail-closed and never abort the scheduler pass
 
-- **GIVEN** a candidate with a configured object-store root whose derived
-  witness manifest key hits a symlinked leaf, a symlinked ancestor, or a stale
-  filesystem handle
+- **GIVEN** a candidate on the journal or direct tier with a configured
+  object-store root whose derived witness manifest key hits a symlinked leaf, a
+  symlinked ancestor, or a stale filesystem handle — or whose recorded URI is
+  malformed enough to make shape classification itself raise
 - **WHEN** the failure-state recovery leg probes artifact existence
-- **THEN** the decision returns a fail-closed blocker whose unsafe reason is
-  `artifact_probe_error` (distinguishable from both "probed, absent" and
-  "store unconfigured"), the scheduler pass continues evaluating other
-  candidates, and the authorized repair channel rejects the blocker (a forcing
-  rebuild cannot clear a filesystem fault)
+- **THEN** the decision returns a fail-closed blocker (never an escaping
+  exception), the scheduler pass continues evaluating other candidates, a
+  store-probe fault carries the unsafe reason `artifact_probe_error`
+  (distinguishable from both "probed, absent" and "store unconfigured") and is
+  rejected by the authorized repair channel (a forcing rebuild cannot clear a
+  filesystem fault), while a malformed unresolvable reference stays on the
+  repair-eligible null-reason residual (re-recording via rebuild is its remedy)
 
 #### Scenario: Root-unconfigured blockers are non-repairable via the authorized repair channel while probed-absent blockers stay repair-eligible
 

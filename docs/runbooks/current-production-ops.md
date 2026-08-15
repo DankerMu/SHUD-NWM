@@ -1598,15 +1598,19 @@ Exact-cycle missing-forcing regeneration (node-22 only):
      `false` on an `object_store_sidecar` source is a genuinely absent package,
      not a read failure.
    - `artifact_guard.unsafe_reason` says why the probe refused or could not use
-     the reference; `null` means the reference was probeable and simply not
-     found ("probed, determined absent"). Route a non-null value by this table:
+     the reference; `null` usually means the reference was probeable and simply
+     not found ("probed, determined absent"), but read it together with
+     `forcing_provenance.tier_status` — on the `object_store_sidecar` tier a
+     read fault surfaces as `forcing_version_row_absent` with a read-fault
+     `tier_status` and a **null** `unsafe_reason`, and there the rebuild is
+     ineffective. Route by this table:
 
    | `unsafe_reason` | Fault | Does an exact-cycle forcing rebuild fix it? |
    |---|---|---|
-   | `null` | The probe ran and the package is genuinely absent | Yes — this is exactly what the rebuild repairs |
+   | `null` | The probe ran and the package is genuinely absent — **unless** `forcing_provenance.tier_status` is a read-fault status (see below), or the recorded reference is malformed enough that no probe could resolve it | Usually yes — that is exactly what the rebuild repairs. A malformed unresolvable reference is also repairable (the rebuild re-records it). **But** if `tier_status` is a read-fault status, no: on the `object_store_sidecar` tier `tier_status`, not `unsafe_reason`, is the authoritative verdict |
    | `object_store_root_unconfigured` | Neither the candidate's `object_store_root` nor `OBJECT_STORE_ROOT` is set, so no probe ran | No — the remedy is configuration; fix it and let the next pass re-probe |
    | `artifact_probe_error` | The object store refused the stat (symlinked witness leaf or ancestor, stale NFS handle, permissions) | No — a rebuild cannot clear a filesystem fault; fix the object/mount/permissions first |
-   | `invalid_local_artifact_path` / `local_artifact_path_outside_allowed_roots` / `local_artifact_path_unresolvable` | A local-path reference is unresolvable or outside the allowed roots | No — fix the path or `NHMS_SCHEDULER_ALLOWED_ROOTS` first |
+   | `invalid_local_artifact_path` / `local_artifact_path_outside_allowed_roots` / `local_artifact_path_unresolvable` | A local-path reference is unresolvable or outside the allowed roots | No — fix the path, or the roots this probe actually consults: resource-profile keys `object_store_root` / `object_store_copyback_root` / `copyback_root` / `published_artifact_root` plus env `OBJECT_STORE_ROOT` / `NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_PUBLISHED_ARTIFACT_ROOT` (**not** `NHMS_SCHEDULER_ALLOWED_ROOTS`, which feeds a different mechanism and is never read here) |
 
    A blocker with a non-null `unsafe_reason` is rejected by the authorized
    repair channel as `forcing_artifact_reference_unsafe` (see the rejected

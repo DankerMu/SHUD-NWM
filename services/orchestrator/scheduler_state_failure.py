@@ -793,12 +793,27 @@ def _needs_package_manifest_witness(value: str) -> bool:
     deployment's ``OBJECT_STORE_PREFIX``, which is an ``s3://`` uri in every
     tracked config and is therefore already stripped by the validator's own
     ``urlparse``.)
+
+    The validator is itself a RAISING surface: it calls ``urlparse``, which
+    rejects a recorded uri whose authority holds a ``[`` with ``ValueError:
+    Invalid IPv6 URL``.  This classification runs OUTSIDE the probe's own
+    containment (it decides what to probe), so an escaping ``ValueError`` here
+    would abort the whole scheduler pass for every remaining candidate -- the
+    exact fault master contained inside the probe's ``(OSError, ValueError)``
+    leg.  An unparseable reference is not a package prefix we can derive a
+    witness for, so it is answered ``False`` and probed as recorded; the probe's
+    own ``ValueError`` leg then yields the fail-closed "missing" verdict with a
+    null unsafe reason, i.e. the D4 repair-eligible unresolvable-reference
+    residual (a rebuild re-records the reference and IS the remedy).
     """
 
     stripped = value.strip()
     if not stripped or _looks_like_local_uri_or_path(stripped):
         return False
-    return not validate_object_path(stripped).valid
+    try:
+        return not validate_object_path(stripped).valid
+    except ValueError:
+        return False
 
 
 def _sidecar_recorded_manifest_uri(record: Mapping[str, Any]) -> str | None:

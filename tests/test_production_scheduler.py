@@ -9791,6 +9791,83 @@ def test_journal_tier_probe_store_error_blocks_fail_closed_and_the_pass_survives
     assert orchestrator.calls == []
 
 
+# A recorded reference whose authority holds a "[": ``urlparse`` rejects it with
+# ``ValueError: Invalid IPv6 URL``, which is the shape-classification fault leg.
+_MALFORMED_RECORDED_PACKAGE_URI = "s3://[/forcing/gfs/2026052106/basin_a_v1/model_a/"
+
+
+def test_malformed_recorded_package_uri_shape_classification_never_raises() -> None:
+    # #1365 round-1b unit seam: the witness-derivation trigger runs OUTSIDE the
+    # probe's own containment (it decides WHAT to probe), and the closed-world
+    # validator it consults is itself a RAISING surface.  Independent oracle
+    # first -- the raw validator really does raise on this recorded shape, so the
+    # containment under test is load-bearing rather than decorative:
+    from packages.common.storage import validate_object_path
+
+    with pytest.raises(ValueError):
+        validate_object_path(_MALFORMED_RECORDED_PACKAGE_URI)
+
+    # An unparseable reference is not a package prefix a witness can be derived
+    # for, so classification answers "probe it as recorded" instead of raising.
+    assert (
+        scheduler_state_failure_module._needs_package_manifest_witness(_MALFORMED_RECORDED_PACKAGE_URI) is False
+    )
+
+
+def test_malformed_recorded_package_uri_blocks_fail_closed_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1365 round-1b decision + pass seam: with the store configured, the
+    # malformed recorded uri reaches the probe as-is; the probe's own
+    # ``(OSError, ValueError)`` leg contains it into the D4 unresolvable-reference
+    # residual -- fail-closed "missing" with a NULL unsafe reason, which keeps the
+    # blocker repair-eligible (a rebuild re-records the reference).  Before the
+    # containment the classification raised and aborted the whole ``run_once``
+    # pass, exactly as the uncontained ``ObjectStoreError`` used to.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _journal_tier_directory_package_state(candidate, _MALFORMED_RECORDED_PACKAGE_URI)
+    # Pre-existing, unchanged by this fix: the evidence redactor's own url leg
+    # cannot parse this uri either and falls back to its marker, so the recorded
+    # reference reaches evidence as ``[redacted]``.  Named here (not hard-coded)
+    # so the assertions below stay honest about WHAT is being pinned.
+    from packages.common.redaction import REDACTION_MARKER
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=REDACTION_MARKER,
+        unsafe_reason=None,
+    )
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "journal",
+        "package_uri": REDACTION_MARKER,
+        "probe": "package_uri",
+        "probe_key": REDACTION_MARKER,
+        "forcing_version_id": candidate.forcing_version_id,
+    }
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_forcing_package_uri"
+    assert result.evidence["blocked_candidates"][0]["state_evidence"]["artifact_guard"]["unsafe_reason"] is None
+    assert orchestrator.calls == []
+
+
 def test_copyback_object_uri_without_object_store_root_blocks_with_the_unsafe_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
