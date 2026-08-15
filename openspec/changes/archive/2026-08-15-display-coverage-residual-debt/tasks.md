@@ -22,11 +22,11 @@
 - [x] 2.3 本地：`openspec validate display-coverage-residual-debt --strict --no-interactive` 通过。
 - [x] 2.4 node-27：定向真实 DB pytest（1.5 集成用例 a/b/c）通过。
 - [x] 2.5 node-27：fallback EXPLAIN receipt——新两语句形状对两 hypertable 均 chunk exclusion / index scan（无全表 seq scan）；同一 DB 状态下新旧 fallback 行结果逐列一致（parity）。
-- [ ] 2.6 node-27：部署后一个 autopipe tick 的 cron 日志 receipt——三阶段 `elapsed_sec` 行齐全；backstop 对刚 publish 的 run 报 0 stale（若窗口内无新 cycle，则以 2.4 集成用例 + 手动触发 backstop 的日志替代，并如实记录口径）。
+- [x] 2.6 node-27：部署后一个 autopipe tick 的 cron 日志 receipt——三阶段 `elapsed_sec` 行齐全；backstop 对刚 publish 的 run 报 0 stale（若窗口内无新 cycle，则以 2.4 集成用例 + 手动触发 backstop 的日志替代，并如实记录口径）。
 
 ## 3. 交付（orchestrator）
 
-- [ ] 3.1 PR（含偏离记录节、证据包、中文工作总结）→ cross-review → merge gate。
+- [x] 3.1 PR（含偏离记录节、证据包、中文工作总结）→ cross-review → merge gate。
 
 ## Evidence Floor（对应 issue #1120 验收标准）
 
