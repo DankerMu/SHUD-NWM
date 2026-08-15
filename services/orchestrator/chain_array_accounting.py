@@ -416,6 +416,10 @@ def record_cycle_stage_status_override(
                 "failed",
                 "cancelled",
                 "reconcile_unverified",
+                # A master already marked permanently failed keeps that status
+                # through re-projection (#1312 terminal stickiness); it is a
+                # durable terminal outcome, not a missing commit.
+                "permanently_failed",
             }
         ):
             raise OrchestratorError(

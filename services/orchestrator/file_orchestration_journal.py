@@ -254,6 +254,34 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+#: The persisted master statuses a permanent-failure mark may transition FROM
+#: (#1312).  A live row (``reserved``/``running``/...) is a stale caller, never
+#: an error: the retry decline that owns the mark runs off its own snapshot and
+#: must never raise into the orchestration cycle.
+#:
+#: ``reservation_lost`` is deliberately EXCLUDED.  A lost reservation means "to
+#: be reclaimed", not "permanently failed": marking it would slam shut both
+#: recovery doors that key off the literal status (the reclaim predicate in
+#: ``reclaim_pipeline_job_reservation`` and the reconcile-verified retry
+#: shortcut), and its ``identity_mismatch_released`` sub-shape may not coexist
+#: with any other status at all (``accepted_submit_identity``).  Declining is
+#: the liveness-fail-safe direction.
+#:
+#: ``partially_failed`` is deliberately EXCLUDED for the same family of reason.
+#: A partially failed master's cohort keeps ADVANCING downstream under the
+#: #1202 partial-advance contract — its succeeded members are still owed the
+#: parse/state-save/publish stages — and the only decline entrance that can
+#: reach the mark with that status is the nested partial-array-retry exit
+#: (``chain_forecast_execution`` :547), not the main decline arm.  Marking it
+#: would flip the next pass's resume from ``parsed_partial`` to ``failed_run``
+#: with an error code and skip every downstream stage: "part of the cohort
+#: failed" is not "the whole job is permanently dead".
+PERMANENT_FAILURE_SOURCE_STATUSES = frozenset(
+    {
+        "failed",
+        "submission_failed",
+    }
+)
 _ACCEPTED_RUNTIME_TRANSITIONS = {
     "submitted": frozenset({"submitted", "pending", "queued", "running", "reconcile_unverified"}),
     "pending": frozenset({"pending", "queued", "running", "reconcile_unverified"}),
@@ -2386,6 +2414,104 @@ class FileOrchestrationJournalRepository:
                 )
             return AcceptedSubmitCommitResult("applied", _public_scheduler_row(master))
 
+    def mark_pipeline_job_permanently_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        finished_at: datetime | None = None,
+        event_details: Mapping[str, Any] | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """Mark one current-contract cohort master permanently failed (#1312).
+
+        ``update_pipeline_job_status`` refuses every master row on purpose, so
+        the permanent-failure mark required for declined retries needs its own
+        typed authority transition.  Only the WRITE SEQUENCE is borrowed from
+        :meth:`reject_pipeline_job_submit_attempt`; none of its preconditions
+        apply here (the target is already bound and already terminal) and its
+        accounting replacement must NOT happen: a permanent-failure mark is a
+        labelling transition, so the accepted-submit accounting tuple
+        (reconciliation decision / submit outcome / matched Slurm job id) is
+        preserved field-for-field by constructing the row in-lock.
+
+        Idempotency reads the PERSISTED row, never the caller's snapshot, and
+        the ``permanently_failed`` event is appended only with a real flip.
+        """
+
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None:
+                return AcceptedSubmitCommitResult("missing")
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            status_from = str(existing.get("status") or "")
+            if status_from == "permanently_failed":
+                return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            if status_from not in PERMANENT_FAILURE_SOURCE_STATUSES:
+                return AcceptedSubmitCommitResult("stale", dict(existing))
+            master = dict(existing)
+            master["status"] = "permanently_failed"
+            if error_code not in (None, ""):
+                master["error_code"] = error_code
+            if error_message is not None:
+                master["error_message"] = _durable_error_message(error_message)
+            if finished_at is not None:
+                master["finished_at"] = _format_utc(finished_at)
+            master["updated_at"] = _format_utc(_utcnow())
+            event = {
+                "event_id": self._next_accepted_submit_event_id_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                ),
+                "entity_type": "pipeline_job",
+                "entity_id": str(master["job_id"]),
+                "event_type": "permanently_failed",
+                "status_from": status_from or None,
+                "status_to": "permanently_failed",
+                "message": "automatic retry declined; job marked permanently failed",
+                "details": dict(event_details or {}),
+                "created_at": _format_utc(_utcnow()),
+            }
+            payloads: list[tuple[str, dict[str, Any], str | None]] = [
+                ("pipeline_job", master, None),
+                ("pipeline_event", event, None),
+            ]
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            self._write_pipeline_job_direct_unlocked(master, records[0])
+            return AcceptedSubmitCommitResult("applied", _public_scheduler_row(master))
+
     def record_pipeline_job_reconciliation(
         self,
         job_id: str,
@@ -2991,13 +3117,25 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
+            # Terminal stickiness (#1312): a master already marked
+            # ``permanently_failed`` keeps that status while the projection
+            # still refreshes its evidence fields.  Without this, every later
+            # resume/reconcile pass would rewrite the derived
+            # ``{succeeded, partially_failed, failed}`` projection over the
+            # mark and oscillate.  Same shape as the defer path's terminal
+            # short-circuit in ``_defer_forecast_cohort_projection_unlocked``.
+            sticky_master_status = (
+                "permanently_failed"
+                if str(existing.get("status") or "") == "permanently_failed"
+                else projected_master_status
+            )
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
                     reconciliation_decision,
                     submit_outcome="accepted",
                     matched_slurm_job_id=master_slurm_job_id,
-                    status=projected_master_status,
+                    status=sticky_master_status,
                 ),
             )
             cohort_row.update(
@@ -6605,7 +6743,20 @@ class FileJournalRetryService:
             and accepted_submit_row_kind(current) == "master"
         ):
             if not self.should_auto_retry(job):
-                return _file_retry_namespace(current)
+                # Same decline judgement as the orchestrator-cycle arm
+                # (``chain_forecast_orchestrator_cycle._schedule_cycle_stage_retry``)
+                # must land the same permanent-failure mark (#1312).  The mark
+                # is journal I/O on a formerly write-free decline, so a journal
+                # failure falls back to the pre-#1312 return value instead of
+                # raising through the caller (the mark is idempotent and the
+                # next pass re-lands it); the caller arm is guarded the same way,
+                # including the operator-visible signal the fallback leaves
+                # behind (#1312 C-P2 — the fallback must not be silent).
+                try:
+                    return self.mark_permanently_failed(job)
+                except (OrchestratorError, FileOrchestrationJournalError) as error:
+                    self._record_permanent_failure_mark_failure(current, error)
+                    return _file_retry_namespace(current)
             retry_job_id, retry_count = _next_current_master_retry_identity(current)
             return _file_retry_namespace(
                 {
@@ -6619,6 +6770,51 @@ class FileJournalRetryService:
         if self.should_auto_retry(job):
             return self.schedule_auto_retry(job)
         return self.mark_permanently_failed(job)
+
+    def _record_permanent_failure_mark_failure(
+        self,
+        current: Mapping[str, Any],
+        error: Exception,
+    ) -> None:
+        """Emit operator-visible evidence that a decline could not be marked.
+
+        Same shape as the orchestrator-cycle arm's signal
+        (``chain_forecast_orchestrator_cycle._record_permanent_failure_mark_failure``)
+        so both decline exits are observable through one event type.  The
+        emission is itself best effort: it exists to keep the fallback from
+        being silent, never to turn a correct decline into a raise.
+        """
+
+        insert_pipeline_event = getattr(self.repository, "insert_pipeline_event", None)
+        if not callable(insert_pipeline_event):
+            return
+        job_id = str(current.get("job_id") or "")
+        status = str(current.get("status") or "") or None
+        reason = str(
+            getattr(error, "error_code", None) or getattr(error, "reason", None) or type(error).__name__
+        )
+        try:
+            insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=job_id,
+                event_type="permanent_failure_mark_failed",
+                status_from=status,
+                status_to=status,
+                message=(
+                    "automatic retry declined but the permanent-failure mark could not be "
+                    f"written (reason={reason}); the row stays at status={status}."
+                ),
+                details={
+                    "pipeline_job_id": job_id,
+                    "reason": reason,
+                    "error_type": type(error).__name__,
+                    "field": getattr(error, "field", None),
+                    "retry_mark_pending": True,
+                },
+            )
+        except (OrchestratorError, FileOrchestrationJournalError):
+            # Evidence emission must never abort a correct decline decision.
+            pass
 
     def schedule_auto_retry(self, job: Any) -> SimpleNamespace:
         current = self.repository.get_pipeline_job(str(_file_retry_job_value(job, "job_id") or ""))
@@ -6703,6 +6899,17 @@ class FileJournalRetryService:
         return _file_retry_namespace(written)
     def mark_permanently_failed(self, job: Any) -> SimpleNamespace:
         source = _file_retry_job_record(job)
+        current = self.repository.get_pipeline_job(str(source.get("job_id") or ""))
+        if (
+            current is not None
+            and accepted_submit_contract_is_current(current)
+            and accepted_submit_row_kind(current) == "master"
+        ):
+            # Master rows own a typed authority transition, and their
+            # idempotency oracle is the PERSISTED row (#1312): the caller's
+            # snapshot may be stale in either direction, so the snapshot gate
+            # below is deliberately bypassed here.
+            return self._mark_master_permanently_failed(current, source)
         if str(source.get("status") or "") == "permanently_failed":
             return _file_retry_namespace(source)
         status_from = str(source.get("status") or "")
@@ -6732,6 +6939,40 @@ class FileJournalRetryService:
             },
         )
         return _file_retry_namespace(written)
+
+    def _mark_master_permanently_failed(
+        self,
+        current: Mapping[str, Any],
+        source: Mapping[str, Any],
+    ) -> SimpleNamespace:
+        """Route one master row through its typed permanent-failure transition."""
+
+        last_error = source.get("error_code")
+        if last_error in (None, ""):
+            last_error = current.get("error_code")
+        retry_count = int(source.get("retry_count") or current.get("retry_count") or 0)
+        result = self.repository.mark_pipeline_job_permanently_failed(
+            str(current["job_id"]),
+            error_code=str(last_error) if last_error not in (None, "") else None,
+            error_message=source.get("error_message") or current.get("error_message"),
+            finished_at=_utcnow(),
+            event_details={
+                "final_retry_count": retry_count,
+                "last_error": last_error,
+                "failure": classify_failure(
+                    last_error,
+                    attempt=retry_count,
+                    retry_limit=self.config.max_retries,
+                ),
+                "automatic_retry_stopped": True,
+            },
+        )
+        # ``stale``/``idempotent`` outcomes hand back the raw persisted row, so
+        # the namespace is normalized to the same public shape callers already
+        # get from ``get_pipeline_job``.
+        return _file_retry_namespace(
+            _public_scheduler_row(result.row) if result.row is not None else current
+        )
 
     def record_manual_repair(
         self,

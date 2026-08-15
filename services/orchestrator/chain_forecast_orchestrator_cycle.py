@@ -14,6 +14,7 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
@@ -194,6 +195,13 @@ class ForecastOrchestratorCycleMixin:
         ):
             should_retry = getattr(self.retry_service, "should_auto_retry", None)
             if callable(should_retry) and not bool(should_retry(job)):
+                # Declining auto retry owns the permanent-failure mark (#1312).
+                # Gate on the SERVICE SHAPE, not on the method name: the
+                # store-less ``RetryService`` used by the db-free gate carries
+                # the same method but no persistence, and must keep returning
+                # None without marking and without raising.
+                if getattr(self.retry_service, "repository", None) is not None:
+                    self._mark_declined_master_permanently_failed(job, current)
                 return None
             # The next call to _submit_and_wait_cycle_stage owns creation of a
             # clean, versioned reservation using the then-current basin cohort.
@@ -211,6 +219,69 @@ class ForecastOrchestratorCycleMixin:
             return None
         _chain.time.sleep(backoff_seconds)
         return handled_job_id
+
+    def _mark_declined_master_permanently_failed(
+        self,
+        job: _chain.Any,
+        current: _chain.Mapping[str, _chain.Any],
+    ) -> None:
+        """Land the decline's permanent-failure mark without owning the cycle.
+
+        The mark (#1312) is two new journal records on a decline path that used
+        to be write-free, and nothing between here and
+        ``chain_forecast_execution`` (:219/:547) handles a journal write
+        failure: letting one escape would replace the correct
+        ``PipelineResult("failed")`` outcome with a pass-level
+        ``production_orchestration_failed``.  The mark is idempotent, so the
+        next pass re-lands it; only the journal's own failure classes are
+        caught here, and the miss is recorded as durable operator evidence
+        rather than swallowed.
+        """
+
+        try:
+            self.retry_service.mark_permanently_failed(job)
+        except (_chain.OrchestratorError, FileOrchestrationJournalError) as error:
+            self._record_permanent_failure_mark_failure(current, error)
+
+    def _record_permanent_failure_mark_failure(
+        self,
+        current: _chain.Mapping[str, _chain.Any],
+        error: Exception,
+    ) -> None:
+        """Emit operator-visible evidence that a decline could not be marked."""
+
+        insert_pipeline_event = getattr(self.repository, "insert_pipeline_event", None)
+        if not callable(insert_pipeline_event):
+            return
+        job_id = str(current.get("job_id") or "")
+        status = str(current.get("status") or "") or None
+        reason = str(
+            getattr(error, "error_code", None) or getattr(error, "reason", None) or type(error).__name__
+        )
+        try:
+            insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=job_id,
+                event_type="permanent_failure_mark_failed",
+                status_from=status,
+                status_to=status,
+                message=(
+                    "automatic retry declined but the permanent-failure mark could not be "
+                    f"written (reason={reason}); the row stays at status={status}."
+                ),
+                details=_chain._safe_pipeline_event_details(
+                    {
+                        "pipeline_job_id": job_id,
+                        "reason": reason,
+                        "error_type": type(error).__name__,
+                        "field": getattr(error, "field", None),
+                        "retry_mark_pending": True,
+                    }
+                ),
+            )
+        except (_chain.OrchestratorError, FileOrchestrationJournalError):
+            # Evidence emission must never abort a correct decline decision.
+            pass
 
     def _release_retry_store_transaction(self) -> None:
         service = self.retry_service
