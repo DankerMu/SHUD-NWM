@@ -101,9 +101,9 @@ example 是工程师复制模板，应反映 runner 实际产出形状（refused
   :3564-3567 冻结（D3 双测试钉）。
 - budget-chain 既有两腿不变量测试群 :126-384 语义零改动（新腿是追加）。
 - env 模板 `infra/env/node27-timeseries-compression.example`：~~字节不动~~ **冻结解除
-  （round-1 C3 amendment；理由经 round-2 N3 更正）**——钉保护的**不是空集**：两个 pin
-  测试钉住 4 条 comment substring（模板 :36/:38/:81/:88，含纯注释行），comment 编辑
-  完全可能破钉。解除许可站在操作规则上而非"注释免钉"错误论述上：**赋值行与全部既有
+  （round-1 C3 amendment；理由经 round-2 N3 更正）**——钉保护的**不是空集**：第一个 pin
+  测试钉住 5 条 comment substring（模板 :36/:38/:78/:80/:88，含纯注释行与 override.conf
+  路径），第二个以唯一性钉赋值行；comment 编辑完全可能破钉。解除许可站在操作规则上而非"注释免钉"错误论述上：**赋值行与全部既有
   钉住 substring 字节不动**，pin 测试必须原样通过（round-1 修复实际以保留
   `PER_TICK_BOUND=1` 字面为约束完成，即活证）。解除动机不变：leg 3 落地后模板只列
   两腿 + "either leg"、把 bound=1 说成 hint，是本 PR 自己制造的矛盾（模板即部署源），

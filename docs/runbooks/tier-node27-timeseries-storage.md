@@ -1726,8 +1726,11 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    `per_tick_bound` were actually applied by that tick, while
    `systemd_wall_seconds` is only the declaration that tick read. **Check 2 is
    the only step that queries the unit manager for the installed wall**; check
-   3 does not replace it. Caveat: §4.5's check-2 and drop-in commands run
-   against the *system* manager while the unit is installed user-scope — that
+   3 does not replace it. Caveat: §4.5's whole system-scope command family —
+   the drop-in install, the timer `stop`/`mask`, and check 2 — runs
+   against the *system* manager while the unit is installed user-scope, and the
+   `stop`/`mask` half is the dangerous one, since it succeeds silently against
+   the system manager while the user timer keeps firing. That
    scope mismatch is tracked in issue `#1387` and is not fixed here, so until
    it lands read the real wall with `systemctl --user show -p
    TimeoutStartUSec nhms-node27-timeseries-compression.service` semantics.
@@ -1760,7 +1763,9 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    systemctl --user list-timers nhms-node27-timeseries-compression.timer
 
    # 2. the default-path receipt must be POST-CLEANUP and carry the defaults
-   CLEANUP_AT=2026-08-15T11:40:07Z   # as recorded at cleanup completion
+   # CLEANUP_AT must be the value you recorded at cleanup completion above;
+   # unset (e.g. a fresh shell) aborts here rather than defaulting to anything.
+   : "${CLEANUP_AT:?not set — record it at cleanup completion (see the cleanup block above) before running check 3}"
    /home/nwm/NWM/.venv/bin/python - "$CLEANUP_AT" <<'PY'
    import json, sys
    from datetime import datetime
