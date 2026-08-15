@@ -26,6 +26,7 @@ import json
 import math
 import os
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -687,12 +688,57 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
         page_size=1000,
     )
 
+    # Surrogate identity keys (migration 000050) are read back from the
+    # authority rows this function just inserted. They are SELECTed rather than
+    # RETURNINGed because every authority INSERT above is ON CONFLICT DO
+    # NOTHING: on a re-seed RETURNING yields nothing while the rows exist.
+    run_keys = _fetch_key_map(
+        cursor,
+        "SELECT run_id, run_key FROM hydro.hydro_run WHERE run_id = ANY(%s)",
+        ([RUN_ID, IFS_RUN_ID, IFS_06Z_RUN_ID],),
+        expected=(RUN_ID, IFS_RUN_ID, IFS_06Z_RUN_ID),
+        label="hydro.hydro_run.run_key",
+    )
+    basin_version_key = _fetch_required_key(
+        cursor,
+        "SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s",
+        (BASIN_VERSION_ID,),
+        label=f"core.basin_version.basin_version_key for {BASIN_VERSION_ID}",
+    )
+    river_network_version_key = _fetch_required_key(
+        cursor,
+        """
+        SELECT river_network_version_key
+        FROM core.river_network_version
+        WHERE river_network_version_id = %s
+        """,
+        (RIVER_NETWORK_VERSION_ID,),
+        label=f"core.river_network_version.river_network_version_key for {RIVER_NETWORK_VERSION_ID}",
+    )
+    segment_ids = [segment.river_segment_id for segment in build_river_segments()]
+    segment_keys = _fetch_key_map(
+        cursor,
+        """
+        SELECT river_segment_id, river_segment_key
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND river_segment_id = ANY(%s)
+        """,
+        (RIVER_NETWORK_VERSION_ID, segment_ids),
+        expected=tuple(segment_ids),
+        label="core.river_segment.river_segment_key",
+    )
+
     river_rows = [
         *_build_river_timeseries_rows(
             rng,
             run_id=RUN_ID,
             start_time=START_TIME,
             forecast_hours=FORECAST_HOURS,
+            run_key=run_keys[RUN_ID],
+            basin_version_key=basin_version_key,
+            river_network_version_key=river_network_version_key,
+            segment_keys=segment_keys,
         ),
         *_build_river_timeseries_rows(
             rng,
@@ -700,6 +746,10 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
             start_time=IFS_CYCLE_TIME,
             forecast_hours=IFS_FORECAST_HOURS,
             flow_offset=-20.0,
+            run_key=run_keys[IFS_RUN_ID],
+            basin_version_key=basin_version_key,
+            river_network_version_key=river_network_version_key,
+            segment_keys=segment_keys,
         ),
         *_build_river_timeseries_rows(
             rng,
@@ -707,6 +757,10 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
             start_time=IFS_06Z_CYCLE_TIME,
             forecast_hours=IFS_06Z_FORECAST_HOURS,
             flow_offset=-25.0,
+            run_key=run_keys[IFS_06Z_RUN_ID],
+            basin_version_key=basin_version_key,
+            river_network_version_key=river_network_version_key,
+            segment_keys=segment_keys,
         ),
     ]
     execute_values(
@@ -722,7 +776,14 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
             variable,
             value,
             unit,
-            quality_flag
+            quality_flag,
+            run_key,
+            river_network_version_key,
+            basin_version_key,
+            river_segment_key,
+            variable_e,
+            unit_e,
+            quality_flag_e
         )
         VALUES %s
         ON CONFLICT DO NOTHING
@@ -732,6 +793,33 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
     )
 
 
+def _fetch_required_key(cursor: Any, sql: str, params: tuple[Any, ...], *, label: str) -> int:
+    cursor.execute(sql, params)
+    row = cursor.fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError(f"seed_demo: {label} is missing; apply migration 000050 before seeding.")
+    return int(row[0])
+
+
+def _fetch_key_map(
+    cursor: Any,
+    sql: str,
+    params: tuple[Any, ...],
+    *,
+    expected: tuple[str, ...],
+    label: str,
+) -> dict[str, int]:
+    cursor.execute(sql, params)
+    keys = {str(identifier): int(key) for identifier, key in cursor.fetchall() if key is not None}
+    missing = [identifier for identifier in expected if identifier not in keys]
+    if missing:
+        raise RuntimeError(
+            f"seed_demo: {label} is missing for {len(missing)} row(s): {', '.join(missing[:10])}; "
+            "apply migration 000050 before seeding."
+        )
+    return keys
+
+
 def _build_river_timeseries_rows(
     rng: random.Random,
     *,
@@ -739,9 +827,19 @@ def _build_river_timeseries_rows(
     start_time: datetime,
     forecast_hours: int,
     flow_offset: float = 0.0,
+    run_key: int,
+    basin_version_key: int,
+    river_network_version_key: int,
+    segment_keys: Mapping[str, int],
 ) -> list[tuple[Any, ...]]:
     rows: list[tuple[Any, ...]] = []
     for segment in build_river_segments():
+        segment_key = segment_keys.get(segment.river_segment_id)
+        if segment_key is None:
+            raise RuntimeError(
+                f"seed_demo: no river_segment_key for {segment.river_segment_id}; "
+                "apply migration 000050 before seeding."
+            )
         for variable in RIVER_VARIABLES:
             unit = "m3/s" if variable == "q_down" else "m"
             for lead_time_hours, valid_time in enumerate(hourly_times(start_time, forecast_hours)):
@@ -762,6 +860,15 @@ def _build_river_timeseries_rows(
                             forecast_hours=forecast_hours,
                             flow_offset=flow_offset,
                         ),
+                        unit,
+                        "ok",
+                        run_key,
+                        river_network_version_key,
+                        basin_version_key,
+                        segment_key,
+                        # Same in-process values as the text columns above; the
+                        # enum column types coerce them server-side.
+                        variable,
                         unit,
                         "ok",
                     )

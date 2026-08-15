@@ -26,6 +26,8 @@ class FakeOutputRepository:
         self.qc_results: list[Any] = []
         self.statuses: list[str] = []
         self.failures: list[tuple[str, str]] = []
+        self.run_identities: list[Any] = []
+        self.segment_key_maps: list[Any] = []
 
     def load_run_context(self, run_id: str) -> HydroRunContext:
         assert run_id == self.context.run_id
@@ -35,8 +37,17 @@ class FakeOutputRepository:
         assert river_network_version_id == self.context.river_network_version_id
         return self.segments
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: Any = None,
+        segment_keys: Any = None,
+    ) -> None:
         assert batch_size > 0
+        self.run_identities.append(run_identity)
+        self.segment_key_maps.append(segment_keys)
         replacement_keys = {
             (row.run_id, row.river_network_version_id, row.variable)
             for row in rows
@@ -332,9 +343,9 @@ def test_compressed_chunk_guard_error_sets_dedicated_error_code(tmp_path: Path) 
 
     original_upsert = repository.upsert_river_timeseries
 
-    def _raise_guard(rows: Any, *, batch_size: int) -> None:
+    def _raise_guard(rows: Any, *, batch_size: int, run_identity: Any = None, segment_keys: Any = None) -> None:
         # Preserve batch_size handshake so the assertion in the fake still fires.
-        del rows, batch_size
+        del rows, batch_size, run_identity, segment_keys
         raise CompressedChunkGuardError(
             "guard raised: chunk _hyper_1_1_chunk in hydro.river_timeseries"
         )

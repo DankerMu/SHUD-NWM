@@ -29,6 +29,7 @@ AUTO_TIME_BASIS_MAX_RELATIVE_DAYS = 366
 AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS = 1
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
+IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
 
@@ -86,6 +87,35 @@ class HydroRunContext:
     output_uri: str | None = None
     run_type: str = "forecast"
     scenario_id: str | None = None
+    # Surrogate identity keys (migration 000050), resolved by the same query
+    # that loads the run context. ``None`` on the DB-free path, which never
+    # reaches the dual-writing INSERT.
+    run_key: int | None = None
+    basin_version_key: int | None = None
+    river_network_version_key: int | None = None
+
+
+@dataclass(frozen=True)
+class RunIdentityKeys:
+    """Run-level surrogate keys handed to ``upsert_river_timeseries``.
+
+    The three keys are constant across every row of one parse batch (they come
+    from a single ``HydroRunContext``), so they travel as one value rather than
+    per-row columns on ``RiverTimeseriesRow`` — the JSONL artifact written by
+    ``FileOutputParserRepository`` stays byte-identical (design D1).
+    """
+
+    run_key: int | None = None
+    river_network_version_key: int | None = None
+    basin_version_key: int | None = None
+
+    @classmethod
+    def from_context(cls, context: HydroRunContext) -> RunIdentityKeys:
+        return cls(
+            run_key=context.run_key,
+            river_network_version_key=context.river_network_version_key,
+            basin_version_key=context.basin_version_key,
+        )
 
 
 @dataclass(frozen=True)
@@ -93,6 +123,7 @@ class RiverSegmentOrder:
     river_segment_id: str
     river_network_version_id: str
     segment_order: int | None
+    river_segment_key: int | None = None
 
 
 @dataclass(frozen=True)
@@ -139,7 +170,14 @@ class OutputParserRepository(Protocol):
     def load_river_segments(self, river_network_version_id: str) -> tuple[RiverSegmentOrder, ...]:
         raise NotImplementedError
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: RunIdentityKeys | None = None,
+        segment_keys: Mapping[str, int | None] | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def insert_qc_result(self, record: QCResultRecord) -> dict[str, Any]:
@@ -189,14 +227,27 @@ class OutputParser:
             if not qc_record.passed:
                 rows = tuple(replace(row, quality_flag="qc_warning") for row in rows)
 
+            run_identity = RunIdentityKeys.from_context(context)
+            segment_keys = {segment.river_segment_id: segment.river_segment_key for segment in segments}
+
             transaction = getattr(self.repository, "transaction", None)
             if callable(transaction):
                 with transaction() as repository:
-                    repository.upsert_river_timeseries(rows, batch_size=self.config.batch_size)
+                    repository.upsert_river_timeseries(
+                        rows,
+                        batch_size=self.config.batch_size,
+                        run_identity=run_identity,
+                        segment_keys=segment_keys,
+                    )
                     repository.insert_qc_result(qc_record)
                     repository.mark_run_parsed(context.run_id)
             else:
-                self.repository.upsert_river_timeseries(rows, batch_size=self.config.batch_size)
+                self.repository.upsert_river_timeseries(
+                    rows,
+                    batch_size=self.config.batch_size,
+                    run_identity=run_identity,
+                    segment_keys=segment_keys,
+                )
                 self.repository.insert_qc_result(qc_record)
                 self.repository.mark_run_parsed(context.run_id)
             return OutputParsingResult(
@@ -340,8 +391,17 @@ class FileOutputParserRepository:
             for index in _read_shud_riv_indices(riv_path)
         )
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
-        del batch_size
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: RunIdentityKeys | None = None,
+        segment_keys: Mapping[str, int | None] | None = None,
+    ) -> None:
+        # The DB-free repository has no surrogate identity to write: the JSONL
+        # artifact is the text-column payload and stays byte-identical.
+        del batch_size, run_identity, segment_keys
         if not rows:
             return
         run_id = rows[0].run_id
@@ -551,6 +611,56 @@ def build_qc_result(
     )
 
 
+def _resolved_run_identity(run_identity: RunIdentityKeys | None) -> tuple[int, int, int]:
+    """Return the three run-level surrogate keys or fail the batch closed."""
+    if run_identity is None:
+        raise OutputParsingError(
+            IDENTITY_KEY_MISSING_ERROR_CODE,
+            "river_timeseries dual-write requires run identity keys; none were supplied.",
+        )
+    missing = [
+        name
+        for name, value in (
+            ("run_key", run_identity.run_key),
+            ("river_network_version_key", run_identity.river_network_version_key),
+            ("basin_version_key", run_identity.basin_version_key),
+        )
+        if value is None
+    ]
+    if missing:
+        raise OutputParsingError(
+            IDENTITY_KEY_MISSING_ERROR_CODE,
+            f"river_timeseries dual-write cannot resolve run identity keys: {', '.join(missing)}.",
+        )
+    return (
+        int(run_identity.run_key),  # type: ignore[arg-type]
+        int(run_identity.river_network_version_key),  # type: ignore[arg-type]
+        int(run_identity.basin_version_key),  # type: ignore[arg-type]
+    )
+
+
+def _resolved_segment_keys(
+    rows: tuple[RiverTimeseriesRow, ...],
+    segment_keys: Mapping[str, int | None] | None,
+) -> tuple[int, ...]:
+    """Return one ``river_segment_key`` per row or fail the batch closed."""
+    if segment_keys is None:
+        raise OutputParsingError(
+            IDENTITY_KEY_MISSING_ERROR_CODE,
+            "river_timeseries dual-write requires river_segment_key mappings; none were supplied.",
+        )
+    unresolved = sorted(
+        {row.river_segment_id for row in rows if segment_keys.get(row.river_segment_id) is None}
+    )
+    if unresolved:
+        raise OutputParsingError(
+            IDENTITY_KEY_MISSING_ERROR_CODE,
+            "river_timeseries dual-write cannot resolve river_segment_key for "
+            f"{len(unresolved)} segment(s): {', '.join(unresolved[:10])}.",
+        )
+    return tuple(int(segment_keys[row.river_segment_id]) for row in rows)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True)
 class PsycopgOutputParserRepository:
     database_url: str
@@ -604,9 +714,20 @@ class PsycopgOutputParserRepository:
                 h.run_type,
                 h.scenario_id,
                 mi.river_network_version_id,
-                fc.cycle_id
+                fc.cycle_id,
+                h.run_key,
+                bv.basin_version_key,
+                rnv.river_network_version_key
             FROM hydro.hydro_run h
             JOIN core.model_instance mi ON mi.model_id = h.model_id
+            -- basin_version is joined on the HYDRO_RUN side: the fact row's
+            -- basin_version_id text column comes from hydro_run, and
+            -- core.model_instance.basin_version_id may differ. Joining the
+            -- model_instance side would make basin_version_key disagree with
+            -- the text column it mirrors (design D1).
+            JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = mi.river_network_version_id
             LEFT JOIN met.forecast_cycle fc
               ON fc.source_id = h.source_id
              AND fc.cycle_time = h.cycle_time
@@ -632,12 +753,15 @@ class PsycopgOutputParserRepository:
             output_uri=row.get("output_uri"),
             run_type=run_type,
             scenario_id=row.get("scenario_id"),
+            run_key=row.get("run_key"),
+            basin_version_key=row.get("basin_version_key"),
+            river_network_version_key=row.get("river_network_version_key"),
         )
 
     def load_river_segments(self, river_network_version_id: str) -> tuple[RiverSegmentOrder, ...]:
         rows = self._fetch_all(
             """
-            SELECT river_segment_id, river_network_version_id, segment_order
+            SELECT river_segment_id, river_network_version_id, segment_order, river_segment_key
             FROM core.river_segment
             WHERE river_network_version_id = %s
               AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
@@ -648,7 +772,7 @@ class PsycopgOutputParserRepository:
         if not rows:
             rows = self._fetch_all(
                 """
-                SELECT river_segment_id, river_network_version_id, segment_order
+                SELECT river_segment_id, river_network_version_id, segment_order, river_segment_key
                 FROM core.river_segment
                 WHERE river_network_version_id = %s
                 ORDER BY segment_order NULLS LAST, river_segment_id
@@ -660,19 +784,38 @@ class PsycopgOutputParserRepository:
                 river_segment_id=str(row["river_segment_id"]),
                 river_network_version_id=str(row["river_network_version_id"]),
                 segment_order=row["segment_order"],
+                river_segment_key=row.get("river_segment_key"),
             )
             for row in rows
         )
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: RunIdentityKeys | None = None,
+        segment_keys: Mapping[str, int | None] | None = None,
+    ) -> None:
         if not rows:
             return
+        # Fail closed BEFORE any statement runs: an unresolvable surrogate key
+        # must cost the whole batch, never a NULL-key row (design D1). NULL
+        # surrogates are the #1339 backfill lane's sentinel and may only be
+        # produced by pre-#1340 code.
+        row_segment_keys = _resolved_segment_keys(rows, segment_keys)
+        run_key, river_network_version_key, basin_version_key = _resolved_run_identity(run_identity)
         replacement_keys = sorted(
             {(row.run_id, row.river_network_version_id, row.variable) for row in rows}
         )
         if self._connection is None:
             with self.transaction() as repository:
-                repository.upsert_river_timeseries(rows, batch_size=batch_size)
+                repository.upsert_river_timeseries(
+                    rows,
+                    batch_size=batch_size,
+                    run_identity=run_identity,
+                    segment_keys=segment_keys,
+                )
             return
         incoming_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
@@ -765,8 +908,19 @@ class PsycopgOutputParserRepository:
                 row.value,
                 row.unit,
                 row.quality_flag,
+                run_key,
+                river_network_version_key,
+                basin_version_key,
+                segment_key,
+                # Same in-process value as the text column above; the enum
+                # column type coerces it server-side, so text<->enum drift is
+                # unrepresentable here and an out-of-vocabulary literal fails
+                # the transaction closed (design D2).
+                row.variable,
+                row.unit,
+                row.quality_flag,
             )
-            for row in rows
+            for row, segment_key in zip(rows, row_segment_keys, strict=True)
         ]
         self._execute_values(
             """
@@ -780,7 +934,14 @@ class PsycopgOutputParserRepository:
                 variable,
                 value,
                 unit,
-                quality_flag
+                quality_flag,
+                run_key,
+                river_network_version_key,
+                basin_version_key,
+                river_segment_key,
+                variable_e,
+                unit_e,
+                quality_flag_e
             )
             VALUES %s
             ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)
@@ -789,7 +950,10 @@ class PsycopgOutputParserRepository:
                 lead_time_hours = EXCLUDED.lead_time_hours,
                 value = EXCLUDED.value,
                 unit = EXCLUDED.unit,
-                quality_flag = EXCLUDED.quality_flag
+                quality_flag = EXCLUDED.quality_flag,
+                basin_version_key = EXCLUDED.basin_version_key,
+                unit_e = EXCLUDED.unit_e,
+                quality_flag_e = EXCLUDED.quality_flag_e
             """,
             value_rows,
             page_size=batch_size,
