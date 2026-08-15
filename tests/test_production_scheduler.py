@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,10 @@ from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import cli
 from services.orchestrator import file_orchestration_journal as file_orchestration_journal_module
+from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+from services.orchestrator import scheduler_config as scheduler_config_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_evidence as scheduler_evidence_module
 from services.orchestrator import scheduler_evidence_payload as scheduler_evidence_payload_module
@@ -31752,8 +31755,9 @@ def test_slurm_preflight_blocks_preexisting_loop_allowed_root_built_by_real_conf
     the B2 anchor.
 
     Scope is the `_slurm_preflight` seam, NOT the run_once pass. The pass-level
-    <=3.12 residual (`_scheduler_allowed_roots`, issue #1348) is pinned
-    separately by the tripwire at the end of this section.
+    residual (`_scheduler_allowed_roots`) was closed by issue #1348; the flipped
+    B8 anchor at the end of this section pins the fixed not-required contract,
+    and the #1348 section below pins the runtime-root preflight planes.
     """
 
     roots = _slurm_roots(tmp_path)
@@ -32030,26 +32034,24 @@ def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
     assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
 
 
-@pytest.mark.skipif(
-    sys.version_info >= (3, 13),
-    reason="the pass-level crash needs a non-strict Path.resolve() that raises, i.e. CPython <=3.12",
-)
-def test_scheduler_root_preflight_still_raises_on_preexisting_loop_allowed_root(
+def test_scheduler_root_preflight_drops_preexisting_loop_allowed_root_without_raising(
     tmp_path: Path,
 ) -> None:
-    """B8 tripwire: pins the #1348 residual this change deliberately leaves open.
+    """B8, flipped by #1348: the not-required payload adjudicates, never raises.
 
-    The `_slurm_preflight` seam is now version-consistent, but the run_once
-    pass is not: `scheduler_runtime.py:606-609` calls
-    `_scheduler_lock_evidence_root_preflight` before `_slurm_preflight`, and
-    its not-required early-exit payload itself calls `_scheduler_allowed_roots`
-    (`scheduler_runtime_roots.py:168` -> `:448-462`), which still canonicalises
-    with a non-strict `Path.resolve()`. On <=3.12 operators therefore still get
-    a bare errno-less RuntimeError at pass level.
+    This was the #1346 tripwire pinning the pass-level residual: the run_once
+    pass calls `_scheduler_lock_evidence_root_preflight` before
+    `_slurm_preflight`, and its not-required early-exit payload calls
+    `_scheduler_allowed_roots`, which used to canonicalise with a non-strict
+    `Path.resolve()` -- an errno-less RuntimeError escaping at pass level on
+    <=3.12, and a silently admitted phantom containment base on 3.13+.
 
-    This pin asserts the CURRENT BROKEN BEHAVIOUR on purpose. When #1348 lands
-    this test MUST go red; flipping it to the fixed structured assertion is
-    part of that change, not a reason to relax the pin here.
+    The fixed contract (design D6) is version-independent: the loop root is
+    dropped from the shared adjudication product, so the payload's allowed-roots
+    evidence never lists it. That payload has no blocker channel and declares no
+    containment adjudication, so it emits no blocker -- the storage preflight
+    stays the blocker-bearing plane for this configuration -- and the
+    adjudication never escapes as an unhandled exception.
     """
 
     loop = tmp_path / "allowed-loop"
@@ -32059,8 +32061,758 @@ def test_scheduler_root_preflight_still_raises_on_preexisting_loop_allowed_root(
     assert config.allowed_storage_roots == (loop,)
     assert config.require_runtime_roots is False
 
-    with pytest.raises(RuntimeError, match="Symlink loop"):
-        scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert preflight["status"] == "not_required"
+    assert preflight["required"] is False
+    assert preflight["blockers"] == []
+    assert preflight["allowed_roots"] == []
+    assert str(loop) not in preflight["allowed_roots"]
+
+
+# --- Issue #1348: the runtime-root planes adopt the same errno split ---------
+#
+# Version-insensitivity discipline for this whole section: every fault is a real
+# on-disk shape built in `tmp_path` and every verdict is asserted from the errno
+# the kernel reports, never from `sys.version_info`. Nothing patches `resolve()`
+# or `realpath()`; the guard assertions below pin the errno of each shape so a
+# future interpreter that reclassified one of them fails loudly instead of
+# silently retargeting the arm under test.
+
+_SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE = "SCHEDULER_ROOT_ALLOWED_ROOTS_UNSAFE_PATH"
+_SCHEDULER_ALLOWED_ROOTS_MISSING_CODE = "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING"
+
+
+@dataclass(frozen=True)
+class _AllowedRootsConfigStub:
+    """The exact attribute surface both allowed-roots seams read from a config.
+
+    The real `ProductionSchedulerConfig` canonicalises allowed roots during
+    construction (#1347 / PR #1349), which erases the raw `<missing>/../<loop>`
+    shape and the raw lexical form before either seam ever sees them. Feeding
+    the seam its configured values directly is the only way to pin the four
+    shapes uniformly; the faults on disk stay real and no resolution primitive
+    is mocked. The real-config integration anchors further down (the preflight
+    arms, the dual-plane anchor and the repair-authority lane) are what keep
+    this surface honest.
+    """
+
+    allowed_storage_roots: tuple[Path, ...]
+    scheduler_db_free_required: bool = False
+    repair_missing_forcing: bool = False
+
+    @property
+    def db_free_required(self) -> bool:
+        return self.scheduler_db_free_required
+
+
+def _allowed_root_errno(root: Path) -> int | None:
+    """The errno the kernel reports for a root, or None when it resolves."""
+
+    try:
+        os.path.realpath(root, strict=True)
+    except OSError as error:
+        return error.errno
+    return None
+
+
+def _scheduler_allowed_roots_unsafe_blocker(path: str) -> dict[str, Any]:
+    return {
+        "code": _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE,
+        "field": "allowed_roots",
+        "reason": "unsafe_path",
+        "message": "Production scheduler allowed_roots is not a safe writable runtime root.",
+        "path": path,
+    }
+
+
+def _runtime_roots_config(
+    tmp_path: Path,
+    *,
+    allowed_storage_roots: tuple[Path, ...],
+    **kwargs: Any,
+) -> ProductionSchedulerConfig:
+    """A database-backed config whose runtime-root arms actually adjudicate.
+
+    `require_runtime_roots=True` is mandatory here: without it both arms
+    early-exit to the not-required payload and every arm-level assertion below
+    would be vacuous.
+    """
+
+    roots = _slurm_roots(tmp_path)
+    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True, exist_ok=True)
+    values: dict[str, Any] = {
+        "slurm_gateway_url": "http://gw-node22.internal:8000",
+        "object_store_root": roots["object_store_root"],
+        "published_artifact_root": roots["published_root"],
+        "log_root": roots["log_root"],
+        "runtime_root": roots["runtime_root"],
+        "temp_root": roots["temp_root"],
+        "service_role": "compute_control",
+        "require_runtime_roots": True,
+        "allowed_storage_roots": allowed_storage_roots,
+        "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    }
+    values.update(kwargs)
+    return _gateway_config(roots["workspace_root"], **values)
+
+
+def _runtime_root_preflight_arm(arm: str) -> Any:
+    if arm == "lock_evidence":
+        return scheduler_module._scheduler_lock_evidence_root_preflight
+    return scheduler_module._scheduler_runtime_root_preflight
+
+
+# Site 1 (`_scheduler_allowed_roots_and_blockers`): the adjudication table.
+
+
+def test_scheduler_allowed_roots_drops_symlink_loop_root_on_database_backed_runtime(
+    tmp_path: Path,
+) -> None:
+    """ELOOP x database-backed: dropped, blocked, and the sibling root survives."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    assert _allowed_root_errno(loop) == errno.ELOOP
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved))
+    )
+
+    assert roots == (approved,)
+    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(loop))]
+
+
+def test_scheduler_allowed_roots_drops_not_a_directory_root_on_database_backed_runtime(
+    tmp_path: Path,
+) -> None:
+    """ENOTDIR x database-backed: the split is "not ENOENT", not "only ELOOP".
+
+    A regular file as an intermediate component needs no symlink at all, so this
+    row is reachable on every supported interpreter and pins that the verdict
+    follows the errno class rather than the ELOOP special case.
+    """
+
+    regular_file = tmp_path / "plain.txt"
+    regular_file.write_text("not a directory", encoding="utf-8")
+    not_a_dir_root = regular_file / "root"
+    assert _allowed_root_errno(not_a_dir_root) == errno.ENOTDIR
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(not_a_dir_root,))
+    )
+
+    assert roots == ()
+    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(not_a_dir_root))]
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+def test_scheduler_allowed_roots_admits_missing_root_without_blocker(
+    tmp_path: Path,
+    db_free_required: bool,
+) -> None:
+    """ENOENT x both runtime modes: the historical admitted semantics, pinned.
+
+    A root that is merely missing (not created yet, NFS not mounted) is never
+    unsafe, and the non-strict `os.path.realpath` fallback reproduces the
+    product the old non-strict `Path.resolve()` produced.
+    """
+
+    missing = tmp_path / "not-created-yet"
+    assert _allowed_root_errno(missing) == errno.ENOENT
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(
+            allowed_storage_roots=(missing,),
+            scheduler_db_free_required=db_free_required,
+        )
+    )
+
+    assert roots == (Path(os.path.realpath(missing)),)
+    assert blockers == []
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+def test_scheduler_allowed_roots_absorbs_loop_behind_missing_root_through_enoent_arm(
+    tmp_path: Path,
+    db_free_required: bool,
+) -> None:
+    """`<missing>/../<loop>` x both modes: the ENOENT arm absorbs the shape.
+
+    Strict resolution stops at the missing `gone` component and reports ENOENT,
+    so the ENOENT arm owns this shape; its non-strict fallback then collapses
+    `..` onto the loop. `Path.resolve()` would raise an errno-less RuntimeError
+    here on <=3.12, which is exactly why the fallback is `os.path.realpath`.
+    """
+
+    loop = tmp_path / "loopdir"
+    loop.symlink_to(loop)
+    loop_behind_missing = tmp_path / "gone" / ".." / "loopdir"
+    assert _allowed_root_errno(loop_behind_missing) == errno.ENOENT
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(
+            allowed_storage_roots=(loop_behind_missing,),
+            scheduler_db_free_required=db_free_required,
+        )
+    )
+
+    assert roots == (Path(os.path.realpath(loop_behind_missing)),)
+    assert blockers == []
+
+
+def test_scheduler_allowed_roots_keeps_lexical_tolerance_for_loop_root_on_db_free_runtime(
+    tmp_path: Path,
+) -> None:
+    """ELOOP x db-free: the PR #831 lexical arm stays verbatim, no blocker."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    assert _allowed_root_errno(loop) == errno.ELOOP
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop,), scheduler_db_free_required=True)
+    )
+
+    assert roots == (loop,)
+    assert blockers == []
+
+
+def test_scheduler_allowed_roots_db_free_lexical_arm_is_distinguishable_from_resolution(
+    tmp_path: Path,
+) -> None:
+    """ENOTDIR x db-free: the lexical arm really ran, not "resolution succeeded".
+
+    `link -> realdir` plus a regular `realdir/file.txt` makes the two candidate
+    products observably different, so this is the shape that proves the db-free
+    arm is still the lexical one on CPython 3.13+, where the old non-strict
+    resolution simply stopped raising and both arms collapsed into one.
+    """
+
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    (realdir / "file.txt").write_text("not a directory", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(realdir)
+    lexical_root = link / "file.txt" / "sub"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+    assert _allowed_root_errno(lexical_root) == errno.ENOTDIR
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,), scheduler_db_free_required=True)
+    )
+
+    assert roots == (lexical_root,)
+    assert roots != (canonical_root,)
+    assert blockers == []
+
+
+def test_scheduler_allowed_roots_preserves_order_and_dedups_around_dropped_root(
+    tmp_path: Path,
+) -> None:
+    """Dropping an unsafe root must not disturb order or duplicate suppression."""
+
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(second, loop, first, second))
+    )
+
+    assert roots == (second, first)
+    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(loop))]
+
+
+def test_scheduler_allowed_roots_reader_returns_the_pair_functions_roots(
+    tmp_path: Path,
+) -> None:
+    """The retained signature is a pure view of the same adjudication product."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    config = _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved))
+
+    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(config)
+
+    assert scheduler_module._scheduler_allowed_roots(config) == roots
+    assert blockers
+
+
+# Site 1 consumers: both runtime-root preflight arms.
+
+
+@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+def test_runtime_root_preflight_arms_drop_unsafe_allowed_root_with_structured_blocker(
+    tmp_path: Path,
+    arm: str,
+) -> None:
+    """Both arms drop the loop root, block, and never show it as an approved base."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop, tmp_path))
+    assert config.require_runtime_roots is True
+    assert config.db_free_required is False
+    assert config.allowed_storage_roots == (loop, tmp_path)
+
+    preflight = _runtime_root_preflight_arm(arm)(config)
+
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"][0] == _scheduler_allowed_roots_unsafe_blocker(str(loop))
+    assert preflight["allowed_roots"] == [str(tmp_path)]
+    assert preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == [str(tmp_path)]
+    assert preflight["checks"]["allowed_roots_policy"]["non_empty"] is True
+
+
+@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+def test_runtime_root_preflight_arms_report_unsafe_before_missing_when_all_roots_drop(
+    tmp_path: Path,
+    arm: str,
+) -> None:
+    """Cause before consequence: "this root was dropped" precedes "no root left"."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop,))
+
+    preflight = _runtime_root_preflight_arm(arm)(config)
+
+    assert preflight["status"] == "blocked"
+    codes = [blocker["code"] for blocker in preflight["blockers"]]
+    assert codes[:2] == [
+        _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE,
+        _SCHEDULER_ALLOWED_ROOTS_MISSING_CODE,
+    ]
+    assert preflight["allowed_roots"] == []
+    assert preflight["checks"]["allowed_roots_policy"]["non_empty"] is False
+
+
+@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+) -> None:
+    """One arm invocation = one adjudication, and the payload reuses that product.
+
+    A second derivation inside the payload reads the filesystem again, so a
+    concurrent change between the two passes can publish a self-contradictory
+    payload: a blocker saying a root was dropped next to a top-level
+    `allowed_roots` that still lists it. Counting the adjudications pins the
+    single-pass property directly instead of trying to race it.
+    """
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop, tmp_path))
+    original_adjudicate = scheduler_module._scheduler_allowed_roots_and_blockers
+    adjudications: list[Any] = []
+
+    def counting_adjudicate(config_argument: Any) -> Any:
+        adjudications.append(config_argument)
+        return original_adjudicate(config_argument)
+
+    monkeypatch.setattr(scheduler_module, "_scheduler_allowed_roots_and_blockers", counting_adjudicate)
+
+    preflight = _runtime_root_preflight_arm(arm)(config)
+
+    assert len(adjudications) == 1
+    assert preflight["allowed_roots"] == preflight["checks"]["allowed_roots_policy"]["allowed_roots"]
+    assert preflight["allowed_roots"] == [str(tmp_path)]
+
+
+def test_storage_and_runtime_root_preflight_planes_agree_on_unsafe_allowed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1348 primary anchor: one run, one root, no contradiction between planes.
+
+    Before this change the same pass could emit
+    `slurm_preflight.checks.allowed_roots == [...]` with an UNSAFE_PATH blocker
+    while `runtime_root_preflight.checks.allowed_roots_policy.allowed_roots`
+    still listed the loop root with no blocker at all. Both planes are exercised
+    here in one process against one config, so the two evidence surfaces have to
+    reach the same verdict.
+    """
+
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop, tmp_path))
+    assert config.require_runtime_roots is True
+
+    slurm_preflight = scheduler_module._slurm_preflight(config)
+    runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    lock_preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert slurm_preflight["status"] == "blocked"
+    assert slurm_preflight["checks"]["allowed_roots"] == [str(tmp_path)]
+    storage_blocker = next(
+        blocker for blocker in slurm_preflight["blockers"] if blocker["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
+    )
+    assert storage_blocker["path"] == str(loop)
+    for preflight in (runtime_preflight, lock_preflight):
+        assert preflight["status"] == "blocked"
+        # Same effective allowed roots on both planes...
+        assert preflight["allowed_roots"] == slurm_preflight["checks"]["allowed_roots"]
+        assert preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == (
+            slurm_preflight["checks"]["allowed_roots"]
+        )
+        # ...and each plane carries its own structured blocker for the same root.
+        runtime_blocker = next(
+            blocker
+            for blocker in preflight["blockers"]
+            if blocker["code"] == _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE
+        )
+        assert runtime_blocker["path"] == storage_blocker["path"]
+
+
+def test_runtime_root_preflight_masks_unsafe_allowed_root_path_on_repair_runs(
+    tmp_path: Path,
+) -> None:
+    """Masking discipline: repair runs report `[local-path]`, never the real path."""
+
+    loop = tmp_path / "allowed-loop-secret-token"
+    loop.symlink_to(loop)
+    config = _runtime_roots_config(
+        tmp_path,
+        allowed_storage_roots=(loop, tmp_path),
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=_dt("2026-05-21T06:00:00Z"),
+        lookback_hours=0,
+        backfill_enabled=False,
+        max_cycles_per_source=1,
+        slurm_array_concurrency_bound=32,
+    )
+    assert config.db_free_required is False
+    assert config.repair_missing_forcing is True
+
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
+    rendered = json.dumps(preflight, sort_keys=True)
+
+    assert preflight["blockers"][0]["code"] == _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE
+    assert preflight["blockers"][0]["path"] == "[local-path]"
+    assert preflight["allowed_roots"] == ["[local-path]"]
+    assert "secret-token" not in rendered
+    assert str(loop) not in rendered
+
+
+@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+def test_runtime_root_preflight_not_required_payload_drops_unsafe_allowed_root(
+    tmp_path: Path,
+    arm: str,
+) -> None:
+    """D6: the not-required payload shares the verdict, emits nothing, never raises.
+
+    The flipped B8 anchor above pins the lock/evidence arm through the exact
+    production ordering; this covers the full runtime arm on the same config.
+    """
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    config = _gateway_config(tmp_path, allowed_storage_roots=(loop, approved))
+    assert config.require_runtime_roots is False
+    assert config.db_free_required is False
+
+    preflight = _runtime_root_preflight_arm(arm)(config)
+
+    assert preflight["status"] == "not_required"
+    assert preflight["blockers"] == []
+    assert preflight["allowed_roots"] == [str(approved)]
+    assert str(loop) not in preflight["allowed_roots"]
+
+
+# Site 2 (`_db_free_allowed_roots_and_blockers`): the db-free-lane containment bases.
+
+
+def test_db_free_allowed_roots_lexical_arm_is_distinguishable_from_resolution(
+    tmp_path: Path,
+) -> None:
+    """db-free x ENOTDIR: the PR #831 lexical arm, provably still the one running."""
+
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    (realdir / "file.txt").write_text("not a directory", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(realdir)
+    lexical_root = link / "file.txt" / "sub"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    assert canonical_root != lexical_root
+    assert _allowed_root_errno(lexical_root) == errno.ENOTDIR
+
+    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,), scheduler_db_free_required=True)
+    )
+
+    assert roots == (lexical_root,)
+    assert roots != (canonical_root,)
+    assert blockers == []
+
+
+def test_db_free_allowed_roots_keeps_lexical_tolerance_for_loop_root(
+    tmp_path: Path,
+) -> None:
+    """db-free x ELOOP: admitted lexically, no blocker (AC 4, kept verbatim)."""
+
+    loop = tmp_path / "allowed-loop"
+    loop.symlink_to(loop)
+    assert _allowed_root_errno(loop) == errno.ELOOP
+
+    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop,), scheduler_db_free_required=True)
+    )
+
+    assert roots == (loop,)
+    assert blockers == []
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+def test_db_free_allowed_roots_admits_missing_root_in_canonical_form(
+    tmp_path: Path,
+    db_free_required: bool,
+) -> None:
+    """ENOENT x both modes: canonical non-strict form, admitted, no blocker.
+
+    `<missing>/../<realdir>` is the discriminating shape: a bare missing leaf is
+    already its own canonical form, so it cannot tell "canonicalised" apart from
+    "passed through lexically". Here strict realpath still raises ENOENT while
+    the non-strict product folds the `..` back onto the real directory.
+    """
+
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    lexical_root = tmp_path / "gone" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+    assert canonical_root == Path(os.path.realpath(realdir))
+    assert _allowed_root_errno(lexical_root) == errno.ENOENT
+
+    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
+        _AllowedRootsConfigStub(
+            allowed_storage_roots=(lexical_root,),
+            scheduler_db_free_required=db_free_required,
+        )
+    )
+
+    assert roots == (canonical_root,)
+    assert roots != (lexical_root,)
+    assert blockers == []
+
+
+def _repair_authority_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allowed_storage_roots: tuple[Path, ...],
+) -> ProductionSchedulerConfig:
+    """A database-backed repair-authority run, adapted from `_missing_forcing_repair_config`.
+
+    `db_free_runtime_preflight` runs here even though `scheduler_db_free_required`
+    is False, because `repair_missing_forcing` skips its not-required early exit
+    — and it adjudicates real containment for the copyback and raw-manifest
+    roots on that pass.
+    """
+
+    authority_root = tmp_path / "repair-raw-authority"
+    authority_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        authority_root,
+        raising=False,
+    )
+    return _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=True,
+        lookback_hours=0,
+        cycle_lag_hours=6,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=_dt("2026-05-21T06:00:00Z"),
+        slurm_array_concurrency_bound=32,
+        object_store_copyback_root=authority_root,
+        nfs_raw_manifest_root=authority_root,
+        nfs_raw_manifest_prefix="s3://nhms",
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        allowed_storage_roots=allowed_storage_roots,
+    )
+
+
+def test_db_free_runtime_preflight_blocks_unsafe_allowed_root_on_repair_authority_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Database-backed repair lane: the phantom containment base is eliminated.
+
+    The lexical tolerance is a property of the db-free lane, not of a
+    database-backed run passing through it, so here the unresolvable root is
+    dropped and this lane's own blocker family records why. The copyback and
+    raw-manifest containment verdicts on the same pass are then decided against
+    the surviving approved root only.
+    """
+
+    loop = tmp_path / "authority-loop"
+    loop.symlink_to(loop)
+    config = _repair_authority_config(tmp_path, monkeypatch, allowed_storage_roots=(loop, tmp_path))
+    assert config.scheduler_db_free_required is False
+    assert config.repair_missing_forcing is True
+
+    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(config)
+    preflight = config.db_free_runtime_preflight()
+
+    assert roots == (tmp_path,)
+    assert loop not in roots
+    assert blockers == [
+        {
+            "code": "db_free_allowed_root_unsafe",
+            "field": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+            "reason": "unsafe_path",
+            "message": (
+                "DB-free scheduler runtime field NHMS_SCHEDULER_ALLOWED_ROOTS "
+                "is not a safe all-file configuration."
+            ),
+            "path": "[local-path]",
+        }
+    ]
+    assert preflight["status"] == "blocked"
+    assert blockers[0] in preflight["blockers"]
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["contained"] is True
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["contained"] is True
+    assert str(loop) not in json.dumps(preflight, sort_keys=True)
+
+
+def test_db_free_runtime_preflight_drops_every_containment_base_when_only_root_is_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the loop as the only configured root the lane keeps no base at all.
+
+    Fail-closed: the copyback/raw-manifest roots are then reported outside the
+    boundary instead of being vouched for by a root the kernel cannot walk.
+    """
+
+    loop = tmp_path / "authority-loop"
+    loop.symlink_to(loop)
+    config = _repair_authority_config(tmp_path, monkeypatch, allowed_storage_roots=(loop,))
+
+    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(config)
+    preflight = config.db_free_runtime_preflight()
+
+    assert roots == ()
+    assert [blocker["code"] for blocker in blockers] == ["db_free_allowed_root_unsafe"]
+    assert preflight["status"] == "blocked"
+    codes = [blocker["code"] for blocker in preflight["blockers"]]
+    assert codes[0] == "db_free_allowed_root_unsafe"
+    assert "db_free_required_path_outside_boundary" in codes
+    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["contained"] is False
+
+
+# Site 3 (retry.py db-free selector lane): the dead rejection becomes reachable.
+
+
+@pytest.mark.parametrize("shape", ["loop", "not_a_directory"])
+def test_db_free_selector_allowed_roots_rejects_unresolvable_root(
+    tmp_path: Path,
+    shape: str,
+) -> None:
+    """`db_free_allowed_root_unresolvable` really fires now.
+
+    It was dead on both interpreter arms: `except OSError` could not catch the
+    errno-less RuntimeError that strict-ish `Path.resolve()` raised on <=3.12,
+    and on 3.13+ non-strict resolution stopped raising at all, so an
+    unresolvable root was silently admitted as a containment base.
+    """
+
+    if shape == "loop":
+        root = tmp_path / "selector-loop"
+        root.symlink_to(root)
+        expected_errno = errno.ELOOP
+    else:
+        regular_file = tmp_path / "plain.txt"
+        regular_file.write_text("not a directory", encoding="utf-8")
+        root = regular_file / "root"
+        expected_errno = errno.ENOTDIR
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    assert _allowed_root_errno(root) == expected_errno
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots(
+        "runtime_manifest",
+        os.pathsep.join((str(root), str(approved))),
+    )
+
+    assert roots == (approved,)
+    assert rejected == [
+        {
+            "field": "scheduler_allowed_roots",
+            "source": "runtime_manifest",
+            "reason": "db_free_allowed_root_unresolvable",
+            "value": str(root),
+        }
+    ]
+
+
+def test_db_free_selector_allowed_roots_admits_missing_root(tmp_path: Path) -> None:
+    """ENOENT is not "unresolvable": a merely missing root stays admitted.
+
+    `<missing>/../<realdir>` discriminates canonicalisation from lexical
+    pass-through, which a bare missing leaf cannot: it is already canonical, so
+    both candidate products coincide and the assertion goes blind.
+    """
+
+    realdir = tmp_path / "realdir"
+    realdir.mkdir()
+    lexical_root = tmp_path / "gone" / ".." / "realdir"
+    canonical_root = Path(os.path.realpath(lexical_root))
+    # Guard the discriminator itself: if these ever coincide the anchor is blind.
+    assert canonical_root != lexical_root
+    assert canonical_root == Path(os.path.realpath(realdir))
+    assert _allowed_root_errno(lexical_root) == errno.ENOENT
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(lexical_root))
+
+    assert roots == (canonical_root,)
+    assert roots != (lexical_root,)
+    assert rejected == []
+
+
+def test_db_free_selector_path_rejection_when_every_allowed_root_is_unresolvable(
+    tmp_path: Path,
+) -> None:
+    """Cascade: with no surviving root the selector path lane fails closed."""
+
+    loop = tmp_path / "selector-loop"
+    loop.symlink_to(loop)
+    inside = tmp_path / "inside"
+    inside.mkdir()
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(loop))
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_registry_manifest",
+        "runtime_manifest",
+        str(inside / "registry.json"),
+        allowed_roots=roots,
+    )
+
+    assert roots == ()
+    assert [item["reason"] for item in rejected] == ["db_free_allowed_root_unresolvable"]
+    assert rejection is not None
+    assert rejection["reason"] == "db_free_allowed_roots_missing"
 
 
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
