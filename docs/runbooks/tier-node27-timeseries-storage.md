@@ -1844,6 +1844,200 @@ in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
 forensic evidence run. This section governs incident catch-up on a lane that is
 already live. The two do not overlap and neither relaxes the other.
 
+### 4.6 River identity normalization: backfill + cutover (`#1339`)
+
+Migration `000050_river_identity_normalization.sql` adds integer surrogate keys
+to the four authority tables, three native enums, and seven **nullable** columns
+on `hydro.river_timeseries`. It backfills nothing and switches nothing. This
+section is the operating procedure for the two things that follow: filling
+those columns (routine, repeatable, online) and switching the primary key +
+compression settings onto them (a one-shot maintenance window).
+
+All timings below are measured, not estimated — node-27 throwaway database
+`nhms_1339_probe`, 2026-08-15, PG 15.2 / TimescaleDB 2.10.2. Full log:
+`openspec/changes/river-identity-normalization-backfill/probe-1339-throwaway.md`.
+
+#### 4.6.1 Applying migration 000050 (low peak)
+
+Adding `INTEGER GENERATED ALWAYS AS IDENTITY` cannot use the fast-default path,
+so each authority table is fully rewritten under `ACCESS EXCLUSIVE`:
+
+| Table | Rows | Measured | Notes |
+|---|---|---|---|
+| `core.river_segment` | 209,126 | **~10 s** (extrapolated from 6.6 s at 228 MB) | 355 MB, 7 indexes; on the MVT read path |
+| `hydro.hydro_run` | 3,609 | 61 ms | |
+| `core.basin_version` | 20 | 46 ms | |
+| `core.river_network_version` | 20 | 47 ms | |
+
+The migration sets `lock_timeout = '2s'` before each `ALTER`. That bounds the
+**wait** for the lock, not the rewrite: if a long-running reader holds the
+table, the statement fails with `canceling statement due to lock timeout`
+instead of queueing in front of every subsequent reader. On that failure,
+re-run — every block is idempotent (a re-applied `ADD COLUMN IF NOT EXISTS
+... IDENTITY` is a 0.563 ms no-op, measured). Apply at low peak.
+
+#### 4.6.2 Backfill (routine, online)
+
+```bash
+# Dry-run FIRST, always. Reports per-chunk rows/bytes/pending counts, the batch
+# plan, estimated bloat against /home headroom, and the compressed/active skip
+# lists. Mutates nothing.
+NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH=/home/nwm/receipts/river-identity-$(date -u +%Y%m%dT%H%M%SZ).json \
+NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH=/home/nwm/locks/river-identity-backfill.lock \
+  uv run python scripts/node27_river_identity_backfill.py
+
+# Optional: one REAL batch, timed, with pg_locks observation, then rolled back.
+  uv run python scripts/node27_river_identity_backfill.py --probe
+
+# Enforce. See the mandatory preconditions below.
+  uv run python scripts/node27_river_identity_backfill.py --enforce
+```
+
+**Mask the compression timer for the whole enforce window.** This is not
+advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=4`; a tick
+landing mid-backfill compresses a chunk that still holds NULL rows, and the
+only way to reach those rows again is decompressing 200+ GB.
+
+```bash
+systemctl --user mask --now nhms-node27-timeseries-compression.timer
+# ... backfill ...
+systemctl --user unmask nhms-node27-timeseries-compression.timer
+systemctl --user start nhms-node27-timeseries-compression.timer
+```
+
+The runner records the timer's `is-active` / `is-enabled` in every receipt, so
+"was the timer masked?" is answerable after the fact rather than from memory.
+
+**Disk headroom precheck.** A full-row `UPDATE` writes a new tuple version for
+every row: the heap roughly doubles, and the indexes churn with it, until
+`VACUUM` reclaims the dead versions. The runner reports
+`disk.estimated_bloat_bytes` against `disk.avail_bytes` on `/home`. Recompute
+at execution time — `/home` was 576 G free on 2026-08-15 and that number moves.
+
+**`VACUUM` each chunk as it completes.** Not optional either. Post-#1338 the
+display read shape depends on a `river_timeseries_pkey` Index Only Scan
+(000049:20); a full-row rewrite clears the visibility map's all-visible bits and
+those scans fall back to heap fetches until the map is rebuilt.
+
+```bash
+docker exec nhms-db psql -U nhms -d nhms -c 'VACUUM (ANALYZE) _timescaledb_internal._hyper_3_NN_chunk;'
+```
+
+Watch display read latency across the backfill as a regression observation
+point.
+
+**Chunks the runner will not touch, and what to do about them.**
+
+- *Compressed* — TimescaleDB 2.10 permits no DML against compressed storage.
+  Orchestration is decompress → backfill → recompress, reusing the existing
+  runners; this runner deliberately embeds no decompression (single
+  responsibility, and decompression is already receipted elsewhere):
+  1. decompress the chunk via the decompression-replay procedure (§4.3),
+  2. re-run the backfill (the chunk is now eligible),
+  3. `VACUUM` it,
+  4. recompress via `scripts/node27_timeseries_compression.py --enforce`.
+- *Active* — the chunk ingest is currently writing. Backfilling it would
+  contend for row locks and never converge, because ingest keeps producing new
+  NULL rows. It is picked up automatically on a later round once it becomes
+  terminal. The only override is `--final-sweep`, which is a cutover
+  precondition, not routine operation — and it refuses unless it first observes
+  the chunk's write counters frozen across an observation window.
+
+**Fail-closed stops.** A `stopped` receipt is not a completed run. Two causes,
+distinguished in `stop.stage`:
+
+- `shortfall` — the batch found more sentinel candidates than it could update.
+  `stop.unmatched_rows` counts rows no authority row resolves (referential rot);
+  `stop.unmappable_rows` counts text values outside the enums. Both are data
+  decisions: escalate, do not widen the enum or invent an authority row to make
+  the runner proceed.
+- `duration_wall` — a batch exceeded the wall even after one halved-range retry.
+  Lower `NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES` or raise
+  `..._DURATION_WALL_MS`; do not loop the runner against a struggling database.
+
+#### 4.6.3 Cutover (one-shot maintenance window)
+
+There is **no work that can be done ahead of the window.** With
+`timescaledb.compress = true` in force, TimescaleDB 2.10.2 rejects
+`ADD CONSTRAINT ... CHECK`, `VALIDATE CONSTRAINT`, `SET NOT NULL`,
+`CREATE UNIQUE INDEX` and `DROP CONSTRAINT` alike — measured with **zero**
+compressed chunks present, so it is the setting and not the data that blocks
+them. Disabling the setting requires the whole hypertable decompressed. The
+usual escape hatches are all closed too: `ADD CONSTRAINT ... PRIMARY KEY USING
+INDEX` is unsupported on hypertables, `CREATE INDEX CONCURRENTLY` is rejected,
+and `WITH (timescaledb.transaction_per_chunk)` is incompatible with `UNIQUE`.
+
+Ordered sequence — do not reorder:
+
+1. **Pause ingest.**
+2. **`--final-sweep`** to fill the last chunk. It asserts write quiescence
+   first and refuses if anything is still writing.
+3. **`verify`** — read-only, no locks, run it before committing to the window:
+   ```sql
+   SELECT * FROM hydro.verify_river_identity_normalization();
+   ```
+   All ten counts must be zero except `rows_total`. A non-zero
+   `equality_audit_divergent` means the ingest writer's `ON CONFLICT DO UPDATE`
+   branch refreshed text columns after the surrogate columns were filled; fix it
+   with a re-sweep, do not proceed. **This is a human gate** — the cutover
+   function does not re-run these counts (that would be a second full scan, and
+   the in-transaction `VALIDATE` already guarantees zero NULLs).
+4. **Decompress every chunk** via the decompression-replay runner. Budget the
+   space: the two compressed chunks alone were 268 GB and 215 GB before
+   compression. **Recompute headroom at execution time**, and add two more
+   consumers on top: the new integer primary-key index, and the sort space its
+   build needs. Compressed chunks accumulate over time, so this requirement
+   only grows — this is an argument for doing it sooner rather than later.
+5. **Cutover**, one transaction:
+   ```sql
+   SELECT hydro.cutover_river_identity_normalization();
+   ```
+   It refuses if any chunk is still compressed. Inside, in order: disable
+   compression → drop the text foreign key → seven `CHECK ... NOT VALID` +
+   `VALIDATE` + `SET NOT NULL` → drop the old primary key → add the integer
+   primary key → re-enable compression with the integer segmentby/orderby.
+   Calling it twice is a no-op, not an error.
+6. **Recompress** via `scripts/node27_timeseries_compression.py --enforce`, then
+   unmask the timer.
+
+**Cost shape inside the window.** `VALIDATE CONSTRAINT` measured ~0.5 s per
+column per 3M rows, so budget on the order of ten minutes for seven columns at
+460M rows. `SET NOT NULL` is then scan-free (0.59–0.79 ms measured, against
+1161 ms without the validated check). The dominant cost is the primary-key index
+build, which happens inside the window and holds `ACCESS EXCLUSIVE` — **display
+reads are blocked for its duration**. The measured base rate is 2.969 s for
+3.024M rows; at 460M this is superlinear (sort and `maintenance_work_mem`
+bound), so **re-measure on a larger toy before scheduling the window** rather
+than extrapolating linearly from that figure.
+
+**Abort / rollback.** If the transaction fails at any point — most likely at
+`VALIDATE` if a NULL slipped through — everything reverts. The table is left
+exactly as it was before the call: `compress = true`, zero compressed chunks,
+old primary key and text foreign key intact, no leftover check constraints
+(measured). Recovery is simply to recompress with the compression runner. There
+is no half-cut-over state and no compensating action to write.
+
+**Precondition checklist before opening the window:**
+
+- [ ] Write-path `ON CONFLICT` target adapted to the new primary key (this is
+      the follow-up issue's work — the cutover changes the conflict target, and
+      `workers/output_parser/parser.py` still names the text columns).
+- [ ] Ingest paused and confirmed quiescent.
+- [ ] `verify` returns zeros.
+- [ ] Disk headroom recomputed for full decompression + index build + sort.
+- [ ] Compression timer masked.
+- [ ] Low-peak window, display-read blocking announced.
+
+**Retiring the text foreign key early is a real, accepted loss.** TimescaleDB
+2.10.2 requires foreign-key columns to be covered by segmentby, and the target
+segmentby is integer-only, so
+`river_timeseries_river_segment_id_river_network_version_id_fkey` cannot
+survive the cutover (measured:
+`ERROR: column "river_segment_id" must be used for segmenting`). Between this
+cutover and the text-column-retirement issue, the fact table has no
+database-enforced referential link to `core.river_segment`. Recorded in the
+ADR 0002 amendment.
+
 ## 8. Gated DB retention (`timeseries-db-retention`)
 
 The retention runner
