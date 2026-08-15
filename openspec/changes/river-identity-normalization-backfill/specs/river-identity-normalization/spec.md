@@ -17,9 +17,8 @@ distinguishable receipt counters) on authority-unmatched or
 enum-unmappable values, and never issues DML against compressed chunks
 or the active (currently ingested) chunk. The production compression
 settings and primary key SHALL remain unchanged by this change;
-switching both is delivered as a verify/prepare/cutover sequence whose
-cutover function is fail-closed, catalog-gated, and never invoked by
-the migration chain.
+switching both is delivered as a read-only verify function plus a
+fail-closed cutover function that the migration chain never invokes.
 
 #### Scenario: Migration replays idempotently without rewriting the fact table
 
@@ -56,22 +55,25 @@ the migration chain.
   final-sweep invocation that first asserts ingest is quiescent
   (active)
 
-#### Scenario: Cutover is catalog-gated, minutes-scale, and never auto-applied
+#### Scenario: Cutover is a fail-closed single-transaction window operation, never auto-applied
 
 - **WHEN** `hydro.cutover_river_identity_normalization()` is invoked
-  without its catalog preconditions — zero compressed chunks, seven
-  validated NOT NULL check constraints, and a valid pre-built unique
-  index in the target key shape (built by plain CREATE UNIQUE INDEX
-  after ingest is paused and a final sweep completes — concurrent
-  index creation is rejected on this hypertable per the recorded
-  TimescaleDB 2.10 measurement — with full-scan verification provided
-  beforehand by the read-only verify function)
-- **THEN** it raises an error and changes nothing; only when all
-  preconditions hold does it atomically set the seven columns NOT NULL
-  (scan-free via the validated checks), replace the primary key using
-  the pre-built index, and set segmentby/orderby to the normalized
+  with any compressed chunk present, or with any NULL remaining in the
+  seven normalized columns
+- **THEN** it raises an error and changes nothing (a compressed chunk
+  fails the explicit precondition; a NULL fails the in-transaction
+  VALIDATE CONSTRAINT step, rolling everything back); only inside a
+  maintenance window — ingest paused, final sweep done, read-only
+  verify counts at zero, all chunks decompressed — does it execute the
+  measured working sequence in one transaction: disable compression,
+  drop the text foreign key (measured TimescaleDB 2.10 rule: foreign
+  key columns must be covered by segmentby∪orderby, so the text FK
+  cannot survive integer segmentby), validate NOT NULL via check
+  constraints then set the seven columns NOT NULL scan-free, replace
+  the primary key with the integer/enum form (in-window index build),
+  and re-enable compression with segmentby/orderby on the normalized
   columns (TimescaleDB 2.10 requires segmentby∪orderby to cover the
   primary-key columns, so the two switches are inseparable), after
   which a compress/decompress round-trip preserves row data; the
-  migration chain itself never calls any of the three stages, keeping
-  CI and production schemas convergent
+  migration chain itself never calls the verify or cutover functions,
+  keeping CI and production schemas convergent

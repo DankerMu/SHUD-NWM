@@ -2,12 +2,12 @@
 
 ## Why
 
-`hydro.river_timeseries`（node-27 生产库，2026-08-15 实测 449M 行 / 264 GB /
-6 个周 chunk，其中 2 个已压缩）每行携带约 163 B 重复文本身份列（run_id 56 B
+`hydro.river_timeseries`（node-27 生产库，2026-08-15 实测 459.9M 行 / 249 GB /
+6 个周 chunk，其中 2 个已压缩，probe 复测口径）每行携带约 163 B 重复文本身份列（run_id 56 B
 × chunk 级 537 distinct、river_segment_id 37 B × 56k 等，chunk 级 pg_stats
 实测与 issue 剖面一致）。规范化为整型代理键后 heap 与含身份列的索引大幅
 收缩。ADR 0002 Decision 6 曾 defer 该 star schema；其字面重评条件（national
-scale ~100 basins）未满足（现 18 流域），本变更以增长曲线（132M→449M 行，
+scale ~100 basins）未满足（现 18 流域），本变更以增长曲线（132M→459.9M 行，
 6 周 3.4×）+ epic #1336 新剖面**提前触发重评**并落 amendment（含被 cutover
 改写的 Decision 4），非绕过 ADR。
 
@@ -32,17 +32,19 @@ scale ~100 basins）未满足（现 18 流域），本变更以增长曲线（13
   pg_locks 观测后回滚，AC-3 证据零持久化）；等值审计计数（识别 writer
   ON CONFLICT DO UPDATE 造成的文本↔代理背离）。压缩判定走共享写守卫的
   加法扩展（timescale_write_guard 增 chunk 级断言，#851 D5 契约）。
-- **verify/prepare/cutover 三段**（AC-4）：TSDB 2.10 要求 segmentby∪
-  orderby 覆盖 PK 列（000047:11-12），压缩设置与 pkey 切换不可分。有序
-  步骤 = ingest 暂停 → runner `--final-sweep` → 只读 `verify_*` 函数
-  （NULL/等值审计计数）→ prepare runbook 步骤（plain CREATE UNIQUE
-  INDEX——CIC 在 hypertable 上被 000049:37-40 实测否定——+ CHECK NOT
-  VALID/VALIDATE）→ `cutover_*` 函数（catalog 前置校验 fail-closed；
-  SET NOT NULL 借 validated CHECK 免扫 + PRIMARY KEY USING INDEX +
-  ALTER segmentby/orderby，AEL 分钟级）。**迁移本体不调用任何一段**（避免 CI/prod
-  schema 分叉）；node-27 throwaway 库 integration 走全三段 + 压缩/解压
-  往返。生产执行随切换 issue 运维窗口（runbook 前置清单；既有文本 FK
-  保留，其与压缩约束校验的关系由实现前 throwaway 实验证伪）。
+- **verify + cutover 两段**（AC-4；D4 第三稿，按 probe-1339 实测重写）：
+  TSDB 2.10 要求 segmentby∪orderby 覆盖 PK 列（000047:11-12）且
+  `compress=true` 状态拒绝一切 unique DDL（probe d-2）——压缩设置与
+  pkey 切换不可分，且不存在窗口外 prepare。有序步骤 = ingest 暂停 →
+  runner `--final-sweep` → 只读 `verify_*`（NULL/等值审计/压缩 chunk
+  三计数，人工闸）→ 全量解压 → `cutover_*` 单事务（compress=false →
+  drop 文本 FK（实测强制：FK 列必须入 segmentby，文本 FK 不可存活）→
+  CHECK NOT VALID/VALIDATE（即零 NULL 闸）/SET NOT NULL 免扫 → 换整型
+  pkey（窗口内建索引为主成本）→ compress=true 新 settings；= probe
+  d-6 实证序列，45x 往返零丢行）。**迁移本体不调用任何一段**（避免
+  CI/prod schema 分叉）；node-27 throwaway 库 integration 自动化全序列
+  + 压缩/解压往返。生产执行随切换 issue 运维窗口（runbook 前置清单 +
+  磁盘余量执行时重算）。
 - **ADR 0002 amendment**（Decision 4 + 6，提前触发重评口径）+ runbook 节
   （回填编排：压缩 timer mask、逐 chunk VACUUM、磁盘余量、压缩 chunk
   解压→回填→再压、cutover 前置清单）。
@@ -59,4 +61,4 @@ scale ~100 basins）未满足（现 18 流域），本变更以增长曲线（13
   旧文本列下线、pkey/segmentby 的**生产**切换执行、000047 文件文本、
   #1069 车道行为、write guard 既有 3 条写路径行为
 - node-27 实机：throwaway 库实验（三项前置证伪）+ 000050 应用 + 回填
-  dry-run/probe receipt；**不做** enforce 全量回填、不跑 prepare/cutover
+  dry-run/probe receipt；**不做** enforce 全量回填、不跑 cutover

@@ -2,18 +2,14 @@
 
 ## 1. 实现
 
-- [ ] 1.0 **写迁移前**：node-27 throwaway 库一次性实验，三项均在非空
-      代表性对象上做（design D2 末段）：（a）toy hypertable 跨 ≥2 chunk
-      灌行 + compress_chunk 一个 → 加 nullable 无默认列计时 +
-      atthasmissing 验证；（b）~9 万行权威表复制品 IDENTITY 加列 →
-      rewrite 耗时 + lock_timeout 取值；（c）复刻文本 FK 后对新
-      settings ALTER → 证伪 FK 列是否须被 segmentby∪orderby 覆盖；
-      （d）toy hypertable 上验证 `ADD CONSTRAINT ... PRIMARY KEY USING
-      INDEX`（约束下推各 chunk）与 `CHECK NOT VALID`+`VALIDATE` 的
-      传播/免扫效果，顺带试 `CREATE INDEX ... WITH
-      (timescaledb.transaction_per_chunk)` 可否作唯一索引较轻变体
-      （CIC 已被 000049:37-40 实测否定，不再试）。结果记录；任一推翻
-      假设 → 回炉 fixture 而非硬写
+- [x] 1.0 **写迁移前**：node-27 throwaway 库一次性实验（记录
+      `probe-1339-throwaway.md`，2026-08-15 完成）。结果：(a) 确认
+      metadata-only（含 a' 理由修正）；(b) 确认（209k 行复制品 ~6.6 s，
+      lock_timeout 2 s 快败可用）；(c) **证伪"FK 可保留"**（FK 列必须
+      入 segmentby）；(d) **证伪 USING INDEX / transaction_per_chunk /
+      窗口外 prepare**（compress=true 拒全部 unique DDL），确认
+      CHECK/VALIDATE/SET NOT NULL 免扫与 d-6 完整可行序列 + 45x 往返
+      零丢行。fixture 已按"推翻即回炉"重写 D4（第三稿）与硬约束 6-8
 - [ ] 1.1 迁移 `db/migrations/000050_river_identity_normalization.sql`：
       四权威表代理键（ALTER 前 SET lock_timeout，头注释记录锁代价与
       1.0(b) 实测耗时）+ 3 ENUM + 事实表 7 nullable 列（design D2；全
@@ -33,14 +29,17 @@
       检测 unmatched/unmappable fail-closed 分流 + 等值审计 + `--probe`
       rollback 采样 + flock（design D3）；receipt schema
       `schemas/river_identity_backfill_receipt.schema.json`
-- [ ] 1.5 `hydro.verify_river_identity_normalization()`（只读）+
-      `hydro.cutover_river_identity_normalization()`（catalog 前置校验
-      + 分钟级 AEL）随 000050 交付，迁移本体不调用；prepare（plain
-      CREATE UNIQUE INDEX——CIC 在 hypertable 上不可用，000049:37-40
-      ——+ CHECK VALIDATE）为 runbook 步骤（design D4 三段有序）
+- [ ] 1.5 `hydro.verify_river_identity_normalization()`（只读三计数）+
+      `hydro.cutover_river_identity_normalization()`（单事务：零压缩
+      chunk 前置 → compress=false → drop 文本 FK → 7× CHECK NOT
+      VALID/VALIDATE（即零 NULL 闸）/SET NOT NULL → 换整型 pkey →
+      compress=true 新 settings；= probe d-6 实证序列）随 000050 交付，
+      迁移本体不调用（design D4 第三稿两段）
 - [ ] 1.6 runbook 节：压缩 timer mask/stop + timer 状态入 receipt、逐
-      chunk VACUUM、磁盘余量前置、压缩 chunk 解压→回填→再压编排、
-      verify→prepare→cutover 顺序与前置清单、权威表加列低峰（design D6）
+      chunk VACUUM、磁盘余量前置（回填膨胀 + cutover 全量解压两口径，
+      执行时重算）、压缩 chunk 解压→回填→再压编排、ingest 暂停→
+      final-sweep→verify→全量解压→cutover 顺序与前置清单、PK 建索引
+      期间读阻塞声明、权威表加列低峰（design D6）
 - [ ] 1.7 ADR 0002 amendment：Decision 4 + 6，提前触发重评口径（design
       D1：18 流域如实、压缩 receipt 压缩比 + #1338 后索引占比数字）
 
@@ -50,9 +49,11 @@
       receipt schema/flock（design D7.1）
 - [ ] 2.2 integration（real-db marker）：000050 双次 replay 幂等 + 7 列
       `pg_attribute.atthasmissing = false` 钉；toy 端到端回填含重入两遍
-      零差异；ENUM 值集 ⊇ 字面量断言。**压缩语义子集（D4 三段
-      verify→prepare→cutover + 往返、压缩 chunk 跳过）以 node-27
-      throwaway 库为 oracle**（CI 是 pg15-latest 非 2.10，不算数）
+      零差异；ENUM 值集 ⊇ 字面量断言。**压缩语义子集（D4 两段
+      verify→cutover 全序列 + 往返、压缩 chunk 跳过、cutover 负路径
+      ——留一行 NULL 调 cutover 断言抛错且 compress=true/文本 FK/旧
+      pkey 三者原状未变）以 node-27 throwaway 库为 oracle**（CI 是
+      pg15-latest 非 2.10，不算数）
 - [ ] 2.3 `uv run pytest -q tests/test_migrations.py` + 定向 runner/write
       guard 测试全绿（含 tests/test_timescale_write_guard_wired.py）
 - [ ] 2.4 `uv run ruff check .` 通过
