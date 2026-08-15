@@ -31,12 +31,22 @@ Semantics:
   ``CompressedChunkGuardError`` before any SQL runs) so a wire-site typo
   cannot silently permit writes.
 
-The guard is a shared helper (design D5); the three production write paths
+The guard is a shared helper (design D5); the four production write paths
 (``workers/output_parser/parser.py::upsert_river_timeseries``,
 ``workers/forcing_producer/store.py::replace_forcing_timeseries``,
 ``packages/common/forcing_domain_handoff_apply.py::
-_replace_forcing_station_timeseries``) all import from this module. Display
-API and frontend code paths never import this module (ADR 0001).
+_replace_forcing_station_timeseries``,
+``scripts/node27_river_identity_backfill.py``) all import from this module.
+Display API and frontend code paths never import this module (ADR 0001).
+
+The first three are batch writers that know a ``valid_time`` window and use
+:func:`check_batch_targets_uncompressed`. The fourth (issue #1339) walks named
+chunks directly rather than time windows, so it uses
+:func:`assert_chunk_uncompressed`, which answers the same question
+("would this write land in compressed storage?") for a chunk identity instead
+of a time range. Both share the registry check, the statement-timeout
+discipline, and the fail-closed catalog-error contract; neither is a
+per-caller reimplementation, which is exactly what design D5 forbids.
 """
 
 from __future__ import annotations
@@ -75,6 +85,11 @@ _COMPRESSED_CHUNK_QUERY = (
     "AND range_start <= %s AND range_end > %s "
     "ORDER BY range_start "
     "LIMIT 1"
+)
+_CHUNK_IDENTITY_QUERY = (
+    "SELECT is_compressed FROM timescaledb_information.chunks "
+    "WHERE hypertable_schema = %s AND hypertable_name = %s "
+    "AND chunk_schema = %s AND chunk_name = %s"
 )
 
 
@@ -210,6 +225,93 @@ def check_batch_targets_uncompressed(
         hypertable_schema=hypertable_schema,
         hypertable_name=hypertable_name,
     )
+
+
+def assert_chunk_uncompressed(
+    cursor: Any,
+    *,
+    hypertable_schema: str,
+    hypertable_name: str,
+    chunk_schema: str,
+    chunk_name: str,
+) -> None:
+    """Fail-closed check that one NAMED chunk is not compressed.
+
+    The chunk-identity counterpart of
+    :func:`check_batch_targets_uncompressed`, added for the identity-backfill
+    runner (issue #1339), which iterates chunks by name rather than by
+    ``valid_time`` window and therefore cannot express its target as a batch
+    range. Same contract, same failure modes:
+
+    * Raises ``CompressedChunkWriteError`` when the chunk is compressed.
+      TimescaleDB 2.10 supports no DML at all against compressed chunks, so
+      the caller must route through the runbook decompress procedure.
+    * Raises ``CompressedChunkGuardError`` when the catalog lookup fails, when
+      the ``(schema, table)`` pair is outside :data:`HYPERTABLES_GUARDED`, or
+      when the chunk is **absent from the catalog**. An unknown chunk is not
+      treated as "probably fine": it usually means the chunk was dropped or
+      renamed between discovery and write, and certifying it would be a
+      guess.
+    * Returns ``None`` on pass.
+
+    The cursor MUST share the connection/transaction of the UPDATE that
+    follows, so ``SET LOCAL statement_timeout`` scopes correctly and the
+    catalog read and the write see the same snapshot.
+    """
+    if (hypertable_schema, hypertable_name) not in HYPERTABLES_GUARDED:
+        raise CompressedChunkGuardError(
+            f"guard called with unregistered hypertable "
+            f"{hypertable_schema}.{hypertable_name}; expected one of "
+            f"{sorted(HYPERTABLES_GUARDED)}"
+        )
+
+    row: Any = None
+    try:
+        try:
+            cursor.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT_LITERAL}'")
+            cursor.execute(
+                _CHUNK_IDENTITY_QUERY,
+                (hypertable_schema, hypertable_name, chunk_schema, chunk_name),
+            )
+            row = cursor.fetchone()
+        except Exception as error:
+            reason = (
+                "compressed-chunk guard chunk lookup failed on "
+                f"{chunk_schema}.{chunk_name}: {type(error).__name__}: "
+                f"{redact_text(str(error))}"
+            )
+            raise CompressedChunkGuardError(_mask_dsn(reason)) from error
+    finally:
+        # Same rationale as the batch guard: the guard's short timeout must not
+        # leak onto the caller's own write, and the reset must fire even when
+        # the lookup raised.
+        try:
+            cursor.execute("SET LOCAL statement_timeout = DEFAULT")
+        except Exception:
+            pass
+
+    if row is None:
+        raise CompressedChunkGuardError(
+            f"chunk {chunk_schema}.{chunk_name} is not present in "
+            f"timescaledb_information.chunks for "
+            f"{hypertable_schema}.{hypertable_name}; refusing to certify an "
+            "unknown chunk as uncompressed"
+        )
+
+    if _extract_is_compressed(row):
+        raise CompressedChunkWriteError(
+            chunk_schema=chunk_schema,
+            chunk_name=chunk_name,
+            hypertable_schema=hypertable_schema,
+            hypertable_name=hypertable_name,
+        )
+
+
+def _extract_is_compressed(row: Any) -> bool:
+    """Extract ``is_compressed`` from a psycopg2 row (tuple or dict cursor)."""
+    if isinstance(row, dict):
+        return bool(row["is_compressed"])
+    return bool(row[0])
 
 
 def _extract_chunk_identity(row: Any) -> tuple[str, str]:

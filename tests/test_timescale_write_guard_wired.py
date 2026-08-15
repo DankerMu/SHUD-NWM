@@ -1,6 +1,7 @@
 """Wired-path tests for the compressed-chunk write guard.
 
-Covers the three production write paths — asserting for each that:
+Covers the three BATCH-WINDOW production write paths — asserting for each
+that:
 
 1. The guard's SELECT against ``timescaledb_information.chunks`` runs BEFORE
    the DELETE. (Ordering: guard must not lose to TimescaleDB's raw error.)
@@ -11,6 +12,15 @@ Covers the three production write paths — asserting for each that:
 
 Every fake connection here records execute-call ordering so ``BEFORE`` claims
 can be asserted, not just claimed.
+
+There is a fourth production write path as of issue #1339 — the identity
+backfill runner ``scripts/node27_river_identity_backfill.py``. It is under the
+same design-D5 shared-helper obligation but reaches it through
+``assert_chunk_uncompressed`` (chunk identity) rather than
+``check_batch_targets_uncompressed`` (time window), because it walks named
+chunks and has no batch window to pass. Its wiring is asserted in
+``tests/test_node27_river_identity_backfill.py``; nothing in this module's
+three-path coverage changes because of it.
 """
 
 from __future__ import annotations
@@ -513,9 +523,12 @@ def test_output_parser_empty_batch_shortcircuits_guard() -> None:
 def test_all_three_paths_import_from_shared_helper_module() -> None:
     """Design D5: divergent per-path guard implementations are forbidden.
 
-    All three write paths import the guard from
+    All three batch-window write paths import the guard from
     ``packages.common.timescale_write_guard``. This test would catch a
-    future copy-paste guard implementation.
+    future copy-paste guard implementation. The fourth production writer
+    (#1339's identity backfill runner) is held to the same rule against
+    ``assert_chunk_uncompressed`` in
+    ``tests/test_node27_river_identity_backfill.py``.
     """
     import packages.common.forcing_domain_handoff_apply as apply_module_ref
     import workers.forcing_producer.store as store_module_ref

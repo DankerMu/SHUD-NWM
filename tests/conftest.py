@@ -64,6 +64,11 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "e2e: end-to-end pipeline tests; opt-in via NHMS_RUN_E2E=1 (node-22)")
     config.addinivalue_line("markers", "real_disk: tests that require node-27 DATABASE_URL and OBJECT_STORE_ROOT")
     config.addinivalue_line("markers", "grib: real GRIB2 decode tests; opt-in via NHMS_RUN_GRIB=1 (node-22)")
+    config.addinivalue_line(
+        "markers",
+        "timescaledb_210: compression-semantics tests whose only valid oracle is a node-27 "
+        "throwaway DB (TimescaleDB 2.10.2); CI's pg15-latest does not prove them",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -120,6 +125,33 @@ def integration_database_url() -> Iterator[str]:
     _create_database(admin_url, db_name)
     try:
         yield target_url
+    finally:
+        _drop_database(admin_url, db_name)
+
+
+@pytest.fixture()
+def throwaway_database_url() -> Iterator[str]:
+    """Per-TEST throwaway database, created and dropped around each test.
+
+    ``integration_database_url`` is session-scoped, which is right for tests
+    that only read or that seed disjoint rows. It is wrong for tests that
+    mutate SCHEMA (issue #1339's cutover swaps the primary key, drops a foreign
+    key and rewrites the compression settings) or that re-seed the same
+    identities: those leak into every later test in the session and produce
+    failures that look like product bugs.
+
+    Same credentials, same server, same never-touch-a-live-database guarantee
+    as the session fixture — only the lifetime differs.
+    """
+    skip_reason = _integration_skip_reason()
+    if skip_reason:
+        pytest.skip(skip_reason)
+    base_url = _integration_database_url()
+    db_name = _integration_database_name()
+    admin_url = _database_url_with_name(base_url, "postgres")
+    _create_database(admin_url, db_name)
+    try:
+        yield _database_url_with_name(base_url, db_name)
     finally:
         _drop_database(admin_url, db_name)
 
