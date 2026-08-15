@@ -842,6 +842,7 @@ def _build_river_timeseries_rows(
             )
         for variable in RIVER_VARIABLES:
             unit = "m3/s" if variable == "q_down" else "m"
+            quality_flag = "ok"
             for lead_time_hours, valid_time in enumerate(hourly_times(start_time, forecast_hours)):
                 rows.append(
                     (
@@ -861,7 +862,7 @@ def _build_river_timeseries_rows(
                             flow_offset=flow_offset,
                         ),
                         unit,
-                        "ok",
+                        quality_flag,
                         run_key,
                         river_network_version_key,
                         basin_version_key,
@@ -870,7 +871,7 @@ def _build_river_timeseries_rows(
                         # enum column types coerce them server-side.
                         variable,
                         unit,
-                        "ok",
+                        quality_flag,
                     )
                 )
     return rows

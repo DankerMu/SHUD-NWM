@@ -83,9 +83,23 @@ def _segment_id(index: int) -> str:
     return f"seg-{index}"
 
 
+# Every authority table's IDENTITY starts at 1, so a one-row-per-table fixture
+# would give run_key = basin_version_key = river_network_version_key = 1 and a
+# permutation of the four keys would be unobservable. Restarting each identity
+# in its own decade forces pairwise-distinct keys for this fixture's rows.
+_IDENTITY_RESTARTS = (
+    ("hydro.hydro_run", "run_key", 4001),
+    ("core.basin_version", "basin_version_key", 5001),
+    ("core.river_network_version", "river_network_version_key", 6001),
+    ("core.river_segment", "river_segment_key", 7001),
+)
+
+
 def _seed_authority(connection: Any, *, output_uri: str) -> None:
     """Authority rows the writer resolves keys from. It never creates them."""
     with connection.cursor() as cursor:
+        for table, column, start in _IDENTITY_RESTARTS:
+            cursor.execute(f"ALTER TABLE {table} ALTER COLUMN {column} RESTART WITH {start}")
         cursor.execute("INSERT INTO core.basin VALUES ('b1', 'B1', NULL, NULL, now()) ON CONFLICT DO NOTHING")
         cursor.execute(
             """
@@ -203,6 +217,19 @@ def test_parsed_rows_have_all_seven_surrogate_columns_populated(parsed_run: Any)
 
 def test_surrogate_keys_match_the_authority_rows_and_enums_match_the_text(parsed_run: Any) -> None:
     connection, _before, _result = parsed_run
+
+    # Premise of the comparison below: the four keys differ from each other on
+    # every written row, so swapping any two of them would be caught.
+    for row in _rows(
+        connection,
+        """
+        SELECT DISTINCT run_key, basin_version_key, river_network_version_key, river_segment_key
+        FROM hydro.river_timeseries WHERE run_id = %s
+        """,
+        (_RUN_ID,),
+    ):
+        assert len(set(row.values())) == 4, f"fixture keys must be pairwise distinct, got {row}"
+
     mismatched = _scalar(
         connection,
         """

@@ -164,15 +164,20 @@ def test_seed_river_timeseries_insert_dual_writes_all_seven_normalized_columns()
         assert field["basin_version_key"] == 21
         assert field["river_network_version_key"] == 31
         assert field["river_segment_key"] == cursor.segment_keys[field["river_segment_id"]]
-        # Enum columns carry the very same in-process value as the text column.
-        assert field["variable_e"] is field["variable"]
-        assert field["unit_e"] is field["unit"]
-        assert field["quality_flag_e"] is field["quality_flag"]
+        # Enum columns carry the row's own text value (not a parallel literal).
+        assert field["variable_e"] == field["variable"]
+        assert field["unit_e"] == field["unit"]
+        assert field["quality_flag_e"] == field["quality_flag"]
 
     # Seed is the only writer producing the y_stage / 'm' branch: it must be
     # dual-written too.
-    variants = {(row[6], row[8]) for row in rows}
-    assert variants == {("q_down", "m3/s"), ("y_stage", "m")}
+    variants = {(row[6], row[8], row[9]) for row in rows}
+    assert variants == {("q_down", "m3/s", "ok"), ("y_stage", "m", "ok")}
+    # Same triples read off the enum positions, by value: a swapped or stale
+    # literal in the enum tail shows up here even when it equals some other
+    # row's text value.
+    enum_variants = {(row[14], row[15], row[16]) for row in rows}
+    assert enum_variants == variants
 
 
 def test_seed_reads_authority_keys_with_select_not_returning() -> None:

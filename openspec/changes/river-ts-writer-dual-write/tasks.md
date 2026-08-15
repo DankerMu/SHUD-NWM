@@ -40,9 +40,12 @@
       回填 runner 共存（旧形态行才是哨兵候选）；seed y_stage/m 分支
       （design D7.2）
 - [x] 2.3 `uv run pytest -q` 定向（output_parser + write_guard_wired +
-      seed 相关 + `tests/test_e2e.py`（`-m e2e`，CI 排除故必须本地跑，
-      E2ERepository 经 parse_run 驱动会暴露签名不匹配））全绿；
-      `uv run ruff check .` 通过
+      seed 相关，`-m "not integration"` 55 passed）全绿；`uv run ruff
+      check .` 通过。e2e 腿如实改述（round-1 裁决）：`-m e2e` 两例
+      pre-existing 红（GFS `.idx` fixture 漂移，净 master 同红，另行
+      立单），但 m2 的 ERA5 腿在 fail 前已真实驱动 `parse_run` 走新
+      签名（parser.py:236/245 是唯一 parsed 路径）——签名兼容已被执行
+      验证，e2e "全绿"声明撤回
 - [x] 2.4 `openspec validate river-ts-writer-dual-write --strict
       --no-interactive` 通过
 - [x] 2.5 diff 自证：`forecast_store.py`/`publisher.py`/
