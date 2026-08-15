@@ -7748,19 +7748,24 @@ def _cohort_task_projections(
     *,
     outcome: str = "failed",
     error_code: str | None = None,
+    outcomes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    """Task projections for one cohort; ``outcomes`` drives a mixed cohort."""
+
+    resolved = list(outcomes) if outcomes is not None else [outcome] * len(record["cohort_members"])
+    assert len(resolved) == len(record["cohort_members"])
     return [
         {
             **{key: member[key] for key in ("candidate_id", "run_id", "model_id", "array_task_id")},
-            "array_task_outcome": outcome,
+            "array_task_outcome": resolved[index],
             "task_slurm_job_id": (
                 f"{_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID}_{member['array_task_id']}"
             ),
             "restart_stage": "forecast",
             "native_shud_resubmitted": False,
-            "error_code": error_code,
+            "error_code": None if resolved[index] == "succeeded" else error_code,
         }
-        for member in record["cohort_members"]
+        for index, member in enumerate(record["cohort_members"])
     ]
 
 
@@ -7809,6 +7814,129 @@ def _terminally_failed_cohort_master(
     persisted = repository.get_pipeline_job(str(record["job_id"]))
     assert persisted is not None
     assert persisted["status"] == "failed"
+    return repository, record
+
+
+def _submission_failed_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One master rejected at submit time, i.e. persisted ``submission_failed``."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    rejected = repository.reject_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        finished_at=_dt("2026-07-20T00:30:00Z"),
+        error_code="SBATCH_REJECTED",
+        error_message="scheduler rejected the forecast array",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+    )
+    assert rejected.outcome == "applied"
+    return repository, record
+
+
+def _partially_failed_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One master whose cohort projected a mixed succeeded/failed outcome."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(
+            record,
+            outcomes=["succeeded", "failed"],
+            error_code="OUT_OF_MEMORY",
+        ),
+        complete=True,
+        master_status="partially_failed",
+        master_error_code="OUT_OF_MEMORY",
+        reconciliation_decision="matched_bound",
+    )
+    return repository, record
+
+
+def _succeeded_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One master whose cohort projected every task as succeeded."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, outcome="succeeded"),
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+    return repository, record
+
+
+def _cancelled_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One master persisted as ``cancelled``.
+
+    ``cancelled`` is a legal persisted master status
+    (``ACCEPTED_SUBMIT_MASTER_STATUSES``) that no current typed API produces —
+    the cancellation flow parks masters on ``reconcile_unverified`` and lets
+    task accounting decide.  The row is therefore written through the journal's
+    own write sequence (same outgoing validator as production writes), so an
+    impossible shape would fail here rather than fake a passing test.
+    """
+
+    repository, record = _terminally_failed_cohort_master(
+        tmp_path,
+        error_code="SLURM_JOB_CANCELLED",
+    )
+    job_id = str(record["job_id"])
+    source_id = journal_module._source_id_from_job(record)
+    cycle_time = journal_module._cycle_time_from_job(record)
+    with repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+        existing = repository._accepted_submit_job_for_id_unlocked(
+            job_id,
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
+        row = {**existing, "status": "cancelled"}
+        journal_record = journal_module._journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=repository._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time),
+        )
+        repository._validate_outgoing_record(
+            journal_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=None,
+        )
+        repository._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=[journal_record],
+        )
+        repository._write_pipeline_job_direct_unlocked(row, journal_record)
+    return repository, record
+
+
+_PERMANENT_FAILURE_SOURCE_BUILDERS = {
+    "failed": _terminally_failed_cohort_master,
+    "submission_failed": _submission_failed_cohort_master,
+    "partially_failed": _partially_failed_cohort_master,
+    "succeeded": _succeeded_cohort_master,
+    "cancelled": _cancelled_cohort_master,
+}
+
+
+def _cohort_master_in_status(tmp_path: Path, status: str) -> tuple[Any, dict[str, Any]]:
+    repository, record = _PERMANENT_FAILURE_SOURCE_BUILDERS[status](tmp_path)
+    persisted = repository.get_pipeline_job(str(record["job_id"]))
+    assert persisted is not None and persisted["status"] == status
     return repository, record
 
 
@@ -7862,6 +7990,33 @@ def test_master_row_declined_for_auto_retry_is_marked_permanently_failed(
     assert events[0]["status_to"] == "permanently_failed"
     assert events[0]["details"]["automatic_retry_stopped"] is True
     assert events[0]["details"]["last_error"] == error_code
+
+
+def test_master_row_decline_survives_a_failed_permanent_failure_mark(tmp_path: Path) -> None:
+    """#1312 C-1, dormant arm: a journal failure falls back, it does not raise.
+
+    ``handle_failed_job`` used to return the row untouched on a decline; the
+    mark is new journal I/O on that path, so a journal write failure must
+    degrade to exactly that pre-#1312 return value (the mark is idempotent and
+    the next pass re-lands it) instead of escaping into the caller.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code="OUT_OF_MEMORY")
+
+    def _refuse(job_id: str, **_kwargs: Any) -> Any:
+        raise FileOrchestrationJournalError("file_journal_write_failed", field=job_id)
+
+    repository.mark_pipeline_job_permanently_failed = _refuse  # type: ignore[method-assign]
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    handled = service.handle_failed_job(job)
+
+    assert handled.job_id == str(record["job_id"])
+    assert handled.status == "failed"
+    del repository.mark_pipeline_job_permanently_failed
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+    assert _permanently_failed_events(repository, record) == []
 
 
 def test_master_row_with_transient_code_and_budget_keeps_retry_identity(tmp_path: Path) -> None:
@@ -7971,13 +8126,74 @@ def test_permanent_failure_transition_reports_stale_for_live_master_rows(
     assert _master_events(repository, record) == events_before
 
 
-def test_permanent_failure_transition_declines_released_reservations(tmp_path: Path) -> None:
-    """#1312: a released reservation's evidence pins ``reservation_lost``.
+@pytest.mark.parametrize("source_status", ["failed", "submission_failed", "partially_failed"])
+def test_permanent_failure_transition_marks_every_markable_failure_source(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    """#1312 seam 4: the whole legal source domain, one real builder each.
 
-    ``identity_mismatch_released`` may only coexist with
-    ``status="reservation_lost"`` (``accepted_submit_identity`` invariant), so
-    the mark is declined as stale instead of corrupting the accounting tuple or
-    raising into the decline path.
+    ``failed`` alone would leave ``submission_failed``/``partially_failed``
+    unproven, so a narrowed source set would still pass the suite while
+    silently dropping two thirds of the terminal-failure domain.
+    """
+
+    repository, record = _cohort_master_in_status(tmp_path, source_status)
+
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="INVALID_MANIFEST",
+        error_message="permanent failure recorded by the retry decline",
+        finished_at=_dt("2026-07-20T02:00:00Z"),
+        event_details={"automatic_retry_stopped": True},
+    )
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    assert result.outcome == "applied"
+    assert after["status"] == "permanently_failed"
+    assert after["error_code"] == "INVALID_MANIFEST"
+    events = _permanently_failed_events(repository, record)
+    assert len(events) == 1
+    assert events[0]["status_from"] == source_status
+    assert events[0]["status_to"] == "permanently_failed"
+
+
+@pytest.mark.parametrize("source_status", ["succeeded", "cancelled"])
+def test_permanent_failure_transition_declines_non_failure_terminal_sources(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    """#1312 seam 4: terminal but not failed is still outside the source set.
+
+    A widened source set would relabel a succeeded or cancelled master as
+    permanently failed — a fabricated failure, not a recorded one.
+    """
+
+    repository, record = _cohort_master_in_status(tmp_path, source_status)
+    before = repository.get_pipeline_job(str(record["job_id"]))
+    events_before = _master_events(repository, record)
+
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code="INVALID_MANIFEST",
+        error_message="permanent failure recorded by the retry decline",
+        finished_at=_dt("2026-07-20T02:00:00Z"),
+    )
+
+    assert result.outcome == "stale"
+    assert result.committed is False
+    assert repository.get_pipeline_job(str(record["job_id"])) == before
+    assert _master_events(repository, record) == events_before
+    assert _permanently_failed_events(repository, record) == []
+
+
+def test_permanent_failure_transition_declines_released_reservations(tmp_path: Path) -> None:
+    """#1312: ``reservation_lost`` is outside the markable source set.
+
+    This is the ``identity_mismatch_released`` sub-shape.  The decline now comes
+    from ``PERMANENT_FAILURE_SOURCE_STATUSES`` alone (the decision-specific
+    guard is gone), which is what keeps the mark from corrupting an accounting
+    tuple whose decision may only coexist with ``status="reservation_lost"``.
     """
 
     repository, record = _reserved_cohort_master(tmp_path, member_count=2)
@@ -8000,8 +8216,15 @@ def test_permanent_failure_transition_declines_released_reservations(tmp_path: P
     assert _permanently_failed_events(repository, record) == []
 
 
-def test_permanent_failure_transition_marks_an_abandoned_reservation(tmp_path: Path) -> None:
-    """#1312 seam 4: ``reservation_lost`` is a legal permanent-failure source."""
+def test_permanent_failure_transition_declines_an_abandoned_reservation(tmp_path: Path) -> None:
+    """#1312 seam 4: the ``absence_retry_permitted`` sub-shape stays reclaimable.
+
+    A lost reservation is reclaim-pending, not permanently failed.  Marking it
+    would slam the reclaim door shut, because
+    ``reclaim_pipeline_job_reservation`` keys off the literal
+    ``status == "reservation_lost"``.  The mark is declined as stale and the
+    door is proved still open afterwards.
+    """
 
     repository, record = _reserved_cohort_master(tmp_path, member_count=2)
     assert repository.reserve_pipeline_job(dict(record)) is not None
@@ -8012,20 +8235,36 @@ def test_permanent_failure_transition_marks_an_abandoned_reservation(tmp_path: P
         expected_submission_attempt=int(reserved["submission_attempt"]),
         expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
     ) == 1
-    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "reservation_lost"
+    before = repository.get_pipeline_job(str(record["job_id"]))
+    assert before["status"] == "reservation_lost"
+    assert before["reconciliation_decision"] == "absence_retry_permitted"
+    events_before = _master_events(repository, record)
 
     result = repository.mark_pipeline_job_permanently_failed(
         str(record["job_id"]),
         error_code="INVALID_MANIFEST",
     )
 
-    after = repository.get_pipeline_job(str(record["job_id"]))
-    assert result.outcome == "applied"
-    assert after["status"] == "permanently_failed"
-    assert after["reconciliation_decision"] == "absence_retry_permitted"
-    events = _permanently_failed_events(repository, record)
-    assert len(events) == 1
-    assert events[0]["status_from"] == "reservation_lost"
+    assert result.outcome == "stale"
+    assert result.committed is False
+    assert repository.get_pipeline_job(str(record["job_id"])) == before
+    assert _master_events(repository, record) == events_before
+    assert _permanently_failed_events(repository, record) == []
+    reclaimed = repository.reclaim_pipeline_job_reservation(
+        {
+            **before,
+            "expected_submission_attempt": before["submission_attempt"],
+            "expected_submission_attempt_started_at": before["submission_attempt_started_at"],
+            "status": "reserved",
+            "submission_attempt": int(before["submission_attempt"]) + 1,
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "matched_slurm_job_id": None,
+        }
+    )
+    assert reclaimed is not None
+    assert reclaimed["status"] == "reserved"
 
 
 def test_generic_status_update_still_refuses_master_rows_after_the_typed_transition(
@@ -8105,6 +8344,65 @@ def test_cohort_projection_keeps_a_permanently_failed_master_sticky(tmp_path: Pa
     assert after["status"] == "permanently_failed"
     assert counts == {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
     assert _master_events(repository, record) == events_before
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+def test_cohort_projection_writes_through_new_evidence_without_losing_the_mark(
+    tmp_path: Path,
+) -> None:
+    """#1312 (design D9): stickiness holds on the WRITE branch, not just the no-op.
+
+    The companion test above re-projects byte-identical evidence, so the whole
+    cohort write short-circuits and the sticky line is never exercised.  Here
+    the second pass carries genuinely new evidence (finished_at / exit_code /
+    log_uri / error message / task error code), so the cohort row really is
+    rewritten — and the mark still has to survive that rewrite.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    service.mark_permanently_failed(repository.get_pipeline_job(str(record["job_id"])))
+    marked = repository.get_pipeline_job(str(record["job_id"]))
+    assert marked["status"] == "permanently_failed"
+    log_uri = "s3://nhms/logs/cycle_gfs_2026072000/forecast-accounting-pass-2.log"
+    finished_at = _dt("2026-07-21T03:00:00Z")
+
+    counts = repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, error_code="SLURM_ARRAY_TASK_FAILED"),
+        complete=True,
+        master_status="failed",
+        master_error_code="SLURM_ARRAY_TASK_FAILED",
+        reconciliation_decision="matched_bound",
+        finished_at=finished_at,
+        exit_code=137,
+        master_error_message="second accounting pass re-observed the same failure",
+        log_uri=log_uri,
+    )
+
+    after = repository.get_pipeline_job(str(record["job_id"]))
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(str(record["job_id"]))
+    # The write branch really ran: one cohort row plus its status-change event.
+    assert counts == {"total": 2, "pipeline_status": 1, "pipeline_event": 1}
+    # ``log_uri`` is stored through the durable redaction filter, so the proof
+    # is that the field moved at all, not that it kept the literal URI.
+    assert after["log_uri"] not in (None, "", marked["log_uri"])
+    assert after["exit_code"] == 137
+    assert after["finished_at"] == journal_module._format_utc(finished_at)
+    assert after["finished_at"] != marked["finished_at"]
+    # ... and the mark survived it, in memory and on reopen.
+    assert after["status"] == "permanently_failed"
+    assert reopened["status"] == "permanently_failed"
+    assert (
+        after["reconciliation_decision"],
+        after["submit_outcome"],
+        after["matched_slurm_job_id"],
+    ) == (
+        marked["reconciliation_decision"],
+        marked["submit_outcome"],
+        marked["matched_slurm_job_id"],
+    )
     assert len(_permanently_failed_events(repository, record)) == 1
 
 

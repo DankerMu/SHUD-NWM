@@ -42,6 +42,18 @@ PipelineResult 仍 `"failed"`（`chain_forecast_execution.py:225-231`）。落
 标后以 repository 读回断言写穿。`job` 来自 `_retry_job_for_stage_result`
 （`chain_forecast_execution.py:468-507`，携 journal 行 job_id `:495`）。
 
+PR round-1 C-1 修订：落标是 decline 臂上**新增的 2 记录 journal I/O**，其
+异常面（`FILE_JOURNAL_WRITE_FAILED`/锁/byte-segment 上限/出站校验）在
+`chain_forecast_execution.py:219/:547` 之上无任何 handler，会把既有
+`PipelineResult("failed")` 收场替换成 pass 级
+`production_orchestration_failed`。裁决：mark 调用以窄捕获包裹（仅
+`OrchestratorError` + `FileOrchestrationJournalError`，绝不裸 `Exception`）
+后仍 `return None`——幂等落标下一趟 pass 自愈；不静默：按
+`chain_forecast_submission.py:157-166` 既有形发运维可见信号。休眠臂对称
+处理（同两类异常回退 pre-#1312 返回值 `_file_retry_namespace(current)`）。
+回归测试：mark raise 时 `orchestrate_cycle` 仍产出
+`PipelineResult("failed")`、零新行。
+
 ### D3 — 休眠臂同判据换出口
 
 `file_orchestration_journal.py:6607-6608` False 臂改为经
@@ -68,16 +80,20 @@ current-contract master 行在 `:3240-3244`（锁前）/`:3251-3255`（锁后）
 
 - reject 的前置（`status=="reserved"` + attempt 匹配 + slurm_job_id 未
   绑，`:2274-2288`）对落标目标（已绑定、已终态的 master）三条全反——不
-  迁移；本 API 的**源状态前置**（round-2 P2-D）：合法源限定终态失败子集
-  `{failed, submission_failed, partially_failed, reservation_lost}`，非法
-  源（如 `running`/`reserved`）返回 `stale` 不 raise、零写入零事件。实施
-  修订（偏离 1）：`reservation_lost` 中携带
-  `reconciliation_decision="identity_mismatch_released"` 的行例外走
-  `stale`——`accepted_submit_identity.py:608` 禁止该 decision 与其它状态
-  共存，逐字段保持 accounting 元组下落标必 raise
-  `file_journal_evidence_invariant_invalid`；该形可达自 decline 臂，raise
-  会击穿生产 cycle，按本 API 自身的 stale 语义拒收（测试钉住两个
-  `reservation_lost` 子形的分野）。
+  迁移；本 API 的**源状态前置**（round-2 P2-D，PR round-1 C-2/R-1 裁决收
+  束）：合法源限定 `{failed, submission_failed, partially_failed}`，非法
+  源（`running`/`reserved`/`succeeded`/`cancelled`/`reservation_lost` 等）
+  返回 `stale` 不 raise、零写入零事件。**`reservation_lost` 整体移出源
+  集**（初版含之，PR round-1 裁决移除）：其两个已知子形都不该落标——
+  `identity_mismatch_released`（实施偏离 1 曾特判：
+  `accepted_submit_identity.py:608` 禁止该 decision 与其它状态共存，落标
+  必 raise 证据不变式错误）与 `absence_retry_permitted`（落标是单向门，
+  会同时关死两条只认字面 `status=="reservation_lost"` 的重收路径——
+  reclaim 谓词 `:1665-1679` 与 reconcile-verified 重试捷径；identity
+  drift 跨版本后该形可达 decline 臂，verifier C-2 存证）。lost
+  reservation 语义上是"待重收"而非"永久失败"，decline 方向对 liveness
+  fail-safe；原 decision 特判守卫随源集收束成为死码一并移除，两个子形改
+  由源集判据统一拒收（测试钉住）。
 - reject 的 `AcceptedSubmitTransition.rejected()` 会整组替换 accounting 元
   组（`accepted_submit_identity.py:296-311`）并把 submit_outcome 改
   `"rejected"`——不迁移；本 API **保 accounting 元组原样**：用
@@ -165,12 +181,15 @@ defer 的 `:3173-3175` 既有终态短路），咬不到粘性本体——D9 红
 journal 级粘性测试承担，e2e 保留钉端到端不变式（实施偏离 3；defer 误路
 由本身是 pre-existing，另行路由）。
 
-### D8 — 红证：两次单臂回退（round-1 P2-5）
+### D8 — 红证：两次单臂回退（round-1 P2-5；PR round-1 S-2 更正）
 
 仅回退 caller 臂 → 仅 caller 测试红、journal 测试绿；仅回退 journal 臂 →
 反之（可达性已核：caller 测试止于 `:197`，journal 测试直连
 `handle_failed_job`，路径不相交）。两组 pytest 输出各留一份。D9 projection
-粘性另有独立红证（回退粘性 → 二趟 e2e 红）。
+粘性红证由 **journal 级粘性单测**承担
+（`test_cohort_projection_keeps_a_permanently_failed_master_sticky`，
+D9-revert 突变下唯一变红）；二趟 e2e 因 resume defer 误路由（#1410）咬不
+到粘性本体，只钉端到端不变式，不参与该红证。
 
 ## Seams under test（round-2 修订）
 

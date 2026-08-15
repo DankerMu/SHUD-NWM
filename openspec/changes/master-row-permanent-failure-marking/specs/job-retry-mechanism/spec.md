@@ -17,9 +17,11 @@ geometry; it does not alter their code classification or budget semantics.
   error code is non-transient (e.g. `OUT_OF_MEMORY`, `INVALID_MANIFEST`),
   unknown and defaulted non-transient, or transient with the retry budget
   exhausted
-- **THEN** the persisted row SHALL transition to `status="permanently_failed"`
-  through a typed journal authority transition, regardless of which decline
-  exit ran
+- **THEN** if the row's persisted status is a markable failure source
+  (`failed`, `submission_failed`, `partially_failed`), it SHALL transition
+  to `status="permanently_failed"` through a typed journal authority
+  transition, regardless of which decline exit ran (lost reservations are
+  carved out below)
 - **THEN** the transition SHALL preserve the row's accepted-submit
   accounting evidence (reconciliation decision, submit outcome, matched
   Slurm job id) unchanged
@@ -29,6 +31,11 @@ geometry; it does not alter their code classification or budget semantics.
 - **THEN** the decline outcome SHALL remain: no automatic retry scheduled,
   no new `pipeline_job` rows created, and the cycle's `PipelineResult`
   status remains `"failed"`
+- **THEN** a journal write failure while marking SHALL NOT alter the decline
+  outcome — the decline exits still return their pre-marking results, the
+  failure is surfaced as an operator-visible signal rather than an exception
+  escaping into the orchestration cycle, and the idempotent mark is
+  re-attempted on a later pass
 
 #### Scenario: The mark survives subsequent cohort projection passes
 
@@ -48,13 +55,24 @@ geometry; it does not alter their code classification or budget semantics.
   already-marked row is returned unchanged with no duplicate event, and a
   not-yet-marked row is still marked despite the stale snapshot
 
-#### Scenario: The typed transition only accepts terminal failure sources
+#### Scenario: The typed transition only accepts markable failure sources
 
 - **WHEN** the typed permanent-failure transition is invoked on a master row
-  whose persisted status is not a terminal failure status (e.g. `running`,
-  `reserved`)
+  whose persisted status is outside the markable set
+  `{failed, submission_failed, partially_failed}` (e.g. `running`,
+  `reserved`, `succeeded`, `cancelled`, `reservation_lost`)
 - **THEN** the row SHALL remain unchanged, no event SHALL be appended, and
   the call SHALL report a stale/no-op outcome rather than raising
+
+#### Scenario: Lost reservations are not mark sources
+
+- **WHEN** a decline exit or any caller invokes the mark on a master row
+  whose persisted status is `reservation_lost` (either durable sub-shape:
+  `absence_retry_permitted` or `identity_mismatch_released`)
+- **THEN** the mark SHALL be declined as stale with zero writes and zero
+  events and SHALL NOT raise — a lost reservation is reclaim-pending, not a
+  permanently failed job, and both reclaim doors (the reservation reclaim
+  predicate and the reconcile-verified retry shortcut) SHALL remain open
 
 #### Scenario: Marked master rows do not resurrect via upstream refresh
 

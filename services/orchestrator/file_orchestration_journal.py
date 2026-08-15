@@ -258,12 +258,19 @@ TERMINAL_PIPELINE_STATUSES = {
 #: (#1312).  A live row (``reserved``/``running``/...) is a stale caller, never
 #: an error: the retry decline that owns the mark runs off its own snapshot and
 #: must never raise into the orchestration cycle.
+#:
+#: ``reservation_lost`` is deliberately EXCLUDED.  A lost reservation means "to
+#: be reclaimed", not "permanently failed": marking it would slam shut both
+#: recovery doors that key off the literal status (the reclaim predicate in
+#: ``reclaim_pipeline_job_reservation`` and the reconcile-verified retry
+#: shortcut), and its ``identity_mismatch_released`` sub-shape may not coexist
+#: with any other status at all (``accepted_submit_identity``).  Declining is
+#: the liveness-fail-safe direction.
 PERMANENT_FAILURE_SOURCE_STATUSES = frozenset(
     {
         "failed",
         "submission_failed",
         "partially_failed",
-        "reservation_lost",
     }
 )
 _ACCEPTED_RUNTIME_TRANSITIONS = {
@@ -2441,12 +2448,6 @@ class FileOrchestrationJournalRepository:
             if status_from == "permanently_failed":
                 return AcceptedSubmitCommitResult("idempotent", dict(existing))
             if status_from not in PERMANENT_FAILURE_SOURCE_STATUSES:
-                return AcceptedSubmitCommitResult("stale", dict(existing))
-            if str(existing.get("reconciliation_decision") or "") == IDENTITY_MISMATCH_RELEASED_DECISION:
-                # A released reservation's durable evidence pins
-                # ``status="reservation_lost"``; relabelling it would either
-                # corrupt the accounting tuple or fail evidence validation, so
-                # the mark is declined the same way any other stale source is.
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             master = dict(existing)
             master["status"] = "permanently_failed"
@@ -6735,8 +6736,15 @@ class FileJournalRetryService:
             if not self.should_auto_retry(job):
                 # Same decline judgement as the orchestrator-cycle arm
                 # (``chain_forecast_orchestrator_cycle._schedule_cycle_stage_retry``)
-                # must land the same permanent-failure mark (#1312).
-                return self.mark_permanently_failed(job)
+                # must land the same permanent-failure mark (#1312).  The mark
+                # is journal I/O on a formerly write-free decline, so a journal
+                # failure falls back to the pre-#1312 return value instead of
+                # raising through the caller (the mark is idempotent and the
+                # next pass re-lands it); the caller arm is guarded the same way.
+                try:
+                    return self.mark_permanently_failed(job)
+                except (OrchestratorError, FileOrchestrationJournalError):
+                    return _file_retry_namespace(current)
             retry_job_id, retry_count = _next_current_master_retry_identity(current)
             return _file_retry_namespace(
                 {

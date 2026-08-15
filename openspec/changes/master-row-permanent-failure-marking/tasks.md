@@ -65,14 +65,16 @@
     max_retries` → 落标 + upstream refresh 不重投（design D6）。
   - seam 8 upstream-refresh：已落标行 + `refreshed_upstream_finished_at`
     → 不重投。
-  - seam 9 e2e 两趟：OOM master 行（经 `_write_task_outcome_receipt`
+  - seam 9 e2e 两趟（端到端不变式钉，**非** D9 粘性红证——二趟走 defer
+    分支，见 D9 偏离 (b)）：OOM master 行（经 `_write_task_outcome_receipt`
     `:1389` 注入，装配复用 `:8843-8853` 形）第一趟落标、第二趟后行仍
     `permanently_failed`、事件计数仍 1、两趟均无 raise、PipelineResult
     "failed"。
   - seam 10 参数化：两臂各覆盖 `OUT_OF_MEMORY` + `INVALID_MANIFEST`。
-- [x] 7. 红证（design D8）：仅回退 caller 臂 → 仅 caller 测试红；仅回退
-  journal 臂 → 仅 journal 测试红；回退 D9 粘性 → seam 9 二趟 e2e 红。三
-  组 pytest 输出留存；`git stash list` 空核验。
+- [x] 7. 红证（design D8，S-2 更正后口径）：仅回退 caller 臂 → 仅 caller
+  测试红；仅回退 journal 臂 → 仅 journal 测试红；回退 D9 粘性 →
+  **journal 级粘性单测红**（二趟 e2e 走 defer 分支不参与该红证，见
+  design D9 偏离 (b)）。三组 pytest 输出留存；`git stash list` 空核验。
 - [x] 8. 回归：`uv run pytest -q tests/test_retry.py
   tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py
   tests/test_production_scheduler.py` 全绿；`uv run ruff check .`；
@@ -80,6 +82,33 @@
   --no-interactive`。
 - [x] 9. 既有 anchor `tests/test_orchestration_chain.py:1637-1652` 原样通过
   （只断 None 返回；不编辑不弱化）。
+
+## Round-1 fix tasks (Phase 5/6)
+
+- [x] 10. C-1（P2 FIX_NOW）：mark 调用双臂窄捕获——caller 臂
+  `chain_forecast_orchestrator_cycle.py` 仅捕
+  `OrchestratorError`/`FileOrchestrationJournalError` 后仍 `return None`，
+  并按 `chain_forecast_submission.py:157-166` 形发运维信号（自身再包一层
+  不得抛）；休眠臂同两类异常回退 `_file_retry_namespace(current)`。回归测
+  试：mark raise → `orchestrate_cycle` 仍 `PipelineResult("failed")`、零新
+  行。
+- [x] 11. C-2/R-1 搭车裁决：`PERMANENT_FAILURE_SOURCE_STATUSES` 移除
+  `reservation_lost`；随之 `identity_mismatch_released` decision 特判守卫
+  成死码一并删除；本 PR 自有的两条 reservation_lost 测试改为断言
+  `stale` + 行不变 + 零事件 + reclaim 门仍开
+  （`reclaim_pipeline_job_reservation` 仍可达）。
+- [x] 12. T-1（P2 FIX_NOW）：源状态域参数化——合法 ×3
+  （`failed`/`submission_failed`/`partially_failed`，各断 `applied` + 真实
+  `status_from` + 事件计数 1；`submission_failed` 经
+  `reject_pipeline_job_submit_attempt` 构造，`partially_failed` 经混合
+  outcome projection 构造）；非法补 `succeeded`/`cancelled`（+ 两个
+  `reservation_lost` 子形，随 task 11）断 `stale` + 整行相等 + 零事件。
+  验收：收窄/放宽两个源集突变体均被杀。
+- [x] 13. C-3/S-3（P2 FIX_NOW）：粘性写穿测试——落标后带**变化证据**
+  （`finished_at`/`log_uri`/`error_code`）重投影，断言持久行仍
+  `permanently_failed`、accounting 元组不变、`permanently_failed` 事件计
+  数仍 1（不得断 `total == 0`——写分支合法写 1 行 + 1 条 pf→pf
+  `status_change`）。D9-revert 突变下必红。
 
 ## Required evidence (maps every selected pack)
 

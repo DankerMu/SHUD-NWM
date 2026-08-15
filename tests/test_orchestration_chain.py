@@ -13607,3 +13607,89 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     assert resumed["status"] == "permanently_failed"
     assert reopened["status"] == "permanently_failed"
     assert len(_permanently_failed_master_events(repository, resumed)) == 1
+
+
+def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(tmp_path: Path) -> None:
+    """#1312 C-1: a journal failure inside the mark may not hijack the cycle.
+
+    The mark added two journal records to a decline path that was previously
+    write-free, and nothing between ``_schedule_cycle_stage_retry`` and
+    ``chain_forecast_execution`` handles journal I/O failures: an escaping
+    ``FILE_JOURNAL_WRITE_FAILED`` would turn the correct
+    ``PipelineResult("failed")`` into a pass-level
+    ``production_orchestration_failed``.  The decline must still land, the row
+    must stay exactly where it was, and the miss must be visible to operators.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    class _MarkRefusingJournalRepository(FileOrchestrationJournalRepository):
+        def mark_pipeline_job_permanently_failed(self, job_id: str, **kwargs: Any) -> Any:
+            raise OrchestratorError(
+                "FILE_JOURNAL_WRITE_FAILED",
+                "failed to append file orchestration journal records",
+                {"job_id": job_id},
+            )
+
+    cycle = "2026050100"
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    repository = _MarkRefusingJournalRepository(tmp_path / "journal")
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    client = _OutOfMemoryForecastArrayClient(
+        object_store=object_store,
+        run_ids=[str(basin["run_id"]) for basin in basins],
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        retry_service=FileJournalRetryService(
+            repository,
+            RetryConfig(max_retries=1, backoff_schedule=[0]),
+        ),
+        object_store=object_store,
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, [dict(basin) for basin in basins])
+
+    masters = [
+        row
+        for row in repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    ]
+    assert result.status == "failed"
+    assert len(masters) == 1
+    master = repository.get_pipeline_job(str(masters[0]["job_id"]))
+    # The mark never landed, so the row keeps its projected terminal status and
+    # no retry row was minted behind the decline.
+    assert master["status"] == "failed"
+    assert _permanently_failed_master_events(repository, master) == []
+    # Not silent: the miss is durable operator evidence on the master row.
+    from tests.test_file_orchestration_journal import _master_events
+
+    mark_failures = [
+        event
+        for event in _master_events(repository, master)
+        if event["event_type"] == "permanent_failure_mark_failed"
+    ]
+    assert len(mark_failures) == 1
+    assert mark_failures[0]["details"]["reason"] == "FILE_JOURNAL_WRITE_FAILED"
+    assert mark_failures[0]["status_to"] == "failed"
