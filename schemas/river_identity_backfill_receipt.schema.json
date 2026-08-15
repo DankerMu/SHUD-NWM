@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Node-27 River Identity Backfill Runner Receipt",
+  "description": "Receipt emitted by scripts/node27_river_identity_backfill.py (issue #1339). Schema-versioned like schemas/timeseries_compression_receipt.schema.json so a receipt can be read years later without guessing which runner produced it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "mode",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {"enum": ["1.0"]},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "provenance_state": {"enum": ["bound", "unavailable"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "now_utc": {"type": "string", "format": "date-time"},
+    "hypertable": {"const": "hydro.river_timeseries"},
+    "mode": {"enum": ["dry-run", "enforce", "probe"]},
+    "outcome": {"enum": ["clean", "stopped", "refused_lock", "failed"]},
+    "final_sweep": {"type": "boolean"},
+    "bounds": {"$ref": "#/$defs/bounds"},
+    "compression_timer": {"$ref": "#/$defs/compression_timer"},
+    "disk": {"$ref": "#/$defs/disk"},
+    "chunks": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"$ref": "#/$defs/chunk_descriptor"}
+    },
+    "totals": {"$ref": "#/$defs/totals"},
+    "cursor": {
+      "description": "Persisted block cursor: chunk identity -> next heap page to scan. Re-entry resumes here; losing it degrades to a full rescan with identical results because the NULL sentinel predicate is the actual correctness guarantee. Carried forward verbatim by a refused_lock receipt, and DELIBERATELY absent from a failed receipt: after an unclassified crash the runner cannot vouch for how far it got, so it falls back to the rescan rather than publishing a guess.",
+      "type": "object",
+      "maxProperties": 10000,
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "stop": {"$ref": "#/$defs/stop"},
+    "failure": {"$ref": "#/$defs/failure"}
+  },
+  "allOf": [
+    {
+      "comment": "A fail-closed stop MUST carry the reason it stopped. Silence here would make a halted run indistinguishable from a completed one.",
+      "if": {"properties": {"outcome": {"const": "stopped"}}, "required": ["outcome"]},
+      "then": {"required": ["stop", "totals", "chunks"]}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
+      "then": {"required": ["failure", "provenance_state"]},
+      "else": {"not": {"required": ["failure"]}}
+    },
+    {
+      "comment": "Every non-failed terminal receipt is bound to the exact source revision that produced it.",
+      "if": {
+        "properties": {"outcome": {"enum": ["clean", "stopped", "refused_lock"]}},
+        "required": ["outcome"]
+      },
+      "then": {"required": ["head_sha", "now_utc", "hypertable", "mode", "bounds"]}
+    },
+    {
+      "comment": "Lock contention is decided before any database call, so the receipt carries no chunk inventory at all. The cursor is the exception: it is copied forward from the receipt being replaced, because a routine flock contention must not rewind every chunk to page 0.",
+      "if": {"properties": {"outcome": {"const": "refused_lock"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "chunks": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "comment": "dry-run and probe never persist a row change; enforce is the only mode allowed to report one.",
+      "if": {
+        "properties": {"mode": {"enum": ["dry-run", "probe"]}},
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "totals": {"properties": {"updated_rows": {"const": 0}}}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batch_pages",
+        "duration_wall_ms",
+        "batch_sleep_ms",
+        "max_batches",
+        "lag_seconds"
+      ],
+      "properties": {
+        "batch_pages": {"type": "integer", "minimum": 1},
+        "duration_wall_ms": {"type": "integer", "minimum": 1000},
+        "batch_sleep_ms": {"type": "integer", "minimum": 0},
+        "max_batches": {"type": "integer", "minimum": 1},
+        "lag_seconds": {
+          "description": "Terminal/active criterion, shared with the #1069 compression lane: a chunk is active unless range_end < now - lag_seconds.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "compression_timer": {
+      "description": "State of nhms-node27-timeseries-compression.timer at run start. The enforce window REQUIRES it masked or stopped: a tick landing mid-backfill compresses a chunk that still holds NULL rows, and recovering those needs a 200+ GB decompression.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed"],
+      "properties": {
+        "observed": {"type": "boolean"},
+        "is_active": {"type": ["string", "null"]},
+        "is_enabled": {"type": ["string", "null"]},
+        "unavailable_reason": {"type": ["string", "null"]}
+      }
+    },
+    "disk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mount", "avail_bytes", "estimated_bloat_bytes", "headroom_sufficient"],
+      "properties": {
+        "mount": {"type": "string", "minLength": 1},
+        "avail_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "estimated_bloat_bytes": {"type": "integer", "minimum": 0},
+        "headroom_sufficient": {"type": ["boolean", "null"]}
+      }
+    },
+    "chunk_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chunk_schema",
+        "chunk_name",
+        "range_start",
+        "range_end",
+        "is_compressed",
+        "state",
+        "total_bytes",
+        "relpages",
+        "pages_planned",
+        "approx_rows",
+        "pending_rows",
+        "batches_planned"
+      ],
+      "properties": {
+        "chunk_schema": {"type": "string", "minLength": 1},
+        "chunk_name": {"type": "string", "minLength": 1},
+        "range_start": {"type": "string", "format": "date-time"},
+        "range_end": {"type": "string", "format": "date-time"},
+        "is_compressed": {"type": "boolean"},
+        "state": {
+          "enum": [
+            "planned",
+            "processed",
+            "skipped_compressed",
+            "skipped_active",
+            "skipped_no_pending",
+            "deferred",
+            "stopped"
+          ]
+        },
+        "skip_reason": {"type": ["string", "null"]},
+        "total_bytes": {"type": "integer", "minimum": 0},
+        "relpages": {"type": "integer", "minimum": 0},
+        "pages_planned": {"type": "integer", "minimum": 0},
+        "approx_rows": {"type": "integer", "minimum": 0},
+        "pending_rows": {
+          "description": "Rows still carrying the NULL sentinel in this chunk. null means NOT MEASURED (a skipped chunk is never counted); 0 is a real measurement and must not be fabricated for chunks the runner never looked at.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "batches_planned": {"type": "integer", "minimum": 0},
+        "resumed_from_page": {
+          "description": "Heap page this invocation started from, taken from the previous receipt's cursor. 0 means a full scan of the chunk.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "batches_run": {
+          "description": "Batch ATTEMPTS, which is exactly the per-invocation budget consumed. Includes a final batch that was rolled back; a halving retry still counts as one attempt.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "batches_halved": {"type": "integer", "minimum": 0},
+        "candidate_rows": {
+          "description": "Sentinel candidates in the batches that COMMITTED. A rolled-back batch is excluded here and reported in stop.candidate_rows instead.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_rows": {
+          "description": "Rows PERSISTED. A rolled-back batch contributes nothing, so this and totals.updated_rows can always be read as rows actually in the table.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "unmatched_rows": {"type": "integer", "minimum": 0},
+        "unmappable_rows": {"type": "integer", "minimum": 0},
+        "equality_audit_divergent": {"type": ["integer", "null"], "minimum": 0},
+        "next_page": {"type": ["integer", "null"], "minimum": 0},
+        "estimated_bloat_bytes": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": ["number", "null"], "minimum": 0},
+        "probe": {"$ref": "#/$defs/probe_sample"}
+      }
+    },
+    "probe_sample": {
+      "description": "One --probe batch: a REAL UPDATE, timed and lock-observed, then rolled back. Nothing it reports was persisted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rolled_back", "candidate_rows", "updated_rows", "duration_ms"],
+      "properties": {
+        "rolled_back": {"const": true},
+        "candidate_rows": {"type": "integer", "minimum": 0},
+        "updated_rows": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "first_page": {"type": "integer", "minimum": 0},
+        "last_page": {"type": "integer", "minimum": 0},
+        "lock_waits": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["locktype", "mode", "granted"],
+            "properties": {
+              "locktype": {"type": "string"},
+              "mode": {"type": "string"},
+              "granted": {"type": "boolean"},
+              "relation": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_rows",
+        "updated_rows",
+        "pending_rows",
+        "batches_run",
+        "batches_halved",
+        "unmatched_rows",
+        "unmappable_rows",
+        "chunks_skipped_compressed",
+        "chunks_skipped_active"
+      ],
+      "properties": {
+        "candidate_rows": {"type": "integer", "minimum": 0},
+        "updated_rows": {
+          "description": "Sum of the per-chunk updated_rows, i.e. rows PERSISTED by this invocation. Successive invocations therefore partition the table exactly, with no double-counting of a rolled-back batch.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_rows": {"type": "integer", "minimum": 0},
+        "batches_run": {"type": "integer", "minimum": 0},
+        "batches_halved": {"type": "integer", "minimum": 0},
+        "unmatched_rows": {"type": "integer", "minimum": 0},
+        "unmappable_rows": {"type": "integer", "minimum": 0},
+        "equality_audit_divergent": {"type": ["integer", "null"], "minimum": 0},
+        "chunks_skipped_compressed": {"type": "integer", "minimum": 0},
+        "chunks_skipped_active": {"type": "integer", "minimum": 0}
+      }
+    },
+    "stop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "reason"],
+      "properties": {
+        "stage": {
+          "description": "Only the stages the runner can actually emit. Budget exhaustion is not a stop (it is chunk state 'deferred') and the compression timer is observed, not enforced, so neither has a stage here.",
+          "enum": [
+            "shortfall",
+            "duration_wall",
+            "ingest_not_quiescent",
+            "compressed_chunk_guard"
+          ]
+        },
+        "reason": {"type": "string", "minLength": 1},
+        "chunk_schema": {"type": ["string", "null"]},
+        "chunk_name": {"type": ["string", "null"]},
+        "first_page": {"type": ["integer", "null"], "minimum": 0},
+        "last_page": {"type": ["integer", "null"], "minimum": 0},
+        "candidate_rows": {"type": ["integer", "null"], "minimum": 0},
+        "updated_rows": {"type": ["integer", "null"], "minimum": 0},
+        "unmatched_rows": {"type": ["integer", "null"], "minimum": 0},
+        "unmappable_rows": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "mutation_state"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "mutation_state": {"enum": ["failed_before_mutation", "indeterminate"]}
+      }
+    }
+  }
+}

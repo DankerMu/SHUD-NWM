@@ -409,3 +409,140 @@ unattended `migrate.py` run silently re-drops the rebuilt index. The
 general lesson for this ADR: "cannot be pruned further" is a measurement, not a
 property — index redundancy claims expire and must be re-measured against
 growth, not carried forward.
+
+## Amendment (2026-08-15): Decision 6 re-evaluated EARLY; Decision 4's column list is superseded at cutover
+
+This amendment covers two Decisions at once because issue #1339 touches both:
+it revives the star-schema idea Decision 6 deferred, and the mechanism it uses
+rewrites the specific segmentby column list Decision 4 pins.
+
+### This is an early trigger, and the literal condition is NOT met
+
+Decision 6 defers the v2 star schema and names its own re-evaluation condition:
+"re-evaluated only against measured growth curves when expanding toward
+national scale (~100 basins), with compression receipts as the baseline."
+
+**The literal condition is not satisfied.** The deployment still carries **18**
+business basins (`docs/runbooks/current-production-ops.md:182`), the same count
+as when this ADR was accepted. Nothing here should be read as claiming
+otherwise, and the display/MVT capacity work of the intervening weeks was
+rendering scale, not basin expansion.
+
+The re-evaluation is triggered early, on two grounds:
+
+1. **The growth curve moved without the basin count moving.**
+   `hydro.river_timeseries` went from 132M rows (2026-07-04, this ADR's Context)
+   to **459.9M rows** (2026-08-15, read-only measurement on node-27) — 3.5x in
+   six weeks, driven by cycle accumulation rather than by new basins. Decision 6
+   names "measured growth curves" as a trigger in its own right; that curve is
+   the trigger being invoked.
+2. **Epic #1336 carries a new profile** of the per-row identity cost that did
+   not exist when Decision 6 was written.
+
+Deferring to ~100 basins while the row count triples every six weeks would mean
+re-evaluating a decision about storage cost only after the cost had already
+compounded — which is what the 2026-08-14 amendment above already recorded as
+this ADR's recurring lesson.
+
+### The compression-receipt baseline, stated in full
+
+Decision 6 set the baseline itself: "with compression receipts as the
+baseline." Honouring that means reporting the numbers that **weaken** the case
+alongside the ones that support it.
+
+Measured read-only on node-27, 2026-08-15 (`chunk_compression_stats`,
+`hypertable_detailed_size`):
+
+| Measurement | Value |
+|---|---|
+| Compression ratio, `_hyper_3_32` | 268 GB → 6096 MB = **45.09x** |
+| Compression ratio, `_hyper_3_51` | 215 GB → 4924 MB = **44.63x** |
+| Total hypertable size | **249 GB** (112 GB heap, 137 GB index, 1696 kB toast) |
+| Index share, post-#1338 | **137 GB index vs 112 GB heap = 55%** of total (this ADR's Context recorded ~70%; #1338's pruning brought it down) |
+| Chunks | 6, of which 2 compressed |
+| Rows | 459,914,080 |
+
+**The 45x ratio supports Decision 6's original argument, and that is stated
+plainly:** for a chunk that has been compressed, columnar compression really
+does capture most of what a star schema would have saved, and normalizing those
+chunks would add little. Decision 6 was right about compressed data.
+
+**What Decision 6's argument does not cover** is the data that is *not*
+compressed. Of the 249 GB live footprint, roughly **239 GB** sits in the four
+uncompressed chunks and in indexes; only ~10 GB is compressed storage. The
+compression lane compresses terminal chunks only — by construction the active
+and recent chunks stay in plain form, and they are also the chunks display
+reads actually hit. Indexes are the sharper point: at 137 GB they are **larger
+than the 112 GB heap**, they are not compressed by the hypertable's compression
+at all, and their width is driven directly by the repeated text identity
+columns (`run_id` 56 B, `river_segment_id` 37 B per row) that #1339 replaces
+with `int4`.
+
+**And one measurement cuts against the urgency, which is also stated plainly:**
+total size went **down**, 264 GB → 249 GB, between the fixture's first capture
+and this one — because another chunk was compressed in between. Bytes are not
+growing monotonically; the compression lane is doing its job. The pressure this
+amendment responds to is visible in the **row curve and the index share**, not
+in the total-bytes curve. Presenting only the row growth, or only the 45x
+ratio, would each be a distortion; both are recorded.
+
+### Disposition for Decision 6
+
+Decision 6's "deferred" status is **narrowed, not reversed**. What issue #1339
+delivers is not the v2 star schema Decision 6 described: no dimension tables are
+created. Integer surrogate keys are added to the four authority tables that
+already exist (`hydro.hydro_run`, `core.basin_version`,
+`core.river_network_version`, `core.river_segment`), which avoids the duplicate
+identity source and the DISTINCT-scan seeding phase that made the dimension-table
+shape unattractive. Narrow hot fact tables remain deferred and remain governed
+by Decision 6 as written.
+
+### Decision 4's segmentby column list is superseded at cutover
+
+Decision 4 pins the river hypertable's compression configuration as segmentby
+`run_id, river_network_version_id, river_segment_id`, orderby
+`variable, valid_time`, chosen to cover the then-current primary key. That
+column list is rewritten by
+`hydro.cutover_river_identity_normalization()` to segmentby
+`run_key, river_network_version_key, river_segment_key`, orderby
+`variable_e, valid_time`, simultaneously with the primary key it covers.
+
+The two cannot be separated: TimescaleDB 2.10 requires segmentby ∪ orderby to
+cover every unique/primary-key column, so the key swap and the settings swap
+are one atomic act. Decision 4's *principle* — "segment/order choices must cover
+the existing primary keys" — is unchanged and is exactly what forces this. Only
+the literal column names are superseded, and only once the cutover has been
+executed in a maintenance window. **As of this amendment the production
+configuration is still Decision 4's original list**; `000050` changes no
+compression setting and the migration chain never calls the cutover function.
+
+### A cost this amendment records rather than hides
+
+The cutover **drops the two-column text foreign key** from
+`hydro.river_timeseries` to `core.river_segment` (000006_hydro.sql:57-58). This
+is forced, not chosen: TimescaleDB 2.10.2 refuses a compression configuration
+that does not cover a foreign key's columns
+(measured: `ERROR: column "river_segment_id" must be used for segmenting`), and
+the target segmentby is integer-only. No integer replacement FK can be added
+either — `basin_version_key` is not in the target segmentby, so an FK on it
+would hit the same rule.
+
+The consequence: between this cutover and the text-column-retirement issue, the
+fact table has **no database-enforced referential integrity** against
+`core.river_segment`. It is guarded instead by the backfill's four-way join,
+the runner's fail-closed unmatched counter, the read-only verify function's
+equality audit, and the seven `NOT NULL` constraints the cutover installs.
+Those are real checks, but they are point-in-time checks, not a continuously
+enforced constraint. Anyone reading this ADR later and wondering where the
+foreign key went: it was traded for a 45x-compressible integer segmentby, and
+the trade is recorded here rather than discovered in the catalog.
+
+### Provenance
+
+All figures above are read-only measurements taken on node-27 on 2026-08-15
+against the live `nhms` database (catalog, `pg_stats`, and size functions only —
+no DDL, no DML). The TimescaleDB behavioural findings come from a dedicated
+throwaway database (`nhms_1339_probe`, since dropped); the full experiment log,
+including the exact error texts and the measurements that refuted two earlier
+designs, is
+`openspec/changes/river-identity-normalization-backfill/probe-1339-throwaway.md`.

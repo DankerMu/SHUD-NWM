@@ -272,7 +272,7 @@ def _insert_run(
                     river_segment_id, valid_time, variable, value, unit, quality_flag
                 ) VALUES (
                     :run_id, :basin_version_id, :river_network_version_id,
-                    :segment, :valid_time, 'q_down', :value, 'm3 s-1', 'ok'
+                    :segment, :valid_time, 'q_down', :value, 'm3/s', 'ok'
                 )
                 """
             ),

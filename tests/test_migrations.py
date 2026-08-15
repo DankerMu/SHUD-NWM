@@ -38,7 +38,17 @@ EXPECTED_TABLES = {
     "ops.qc_result",
     "ops.audit_log",
 }
-EXPECTED_TYPES = {"hydro.run_type", "hydro.run_status", "met.source_status", "met.cycle_status"}
+EXPECTED_TYPES = {
+    "hydro.run_type",
+    "hydro.run_status",
+    "met.source_status",
+    "met.cycle_status",
+    # 000050 (issue #1339): native enums replacing the repeated text identity
+    # columns on hydro.river_timeseries.
+    "hydro.river_variable",
+    "hydro.river_unit",
+    "hydro.river_quality_flag",
+}
 
 
 def _migration_sql() -> list[tuple[str, str]]:
