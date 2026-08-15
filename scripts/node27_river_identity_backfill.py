@@ -401,8 +401,11 @@ def load_persisted_cursor(receipt_path: Path) -> dict[str, int]:
     rows, so anything unrecognised is discarded rather than guessed at.
     """
     try:
+        # ValueError catches UnicodeDecodeError: a truncated or byte-corrupted
+        # receipt is "unreadable" in exactly the sense the docstring promises,
+        # and must not turn a routine lock refusal into a crash.
         raw = receipt_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return {}
     try:
         document = json.loads(raw)

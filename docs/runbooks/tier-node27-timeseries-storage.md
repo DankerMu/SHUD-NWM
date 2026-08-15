@@ -1943,7 +1943,7 @@ point.
   precondition, not routine operation — and it refuses unless it first observes
   the chunk's write counters frozen across an observation window.
 
-**Fail-closed stops.** A `stopped` receipt is not a completed run. Two causes,
+**Fail-closed stops.** A `stopped` receipt is not a completed run. Four causes,
 distinguished in `stop.stage`:
 
 - `shortfall` — the batch found more sentinel candidates than it could update.
@@ -1954,6 +1954,20 @@ distinguished in `stop.stage`:
 - `duration_wall` — a batch exceeded the wall even after one halved-range retry.
   Lower `NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES` or raise
   `..._DURATION_WALL_MS`; do not loop the runner against a struggling database.
+- `ingest_not_quiescent` — `--final-sweep` was asked to touch the active chunk
+  while its write counters were still moving. Nothing was written. Complete the
+  ingest pause (step 1 of the cutover sequence in 4.6.3), confirm it, and rerun;
+  do not drop the flag to make the refusal go away, because that just leaves the
+  active chunk unfilled and the cutover's `VALIDATE` will fail on it later.
+- `compressed_chunk_guard` — the shared write guard refused a batch. Read
+  `stop.reason` to tell the two cases apart: a **compressed chunk** (the
+  compression timer fired mid-run — mask the timer, then run the
+  decompress → backfill → recompress procedure above for that chunk) versus a
+  **guard lookup failure or a chunk missing from the catalog** (infrastructure:
+  the chunk was dropped or renamed, or the catalog query failed — investigate
+  before rerunning; the guard refuses to certify what it cannot see). Batches
+  committed before the refusal are kept, counted, and resumable — the receipt's
+  `cursor` points at the batch that was refused.
 
 #### 4.6.3 Cutover (one-shot maintenance window)
 

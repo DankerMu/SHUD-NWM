@@ -390,6 +390,37 @@ def test_a_lock_refusal_carries_the_previous_cursor_instead_of_wiping_it(
     }
 
 
+def test_a_lock_refusal_survives_a_byte_corrupted_previous_receipt(tmp_path: Path) -> None:
+    """Carrying the cursor forward must not make the refusal path crashable.
+
+    The refusal is the one code path that reads the previous receipt before
+    anything else; a truncated or byte-corrupted file there would turn a
+    routine flock contention into an unhandled UnicodeDecodeError.
+    """
+    values = env(tmp_path)
+    for key, value in values.items():
+        os.environ[key] = value
+    (tmp_path / "receipt.json").write_bytes(b'{"schema_version": "1.0", "cur\xffsor": {}}')
+    holder = backfill.acquire_lock(tmp_path / "runner.lock")
+    assert holder is not None
+
+    def _explode(_url: str) -> Any:  # pragma: no cover - must never run
+        raise AssertionError("lock contention must be decided before any DB call")
+
+    try:
+        exit_code = backfill.main([], now_utc=NOW, connect=_explode)
+    finally:
+        os.close(holder)
+        for key in values:
+            os.environ.pop(key, None)
+
+    assert exit_code == 0
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "refused_lock"
+    assert receipt["cursor"] == {}
+
+
 def test_a_failed_receipt_deliberately_carries_no_cursor() -> None:
     """Spec-blessed loss: after an unclassified crash the runner cannot vouch
     for how far it got, and the NULL sentinel makes a full rescan identical in

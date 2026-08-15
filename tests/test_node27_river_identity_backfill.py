@@ -238,6 +238,11 @@ def test_persisted_cursor_is_discarded_when_the_receipt_is_unusable(tmp_path: Pa
     path.write_text("{not json", encoding="utf-8")
     assert backfill.load_persisted_cursor(path) == {}
 
+    # Byte-corrupted / truncated file: UnicodeDecodeError must degrade like any
+    # other unreadable receipt, not crash the lock-refusal path that reads it.
+    path.write_bytes(b'{"schema_version": "1.0", "cursor": {"a\xff.b": 5}}')
+    assert backfill.load_persisted_cursor(path) == {}
+
     path.write_text(json.dumps({"schema_version": "9.9", "cursor": {"a.b": 5}}), encoding="utf-8")
     assert backfill.load_persisted_cursor(path) == {}
 
