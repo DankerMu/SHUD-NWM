@@ -4,7 +4,7 @@
 
 ### Requirement: Pre-Guard Evidence Channels Consult Permanence
 
-Every db-free decision-ladder evidence channel that can emit an automatic-retry decision before the permanent-failure guard SHALL consult a single shared permanence judgement before overwriting a permanent failure classification, and SHALL refuse the overwrite when the failure's classification proves the channel's remedy cannot address the cause.
+Every db-free decision-ladder evidence channel that can emit an automatic-retry decision before the permanent-failure guard — except the output-absence recompute channel, recorded exempt below — SHALL consult a single shared permanence judgement before overwriting a permanent failure classification, and SHALL refuse the overwrite when the failure's classification proves the channel's remedy cannot address the cause.
 
 The permanent-failure guard remains consulted at emitting return points
 (never as an unconditional pre-pass). The recorded-code scoping governs the
@@ -24,17 +24,22 @@ exceptions to those clauses' blanket prohibitions, not reinterpretations:
 - **Output-absence recompute** (ruled in #1161): when durable forecast
   output is absent, the recompute channel may schedule an automatic restart
   from the forecast stage for its approved code set (including
-  `OUT_OF_MEMORY`).
+  `OUT_OF_MEMORY`), including with an exhausted retry budget (the channel
+  carries no budget gate), and is exempt from the consultation obligation
+  above (it gates on its own approved code set instead).
 - **Raw-manifest repair and post-repair downstream retry**: when the
   geometry itself evidences an input defect (a manifest probed missing
   after a previously successful download, or a repair download newer than
   the failure), the channels may re-emit their repair/retry decisions for
-  input-defect codes (e.g. `INVALID_MANIFEST`) and unknown-default codes
-  (e.g. `SLURM_JOB_FAILED`), including with an exhausted retry budget.
+  any recorded code outside the remedy-non-causal classes — input-defect
+  codes (e.g. `INVALID_MANIFEST`), unknown-default codes (e.g.
+  `SLURM_JOB_FAILED`), and other listed non-transient codes (e.g.
+  `OUTPUT_INCOMPLETE`) — including with an exhausted retry budget.
 - **Model-package refresh** (ruled in #1161): when the model package
   genuinely changed, the refresh channel may claim codes outside its own
   refusal set (e.g. `TEMPLATE_NOT_ALLOWED`), because the changed package is
-  itself the causal remedy for policy/template rejections.
+  itself the causal remedy for policy/template rejections, including with
+  an exhausted retry budget.
 
 Manual-retry paths are out of scope: their emitted decision, reason, and
 retry policy are unchanged (the `failure.retryable` evidence field narrows
