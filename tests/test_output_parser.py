@@ -15,7 +15,16 @@ from workers.output_parser import (
     OutputParsingError,
     RiverSegmentOrder,
     RiverTimeseriesRow,
+    RunIdentityKeys,
 )
+
+# Pairwise-distinct on purpose: the parser assembles four surrogate keys from
+# two different sources (run context, segment rows) and hands them to the
+# repository. Equal values would make any permutation of them unobservable.
+RUN_KEY = 11
+RIVER_NETWORK_VERSION_KEY = 22
+BASIN_VERSION_KEY = 33
+SEGMENT_KEYS = {"seg_a": 44, "seg_b": 55}
 
 
 class FakeOutputRepository:
@@ -26,6 +35,8 @@ class FakeOutputRepository:
         self.qc_results: list[Any] = []
         self.statuses: list[str] = []
         self.failures: list[tuple[str, str]] = []
+        self.run_identities: list[Any] = []
+        self.segment_key_maps: list[Any] = []
 
     def load_run_context(self, run_id: str) -> HydroRunContext:
         assert run_id == self.context.run_id
@@ -35,8 +46,17 @@ class FakeOutputRepository:
         assert river_network_version_id == self.context.river_network_version_id
         return self.segments
 
-    def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
+    def upsert_river_timeseries(
+        self,
+        rows: tuple[RiverTimeseriesRow, ...],
+        *,
+        batch_size: int,
+        run_identity: Any = None,
+        segment_keys: Any = None,
+    ) -> None:
         assert batch_size > 0
+        self.run_identities.append(run_identity)
+        self.segment_key_maps.append(segment_keys)
         replacement_keys = {
             (row.run_id, row.river_network_version_id, row.variable)
             for row in rows
@@ -87,6 +107,28 @@ def test_parse_csv_converts_units_and_writes_q_down(tmp_path: Path) -> None:
     assert repository.qc_results[-1].passed is True
     assert repository.qc_results[-1].target_type == "river_timeseries"
     assert repository.qc_results[-1].checks_json["range_check"]["max_value"] == pytest.approx(2.0)
+
+
+def test_parse_run_hands_the_repository_the_run_identity_and_segment_key_map(tmp_path: Path) -> None:
+    """The key-assembly pipeline: three run-level keys come off the run context
+    and the per-segment keys off the segment rows, both reaching
+    ``upsert_river_timeseries`` unpermuted and in exactly one call."""
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        ("time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n").encode("utf-8"),
+    )
+
+    parser.parse_run("run_001")
+
+    assert repository.run_identities == [
+        RunIdentityKeys(
+            run_key=RUN_KEY,
+            river_network_version_key=RIVER_NETWORK_VERSION_KEY,
+            basin_version_key=BASIN_VERSION_KEY,
+        )
+    ]
+    assert repository.segment_key_maps == [{"seg_a": SEGMENT_KEYS["seg_a"], "seg_b": SEGMENT_KEYS["seg_b"]}]
 
 
 def test_parse_dat_relative_minutes_from_run_start(tmp_path: Path) -> None:
@@ -202,7 +244,7 @@ def test_qc_failures_are_advisory_and_flag_inserted_rows(tmp_path: Path) -> None
 def test_reparse_upserts_existing_timeseries_rows(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(
         tmp_path,
-        segments=(RiverSegmentOrder("seg_a", "rivnet_v1", 1),),
+        segments=(RiverSegmentOrder("seg_a", "rivnet_v1", 1, SEGMENT_KEYS["seg_a"]),),
     )
     key = "runs/run_001/output/demo.rivqdown"
     store.write_bytes_atomic(key, "time,seg_a\n2026-05-01T00:00:00Z,86400\n".encode("utf-8"))
@@ -219,7 +261,7 @@ def test_reparse_upserts_existing_timeseries_rows(tmp_path: Path) -> None:
 def test_reparse_replaces_stale_timeseries_window(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(
         tmp_path,
-        segments=(RiverSegmentOrder("seg_a", "rivnet_v1", 1),),
+        segments=(RiverSegmentOrder("seg_a", "rivnet_v1", 1, SEGMENT_KEYS["seg_a"]),),
     )
     key = "runs/run_001/output/demo.rivqdown"
     store.write_bytes_atomic(key, "time,seg_a\n2026-05-01T00:00:00Z,86400\n".encode("utf-8"))
@@ -332,9 +374,9 @@ def test_compressed_chunk_guard_error_sets_dedicated_error_code(tmp_path: Path) 
 
     original_upsert = repository.upsert_river_timeseries
 
-    def _raise_guard(rows: Any, *, batch_size: int) -> None:
+    def _raise_guard(rows: Any, *, batch_size: int, run_identity: Any = None, segment_keys: Any = None) -> None:
         # Preserve batch_size handshake so the assertion in the fake still fires.
-        del rows, batch_size
+        del rows, batch_size, run_identity, segment_keys
         raise CompressedChunkGuardError(
             "guard raised: chunk _hyper_1_1_chunk in hydro.river_timeseries"
         )
@@ -389,8 +431,8 @@ def _build_parser(
     max_flow_m3s: float = 100_000.0,
     object_store_prefix: str = "s3://nhms",
     segments: tuple[RiverSegmentOrder, ...] = (
-        RiverSegmentOrder("seg_a", "rivnet_v1", 1),
-        RiverSegmentOrder("seg_b", "rivnet_v1", 2),
+        RiverSegmentOrder("seg_a", "rivnet_v1", 1, SEGMENT_KEYS["seg_a"]),
+        RiverSegmentOrder("seg_b", "rivnet_v1", 2, SEGMENT_KEYS["seg_b"]),
     ),
 ) -> tuple[LocalObjectStore, OutputParser, FakeOutputRepository]:
     object_root = tmp_path / "object-store"
@@ -405,6 +447,9 @@ def _build_parser(
         cycle_time=_dt("2026-05-01T00:00:00Z"),
         start_time=_dt("2026-05-01T00:00:00Z"),
         output_uri=f"{object_store_prefix.rstrip('/')}/runs/run_001/output/",
+        run_key=RUN_KEY,
+        basin_version_key=BASIN_VERSION_KEY,
+        river_network_version_key=RIVER_NETWORK_VERSION_KEY,
     )
     repository = FakeOutputRepository(context=context, segments=segments)
     parser = OutputParser(
