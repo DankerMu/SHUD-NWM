@@ -106,14 +106,14 @@ macOS 的 `.venv` 和 `node_modules` 不可复用到 Linux，必须删除重建�
 
 ## Issue 驱动开发
 
-每个 issue 的验证标准写在 `openspec/changes/<milestone>/tasks.md` 的 "Evidence Floor" 中。
+每个 issue 的验证标准写在 `openspec/changes/<change>/tasks.md` 的 "Evidence Floor" 中。
 
 ### 当前优先事项
 
-- **Governance-3B #368**：对齐高影响 stale 文档事实与 display readonly live MVT 配置。
-- **Governance-3C #369**：后续整理 `docs/bugs.md` ledger。
-- **Governance-3D #370**：对齐 `.agents` / `.codex` / artifact ownership；已跟踪 project assets 走 PR review，新生成证据默认 local/generated。
-- **node-27 / station-MVT #342**：station-MVT 点图层端点仍是独立 open backend 工作，不并入 #368。
+本节只列**跨窗口长线**优先项；条目完结后必须随手删除（本节是 stale 高发区，以 GitHub open issues 为准）：
+
+- **river_timeseries 表瘦身 Epic #1336**：#1338/#1339/#1340 已交付；剩 #1341（读路径代理键切换，**等用户裁定**回填/排水/混合）→ #1342（旧文本列下线终态验收，下游阻塞）。
+- **node-27 display 性能 #1378**：valid_times named-identity 查询计划翻转（0.56ms → 887ms），待排期。
 
 ### Issue 验证模板
 
@@ -185,7 +185,7 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 | 前端 | pnpm, TypeScript | `apps/frontend/` |
 | 数据库 | PostgreSQL + TimescaleDB + PostGIS | 远端有实例 |
 | 对象存储 | MinIO (dev) / S3 | 远端有实例 |
-| 气象代站时间序列 | 直读 object-store | `/home/ghdc/nwm/object-store/forcing/.../shud/X<lon>Y<lat>.csv` |
+| 气象代站时间序列 | 直读 object-store | `/home/ghdc/nwm/object-store/forcing/<source>/<cycle>/<basin>/<dg_variant>/shud/station_<n>.csv`（#1176 后流域中性命名；旧 `X<lon>Y<lat>.csv` 是 legacy CMFD 命名，mapping_builder 拒收）；读取口径见 `docs/runbooks/object-store-forcing-series-read.md` |
 | HPC 调度 | Slurm | 仅远端可用 |
 | 水文模型 | SHUD | 仅远端可用 |
 | 规格管理 | OpenSpec | `openspec validate` |
@@ -200,7 +200,7 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
 | 本地 Mac | localhost | 开发编辑 | 不连远端 DB |
 
 node-27 DB 数据文件**全部**位于 `pg_default`，即 `/home/nwm/nhms-pgdata`
-（1.7 TB 卷，与 object store 共用；2026-08-10 实测 389 GB）。曾承载
+（1.7 TB 卷，与 object store 共用；2026-08-16 实测 310 GB——#1338/#1339 索引瘦身后自 389 GB 回落）。曾承载
 `river_timeseries` / `forcing_station_timeseries` 大 chunk 的 `ghdc` 表空间
 （`/data/GHDC/nwm-archive/nhms-tablespace`，`/dev/md0`，与归档层共用文件系统 ——
 该例外见 ADR 0002）**已退役**：集群 `pg_tablespace` 只剩 `pg_default` / `pg_global`，
@@ -230,15 +230,16 @@ mount 缺一不可；重建流程见
 
 - 核心工作流：`subagent-workflow`（issue 实现全流程）· `stage-change-pipeline`（设计到 issue 全流水线）· `risk-adaptive-cross-review`（审核语义源）
 - 执行编排：由 native 子代理（`implementer`/`reviewer`/`verifier`）执行，编排见 `subagent-workflow`
-- 设计与澄清：`clarify` · `grill-me` · `grill-with-docs` · `brainstorming` · `future-aware-architecture` · `implementation-planning` · `blind-spot-pass`
-- 代码质量：`review` · `entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor`
-- 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `deep-research` · `codeagent`
+- 设计与澄清：`clarify` · `grill-me` · `grill-with-docs` · `future-aware-architecture` · `implementation-planning` · `blind-spot-pass`
+- 代码质量与诊断：`entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor` · `diagnosing-bugs`
+- 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `deep-research` · `codeagent` · `handoff` · `ask-danker` · `project-instruction-bootstrap`（本文件生成器）
+- legacy：`dual-end-issue-workflow`（与 `subagent-workflow` 重叠时以后者为准）
 
 **Agents**（投影在 `.claude/agents/`（Claude）或 `.codex/agents/`（Codex））：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor` · `issue-scribe`
 
-## 项目本地适配（living 文件，按需创建）
+## 项目本地适配（living 文件，均已存在）
 
-- `openspec/project-profile.md` — workflow 适配（入口/契约/风险轴）；`subagent-workflow` 首次运行可自动 bootstrap。
+- `openspec/project-profile.md` — workflow 适配（入口/契约/风险轴）；`subagent-workflow` Phase 0.5 维护。
 - `openspec/glossary.md` — 领域 ubiquitous language 单一来源；由 `grill-with-docs` / `improve-codebase-architecture` 维护。
 - `docs/adr/NNNN-slug.md` — 长期架构决策账本（三门槛：难回退 + 无背景会困惑 + 真实权衡）。
 
