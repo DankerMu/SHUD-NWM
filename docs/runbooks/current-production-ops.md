@@ -1672,6 +1672,45 @@ Business-readiness receipt after fix:
 - Scheduler evidence shows duplicate-free file-journal progress and lock release
   after the pass.
 
+#### 8.5.1 Withheld copyback source (`COPYBACK_SOURCE_WITHHELD`)
+
+A candidate blocked with reason `copyback_source_withheld` / error code
+`COPYBACK_SOURCE_WITHHELD` is **not** a missing-forcing blocker and none of the
+triage tables above apply to it. The blocker means the copyback source reference
+the scheduler resolved was a redaction placeholder (`[object-uri]`, `[uri]`,
+`[local-path]`, `[redacted]`, `sha256:[redacted]`): the public-read redaction
+boundary withheld the value, so existence could not be determined. Read it as
+"cannot determine", not "source determined absent" — that is what distinguishes
+it from `missing_copyback_source` / `COPYBACK_SOURCE_MISSING`, which does mean a
+probe ran and found nothing.
+
+- `artifact_guard.unsafe_reason` is `null` here because **no probe ran at all**.
+  The §8.5 `unsafe_reason` table above is keyed on probe verdicts and does not
+  cover this blocker; do not read its `null` row as "probed, determined absent".
+- `artifact_guard.artifact_uri` is the placeholder itself, i.e. the evidence that
+  the reference was withheld rather than absent.
+- The exact-cycle forcing rebuild does **not** apply: it repairs forcing
+  packages, and this blocker names a copyback reference. Running it burns a cycle
+  and clears nothing. The blocker is also refused by the missing-forcing repair
+  authorization channel by design.
+- Whether a manual retry request helps depends on which arm the candidate rides,
+  so check for a failure signal (failed pipeline status, failed hydro run, or a
+  failed job row) before choosing:
+  - **Failure-state candidate** (the common case, and the one this blocker's
+    regression tests pin): a manual retry request **does** pre-empt this blocker
+    and re-submits the candidate, exactly as it does for the missing-forcing
+    blockers. Note it **bypasses, not clears**: the withheld reference is
+    untouched, so if the resubmitted run fails again the blocker reappears on the
+    next pass.
+  - **Completed-stage resume candidate** (no failure signal at all; the state
+    carries `completed_stage_evidence` with a `copyback` restart stage): that arm
+    is evaluated *before* the manual-retry branch, so a manual retry request has
+    no effect and the candidate stays blocked. There is no operator clearing path
+    for this arm today — the DB-free public read re-redacts the reference on every
+    pass. Defining one depends on a copyback write side that does not exist yet;
+    it is tracked in issue #1464. Report the occurrence — the geometry is latent
+    in production and a live instance is itself the signal.
+
 ### 8.6 Heihe 底图和 DB 范围混用
 
 Current DB registered Heihe data uses `/home/ghdc/nwm/Basins/...` on node-27.

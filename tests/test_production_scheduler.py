@@ -81,6 +81,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_preflight import _production_slurm_env
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
@@ -13328,6 +13329,252 @@ def test_copyback_source_workspace_local_path_blocks_even_when_file_exists(
     assert decision.action == "blocked"
     assert decision.reason == "missing_copyback_source"
     assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
+
+
+def _record_artifact_probe_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every uri handed to the artifact existence probe, delegating on.
+
+    The guard calls ``_artifact_uri_missing_status`` by BARE NAME inside
+    ``scheduler_state_failure``, so the recorder has to replace the attribute on
+    that module -- patching an importing module would never be consulted.
+    """
+
+    probed: list[str] = []
+    original = scheduler_state_failure_module._artifact_uri_missing_status
+
+    def _record(candidate: Any, artifact_uri: str) -> tuple[bool, str | None]:
+        probed.append(artifact_uri)
+        return original(candidate, artifact_uri)
+
+    monkeypatch.setattr(scheduler_state_failure_module, "_artifact_uri_missing_status", _record)
+    return probed
+
+
+def _withheld_copyback_state(candidate: Any, placeholder: str, *, required_arm: str) -> dict[str, Any]:
+    """Failure state whose resolved copyback reference is a redaction placeholder.
+
+    ``required_arm`` selects which half of ``copyback_required`` is exercised:
+    ``restart_stage`` rides the ``copyback`` restart stage (set membership),
+    ``state_flag`` rides ``_copyback_source_required``, and ``none`` leaves the
+    copyback requirement off entirely.
+    """
+
+    if required_arm == "restart_stage":
+        return _forecast_failure_state(
+            candidate,
+            failed_stage="copyback",
+            # Same shaping as the existing copyback restart-stage anchor: a
+            # non-transient code with an explicit ``retryable`` override keeps the
+            # state off both the recompute and the permanent branch.
+            error_code="COPYBACK_FAILED",
+            retryable=True,
+            copyback_source_uri=placeholder,
+        )
+    state = _copyback_downstream_failure_state(
+        candidate,
+        _production_identity_fixture(),
+        copyback_source=placeholder,
+        error_code="NODE_FAILURE",
+    )
+    if required_arm == "state_flag":
+        state["copyback_source_required"] = True
+    return state
+
+
+@pytest.mark.parametrize("required_arm", ["restart_stage", "state_flag"])
+@pytest.mark.parametrize("placeholder", sorted(EVIDENCE_REDACTION_PLACEHOLDERS))
+def test_withheld_copyback_reference_blocks_with_the_distinct_withheld_reason(
+    placeholder: str,
+    required_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367: a redaction placeholder is a WITHHELD reference, not a probeable one.
+    # Probing it always reports "missing" and lands on ``COPYBACK_SOURCE_MISSING``
+    # -- a determined-missing claim no probe made, and one the missing-forcing
+    # repair channel rejects, i.e. an uncleareable deadlock.  Both
+    # ``copyback_required`` arms are covered.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, placeholder, required_arm=required_arm)
+    expected_restart_stage = "copyback" if required_arm == "restart_stage" else "parse"
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_WITHHELD"
+    assert decision.evidence["classifier"] == "missing_upstream_artifact"
+    assert decision.evidence["restart_stage"] == expected_restart_stage
+    assert decision.evidence["artifact_guard"]["artifact_type"] == "copyback_source"
+    # The placeholder itself is the artifact reference: it is already redacted, so
+    # it is evidence-safe, and it tells the operator the reference was WITHHELD
+    # rather than absent.
+    assert decision.evidence["artifact_guard"]["artifact_uri"] == placeholder
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "COPYBACK_SOURCE_WITHHELD"
+    # No probe ran on the withheld reference, so there is no probe-layer unsafe
+    # reason to report.  The recorder is global, so the pin is "the placeholder
+    # never reached the probe" -- unrelated lanes above the guard (the raw-manifest
+    # repair probe on the restart-stage geometry) legitimately probe their own uris.
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] is None
+    assert placeholder not in probed
+
+
+@pytest.mark.parametrize("placeholder", sorted(EVIDENCE_REDACTION_PLACEHOLDERS))
+def test_withheld_copyback_reference_without_a_copyback_requirement_does_not_block(
+    placeholder: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D1: a withheld reference carries no existence evidence at all, so with
+    # nothing requiring a copyback source there is nothing to determine -- the leg
+    # emits no blocker, exactly like the absent-reference arm.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, placeholder, required_arm="none")
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence.get("error_code") not in {"COPYBACK_SOURCE_MISSING", "COPYBACK_SOURCE_WITHHELD"}
+    assert placeholder not in probed
+
+
+def test_withheld_copyback_blocker_is_not_a_stable_missing_forcing_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D3: the forcing repair authorization channel licenses a single-cycle
+    # forcing REBUILD, which cannot clear a withheld copyback reference.  The
+    # withheld blocker must therefore stay outside that channel.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm="restart_stage")
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.reason == "copyback_source_withheld"
+    assert _decision_is_stable_missing_forcing_blocker(decision) is False
+
+
+def test_withheld_copyback_reference_shadows_a_lower_priority_alias_without_probing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D6: ``_first_artifact_uri`` resolves container-major, so a placeholder
+    # in the state-level key WINS the resolution.  A lower-priority alias that
+    # survived unredacted is an echo of unknown provenance -- probing it would
+    # bypass the withheld ruling on the authoritative reference -- so the leg does
+    # NOT continue scanning.  The echo is materialized as a PRESENT object here:
+    # a continue-scan would find it and emit no blocker at all.
+    object_store_root = tmp_path / "object-store"
+    surviving_alias = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    surviving_alias.parent.mkdir(parents=True)
+    surviving_alias.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm="restart_stage")
+    state["copyback_evidence"] = {"copyback_source_uri": str(surviving_alias)}
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["artifact_guard"]["artifact_uri"] == "[object-uri]"
+    assert "[object-uri]" not in probed
+    assert str(surviving_alias) not in probed
+
+
+def _withheld_copyback_manual_retry_marker(job_id: str) -> dict[str, Any]:
+    return _decision_path_manual_retry_marker(
+        entity_id=job_id,
+        retry_count=1,
+        previous_job_id=job_id,
+        details_model_id="model_a",
+    )
+
+
+@pytest.mark.parametrize("required_arm", ["restart_stage", "state_flag"])
+def test_manual_retry_pre_empts_the_withheld_copyback_blocker_on_failure_state_arms(
+    required_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D: "manual retry is not an escape hatch" is FALSE for the
+    # failure-state geometries this change pins.  They reach the guard at
+    # ``scheduler_state_decision.py:277``/``:355``, both AFTER the manual-retry
+    # return (``:269``), so a production-shaped marker pre-empts the blocker.  It
+    # bypasses rather than clears: the withheld reference is untouched, so the
+    # blocker returns if the resubmitted run fails again (the no-marker arm of this
+    # same geometry is pinned by the withheld-blocker test above).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm=required_arm)
+    state["pipeline_events"] = [
+        _withheld_copyback_manual_retry_marker("job_cycle_gfs_2026052106_forecast_model_a_forecast")
+    ]
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+
+
+def test_withheld_copyback_blocker_on_the_completed_stage_arm_survives_a_manual_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D, the other half: the completed-stage resume arm
+    # (``scheduler_state_decision.py:237``) is evaluated BEFORE the manual-retry
+    # return, so a marker does not pre-empt it.  This arm requires NO failure
+    # signal, which is exactly what makes it disjoint from the two arms above --
+    # and it is the arm the runbook routes to "report + #1464", since no operator
+    # channel reaches it.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    parse_job_id = "job_cycle_gfs_2026052106_forecast_model_a_parse"
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "copyback_source_uri": "[object-uri]",
+        "completed_stage_evidence": {
+            "restart_stage": "copyback",
+            "stage": "parse",
+            "status": "succeeded",
+            "job_id": parse_job_id,
+        },
+        "pipeline_jobs": [{**identity, "job_id": parse_job_id, "status": "succeeded", "stage": "parse"}],
+        "pipeline_events": [_withheld_copyback_manual_retry_marker(parse_job_id)],
+    }
+    # The disjointness premise, asserted rather than assumed.
+    assert scheduler_module._state_has_failure_signal(state) is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_WITHHELD"
+    assert decision.evidence["restart_stage"] == "copyback"
 
 
 # ---------------------------------------------------------------------------
