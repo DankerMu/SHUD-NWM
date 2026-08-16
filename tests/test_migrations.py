@@ -448,10 +448,17 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     # compression does NOT let us push down stay off the fact table entirely,
     # in either branch, and neither branch keeps the old IS-NULL-or-equals
     # text guards.
+    #
+    # Word-boundary matching, not bare substrings: these two branches are
+    # single-table queries with no alias to qualify on, and `unit` /
+    # `quality_flag` are prefixes of the legitimate `unit_e` /
+    # `quality_flag_e`. A bare `in` check would false-red the moment either
+    # enum column is projected here, and would false-red on correct post-#1342
+    # code for the same reason.
     for branch in (named_branch_sql, no_named_branch_sql):
         outer = outer_predicates(branch)
         for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
-            assert forbidden not in outer, forbidden
+            assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
     assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
     assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
         valid_time_source

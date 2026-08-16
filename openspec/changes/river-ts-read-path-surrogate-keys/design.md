@@ -62,7 +62,7 @@
   安全形态）——它在边界内文件里，留文本会违反"fact 谓词只落键/枚举
   列"的 delta 措辞，且 #1342 删文本列时必炸；仓库内唯一 caller
   （hydro_display.py:270）恒传非空 run_id，该分支无生产流量，形态
-  断言 unit 覆盖即可，不进 EXPLAIN 四形态集。
+  断言 unit 覆盖即可，不进 EXPLAIN 六形态集。
 - `display_coverage.py` river 扫描：fact 侧 GROUP BY 四键 +
   `COUNT(DISTINCT river_segment_key)`（网络内 1:1，计数等值），汇总后
   join 权威表还原文本身份（join-and-reconstruct）；`candidate_runs`
@@ -83,8 +83,14 @@
   语义为带键行严格 no-op、NULL 键行仍由键谓词排除，只窄不宽；
   (c) 随 #1342 删文本列一并移除——漏删即列不存在报错，显式失败而非
   静默退化。范围判定从宽：display 边界内全部 `hydro.river_timeseries`
-  fact 读查询统一携带（含 scan 窗口常量折叠后可排除压缩 chunk 的
-  coverage 扫描——冗余无害且省去"哪条会命中"逐条论证的维护负担）。
+  fact 读查询统一携带，省去"哪条会命中"逐条论证的维护负担。coverage
+  扫描按模式拆开（round-2 裁决修正原措辞）：`--run-id` 模式 scan
+  窗口常量折叠后可排除压缩 chunk，辅助真冗余；`--all` 模式 scan
+  守卫整体折叠消失，剩余时间界是 candidate_runs 关联列（非计划期
+  常量）、无 chunk 排除，唯一文本辅助 `q_down` 单值不消 batch——
+  该形态对压缩 chunk 无有效辅助，但与 master 等价**非回归**
+  （master 的 CTE join 文本等值同样不可下推，模块头注释自证），
+  据此记录为不入 2.5 形态集的理由。
 
 ## D2 索引（000051）
 
@@ -174,7 +180,12 @@
   与 national 两图层都做），否则 post 快照可能读到 pre 代码的缓存
   产物，等价性证据失真。配套：`NATIONAL_DISCHARGE_QUERY_VERSION`
   常量随本 change 递增（查询形态变更即缓存世代变更，防部署后
-  stale/fresh 分裂窗口）。
+  stale/fresh 分裂窗口）；hydro 单 run 图层不 bump——存在性探针在
+  缓存读之前跑且已切键，NULL 键身份直接 404 不触缓存，全回填身份
+  的新旧 tile 逐字段相等（round-2 裁决：不对称正确）。**同款双图层
+  缓存清空也适用于回滚与后续重部署路径**（回滚 = revert 部署，若
+  期间存在部分回填 chunk，须随部署动作清 `map.tile_cache` +
+  `NHMS_MVT_FILE_CACHE_DIR`），不只限快照窗口。
 - EXPLAIN (ANALYZE, BUFFERS) before/after **六形态**：tile 点查、
   valid_times named-identity（#1378 基线对照）、coverage run 域扫描、
   存在性探针、**national identity-stats 探针、national
@@ -183,9 +194,17 @@
   零可用前缀，退化风险最高，不测即盲区）。判据：切换后计划走
   000051 索引、fact 表无 Seq Scan、latency 不高于文本基线（#1378
   形态应数量级改善）。**每一形态至少含一次绑定命中压缩 chunk 的
-  valid_time**，其压缩段计划须显示文本 segmentby 下推（compression
-  内部关系上有 Index/Filter Cond），不得出现全解压 Seq Scan——这是
-  混合下推谓词的实机验收面。
+  valid_time**；压缩段验收判据**分形态**（round-2 裁决修正——原
+  "每形态 segmentby 下推" 对 national 三形态物理不可满足）：绑定
+  字面量四形态（tile 点查、valid_times named、coverage run 域、
+  存在性探针）须显示文本 segmentby 下推（compression 内部关系上有
+  Index/Filter Cond）；national 三形态（identity-stats、typed/
+  untyped 腿）身份经 latest_runs join 到达、无 segmentby 字面量，
+  判据为**不得全解压 Seq Scan**——batch 消除通道是 orderby 第 2 列
+  `valid_time` 等值绑定的 min/max 元数据（`variable` 单值 q_down、
+  其元数据不消 batch，受批辅助在这三形态是声明性 no-op，如实进
+  receipt）。这与 spec delta 的 "segmentby/orderby columns" 措辞
+  一致。
 - deny-write（AC-5）与 `/`、`/ops` 浏览器 e2e（AC-4）照 C1-C4 惯例。
 
 ## D5 测试策略（Evidence Floor 映射）
@@ -196,7 +215,7 @@
   `river_segment_id` 文本 fact 谓词与文本列 fact join 为负向钉子；
   OOV variable →空结果路径；`scale_validation.py` plan_lines 新旧
   对齐。红证配对：新断言在 pre-change 代码上必红（stash 法）。
-- **`tests/sql_shape_helpers.py` 是测试 oracle，本身必须有自测**
+- **`tests/test_sql_shape_helpers.py`（自 `tests/sql_shape_helpers.py` 迁址，pytest 可采集）是测试 oracle，本身必须有自测**
   （round-1 P1 教训：`strip_scalar_subqueries` 把 CTE 开头
   `(SELECT` 误当标量子查询整段剥除，5 条负向钉子在未切换 master 上
   假绿）。要求：(a) 剥除逻辑区分标量子查询与 CTE/派生表开头，括号
@@ -233,7 +252,7 @@
   （不动，跟踪单挂 #1342）。
 - Failure paths: 未知身份/OOV → 空结果；部署回滚 = revert 代码，文本
   列仍权威；压缩 chunk NULL 行不可见窗口由 retention 收敛。
-- Evidence: pre/post 快照、EXPLAIN 四形态、回填 receipts + SQL 计数、
+- Evidence: pre/post 快照、EXPLAIN 六形态、回填 receipts + SQL 计数、
   deny-write、浏览器 e2e。
 - Regression rows:
   - 钉住身份 tile/JSON 请求 → 切换前后逐字段等价；

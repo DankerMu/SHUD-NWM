@@ -212,7 +212,13 @@ def test_variable_predicates_are_enum_range_matches_not_casts_on_every_switched_
         "hydro tile": _source_cte("hydro"),
         "national tile": _source_cte("hydro-national"),
         "national identity probe": _identity_stats_cte("hydro-national"),
-        "valid_times": _slice(MVT_SOURCE, "def valid_times_for_layer", "def _valid_time_discovery"),
+        # Tail anchor is the NEXT function, not `_valid_time_discovery` (which
+        # is defined further down): the wider slice over-spans into
+        # `national_discharge_valid_times` and `_coverage_datetime`, so a cast
+        # smuggled into either would be attributed to `valid_times_for_layer`
+        # here. Same anchor as `_valid_times_branch_sql` below and as
+        # tests/test_migrations.py.
+        "valid_times": _slice(MVT_SOURCE, "def valid_times_for_layer", "def national_discharge_valid_times"),
         "existence probe": _slice(
             HYDRO_DISPLAY_SOURCE,
             "def _require_hydro_mvt_source_identity",

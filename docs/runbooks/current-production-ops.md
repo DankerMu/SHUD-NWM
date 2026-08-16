@@ -116,6 +116,11 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   当前使用两个独立连接并行刷新。该步骤非 fatal，不应掩盖 autopipe 主返回码。
+- **`--skip-fresh` 不可省**：#1341 后 river coverage 扫描按代理键选行，legacy
+  （pre-#1340、NULL 键）run 扫不到任何行，裸 `--all` 或 `--run-id <legacy run>`
+  会把已物化的 `run_display_coverage` 覆写成 0 / NULL 边界，**无法撤销**，该 run
+  随即掉出 latest-product readiness 与 national tile。详见
+  `scripts/node27_refresh_coverage.py` 模块 docstring 的 warning 块。
 
 确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production
 scheduler 是 DB-free systemd timer：

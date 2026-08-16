@@ -18,7 +18,6 @@ from typing import Any
 
 from packages.common import display_coverage
 from tests.test_sql_shape_helpers import (
-    FORBIDDEN_TEXT_FACT_COLUMNS,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     outer_predicates,
     text_fact_columns,
@@ -151,8 +150,15 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # Negative half: the aids are bounded to the sanctioned three, and nothing
     # joins the fact table on a text column (a join equality buys no
     # compressed-chunk pushdown anyway, so it would be cost without benefit).
+    #
+    # The set equality carries the whole forbidden-column half on its own:
+    # `text_fact_columns` scans the same `outer` text for every column in
+    # SANCTIONED | FORBIDDEN under word boundaries, so any `rt.basin_version_id`
+    # / `rt.river_segment_id` / `rt.unit` / `rt.quality_flag` reference widens
+    # the left side and fails. A bare `f"rt.{forbidden}" not in outer` loop
+    # beside it adds nothing and actively false-reds: "rt.unit" is a prefix of
+    # the legitimate `rt.unit_e`, and it would also fail on correct post-#1342
+    # code for the same reason.
     assert text_fact_columns(sql, "rt") == set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
-    for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
-        assert f"rt.{forbidden}" not in outer, forbidden
     assert "cr.run_id = rt.run_id" not in outer
     assert "cr.river_network_version_id = rt.river_network_version_id" not in outer

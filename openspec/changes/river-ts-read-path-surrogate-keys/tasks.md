@@ -60,7 +60,8 @@
 
 ### 1F. round-1 修复轮（8 项 verified findings，用户裁定混合谓词在案）
 
-- [x] 1F.1 (P1) `tests/sql_shape_helpers.py` 重写：`strip_scalar_
+- [x] 1F.1 (P1) `tests/sql_shape_helpers.py` 重写并迁址为
+      `tests/test_sql_shape_helpers.py`（pytest 采集 + 自选择 exit 0）：`strip_scalar_
       subqueries` 区分 CTE/派生表开头与标量子查询，括号配平跳过
       字符串字面量与注释；真实 pytest 自测函数；5 条既有负向钉子
       对 master 源码红证复验；`scripts/select_ci_tests.py` 选择规则
@@ -72,9 +73,12 @@
       unit 形态断言与负向钉子按混合口径重写（受批三列成对出现；
       `basin_version_id`/`river_segment_id` 文本 fact 谓词禁入）
 - [x] 1F.3 (P2) coverage legacy run 刷新行为显式钉死：integration 用
-      `_LEGACY_RUN_ID` 独立断言 segment_count 归零 + valid_time 边界
-      丢失；ops 禁令（legacy run 不得无 `--skip-fresh` 重扫）进
-      runbook/receipt 记录
+      `_ALL_LEGACY_RUN_ID` 独立断言 segment_count 归零 + valid_time
+      边界丢失；ops 禁令（legacy run 不得无 `--skip-fresh` 重扫）落
+      `scripts/node27_refresh_coverage.py` docstring + `--skip-fresh`
+      help + `docs/runbooks/current-production-ops.md` coverage
+      backstop 段（round-2 裁决补落 runbook 半边）+ 交付 receipt
+      （3.2）
 - [x] 1F.4 (P2) `NATIONAL_DISCHARGE_QUERY_VERSION` 递增（查询形态
       变更即缓存世代变更）
 - [x] 1F.5 (P2) national 图层 integration oracle 补强：per-segment
@@ -98,7 +102,13 @@
       coverage run 域扫描、存在性探针、national identity-stats、
       national typed/untyped 腿）——走 000051 索引、无 Seq Scan、
       latency 不退化；valid_times 形态对照 #1378 基线；**每形态含
-      压缩 chunk 命中绑定，压缩段显示文本 segmentby 下推**（AC-1）
+      压缩 chunk 命中绑定；压缩段判据分形态**（round-2 裁决修正）：
+      绑定字面量四形态（tile 点查、valid_times named、coverage run
+      域、存在性探针）须显示文本 segmentby 下推（compression 内部
+      关系 Index/Filter Cond）；national 三形态身份经 join 到达、无
+      segmentby 字面量可下推，判据改为**无全解压 Seq Scan**——batch
+      消除依赖 orderby 第 2 列 valid_time 等值绑定的 min/max 元数据
+      （q_down 单值、variable 元数据不消 batch，如实记录）（AC-1）
 - [ ] 2.6 node-27：`/` 与 `/ops` 浏览器 e2e + MVT 渲染正常（AC-4）；
       deny-write 校验通过（AC-5）；定向真实 DB pytest（integration 子集）
 - [x] 2.7 issue-scribe 立"边界外 river_timeseries 文本读者改造"跟踪单，
