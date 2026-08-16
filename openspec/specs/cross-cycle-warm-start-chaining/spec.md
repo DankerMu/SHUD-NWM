@@ -129,6 +129,19 @@ every artifact the manifest names is integrity-pinned by its checksum.
   empty `checkpoints` list, `provenance.requested_checkpoint_hours: []`, and a `final_ic` entry
   naming and checksumming the solve's final state, rather than omitting the file.
 
+#### Scenario: Failure-message diagnostics survive receipt truncation and render minutes losslessly
+
+- **WHEN** the `STATE_CHECKPOINTS_MISSING` failure message is truncated to the task-outcome
+  receipt's message budget while the observed-header-minutes trail is long (its length grows
+  with run duration), or an observed header minute is in epoch-minutes form
+- **THEN** the per-hour recovery-outcome trail is placed before the observed-header-minutes
+  trail in the message, so truncation sacrifices the observed trail first and the receipt's
+  `error_message` still names how each missing hour's recovery ended
+- **AND** header minutes rendered into the failure message — both the observed trail and the
+  recovery-outcome `gate_rejected(header=...)` value — render in plain decimal form (never
+  scientific notation), so an epoch-form minute remains greppable against the manifest's
+  full-precision values
+
 ### Requirement: Next cycle consumes the prior cycle's saved state
 A production forecast cycle SHALL initialize SHUD from the snapshot valid at its init time when one
 exists, not from the packaged calibrated state.
