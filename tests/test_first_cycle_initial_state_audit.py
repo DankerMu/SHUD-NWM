@@ -187,6 +187,67 @@ class _Fixture:
             }
         )
 
+    def add_baseline_package_model(
+        self,
+        model_id: str,
+        *,
+        shud_input_name: str,
+        ic_content: bytes | None,
+    ) -> Path:
+        """Register an inventory-shaped baseline row AND lay down its IC object.
+
+        The inventory tier decides such a row from recorded digests alone; the
+        object exists here so the audit's own-layer content probe (#1197) has real
+        bytes to read.  Returns the IC object path so a test can obstruct it.
+        """
+        package_key = f"models/{model_id}/package"
+        manifest_key = f"{package_key}/manifest.json"
+        ic_bytes = ic_content if ic_content is not None else b""
+        _write_json(
+            self.object_store_root / manifest_key,
+            {
+                "schema_version": "nhms.basins_package_manifest.v1",
+                "model_id": model_id,
+                "version": "vbasins-test",
+                "package_checksum": _sha256(f"package-{model_id}".encode()),
+                "shud_input_name": shud_input_name,
+                "included_files": [
+                    {
+                        "relative_path": f"{shud_input_name}.sp.mesh",
+                        "role": "shud_input",
+                        "size_bytes": 4096,
+                        "sha256": _sha256(b"mesh"),
+                    },
+                    {
+                        "relative_path": f"{shud_input_name}.cfg.ic",
+                        "role": "shud_input",
+                        "size_bytes": max(len(ic_bytes), 1),
+                        "sha256": _sha256(ic_bytes) if ic_bytes else _sha256(model_id.encode()),
+                    },
+                ],
+            },
+        )
+        ic_path = self.object_store_root / package_key / f"{shud_input_name}.cfg.ic"
+        if ic_content is not None:
+            ic_path.parent.mkdir(parents=True, exist_ok=True)
+            ic_path.write_bytes(ic_content)
+        self._models.append(
+            {
+                "model_id": model_id,
+                "basin_id": model_id,
+                "model_package_uri": f"s3://nhms/{package_key}/",
+                "manifest_uri": f"s3://nhms/{manifest_key}",
+                "package_checksum": _sha256(f"package-{model_id}".encode()),
+                "resource_profile": {
+                    "manifest_uri": f"s3://nhms/{manifest_key}",
+                    "model_package_uri": f"s3://nhms/{package_key}/",
+                    "shud_input_name": shud_input_name,
+                    "package_checksum": _sha256(f"package-{model_id}".encode()),
+                },
+            }
+        )
+        return ic_path
+
     def variant_ic_path(self, model_id: str, shud_input_name: str) -> Path:
         """Absolute path of the canonical IC object probed for a variant row."""
         return self.object_store_root / _variant_package_key(model_id) / f"{shud_input_name}.cfg.ic"
@@ -816,3 +877,243 @@ def test_audit_verdict_table_requires_an_explicit_completeness_claim() -> None:
             first_run_quality="cold_start_no_state",
             first_run_init_mode=1,
         )
+
+
+# ---------------------------------------------------------------------------
+# IC header content-shape (#1197): the malformed `23106\t6` delivery digested
+# cleanly and was non-empty, so every pre-change qualification check passed it.
+# ---------------------------------------------------------------------------
+
+MALFORMED_IC = b"23106\t6\n1\t0.1\t0.2\t0.3\t0.4\n"
+WELL_FORMED_IC = b"23106\t6\t29714400.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
+#: The same malformed header carried by a body many times the header bound
+#: (~72 KiB here — 26 + 4096*18 bytes — against hundreds of KiB in production).
+#: The tier-(a) sweep must reach its verdict from the first line alone, without
+#: pulling the body across NFS.
+LARGE_MALFORMED_IC = MALFORMED_IC + b"1\t0.1\t0.2\t0.3\t0.4\n" * 4096
+#: A first line that never ends: 8192 bytes of numeric tokens with no newline at
+#: all, so a bounded read can only ever hold a TRUNCATION of the header.
+HEADERLESS_OVERLONG_IC = b"1 " * 4096
+
+
+def test_audit_mirror_probe_fills_the_header_shape_verdict(tmp_path: Path) -> None:
+    """The audit probe implementation itself, over real bytes on disk."""
+    root = tmp_path / "store"
+    (root / "models/x/package").mkdir(parents=True)
+    (root / "models/x/package/x.cfg.ic").write_bytes(MALFORMED_IC)
+
+    malformed = audit._canonical_ic_object_probe(
+        "s3://nhms/models/x/package/x.cfg.ic",
+        object_store_root=root,
+        object_store_prefix="s3://nhms",
+    )
+    assert malformed.unreadable_detail == ""
+    assert malformed.exists is True
+    assert "2 numeric token(s)" in malformed.header_shape_invalid_reason
+
+    (root / "models/x/package/x.cfg.ic").write_bytes(WELL_FORMED_IC)
+    well_formed = audit._canonical_ic_object_probe(
+        "s3://nhms/models/x/package/x.cfg.ic",
+        object_store_root=root,
+        object_store_prefix="s3://nhms",
+    )
+    assert well_formed.header_shape_invalid_reason == ""
+    assert well_formed.sha256 == _sha256(WELL_FORMED_IC)
+
+    # An object that cannot be read reports unreadability and NO shape verdict.
+    absent = audit._canonical_ic_object_probe(
+        "s3://nhms/models/x/package/missing.cfg.ic",
+        object_store_root=root,
+        object_store_prefix="s3://nhms",
+    )
+    assert absent.header_shape_invalid_reason == ""
+
+
+def test_audit_variant_row_with_a_malformed_ic_header_is_disqualified(tmp_path: Path) -> None:
+    """Tier (b) through the real audit entry point."""
+    fixture = _Fixture(tmp_path)
+    fixture.add_direct_grid_variant_model(
+        "lh_gl_dg_gfs", shud_input_name="LH-GL", ic_content=MALFORMED_IC
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "lh_gl_dg_gfs", "gfs")
+    assert row["ic_qualified"] is False
+    assert row["ic_status"] == "unqualified"
+    assert row["detail"] == "packaged_initial_condition_header_shape_invalid"
+    assert row["ic_qualification_source"] == "object_probe"
+
+
+def test_audit_sweeps_inventory_shaped_packages_with_its_own_content_probe(tmp_path: Path) -> None:
+    """Tier (a) left-shift: the 51 already-published baseline packages get checked.
+
+    The shared classification never probes for an inventory-shaped manifest (the
+    production gate's zero-object-IO promise); this offline audit does it in its
+    own layer, and says so through a dedicated qualification-source value.
+    """
+    fixture = _Fixture(tmp_path)
+    fixture.add_baseline_package_model(
+        "lh_gl", shud_input_name="LH-GL", ic_content=MALFORMED_IC
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "lh_gl", "gfs")
+    assert row["ic_qualified"] is False
+    assert row["ic_status"] == "unqualified"
+    assert row["detail"] == "packaged_initial_condition_header_shape_invalid"
+    assert row["ic_qualification_source"] == "inventory_content_probe"
+
+
+def test_audit_inventory_sweep_leaves_a_well_formed_package_on_the_inventory_verdict(
+    tmp_path: Path,
+) -> None:
+    fixture = _Fixture(tmp_path)
+    fixture.add_baseline_package_model(
+        "keliya", shud_input_name="keliya", ic_content=WELL_FORMED_IC
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "keliya", "gfs")
+    assert row["ic_qualified"] is True
+    assert row["ic_qualification_source"] == "inventory"
+
+
+def test_audit_inventory_sweep_keeps_the_inventory_verdict_when_the_object_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    """Only a READ header may downgrade a row; a failed read manufactures nothing.
+
+    The audit is a read-only sweep over an object store it does not own, so an
+    object it cannot reach is not evidence that the package is malformed.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_path = fixture.add_baseline_package_model(
+        "unreachable", shud_input_name="unreachable", ic_content=None
+    )
+    assert not ic_path.exists()
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "unreachable", "gfs")
+    assert row["ic_qualified"] is True
+    assert row["ic_qualification_source"] == "inventory"
+
+
+def test_audit_inventory_sweep_keeps_the_inventory_verdict_when_the_header_outruns_the_bound(
+    tmp_path: Path,
+) -> None:
+    """The other half of the bound: a truncated header may not manufacture a verdict.
+
+    ``read_bytes_limited_no_follow`` returns one sentinel byte past its bound, so
+    an IC object whose first line is longer than
+    :data:`audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES` hands the probe a PREFIX of the
+    header, not the header.  Counting tokens in that prefix would report a token
+    count the file does not have (here: "2049 numeric token(s)" for a 4096-token
+    line) and write that invented reason into a shipped receipt, so the probe
+    returns ``None`` and the inventory verdict stands untouched.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_path = fixture.add_baseline_package_model(
+        "overlong_header", shud_input_name="overlong", ic_content=HEADERLESS_OVERLONG_IC
+    )
+    assert b"\n" not in ic_path.read_bytes()
+    assert ic_path.stat().st_size > audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "overlong_header", "gfs")
+    assert row["ic_qualified"] is True
+    assert row["ic_qualification_source"] == "inventory"
+    assert "numeric token(s)" not in str(row.get("detail") or "")
+
+
+def test_audit_receipt_limits_declare_the_inventory_tier_header_probe(tmp_path: Path) -> None:
+    """closure F-B: the receipt contract stays truthful about what was probed."""
+    fixture = _Fixture(tmp_path)
+    fixture.add_baseline_package_model(
+        "keliya", shud_input_name="keliya", ic_content=WELL_FORMED_IC
+    )
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    limits = fixture.receipt()["limits"]
+    assert limits["inventory_tier_ic_header_probed"] is True
+    # The sweep reads a bounded header prefix and hashes nothing (proved by
+    # ``test_audit_inventory_sweep_reads_only_the_header_and_hashes_nothing``),
+    # so the older const still holds.
+    assert limits["inventory_tier_package_objects_rehashed"] is False
+    note = str(limits["note"]).lower()
+    assert "header" in note and "inventory_content_probe" in note
+
+
+class _HashlibSpy:
+    """Delegating stand-in for the audit module's ``hashlib`` that counts sha256."""
+
+    def __init__(self) -> None:
+        self.sha256_calls = 0
+
+    def sha256(self, *args: Any, **kwargs: Any) -> Any:
+        self.sha256_calls += 1
+        return hashlib.sha256(*args, **kwargs)
+
+
+def test_audit_inventory_sweep_reads_only_the_header_and_hashes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tier-(a) sweep's cost, asserted in BYTES READ rather than in prose.
+
+    Production carries 51 inventory-shaped packages, ~16 MB of IC object bytes per
+    full-probe pass (the figure :func:`audit._canonical_ic_header_shape_probe`'s own
+    docstring quotes); a sweep that re-read (let alone re-hashed) them whole would
+    burn that IO on every pass and would make the receipt's
+    ``inventory_tier_package_objects_rehashed=false`` claim, the schema's
+    ``inventory_tier_ic_header_probed`` description and this module's docstring
+    untrue at once.  So this test instruments the audit's own reader and digest
+    entry points: the canonical IC object is opened exactly once, bounded by
+    :data:`audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES`, and no sha256 is computed at all.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_path = fixture.add_baseline_package_model(
+        "lh_gl", shud_input_name="LH-GL", ic_content=LARGE_MALFORMED_IC
+    )
+    fixture.publish_registry()
+    ic_size_bytes = ic_path.stat().st_size
+    assert ic_size_bytes > 8 * audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+
+    reads: list[tuple[Path, int, int]] = []
+    real_read = audit.read_bytes_limited_no_follow
+
+    def _recording_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        content = real_read(path, max_bytes=max_bytes, containment_root=containment_root)
+        reads.append((Path(path), max_bytes, len(content)))
+        return content
+
+    hashlib_spy = _HashlibSpy()
+    monkeypatch.setattr(audit, "read_bytes_limited_no_follow", _recording_read)
+    monkeypatch.setattr(audit, "hashlib", hashlib_spy)
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    # The bound did not cost the sweep its verdict: this package IS malformed.
+    row = _row(fixture.receipt(), "lh_gl", "gfs")
+    assert row["ic_qualified"] is False
+    assert row["ic_qualification_source"] == "inventory_content_probe"
+
+    ic_reads = [entry for entry in reads if entry[0] == ic_path]
+    assert len(ic_reads) == 1, f"the canonical IC object was read {len(ic_reads)} times: {ic_reads}"
+    _path, max_bytes, bytes_read = ic_reads[0]
+    assert max_bytes == audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+    # ``read_bytes_limited_no_follow`` returns at most one sentinel byte past its
+    # bound, so that — not the bound itself — is the ceiling on bytes in hand.
+    assert bytes_read <= audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES + 1
+    assert bytes_read < ic_size_bytes
+    assert hashlib_spy.sha256_calls == 0

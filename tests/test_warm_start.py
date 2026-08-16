@@ -213,7 +213,11 @@ def test_forecast_hard_stale_state_falls_back_to_cold_start(tmp_path: Path) -> N
 def test_runtime_corrupted_init_state_is_rejected_and_next_state_is_staged(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     _write_runtime_inputs(object_root)
-    good_content = b"good-state"
+    # A real native SHUD IC header (``<mesh> <mesh-state-columns> <minute-time>``),
+    # stamped at the good snapshot's valid_time (2026-04-29T00:00Z). Materialization
+    # validates the header shape before re-stamping it, so a placeholder body would
+    # be rejected as a corrupt snapshot in its own right.
+    good_content = b"2\t6\t29623680.000000\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
     bad_content = b"bad-state"
     _write_object(object_root, "states/demo_model/2026043000/state.cfg.ic", bad_content)
     _write_object(object_root, "states/demo_model/2026042900/state.cfg.ic", good_content)
@@ -244,7 +248,109 @@ def test_runtime_corrupted_init_state_is_rejected_and_next_state_is_staged(tmp_p
     assert manifest["runtime"]["init_mode"] == 3
     assert repository.init_state_updates[-1] == good_state.state_id
     staged_ic = next(input_dir.rglob("*.cfg.ic"))
-    assert staged_ic.read_bytes() == good_content
+    # Full-byte oracle, constructed independently of the runtime: the BODY is the
+    # good snapshot's verbatim, and the header's trailing token is the RUN START
+    # minute, because the pre-existing shift step re-stamps it there (behaviour
+    # unchanged by #1197; the fixture body is now a real SHUD IC, so that step
+    # actually runs instead of silently no-opping). 29626560 = the fixture
+    # manifest's start_time 2026-05-01T00:00:00Z in minutes since the epoch
+    # (20574 days x 1440), i.e. 2880 minutes past the snapshot's own
+    # 29623680 / 2026-04-29T00:00:00Z stamp.
+    assert staged_ic.read_bytes() == b"2\t6\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
+
+
+def test_runtime_malformed_ic_header_snapshot_degrades_instead_of_failing_the_run(
+    tmp_path: Path,
+) -> None:
+    """#1197 on the warm-start path: a bad header must not fail the whole forecast.
+
+    ``_shift_cfg_ic_time`` now refuses a header with no minute-time slot. On the
+    forcing-staging call sites that refusal is meant to surface; here it must be
+    translated into the corrupted-state rejection instead, or one malformed
+    snapshot takes the cycle down with it and the degradation ladder this loop
+    exists to provide is gone.
+
+    The snapshot shape is deliberately a ONE-numeric-token header: a two-token
+    header on a snapshot carrying a recorded valid_time hits the pre-existing
+    ``WARM_START_TIME_MISMATCH`` check first (unchanged by this change), so it
+    would not exercise this path at all.
+    """
+    object_root = tmp_path / "object-store"
+    _write_runtime_inputs(object_root)
+    malformed_content = b"23106\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
+    good_content = b"2\t6\t29623680.000000\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
+    _write_object(object_root, "states/demo_model/2026043000/state.cfg.ic", malformed_content)
+    _write_object(object_root, "states/demo_model/2026042900/state.cfg.ic", good_content)
+    bad_state = _state(
+        "state_demo_model_2026043000",
+        "2026-04-30T00:00:00Z",
+        checksum=sha256_bytes(malformed_content),
+    )
+    good_state = _state(
+        "state_demo_model_2026042900",
+        "2026-04-29T00:00:00Z",
+        checksum=sha256_bytes(good_content),
+    )
+    state_manager = FakeStateManager([bad_state, good_state])
+    repository = FakeRuntimeRepository()
+    runtime = SHUDRuntime(
+        config=SHUDRuntimeConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        ),
+        repository=repository,
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+        state_manager=state_manager,
+    )
+    manifest = _runtime_manifest(bad_state)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No raise: the run still prepares.
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert state_manager.corrupted == [bad_state.state_id]
+    assert manifest["initial_state"]["state_id"] == good_state.state_id
+    assert manifest["runtime"]["init_mode"] == 3
+    staged_ic = next(input_dir.rglob("*.cfg.ic"))
+    assert staged_ic.read_bytes().splitlines()[0].split()[:2] == [b"2", b"6"]
+
+
+def test_runtime_malformed_only_snapshot_falls_back_to_cold_start(tmp_path: Path) -> None:
+    """Bottom of the same ladder: no usable successor -> cold start, not a failure."""
+    object_root = tmp_path / "object-store"
+    _write_runtime_inputs(object_root)
+    malformed_content = b"23106\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
+    _write_object(object_root, "states/demo_model/2026043000/state.cfg.ic", malformed_content)
+    only_state = _state(
+        "state_demo_model_2026043000",
+        "2026-04-30T00:00:00Z",
+        checksum=sha256_bytes(malformed_content),
+    )
+    state_manager = FakeStateManager([only_state])
+    runtime = SHUDRuntime(
+        config=SHUDRuntimeConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+        ),
+        repository=FakeRuntimeRepository(),
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+        state_manager=state_manager,
+    )
+    manifest = _runtime_manifest(only_state)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert state_manager.corrupted == [only_state.state_id]
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # The malformed bytes are not left behind for the staging path to trip over.
+    assert list(input_dir.rglob("*.cfg.ic")) == []
 
 
 def test_lineage_reject_incompatible_state(tmp_path: Path) -> None:

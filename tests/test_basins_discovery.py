@@ -397,6 +397,152 @@ def test_real_basins_smoke_inventory_contract() -> None:
     assert by_slug["xinanjiang_upstream"]["shud_input_name"] == "xinanjiang"
 
 
+#: Native SHUD IC header, matching :data:`VALID_MESH_HEADER`'s element count:
+#: ``<mesh> <mesh-state-columns> <minute-time>``. Real node-27 baselines all carry
+#: this three-token shape (task 0(f) probe, 13/13 models).
+VALID_IC_HEADER = "484\t6\t38920320.000000"
+#: Native SHUD mesh header: ``<n_elements> <n_columns>``.
+VALID_MESH_HEADER = "484\t8"
+
+
+# ---------------------------------------------------------------------------
+# IC header content-shape gate (#1197). Existence + checksum were all discovery
+# ever checked, so a present, non-empty, checksum-clean `23106\t6` IC sailed
+# through registration and only detonated in the first real SHUD run.
+# ---------------------------------------------------------------------------
+
+INCIDENT_IC_HEADER = "23106\t6"
+
+
+def test_two_token_ic_header_is_rejected_and_other_models_still_register(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(
+        root / "lh-gl",
+        "LH-GL",
+        ic_header=INCIDENT_IC_HEADER,
+        mesh_header="23106\t8",
+    )
+    make_valid_model(root / "keliya", "keliya")
+
+    inventory = discover_basins_inventory(root)
+    by_slug = {model["basin_slug"]: model for model in inventory["models"]}
+
+    bad = by_slug["lh-gl"]
+    assert bad["status"] == "partial"
+    assert bad["default_import_eligible"] is False
+    assert bad["default_publish_eligible"] is False
+    # The shape verdict must not leak into the missing-file set: its consumers
+    # compare that set for an exact `{"*.tsd.rl"}` repairability match.
+    assert bad["missing_required_files"] == []
+    assert len(bad["invalid_required_files"]) == 1
+    reason = bad["invalid_required_files"][0]
+    assert reason.startswith("LH-GL.cfg.ic:")
+    assert "2 numeric token(s)" in reason
+    # Discovery is not aborted: the well-formed sibling still registers.
+    assert by_slug["keliya"]["status"] == "valid"
+    assert by_slug["keliya"]["invalid_required_files"] == []
+    assert inventory["model_count"] == 2
+
+
+def test_ic_mesh_count_mismatch_against_sp_mesh_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(
+        root / "basin-a",
+        "alias-a",
+        ic_header="484\t6\t38920320.000000",
+        mesh_header="6335\t8",
+    )
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "partial"
+    reason = model["invalid_required_files"][0]
+    # Both counts named so the operator can see which side is wrong.
+    assert "484" in reason and "6335" in reason
+
+
+def test_three_and_four_token_ic_headers_with_matching_mesh_still_register(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "native", "native", ic_header="484\t6\t38920320.000000")
+    make_valid_model(root / "lake", "lake", ic_header="484\t50\t3\t38920320.000000")
+
+    inventory = discover_basins_inventory(root)
+
+    for model in inventory["models"]:
+        assert model["status"] == "valid", model["invalid_required_files"]
+        assert model["invalid_required_files"] == []
+        assert model["default_publish_eligible"] is True
+
+
+def test_unparseable_sp_mesh_header_rejects_the_model_naming_the_mesh_file(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a", mesh_header="ID\tNode1")
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "partial"
+    reasons = model["invalid_required_files"]
+    assert any(reason.startswith("alias-a.sp.mesh:") for reason in reasons)
+
+
+def test_unreadable_ic_blocks_registration_with_a_reason_distinct_from_a_shape_violation(
+    tmp_path: Path,
+) -> None:
+    shaped_root = tmp_path / "shaped"
+    make_valid_model(shaped_root / "basin-a", "alias-a", ic_header=INCIDENT_IC_HEADER)
+    shape_reason = one_model(discover_basins_inventory(shaped_root))["invalid_required_files"][0]
+
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+    locked = input_dir / "alias-a.cfg.ic"
+    locked.chmod(0)
+    try:
+        model = one_model(discover_basins_inventory(root))
+    finally:
+        locked.chmod(0o600)
+
+    assert model["status"] == "partial"
+    # Matched by glob, so it is NOT missing -- it is unreadable.
+    assert model["missing_required_files"] == []
+    unreadable_reason = model["invalid_required_files"][0]
+    assert unreadable_reason.startswith("alias-a.cfg.ic:")
+    assert "could not be read" in unreadable_reason
+    # AC-4: the two refusal channels must not be reported as one another.
+    assert unreadable_reason != shape_reason
+    assert "numeric token(s)" not in unreadable_reason
+    assert "could not be read" not in shape_reason
+
+
+def test_every_matched_ic_is_validated_not_just_the_first(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+    # A second matched IC, malformed. Sorted after the well-formed one, so a
+    # first-match-only check would pass the model.
+    (input_dir / "zz-second.cfg.ic").write_text(f"{INCIDENT_IC_HEADER}\n", encoding="utf-8")
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "partial"
+    assert [reason.split(":")[0] for reason in model["invalid_required_files"]] == ["zz-second.cfg.ic"]
+
+
+def test_multiple_matched_sp_mesh_files_are_rejected_as_ambiguous(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+    (input_dir / "zz-second.sp.mesh").write_text("484\t8\n", encoding="utf-8")
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "partial"
+    reasons = model["invalid_required_files"]
+    assert len(reasons) == 1
+    ambiguous = reasons[0]
+    assert "2 *.sp.mesh files" in ambiguous
+    assert "alias-a.sp.mesh" in ambiguous and "zz-second.sp.mesh" in ambiguous
+    # Ambiguity is its own reason, not a shape verdict on the (well-formed) IC.
+    assert "numeric token(s)" not in ambiguous
+
+
 def make_valid_model(
     model_dir: Path,
     input_name: str,
@@ -405,14 +551,14 @@ def make_valid_model(
     calibration_count: int = 0,
     forcing_count: int = 0,
     forcing_dir_name: str = "forcing",
+    ic_header: str = VALID_IC_HEADER,
+    mesh_header: str = VALID_MESH_HEADER,
 ) -> Path:
     input_dir = model_dir / "input" / input_name
     input_dir.mkdir(parents=True)
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.riv",
         "sp.rivseg",
         "sp.att",
@@ -424,6 +570,11 @@ def make_valid_model(
         "tsd.mf",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    # These two carry REAL headers: discovery validates the IC header's numeric-token
+    # shape against the mesh element count, so a placeholder body would make every
+    # "valid model" fixture invalid.
+    (input_dir / f"{input_name}.cfg.ic").write_text(f"{ic_header}\n1\t0.1\n", encoding="utf-8")
+    (input_dir / f"{input_name}.sp.mesh").write_text(f"{mesh_header}\nID\tNode1\n", encoding="utf-8")
     if include_tsd_rl:
         (input_dir / f"{input_name}.tsd.rl").write_text("radiation\n", encoding="utf-8")
 

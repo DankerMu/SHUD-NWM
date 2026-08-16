@@ -258,9 +258,7 @@ def _stage_qhh_sample_basin_dir(basins_root: Path, basin_slug: str) -> None:
     input_dir.mkdir(parents=True)
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.att",
         "para.soil",
         "para.geol",
@@ -271,6 +269,13 @@ def _stage_qhh_sample_basin_dir(basins_root: Path, basin_slug: str) -> None:
         "tsd.rl",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    # Real SHUD headers: discovery validates the IC header's numeric-token shape
+    # against the mesh element count, so placeholder bodies would make every model
+    # here invalid (#1197).
+    (input_dir / f"{input_name}.cfg.ic").write_text(
+        "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
+    )
+    (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
     shutil.copy2(_QHH_SAMPLE_DIR / "qhh.sp.riv", input_dir / f"{input_name}.sp.riv")
     shutil.copy2(_QHH_SAMPLE_DIR / "qhh.sp.rivseg", input_dir / f"{input_name}.sp.rivseg")
     # Header normalisation: source declares the full production counts (1633

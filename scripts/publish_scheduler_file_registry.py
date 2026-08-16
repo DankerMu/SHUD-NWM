@@ -672,6 +672,7 @@ def _select_publishable_models(
                         "basin_slug": basin_slug,
                         "status": model.get("status"),
                         "missing_required_files": model.get("missing_required_files") or [],
+                        "invalid_required_files": model.get("invalid_required_files") or [],
                     },
                 )
             continue
@@ -757,17 +758,48 @@ def _repair_missing_radiation_contexts(
         repaired_inventory = discover_basins_inventory(repaired_root)
         repaired_model = _find_inventory_model(repaired_inventory, model_id)
         if repaired_model.get("status") != "valid" or repaired_model.get("default_publish_eligible") is not True:
-            raise SchedulerRegistryPublishError(
-                "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
-                "Repaired Basins model is still not publishable.",
-                details={
-                    "model_id": model_id,
-                    "basin_slug": basin_slug,
-                    "status": repaired_model.get("status"),
-                    "missing_required_files": repaired_model.get("missing_required_files") or [],
-                    "repair": repair,
-                },
-            )
+            # Same split as the missing-template branch above, and as
+            # ``_select_publishable_models``: an EXPLICITLY requested model that
+            # cannot be published fails closed, but on a bulk (unfiltered) run
+            # this model is simply not selected. The repair is a best-effort
+            # rescue of models the plain selection already dropped, so aborting
+            # the whole run over one of them would let an unrelated malformed
+            # package (e.g. #1197's `23106\t6` IC on a basin that also lacks
+            # *.tsd.rl) block every healthy basin from publishing.
+            #
+            # Scope of that relief: it only reaches models NOT already in the
+            # canonical registry. A skipped model that IS registered leaves the
+            # prospective registry short a row, which #1080's cutover gate
+            # classifies as a removal and refuses
+            # (``registry_cutover_removal_refused``) before canonical
+            # replacement — the refresh lane has no bypass, only this CLI's
+            # ``--allow-uncovered-cutover``. So for registered models the run
+            # still fails; what changed is that it fails at the gate, with the
+            # previous registry intact, instead of mid-publish.
+            # (Pinned by
+            # ``test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate``.)
+            #
+            # On the manual CLI lane the skip is not silent: with a persistent
+            # ``--work-dir`` the run's ``basins-inventory.json`` keeps the
+            # model's ``invalid_required_files`` / ``missing_required_files``.
+            # The refresh lane leaves no such trace — it deletes its run
+            # workspace every run (``scheduler_file_provider_refresh``'s
+            # ``_cleanup_run_workspace``) and its receipt does not list skipped
+            # models.
+            if requested_slugs or requested_model_ids:
+                raise SchedulerRegistryPublishError(
+                    "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
+                    "Repaired Basins model is still not publishable.",
+                    details={
+                        "model_id": model_id,
+                        "basin_slug": basin_slug,
+                        "status": repaired_model.get("status"),
+                        "missing_required_files": repaired_model.get("missing_required_files") or [],
+                        "invalid_required_files": repaired_model.get("invalid_required_files") or [],
+                        "repair": repair,
+                    },
+                )
+            continue
         repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
         _guard_resources(resource_validator, workspace)
         _write_workspace_inventory(repaired_inventory, repaired_inventory_path, workspace_budget)
@@ -895,6 +927,7 @@ def _repair_calibrated_shud_context(
                 "basin_slug": basin_slug,
                 "status": repaired_model.get("status"),
                 "missing_required_files": repaired_model.get("missing_required_files") or [],
+                "invalid_required_files": repaired_model.get("invalid_required_files") or [],
                 "repair": repair,
             },
         )

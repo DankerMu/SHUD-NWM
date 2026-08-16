@@ -43,6 +43,7 @@ from packages.common.state_manager import PsycopgStateSnapshotRepository, StateM
 from packages.common.state_qc import (
     cfg_ic_header_minute_index,
     cfg_ic_header_minute_time,
+    cfg_ic_header_shape,
     normalize_state_negative_residuals,
     state_ic_structure_complete,
 )
@@ -55,6 +56,20 @@ class SHUDRuntimeError(RuntimeError):
         self.error_code = error_code
         self.message = message
 
+
+# Structured error code raised by ``_shift_cfg_ic_time`` when an existing, non-empty
+# ``*.cfg.ic`` header carries no minute-time slot to re-stamp.  On the forcing-staging
+# call sites it propagates through the existing visible failure channel; on the
+# warm-start materialization path ``_stage_initial_state`` translates it into the
+# corrupted-state rejection so the snapshot degradation ladder keeps running.  That
+# translation covers ONLY snapshots whose header has no minute-time slot and that did
+# not already trip an earlier check: a 2-token header on a snapshot carrying a recorded
+# ``valid_time`` hits the pre-existing ``WARM_START_TIME_MISMATCH`` verification first
+# and still fails the whole run, unchanged by #1197.
+IC_TIME_SHIFT_HEADER_INVALID = "IC_TIME_SHIFT_HEADER_INVALID"
+# A shiftable SHUD IC header needs at least the counts plus a trailing minute-time:
+# native ``<mesh> <mesh-state-columns> <minute-time>`` is the shortest legal form.
+MIN_CFG_IC_HEADER_NUMERIC_TOKENS = 3
 
 # Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from the
 # package's station-index member (canonical ``shud/stations.tsd.forc``; legacy
@@ -1278,10 +1293,24 @@ class SHUDRuntime:
             if staged_path is not None and (
                 expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
             ):
-                self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
-                _set_runtime_init_mode(manifest, 3)
-                self._sync_init_state_id(manifest)
-                return
+                try:
+                    self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
+                except SHUDRuntimeError as error:
+                    if error.error_code != IC_TIME_SHIFT_HEADER_INVALID:
+                        raise
+                    # A snapshot whose IC header has no minute-time slot is a
+                    # CORRUPT SNAPSHOT, not a broken run: translate the injector's
+                    # fail-closed refusal into the same rejection channel a
+                    # checksum mismatch uses, so this candidate is marked and the
+                    # ladder below moves on to the next usable state (or cold
+                    # start).  Letting it propagate here would turn one bad
+                    # snapshot into a whole failed forecast, losing the
+                    # degradation ladder this loop exists to provide.
+                    error_message = error.message
+                else:
+                    _set_runtime_init_mode(manifest, 3)
+                    self._sync_init_state_id(manifest)
+                    return
 
             message = error_message or "Initial state checksum mismatch."
             if state_id:
@@ -3219,10 +3248,32 @@ def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     if not lines:
         return
     header = lines[0].split()
+    # Count with the SHARED numeric-token rule (``cfg_ic_header_shape``) so read,
+    # shift and the registration/qualification gates can never disagree about what
+    # a token is.  The gates' own {3, 4} verdict is deliberately NOT applied here:
+    # the injector admits any header with a minute-time slot (>= 3 tokens) so an
+    # unknown-but-established layout keeps its existing behaviour instead of being
+    # silently flipped at runtime.  The gates already refuse those upstream.
+    numeric_token_count = cfg_ic_header_shape(header).numeric_token_count
+    if numeric_token_count < MIN_CFG_IC_HEADER_NUMERIC_TOKENS:
+        # Fewer than three numeric tokens means there is no minute-time SLOT to
+        # re-stamp, only counts.  The old code shifted the LAST numeric token
+        # anyway whenever it found two of them: on issue #1197's ``23106\t6``
+        # header that overwrote the mesh-state COLUMN COUNT with an epoch-minute
+        # (~29.7M), SHUD then sized its state matrix off that number, allocated
+        # ~183 GB and was OOM-killed mid-cycle.  A single numeric token was
+        # silently left alone, which is how a malformed delivery stayed invisible
+        # all the way to production.  Both cases now fail closed with the file
+        # byte-identical, so the defect surfaces where it can be fixed.
+        raise SHUDRuntimeError(
+            IC_TIME_SHIFT_HEADER_INVALID,
+            f"Refusing to re-stamp {path.name}: its header line carries "
+            f"{numeric_token_count} numeric token(s), fewer than the "
+            f"{MIN_CFG_IC_HEADER_NUMERIC_TOKENS} required for a "
+            "<counts...> <minute-time> layout; the file is left unchanged.",
+        )
     minute_index = cfg_ic_header_minute_index(header)
-    if minute_index is None:
-        # Cannot locate the minute-time token (header lacks a count + minute-time
-        # pair) -- leave the file untouched rather than corrupt it.
+    if minute_index is None:  # pragma: no cover - unreachable: >=3 numeric tokens implies >=2
         return
     header[minute_index] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
     lines[0] = "\t".join(header)

@@ -15,8 +15,13 @@ two independent facts and writes a schema-versioned receipt:
       and disqualifies), that entry must be the CANONICAL one
       (``<shud_input_name>.cfg.ic`` when the manifest names the SHUD input
       directory, otherwise a top-level path), its ``sha256`` must differ from the
-      empty-file digest and its ``size_bytes`` must be positive.  No package
-      object is opened.
+      empty-file digest and its ``size_bytes`` must be positive.  The shared
+      classification opens no package object for this tier.  On top of it, THIS
+      audit (not the production gate) adds an own-layer header-only sweep: a
+      bounded no-follow read of at most
+      :data:`MAX_IC_HEADER_SHAPE_PROBE_BYTES` bytes off the front of the
+      canonical IC object, whose FIRST LINE is checked for header shape and
+      which is never hashed (see :func:`_with_inventory_tier_header_sweep`).
    b. *object-probe tier* — when the manifest is readable but carries NO
       ``included_files`` inventory (the direct-grid variant shape, whose only
       top-level key is ``direct_grid_forcing``), the registry row's
@@ -58,7 +63,11 @@ Limits recorded in the receipt: inventory-tier package objects are NOT re-hashed
 — qualification trusts the digests recorded in the package manifest (NFS IO
 budget), and a manifest whose recorded digest disagrees with the object on disk
 is caught at run time by the runtime's end-to-end checksum verification, not
-here.  Object-probe-tier rows DO hash one object (the canonical
+here.  The inventory-tier header sweep does open the canonical IC object, but
+only for a header-only bounded read (at most
+:data:`MAX_IC_HEADER_SHAPE_PROBE_BYTES` bytes, no digest computed), so the whole
+object is neither read nor re-hashed.  Object-probe-tier rows DO read up to
+:data:`MAX_PACKAGED_IC_PROBE_BYTES` of one object and hash it (the canonical
 ``<shud_input_name>.cfg.ic``) because that shape publishes no digest to trust.
 """
 
@@ -87,13 +96,17 @@ from packages.common.safe_fs import (
     stat_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.common.state_qc import cfg_ic_header_shape
 from services.orchestrator.scheduler_generation import (
     MAX_PACKAGED_IC_PROBE_BYTES,
+    PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL,
     PACKAGED_IC_QUALIFIED,
     PACKAGED_IC_QUALITY,
+    PACKAGED_IC_SOURCE_INVENTORY,
     PACKAGED_IC_UNQUALIFIED,
     PACKAGED_IC_UNREADABLE,
     PackagedIcObjectProbe,
+    canonical_packaged_ic_object_uri,
     classify_packaged_initial_condition,
 )
 
@@ -105,6 +118,22 @@ RECEIPT_SCHEMA_PATH = _ROOT / "schemas/first_cycle_initial_state_audit_receipt.s
 #: asymmetric — ``gfs`` stays lower-case while ``IFS`` is upper-case — so the
 #: default list is normalized here rather than written by hand.
 DEFAULT_SOURCES = tuple(normalize_source_id(source) for source in ("gfs", "ifs"))
+
+#: Qualification source for a row the package inventory qualified but this audit's
+#: own-layer content probe then disqualified on header shape.  A THIRD value, not a
+#: reuse of ``inventory``/``object_probe``: it says the digest evidence came from the
+#: inventory while the deciding evidence came from reading the object here, which is
+#: precisely the offline left-shift the production gate does not perform.
+PACKAGED_IC_SOURCE_INVENTORY_CONTENT_PROBE = "inventory_content_probe"
+
+#: Upper bound on the inventory-tier header sweep's read of ONE canonical IC
+#: object.  A legal SHUD IC header is a handful of whitespace-separated numbers,
+#: so the same bound Basins discovery uses for the identical job
+#: (``workers.model_registry.basins_discovery.HEADER_LINE_LIMIT_BYTES``) is
+#: enough to hold the first line; anything past it is not a header.  The sweep
+#: reads no further and computes no digest, which is what keeps the receipt's
+#: ``inventory_tier_package_objects_rehashed=false`` claim true.
+MAX_IC_HEADER_SHAPE_PROBE_BYTES = 4 * 1024
 
 MAX_REGISTRY_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -387,7 +416,81 @@ def _canonical_ic_object_probe(
         exists=True,
         size_bytes=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
+        header_shape_invalid_reason=_ic_header_shape_invalid_reason(content),
     )
+
+
+def _canonical_ic_header_shape_probe(
+    object_uri: str,
+    *,
+    object_store_root: Path,
+    object_store_prefix: str,
+) -> str | None:
+    """Header-ONLY shape probe of one canonical packaged-IC object.
+
+    Deliberately NOT :func:`_canonical_ic_object_probe`: that one reads up to
+    :data:`MAX_PACKAGED_IC_PROBE_BYTES` (16 MiB) and hashes what it read, which
+    is the price tier (b) pays for having no published digest to trust.  The
+    inventory-tier sweep needs neither — the digest is already in the manifest
+    and only the FIRST LINE decides header shape — so it reads at most
+    :data:`MAX_IC_HEADER_SHAPE_PROBE_BYTES` off the front and computes nothing.
+    On production's 51 packages that is the difference between ~16 MB of NFS
+    reads per pass and ~200 KB.
+
+    Ternary return, matching how narrow the sweep's override is:
+
+    - ``None`` — no header was read (key escapes the store, the object is
+      absent, its stat or read could not complete, it is not a regular file, or
+      its first line runs past the bound).  Every one of those leaves the
+      inventory verdict untouched: a failed read is not evidence of a malformed
+      package.  The three-way stat distinction :func:`_canonical_ic_object_probe`
+      must keep is unnecessary here precisely because ALL of them collapse to
+      the same "change nothing" outcome — the collapse is fail-CLOSED for the
+      only thing this probe can do, which is downgrade a row.
+    - ``""`` — the header line was read and is well formed.
+    - non-empty ``str`` — the header line was read and is malformed; the reason.
+    """
+    key = _safe_relative_key(_object_key(object_uri, object_store_prefix))
+    if key is None:
+        return None
+    path = object_store_root / key
+    try:
+        entry_stat = stat_no_follow(path, containment_root=object_store_root)
+    except (FileNotFoundError, SafeFilesystemError, OSError):
+        return None
+    if not stat.S_ISREG(entry_stat.st_mode):
+        return None
+    try:
+        prefix = read_bytes_limited_no_follow(
+            path, max_bytes=MAX_IC_HEADER_SHAPE_PROBE_BYTES, containment_root=object_store_root
+        )
+    except (OSError, SafeFilesystemError):
+        return None
+    if b"\n" not in prefix and len(prefix) > MAX_IC_HEADER_SHAPE_PROBE_BYTES:
+        # The bounded read ended mid-line (``read_bytes_limited_no_follow``
+        # returns one sentinel byte past the bound), so the "header" in hand is a
+        # truncation, not the object's first line.  Judging shape from it could
+        # manufacture a downgrade out of a read limit.
+        return None
+    return _ic_header_shape_invalid_reason(prefix)
+
+
+def _ic_header_shape_invalid_reason(content: bytes) -> str:
+    """Return why the probed IC header is malformed, or "" when it is well formed.
+
+    The audit's mirror of the gate's shape check, over the SAME
+    :func:`cfg_ic_header_shape` rule so the two layers can never drift into
+    disagreeing about what a legal SHUD IC header is.  Shape only: a packaged IC
+    object is probed on its own, without the package's ``.sp.mesh``, so the mesh
+    element cross-check stays on the registration / provision gates.
+    """
+
+    try:
+        header = content.split(b"\n", 1)[0].decode("utf-8")
+    except UnicodeDecodeError:
+        return "IC header line is not UTF-8 text"
+    shape = cfg_ic_header_shape(header.split())
+    return "" if shape.valid else (shape.reason or "IC header shape is invalid")
 
 
 def packaged_ic_qualification(
@@ -403,8 +506,11 @@ def packaged_ic_qualification(
     ``unreadable`` when the reference cannot be read or parsed, and otherwise
     the classifier's own verdict.  ``ic_qualified`` is tri-state: ``None`` means
     "cannot tell", which the verdict table refuses to collapse into either
-    defect or clean.  ``ic_qualification_source`` names the tier that decided
-    (``inventory`` / ``object_probe``) and is ``None`` when no tier ran.
+    defect or clean.  ``ic_qualification_source`` names the tier that decided —
+    ``inventory`` (recorded digests), ``object_probe`` (the tier-(b) bounded read
+    of the canonical object) or ``inventory_content_probe`` (an inventory row this
+    audit's own header-only sweep then disqualified on header shape) — and is
+    ``None`` when no tier ran.
     """
     manifest_uri = str(model.get("manifest_uri") or "").strip()
     unknown: dict[str, Any] = {
@@ -474,7 +580,73 @@ def packaged_ic_qualification(
     }
     if signal.detail:
         view["detail"] = signal.detail
-    return view
+    return _with_inventory_tier_header_sweep(
+        view,
+        signal_status=signal.status,
+        qualification_source=signal.qualification_source,
+        model=model,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+
+
+def _with_inventory_tier_header_sweep(
+    view: dict[str, Any],
+    *,
+    signal_status: str,
+    qualification_source: str,
+    model: Mapping[str, Any],
+    object_store_root: Path,
+    object_store_prefix: str,
+) -> dict[str, Any]:
+    """Left-shift the header-shape check onto already-registered inventory rows.
+
+    The shared classification decides inventory-shaped manifests from the digests
+    the publisher recorded and fires NO probe — the production gate's every-pass
+    zero-object-IO promise for that tier.  This audit is offline, so it can afford
+    what the gate cannot: it re-runs the SAME :func:`cfg_ic_header_shape` rule over
+    the canonical IC object of rows the inventory qualified, and downgrades a row
+    whose header turns out malformed.  That is how the already-published baseline
+    packages (issue #1197's ``23106\\t6`` lh_gl delivery among them) get checked at
+    all, instead of waiting for their first real SHUD run.
+
+    Deliberately narrow: ONLY a probe that read the bytes and found a bad shape
+    overrides the verdict.  A probe that cannot reach the object leaves the
+    inventory verdict exactly as it was rather than manufacturing a downgrade from
+    a failed read — the audit is a read-only sweep over an object store it does
+    not own, and an unreachable object is not evidence of a malformed package.
+    The receipt's limits note says so; the row's source value says which of the two
+    layers decided it.
+
+    Deliberately HEADER-ONLY too, via :func:`_canonical_ic_header_shape_probe`
+    rather than the tier-(b) :func:`_canonical_ic_object_probe`: the inventory
+    already publishes the digest, so re-reading a whole multi-MB IC and hashing
+    it would buy nothing and would make the receipt's
+    ``inventory_tier_package_objects_rehashed=false`` claim a lie.
+    """
+
+    if signal_status != PACKAGED_IC_QUALIFIED or qualification_source != PACKAGED_IC_SOURCE_INVENTORY:
+        return view
+    object_uri = canonical_packaged_ic_object_uri(
+        model_package_uri=model.get("model_package_uri"),
+        shud_input_name=model.get("shud_input_name"),
+    )
+    if object_uri is None:
+        return view
+    header_shape_invalid_reason = _canonical_ic_header_shape_probe(
+        object_uri,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if not header_shape_invalid_reason:
+        return view
+    return {
+        **view,
+        "ic_status": PACKAGED_IC_UNQUALIFIED,
+        "ic_qualified": False,
+        "ic_qualification_source": PACKAGED_IC_SOURCE_INVENTORY_CONTENT_PROBE,
+        "detail": PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +891,7 @@ def build_receipt(
         },
         "limits": {
             "inventory_tier_package_objects_rehashed": False,
+            "inventory_tier_ic_header_probed": True,
             "probe_tier_max_object_bytes": MAX_PACKAGED_IC_PROBE_BYTES,
             "run_evidence_lanes": (
                 [OBJECT_STORE_LANE, WORKSPACE_LANE] if workspace_root is not None else [OBJECT_STORE_LANE]
@@ -730,7 +903,16 @@ def build_receipt(
                 "SHUD runtime, not in this audit. 'object_probe' rows (inventory-less "
                 "direct-grid variant manifests) carry the sha256 of a bounded no-follow read "
                 "of the single canonical <shud_input_name>.cfg.ic object, and their inventory "
-                "is not enumerable, so package-level IC ambiguity is not detectable for them."
+                "is not enumerable, so package-level IC ambiguity is not detectable for them. "
+                "On top of that, every inventory-qualified row gets an own-layer header-only "
+                "content probe: a bounded no-follow read of at most "
+                f"{MAX_IC_HEADER_SHAPE_PROBE_BYTES} bytes off the front of that same canonical "
+                "object, whose first line is validated for numeric-token shape. No digest is "
+                "computed from it and the rest of the object is never read, so "
+                "inventory_tier_package_objects_rehashed stays false. A row the header probe "
+                "disqualifies is recorded as 'inventory_content_probe'; a row whose object the "
+                "probe could not reach, or whose first line runs past the read bound, keeps its "
+                "inventory verdict unchanged."
             ),
         },
         "totals": totals,

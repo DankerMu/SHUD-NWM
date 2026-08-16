@@ -470,9 +470,7 @@ def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None 
     _safe_fixture_dir(input_dir, containment_root=containment_root)
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.att",
         "para.soil",
         "para.geol",
@@ -483,6 +481,20 @@ def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None 
         "tsd.rl",
     ):
         _safe_fixture_write_text(input_dir / f"{input_name}.{suffix}", f"{suffix}\n", containment_root=containment_root)
+    # The IC and mesh headers must be REAL: basins discovery validates the
+    # ``*.cfg.ic`` header's numeric-token shape against the ``*.sp.mesh`` element
+    # count (#1197), so a placeholder body would make this synthetic model
+    # unpublishable and the whole object-store validation lane unrunnable.
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.cfg.ic",
+        "2\t6\t0.000000\n1\t0.0\t0.0\t0.0\t0.0\t0.0\n2\t0.0\t0.0\t0.0\t0.0\t0.0\n",
+        containment_root=containment_root,
+    )
+    _safe_fixture_write_text(
+        input_dir / f"{input_name}.sp.mesh",
+        "2\t8\nID\tNode1\tNode2\tNode3\tNabr1\tNabr2\tNabr3\tZmax\n",
+        containment_root=containment_root,
+    )
     _safe_fixture_write_text(
         input_dir / f"{input_name}.sp.riv",
         "2 6\n1 0 0 0.01 100 0\n",

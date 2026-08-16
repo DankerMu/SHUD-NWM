@@ -8,6 +8,7 @@ from packages.common.state_qc import (
     MAX_STATE_IC_BYTES,
     cfg_ic_header_minute_index,
     cfg_ic_header_minute_time,
+    cfg_ic_header_shape,
     normalize_state_negative_residuals,
     run_state_variable_qc,
     state_ic_structure_complete,
@@ -464,3 +465,99 @@ def test_cfg_ic_header_minute_no_numeric_returns_none() -> None:
     # Single numeric token is insufficient (need a count + minute-time pair).
     assert cfg_ic_header_minute_index(["27000000.0"]) is None
     assert cfg_ic_header_minute_time([]) is None
+
+
+# ---------------------------------------------------------------------------
+# cfg_ic_header_shape (#1197): the single header content-shape rule shared by the
+# registration, direct-grid provision and packaged-IC qualification gates.
+# ---------------------------------------------------------------------------
+
+
+def test_cfg_ic_header_shape_accepts_native_three_token_layout() -> None:
+    shape = cfg_ic_header_shape(["23106", "6", "29714400.000000"])
+    assert shape.valid is True
+    assert shape.reason is None
+    assert shape.numeric_token_count == 3
+    assert shape.mesh_count == 23106
+
+
+def test_cfg_ic_header_shape_accepts_compatibility_four_token_layout() -> None:
+    shape = cfg_ic_header_shape(["100", "50", "3", "27000000.000000"])
+    assert shape.valid is True
+    assert shape.reason is None
+    assert shape.numeric_token_count == 4
+    assert shape.mesh_count == 100
+
+
+def test_cfg_ic_header_shape_rejects_the_incident_two_token_header() -> None:
+    # The exact lh_gl delivery from issue #1197. Two numeric tokens is precisely the
+    # shape the runtime mis-reads as "<count> <minute-time>", overwriting the
+    # mesh-state COLUMN COUNT with an epoch-minute.
+    shape = cfg_ic_header_shape(["23106", "6"])
+    assert shape.valid is False
+    assert shape.numeric_token_count == 2
+    assert shape.mesh_count == 23106
+    # AC-3 locatability: the operator must be able to read the actual count off the
+    # reason without re-opening the file.
+    assert "2 numeric token(s)" in (shape.reason or "")
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected_count"),
+    [
+        ([], 0),
+        (["mesh", "columns", "time"], 0),
+        (["23106"], 1),
+        (["1", "2", "3", "4", "5"], 5),
+        (["1", "2", "3", "4", "5", "6"], 6),
+    ],
+)
+def test_cfg_ic_header_shape_rejects_every_non_three_or_four_token_count(
+    tokens: list[str], expected_count: int
+) -> None:
+    shape = cfg_ic_header_shape(tokens)
+    assert shape.valid is False
+    assert shape.numeric_token_count == expected_count
+    assert f"{expected_count} numeric token(s)" in (shape.reason or "")
+
+
+def test_cfg_ic_header_shape_counts_only_numeric_tokens_in_a_mixed_header() -> None:
+    # Non-numeric tokens are not counted, and they do not shift the mesh count off
+    # the FIRST numeric token.
+    shape = cfg_ic_header_shape(["#", "23106", "columns", "6", "29714400.000000"])
+    assert shape.numeric_token_count == 3
+    assert shape.mesh_count == 23106
+    assert shape.valid is True
+
+
+def test_cfg_ic_header_shape_cross_checks_the_mesh_element_count() -> None:
+    matched = cfg_ic_header_shape(["484", "6", "38920320.000000"], expected_mesh_count=484)
+    assert matched.valid is True
+
+    mismatched = cfg_ic_header_shape(["484", "6", "38920320.000000"], expected_mesh_count=6335)
+    assert mismatched.valid is False
+    assert mismatched.mesh_count == 484
+    # The reason has to name BOTH counts for the operator to see which side is wrong.
+    assert "484" in (mismatched.reason or "")
+    assert "6335" in (mismatched.reason or "")
+
+
+def test_cfg_ic_header_shape_skips_the_mesh_cross_check_when_no_count_is_supplied() -> None:
+    # The packaged-IC qualification gates probe one object without its .sp.mesh, so
+    # they pass no expected count and must not be blocked by its absence.
+    shape = cfg_ic_header_shape(["484", "6", "38920320.000000"])
+    assert shape.valid is True
+
+
+def test_cfg_ic_header_shape_rejects_a_non_integer_mesh_token_against_an_expected_count() -> None:
+    shape = cfg_ic_header_shape(["484.5", "6", "38920320.000000"], expected_mesh_count=484)
+    assert shape.valid is False
+    assert shape.mesh_count is None
+
+
+def test_cfg_ic_header_shape_leaves_the_existing_minute_index_helpers_untouched() -> None:
+    # The new helper is a bypass, not a replacement: the shift/read rule keeps its
+    # historical "LAST numeric token" semantics for every existing caller, including
+    # on the two-token header the new helper rejects.
+    assert cfg_ic_header_minute_index(["23106", "6"]) == 1
+    assert cfg_ic_header_minute_time(["23106", "6"]) == 6.0
