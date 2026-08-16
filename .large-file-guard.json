@@ -10,6 +10,8 @@
     "workers/output_parser/parser.py",
     "workers/forcing_producer/producer.py",
     "tests/test_forcing_producer.py",
+    "workers/shud_runtime/runtime.py",
+    "tests/test_shud_runtime.py",
     "scripts/node27_timeseries_retention.py",
     "scripts/node27_frontier_stall_alert.py",
     "tests/test_node27_frontier_stall_alert.py",

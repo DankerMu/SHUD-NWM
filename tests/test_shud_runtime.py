@@ -1835,6 +1835,263 @@ def test_runtime_non_direct_grid_package_manifest_declaring_both_members_prefers
     _assert_staged_index_member_content(input_dir / "alias-a", repository)
 
 
+def _dot_prefixed_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    return {**entry, "relative_path": f"./{entry['relative_path']}"}
+
+
+def _uri_only_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in entry.items() if key != "relative_path"}
+
+
+def _underivable_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    """No ``relative_path`` and a ``uri`` outside ``forcing_uri`` — underivable."""
+    return {**_uri_only_declaration(entry), "uri": "s3://nhms/somewhere-else/qhh.tsd.forc"}
+
+
+def _declared_index_member_entry(files: list[dict[str, Any]]) -> dict[str, Any]:
+    for entry in files:
+        if entry.get("relative_path") in set(SHUD_FORCING_INDEX_MEMBERS):
+            return entry
+    raise AssertionError("no station-index member is declared in the files list")
+
+
+def _reshape_declared_index_member(files: list[dict[str, Any]], reshape: Any) -> None:
+    """Rewrite the station-index entry of a ``files`` list into another accepted shape."""
+    entry = _declared_index_member_entry(files)
+    files[files.index(entry)] = reshape(entry)
+
+
+def _assert_staged_index_member_longitude(
+    model_input_dir: Path,
+    repository: FakeHydroRunRepository,
+    *,
+    longitude: int,
+) -> None:
+    """Both members staged; ``longitude`` (100 packaged, 777 residual) says which one won."""
+    staged_shud_dir = model_input_dir / "shud"
+    assert (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).is_file()
+    assert (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert f"1\t{longitude}\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    other_longitude = 777 if longitude == 100 else 100
+    # Row-shaped, not the bare number: the staged header line carries the run
+    # workspace path, and ``2026050100`` contains ``100``.
+    assert f"1\t{other_longitude}\t30\t" not in tsd_forc
+    assert (model_input_dir / "forcing.csv").exists()
+    assert repository.statuses == []
+
+
+@pytest.mark.parametrize(
+    "reshape",
+    [_dot_prefixed_declaration, _uri_only_declaration],
+    ids=["dot-prefixed", "uri-only"],
+)
+def test_runtime_non_direct_grid_package_manifest_shape_variants_resolve_declared_member(
+    tmp_path: Path,
+    reshape: Any,
+) -> None:
+    """#1357 2.1/2.2: the anchor accepts every shape the direct-grid lane accepts.
+
+    ``forcing_package.json`` has no schema and the direct-grid lane deliberately
+    tolerates both a ``./`` prefix and a bare ``uri``; matching the anchor by raw
+    string equality made those declarations invisible, so the dual-member tree
+    fell back canonical-first onto the stale orphan (longitude 777) with no error.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: _reshape_declared_index_member(payload["files"], reshape),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert "files" not in manifest["forcing"]
+    # Raw equality sees nothing: only normalization can resolve this declaration.
+    assert _declared_package_manifest_index_members(object_root) == set()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
+
+
+@pytest.mark.parametrize(
+    "reshape",
+    [_dot_prefixed_declaration, _uri_only_declaration],
+    ids=["dot-prefixed", "uri-only"],
+)
+def test_runtime_non_direct_grid_run_manifest_shape_variants_resolve_declared_member(
+    tmp_path: Path,
+    reshape: Any,
+) -> None:
+    """#1357 2.3: the diagnostic run-manifest lane gets the same shape tolerance.
+
+    Same widening as the package-manifest lane, anchored on ``forcing.files``
+    (written only by ``scripts/create_qhh_shud_manifest.py``) after the published
+    package manifest drops its file list.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload.pop("files", None),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    _reshape_declared_index_member(manifest["forcing"]["files"], reshape)
+    assert _declared_package_manifest_index_members(object_root) == set()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
+
+
+@pytest.mark.parametrize(
+    ("keep_valid_sibling", "expected_longitude"),
+    [(False, 777), (True, 100)],
+    ids=["invalid-only-falls-back-canonical", "invalid-does-not-blind-valid-sibling"],
+)
+def test_runtime_non_direct_grid_unresolvable_declaration_is_skipped_not_raised(
+    tmp_path: Path,
+    keep_valid_sibling: bool,
+    expected_longitude: int,
+) -> None:
+    """#1357 2.4: the anchor is a resolver, not a gate.
+
+    The direct-grid normalizer raises on an unsafe ``relative_path`` or a ``uri``
+    outside ``forcing_uri``; reusing it here must not hand the non-direct-grid
+    lane a new fail-closed surface. Bad entries are skipped per entry, so a valid
+    sibling declaration still resolves and an all-bad list just falls back
+    canonical-first onto the residual member (longitude 777).
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    residual_entry = _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+
+    def _inject_unresolvable(payload: dict[str, Any]) -> None:
+        _reshape_declared_index_member(
+            payload["files"],
+            _dot_prefixed_declaration if keep_valid_sibling else _underivable_declaration,
+        )
+        payload["files"].append(_underivable_declaration(residual_entry))
+        payload["files"].append({**residual_entry, "relative_path": f"../{residual_entry['relative_path']}"})
+        # Both of the skip wrapper's escape hatches, not just the unsafe-path one:
+        # neither key at all (the underivable branch's missing-uri error) and a
+        # uri whose bracket-malformed authority makes ``urlparse`` raise a bare
+        # ``ValueError`` rather than a ``SHUDRuntimeError``.
+        payload["files"].append({"role": "notes", "checksum": "x"})
+        payload["files"].append({"role": "notes2", "checksum": "x", "uri": "s3://buck[et/notes.txt"})
+
+    checksums = _rewrite_package_manifest(object_root, checksums, transform=_inject_unresolvable)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=expected_longitude)
+
+
+def test_runtime_non_direct_grid_mixed_shape_both_members_declared_falls_back_canonical(
+    tmp_path: Path,
+) -> None:
+    """#1357 2.5: ambiguity survives shape mixing — both declared means None.
+
+    Today the ``./``-shaped canonical declaration is invisible to the anchor, so
+    the manifest looks like a single legacy declaration and resolves to it by
+    accident. Once both shapes are read, this is the same both-members ambiguity
+    the plain-shape pin covers and it must resolve canonical-first (longitude 777
+    here), not keep the accidental legacy answer.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    residual_entry = _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload["files"].append(_dot_prefixed_declaration(residual_entry)),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=777)
+
+
+def test_runtime_non_direct_grid_duplicate_shapes_of_one_member_resolve_to_that_member(
+    tmp_path: Path,
+) -> None:
+    """#1357 2.5 extra: declaring one member twice is not ambiguity (zero delta).
+
+    ``shud/qhh.tsd.forc`` plus ``./shud/qhh.tsd.forc`` collapse to a single
+    element, so the manifest still names exactly one accepted member. Green
+    before and after the widening; it pins that normalization does not turn a
+    duplicate into a both-members ``None``.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload["files"].append(
+            _dot_prefixed_declaration(_declared_index_member_entry(payload["files"]))
+        ),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
+
+
 @pytest.mark.parametrize(
     "index_member",
     [CANONICAL_SHUD_FORCING_INDEX_MEMBER, LEGACY_SHUD_FORCING_INDEX_MEMBER],
