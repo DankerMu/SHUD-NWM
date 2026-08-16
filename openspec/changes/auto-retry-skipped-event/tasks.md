@@ -56,7 +56,7 @@ Fixture level: expanded · Repair intensity: medium · Issue #1314
   decline branch at tests/test_orchestration_chain.py:13504);
   (h) stale/duplicate master mark (repository returns without appending) →
   event count unchanged AND warning count unchanged (no orphan warning).
-- [ ] 5. Spec delta (MODIFIED Retry Guard requirement): plane disposition +
+- [x] 5. Spec delta (MODIFIED Retry Guard requirement): plane disposition +
   limit-exhausted discrimination + event-reuse scenarios.
 
 ## Required evidence

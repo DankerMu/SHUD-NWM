@@ -43,6 +43,17 @@ _SPEC_BULLET_CODE_PATTERN = re.compile(r"^\s+-\s+`([^`]+)`")
 # A code on neither classification list, so the guard must default it non-transient.
 _UNKNOWN_ERROR_CODE = "MYSTERY_SUBSYSTEM_FAILURE"
 _RETRY_MODULE_LOGGER = "services.orchestrator.retry"
+# Codes the orchestrator classifies non-transient that the spec's scenario list does
+# not enumerate.  They are named here (rather than parsed) precisely because no
+# independent source carries them: without this literal, dropping one from
+# NON_TRANSIENT_ERROR_CODES would silently shrink every set-parameterized test's
+# case list instead of failing it.
+_CODE_ONLY_NON_TRANSIENT_ERROR_CODES = frozenset(
+    {"MALFORMED_INPUT", "POLICY_BLOCKED", "WARM_START_CHECKPOINT_RETRY"}
+)
+# Production catch-all codes that sit on NEITHER classification list, so the guard
+# defaults them non-transient and warns.  See the pinning test below.
+_UNLISTED_PRODUCTION_ERROR_CODES = ("SLURM_JOB_FAILED", "SHUD_FAILED")
 
 
 def _unknown_error_code_warning(error_code: str) -> str:
@@ -86,6 +97,23 @@ def test_spec_and_code_classify_out_of_memory_as_non_transient() -> None:
     assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_RETRY_REASON_CODES
+
+
+def test_non_transient_classification_set_is_a_documented_superset_of_the_spec_list() -> None:
+    """The spec list is a SUBSET of the code set on purpose, and the gap is enumerated.
+
+    Equality would be wrong: `job-retry-mechanism` names the six codes whose
+    non-transient handling it governs, while the orchestrator additionally blocks
+    three codes of its own.  Pinning `spec ⊆ code` plus the exact extras keeps both
+    drift directions loud — a spec code dropped from the set, and a set member
+    quietly removed (which would otherwise just shrink the parameterized cases).
+    """
+
+    spec_codes = set(_spec_non_transient_error_codes())
+
+    assert spec_codes <= NON_TRANSIENT_ERROR_CODES
+    assert NON_TRANSIENT_ERROR_CODES - spec_codes == set(_CODE_ONLY_NON_TRANSIENT_ERROR_CODES)
+    assert NON_TRANSIENT_ERROR_CODES & TRANSIENT_ERROR_CODES == set()
 
 
 def test_transient_error_classification() -> None:
@@ -231,6 +259,28 @@ def test_auto_retry_skipped_details_flags_non_transient_codes() -> None:
         }
 
 
+@pytest.mark.parametrize("error_code", sorted(NON_TRANSIENT_ERROR_CODES))
+def test_auto_retry_skipped_details_covers_every_non_transient_set_member(
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Full-set coverage, including the three members the spec list does not name.
+
+    The set-closure test above is what makes a removed member fail rather than
+    silently drop its case from this parameterization.
+    """
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = auto_retry_skipped_details(error_code)
+
+    assert details == {
+        "auto_retry_skipped": True,
+        "reason": "non_transient_error",
+        "error_code": error_code,
+    }
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
 def test_auto_retry_skipped_details_defaults_unlisted_codes_to_non_transient() -> None:
     assert _UNKNOWN_ERROR_CODE not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
     assert auto_retry_skipped_details(_UNKNOWN_ERROR_CODE) == {
@@ -297,6 +347,41 @@ def test_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
         assert details["error_code"] == _UNKNOWN_ERROR_CODE
         assert details["failure"]["retryable"] is False
         assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+@pytest.mark.parametrize("error_code", _UNLISTED_PRODUCTION_ERROR_CODES)
+def test_unlisted_production_error_codes_default_to_the_unknown_reason_and_warn(
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Knowing acceptance: real production codes ride the unknown-default branch.
+
+    `SLURM_JOB_FAILED` is the gateway's catch-all for terminal Slurm states
+    (pinned onto neither classification list by
+    tests/test_real_slurm_gateway.py) and `SHUD_FAILED` is a code
+    `failure_classifier` recognises without either list carrying it.  Both
+    therefore produce reason `unknown_error_code_defaulted_non_transient` and the
+    "add to classification list" warning on every permanent failure — which is
+    exactly what spec.md's unknown-code scenario prescribes, so #1314 accepts it
+    rather than silencing it.  Whether these codes should join a classification
+    list is a classification change, out of scope here and tracked in issue #1462;
+    this test exists so that decision cannot be made by accident.
+    """
+
+    assert error_code not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
+    with _store() as store:
+        job = _create_job(store, error_code=error_code)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert details["auto_retry_skipped"] is True
+        assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+        assert details["error_code"] == error_code
+        assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(error_code)]
 
 
 def test_permanently_failed_event_omits_auto_retry_skipped_when_the_budget_is_exhausted(

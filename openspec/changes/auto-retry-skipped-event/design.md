@@ -64,8 +64,12 @@ Project profile: NHMS
    `missing`/`stale`/`idempotent` without appending (~:2449-2460); the
    implementation must not leave an orphan warning in those outcomes
    (log after the append outcome is known, or gate on it). DB plane and
-   file non-master branch return early before constructing details, so
-   they are naturally safe.
+   file non-master branch append unconditionally once reached, so their
+   warning is inherently paired with an append; the residual edge — a
+   caller re-marking from a stale snapshot produces a second event AND a
+   second warning — mirrors the pre-existing duplicate-event semantics
+   (caller contract: re-read the row before marking) and is pinned by a
+   test rather than guarded.
 4. **Single source**: file-journal plane imports the helper; a test asserts
    the reason literals appear exactly once in `services/` (no dual
    maintenance).
@@ -81,6 +85,19 @@ Project profile: NHMS
    per pass without an event to anchor audit — the guard-blocked failure
    reaching permanent failure still produces its single warning at the
    file-journal sink.
+6. **Known unknown-default codes accepted knowingly** (recorded, not
+   remediated here): the production catch-all `SLURM_JOB_FAILED` is
+   test-pinned OFF both classification lists
+   (tests/test_real_slurm_gateway.py:1029-1036), and several
+   classifier-recognized stage codes (e.g. `SHUD_FAILED`, minted
+   `{STAGE}_FAILED` codes) are likewise on neither list. Under spec.md's
+   literal rule they land in the `unknown_error_code_defaulted_non_transient`
+   branch and emit the "add to classification list" warning — for
+   `SLURM_JOB_FAILED` that advice is unactionable by design. This is the
+   spec-mandated behavior and this change implements it verbatim; tests pin
+   `SLURM_JOB_FAILED`/`SHUD_FAILED` → unknown reason + warning so the
+   dominance is visible, not accidental. Changing the classification sets or
+   the warning text is out of #1314 scope and tracked in issue #1462.
 
 ## Must preserve
 

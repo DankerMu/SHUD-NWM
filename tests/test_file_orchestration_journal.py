@@ -8847,6 +8847,56 @@ def test_duplicate_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
     assert _auto_retry_skipped_warnings(caplog) == warnings_after_first
 
 
+def test_duplicate_non_master_mark_warns_once_per_appended_event(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-master twin of the master duplicate-mark test — pinning what the plane does.
+
+    The master branch has a persisted-row idempotency oracle, so a re-mark appends
+    nothing and warns nothing.  The non-master branch has no such oracle: its gate
+    reads the CALLER's snapshot, so re-driving the same stale ``failed`` snapshot
+    appends a second ``permanently_failed`` event (the durable status update itself
+    no-ops).  The duplicate event predates #1314; what #1314 owes is that warnings
+    track APPENDED events one-for-one, and that is what this pins — a warning count
+    that drifts from the event count in either direction is the regression.
+    Production callers re-read the row between passes, so the shape is reachable
+    only by re-using a snapshot across marks.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_auto_retry_skipped_twin")
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_auto_retry_skipped_twin",
+        "failed",
+        error_code=_UNKNOWN_ERROR_CODE,
+        error_message="stage failed",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = dict(repository.get_pipeline_job("job_auto_retry_skipped_twin"))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        first = service.mark_permanently_failed(stale_snapshot)
+        second = service.mark_permanently_failed(stale_snapshot)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    events = [event for event in state["pipeline_events"] if event["event_type"] == "permanently_failed"]
+    warnings = _auto_retry_skipped_warnings(caplog)
+    assert first.status == "permanently_failed"
+    assert second.status == "permanently_failed"
+    assert len(events) == 2
+    assert all(event["details"]["reason"] == "unknown_error_code_defaulted_non_transient" for event in events)
+    assert warnings == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)] * len(events)
+    # Re-driving after a fresh read is what production does, and it is inert.
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        service.mark_permanently_failed(repository.get_pipeline_job("job_auto_retry_skipped_twin"))
+    assert _auto_retry_skipped_warnings(caplog) == warnings
+
+
 def test_stale_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
