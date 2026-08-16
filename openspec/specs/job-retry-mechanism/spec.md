@@ -513,14 +513,26 @@ was excluded but whose event survived would re-enter the pinning
 decision through the unresolvable cycle-scope entity grammar — so a
 foreign model's manual retry marker can neither report
 `manual_retry_requested` nor pin the candidate's derived
-`new_attempt`. The exclusion applies to candidate-state membership
-only: the cycle-level duplicate-submission and completion gates (the
-active-pipeline, completed-pipeline, and active-slurm-jobs scans)
-keep their wider unconditional cycle-run visibility unchanged by this
-rule — the DB read path's active-pipeline and active-slurm-jobs gates
-deliberately share that wider visibility, while its
-completed-pipeline gate reads the candidate's own hydro run alone and
-so has no job-row counterpart to align with here. On the
+`new_attempt`. The candidate-state membership exclusion and the
+cycle-level gates draw different lines: the duplicate-submission
+gates (the active-pipeline and active-slurm-jobs scans) keep their
+wider unconditional cycle-run visibility unchanged — the DB read
+path's counterparts deliberately share that wider visibility — but
+the completed-pipeline gate answers a candidate-scoped question
+("has THIS candidate completed") and SHALL NOT count a
+foreign-model named cycle-run row as the candidate's completion:
+its job-row conjunction excludes a row whose `model_id` is
+non-empty and names another model while its run id is exactly the
+cycle run id, so completion is proven only by the candidate's own
+rows (its own run id or its own `model_id`), by model-less
+cycle-scope cohort completion rows (which stay cycle-wide — every
+candidate completes through them), or by the candidate's own
+completed hydro run. This aligns the journal verdict's direction
+with the DB completed-pipeline gate, which reads `hydro.hydro_run`
+under a source/cycle/model three-key restriction and never sees
+another model's job rows; the exclusion lives in the
+completed-pipeline gate's own conjunction, not in the shared
+row-match predicate that feeds the duplicate-submission gates. On the
 identity-filtered
 decision state, preserving the attribution predicate fields makes a
 self-declared MATCHING `model_id` a retention credential for a
@@ -556,8 +568,48 @@ drive the retry decision it was written to request.
   widening that this change leaves in place
 - **AND** with the foreign-model row and its marker in place, the
   cycle-level duplicate-submission gates (active-pipeline,
-  completed-pipeline, active-slurm-jobs) answer exactly as before
-  the exclusion — the row stays visible to those scans
+  active-slurm-jobs) answer exactly as before the exclusion — the
+  row stays visible to those scans — while the completed-pipeline
+  gate applies its own candidate-scoped conjunction (see the
+  completion-gate scenario below)
+
+#### Scenario: Foreign-model named cycle-run_id completion row does not complete the candidate
+
+- **WHEN** on the journal (db-free) read path another model's
+  pipeline job row is recorded with `run_id` equal to the cycle run
+  id (`cycle_<source>_<stamp>`), a non-empty `model_id` naming that
+  other model, `status` `succeeded`, and a completion stage —
+  `state_save_qc`, `publish`, or `parse` under the default terminal
+  contract, or `state_save_qc` under the production
+  `forecast_state_save_qc` terminal contract
+- **THEN** `has_completed_pipeline` answers `False` for every other
+  candidate of the cycle in all of those stage/contract
+  combinations — another model's completion is never this
+  candidate's completion
+- **AND** when the candidate's own hydro run is recorded with
+  `status` `failed`, `cancelled`, or `created` and the candidate's
+  own forecast row is `failed`, the foreign completion row still
+  cannot flip the candidate's verdict to `True`
+- **AND** a model-less cycle-scope cohort completion row (`run_id`
+  equal to the cycle run id or extending it with a suffix, empty
+  `model_id`) keeps answering `True` for every candidate of the
+  cycle whenever its stage is a terminal completion stage under the
+  active contract, and the candidate's own completion evidence
+  keeps answering `True` on the same terms — its own named
+  cycle-run row and its own-run-id rows at a terminal completion
+  stage under the active contract, and its own completed hydro run
+  under the default contract (the production
+  `forecast_state_save_qc` contract derives completion from
+  pipeline job rows alone and never consults the hydro completion
+  arm)
+- **AND** on the same fixture the active-pipeline and
+  active-slurm-jobs answers are byte-for-byte unchanged, proving
+  the shared row-match predicate was not narrowed
+- **AND** the DB read path already answers `False` for the foreign
+  shape — its completed-pipeline gate reads `hydro.hydro_run` under
+  the source/cycle/model three-key restriction — so the journal and
+  DB verdicts now agree in direction for this shape instead of
+  diverging
 
 #### Scenario: Unattributed cycle-granularity marker is fail-closed with an explicit escape
 
