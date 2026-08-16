@@ -1586,13 +1586,17 @@ def test_foreign_model_cycle_run_row_stays_visible_to_the_duplicate_submission_g
     ] == [foreign["job_id"]]
 
 
-def test_foreign_model_cycle_run_row_stays_visible_to_the_completion_gate(tmp_path: Path) -> None:
-    """Negative regression for the completion gate specifically.
+def test_foreign_model_cycle_run_row_no_longer_completes_the_candidate(tmp_path: Path) -> None:
+    """The completion gate's answer on the foreign shape, frozen then unfrozen.
 
     A queued row is a vacuous input for ``has_completed_pipeline``; only a
-    succeeded completion-stage row discriminates.  The DB side of this gate reads
-    ``hydro.hydro_run`` alone (``chain_repository.py:97-109``) and has no job-row
-    predicate to align with, so the journal side keeps its current answer.
+    succeeded completion-stage row discriminates.  #1288 froze this answer at
+    ``True`` because the DB side of this gate reads ``hydro.hydro_run`` alone
+    (``chain_repository.py:98-111``) and offered no job-row predicate to copy;
+    #1302 unfroze it: the gate answers a candidate-scoped question, and that
+    DB three-key (source/cycle/model) restriction is exactly the direction the
+    journal side now aligns with — another model's completion is never this
+    candidate's completion.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1607,7 +1611,251 @@ def test_foreign_model_cycle_run_row_stays_visible_to_the_completion_gate(tmp_pa
     )
     repository = FileOrchestrationJournalRepository(journal_root)
 
-    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
+def test_foreign_model_completion_row_does_not_complete_the_candidate(tmp_path: Path, stage: str) -> None:
+    """#1302 main discriminator: a foreign model's completion is not this candidate's.
+
+    Every completion stage of the default terminal contract is covered — the
+    foreign row is excluded by identity, not by stage.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage=stage,
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
+def test_foreign_model_completion_row_does_not_complete_under_production_terminal_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """Same verdict under the production ``forecast_state_save_qc`` terminal contract.
+
+    That contract returns ``has_terminal_completion`` directly
+    (``file_orchestration_journal.py:564-565``), so the narrowed conjunction is
+    the only thing standing between the foreign row and a ``True``.  The
+    ``publish``/``parse`` rows answered ``False`` before this change too (they
+    are not terminal under that contract) and must keep doing so.
+    """
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage=stage,
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("hydro_status", ["failed", "cancelled", "created"])
+def test_foreign_model_completion_row_cannot_complete_a_failed_candidate(
+    tmp_path: Path, hydro_status: str
+) -> None:
+    """The harmful shape: the candidate itself failed, another model finished.
+
+    Before #1302 the foreign row flipped this candidate to "completed" and four
+    consumer surfaces skipped it silently.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(
+            cycle_time=cycle_time,
+            hydro_status=hydro_status,
+            jobs=[_own_failed_forecast_job(cycle_time)],
+        ),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("run_id_suffix", ["", "_state_save_qc_cohort_abc123"])
+def test_model_less_cohort_completion_row_still_completes_every_candidate(
+    tmp_path: Path, run_id_suffix: str
+) -> None:
+    """Negative regression: the cohort completion contract (#841) is untouched.
+
+    Both cohort run-id shapes — the exact cycle run id and the journal-only
+    suffix widening — complete every candidate of the cycle; only the foreign
+    NAMED row leaves.  The suffixed row can only enter through the shared cycle
+    journal segment (see ``_write_journal_pipeline_job``).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    cohort = _cycle_run_id_job(
+        cycle_time,
+        model_id=None,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+        run_id_suffix=run_id_suffix,
+    )
+    for model_id in ("model_a", "model_b"):
+        _write_json(
+            journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/{model_id}.json",
+            _latest_view(
+                cycle_time=cycle_time,
+                model_id=model_id,
+                jobs=[_own_failed_forecast_job(cycle_time, model_id=model_id)],
+            ),
+        )
+    if run_id_suffix:
+        _write_journal_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    else:
+        _write_direct_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    for model_id in ("model_a", "model_b"):
+        assert (
+            repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id=model_id) is True
+        ), model_id
+
+
+def test_candidate_own_completion_evidence_still_completes_the_candidate(tmp_path: Path) -> None:
+    """Negative regression: every own-evidence arm of the gate keeps answering ``True``.
+
+    The candidate's own NAMED cycle-run row, its own ``fcst_...`` run-id row and
+    its own completed hydro run are the three legal completion sources left after
+    the foreign exclusion (the hydro arm is reachable under the default terminal
+    contract only — ``file_orchestration_journal.py:564-567``).
+    """
+
+    cycle_stamp = format_cycle_time(_dt("2026-06-28T00:00:00Z"))
+    own_named_cycle_row = _cycle_run_id_job(
+        _dt("2026-06-28T00:00:00Z"),
+        model_id="model_a",
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    own_run_id_row = _own_failed_forecast_job(_dt("2026-06-28T00:00:00Z"))
+    own_run_id_row.update(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_model_a_state_save_qc",
+            "idempotency_key": f"gfs:{cycle_id_for('gfs', _dt('2026-06-28T00:00:00Z'))}:model_a:state_save_qc",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+        }
+    )
+    shapes: dict[str, dict[str, Any]] = {
+        "own_named_cycle_row": {"jobs": [own_named_cycle_row], "hydro_status": None},
+        "own_run_id_row": {"jobs": [own_run_id_row], "hydro_status": None},
+        "own_completed_hydro_run": {"jobs": [], "hydro_status": "succeeded"},
+    }
+
+    for name, shape in shapes.items():
+        cycle_time = _dt("2026-06-28T00:00:00Z")
+        journal_root = tmp_path / name
+        _write_json(
+            journal_root / f"latest/gfs/{cycle_stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, hydro_status=shape["hydro_status"], jobs=shape["jobs"]),
+        )
+        _write_direct_pipeline_job(
+            journal_root,
+            _cycle_run_id_job(
+                cycle_time,
+                model_id="model_b",
+                stage="state_save_qc",
+                status="succeeded",
+                retry_count=0,
+            ),
+            cycle_time=cycle_time,
+        )
+        repository = FileOrchestrationJournalRepository(journal_root)
+
+        assert (
+            repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+        ), name
+
+
+def test_foreign_model_non_terminal_stage_row_never_completed_the_candidate(tmp_path: Path) -> None:
+    """Negative regression: a foreign ``forecast`` success was never a completion."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage="forecast",
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+def test_foreign_model_completion_row_leaves_the_duplicate_submission_gates_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Negative regression: the shared row predicate was NOT narrowed.
+
+    On the very fixture whose completion verdict flips, the cycle-level
+    duplicate-submission gates keep seeing the foreign rows — their DB
+    counterparts match the cycle run id unconditionally
+    (``chain_repository.py:74-79`` / ``:177-181``).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    foreign_active = _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(cycle_time, model_id="model_b", status="queued", retry_count=0),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert [
+        job.get("job_id")
+        for job in repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    ] == [foreign_active["job_id"]]
 
 
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:

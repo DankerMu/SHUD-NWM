@@ -7954,6 +7954,68 @@ def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
     assert repository.hydro_runs["fcst_gfs_2026050100_model_0"]["status"] == "parsed"
 
 
+def test_trigger_ready_forecasts_does_not_skip_on_a_foreign_model_completion_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1302 consumer anchor: the trigger surface stops swallowing the candidate.
+
+    ``chain_forecast_trigger.py:247-251`` skips a "completed" candidate with a
+    bare ``continue`` — no skipped result, no event, no log — so a wrong verdict
+    from ``has_completed_pipeline`` erases the candidate silently.  Only the
+    completion gate is delegated to a real ``FileOrchestrationJournalRepository``
+    (seeded with another model's succeeded cycle-run row); readiness, cycle
+    listing and submission stay on the fake harness.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import _cycle_run_id_job, _write_direct_pipeline_job
+
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    journal_root = tmp_path / "foreign-model-journal"
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    journal = FileOrchestrationJournalRepository(journal_root)
+
+    class ForeignCompletionReadyForecastRepository(ReadyForecastRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            return journal.has_completed_pipeline(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ForeignCompletionReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == [
+        "run_shud_forecast",
+        "parse_output",
+    ]
+
+
 def test_trigger_ready_forecasts_demotes_stale_converter_version_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
