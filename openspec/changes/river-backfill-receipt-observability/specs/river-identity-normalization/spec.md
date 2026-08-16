@@ -104,8 +104,9 @@ nothing, so 0 does not assert the table is sentinel-free).
 - **WHEN** the batch UPDATE fails with SQLSTATE 55P03 or 40P01
 - **THEN** the run stops fail-closed under stage `lock_contention`
   without a halved-range retry, the reason carries the SQLSTATE and
-  advises waiting for an ingest idle window or using the final-sweep
-  quiescence gate rather than tuning batch size or the duration wall,
+  advises pausing the ingest writer / waiting for an idle window (with
+  the final-sweep quiescence gate noted as enforcing that pause on the
+  active chunk only) rather than tuning batch size or the duration wall,
   the receipt validates against the schema, and the statement-timeout
   (57014) path keeps its existing halved-retry-then-`duration_wall`
   behavior unchanged

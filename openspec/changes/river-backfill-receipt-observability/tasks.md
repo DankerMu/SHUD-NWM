@@ -59,9 +59,13 @@
       `test_stop_stage_enum_contains_only_stages_the_runner_can_emit` —
       the expected exact stage set gains `lock_contention`; the
       source-reachability leg (:119-122) needs no change (the runner
-      emits the literal). Together with 4.6's extension, these are the
-      ONLY authorized existing-test changes; the exactness assertion
-      must NOT be loosened.
+      emits the literal). Third authorized edit (round-1 D 追认, pure
+      addition): tests/test_node27_river_identity_backfill.py:679-680 —
+      2 lines added to the existing shortfall test pinning the ABSENCE
+      of the race-signature hedge when causes are named (kills the
+      unconditional-append mutation). Together with 4.6's extension,
+      these THREE are the only authorized existing-test changes — all
+      pure additions; the exactness assertion must NOT be loosened.
 
 ## 5. Spec delta
 
@@ -79,9 +83,11 @@
 - [x] 6.3 `uv run ruff check .` passes (per issue Verification field).
 - [x] 6.4 `openspec validate river-backfill-receipt-observability
       --strict --no-interactive` passes.
-- [x] 6.5 Zero modifications to existing test assertions beyond the two
-      enumerated authorizations (4.6 extension, 4.8 stage-set update);
-      57014 path byte-unchanged (diff inspection).
+- [x] 6.5 Zero modifications to existing test assertions beyond the
+      three enumerated authorizations (4.6 extension, 4.8 stage-set
+      update, 4.8 shortfall absence-pin addition — all pure additions,
+      tests diff 0 deletions); 57014 path byte-unchanged (diff
+      inspection).
 - [x] 6.6 Follow-up issue for `SET LOCAL lock_timeout` adoption +
       node-27 dry-run filed (#1476, label node-27) and referenced in the
       PR body.
