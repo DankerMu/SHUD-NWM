@@ -533,6 +533,94 @@ def cfg_ic_header_minute_time(header_tokens: Sequence[str]) -> float | None:
     return _as_float(header_tokens[index])
 
 
+# The only two ``.cfg.ic`` header layouts SHUD's ``Model_Data::read_ic`` and this
+# repository's writers ever produce: the native 3-token
+# ``<mesh> <mesh-state-columns> <minute-time>`` and the compatibility 4-token
+# ``<mesh> <river> <lake> <minute-time>``. Anything else is a malformed delivery.
+_VALID_CFG_IC_HEADER_TOKEN_COUNTS = (3, 4)
+
+
+@dataclass(frozen=True)
+class CfgIcHeaderShape:
+    """Verdict of the shared ``.cfg.ic`` header content-shape check.
+
+    ``mesh_count`` is the integer value of the FIRST numeric token (the mesh
+    element count in both accepted layouts), or None when that token is absent
+    or not an integer. ``reason`` is None exactly when ``valid`` is True.
+    """
+
+    numeric_token_count: int
+    mesh_count: int | None
+    valid: bool
+    reason: str | None
+
+
+def cfg_ic_header_shape(
+    header_tokens: Sequence[str],
+    *,
+    expected_mesh_count: int | None = None,
+) -> CfgIcHeaderShape:
+    """Validate the content shape of a SHUD ``.cfg.ic`` header line.
+
+    This is the SINGLE source of the header-shape rule shared by the baseline
+    registration gate, the direct-grid provision gate and the packaged-IC
+    qualification gates. It is pure: the caller reads the header line (bounded)
+    and passes the already-split tokens, mirroring this module's existing
+    ``expected_*_count`` convention of taking model metadata from the caller.
+
+    A header is valid when it carries exactly three or four numeric tokens
+    (:data:`_VALID_CFG_IC_HEADER_TOKEN_COUNTS`) -- and, when
+    ``expected_mesh_count`` is supplied, when its leading numeric token is an
+    integer equal to that count. Two numeric tokens (the ``23106\\t6`` shape from
+    issue #1197) is exactly the case the gates must refuse: the runtime's
+    "LAST numeric token is the minute-time" rule would overwrite the column
+    count with an epoch-minute value.
+
+    Note this is deliberately STRICTER than the runtime injector, which shifts
+    any header with three or more numeric tokens: the gates refuse unknown
+    (>= 5 token) layouts fail-closed, while the injector keeps its existing
+    behaviour there rather than silently flipping on an unknown live layout.
+
+    "Numeric" uses the same :func:`_as_float` rule as
+    :func:`cfg_ic_header_minute_index`, so there is one definition of what
+    counts as a token across read, shift and validation.
+    """
+
+    numeric_values = [value for value in (_as_float(token) for token in header_tokens) if value is not None]
+    numeric_token_count = len(numeric_values)
+    mesh_value = numeric_values[0] if numeric_values else None
+    mesh_count = int(mesh_value) if mesh_value is not None and float(mesh_value).is_integer() else None
+
+    if numeric_token_count not in _VALID_CFG_IC_HEADER_TOKEN_COUNTS:
+        return CfgIcHeaderShape(
+            numeric_token_count=numeric_token_count,
+            mesh_count=mesh_count,
+            valid=False,
+            reason=(
+                f"IC header carries {numeric_token_count} numeric token(s); "
+                f"expected 3 (<mesh> <mesh-state-columns> <minute-time>) "
+                f"or 4 (<mesh> <river> <lake> <minute-time>)"
+            ),
+        )
+    if expected_mesh_count is not None and mesh_count != expected_mesh_count:
+        return CfgIcHeaderShape(
+            numeric_token_count=numeric_token_count,
+            mesh_count=mesh_count,
+            valid=False,
+            reason=(
+                f"IC header mesh count {mesh_count} does not match the expected "
+                f"mesh element count {expected_mesh_count} "
+                f"({numeric_token_count} numeric token(s) in the header)"
+            ),
+        )
+    return CfgIcHeaderShape(
+        numeric_token_count=numeric_token_count,
+        mesh_count=mesh_count,
+        valid=True,
+        reason=None,
+    )
+
+
 def _numeric_row(line: str) -> list[float] | None:
     tokens = line.split()
     row: list[float] = []

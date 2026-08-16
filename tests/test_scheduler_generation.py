@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 
 from services.orchestrator import scheduler_generation as generation
+from services.orchestrator import scheduler_generation_gate as gate
 from services.orchestrator.scheduler_generation import MAX_CUTOVER_DECLARATION_BYTES
 
 # ---------------------------------------------------------------------------
@@ -3031,6 +3032,99 @@ def test_variant_manifest_without_registry_fields_is_unqualified_without_probing
     assert signal.status == generation.PACKAGED_IC_UNQUALIFIED
     assert signal.detail == "packaged_initial_condition_registry_fields_absent"
     assert probe.uris == []
+
+
+def test_probed_malformed_header_is_unqualified_not_unreadable() -> None:
+    """#1197: a READABLE object with a bad header is a content verdict.
+
+    The malformed lh_gl delivery digested cleanly and was non-empty -- every check
+    tier (b) had. Only the header shape separates it from a usable IC, and the
+    verdict must land in the UNQUALIFIED domain: routing it to UNREADABLE would
+    make it 'undetermined' and let the audit report it as a clean cold start.
+    """
+    probe = _RecordingProbe(
+        generation.PackagedIcObjectProbe(
+            exists=True,
+            size_bytes=len(DG_IC_CONTENT),
+            sha256=PACKAGE_IC_SHA256,
+            header_shape_invalid_reason="IC header carries 2 numeric token(s); expected 3 or 4",
+        )
+    )
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=probe,
+    )
+
+    assert signal.status == generation.PACKAGED_IC_UNQUALIFIED
+    assert signal.detail == generation.PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL
+    assert signal.detail == "packaged_initial_condition_header_shape_invalid"
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+    # The digest evidence survives the downgrade so the operator can identify the object.
+    assert signal.ic_sha256 == PACKAGE_IC_SHA256
+    assert probe.uris == [DG_CANONICAL_IC_URI]
+
+
+def test_unreadable_probe_never_reports_the_header_shape_token() -> None:
+    """AC-4 discriminator, read from the other side."""
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=_RecordingProbe(
+            generation.PackagedIcObjectProbe(exists=True, unreadable_detail="probe_failed")
+        ),
+    )
+
+    assert signal.status == generation.PACKAGED_IC_UNREADABLE
+    assert signal.detail == "probe_failed"
+    assert signal.detail != generation.PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL
+
+
+def test_well_formed_probed_header_keeps_qualifying() -> None:
+    """A probe that reports no shape problem must not change the pre-change verdict."""
+    signal = generation.classify_packaged_initial_condition(
+        _direct_grid_variant_manifest(),
+        resource_profile=_dg_resource_profile(),
+        canonical_object_probe=_RecordingProbe(
+            generation.PackagedIcObjectProbe(
+                exists=True,
+                size_bytes=len(DG_IC_CONTENT),
+                sha256=PACKAGE_IC_SHA256,
+                header_shape_invalid_reason="",
+            )
+        ),
+    )
+
+    assert signal.status == generation.PACKAGED_IC_QUALIFIED
+    assert signal.qualification_source == generation.PACKAGED_IC_SOURCE_OBJECT_PROBE
+
+
+def test_gate_probe_fills_the_header_shape_verdict_from_real_bytes() -> None:
+    """The production gate's own probe implementation, over the incident bytes."""
+    malformed = gate._canonical_packaged_ic_probe(
+        _StubIcReader(b"23106\t6\n1\t0.1\n"), DG_CANONICAL_IC_URI
+    )
+    assert malformed.unreadable_detail == ""
+    assert "2 numeric token(s)" in malformed.header_shape_invalid_reason
+
+    well_formed = gate._canonical_packaged_ic_probe(
+        _StubIcReader(b"23106\t6\t29714400.000000\n1\t0.1\n"), DG_CANONICAL_IC_URI
+    )
+    assert well_formed.header_shape_invalid_reason == ""
+    assert well_formed.sha256
+
+
+class _StubIcReader:
+    """Minimal object reader: the gate probe only calls exists/read_bytes_limited."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    def exists(self, object_uri: str) -> bool:
+        return True
+
+    def read_bytes_limited(self, object_uri: str, *, max_bytes: int) -> bytes:
+        return self.content[:max_bytes]
 
 
 def test_inventory_tier_never_probes_and_absent_probe_keeps_the_legacy_reason() -> None:

@@ -100,6 +100,7 @@ __all__ = (
     "MAX_CUTOVER_DECLARATION_BYTES",
     "MAX_PACKAGED_IC_PROBE_BYTES",
     "PACKAGED_IC_BOOTSTRAP_MODE",
+    "PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL",
     "PACKAGED_IC_QUALIFIED",
     "PACKAGED_IC_SOURCE_INVENTORY",
     "PACKAGED_IC_SOURCE_OBJECT_PROBE",
@@ -293,6 +294,12 @@ PACKAGED_IC_UNREADABLE = "unreadable"
 PACKAGED_IC_SOURCE_INVENTORY = "inventory"
 PACKAGED_IC_SOURCE_OBJECT_PROBE = "object_probe"
 
+#: Content verdict for a packaged IC whose header line was READ and found not to
+#: carry the native 3-token / compatibility 4-token layout (issue #1197's
+#: ``23106\t6``).  Deliberately in the UNQUALIFIED domain, never UNREADABLE: the
+#: object was readable, the package is simply not usable.
+PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL = "packaged_initial_condition_header_shape_invalid"
+
 #: Hard cap for the tier-(b) canonical-IC object probe.  The probe hashes the
 #: object, so the cap bounds how much a corrupt / oversized package object can
 #: pull into scheduler memory during planning.  Production ICs run 128 KiB –
@@ -376,6 +383,19 @@ class PackagedIcObjectProbe:
     size_bytes: int = 0
     sha256: str = ""
     unreadable_detail: str = ""
+    header_shape_invalid_reason: str = ""
+    """Set when the probe READ the object and its header line is malformed.
+
+    Filled by each probe implementation with
+    :func:`packages.common.state_qc.cfg_ic_header_shape` -- one rule, two probes
+    -- and consumed by :func:`_classify_packaged_ic_by_object_probe`, which turns
+    it into the ``packaged_initial_condition_header_shape_invalid`` content
+    verdict.  It is emphatically NOT ``unreadable_detail``: a header the probe
+    could read and found malformed is a disqualified package (issue #1197's
+    ``23106\\t6`` delivery), while an object the probe could not read stays
+    undetermined.  Conflating the two would lose exactly the distinction #1164
+    and this gate both exist to keep.
+    """
 
 
 def classify_packaged_initial_condition(
@@ -565,6 +585,19 @@ def _classify_packaged_ic_by_object_probe(
             ic_relative_path=relative_path,
             ic_size_bytes=size_bytes,
             detail="packaged_initial_condition_object_empty",
+            qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
+        )
+    if probe.header_shape_invalid_reason:
+        # Content verdict, NOT a probe failure: the object was read and its header
+        # line does not carry a usable minute-time slot.  Disqualifying here is what
+        # moves issue #1197's malformed delivery from "detonates in the first real
+        # SHUD run" to "never qualifies".
+        return PackagedIcSignal(
+            status=PACKAGED_IC_UNQUALIFIED,
+            ic_sha256=sha256,
+            ic_relative_path=relative_path,
+            ic_size_bytes=size_bytes,
+            detail=PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL,
             qualification_source=PACKAGED_IC_SOURCE_OBJECT_PROBE,
         )
     return PackagedIcSignal(

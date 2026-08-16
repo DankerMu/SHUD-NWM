@@ -3052,9 +3052,7 @@ def _make_valid_model(
     input_dir.mkdir(parents=True)
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.riv",
         "sp.rivseg",
         "sp.att",
@@ -3068,6 +3066,13 @@ def _make_valid_model(
         "tsd.mf",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    # Real SHUD headers: discovery validates the IC header's numeric-token shape
+    # against the mesh element count, so placeholder bodies would make every model
+    # here invalid (#1197).
+    (input_dir / f"{input_name}.cfg.ic").write_text(
+        "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
+    )
+    (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
     (input_dir / f"{input_name}.lake.sp").write_text("lake.sp\n", encoding="utf-8")
     if include_tsd_rl:
         (input_dir / f"{input_name}.tsd.rl").write_text("radiation\n", encoding="utf-8")

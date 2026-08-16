@@ -2008,9 +2008,7 @@ def _make_valid_model(
     input_dir.mkdir(parents=True)
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.att",
         "para.soil",
         "para.geol",
@@ -2021,6 +2019,13 @@ def _make_valid_model(
         "tsd.rl",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    # Real SHUD headers: discovery validates the IC header's numeric-token shape
+    # against the mesh element count, so placeholder bodies would make every model
+    # here invalid (#1197).
+    (input_dir / f"{input_name}.cfg.ic").write_text(
+        "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
+    )
+    (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
     river_count = sp_segment_count if sp_river_count is None else sp_river_count
     sp_riv_rows = "".join(f"{index} 0 0 0.01 100 0\n" for index in range(1, river_count + 1))
     (input_dir / f"{input_name}.sp.riv").write_text(f"{river_count} 6\n{sp_riv_rows}", encoding="utf-8")
@@ -2587,9 +2592,7 @@ def _stage_qhh_sample_fixture(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     # contribute to the geometry assertions here.
     for suffix in (
         "cfg.para",
-        "cfg.ic",
         "cfg.calib",
-        "sp.mesh",
         "sp.att",
         "para.soil",
         "para.geol",
@@ -2600,6 +2603,13 @@ def _stage_qhh_sample_fixture(tmp_path: Path) -> tuple[Path, Path, Path, str]:
         "tsd.rl",
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    # Real SHUD headers: discovery validates the IC header's numeric-token shape
+    # against the mesh element count, so placeholder bodies would make every model
+    # here invalid (#1197).
+    (input_dir / f"{input_name}.cfg.ic").write_text(
+        "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
+    )
+    (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
     # Bring the fixture sp.riv / sp.rivseg in under the alias name.
     shutil.copy2(_QHH_SAMPLE_DIR / "qhh.sp.riv", input_dir / f"{input_name}.sp.riv")
     shutil.copy2(_QHH_SAMPLE_DIR / "qhh.sp.rivseg", input_dir / f"{input_name}.sp.rivseg")

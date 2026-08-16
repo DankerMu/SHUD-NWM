@@ -24,6 +24,7 @@ from typing import Any
 from packages.common.grid_registry_store import CanonicalGridCell, CanonicalGridSnapshot
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.source_identity import normalize_source_id
+from packages.common.state_qc import cfg_ic_header_shape
 from services.orchestrator.scheduler_file_providers import publish_scheduler_registry_manifest
 from workers.mapping_builder.algorithm import (
     SmallBasinApproval,
@@ -46,6 +47,10 @@ from workers.model_registry.direct_grid_variant_registration import (
 
 DEFAULT_SOURCE_GRIDS = ("GFS=gfs_0p25", "IFS=ifs_0p25")
 SCHEMA_VERSION = "nhms.direct_grid.scheduler_registry_provision.v1"
+
+# Upper bound (bytes) on the leading line read out of a ``*.sp.mesh`` to recover the
+# declared element count for the IC header cross-check.
+HEADER_LINE_LIMIT_BYTES = 4 * 1024
 
 
 class DirectGridProvisionError(RuntimeError):
@@ -166,6 +171,52 @@ def _required_single(root: Path, pattern: str) -> Path:
 
 def _relative(root: Path, paths: Sequence[Path]) -> tuple[str, ...]:
     return tuple(str(path.relative_to(root)) for path in paths)
+
+
+def _first_line(payload: bytes, *, label: str) -> str:
+    try:
+        return payload.split(b"\n", 1)[0].decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise DirectGridProvisionError(f"Cannot read the {label} header line: not UTF-8 text.") from error
+
+
+def _mesh_element_count(baseline_root: Path) -> int:
+    """Return the mesh element count declared on the baseline ``*.sp.mesh`` first line."""
+
+    mesh_path = _required_single(baseline_root, "*.sp.mesh")
+    with mesh_path.open("rb") as handle:
+        header = _first_line(handle.read(HEADER_LINE_LIMIT_BYTES), label=str(mesh_path))
+    tokens = header.split()
+    try:
+        value = float(tokens[0]) if tokens else None
+    except ValueError:
+        value = None
+    if value is None or not value.is_integer():
+        raise DirectGridProvisionError(
+            f"Mesh header line of {mesh_path} declares no leading integer element count."
+        )
+    return int(value)
+
+
+def _validated_state_schema_bytes(baseline_root: Path) -> bytes:
+    """Return the baseline ``*.cfg.ic`` bytes, refusing a malformed header fail-closed.
+
+    The direct-grid variant package copies these bytes verbatim as the variant's
+    state schema, so a malformed baseline header propagates into every provisioned
+    variant and only detonates at first runtime consumption (issue #1197: a
+    ``23106\\t6`` two-token header made the runtime overwrite the mesh-state COLUMN
+    COUNT with an epoch-minute, and SHUD tried to allocate ~183 GB). This is the
+    only point in the direct-grid flow that reads IC bytes into a package, so it is
+    where the shape is checked -- before the bytes are handed to the builder.
+    """
+
+    ic_path = _required_single(baseline_root, "*.cfg.ic")
+    payload = ic_path.read_bytes()
+    header = _first_line(payload, label=str(ic_path))
+    shape = cfg_ic_header_shape(header.split(), expected_mesh_count=_mesh_element_count(baseline_root))
+    if not shape.valid:
+        raise DirectGridProvisionError(f"Refusing to package {ic_path}: {shape.reason}.")
+    return payload
 
 
 def _category_files(root: Path) -> dict[str, tuple[str, ...]]:
@@ -351,7 +402,7 @@ def _build_one(
             binding_uri=binding_uri,
             sp_att_manifest_path=str(sp_att.relative_to(baseline_root)),
             category_files=_category_files(baseline_root),
-            state_schema_bytes=_required_single(baseline_root, "*.cfg.ic").read_bytes(),
+            state_schema_bytes=_validated_state_schema_bytes(baseline_root),
             solver_config_bytes=_required_single(baseline_root, "*.cfg.para").read_bytes(),
             domain_shp_path=_required_single(baseline_root, "domain.shp"),
             proj_crs_database_version="pyproj-runtime-pinned-by-lockfile",

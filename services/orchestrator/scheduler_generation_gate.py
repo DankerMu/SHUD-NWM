@@ -35,6 +35,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
+from packages.common import state_qc as _state_qc
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_file_providers as _file_providers
 from services.orchestrator import scheduler_generation as _generation
@@ -241,7 +242,27 @@ def _canonical_packaged_ic_probe(reader: Any, object_uri: str) -> _generation.Pa
         exists=True,
         size_bytes=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
+        header_shape_invalid_reason=_packaged_ic_header_shape_invalid_reason(content),
     )
+
+
+def _packaged_ic_header_shape_invalid_reason(content: bytes) -> str:
+    """Return why the probed IC header is malformed, or "" when it is well formed.
+
+    Shape only -- the mesh element count cannot be cross-checked here because a
+    packaged IC object is probed alone, without the package's ``.sp.mesh`` in hand
+    (a named limit; the mesh cross-check lives on the registration and provision
+    gates, which do have the whole package).  Undecodable bytes count as malformed
+    rather than unreadable: the probe completed, the payload is simply not a SHUD
+    header.
+    """
+
+    try:
+        header = content.split(b"\n", 1)[0].decode("utf-8")
+    except UnicodeDecodeError:
+        return "IC header line is not UTF-8 text"
+    shape = _state_qc.cfg_ic_header_shape(header.split())
+    return "" if shape.valid else (shape.reason or "IC header shape is invalid")
 
 
 def packaged_initial_condition_signal(

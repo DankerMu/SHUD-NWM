@@ -57,12 +57,17 @@
       "additionalProperties": false,
       "required": [
         "inventory_tier_package_objects_rehashed",
+        "inventory_tier_ic_header_probed",
         "probe_tier_max_object_bytes",
         "run_evidence_lanes",
         "note"
       ],
       "properties": {
         "inventory_tier_package_objects_rehashed": { "const": false },
+        "inventory_tier_ic_header_probed": {
+          "const": true,
+          "description": "The audit runs an own-layer content probe over inventory-qualified rows that reads only the canonical IC object's header line to validate its numeric-token shape. Reading a header line is not re-hashing the package object, so inventory_tier_package_objects_rehashed stays false."
+        },
         "probe_tier_max_object_bytes": { "type": "integer", "minimum": 1 },
         "run_evidence_lanes": {
           "type": "array",
@@ -117,8 +122,8 @@
         "ic_relative_path": { "type": ["string", "null"] },
         "ic_qualification_source": {
           "type": ["string", "null"],
-          "enum": ["inventory", "object_probe", null],
-          "description": "Which qualification tier decided this row: the package manifest inventory (recorded digest) or a bounded probe of the canonical packaged-IC object (probed digest). Null when no tier ran (absent or unreadable manifest)."
+          "enum": ["inventory", "object_probe", "inventory_content_probe", null],
+          "description": "Which qualification tier decided this row: the package manifest inventory (recorded digest), a bounded probe of the canonical packaged-IC object (probed digest), or the audit's own-layer content probe that disqualified an inventory-qualified row on IC header shape. Null when no tier ran (absent or unreadable manifest)."
         },
         "first_cycle": { "type": ["string", "null"] },
         "first_run_id": { "type": ["string", "null"] },

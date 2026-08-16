@@ -672,6 +672,7 @@ def _select_publishable_models(
                         "basin_slug": basin_slug,
                         "status": model.get("status"),
                         "missing_required_files": model.get("missing_required_files") or [],
+                        "invalid_required_files": model.get("invalid_required_files") or [],
                     },
                 )
             continue
@@ -765,6 +766,7 @@ def _repair_missing_radiation_contexts(
                     "basin_slug": basin_slug,
                     "status": repaired_model.get("status"),
                     "missing_required_files": repaired_model.get("missing_required_files") or [],
+                    "invalid_required_files": repaired_model.get("invalid_required_files") or [],
                     "repair": repair,
                 },
             )
@@ -895,6 +897,7 @@ def _repair_calibrated_shud_context(
                 "basin_slug": basin_slug,
                 "status": repaired_model.get("status"),
                 "missing_required_files": repaired_model.get("missing_required_files") or [],
+                "invalid_required_files": repaired_model.get("invalid_required_files") or [],
                 "repair": repair,
             },
         )

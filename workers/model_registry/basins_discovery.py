@@ -11,6 +11,8 @@ from errno import ENOENT
 from pathlib import Path
 from typing import Any
 
+from packages.common.state_qc import cfg_ic_header_shape
+
 DEFAULT_BASINS_ROOT = Path("data/Basins")
 NHMS_BASINS_ROOT_ENV = "NHMS_BASINS_ROOT"
 
@@ -42,6 +44,12 @@ GIS_REQUIRED_FILES: tuple[tuple[str, str], ...] = tuple(
 
 CHECKSUM_LIMIT_BYTES = 16 * 1024 * 1024
 BLOCKING_WARNING_CODES = {"BASINS_SYMLINK_OUTSIDE_ROOT", "BASINS_SYMLINK_UNRESOLVABLE"}
+
+# Upper bound (bytes) on the leading line discovery reads out of a ``*.cfg.ic`` or
+# ``*.sp.mesh`` to validate its declared counts. Both headers are a handful of
+# whitespace-separated numbers; anything past this bound is not a header line, and
+# the bound keeps discovery from pulling a multi-GB state file into memory.
+HEADER_LINE_LIMIT_BYTES = 4 * 1024
 
 
 class BasinsDiscoveryError(RuntimeError):
@@ -216,6 +224,7 @@ def _inventory_for_model(
 
     gis_dir = input_dir / "gis"
     required_files, missing_required_files = _match_required_files(input_dir, gis_dir, resolved_root, warnings)
+    invalid_required_files = _invalid_required_files(input_dir, required_files, resolved_root, warnings)
     checksums = _checksums_for_required_files(input_dir, required_files, resolved_root, warnings)
     calibration_count = _count_files(
         model_dir / "CALIB",
@@ -240,7 +249,13 @@ def _inventory_for_model(
     unsafe_descendant = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings[warning_start:])
     if unsafe_descendant:
         quirks.append("unsafe_symlink_outside_root")
-    status = "valid" if not missing_required_files and not unsafe_descendant else "partial"
+    if invalid_required_files:
+        quirks.append("invalid_required_file_content")
+    status = (
+        "valid"
+        if not missing_required_files and not invalid_required_files and not unsafe_descendant
+        else "partial"
+    )
     suggested_ids = {
         "basin_id": f"basins_{_slug_id(basin_slug)}",
         "basin_version_id": f"basins_{_slug_id(basin_slug)}_vbasins",
@@ -262,6 +277,7 @@ def _inventory_for_model(
         "status": status,
         "quirks": sorted(set(quirks)),
         "missing_required_files": missing_required_files,
+        "invalid_required_files": invalid_required_files,
         "required_files": required_files,
         "calibration_count": calibration_count,
         "forcing_csv_count": forcing_count,
@@ -301,6 +317,106 @@ def _match_required_files(
             required[role] = []
             missing.append(f"gis/{file_name}")
     return required, missing
+
+
+def _invalid_required_files(
+    input_dir: Path,
+    required_files: dict[str, list[str]],
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+) -> list[str]:
+    """Return locatable reasons why matched required files are unusable, if any.
+
+    Existence (``missing_required_files``) is not enough for the ``*.cfg.ic``:
+    issue #1197 shipped a present, non-empty, checksum-clean IC whose header line
+    was ``23106\\t6`` -- two numeric tokens instead of the native three. The
+    runtime reads the LAST numeric token as the minute-time, so that header made
+    the mesh-state COLUMN COUNT be overwritten with an epoch-minute at first real
+    consumption and SHUD allocated ~183 GB. This is where the delivery is refused
+    instead: EVERY matched ``*.cfg.ic`` header is validated, cross-checked against
+    the mesh element count on the single matched ``*.sp.mesh`` first line.
+
+    Three refusal channels are kept DISTINCT so a receipt says which one fired:
+    a shape violation, a header line that could not be read, and an ambiguous /
+    unparseable ``*.sp.mesh`` that leaves the cross-check without a subject.
+    Reasons are returned (never raised) so one malformed model does not abort
+    discovery of the rest, and they land in ``invalid_required_files`` rather
+    than ``missing_required_files``, whose consumers compare the glob-pattern set
+    for exact repairability matches.
+    """
+
+    ic_matches = required_files.get("cfg_ic") or []
+    if not ic_matches:
+        # Absence is already reported through ``missing_required_files``; there is
+        # no content to validate and no second verdict to add.
+        return []
+
+    invalid: list[str] = []
+    expected_mesh_count: int | None = None
+    mesh_matches = required_files.get("sp_mesh") or []
+    if len(mesh_matches) > 1:
+        listed = ", ".join(sorted(mesh_matches))
+        invalid.append(
+            f"{listed}: model matches {len(mesh_matches)} *.sp.mesh files; "
+            "the IC mesh-count cross-check has no unambiguous element count"
+        )
+    elif len(mesh_matches) == 1:
+        mesh_relative = mesh_matches[0]
+        mesh_line = _read_header_line(input_dir / mesh_relative, resolved_root, warnings)
+        if mesh_line is None:
+            invalid.append(f"{mesh_relative}: mesh header line could not be read")
+        else:
+            expected_mesh_count = _leading_int_token(mesh_line)
+            if expected_mesh_count is None:
+                invalid.append(
+                    f"{mesh_relative}: mesh header line declares no leading integer element count"
+                )
+
+    for ic_relative in ic_matches:
+        header_line = _read_header_line(input_dir / ic_relative, resolved_root, warnings)
+        if header_line is None:
+            invalid.append(f"{ic_relative}: IC header line could not be read")
+            continue
+        shape = cfg_ic_header_shape(header_line.split(), expected_mesh_count=expected_mesh_count)
+        if not shape.valid:
+            invalid.append(f"{ic_relative}: {shape.reason}")
+    return invalid
+
+
+def _read_header_line(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> str | None:
+    """Return the bounded first line of ``path``, or None when it cannot be read.
+
+    None is the "could not be read" verdict only -- an empty or whitespace-only
+    first line is returned as-is so the caller reports it as a shape violation
+    (zero numeric tokens) rather than conflating it with unreadability.
+    """
+
+    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+        return None
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(HEADER_LINE_LIMIT_BYTES)
+    except OSError:
+        return None
+    try:
+        return chunk.split(b"\n", 1)[0].decode("utf-8")
+    except UnicodeDecodeError:
+        # Not a text header at all: unreadable for header purposes, and reported
+        # through the unreadable channel rather than as a token-count verdict.
+        return None
+
+
+def _leading_int_token(line: str) -> int | None:
+    tokens = line.split()
+    if not tokens:
+        return None
+    try:
+        value = float(tokens[0])
+    except ValueError:
+        return None
+    if not value.is_integer():
+        return None
+    return int(value)
 
 
 def _checksums_for_required_files(

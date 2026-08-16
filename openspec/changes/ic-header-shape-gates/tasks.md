@@ -10,7 +10,7 @@
 
 ## Tasks
 
-- [ ] 0. 运行时探针（先于实现，结果记入 PR 偏离记录）：
+- [x] 0. 运行时探针（先于实现，结果记入 PR 偏离记录）：
   - (a) 复证 issue 证据链：构造 `23106\t6` 头部 fixture 直调
     `cfg_ic_header_minute_index(["23106","6"])` → 1（列数被当 minute），
     `_shift_cfg_ic_time` 实测覆写第二 token。
@@ -35,9 +35,9 @@
     token，全表记入 PR 证据；**发现任何在跑 model 不匹配 → 停下报告重
     裁**（never-break-userspace）。
   - 任一探针与 design 断言不符 → 停下报告重裁。
-- [ ] 1. `packages/common/state_qc.py`：`CfgIcHeaderShape` +
+- [x] 1. `packages/common/state_qc.py`：`CfgIcHeaderShape` +
   `cfg_ic_header_shape`（design D1）；沿用 `_as_float`；不改既有函数。
-- [ ] 2. 注册门接线（design D2 行 1）：`basins_discovery.py` **每个**
+- [x] 2. 注册门接线（design D2 行 1）：`basins_discovery.py` **每个**
   cfg_ic 匹配文件首行有界读取 + `.sp.mesh` 首行轻量解析 + 新 key
   `invalid_required_files`（参与 `status` 计算，不污染
   `missing_required_files`）fail-closed 拒绝（reason 含路径 + 实际 token
@@ -46,10 +46,10 @@
   publish/import 终态错误 details（closure F-D 三处：
   `publish_scheduler_file_registry.py:670-676`/`:762-770`/`:890-898`）；
   不 abort 整个 discovery。
-- [ ] 3. dg provision 门接线（design D2 行 2）：
+- [x] 3. dg provision 门接线（design D2 行 2）：
   `provision_direct_grid_scheduler_registry.py` 喂 bytes 前形状 + mesh 校
   验，fail-closed 拒绝。
-- [ ] 4. 限定门接线（design D2 行 3 分层 seam）：tier-b——
+- [x] 4. 限定门接线（design D2 行 3 分层 seam）：tier-b——
   `PackagedIcObjectProbe` 形状字段 + 生产门/审计镜像两探针填充 +
   `classify_packaged_initial_condition` 消费（classify tier 分派不动，
   `test_scheduler_generation.py:3035-3044` tier-a 永不探针锁保持绿）；
@@ -58,16 +58,16 @@
   schema 同步（limits 新键 + source 词表 + note 文案）；新 token
   `packaged_initial_condition_header_shape_invalid` 归 UNQUALIFIED 分
   域；UNREADABLE 分域零改动；生产门 tier-a metadata-only 具名限制。
-- [ ] 5. 注入器 fail-closed（design D2 行 4 + D3 表）：文件存在且非空且
+- [x] 5. 注入器 fail-closed（design D2 行 4 + D3 表）：文件存在且非空且
   <3 数字 token → 不写 + `SHUDRuntimeError`；缺失/空文件 noop 不变；≥3
   行为逐字节不变；`:2796`/`:2844` 两调用点零改动自然冒泡；`:1576` warm
   路径调用方捕获转 corrupted-state 降级阶梯。
-- [ ] 6. 测试（design D4 seams 1-6 + D5 重判）：helper 矩阵、四门用例、
+- [x] 6. 测试（design D4 seams 1-6 + D5 重判）：helper 矩阵、四门用例、
   回归夹具 `23106\t6` 三处拦截、byte-compat oracle、重判
   `test_shift_header_without_minute_time_pair_is_noop`（表外零编辑）。
-- [ ] 7. 红证五组（design D6 R1-R5）+ mutation 还原 + `git stash list`
+- [x] 7. 红证五组（design D6 R1-R5）+ mutation 还原 + `git stash list`
   空核验。
-- [ ] 8. 回归：`uv run pytest -q tests/test_state_qc.py
+- [x] 8. 回归：`uv run pytest -q tests/test_state_qc.py
   tests/test_basins_discovery.py tests/test_runtime_ic_header.py
   tests/test_first_cycle_initial_state_audit.py` 全绿；
   `uv run pytest -q tests/test_shud_runtime.py` 全量全绿；
