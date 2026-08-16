@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -20,6 +21,8 @@ from services.orchestrator.persistence import PipelineEvent, PipelineJob, Pipeli
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
 from services.slurm_gateway.models import SubmitJobRequest
+
+LOGGER = logging.getLogger(__name__)
 
 TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
@@ -45,6 +48,8 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
     "MANIFEST_SCHEMA_INVALID",
     "WARM_START_CHECKPOINT_RETRY",
 }
+AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON = "non_transient_error"
+AUTO_RETRY_SKIPPED_UNKNOWN_REASON = "unknown_error_code_defaulted_non_transient"
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
 ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
@@ -123,6 +128,43 @@ _DB_FREE_ENV_SPECS = (
 
 def is_transient_error(error_code: str | None) -> bool:
     return error_code in TRANSIENT_ERROR_CODES
+
+
+def auto_retry_skipped_details(error_code: str | None) -> dict[str, Any] | None:
+    """Payload for a job whose RECORDED error code is blocked by classification.
+
+    Returns ``None`` whenever the block is not classification-caused: a
+    transient code (its permanent failure means the retry budget ran out) and a
+    job with no recorded code (nothing to audit-classify) both stay keyless and
+    are told apart by the event's existing ``failure`` sub-dict.
+    """
+
+    if error_code is None or str(error_code) == "":
+        return None
+    code = str(error_code)
+    if code in TRANSIENT_ERROR_CODES:
+        return None
+    reason = (
+        AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON
+        if code in NON_TRANSIENT_ERROR_CODES
+        else AUTO_RETRY_SKIPPED_UNKNOWN_REASON
+    )
+    return {"auto_retry_skipped": True, "reason": reason, "error_code": code}
+
+
+def warn_unknown_error_code(auto_retry_skipped: Mapping[str, Any] | None) -> None:
+    """Emit the spec-required warning once per APPENDED permanently_failed event.
+
+    Call sites invoke this only after the event is known to have landed, so a
+    repository outcome that skips the append leaves no orphan warning behind.
+    """
+
+    if not auto_retry_skipped or auto_retry_skipped.get("reason") != AUTO_RETRY_SKIPPED_UNKNOWN_REASON:
+        return
+    LOGGER.warning(
+        "unknown error_code '%s' defaulted to non-transient — add to classification list",
+        auto_retry_skipped.get("error_code"),
+    )
 
 
 def classify_failure(
@@ -417,6 +459,7 @@ class RetryService:
             attempt=job.retry_count,
             retry_limit=self.config.max_retries,
         )
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         job.status = "permanently_failed"
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
@@ -432,8 +475,10 @@ class RetryService:
                 "last_error": last_error,
                 "failure": classification,
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        warn_unknown_error_code(auto_retry_skipped)
         return job
 
     def attempt_manual_retry(
