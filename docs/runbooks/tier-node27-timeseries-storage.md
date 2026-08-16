@@ -1606,9 +1606,8 @@ Read each field for what it is worth:
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
   read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
   the receipt only proves what the env file declared. Check 2 below
-  (`systemctl show -p TimeoutStartUSec`) is the only step that queries the unit
-  manager for the installed wall — subject to the user-scope caveat recorded
-  with that check (issue `#1387`).
+  (`systemctl --user show -p TimeoutStartUSec`) is the only step that queries
+  the user unit manager for the installed wall (scope fixed per issue `#1387`).
 
 The only receipt without a `budget` block is the config tombstone
 (`outcome: "failed"`, `failure.stage: "config"`), written when the
@@ -1637,21 +1636,26 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 1. **systemd drop-in FIRST, then reload.** Before touching the env file:
 
    ```bash
-   sudo mkdir -p /etc/systemd/system/nhms-node27-timeseries-compression.service.d
-   printf '[Service]\nTimeoutStartSec=5740\n' | \
-     sudo tee /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
-   sudo systemctl daemon-reload
-   systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   mkdir -p ~/.config/systemd/user/nhms-node27-timeseries-compression.service.d
+   printf '[Service]\nTimeoutStartSec=5740\n' > \
+     ~/.config/systemd/user/nhms-node27-timeseries-compression.service.d/override.conf
+   systemctl --user daemon-reload
+   systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
    ```
 
    The last line must report the new wall; the committed unit ships
    `TimeoutStartSec=3940` and the repository is not edited for a catch-up.
+   This tier has **no system-level unit** (see the install section: "Do NOT
+   install system-level (root) units for this tier"): a root/system-scope
+   variant of any command in this section (`systemctl` without `--user`, or a
+   drop-in under `/etc/systemd/system`) succeeds silently against the *system*
+   manager while the real user unit is untouched — never use system scope here.
 2. **Stop and mask the timer for the whole window**, and keep the other
    compression lanes out of it:
 
    ```bash
-   sudo systemctl stop nhms-node27-timeseries-compression.timer
-   sudo systemctl mask nhms-node27-timeseries-compression.timer
+   systemctl --user stop nhms-node27-timeseries-compression.timer
+   systemctl --user mask nhms-node27-timeseries-compression.timer
    ```
 
    A scheduled tick inside the window would read the override env, run to the
@@ -1694,7 +1698,8 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 
    Cleanup order is as hard a requirement as the setup order, and it is the
    mirror image: **delete the env override FIRST**, then unmask and start the
-   timer, then remove the systemd drop-in and `daemon-reload`, then confirm the
+   timer (`systemctl --user unmask/start`), then remove the user-scope drop-in
+   and `systemctl --user daemon-reload`, then confirm the
    next default tick writes to the default receipt path (the catch-up receipts
    were per-invocation `--receipt-path` files; nothing restores itself).
    Removing the drop-in or unmasking the timer while the env override is still
@@ -1714,7 +1719,7 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    diff ~/node27-compression-env.pre-catchup \
      /home/nwm/NWM/infra/env/node27-timeseries-compression.env
    # real systemd wall back to the committed 3940 s
-   systemctl show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
    ```
 
    Both checks read the *intended* configuration. The third check reads what a
@@ -1726,14 +1731,13 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    `per_tick_bound` were actually applied by that tick, while
    `systemd_wall_seconds` is only the declaration that tick read. **Check 2 is
    the only step that queries the unit manager for the installed wall**; check
-   3 does not replace it. Caveat: §4.5's whole system-scope command family —
-   the drop-in install, the timer `stop`/`mask`, and check 2 — runs
-   against the *system* manager while the unit is installed user-scope, and the
-   `stop`/`mask` half is the dangerous one, since it succeeds silently against
-   the system manager while the user timer keeps firing. That
-   scope mismatch is tracked in issue `#1387` and is not fixed here, so until
-   it lands read the real wall with `systemctl --user show -p
-   TimeoutStartUSec nhms-node27-timeseries-compression.service` semantics.
+   3 does not replace it. All §4.5 unit-manager commands — the drop-in
+   install, the timer `stop`/`mask`, and check 2 — target the *user* manager
+   (`systemctl --user`), matching this tier's user-scope install. The
+   historical system-scope variants of these commands (fixed per issue
+   `#1387`) succeeded silently against the system manager while the user
+   timer kept firing — the dangerous half was `stop`/`mask`, which reported
+   success while stopping nothing.
 
    Check 3 must establish *freshness before budget*, in that order. §4.5's own
    window stopped and masked the timer, and both catch-up ticks wrote
