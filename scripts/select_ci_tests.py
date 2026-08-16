@@ -10,6 +10,14 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+# The selector's own suite carries tracked-tree-derived meta-guards (same-name
+# script pairs, container-contract closure, guarded-module importer closure). A
+# PR that adds or moves a test file can invalidate any of them, so every changed
+# `tests/test_*.py` drags this suite along (~6s) instead of letting the guards
+# go unrun on exactly the change class they exist for.
+SELECTOR_META_GUARD_TEST = "tests/test_select_ci_tests.py"
+CHANGED_TEST_META_GUARD_PATTERN = "tests/test_*.py"
+
 CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_api.py",
     "tests/test_gateway.py",
@@ -253,6 +261,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile.py",
             "tests/test_slurm_gateway_app.py",
             "tests/test_slurm_route_contract.py",
+            "tests/test_real_slurm_gateway.py",
+            "tests/test_slurm_array_contract.py",
+            "tests/test_job_array.py",
         ),
     ),
     PathTestRule(
@@ -297,6 +308,23 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
+        ),
+    ),
+    PathTestRule(
+        # No rule covered this module before, and no broad `packages/common/**`
+        # rule exists, so a display-coverage-only PR fell through to the
+        # core-smoke fallback — which imports none of it. The three targets are
+        # its non-gated top-level importer suites. The fourth importer,
+        # tests/test_display_coverage_residual_debt_integration.py, is
+        # deliberately excluded: it is `integration`-marked and therefore skipped
+        # in the PR lane, so listing it buys constant skips and zero assertions.
+        # tests/test_select_ci_tests.py derives this closure from the tracked
+        # tree and reddens if a new non-gated importer suite appears here.
+        "packages/common/display_coverage.py",
+        (
+            "tests/test_display_coverage_refresh.py",
+            "tests/test_display_coverage_parallel.py",
+            "tests/test_forecast_api.py",
         ),
     ),
     PathTestRule(
@@ -400,7 +428,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/select_ci_tests.py",
-        ("tests/test_select_ci_tests.py",),
+        (SELECTOR_META_GUARD_TEST,),
     ),
     PathTestRule(
         "pyproject.toml",
@@ -431,6 +459,11 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                         break
             if not matched_changed_test:
                 selected.add(path)
+            # Unconditional, redirect or not: a redirect fires exactly when a
+            # changed test file is swapped for focused nodes, which is also when
+            # the meta-guards most need to run.
+            if fnmatch.fnmatch(path, CHANGED_TEST_META_GUARD_PATTERN):
+                selected.add(SELECTOR_META_GUARD_TEST)
             continue
         matched = False
         for rule in PATH_TEST_RULES:
