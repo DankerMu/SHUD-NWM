@@ -1454,14 +1454,47 @@ def _is_uri_style_value(value: str) -> bool:
 
 
 def _local_runtime_root_safety(value: str) -> tuple[str | None, str]:
-    path = Path(value).expanduser()
+    # os.path.expanduser (not Path.expanduser) so that an unknown-user tilde
+    # ("~nosuchuser/x") is returned verbatim and falls closed through the
+    # non-absolute arm below instead of raising RuntimeError out of the helper.
+    try:
+        expanded = os.path.expanduser(value)
+    except ValueError:
+        return None, "unresolvable_local_root"
+    path = Path(expanded)
     if not path.is_absolute():
         reason = "parent_traversal_local_root" if ".." in path.parts else "relative_local_root"
         return None, reason
+    # Strict resolution + errno split: non-strict resolution stopped raising on
+    # symlink loops in CPython 3.13+ (the loop root was silently admitted into
+    # the submission manifest and the overlap baseline) and strict
+    # Path.resolve() raises an errno-less RuntimeError on <=3.12, so the
+    # unresolvable rejection only becomes reachable -- and version-independent
+    # -- through os.path.realpath(..., strict=True). ENOENT is not
+    # unresolvable: a merely not-yet-created root keeps its admitted semantics.
     try:
-        return str(path.resolve(strict=False)), "ok"
-    except OSError:
+        return os.path.realpath(expanded, strict=True), "ok"
+    except ValueError:
         return None, "unresolvable_local_root"
+    except OSError as exc:
+        if getattr(exc, "errno", None) != ENOENT:
+            return None, "unresolvable_local_root"
+    # Loop-filtered admit: the ENOENT fallback is strictly re-resolved so that a
+    # "<missing>/../<loop>" form -- whose strict resolution stops at the missing
+    # component but whose fallback still carries a symlink loop -- cannot be
+    # admitted. Only a second ENOENT (or a clean resolution) keeps the verdict.
+    try:
+        fallback = os.path.realpath(expanded)
+    except (ValueError, OSError):
+        return None, "unresolvable_local_root"
+    try:
+        os.path.realpath(fallback, strict=True)
+    except ValueError:
+        return None, "unresolvable_local_root"
+    except OSError as exc:
+        if getattr(exc, "errno", None) != ENOENT:
+            return None, "unresolvable_local_root"
+    return fallback, "ok"
 
 
 def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:

@@ -394,6 +394,15 @@ LIMIT 20;
 2. 确认 `$OBJECT_STORE_ROOT` 可写，且不是 `$WORKSPACE_ROOT`。如果当前 API 返回
    `RETRY_RUNTIME_ROOTS_UNRESOLVED` 或 `RETRY_RUNTIME_ROOTS_SECRET_BEARING`，先修正环境变量或原始
    submission evidence；不要通过 DB update 绕过 fail-closed guard。
+   如果返回 `RETRY_RUNTIME_ROOTS_UNSAFE`，按 `details.runtime_root_resolution.rejected[].reason` 分两类处置：
+   - `relative_local_root` / `parent_traversal_local_root` / `resolves_to_workspace_dir`：同上，修正环境变量或原始
+     submission evidence（root 必须是绝对路径、不含 `..`；object store 不得与 workspace **同一路径**——含
+     symlink 别名等值，子目录是允许的）。
+   - `unresolvable_local_root`：**不是**环境变量拼写问题——root 路径本身有 symlink loop / EACCES /
+     ESTALE / ENOTDIR 一类解析故障。在**跑 retry API 的那台主机上** `readlink -f "$ROOT"` 并逐层
+     `ls -ld` 复现内核判决，修好挂载/链接/权限后对同一 `run_id` 重发手动重试即可（该失败不永久化）。
+     单纯 ENOENT（root 尚未创建）不会命中本码；例外：`<missing>/../<loop>` 形态首查虽 ENOENT，
+     但非 strict 回退值仍带环，照拒（此时 `readlink -f` 不报错，需逐层 `ls -ld` 找环分量）。
 3. 通过既有 retry API 对同一 `run_id` 重新发起手动重试。新的 retry submission event 应包含
    `runtime_root_resolution.resolved.object_store_root.value=$OBJECT_STORE_ROOT` 且
    `same_as_workspace=false`。

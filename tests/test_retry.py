@@ -25,6 +25,8 @@ from services.orchestrator.retry import (
     RetryError,
     RetryNotFoundError,
     RetryService,
+    _local_runtime_root_safety,
+    _resolve_runtime_root_candidate,
     _retry_submission_manifest,
     _RetrySubmissionJob,
     compute_backoff_seconds,
@@ -1939,6 +1941,287 @@ def test_permanently_failed_is_sticky() -> None:
         assert partial.status == "permanently_failed"
         assert running.status == "permanently_failed"
         assert store.get_job("job_failed").status == "permanently_failed"
+
+
+# --- runtime-root safety: symlink loops and other normalization faults (#1401) ---
+#
+# Exit-table coverage for _local_runtime_root_safety. The verdicts below are the
+# same on every supported CPython version: before this change the non-strict
+# Path.resolve() arm admitted a symlink loop verbatim on 3.13+ and raised an
+# errno-less RuntimeError on <=3.12, so the same input produced two different
+# outcomes and neither of them was the fail-closed rejection.
+
+_UNRESOLVABLE_LOCAL_ROOT = (None, "unresolvable_local_root")
+
+
+def _make_symlink_loop(directory: Path, name: str) -> Path:
+    """Create a two-hop symlink loop under ``directory`` and return its entry path."""
+    first = directory / f"{name}_a"
+    second = directory / f"{name}_b"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    return first
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("relative/object-store", (None, "relative_local_root")),
+        ("../object-store", (None, "parent_traversal_local_root")),
+        ("relative/../object-store", (None, "parent_traversal_local_root")),
+    ],
+)
+def test_local_runtime_root_safety_keeps_lexical_rejection_reasons(
+    value: str,
+    expected: tuple[str | None, str],
+) -> None:
+    assert _local_runtime_root_safety(value) == expected
+
+
+def test_local_runtime_root_safety_admits_existing_absolute_root_byte_compatibly(tmp_path: Path) -> None:
+    root = tmp_path / "object-store"
+    root.mkdir()
+    # Pre-change oracle: str(Path(value).resolve(strict=False)).
+    expected = str(Path(str(root)).resolve(strict=False))
+
+    assert _local_runtime_root_safety(str(root)) == (expected, "ok")
+
+
+def test_local_runtime_root_safety_admits_not_yet_created_root_byte_compatibly(tmp_path: Path) -> None:
+    root = tmp_path / "not-created" / "object-store"
+    expected = str(Path(str(root)).resolve(strict=False))
+
+    assert not root.exists()
+    assert _local_runtime_root_safety(str(root)) == (expected, "ok")
+
+
+def test_local_runtime_root_safety_admits_missing_component_pointing_at_existing_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "object-store"
+    real_root.mkdir()
+    value = f"{tmp_path / 'never-created'}/../object-store"
+    expected = str(Path(value).resolve(strict=False))
+
+    assert _local_runtime_root_safety(value) == (expected, "ok")
+    assert expected == str(real_root.resolve())
+
+
+def test_local_runtime_root_safety_rejects_symlink_loop_root(tmp_path: Path) -> None:
+    loop_root = _make_symlink_loop(tmp_path, "loop")
+
+    assert _local_runtime_root_safety(str(loop_root)) == _UNRESOLVABLE_LOCAL_ROOT
+
+
+def test_local_runtime_root_safety_rejects_missing_component_pointing_at_symlink_loop(tmp_path: Path) -> None:
+    """The loop-filtering re-check is the only discriminator for this phantom form.
+
+    Strict resolution stops at the missing component with ENOENT, so without the
+    re-check the non-strict fallback (which still carries the loop) would be
+    admitted into the manifest -- a fail-open regression on <=3.12, where the
+    pre-change helper raised instead.
+    """
+    _make_symlink_loop(tmp_path, "loop")
+    value = f"{tmp_path / 'never-created'}/../loop_a"
+
+    assert _local_runtime_root_safety(value) == _UNRESOLVABLE_LOCAL_ROOT
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses unreadable directories")
+def test_local_runtime_root_safety_rejects_permission_fault_root(tmp_path: Path) -> None:
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    unreachable = guard / "object-store"
+    unreachable.mkdir()
+    guard.chmod(0o000)
+    try:
+        assert _local_runtime_root_safety(str(unreachable)) == _UNRESOLVABLE_LOCAL_ROOT
+    finally:
+        guard.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses unreadable directories")
+def test_local_runtime_root_safety_rejects_missing_component_pointing_at_permission_fault(tmp_path: Path) -> None:
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    unreachable = guard / "object-store"
+    unreachable.mkdir()
+    value = f"{tmp_path / 'never-created'}/../guard/object-store"
+    guard.chmod(0o000)
+    try:
+        assert _local_runtime_root_safety(value) == _UNRESOLVABLE_LOCAL_ROOT
+    finally:
+        guard.chmod(0o755)
+
+
+def test_local_runtime_root_safety_rejects_unknown_user_tilde_without_raising() -> None:
+    # os.path.expanduser leaves an unresolvable "~user" prefix verbatim, so the
+    # value falls closed through the non-absolute arm; Path.expanduser would
+    # raise RuntimeError straight out of the helper instead.
+    assert _local_runtime_root_safety("~nhms_no_such_user_1401/object-store") == (None, "relative_local_root")
+
+
+@pytest.mark.parametrize("value", ["/srv/nhms/object\x00store", "~\x00nhms/object-store"])
+def test_local_runtime_root_safety_rejects_embedded_null_byte_without_raising(value: str) -> None:
+    assert _local_runtime_root_safety(value) == _UNRESOLVABLE_LOCAL_ROOT
+
+
+@pytest.mark.parametrize(
+    "root_field",
+    ["workspace_dir", "object_store_root", "published_artifact_root"],
+)
+def test_resolve_runtime_root_candidate_rejects_symlink_loop_in_every_local_field(
+    root_field: str,
+    tmp_path: Path,
+) -> None:
+    loop_root = _make_symlink_loop(tmp_path, "loop")
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    candidate = {
+        "workspace_dir": str(workspace_root),
+        "object_store_root": str(object_store_root),
+        "object_store_prefix": "s3://nhms-prod",
+        "published_artifact_root": str(tmp_path / "published"),
+        root_field: str(loop_root),
+    }
+
+    resolution = _resolve_runtime_root_candidate("runtime_config:environment", candidate)
+
+    assert resolution.unsafe_rejected is True
+    assert root_field not in resolution.resolved
+    assert [
+        (item["field"], item["reason"]) for item in resolution.rejected
+    ] == [(root_field, "unresolvable_local_root")]
+
+
+def test_resolve_runtime_root_candidate_keeps_loop_roots_out_of_manifest_and_overlap_baseline(
+    tmp_path: Path,
+) -> None:
+    """Two loop aliases used to be admitted as mutually unequal comparable roots.
+
+    On 3.13+ the pre-change helper returned each loop path verbatim, so both
+    roots entered the resolved set (and the submitted manifest) while the
+    workspace/object-store overlap guard compared two unequal strings and stayed
+    silent. Both roots must now be rejected outright instead.
+    """
+    _make_symlink_loop(tmp_path, "loop")
+    candidate = {
+        "workspace_dir": f"{tmp_path}/loop_a",
+        "object_store_root": f"{tmp_path}/loop_b",
+        "object_store_prefix": "s3://nhms-prod",
+    }
+
+    resolution = _resolve_runtime_root_candidate("runtime_config:environment", candidate)
+
+    assert resolution.unsafe_rejected is True
+    assert "workspace_dir" not in resolution.resolved
+    assert "object_store_root" not in resolution.resolved
+    assert resolution.missing == ["workspace_dir", "object_store_root"]
+    assert [(item["field"], item["reason"]) for item in resolution.rejected] == [
+        ("workspace_dir", "unresolvable_local_root"),
+        ("object_store_root", "unresolvable_local_root"),
+    ]
+
+
+def test_manual_retry_download_source_cycle_rejects_symlink_loop_workspace_root_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    loop_root = _make_symlink_loop(tmp_path, "loop")
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": str(loop_root),
+                "object_store_root": str(object_store_root),
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert retry.status == "submission_failed"
+        # Not the degraded SBATCH_SUBMISSION_FAILED attribution the RuntimeError
+        # escape produced on <=3.12.
+        assert retry.error_code == "RETRY_RUNTIME_ROOTS_UNSAFE"
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        assert evidence
+        assert any(
+            item["field"] == "workspace_dir" and item["reason"] == "unresolvable_local_root"
+            for item in evidence["rejected"]
+        )
+        assert "workspace_dir" not in evidence["resolved"]
+
+
+def test_manual_retry_download_source_cycle_keeps_loop_root_out_of_manifest_when_env_candidate_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    loop_root = _make_symlink_loop(tmp_path, "loop")
+    env_workspace_root = tmp_path / "env-workspace"
+    env_workspace_root.mkdir()
+    env_object_store_root = tmp_path / "env-object-store"
+    env_object_store_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(env_workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(env_object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms-prod")
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": str(loop_root),
+                "object_store_root": str(loop_root),
+                "object_store_prefix": "s3://nhms-legacy",
+            },
+        )
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        manifest = gateway.submissions[0].manifest
+        assert manifest["workspace_dir"] == str(env_workspace_root)
+        assert manifest["object_store_root"] == str(env_object_store_root)
+        assert str(loop_root) not in manifest.values()
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        assert [
+            (item["field"], item["reason"])
+            for item in evidence["rejected"]
+            if item["reason"] == "unresolvable_local_root"
+        ] == [
+            ("workspace_dir", "unresolvable_local_root"),
+            ("object_store_root", "unresolvable_local_root"),
+        ]
 
 
 def _store() -> "_ClosingStore":
