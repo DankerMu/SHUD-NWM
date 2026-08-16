@@ -98,8 +98,10 @@ from services.orchestrator.retry import (
     _RuntimeRootCandidate,
     _RuntimeRootCandidateBatch,
     _safe_error_message,
+    auto_retry_skipped_details,
     classify_failure,
     compute_backoff_seconds,
+    warn_unknown_error_code,
 )
 from services.orchestrator.retry_identity import (
     RETRY_JOB_ID_MARKER,
@@ -6914,6 +6916,7 @@ class FileJournalRetryService:
             return _file_retry_namespace(source)
         status_from = str(source.get("status") or "")
         last_error = source.get("error_code")
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         _previous_status, written = self.repository.update_pipeline_job_status(
             str(source["job_id"]),
             "permanently_failed",
@@ -6936,8 +6939,10 @@ class FileJournalRetryService:
                     retry_limit=self.config.max_retries,
                 ),
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        warn_unknown_error_code(auto_retry_skipped)
         return _file_retry_namespace(written)
 
     def _mark_master_permanently_failed(
@@ -6951,6 +6956,7 @@ class FileJournalRetryService:
         if last_error in (None, ""):
             last_error = current.get("error_code")
         retry_count = int(source.get("retry_count") or current.get("retry_count") or 0)
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         result = self.repository.mark_pipeline_job_permanently_failed(
             str(current["job_id"]),
             error_code=str(last_error) if last_error not in (None, "") else None,
@@ -6965,8 +6971,13 @@ class FileJournalRetryService:
                     retry_limit=self.config.max_retries,
                 ),
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        # ``missing``/``stale``/``idempotent`` outcomes append no event, so the
+        # unknown-code warning is gated on the write that actually landed.
+        if result.wrote:
+            warn_unknown_error_code(auto_retry_skipped)
         # ``stale``/``idempotent`` outcomes hand back the raw persisted row, so
         # the namespace is normalized to the same public shape callers already
         # get from ``get_pipeline_job``.

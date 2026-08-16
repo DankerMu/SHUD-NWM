@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import stat
 from datetime import UTC, datetime
@@ -34,6 +35,13 @@ from tests.test_production_scheduler import (
     _set_db_free_scheduler_env,
     _write_db_free_file_provider_fixtures,
     _write_db_free_raw_manifest_fixture,
+)
+from tests.test_retry import (
+    _RETRY_MODULE_LOGGER,
+    _UNKNOWN_ERROR_CODE,
+    _auto_retry_skipped_warnings,
+    _spec_non_transient_error_codes,
+    _unknown_error_code_warning,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
@@ -8638,3 +8646,227 @@ def test_cohort_projection_still_writes_terminal_status_for_unmarked_masters(tmp
     _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
 
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+
+
+def _non_master_permanently_failed_details(
+    tmp_path: Path,
+    *,
+    error_code: str | None,
+    retry_count: int = 0,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    """Drive one plain (non-master) journal row to its permanent-failure event."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_auto_retry_skipped")
+    record["retry_count"] = retry_count
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_auto_retry_skipped",
+        "failed",
+        error_code=error_code,
+        error_message="stage failed",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=max_retries, backoff_schedule=[0]))
+
+    handled = service.handle_failed_job(repository.get_pipeline_job("job_auto_retry_skipped"))
+
+    assert handled.status == "permanently_failed"
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    events = [event for event in state["pipeline_events"] if event["event_type"] == "permanently_failed"]
+    assert len(events) == 1
+    return dict(events[0]["details"])
+
+
+@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
+def test_file_journal_permanently_failed_event_carries_auto_retry_skipped(
+    tmp_path: Path,
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the file-journal plane's non-master production point emits the payload."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=error_code)
+
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "non_transient_error"
+    assert details["error_code"] == error_code
+    assert details["failure"]["retryable"] is False
+    assert details["automatic_retry_stopped"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_file_journal_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the spec warning fires once per appended event, from the shared helper."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert details["error_code"] == _UNKNOWN_ERROR_CODE
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+def test_file_journal_permanently_failed_event_omits_auto_retry_skipped_when_budget_exhausted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 discrimination rule: an exhausted TRANSIENT code is not guard-blocked."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code="SLURM_TIMEOUT", retry_count=3)
+
+    assert "auto_retry_skipped" not in details
+    assert details["failure"]["limit_exhausted"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_file_journal_permanently_failed_event_omits_auto_retry_skipped_without_an_error_code(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 edge: a missing code is not a code, so there is nothing to audit-classify."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=None)
+
+    assert "auto_retry_skipped" not in details
+    assert details["failure"]["reason_code"] == "UNKNOWN_FAILURE"
+    assert details["failure"]["limit_exhausted"] is False
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
+def test_master_permanently_failed_event_carries_auto_retry_skipped(
+    tmp_path: Path,
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the master production point feeds the payload through the typed transition."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=error_code)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "non_transient_error"
+    assert details["error_code"] == error_code
+    assert details["failure"]["retryable"] is False
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_master_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert details["error_code"] == _UNKNOWN_ERROR_CODE
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+def test_master_permanently_failed_event_omits_auto_retry_skipped_when_budget_exhausted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 discrimination rule on master geometry (production attempt shape)."""
+
+    from services.orchestrator.retry_identity import effective_retry_attempt
+
+    repository, record = _retry_attempt_failed_cohort_master(
+        tmp_path,
+        error_code="NODE_FAILURE",
+        attempt=2,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    persisted_before = repository.get_pipeline_job(str(record["job_id"]))
+    job = {
+        **persisted_before,
+        "retry_count": effective_retry_attempt(
+            persisted_before["job_id"],
+            persisted_before.get("retry_count"),
+        ),
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    assert "auto_retry_skipped" not in events[0]["details"]
+    assert events[0]["details"]["failure"]["limit_exhausted"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_duplicate_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 decision 3: the warning is append-gated, so an idempotent re-mark is silent."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = dict(repository.get_pipeline_job(str(record["job_id"])))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        first = service.mark_permanently_failed(stale_snapshot)
+        warnings_after_first = _auto_retry_skipped_warnings(caplog)
+        second = service.mark_permanently_failed(stale_snapshot)
+
+    assert first.status == "permanently_failed"
+    assert second.status == "permanently_failed"
+    assert len(_permanently_failed_events(repository, record)) == 1
+    assert warnings_after_first == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+    assert _auto_retry_skipped_warnings(caplog) == warnings_after_first
+
+
+def test_stale_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 decision 3: a live master returns ``stale`` without appending — no warning."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    assert repository.transition_pipeline_job_runtime_status(str(record["job_id"]), "running").committed
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = {
+        **repository.get_pipeline_job(str(record["job_id"])),
+        "status": "failed",
+        "error_code": _UNKNOWN_ERROR_CODE,
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        marked = service.mark_permanently_failed(stale_snapshot)
+
+    assert marked.status == "running"
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "running"
+    assert _permanently_failed_events(repository, record) == []
+    assert _auto_retry_skipped_warnings(caplog) == []
