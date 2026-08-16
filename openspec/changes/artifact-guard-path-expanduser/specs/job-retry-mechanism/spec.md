@@ -12,11 +12,14 @@ source), the unexpanded value SHALL flow on as an ordinary path into the
 existing containment verdicts and produce a deterministic missing-status
 tuple under those rules instead of aborting the scheduling pass. Because
 the unexpanded value is a relative path, its verdict is anchored at the
-process working directory: with the working directory outside every
-configured artifact root the guard reports the existing
-outside-allowed-roots containment reason, and with the working directory
-under a configured root the existing contained-and-probed verdicts apply
-unchanged. Values whose tilde does expand, and values without a tilde,
+process working directory: with every configured root normalized
+successfully and the working directory outside all of them the guard
+reports the existing outside-allowed-roots containment reason, and with
+the working directory under a configured root the existing
+contained-and-probed verdicts apply unchanged. The existing root-fault
+priority is untouched — when any configured root is unresolvable and no
+resolvable root contains the anchored path, the root-fault reason still
+wins exactly as the existing requirement reserves it. Values whose tilde does expand, and values without a tilde,
 keep their existing behavior byte-for-byte, and the guard's root-side and
 path-side normalization SHALL treat the same unexpandable-tilde input
 consistently — neither side raises, and each side follows the existing

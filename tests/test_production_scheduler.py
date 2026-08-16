@@ -13213,7 +13213,7 @@ def test_local_artifact_guard_plain_tilde_without_any_home_source_fails_closed(
 
 
 def _pre_change_local_artifact_path(value: str) -> Path | None:
-    """Independent transcription of the pre-change implementation (master ``:983-989``).
+    """Independent transcription of the pre-change implementation (master ``:1083-1089``).
 
     Deliberately NOT imported from the module under test: the byte-compat oracle
     below must compare the new behaviour against a fixed written-down old one,
@@ -13258,11 +13258,14 @@ def test_local_artifact_path_is_byte_compatible_with_the_pre_change_implementati
     # returns the identical value.  The change is strictly "stops raising", not
     # "normalizes differently".
     #
-    # Input-domain carve-out (D3 seam 3): ``HOME=''`` is excluded.  There the two
-    # primitives genuinely differ -- ``Path('~//x').expanduser()`` yields ``x``
-    # while ``Path(os.path.expanduser('~//x'))`` yields ``//x`` (POSIX keeps a
-    # leading double slash) -- but an empty ``HOME`` is not a reachable input for
-    # this guard, whose values come from recorded state, not from ``$HOME``.
+    # Input-domain carve-out (D3 seam 3): homes that rstrip('/') to '' are
+    # excluded (``HOME`` of ``''``, ``/``, ``//``...).  There the two primitives
+    # genuinely differ on ``~//x`` inputs -- ``Path('~//x').expanduser()`` yields
+    # ``/x`` while ``Path(os.path.expanduser('~//x'))`` yields ``//x`` (POSIX
+    # keeps a leading double slash) -- but the downstream realpath folds ``//x``
+    # back to ``/x``, so the guard's verdict is unchanged even in that corner
+    # (round-1 O1 measurement); this oracle pins Path equality, hence the
+    # carve-out.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))

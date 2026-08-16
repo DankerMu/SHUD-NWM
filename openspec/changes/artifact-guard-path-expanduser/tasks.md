@@ -13,14 +13,14 @@
 - [x] 1. `_local_artifact_path` 两处改 `Path(os.path.expanduser(...))`
   （design D1；except 臂/reason 码/准入判据零改动）。
 - [x] 2. 测试（design D3 seams 1-6）：双触发面用例（chdir 锚定 cwd 于
-  roots 外）、byte-compat oracle（输入域排除 `HOME=''`）、receiver 判别
+  roots 外）、byte-compat oracle（输入域排除 home rstrip 后为空的环境）、receiver 判别
   式钉测（`os.path.expanduser` receiver 合法、`<Path>.expanduser()`
   红——非 attr 名全禁）、root/path 对称断言（终态 `(True, None)`）。
 - [x] 3. 红证两组（design D4 R1/R2）+ 还原 + `git stash list` 空核验。
 - [x] 4. 回归：`uv run pytest -q tests/test_production_scheduler.py`；
   `uv run ruff check .`；`openspec validate artifact-guard-path-expanduser
   --strict --no-interactive`。
-- [ ] 5. AC 对照自审（issue 六条 AC 逐条映射入 PR body）；偏离记录；
+- [x] 5. AC 对照自审（issue 六条 AC 逐条映射入 PR body）；偏离记录；
   兄弟副本 `scheduler_preflight.py:534/:587` 不修声明留 PR body。
 
 ## Required evidence (maps every selected pack)

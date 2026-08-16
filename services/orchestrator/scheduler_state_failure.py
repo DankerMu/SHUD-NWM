@@ -1096,7 +1096,10 @@ def _local_artifact_path(value: str) -> Path | None:
     the input UNCHANGED instead of raising.  The value then flows on as an
     ordinary relative path into the existing containment verdicts, anchored at the
     process working directory.  Expandable ``~`` values and tilde-free values are
-    byte-for-byte unaffected.
+    byte-for-byte unaffected, except when the home directory rstrips to ``''``
+    (``HOME`` of ``''``, ``/``, ``//``...) and the value starts with ``~//``: the
+    returned Path keeps a doubled leading slash the old code collapsed, which the
+    downstream realpath folds back, so the verdict is still unchanged.
     """
 
     if value.startswith("file://"):
