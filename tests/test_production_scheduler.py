@@ -4656,6 +4656,7 @@ def test_candidate_state_decision_scheduler_monkeypatch_active_jobs_compat(monke
 
 def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_compat(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     candidate = _scheduler_candidate_fixture()
     manifest_uri = "s3://nhms/raw/gfs/2026052106/manifest.json"
@@ -4665,6 +4666,13 @@ def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_comp
         calls.append((patched_candidate.candidate_id, patched_manifest_uri))
         return True
 
+    # #1393 seam 8: the raw-manifest legs now reach the store helper THROUGH
+    # ``_artifact_uri_missing_status``, which short-circuits fail-closed before any
+    # probe runs when no root is configured.  A per-test real root (the shared
+    # ``_scheduler_candidate_fixture`` still carries none) restores the geometry in
+    # which the monkeypatched helper is actually consulted; every assertion below
+    # is unchanged.
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setattr(scheduler_module, "_object_manifest_is_missing", patched_manifest_missing)
 
     decision = scheduler_module._candidate_state_decision(
@@ -20587,8 +20595,23 @@ def _raw_manifest_decision(
     candidate: Any,
     state: Mapping[str, Any],
     *,
+    object_store_root: Path,
     manifest_missing: bool,
 ) -> Any:
+    """Decide the raw-manifest geometry with the manifest probe stubbed.
+
+    #1393 seam 8: since both raw-manifest legs consult
+    ``_artifact_uri_missing_status``, the probe short-circuits fail-closed (and the
+    legs abstain) whenever no object-store root is configured -- the stub below
+    would never be reached.  Each caller therefore passes a per-test real
+    ``tmp_path`` root; the shared ``_scheduler_candidate_fixture`` is deliberately
+    left rootless (``tests/test_production_scheduler.py`` pins that emptiness for
+    the #1365 fail-closed seam).  With a root in play the stub is consulted from
+    inside the probe exactly as it used to be consulted from the legs, so every
+    caller's assertions are unchanged.
+    """
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     monkeypatch.setattr(
         scheduler_module,
         "_object_manifest_is_missing",
@@ -20618,6 +20641,7 @@ def test_raw_manifest_channels_refuse_remedy_non_causal_permanent_codes(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     repaired: bool,
+    tmp_path: Path,
 ) -> None:
     # Seams 1 and 3 (refusing half).  Re-ingesting raw input cannot resize a job's
     # memory nor lift a policy denial, so neither raw-manifest channel may
@@ -20625,7 +20649,13 @@ def test_raw_manifest_channels_refuse_remedy_non_causal_permanent_codes(
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code=error_code, repaired=repaired)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=not repaired,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -20648,6 +20678,7 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     expected_classifier: str,
+    tmp_path: Path,
 ) -> None:
     # Seam 2, the discriminating anchor for the D2 ruling: the geometry itself
     # (a manifest probed missing after a previously successful download) IS the
@@ -20659,7 +20690,13 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code=error_code)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20672,13 +20709,20 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
 
 def test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 3, open half (mirrors the end-to-end anchor
     # ``test_repaired_raw_manifest_allows_stale_downstream_failure_retry``).
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", repaired=True)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=False)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=False,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20692,6 +20736,7 @@ def test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes(
 
 def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 11, channel (a) half: the causal open domain keeps its limit_exhausted
     # exemption byte for byte (the compat anchor at the INVALID_MANIFEST shape
@@ -20704,7 +20749,13 @@ def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
         retry_limit=3,
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20718,6 +20769,7 @@ def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
 @pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 9, first tail path.  A policy/permission failure is remedy-non-causal
     # for RE-INGESTING RAW INPUT, but a genuinely changed model package is a
@@ -20730,7 +20782,13 @@ def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
         extra={"run_manifest_model_package": _changed_model_package_prior()},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20741,12 +20799,19 @@ def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
 @pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_raw_manifest_refusal_without_package_change_falls_to_guard(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 9, second tail path: no other channel has a claim, so the guard blocks.
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code="TEMPLATE_NOT_ALLOWED")
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21131,6 +21196,7 @@ def test_remedy_judgement_refusal_matrix(
 
 def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifest_repair(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 12 end to end: the code arm is load-bearing, not decorative.  A state
     # that overrides ``classifier`` (an identity-filter whitelisted transit key)
@@ -21142,7 +21208,13 @@ def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifes
         extra={"classifier": "unknown_failure"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21155,6 +21227,7 @@ def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifes
 def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest_repair(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
+    tmp_path: Path,
 ) -> None:
     # Seam 12, end to end for the PER-REMEDY code arm (#1313 round-1 V1-C1).  The
     # smuggle shape is identical to the OOM one above: overriding ``classifier``
@@ -21168,7 +21241,13 @@ def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest
         extra={"classifier": "unknown_failure"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21183,6 +21262,7 @@ def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest
 def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_manifest_channels(
     monkeypatch: pytest.MonkeyPatch,
     repaired: bool,
+    tmp_path: Path,
 ) -> None:
     # The classifier arm deliberately does NOT normalize casing (normalizing it
     # would change refresh-channel behaviour outside the zero-change line), so a
@@ -21196,7 +21276,13 @@ def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_man
         extra={"classifier": "Policy_Blocked"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=not repaired,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21236,6 +21322,459 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
         {"resource_configuration", "policy_blocked"}
     )
+
+
+# ---------------------------------------------------------------------------
+# #1393 -- both raw-manifest repair legs consult the unified artifact probe and
+# ABSTAIN whenever the probe reports a non-null unsafe reason.  Seams 1-9 of the
+# change design (seam 8, the geometry migration, is carried by the
+# ``_raw_manifest_decision`` family above rather than by a test of its own).
+# ---------------------------------------------------------------------------
+
+
+#: The two unsafe reasons ``_artifact_uri_missing_status`` can report on the
+#: object branch.  Both mean "no probe verdict was reached", so both must make
+#: the raw-manifest legs abstain -- neither is a licence to claim the candidate.
+_RAW_MANIFEST_ABSTENTION_REASONS = ("object_store_root_unconfigured", "artifact_probe_error")
+
+#: A raw-manifest key whose closed-world validation raises ``ValueError`` inside
+#: ``LocalObjectStore.resolve_path``: the probe's ``(OSError, ValueError)``
+#: residual arm turns it into ``(True, None)``, i.e. "determined absent" with a
+#: NULL reason (#1365 D4), which stays repair-eligible.
+_UNRESOLVABLE_RAW_MANIFEST_URI = "raw/gfs/2026052106/../manifest.json"
+
+
+def _raw_manifest_probe_fault_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw-manifest key is a SYMLINK.
+
+    ``LocalObjectStore.exists`` refuses to stat a symlinked target and raises
+    ``ObjectStoreError`` -- the production shape of an NFS ESTALE/EIO handle --
+    which is the fault the unified probe contains as ``artifact_probe_error``.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    manifest_path = object_store_root / _RECORDED_RAW_MANIFEST_URI
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere-manifest.json"
+    elsewhere.write_bytes(b'{"source_id": "gfs"}')
+    manifest_path.symlink_to(elsewhere)
+    return object_store_root
+
+
+def _apply_raw_manifest_unsafe_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    """Put the process in the geometry that yields ``unsafe_reason`` for the manifest key."""
+
+    if unsafe_reason == "object_store_root_unconfigured":
+        monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    elif unsafe_reason == "artifact_probe_error":
+        _raw_manifest_probe_fault_root(monkeypatch, tmp_path)
+    else:  # pragma: no cover - guards the parametrization against silent drift
+        raise AssertionError(f"unhandled unsafe reason: {unsafe_reason}")
+
+
+def _assert_raw_manifest_geometry_is_unsafe(candidate: Any, unsafe_reason: str) -> None:
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}",
+    ) == (True, unsafe_reason)
+
+
+def test_unconfigured_store_no_longer_vouches_for_raw_manifest_existence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 1 / AC-1 behaviour face.  With no root configured the bare
+    # ``_object_manifest_is_missing`` fail-OPENED ("present"), so the downstream leg
+    # emitted ``manifest_exists: true`` plus ``automatic_retry_allowed: true`` from
+    # a probe that had never run.  Now the probe fails closed with a reason and the
+    # leg abstains; the decision must come from the remaining ladder instead.
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    assert candidate.resource_profile.get("object_store_root") in (None, "")
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "object_store_root_unconfigured")
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+
+    assert (
+        scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence(
+            candidate,
+            state,
+            {},
+        )
+        is None
+    )
+    assert (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence(candidate, state, {})
+        is None
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.reason != "retry_downstream_after_raw_repair"
+    assert decision.evidence["reason"] != "retry_downstream_after_raw_repair"
+    # No raw-manifest leg spoke, so no existence claim reaches evidence at all.
+    assert "raw_manifest_repair" not in decision.evidence
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+
+
+@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED"])
+@pytest.mark.parametrize("repaired", [False, True])
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_keeps_transient_failures_on_automatic_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_code: str,
+    repaired: bool,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2, the availability-regression lock behind the abstention ruling.  The
+    # rejected alternative (fail closed into a manual/blocked channel) would have
+    # converted every transient failure in a cycle -- a single NFS wobble is enough
+    # to raise ``artifact_probe_error`` for the whole batch -- from an automatic
+    # retry into an operator ticket.  Abstention must leave the generic retry rung
+    # untouched.
+    candidate = _scheduler_candidate_fixture()
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code=error_code,
+        repaired=repaired,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+
+
+def test_unconfigured_store_does_not_let_the_repair_leg_invent_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 3 / the recorded AC-2 limitation.  Discriminating half first: with a
+    # real (empty) root the very same state IS a genuine repair geometry, so the
+    # repair leg claims it.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", retry_count=0)
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}",
+    ) == (True, None)
+    claimed = scheduler_state_failure_module._missing_raw_manifest_repair_evidence(
+        candidate,
+        state,
+        {},
+    )
+    assert claimed is not None
+    assert claimed["raw_manifest_repair"]["manifest_exists"] is False
+
+    # Now take the root away.  The manifest is still genuinely absent, but nothing
+    # probed it, so the leg abstains rather than asserting either way -- the repair
+    # channel stays untriggered until a root is configured, which is identical to
+    # the pre-change outcome for THIS leg (the old fail-open said "present", which
+    # also produced ``None``).
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "object_store_root_unconfigured")
+
+    assert (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence(candidate, state, {})
+        is None
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.reason != "repair_missing_raw_manifest"
+    assert "raw_manifest_repair" not in decision.evidence
+
+
+def test_raw_manifest_probe_fault_blocks_one_candidate_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 4 / AC-3, through the real ``run_once`` path.  ``ObjectStoreError`` is a
+    # ``RuntimeError`` subclass: raised from the bare leg call it escaped
+    # ``_candidate_state_decision``, ``_build_candidates`` and ``run_once``'s only
+    # except arm, aborting the whole pass -- every other candidate in the batch went
+    # unevaluated, every pass, until the filesystem fault cleared.  Now the probe
+    # contains it, the leg abstains, and the faulted candidate takes a ladder
+    # terminal while its healthy neighbour still schedules.
+    _raw_manifest_probe_fault_root(monkeypatch, tmp_path)
+    candidate = _scheduler_candidate_fixture()
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "artifact_probe_error")
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        retry_count=3,
+        retry_limit=3,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=_PerModelCandidateStateRepository({"model_a": state, "model_b": {}}),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"]
+    assert [entry["model_id"] for entry in blocked] == ["model_a"]
+    # A ladder terminal (the exhausted-budget permanent guard), not an invented
+    # raw-manifest verdict and not a crash.
+    assert blocked[0]["reason"] == "retry_limit_exhausted"
+    assert blocked[0]["state_evidence"]["decision"] == "permanent_failure"
+    assert "raw_manifest_repair" not in blocked[0]["state_evidence"]
+    # The discriminating half: the pass kept going and the neighbour was submitted.
+    assert result.evidence["counts"]["candidate_count"] == 2
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [basin["model_id"] for call in orchestrator.calls for basin in call["basins"]] == [
+        "model_b"
+    ]
+    assert result.artifact_path is not None
+    assert result.artifact_path.exists()
+
+
+def test_configured_store_keeps_both_raw_manifest_legs_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 5 / AC-4.  Independent oracle for "byte-for-byte": the bare helper the
+    # legs used to call is still in the tree, so assert the unified probe agrees
+    # with it -- verdict AND null reason -- for both the absent and the present
+    # manifest, and then assert the evidence each leg builds on top of that verdict
+    # in full.  (The two ``run_once`` anchors for this pair are
+    # ``test_missing_raw_manifest_after_successful_download_repairs_from_full_chain``
+    # and ``test_repaired_raw_manifest_allows_stale_downstream_failure_retry``,
+    # which stay untouched.)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    manifest_uri = f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}"
+
+    assert scheduler_state_failure_module._object_manifest_is_missing(candidate, manifest_uri) is True
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, manifest_uri) == (
+        True,
+        None,
+    )
+    repair_state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_JOB_FAILED",
+        retry_count=0,
+    )
+    repair = scheduler_state_failure_module._missing_raw_manifest_repair_evidence(
+        candidate,
+        repair_state,
+        {},
+    )
+    assert repair is not None
+    assert repair["decision"] == "retry_failed"
+    assert repair["reason"] == "repair_missing_raw_manifest"
+    assert repair["restart_from_stage"] == "download"
+    assert repair["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+    assert repair["failure"]["classifier"] == "recoverable_missing_raw_manifest"
+    assert repair["raw_manifest_repair"] == {
+        "manifest_uri": manifest_uri,
+        "manifest_exists": False,
+        "successful_download_stage": True,
+        "downstream_failed_stage": "convert",
+    }
+    assert repair["retry_policy"] == {
+        "automatic_retry_allowed": True,
+        "manual_retry_required": False,
+        "attempt": 0,
+        "retry_limit": 3,
+    }
+
+    LocalObjectStore(str(object_store_root)).write_bytes_atomic(
+        _RECORDED_RAW_MANIFEST_URI,
+        b'{"source_id": "gfs"}',
+    )
+
+    assert scheduler_state_failure_module._object_manifest_is_missing(candidate, manifest_uri) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, manifest_uri) == (
+        False,
+        None,
+    )
+    downstream_state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+    downstream = scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence(
+        candidate,
+        downstream_state,
+        {},
+    )
+    assert downstream is not None
+    assert downstream["decision"] == "retry_failed"
+    assert downstream["reason"] == "retry_downstream_after_raw_repair"
+    assert downstream["restart_from_stage"] == "download"
+    assert downstream["fresh_ingestion"] == {
+        "required": False,
+        "mode": "reuse_repaired_raw_then_full_chain",
+    }
+    assert downstream["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
+    assert downstream["raw_manifest_repair"] == {
+        "manifest_uri": manifest_uri,
+        "manifest_exists": True,
+        "successful_download_stage": True,
+        "successful_download_job_id": "job_cycle_gfs_2026052106_download_retry_1",
+        "downstream_failed_stage": "convert",
+        "downstream_failed_job_id": "job_cycle_gfs_2026052106_convert",
+    }
+    assert downstream["retry_policy"] == {
+        "automatic_retry_allowed": True,
+        "manual_retry_required": False,
+        "attempt": 0,
+        "retry_limit": 3,
+    }
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_both_raw_manifest_legs_consult_the_unified_probe_and_abstain(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_reason: str,
+) -> None:
+    # Seam 6, the wiring pin for the AC-1 abstention departure: because an
+    # abstaining leg emits NO evidence, the distinguishable reason cannot be read
+    # off a terminal, so pin it where it exists -- each leg consults
+    # ``_artifact_uri_missing_status`` with its own ``(candidate, str(uri))`` and
+    # returns ``None`` once the reason comes back non-null.  This is also what
+    # separates the real fix from a call-site ``try/except ObjectStoreError``: a
+    # swallow never reaches the unified probe at all.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+    manifest_uri = f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}"
+
+    for leg in (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence,
+        scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence,
+    ):
+        consulted: list[tuple[str, str]] = []
+
+        def _spy(spied_candidate: Any, spied_uri: str) -> tuple[bool, str | None]:
+            consulted.append((spied_candidate.candidate_id, spied_uri))
+            return True, unsafe_reason
+
+        monkeypatch.setattr(
+            scheduler_state_failure_module,
+            "_artifact_uri_missing_status",
+            _spy,
+        )
+
+        assert leg(candidate, state, {}) is None
+        assert consulted == [(candidate.candidate_id, manifest_uri)]
+        assert isinstance(consulted[0][1], str)
+
+
+def test_unresolvable_raw_manifest_reference_still_reaches_the_repair_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 7, the ``(True, None)`` residual arm, carried over verbatim from #1365
+    # D4: a recorded reference the closed-world validator cannot resolve counts as
+    # ABSENT with a null reason, because a full re-ingestion re-records the
+    # reference and therefore IS an effective remedy.  Abstention is for unsafe
+    # reasons only; this one is null, so the repair leg still claims.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    # Independent oracle: the store helper really does raise ``ValueError`` here,
+    # so the residual arm under test is load-bearing rather than decorative.
+    with pytest.raises(ValueError):
+        LocalObjectStore(str(object_store_root)).resolve_path(_UNRESOLVABLE_RAW_MANIFEST_URI)
+    assert (
+        scheduler_state_failure_module._is_raw_manifest_object_uri(_UNRESOLVABLE_RAW_MANIFEST_URI)
+        is True
+    )
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        _UNRESOLVABLE_RAW_MANIFEST_URI,
+    ) == (True, None)
+    state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", retry_count=0)
+    state["forecast_cycle"] = {
+        **state["forecast_cycle"],
+        "manifest_uri": _UNRESOLVABLE_RAW_MANIFEST_URI,
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "repair_missing_raw_manifest"
+    assert decision.evidence["raw_manifest_repair"] == {
+        "manifest_uri": _UNRESOLVABLE_RAW_MANIFEST_URI,
+        "manifest_exists": False,
+        "successful_download_stage": True,
+        "downstream_failed_stage": "convert",
+    }
+    assert decision.evidence["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+
+
+@pytest.mark.parametrize("repaired", [False, True])
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_keeps_permanent_refusals_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repaired: bool,
+    unsafe_reason: str,
+) -> None:
+    # Seam 9, the #1313 regression lock on the other side of the abstention: a
+    # remedy-non-causal permanent code stays blocked, now reached through the
+    # ladder's permanent guard rather than through a leg-internal permanence
+    # consultation.  Abstention must not hand a refused candidate an automatic
+    # retry by the back door.
+    candidate = _scheduler_candidate_fixture()
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="OUT_OF_MEMORY",
+        repaired=repaired,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
 
 
 def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
