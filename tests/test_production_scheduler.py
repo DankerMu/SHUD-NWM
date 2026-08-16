@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -15,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -12334,7 +12336,7 @@ def _copyback_downstream_failure_state(
     candidate: Any,
     identity: Mapping[str, str],
     *,
-    copyback_source: Path,
+    copyback_source: Path | str,
     error_code: str,
 ) -> dict[str, Any]:
     return {
@@ -13100,6 +13102,403 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     assert repair["reason"] == "forcing_artifact_reference_unsafe"
     assert repair["unsafe_reason"] == "local_artifact_root_unresolvable"
     assert result.evidence["counts"]["submitted_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #1424: the SAME lane's other throw-type mismatch.  ``_local_artifact_path``
+# expanded ``~`` with ``Path.expanduser()``, which raises an errno-LESS
+# ``RuntimeError`` whenever the home directory cannot be determined -- and
+# ``_looks_like_local_uri_or_path`` deliberately admits ``~``-leading values into
+# this leg.  ``except (OSError, ValueError)`` (``scheduler_state_failure.py``
+# ``:1062``) does not catch it, so it escaped ``run_once`` and aborted the whole
+# pass with zero evidence, exactly like the #1402 ``Path.resolve()`` hole.  The
+# fix routes both expansions through ``os.path.expanduser``, the same
+# non-raising primitive the root side already uses in ``_realpath_or_none``.
+#
+# Because the unexpandable value comes back UNCHANGED it is a RELATIVE path, so
+# its containment verdict is a function of the process working directory: every
+# test below anchors the cwd with ``monkeypatch.chdir`` rather than inheriting
+# the runner's.
+# ---------------------------------------------------------------------------
+
+#: The empirically triggering shape (issue #1424 evidence 2): an unknown user has
+#: no password-database entry, so no home directory can be derived for it.
+_UNEXPANDABLE_TILDE_URI = "~nosuchuser_zz/output/summary.json"
+
+
+def _assert_tilde_is_genuinely_unexpandable(value: str) -> None:
+    """Independent oracle: this interpreter really cannot expand ``value``.
+
+    Pins all three facts the fix rests on, so the tests below cannot pass merely
+    because the trigger stopped existing: the old primitive raises, the raise is
+    a ``RuntimeError`` carrying NO errno (hence outside every handler in the
+    lane, and not narrowable by an errno split the way #1402's OSError was), and
+    the new primitive returns the input untouched instead.
+    """
+
+    with pytest.raises(RuntimeError) as excinfo:
+        Path(value).expanduser()
+    assert "home directory" in str(excinfo.value)
+    assert not isinstance(excinfo.value, OSError | ValueError)
+    assert getattr(excinfo.value, "errno", None) is None
+    assert os.path.expanduser(value) == value
+
+
+def _break_home_directory_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second trigger face: no ``HOME`` and no passwd entry for this uid.
+
+    That is the container shape from issue #1424 evidence 2 -- it needs no exotic
+    username, an ordinary ``~/...`` value is enough.
+    """
+
+    monkeypatch.delenv("HOME", raising=False)
+
+    def _no_passwd_entry(uid: int) -> None:
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+    # ``posixpath.expanduser`` imports ``pwd`` and calls ``pwd.getpwuid`` at call
+    # time, and ``Path.expanduser`` delegates to it, so patching the module
+    # attribute covers both the old and the new primitive.
+    monkeypatch.setattr(pwd, "getpwuid", _no_passwd_entry)
+
+
+def test_local_artifact_guard_unknown_user_tilde_fails_closed_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # D3 seam 1 / D2 row 1: the escaping RuntimeError becomes the lane's existing
+    # deterministic fail-closed verdict.  The reason is non-null, so the
+    # operator-authorized repair channel refuses it (#1365 doctrine) and the
+    # runbook routes to artifact placement -- which is correct, an operator-written
+    # ``~unknown`` uri IS a placement fault.
+    good = tmp_path / "good-root"
+    good.mkdir()
+    cwd_outside_every_root = tmp_path / "cwd-outside-every-root"
+    cwd_outside_every_root.mkdir()
+    monkeypatch.chdir(cwd_outside_every_root)
+    _assert_tilde_is_genuinely_unexpandable(_UNEXPANDABLE_TILDE_URI)
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=good)
+
+    # The unexpanded literal flows on as an ordinary relative path...
+    assert scheduler_state_failure_module._local_artifact_path(_UNEXPANDABLE_TILDE_URI) == Path(
+        _UNEXPANDABLE_TILDE_URI
+    )
+    # ...and the existing containment rules decide, anchored at the cwd.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, _UNEXPANDABLE_TILDE_URI) == (
+        True,
+        "local_artifact_path_outside_allowed_roots",
+    )
+
+
+def test_local_artifact_guard_plain_tilde_without_any_home_source_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # D3 seam 2 / D2 row 4: the second trigger face lands on the same verdict, so
+    # the fix is not keyed to the ``~user`` spelling but to "no home directory
+    # obtainable" as a class.
+    good = tmp_path / "good-root"
+    good.mkdir()
+    cwd_outside_every_root = tmp_path / "cwd-outside-every-root"
+    cwd_outside_every_root.mkdir()
+    monkeypatch.chdir(cwd_outside_every_root)
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=good)
+    _break_home_directory_resolution(monkeypatch)
+    _assert_tilde_is_genuinely_unexpandable("~/output/summary.json")
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, "~/output/summary.json") == (
+        True,
+        "local_artifact_path_outside_allowed_roots",
+    )
+
+
+def _pre_change_local_artifact_path(value: str) -> Path | None:
+    """Independent transcription of the pre-change implementation (master ``:1083-1089``).
+
+    Deliberately NOT imported from the module under test: the byte-compat oracle
+    below must compare the new behaviour against a fixed written-down old one,
+    not against itself.
+    """
+
+    if value.startswith("file://"):
+        parsed = urlparse(value)
+        if parsed.scheme != "file":
+            return None
+        return Path(unquote(parsed.path)).expanduser()
+    return Path(value).expanduser()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Expandable tilde forms -- the arm the fix must not disturb.
+        "~/output/summary.json",
+        "~/",
+        "~",
+        "~/a/../b/summary.json",
+        # No tilde at all.
+        "/abs/output/summary.json",
+        "relative/output/summary.json",
+        "",
+        # file:// forms, including the percent-encoded and netloc tilde spellings.
+        "file:///abs/output/summary.json",
+        "file://~nosuchuser_zz/o.json",
+        "file:///~nosuchuser_zz/o.json",
+        "file:///abs/%7Enosuchuser_zz/o.json",
+        "file://localhost/abs/o.json",
+        "file://",
+    ],
+)
+def test_local_artifact_path_is_byte_compatible_with_the_pre_change_implementation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    # D3 seam 3: on every input the OLD implementation could handle, the new one
+    # returns the identical value.  The change is strictly "stops raising", not
+    # "normalizes differently".
+    #
+    # Input-domain carve-out (D3 seam 3): homes that rstrip('/') to '' are
+    # excluded (``HOME`` of ``''``, ``/``, ``//``...).  There the two primitives
+    # genuinely differ on ``~//x`` inputs -- ``Path('~//x').expanduser()`` yields
+    # ``/x`` while ``Path(os.path.expanduser('~//x'))`` yields ``//x`` (POSIX
+    # keeps a leading double slash) -- but the downstream realpath folds ``//x``
+    # back to ``/x``, so the guard's verdict is unchanged even in that corner
+    # (round-1 O1 measurement); this oracle pins Path equality, hence the
+    # carve-out.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    expected = _pre_change_local_artifact_path(value)
+    actual = scheduler_state_failure_module._local_artifact_path(value)
+
+    assert actual == expected
+    assert str(actual) == str(expected)
+
+
+def _expanduser_calls_with_foreign_receiver(node: ast.AST) -> list[str]:
+    """Every ``.expanduser()`` call in ``node`` whose receiver is not ``os.path``.
+
+    A RECEIVER discriminant, deliberately not the attribute-name ban the issue's
+    AC-3 wording suggested: the fix keeps the ``expanduser`` attribute name and
+    only changes what it hangs off, so a name ban would go red on the correct
+    code.  ``os.path.expanduser`` never raises; ``<Path expression>.expanduser()``
+    is exactly the raising form this change removes.
+    """
+
+    foreign: list[str] = []
+    for child in ast.walk(node):
+        if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)):
+            continue
+        if child.func.attr != "expanduser":
+            continue
+        receiver = child.func.value
+        is_os_path = (
+            isinstance(receiver, ast.Attribute)
+            and receiver.attr == "path"
+            and isinstance(receiver.value, ast.Name)
+            and receiver.value.id == "os"
+        )
+        if not is_os_path:
+            foreign.append(ast.unparse(child.func))
+    return foreign
+
+
+def _os_path_expanduser_call_count(node: ast.AST) -> int:
+    return len(
+        [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "expanduser"
+        ]
+    ) - len(_expanduser_calls_with_foreign_receiver(node))
+
+
+def test_local_artifact_guard_lane_expands_tilde_only_through_os_path_expanduser() -> None:
+    # D3 seam 4 / AC-3: no function in the lane may reach the raising expansion
+    # form again, on either the root side or the path side.
+    lane = _artifact_guard_lane_function_nodes()
+
+    assert sorted(lane) == sorted(_ARTIFACT_GUARD_LANE_FUNCTIONS)
+    for name, node in lane.items():
+        assert _expanduser_calls_with_foreign_receiver(node) == [], f"{name} still expands ~ off a Path receiver"
+    # Non-vacuous: the lane really does still expand ``~`` -- twice on the path
+    # side (the file:// arm and the bare arm) and once on the root side -- so this
+    # pin cannot be satisfied by deleting tilde support altogether.
+    assert _os_path_expanduser_call_count(lane["_local_artifact_path"]) == 2
+    assert _os_path_expanduser_call_count(lane["_realpath_or_none"]) == 1
+
+
+def test_expanduser_pin_discriminates_on_the_receiver_not_on_the_attribute_name() -> None:
+    # The pin's own oracle.  An attribute-NAME ban would flag the two calls in
+    # ``allowed`` below -- i.e. it would go red on the correct fix and on the
+    # already-shipped ``_realpath_or_none`` -- so the discriminant is proven to be
+    # about the receiver.
+    banned = ast.parse("Path(value).expanduser()\nPath(unquote(parsed.path)).expanduser()\nroot.expanduser()\n")
+    allowed = ast.parse("Path(os.path.expanduser(value))\nexpanded = os.path.expanduser(text)\n")
+
+    assert _expanduser_calls_with_foreign_receiver(banned) == [
+        "Path(value).expanduser",
+        "Path(unquote(parsed.path)).expanduser",
+        "root.expanduser",
+    ]
+    assert _expanduser_calls_with_foreign_receiver(allowed) == []
+    # Both allowed calls DO carry the ``expanduser`` attribute name.
+    assert _os_path_expanduser_call_count(allowed) == 2
+
+
+def test_unexpandable_tilde_root_and_path_sides_agree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # D3 seam 5 / D2 row 8 / AC-4: the asymmetry the issue reported (root side
+    # immune since PR #1422, path side still raising) is gone.  "Agree" means the
+    # same rule from the same anchor -- both sides keep the literal and resolve it
+    # against the cwd -- so the equal anchored paths make the artifact CONTAINED by
+    # its own root.  The verdict is therefore the contained-but-absent
+    # ``(True, None)``, not a containment rejection.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    _assert_tilde_is_genuinely_unexpandable(_UNEXPANDABLE_TILDE_URI)
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=_UNEXPANDABLE_TILDE_URI)
+    anchored = Path(os.path.realpath(anchor / _UNEXPANDABLE_TILDE_URI))
+
+    # Root side: admitted (ENOENT fallback), anchored at the cwd, no fault flag.
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == ((anchored,), False)
+    # Path side: same literal, same anchor.
+    path = scheduler_state_failure_module._local_artifact_path(_UNEXPANDABLE_TILDE_URI)
+    assert path is not None
+    assert scheduler_state_failure_module._realpath_or_none(str(path)) == anchored
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, _UNEXPANDABLE_TILDE_URI) == (
+        True,
+        None,
+    )
+
+
+def test_unexpandable_tilde_with_cwd_under_a_root_keeps_the_null_reason_absent_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # D2 row 2, a NAMED ACCEPTANCE: with the cwd under a configured root the
+    # anchored literal is contained, so the existing "contained and probed absent"
+    # semantics apply and the null reason routes the candidate to the authorized
+    # rebuild/repair channel.  That is the lane's standing doctrine for a
+    # genuinely-not-there artifact, and it beats aborting the pass either way.
+    #
+    # Recorded residual (D2 row 3, report-not-fix): if a directory literally named
+    # ``~nosuchuser_zz`` also existed under the cwd, ``path.exists()`` would be
+    # true and the guard would vouch for the artifact (``(False, None)``).  That
+    # needs an operator-written ``~unknown`` uri AND a cwd under a root AND a
+    # literal same-named directory at once.
+    good = tmp_path / "good-root"
+    cwd_under_root = good / "runs"
+    cwd_under_root.mkdir(parents=True)
+    monkeypatch.chdir(cwd_under_root)
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=good)
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, _UNEXPANDABLE_TILDE_URI) == (
+        True,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "file://~nosuchuser_zz/o.json",
+        "file:///~nosuchuser_zz/o.json",
+        "file:///%7Enosuchuser_zz/o.json",
+        "file://localhost/~nosuchuser_zz/o.json",
+    ],
+)
+def test_file_uri_tilde_never_reaches_home_expansion_on_either_implementation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    uri: str,
+) -> None:
+    # D2 row 5: the ``file://`` arm's ``expanduser`` is a theoretical surface only.
+    # ``urlparse`` either eats the tilde as a netloc or leaves it behind a leading
+    # slash, so ``parsed.path`` never starts with ``~`` and the expansion is a
+    # no-op -- which is why the pre-change code never raised here.  Pinned so a
+    # future url-parsing change cannot quietly re-open the surface.
+    good = tmp_path / "good-root"
+    good.mkdir()
+    cwd_outside_every_root = tmp_path / "cwd-outside-every-root"
+    cwd_outside_every_root.mkdir()
+    monkeypatch.chdir(cwd_outside_every_root)
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=good)
+
+    assert not unquote(urlparse(uri).path).startswith("~")
+    assert scheduler_state_failure_module._local_artifact_path(uri) == _pre_change_local_artifact_path(uri)
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, uri) == (
+        True,
+        "local_artifact_path_outside_allowed_roots",
+    )
+
+
+def test_unknown_user_tilde_copyback_source_blocks_one_candidate_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The escape chain end to end, on the copyback leg through the real
+    # ``run_once``: an operator-written ``~unknown`` ``copyback_source_uri`` used
+    # to abort the entire pass (RuntimeError escaping ``_candidate_state_decision``,
+    # ``_build_candidates`` and ``run_once``'s only except arm) -- no candidates,
+    # no evidence, and ``run_continuous`` exiting.  Now the faulty candidate is
+    # blocked with a fail-closed reason and its NEIGHBOUR still schedules.
+    copyback_root = tmp_path / "copyback-root"
+    copyback_root.mkdir()
+    cwd_outside_every_root = tmp_path / "cwd-outside-every-root"
+    cwd_outside_every_root.mkdir()
+    monkeypatch.chdir(cwd_outside_every_root)
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    _assert_tilde_is_genuinely_unexpandable(_UNEXPANDABLE_TILDE_URI)
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=_PerModelCandidateStateRepository(
+            {
+                "model_a": _copyback_downstream_failure_state(
+                    candidate,
+                    identity,
+                    copyback_source=_UNEXPANDABLE_TILDE_URI,
+                    error_code="NODE_FAILURE",
+                ),
+                "model_b": {},
+            }
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"]
+    assert [entry["model_id"] for entry in blocked] == ["model_a"]
+    assert blocked[0]["reason"] == "missing_copyback_source"
+    assert (
+        blocked[0]["state_evidence"]["artifact_guard"]["unsafe_reason"]
+        == "local_artifact_path_outside_allowed_roots"
+    )
+    # The discriminating half: the pass kept going and the healthy neighbour was
+    # actually submitted, which is exactly what the aborting RuntimeError destroyed.
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [basin["model_id"] for call in orchestrator.calls for basin in call["basins"]] == ["model_b"]
+    assert result.evidence["counts"]["candidate_count"] == 2
+    # And the pass evidence really reached disk (the abort produced none).
+    assert result.artifact_path is not None
+    assert result.artifact_path.exists()
 
 
 def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:

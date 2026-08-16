@@ -1081,12 +1081,33 @@ def _looks_like_local_uri_or_path(value: str) -> bool:
 
 
 def _local_artifact_path(value: str) -> Path | None:
+    """Normalize a probed local artifact value without a raising ``~`` expansion (#1424).
+
+    ``Path.expanduser()`` raises an errno-LESS ``RuntimeError`` whenever the home
+    directory cannot be determined -- an unknown ``~user`` prefix, or a plain
+    ``~`` when ``HOME`` is unset and the uid has no password-database entry -- and
+    ``_looks_like_local_uri_or_path`` deliberately admits ``~``-leading values
+    into this leg.  No ``(OSError, ValueError)`` handler in this lane catches it,
+    so it escaped ``run_once`` and aborted the whole pass with zero evidence,
+    exactly as the ``Path.resolve()`` hole did in #1402.
+
+    ``os.path.expanduser`` (the same primitive ``_realpath_or_none`` already uses
+    on the root side, so both sides now treat an unexpandable ``~`` alike) returns
+    the input UNCHANGED instead of raising.  The value then flows on as an
+    ordinary relative path into the existing containment verdicts, anchored at the
+    process working directory.  Expandable ``~`` values and tilde-free values are
+    byte-for-byte unaffected, except when the home directory rstrips to ``''``
+    (``HOME`` of ``''``, ``/``, ``//``...) and the value starts with ``~//``: the
+    returned Path keeps a doubled leading slash the old code collapsed, which the
+    downstream realpath folds back, so the verdict is still unchanged.
+    """
+
     if value.startswith("file://"):
         parsed = urlparse(value)
         if parsed.scheme != "file":
             return None
-        return Path(unquote(parsed.path)).expanduser()
-    return Path(value).expanduser()
+        return Path(os.path.expanduser(unquote(parsed.path)))
+    return Path(os.path.expanduser(value))
 
 
 def _realpath_or_none(text: str) -> Path | None:
