@@ -47,8 +47,8 @@ None，`["23106","6"]` 恰好 2 个 → `minute_index=1` 命中列数。下一�
   **不混同**（AC-4 明文）。tier-a（inventory 形，baseline 打包产物如
   lh_gl）：classify 的 tier 分派与「tier-a 永不探针」既有锁不动，审计脚
   本在**自有层**对 tier-a 行追加内容探针（同一 helper 判形状、receipt
-  覆写 + 新 `ic_qualification_source` 值 + schema 同步），让存量 37 包获
-  得离线左移；生产调度门 tier-a 保持 metadata-only（判别 seam 与 receipt
+  覆写 + 新 `ic_qualification_source` 值 + schema 同步），让存量 51 个打
+  包 package（含 dg 变体共 103 个 IC 文件）获得离线左移；生产调度门 tier-a 保持 metadata-only（判别 seam 与 receipt
   契约见 design D2 行 3）。
 - **注入器 fail-closed**（`runtime.py:3215-3229` `_shift_cfg_ic_time`）：头部
   数字 token **少于 3 个**时不写文件 + 上抛 `SHUDRuntimeError`（文件字节

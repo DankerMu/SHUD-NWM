@@ -248,13 +248,15 @@ def test_runtime_corrupted_init_state_is_rejected_and_next_state_is_staged(tmp_p
     assert manifest["runtime"]["init_mode"] == 3
     assert repository.init_state_updates[-1] == good_state.state_id
     staged_ic = next(input_dir.rglob("*.cfg.ic"))
-    staged_lines = staged_ic.read_bytes().splitlines()
-    # The BODY is the good snapshot's, verbatim. Only the header's trailing
-    # minute-time differs, because the pre-existing shift step re-stamps it to the
-    # run start (behaviour unchanged by #1197; the fixture body is now a real SHUD
-    # IC, so that step actually runs instead of silently no-opping).
-    assert staged_lines[1:] == good_content.splitlines()[1:]
-    assert staged_lines[0].split()[:2] == good_content.splitlines()[0].split()[:2]
+    # Full-byte oracle, constructed independently of the runtime: the BODY is the
+    # good snapshot's verbatim, and the header's trailing token is the RUN START
+    # minute, because the pre-existing shift step re-stamps it there (behaviour
+    # unchanged by #1197; the fixture body is now a real SHUD IC, so that step
+    # actually runs instead of silently no-opping). 29626560 = the fixture
+    # manifest's start_time 2026-05-01T00:00:00Z in minutes since the epoch
+    # (20574 days x 1440), i.e. 2880 minutes past the snapshot's own
+    # 29623680 / 2026-04-29T00:00:00Z stamp.
+    assert staged_ic.read_bytes() == b"2\t6\t29626560.000000\n1\t0.1\t0.2\t0.3\t0.4\t0.5\n"
 
 
 def test_runtime_malformed_ic_header_snapshot_degrades_instead_of_failing_the_run(

@@ -30,7 +30,8 @@
     （scheduler_generation.py:449-560 token 词表）。
   - (f) **实机 mesh 先验探针**（fixture review P2-4，mesh 交叉校验零真实
     数据先验）：node-27 `/home/ghdc/nwm/Basins` 13 个 baseline + node-22
-    NFS `/ghdc/data/nwm/object-store/models/**` 37 个打包 IC，逐个
+    NFS `/ghdc/data/nwm/object-store/models/**` 51 个打包 package（含
+    dg 变体共 103 个 IC 文件），逐个
     `head -1 *.cfg.ic`（token 数 + 首 token）对 `head -1 *.sp.mesh` 首
     token，全表记入 PR 证据；**发现任何在跑 model 不匹配 → 停下报告重
     裁**（never-break-userspace）。

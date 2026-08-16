@@ -758,18 +758,30 @@ def _repair_missing_radiation_contexts(
         repaired_inventory = discover_basins_inventory(repaired_root)
         repaired_model = _find_inventory_model(repaired_inventory, model_id)
         if repaired_model.get("status") != "valid" or repaired_model.get("default_publish_eligible") is not True:
-            raise SchedulerRegistryPublishError(
-                "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
-                "Repaired Basins model is still not publishable.",
-                details={
-                    "model_id": model_id,
-                    "basin_slug": basin_slug,
-                    "status": repaired_model.get("status"),
-                    "missing_required_files": repaired_model.get("missing_required_files") or [],
-                    "invalid_required_files": repaired_model.get("invalid_required_files") or [],
-                    "repair": repair,
-                },
-            )
+            # Same split as the missing-template branch above, and as
+            # ``_select_publishable_models``: an EXPLICITLY requested model that
+            # cannot be published fails closed, but on a bulk (unfiltered) run
+            # this model is simply not selected. The repair is a best-effort
+            # rescue of models the plain selection already dropped, so aborting
+            # the whole run over one of them would let an unrelated malformed
+            # package (e.g. #1197's `23106\t6` IC on a basin that also lacks
+            # *.tsd.rl) block every healthy basin from publishing. The refusal is
+            # not silent: the model keeps its inventory row carrying
+            # ``invalid_required_files`` / ``missing_required_files``.
+            if requested_slugs or requested_model_ids:
+                raise SchedulerRegistryPublishError(
+                    "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",
+                    "Repaired Basins model is still not publishable.",
+                    details={
+                        "model_id": model_id,
+                        "basin_slug": basin_slug,
+                        "status": repaired_model.get("status"),
+                        "missing_required_files": repaired_model.get("missing_required_files") or [],
+                        "invalid_required_files": repaired_model.get("invalid_required_files") or [],
+                        "repair": repair,
+                    },
+                )
+            continue
         repaired_inventory_path = repaired_inventory_dir / f"{model_id}.inventory.json"
         _guard_resources(resource_validator, workspace)
         _write_workspace_inventory(repaired_inventory, repaired_inventory_path, workspace_budget)

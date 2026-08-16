@@ -886,6 +886,10 @@ def test_audit_verdict_table_requires_an_explicit_completeness_claim() -> None:
 
 MALFORMED_IC = b"23106\t6\n1\t0.1\t0.2\t0.3\t0.4\n"
 WELL_FORMED_IC = b"23106\t6\t29714400.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
+#: The same malformed header carried by a production-sized body (~78 KiB here,
+#: megabytes in production).  The tier-(a) sweep must reach its verdict from the
+#: first line alone, without pulling the body across NFS.
+LARGE_MALFORMED_IC = MALFORMED_IC + b"1\t0.1\t0.2\t0.3\t0.4\n" * 4096
 
 
 def test_audit_mirror_probe_fills_the_header_shape_verdict(tmp_path: Path) -> None:
@@ -1010,7 +1014,72 @@ def test_audit_receipt_limits_declare_the_inventory_tier_header_probe(tmp_path: 
 
     limits = fixture.receipt()["limits"]
     assert limits["inventory_tier_ic_header_probed"] is True
-    # Reading a header line is not re-hashing the object, so the older const holds.
+    # The sweep reads a bounded header prefix and hashes nothing (proved by
+    # ``test_audit_inventory_sweep_reads_only_the_header_and_hashes_nothing``),
+    # so the older const still holds.
     assert limits["inventory_tier_package_objects_rehashed"] is False
     note = str(limits["note"]).lower()
     assert "header" in note and "inventory_content_probe" in note
+
+
+class _HashlibSpy:
+    """Delegating stand-in for the audit module's ``hashlib`` that counts sha256."""
+
+    def __init__(self) -> None:
+        self.sha256_calls = 0
+
+    def sha256(self, *args: Any, **kwargs: Any) -> Any:
+        self.sha256_calls += 1
+        return hashlib.sha256(*args, **kwargs)
+
+
+def test_audit_inventory_sweep_reads_only_the_header_and_hashes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tier-(a) sweep's cost, asserted in BYTES READ rather than in prose.
+
+    Production carries 51 inventory-shaped packages whose IC objects are megabytes
+    each; a sweep that re-read (let alone re-hashed) them whole would burn that IO
+    on every pass and would make the receipt's
+    ``inventory_tier_package_objects_rehashed=false`` claim, the schema's
+    ``inventory_tier_ic_header_probed`` description and this module's docstring
+    untrue at once.  So this test instruments the audit's own reader and digest
+    entry points: the canonical IC object is opened exactly once, bounded by
+    :data:`audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES`, and no sha256 is computed at all.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_path = fixture.add_baseline_package_model(
+        "lh_gl", shud_input_name="LH-GL", ic_content=LARGE_MALFORMED_IC
+    )
+    fixture.publish_registry()
+    ic_size_bytes = ic_path.stat().st_size
+    assert ic_size_bytes > 8 * audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+
+    reads: list[tuple[Path, int, int]] = []
+    real_read = audit.read_bytes_limited_no_follow
+
+    def _recording_read(path: Path, *, max_bytes: int, containment_root: Path | None = None) -> bytes:
+        content = real_read(path, max_bytes=max_bytes, containment_root=containment_root)
+        reads.append((Path(path), max_bytes, len(content)))
+        return content
+
+    hashlib_spy = _HashlibSpy()
+    monkeypatch.setattr(audit, "read_bytes_limited_no_follow", _recording_read)
+    monkeypatch.setattr(audit, "hashlib", hashlib_spy)
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    # The bound did not cost the sweep its verdict: this package IS malformed.
+    row = _row(fixture.receipt(), "lh_gl", "gfs")
+    assert row["ic_qualified"] is False
+    assert row["ic_qualification_source"] == "inventory_content_probe"
+
+    ic_reads = [entry for entry in reads if entry[0] == ic_path]
+    assert len(ic_reads) == 1, f"the canonical IC object was read {len(ic_reads)} times: {ic_reads}"
+    _path, max_bytes, bytes_read = ic_reads[0]
+    assert max_bytes == audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+    # ``read_bytes_limited_no_follow`` returns at most one sentinel byte past its
+    # bound, so that — not the bound itself — is the ceiling on bytes in hand.
+    assert bytes_read <= audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES + 1
+    assert bytes_read < ic_size_bytes
+    assert hashlib_spy.sha256_calls == 0

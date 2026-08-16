@@ -60,8 +60,12 @@ class SHUDRuntimeError(RuntimeError):
 # Structured error code raised by ``_shift_cfg_ic_time`` when an existing, non-empty
 # ``*.cfg.ic`` header carries no minute-time slot to re-stamp.  On the forcing-staging
 # call sites it propagates through the existing visible failure channel; on the
-# warm-start materialization path ``_prepare_initial_state`` translates it into the
-# corrupted-state rejection so the snapshot degradation ladder keeps running.
+# warm-start materialization path ``_stage_initial_state`` translates it into the
+# corrupted-state rejection so the snapshot degradation ladder keeps running.  That
+# translation covers ONLY snapshots whose header has no minute-time slot and that did
+# not already trip an earlier check: a 2-token header on a snapshot carrying a recorded
+# ``valid_time`` hits the pre-existing ``WARM_START_TIME_MISMATCH`` verification first
+# and still fails the whole run, unchanged by #1197.
 IC_TIME_SHIFT_HEADER_INVALID = "IC_TIME_SHIFT_HEADER_INVALID"
 # A shiftable SHUD IC header needs at least the counts plus a trailing minute-time:
 # native ``<mesh> <mesh-state-columns> <minute-time>`` is the shortest legal form.

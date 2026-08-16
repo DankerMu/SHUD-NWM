@@ -66,7 +66,7 @@
         "inventory_tier_package_objects_rehashed": { "const": false },
         "inventory_tier_ic_header_probed": {
           "const": true,
-          "description": "The audit runs an own-layer content probe over inventory-qualified rows that reads only the canonical IC object's header line to validate its numeric-token shape. Reading a header line is not re-hashing the package object, so inventory_tier_package_objects_rehashed stays false."
+          "description": "The audit runs an own-layer header-only content probe over inventory-qualified rows: a bounded no-follow read of a few KiB off the front of the canonical IC object, whose first line is validated for numeric-token shape. The rest of the object is never read and no digest is computed from it, so inventory_tier_package_objects_rehashed stays false. The exact byte bound is the audit tool's MAX_IC_HEADER_SHAPE_PROBE_BYTES and is restated in limits.note."
         },
         "probe_tier_max_object_bytes": { "type": "integer", "minimum": 1 },
         "run_evidence_lanes": {

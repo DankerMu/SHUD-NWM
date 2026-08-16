@@ -856,6 +856,86 @@ def test_publish_all_basin_scheduler_registry_repairs_missing_radiation_model(
     assert {row["model_id"] for row in payload["models"]} == {"basins_qhh_shud", "basins_tailanhe_shud"}
 
 
+def _write_radiation_repair_pair(basins_root: Path) -> None:
+    """Real two-basin tree: healthy ``alpha`` + ``bravo`` that no repair can save.
+
+    ``bravo`` is missing ``*.tsd.rl`` (so the radiation repair picks it up, using
+    alpha's file as the template — the matcher keys on the ``*.tsd.lai`` header)
+    AND carries #1197's malformed ``23106\\t6`` IC header, which discovery refuses
+    on the repaired copy too.  Nothing about that refusal is bravo-specific: it is
+    the shape of "one basin in the tree is unpublishable for a reason the repair
+    does not address".
+    """
+    from tests.test_basins_registry_import import _make_valid_model
+
+    lai_header = "900\t18\t19810101\t20551201\t86400\n"
+    alpha_input = _make_valid_model(basins_root / "alpha", "alpha", sp_segment_count=2)
+    (alpha_input / "alpha.tsd.lai").write_text(f"{lai_header}lai\n", encoding="utf-8")
+    (alpha_input / "alpha.tsd.rl").write_text(f"{lai_header}radiation\n", encoding="utf-8")
+
+    bravo_input = _make_valid_model(basins_root / "bravo", "bravo", sp_segment_count=2)
+    (bravo_input / "bravo.tsd.lai").write_text(f"{lai_header}lai\n", encoding="utf-8")
+    (bravo_input / "bravo.tsd.rl").unlink()
+    (bravo_input / "bravo.cfg.ic").write_text("23106\t6\n1\t0.1\n", encoding="utf-8")
+
+
+def test_bulk_publish_skips_a_repaired_model_that_is_still_unpublishable(tmp_path: Path) -> None:
+    """B1: one unsalvageable basin must not take the whole bulk publish down.
+
+    The radiation repair is a best-effort rescue of models plain selection already
+    dropped.  Raising when the rescue fails is right for an EXPLICIT request and
+    wrong for a bulk run: production's registry refresh and the node-27 runbook
+    both publish unfiltered, so a single malformed IC in the tree would leave the
+    scheduler registry with zero models — a strictly worse terminal state than the
+    one basin that is actually broken.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_radiation_repair_pair(basins_root)
+    registry_manifest = tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json"
+    work_dir = tmp_path / "work"
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=work_dir,
+    )
+
+    assert summary["status"] == "published"
+    assert summary["selected_basin_slugs"] == ["alpha"]
+    assert summary["repairs"] == []
+    payload = json.loads(registry_manifest.read_text(encoding="utf-8"))
+    assert {row["model_id"] for row in payload["models"]} == {"basins_alpha_shud"}
+    # Skipped, not silent: the run's own inventory keeps bravo's refusal reason.
+    inventory = json.loads((work_dir / "basins-inventory.json").read_text(encoding="utf-8"))
+    bravo = next(model for model in inventory["models"] if model["basin_slug"] == "bravo")
+    assert bravo["status"] == "partial"
+    assert bravo["missing_required_files"] == ["*.tsd.rl"]
+    assert any("2 numeric token(s)" in reason for reason in bravo["invalid_required_files"])
+
+
+def test_explicitly_requested_unsalvageable_model_still_fails_closed(tmp_path: Path) -> None:
+    """The other half of B1: an operator who NAMES the basin gets the refusal."""
+    basins_root = tmp_path / "Basins"
+    _write_radiation_repair_pair(basins_root)
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        registry_script.publish_all_basin_scheduler_registry(
+            basins_root=basins_root,
+            registry_manifest=tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json",
+            object_store_root=tmp_path / "objects",
+            object_store_prefix="s3://nhms",
+            work_dir=tmp_path / "work-filtered",
+            basin_slugs=["bravo"],
+        )
+
+    assert excinfo.value.error_code == "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE"
+    details = excinfo.value.details
+    assert details["basin_slug"] == "bravo"
+    assert any("2 numeric token(s)" in reason for reason in details["invalid_required_files"])
+
+
 def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:
     input_dir = _write_soil_alpha_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
 
