@@ -94,12 +94,13 @@ message change breaking existing message-anchored assertions.
 - Receipt schema backward compatibility: enum widening only (old
   receipts remain valid); no field type changes.
 - `_accumulate` arithmetic unchanged (totals fix is description-only).
-- Existing tests: zero modified assertions beyond the TWO fixture-review
-  enumerated authorizations — (a) the exact stage-set guard
+- Existing tests: zero modified assertions beyond the THREE enumerated
+  authorizations — (a) the exact stage-set guard
   tests/test_node27_river_identity_backfill_receipt.py:105-122 gains
   `lock_contention` (exactness NOT loosened; reachability leg untouched),
   (b) the receipt-shape test :86-102 is extended with totals/skip-counter
-  assertions. Shortfall message anchors: fixture review verified NO test
+  assertions, (c) the existing shortfall test gains a 2-line
+  absence-pin (round-1 D 追认; see tasks 4.8). All pure additions. Shortfall message anchors: fixture review verified NO test
   asserts on the reason string (grep zero), so the conditional append
   needs no authorization.
 - `stop` object is schema-closed (`additionalProperties: false`; splat
