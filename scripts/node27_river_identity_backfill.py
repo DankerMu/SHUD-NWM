@@ -362,6 +362,19 @@ class BatchDurationExceeded(RuntimeError):
     """The server cancelled the batch because it exceeded the duration wall."""
 
 
+class BatchLockContention(RuntimeError):
+    """The batch could not take its row locks (SQLSTATE 55P03 or 40P01).
+
+    Deliberately NOT a subclass of :class:`BatchDurationExceeded`: the caller's
+    remedy for a slow batch is a halved range, and halving shortens the scan,
+    not the wait for a lock another transaction is holding.
+    """
+
+    def __init__(self, message: str, *, pgcode: str | None = None) -> None:
+        super().__init__(message)
+        self.pgcode = pgcode
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (the unit-test surface)
 # ---------------------------------------------------------------------------
@@ -780,6 +793,12 @@ def execute_batch(
                 f"batch {chunk.key} pages [{first_page},{last_page}) exceeded "
                 f"{duration_wall_ms} ms"
             ) from error
+        elif _is_lock_contention(error):
+            raise BatchLockContention(
+                f"batch {chunk.key} pages [{first_page},{last_page}) could not take its "
+                f"row locks (SQLSTATE {getattr(error, 'pgcode', None)})",
+                pgcode=getattr(error, "pgcode", None),
+            ) from error
         raise
     duration_ms = (time.monotonic() - started) * 1000.0
 
@@ -827,6 +846,17 @@ def _is_query_cancelled(error: Exception) -> bool:
     if pgcode == "57014":
         return True
     return "canceling statement due to statement timeout" in str(error).lower()
+
+
+def _is_lock_contention(error: Exception) -> bool:
+    """True for lock_not_available (55P03) and deadlock_detected (40P01).
+
+    SQLSTATE only, no message fallback: unlike 57014 -- where a client-side
+    cancellation and a server timeout share one code and the text is the only
+    discriminator -- these two codes are unambiguous, and matching on English
+    lock messages would misclassify under any other lc_messages.
+    """
+    return getattr(error, "pgcode", None) in {"55P03", "40P01"}
 
 
 def sample_write_activity(cursor: Any, chunk: ChunkRow) -> int:
@@ -1103,6 +1133,21 @@ def _run_probe(
         connection.rollback()
 
 
+# Both diagnostic counts are taken AFTER the UPDATE, so rows a concurrent
+# transaction deleted between the candidate count and the UPDATE (the two
+# READ COMMITTED snapshots of one batch) are already out of range and leave
+# both counts at zero. Genuine rot leaves at least one of them non-zero, which
+# makes the double zero a cheap discriminator worth spelling out for whoever
+# reads the receipt at 3am.
+_SHORTFALL_DELETE_RACE_NOTE = (
+    " Both diagnostic counts are zero, which is the signature of a concurrent DELETE "
+    "(or any concurrent write that moves rows out of the block range) "
+    "between the candidate count and the UPDATE (two READ COMMITTED snapshots) rather "
+    "than of referential rot: check the output parser's re-parse delete window for this "
+    "chunk before escalating this as data corruption."
+)
+
+
 def _run_enforce(
     connection: Any,
     chunk: ChunkRow,
@@ -1154,15 +1199,18 @@ def _run_enforce(
                 # per-invocation partition the integration test asserts) that
                 # are not in the table. The full arithmetic of the failed batch
                 # is carried in stop.detail below.
+                reason = (
+                    f"{chunk.key} pages [{outcome.first_page},{outcome.last_page}): "
+                    f"{outcome.candidate_rows} sentinel candidate(s) but only "
+                    f"{outcome.updated_rows} updated -- {outcome.unmatched_rows} unresolvable "
+                    f"against the authority tables, {outcome.unmappable_rows} unmappable to an "
+                    "enum label. Refusing to record this as progress."
+                )
+                if outcome.unmatched_rows == 0 and outcome.unmappable_rows == 0:
+                    reason += _SHORTFALL_DELETE_RACE_NOTE
                 raise BackfillStop(
                     "shortfall",
-                    (
-                        f"{chunk.key} pages [{outcome.first_page},{outcome.last_page}): "
-                        f"{outcome.candidate_rows} sentinel candidate(s) but only "
-                        f"{outcome.updated_rows} updated -- {outcome.unmatched_rows} unresolvable "
-                        f"against the authority tables, {outcome.unmappable_rows} unmappable to an "
-                        "enum label. Refusing to record this as progress."
-                    ),
+                    reason,
                     chunk_schema=chunk.chunk_schema,
                     chunk_name=chunk.chunk_name,
                     first_page=outcome.first_page,
@@ -1303,6 +1351,9 @@ def _run_one_batch_with_retry(
         return _guarded_batch(connection, chunk, config, first_page, last_page), 0, None
     except BatchDurationExceeded:
         connection.rollback()
+    except BatchLockContention as error:
+        connection.rollback()
+        raise _lock_contention_stop(chunk, first_page, last_page, error) from error
 
     midpoint = first_page + max(1, (last_page - first_page) // 2)
     if midpoint >= last_page:
@@ -1337,6 +1388,40 @@ def _run_one_batch_with_retry(
             first_page=first_page,
             last_page=midpoint,
         ) from error
+    except BatchLockContention as error:
+        connection.rollback()
+        raise _lock_contention_stop(chunk, first_page, midpoint, error) from error
+
+
+def _lock_contention_stop(
+    chunk: ChunkRow, first_page: int, last_page: int, error: BatchLockContention
+) -> BackfillStop:
+    """Turn a lock-contention batch failure into a stop with its own remedy.
+
+    There is deliberately no retry: the duration wall's halving exists because
+    a narrower block range really does less scanning, whereas a lock is held by
+    another transaction for as long as that transaction wants it. Retrying is
+    the anti-pattern, and reporting this as ``duration_wall`` would send the
+    operator to tune batch_pages against a problem that is not about batch size.
+    The SQLSTATE rides in the reason string because ``stop`` is a closed object
+    in the receipt schema.
+    """
+    return BackfillStop(
+        "lock_contention",
+        (
+            f"{chunk.key} pages [{first_page},{last_page}) could not take its row locks "
+            f"(SQLSTATE {error.pgcode or 'unknown'}); pause the ingest writer and wait for an "
+            "idle window, then rerun. A plain --enforce run only reaches terminal chunks, where "
+            "that pause is the whole remedy; --final-sweep's quiescence gate enforces the pause "
+            "for the active chunk only. "
+            "Lowering batch_pages or raising the duration wall will not help: halving a range "
+            "shortens the scan, not the lock wait."
+        ),
+        chunk_schema=chunk.chunk_schema,
+        chunk_name=chunk.chunk_name,
+        first_page=first_page,
+        last_page=last_page,
+    )
 
 
 def build_receipt(

@@ -20,6 +20,7 @@ from tests.river_identity_backfill_fakes import (
     NOW,
     UNCOMPRESSED_GUARD,
     FakeConnection,
+    LockUnavailable,
     chunk,
     config,
     env,
@@ -101,6 +102,17 @@ def test_skipped_chunks_report_pending_rows_as_null_rather_than_a_fabricated_zer
     # The chunk that WAS measured still reports a number.
     assert by_state["skipped_no_pending"]["pending_rows"] == 0
 
+    # The same receipt, read at the totals level: 0 over the MEASURED chunks,
+    # while two chunks were never counted at all. This combination is legal and
+    # the schema says so, because "totals.pending_rows == 0" read as "the table
+    # is clean" is the exact misreading the skip counters exist to block.
+    assert receipt["totals"]["pending_rows"] == 0
+    assert receipt["totals"]["chunks_skipped_compressed"] == 1
+    assert receipt["totals"]["chunks_skipped_active"] == 1
+    assert "MEASURED in this invocation only" in (
+        load_schema()["$defs"]["totals"]["properties"]["pending_rows"]["description"]
+    )
+
 
 def test_stop_stage_enum_contains_only_stages_the_runner_can_emit() -> None:
     """A dead enum value is a documented behaviour that does not exist. Budget
@@ -114,11 +126,27 @@ def test_stop_stage_enum_contains_only_stages_the_runner_can_emit() -> None:
         "duration_wall",
         "ingest_not_quiescent",
         "compressed_chunk_guard",
+        "lock_contention",
     }
 
     source = Path(backfill.__file__).read_text(encoding="utf-8")
     for stage in stages:
         assert f'"{stage}"' in source, f"schema advertises unreachable stop stage {stage}"
+
+
+def test_schema_accepts_the_lock_contention_stage_and_still_rejects_an_unknown_one() -> None:
+    """Widening the enum is what makes a lock_contention stop publishable at
+    all — a runner emitting a stage the schema lacks fails validation and loses
+    the receipt. The enum still has to reject stages nothing emits, or it stops
+    being a statement about this runner."""
+    stop_schema = load_schema()["$defs"]["stop"]
+
+    jsonschema.validate(
+        {"stage": "lock_contention", "reason": "SQLSTATE 40P01"}, stop_schema
+    )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"stage": "lock_timeout", "reason": "invented"}, stop_schema)
 
 
 def test_receipt_records_the_compression_timer_state(tmp_path: Path) -> None:
@@ -319,6 +347,42 @@ def test_a_shortfall_stopped_receipt_totals_only_the_rows_that_persisted(
     # The failed batch is still fully described, just not counted as progress.
     assert receipt["stop"]["updated_rows"] == 1
     assert receipt["stop"]["candidate_rows"] == 2
+
+
+def test_a_lock_contended_batch_publishes_a_schema_valid_lock_contention_receipt(
+    tmp_path: Path,
+) -> None:
+    """The classification is only worth anything if it survives to the receipt:
+    a stage the schema rejects would take the whole receipt down with it, and
+    the operator would be left with the duration_wall reading again."""
+    target = chunk("c1", days_old=30, pages=4)
+    connection = FakeConnection(
+        [
+            ("pg_total_relation_size", lambda s, p: {"fetchall": [inventory_row(target)]}),
+            UNCOMPRESSED_GUARD,
+            ("t.run_key IS NOT NULL", lambda s, p: {"fetchone": (0,)}),
+            ("UPDATE ONLY", lambda s, p: LockUnavailable("55P03")),
+            ("SELECT count(*)", lambda s, p: {"fetchone": (2,)}),
+        ]
+    )
+
+    receipt = backfill.build_receipt(
+        config(tmp_path, enforce=True, batch_pages=4, max_batches=10, batch_sleep_ms=0),
+        now_utc=NOW,
+        connect=lambda _url: connection,
+        head_sha="0" * 40,
+        timer_state=dict(_TIMER_STATE),
+    )
+
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "stopped"
+    assert receipt["stop"]["stage"] == "lock_contention"
+    assert "55P03" in receipt["stop"]["reason"]
+    # Nothing was written, and the chunk keeps its own record instead of being
+    # replaced by a failure shell.
+    assert receipt["totals"]["updated_rows"] == 0
+    assert receipt["chunks"][0]["state"] == "stopped"
+    assert connection.commits == 0
 
 
 def test_a_guard_error_produces_a_stopped_receipt_not_a_bare_failure_shell(
