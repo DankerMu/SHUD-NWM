@@ -625,6 +625,48 @@ def _missing_upstream_forecast_artifact_evidence(
         ),
     )
     copyback_required = restart_stage in _COPYBACK_REQUIRED_RESTART_STAGES or _copyback_source_required(state)
+    if _is_withheld_uri_placeholder(copyback_uri):
+        # Same withheld-reference ruling the forcing leg got in #1203, now on the
+        # leg that has no recovery tier (#1367).  A placeholder is a WITHHELD
+        # reference, not a copyback source: probing it would report "missing" for a
+        # source nobody looked for, and ``missing_copyback_source`` would then claim
+        # a probe witnessed absence -- a claim that is false AND unfixable, since
+        # the placeholder never exists in the store.  Existence is "cannot
+        # determine" here, so the REQUIREMENT decides: required fail-closes with the
+        # distinct withheld reason, not required emits no blocker at all (exactly
+        # like an absent reference).  The probe is never taught about placeholders
+        # and the redaction boundary is never bypassed.
+        #
+        # The ruling applies to the reference the alias resolution RETURNED: a
+        # placeholder is non-empty, so it wins ``_first_artifact_uri`` and shadows
+        # any lower-priority alias.  We do not continue scanning for a probeable
+        # substitute -- a surviving unredacted echo is of unknown provenance, and
+        # probing it would bypass this ruling on the authoritative reference.
+        #
+        # ``COPYBACK_SOURCE_WITHHELD`` has NO clearing path on the enabled DB-free
+        # public-read plane (that read redacts every s3/published-shaped ``*_uri``
+        # on every pass, the write side strips placeholders back to ``None``, and
+        # the unredacted DB-backed read is pinned off), and the completed-stage call
+        # site is evaluated before the manual-retry escape hatch.  Naming the
+        # blocker truthfully is what this change delivers; a clearing mechanism
+        # depends on a copyback write side that does not exist yet and is tracked in
+        # issue #1464.
+        if copyback_required:
+            return (
+                _artifact_blocker_evidence(
+                    candidate,
+                    base_evidence,
+                    planned_retry,
+                    reason="copyback_source_withheld",
+                    error_code="COPYBACK_SOURCE_WITHHELD",
+                    artifact_type="copyback_source",
+                    artifact_uri=copyback_uri,
+                    artifact_exists=False,
+                    forcing_provenance=forcing_provenance,
+                ),
+                forcing_provenance,
+            )
+        return None, forcing_provenance
     if copyback_uri not in (None, ""):
         # #1365 D3: the copyback leg shares the probe, so the object branch's
         # root-unconfigured fail-closed ruling

@@ -1672,6 +1672,34 @@ Business-readiness receipt after fix:
 - Scheduler evidence shows duplicate-free file-journal progress and lock release
   after the pass.
 
+#### 8.5.1 Withheld copyback source (`COPYBACK_SOURCE_WITHHELD`)
+
+A candidate blocked with reason `copyback_source_withheld` / error code
+`COPYBACK_SOURCE_WITHHELD` is **not** a missing-forcing blocker and none of the
+triage tables above apply to it. The blocker means the copyback source reference
+the scheduler resolved was a redaction placeholder (`[object-uri]`, `[uri]`,
+`[local-path]`, `[redacted]`, `sha256:[redacted]`): the public-read redaction
+boundary withheld the value, so existence could not be determined. Read it as
+"cannot determine", not "source determined absent" — that is what distinguishes
+it from `missing_copyback_source` / `COPYBACK_SOURCE_MISSING`, which does mean a
+probe ran and found nothing.
+
+- `artifact_guard.unsafe_reason` is `null` here because **no probe ran at all**.
+  The §8.5 `unsafe_reason` table above is keyed on probe verdicts and does not
+  cover this blocker; do not read its `null` row as "probed, determined absent".
+- `artifact_guard.artifact_uri` is the placeholder itself, i.e. the evidence that
+  the reference was withheld rather than absent.
+- The exact-cycle forcing rebuild does **not** apply: it repairs forcing
+  packages, and this blocker names a copyback reference. Running it burns a cycle
+  and clears nothing. The blocker is also refused by the missing-forcing repair
+  authorization channel by design.
+- No operator clearing path exists today (the DB-free public read redacts the
+  reference on every pass and the manual-retry escape hatch is evaluated after
+  the call site this blocker rides). Defining one depends on a copyback write
+  side that does not exist yet; it is tracked in issue #1464. Until then, report
+  the occurrence — the geometry is latent in production and a live instance is
+  itself the signal.
+
 ### 8.6 Heihe 底图和 DB 范围混用
 
 Current DB registered Heihe data uses `/home/ghdc/nwm/Basins/...` on node-27.

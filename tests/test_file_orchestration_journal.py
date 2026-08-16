@@ -17,6 +17,7 @@ from packages.common import safe_fs
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator.chain import SlurmClientError
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
@@ -621,6 +622,44 @@ def test_candidate_state_applies_the_direct_file_forcing_fallback_the_context_re
     recovered_uri = state["forcing_version"]["forcing_package_uri"]
     assert recovered_uri == "[object-uri]"
     assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
+
+
+def test_candidate_state_withholds_a_recorded_copyback_source_uri_behind_the_placeholder(
+    tmp_path: Path,
+) -> None:
+    # #1367 premise pin: the geometry the copyback withheld-reference guard exists
+    # for is produced by this read, not simulated.  An s3-shaped
+    # ``copyback_source_uri`` recorded on a job crosses the public-read redaction
+    # boundary and reaches the scheduler as ``[object-uri]``, which is exactly what
+    # the guard's alias resolution then hands the copyback leg.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    recorded_uri = "s3://nhms/runs/fcst_gfs_2026062800_model_a/output/summary.json"
+    job["details"] = {"copyback_source_uri": recorded_uri}
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="failed", jobs=[job]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    recovered_uri = state["pipeline_jobs"][0]["details"]["copyback_source_uri"]
+    assert recovered_uri == "[object-uri]"
+    assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
+    assert recorded_uri not in json.dumps(state, sort_keys=True)
+    # The guard resolves the withheld value, not the recorded one.
+    assert (
+        scheduler_state_failure_module._first_artifact_uri(
+            state,
+            ("copyback_source_uri", "copyback_source", "copyback_source_path", "copyback_uri"),
+        )
+        == "[object-uri]"
+    )
 
 
 def test_candidate_state_marks_the_journal_row_forcing_provenance_tier(tmp_path: Path) -> None:
