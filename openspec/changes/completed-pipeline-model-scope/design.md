@@ -1,5 +1,10 @@
 # Design: completed-pipeline-model-scope
 
+> 行号坐标声明（round-2 复审 Note-2）：本文实现点行号除显式标注
+> 「实现后 HEAD」处（D1 末 bullet、D5 第 6 行、复合行）外，均为**改前
+> master（1c84634a）坐标**——实现插入的 11 行 gate 注释使
+> `file_orchestration_journal.py` 原 :564 起整体下移。
+
 ## Context
 
 `has_completed_pipeline`（`file_orchestration_journal.py:543-568`）是 db-free

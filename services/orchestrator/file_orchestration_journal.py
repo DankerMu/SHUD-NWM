@@ -736,7 +736,17 @@ class FileOrchestrationJournalRepository:
         # duplicate-submission gates (`has_active_pipeline`,
         # `active_slurm_jobs`), whose DB counterparts match the cycle run id
         # UNCONDITIONALLY (`chain_repository.py:74-79` and `:177-181`), so those
-        # two gates keep answering wide.  `has_completed_pipeline` has no DB
+        # two gates keep answering wide.  That wide visibility is NOT uniformly
+        # permissive, and this paragraph is no warrant for leaving the active
+        # side alone: `has_active_pipeline` runs its own local
+        # `has_terminal_completion` over the same unnarrowed rows (`:534-536`),
+        # so on the composite shape — a foreign model's completion row beside
+        # this candidate's ACTIVE hydro run — the wide visibility INVERTS into a
+        # suppression of the hydro-active arm and the gate answers False, where
+        # the DB counterpart's plain UNION (`chain_repository.py:57-95`) has no
+        # such clause and answers True.  That divergence is issue #1472, pinned
+        # by `test_foreign_model_completion_row_suppresses_the_hydro_active_arm`.
+        # `has_completed_pipeline` has no DB
         # job-row counterpart at all (`chain_repository.py:98-111` reads
         # `hydro.hydro_run` only) — but that DB gate's source/cycle/model
         # three-key restriction fixes the DIRECTION the journal side must answer
