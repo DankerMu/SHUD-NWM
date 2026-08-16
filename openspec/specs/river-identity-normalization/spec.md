@@ -21,6 +21,19 @@ settings and primary key SHALL remain unchanged by this change;
 switching both is delivered as a read-only verify function plus a
 fail-closed cutover function that the migration chain never invokes.
 
+The runner's stop/receipt observability SHALL additionally distinguish
+lock contention from slowness and keep totals honest about unmeasured
+chunks: SQLSTATE 55P03 (lock_not_available) and 40P01
+(deadlock_detected) during a batch SHALL stop the run under a dedicated
+stop stage `lock_contention` (no halved-range retry, remediation advice
+distinct from `duration_wall`); a shortfall stop whose diagnostic counts
+are both zero (`unmatched_rows == 0` and `unmappable_rows == 0`) SHALL
+name the concurrent-DELETE double-snapshot signature in its reason so
+operators re-check the parser re-parse window before escalating as data
+corruption; and `totals.pending_rows` SHALL be documented as summing
+only chunks measured in the invocation (a skipped chunk contributes
+nothing, so 0 does not assert the table is sentinel-free).
+
 #### Scenario: Migration replays idempotently without rewriting the fact table
 
 - **WHEN** the migration chain through 000050 is applied twice to an
@@ -78,6 +91,38 @@ fail-closed cutover function that the migration chain never invokes.
   which a compress/decompress round-trip preserves row data; the
   migration chain itself never calls the verify or cutover functions,
   keeping CI and production schemas convergent
+
+#### Scenario: Double-zero shortfall names the concurrent-DELETE signature
+
+- **WHEN** a batch stops with `shortfall > 0` while both
+  `unmatched_rows` and `unmappable_rows` are zero
+- **THEN** the stop remains fail-closed under stage `shortfall` with
+  unchanged rollback and cursor-rewind behavior, and the stop reason
+  directs the operator to check for a concurrent DELETE (parser
+  re-parse window) between the candidate count and the UPDATE before
+  treating the stop as referential rot or enum overflow
+
+#### Scenario: Lock contention stops under its own stage, not duration_wall
+
+- **WHEN** the batch UPDATE fails with SQLSTATE 55P03 or 40P01
+- **THEN** the run stops fail-closed under stage `lock_contention`
+  without a halved-range retry, the reason carries the SQLSTATE and
+  advises pausing the ingest writer / waiting for an idle window (with
+  the final-sweep quiescence gate noted as enforcing that pause on the
+  active chunk only) rather than tuning batch size or the duration wall,
+  the receipt validates against the schema, and the statement-timeout
+  (57014) path keeps its existing halved-retry-then-`duration_wall`
+  behavior unchanged
+
+#### Scenario: totals.pending_rows covers only measured chunks
+
+- **WHEN** every eligible chunk in an invocation reaches zero pending
+  rows while at least one chunk was skipped as compressed or active
+- **THEN** the receipt may legally report `totals.pending_rows == 0`
+  with the skipped chunk's per-chunk `pending_rows` null and the
+  `chunks_skipped_*` counters non-zero, and the schema documents that
+  this total covers only measured chunks rather than asserting the
+  whole table is sentinel-free
 
 ### Requirement: river_timeseries writers SHALL dual-write surrogate identity columns atomically with the text columns
 
