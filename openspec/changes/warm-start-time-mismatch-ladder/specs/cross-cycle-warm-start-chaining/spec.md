@@ -19,9 +19,11 @@ not a shortened forecast horizon or a request for extra short production runs.
 - **WHEN** cycle N+1 consumes the saved state
 - **THEN** the snapshot `valid_time`, the `.cfg.ic` header minute-time, and the run's
   `start_time`/`cycle_time` all equal `T_{N+1}`
-- **AND** a mismatch among the three is a recorded blocker at the **candidate-snapshot** level —
-  the drifted candidate is rejected and recorded through the corrupted-state channel and is never
-  consumed at the wrong time; the run-level terminal (move to the next usable state, labeled cold
-  start, systemic escalation, or the exact-warm-start hard failure) is governed by the
-  forecast-warm-start degradation-ladder requirement, so a recorded blocker no longer implies a
-  whole-run failure outside the exact-warm-start policy.
+- **AND** a mismatch among the three is a blocker at the **candidate-snapshot** level — the
+  drifted candidate is rejected and is never consumed at the wrong time; on the degradation
+  terminals (next usable state, labeled cold start) the rejection is recorded through the
+  corrupted-state channel, while the systemic-escalation and exact-warm-start terminals fail the
+  run loudly without persisting the mark (escalation deliberately keeps the snapshots usable so
+  the alarm repeats). The run-level terminal is governed by the forecast-warm-start
+  degradation-ladder requirement, so a rejected candidate no longer implies a whole-run failure
+  outside the exact-warm-start policy.

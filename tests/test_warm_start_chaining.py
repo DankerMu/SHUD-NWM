@@ -668,6 +668,11 @@ class MarkRecordingStateManager(FakeStateManager):
         expected_checksum: str | None,
     ) -> None:
         self.mark_messages.append((state_id, message))
+        if state_id not in self.snapshots:
+            # Fidelity with the real StateManager.mark_init_state_corrupted: an id the
+            # index does not carry (a manifest naming a re-keyed-away state) is a
+            # zero-row UPDATE, not an error. The base double would KeyError.
+            return
         super().mark_init_state_corrupted(
             state_id,
             message=message,
@@ -898,6 +903,72 @@ def test_unanimous_plural_time_mismatch_escalates_and_keeps_snapshots_usable(tmp
     assert state_manager.snapshots[second.state_id].usable_flag is True
 
 
+def test_uri_only_declaration_of_one_drifted_snapshot_is_not_a_systemic_batch(tmp_path: Path) -> None:
+    # #1431 escalate accounting is per CANDIDATE, not per loop iteration. A manifest that
+    # declares only an ``ic_file_uri`` walks the SAME physical snapshot twice: round 1
+    # under the URI (no state_id, so it never enters ``rejected_state_ids``), round 2
+    # after ``_next_usable_state`` serves that very object back with its index id. Counted
+    # per iteration this ONE drifted snapshot fakes "2 of 2" unanimity and raises the
+    # systemic alarm every cycle, with nothing ever marked. It must degrade like the lone
+    # drifted snapshot it is.
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")  # header off by 6h from valid_time
+    drifted = _ic_state(t_run, drifted_content)
+    state_manager = MarkRecordingStateManager([drifted])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    manifest["initial_state"]["state_id"] = None  # URI-only declaration
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No raise: one snapshot cannot be a systematic batch, however many times it is walked.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # Exactly one mark: the URI-only round has no id to mark, the id-bearing round defers
+    # one, and the cold-start exit flushes it -- no duplicate for the same snapshot.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert [state_id for state_id, _ in state_manager.mark_messages] == [drifted.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_rekeyed_away_state_id_over_one_drifted_snapshot_is_not_a_systemic_batch(tmp_path: Path) -> None:
+    # #1431: the second geometry that walks one snapshot twice -- the manifest names a
+    # state_id the index no longer carries (re-keyed away) while its ``ic_file_uri`` still
+    # points at the one indexed object. Round 1 rejects it under the stale id, round 2
+    # under the index's own id; per-iteration counting would again fake plural unanimity.
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")
+    drifted = _ic_state(t_run, drifted_content)
+    state_manager = MarkRecordingStateManager([drifted])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    manifest["initial_state"]["state_id"] = "state_demo_model_rekeyed_away"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # The only snapshot the index actually carries is marked (the stale id names no row,
+    # so marking it changes nothing), and the flush happened on the cold-start exit.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    tokened = {state_id for state_id, message in state_manager.mark_messages if "WARM_START_TIME_MISMATCH" in message}
+    assert drifted.state_id in tokened
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
 @pytest.mark.parametrize("order", ["mismatch_first", "checksum_first"])
 def test_mixed_rejection_causes_keep_the_cold_start_fallback(tmp_path: Path, order: str) -> None:
     # #1431: escalation requires UNANIMITY. A ladder exhausted by a mixture of checksum
@@ -943,6 +1014,62 @@ def test_mixed_rejection_causes_keep_the_cold_start_fallback(tmp_path: Path, ord
     assert tokened == [mismatched_id]
     assert state_manager.snapshots[first.state_id].usable_flag is False
     assert state_manager.snapshots[second.state_id].usable_flag is False
+
+
+def _over_policy_residual_ic_bytes(header_time: str) -> bytes:
+    """A 2-cell sectioned IC whose unsat domain-mean repair exceeds the policy cap.
+
+    One cell carries -0.01 m (inside the 0.05 m per-value repair ceiling, so it IS
+    projected), which makes the domain mean 0.005 m -- far above
+    ``MAX_UNSAT_MEAN_CORRECTION_M`` (2e-4 m) -- so normalization refuses with
+    ``WARM_START_STATE_RESIDUALS_EXCEED_POLICY``.
+    """
+
+    return (
+        f"2\t1\t{_minute_time(header_time):.6f}\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0\t0\t0\t-0.010000\t0\n"
+        "2\t0\t0\t0\t0.100000\t0\n"
+        "Index\tStage\n"
+        "1\t0\n"
+    ).encode()
+
+
+def test_deferred_mismatch_mark_is_flushed_when_a_later_candidate_raises_another_code(tmp_path: Path) -> None:
+    # #1431 deferred-mark invariant: only the systemic escalate may withhold the pending
+    # marks. Here candidate 1 is rejected for a time mismatch (mark deferred) and
+    # candidate 2 fails with a THIRD code that leaves the ladder through the
+    # unexpected-error arm -- that code must still propagate, and candidate 1's earned QC
+    # record must not leave with it (otherwise the drifted snapshot stays usable with
+    # nothing recorded against it and every later cycle repeats the same wasted ladder).
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")
+    drifted = _ic_state(t_run, drifted_content)
+    older_valid = "2026-05-01T00:00:00Z"
+    # Header agrees with its own valid_time, so the time legs pass; the negative-residual
+    # policy is what refuses it.
+    residual_content = _over_policy_residual_ic_bytes(older_valid)
+    residual = _ic_state(older_valid, residual_content)
+    state_manager = MarkRecordingStateManager([drifted, residual])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+    _publish_state(object_root, residual, residual_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+
+    # The third code is preserved verbatim: this exit is not the ladder's own terminal.
+    assert excinfo.value.error_code == "WARM_START_STATE_RESIDUALS_EXCEED_POLICY"
+    # ...and the deferred mark was flushed on the way out.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert [state_id for state_id, _ in state_manager.mark_messages] == [drifted.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert state_manager.snapshots[residual.state_id].usable_flag is True
 
 
 def test_exact_warm_start_time_mismatch_keeps_original_error_and_clears_staged(tmp_path: Path) -> None:

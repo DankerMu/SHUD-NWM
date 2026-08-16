@@ -66,7 +66,11 @@ class SHUDRuntimeError(RuntimeError):
 # not already trip an earlier check: a 2-token header on a snapshot carrying a recorded
 # ``valid_time`` hits the pre-existing ``WARM_START_TIME_MISMATCH`` verification first,
 # which since #1431 joins the SAME degradation ladder through its own rejection channel
-# in ``_stage_initial_state`` instead of failing the whole run.
+# in ``_stage_initial_state`` instead of failing the whole run -- with two named
+# exceptions that still fail the whole run: under the exact-warm-start policy (there is
+# no ladder to walk, so the original error propagates verbatim) and at a ladder
+# exhaustion where every rejected candidate -- at least two of them -- was rejected for a
+# time mismatch (``WARM_START_TIME_MISMATCH_SYSTEMIC``, below).
 IC_TIME_SHIFT_HEADER_INVALID = "IC_TIME_SHIFT_HEADER_INVALID"
 # Terminal error code for SYSTEMATIC warm-start time drift (#1431): every candidate the
 # ladder walked was rejected for a header/valid-time mismatch and there were at least two
@@ -1276,149 +1280,179 @@ class SHUDRuntime:
         # #1431 escalate accounting: one drifted snapshot is a snapshot accident and
         # degrades like any other corrupt candidate, but a ladder whose candidates were
         # ALL rejected for a time mismatch (at least two of them) is systematic drift and
-        # must stay fail-loud.  URI-only candidates (no ``state_id``) count too: they are
-        # real rejections, they just cannot be marked.
-        rejections = 0
-        time_mismatch_rejections = 0
+        # must stay fail-loud.  Both tallies are SETS of candidate identities, not
+        # iteration counters, because the SAME physical snapshot can be walked twice: a
+        # manifest that carries only an ``ic_file_uri`` (or a ``state_id`` the index no
+        # longer knows) is rejected once without ever entering ``rejected_state_ids``
+        # under the index's own id, and ``_next_usable_state`` then hands the very same
+        # object back with that id attached.  Counting iterations would let that ONE
+        # drifted snapshot fake the plural unanimity the escalate demands and fail every
+        # cycle with a false systemic alarm.  The identity is the resolved state URI: it is
+        # the one key stable across both rounds (and it is always set here -- the
+        # ``not state_uri`` exit below returns first).  URI-only candidates therefore count
+        # like any other; they just cannot be marked.
+        rejected_identities: set[str] = set()
+        mismatch_identities: set[str] = set()
         last_time_mismatch_message: str | None = None
         # Time-mismatch marks are DEFERRED rather than written as they happen: marking
         # persists ``usable_flag=False``, so writing them on the systemic-escalate exit
         # would make the next cycle find no usable candidate and cold-start silently --
         # the systematic-drift alarm would ring exactly once.  Every other loop exit
-        # flushes them, so the QC record is only withheld on the exit that is itself the
-        # loud signal.  Loop termination reads ``rejected_state_ids`` (in memory), never
-        # the persisted flag, so deferring cannot loop.
+        # flushes them (the ``return``s below call the flush directly; the wrapper around
+        # the loop covers every exception exit), so the QC record is only withheld on the
+        # exit that is itself the loud signal.  Loop termination reads
+        # ``rejected_state_ids`` (in memory), never the persisted flag, so deferring
+        # cannot loop.
         pending_mismatch_marks: list[dict[str, Any]] = []
-        while True:
-            # Per-candidate, reset BEFORE anything else: a candidate that fails staging or
-            # the checksum never reaches the materialization ``try`` below, so a value left
-            # over from the previous iteration would count that rejection as a time
-            # mismatch and fake the unanimity the escalate below requires.
-            time_mismatch = False
-            state_id = _initial_state_id(manifest)
-            state_uri = _initial_state_uri(manifest)
-            expected_checksum = _initial_state_checksum(manifest)
-            snapshot = self._state_snapshot(state_id)
-            if snapshot is not None:
-                state_uri = snapshot.state_uri
-                expected_checksum = snapshot.checksum
-                _set_initial_state_from_snapshot(
-                    manifest,
-                    snapshot,
-                    quality=_initial_state_quality(manifest) or "fresh",
-                )
-
-            if not state_uri:
-                self._flush_pending_corruption_marks(pending_mismatch_marks)
-                if _exact_warm_start_required(manifest):
-                    raise SHUDRuntimeError(
-                        "WARM_START_UNAVAILABLE",
-                        "Exact warm-start policy rejects a selected state without a readable URI.",
+        try:
+            while True:
+                # Per-candidate, reset BEFORE anything else: a candidate that fails staging or
+                # the checksum never reaches the materialization ``try`` below, so a value left
+                # over from the previous iteration would count that rejection as a time
+                # mismatch and fake the unanimity the escalate below requires.
+                time_mismatch = False
+                state_id = _initial_state_id(manifest)
+                state_uri = _initial_state_uri(manifest)
+                expected_checksum = _initial_state_checksum(manifest)
+                snapshot = self._state_snapshot(state_id)
+                if snapshot is not None:
+                    state_uri = snapshot.state_uri
+                    expected_checksum = snapshot.checksum
+                    _set_initial_state_from_snapshot(
+                        manifest,
+                        snapshot,
+                        quality=_initial_state_quality(manifest) or "fresh",
                     )
-                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
-                self._sync_init_state_id(manifest)
-                return
 
-            self._clear_staged_initial_states(input_dir)
-            staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(state_uri, input_dir)
-            if staged_path is not None and (
-                expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
-            ):
-                try:
-                    self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
-                except SHUDRuntimeError as error:
-                    if error.error_code == IC_TIME_SHIFT_HEADER_INVALID:
-                        # A snapshot whose IC header has no minute-time slot is a
-                        # CORRUPT SNAPSHOT, not a broken run: translate the injector's
-                        # fail-closed refusal into the same rejection channel a
-                        # checksum mismatch uses, so this candidate is marked and the
-                        # ladder below moves on to the next usable state (or cold
-                        # start).  Letting it propagate here would turn one bad
-                        # snapshot into a whole failed forecast, losing the
-                        # degradation ladder this loop exists to provide.
-                        error_message = error.message
-                    elif error.error_code == "WARM_START_TIME_MISMATCH":
-                        # #1431: same reasoning for a snapshot whose header time
-                        # disagrees with the valid_time it was recorded at -- it is not
-                        # the state it claims to be, i.e. one more corrupt candidate,
-                        # and a healthy neighbour in the index must still get its turn.
-                        # Under the exact-warm policy there is no ladder to walk, so the
-                        # historical whole-run failure is preserved verbatim (bare
-                        # re-raise: same code, message and traceback); only the
-                        # materialized IC is cleared first, matching the workspace
-                        # hygiene the exact-warm arm below already had.
-                        if _exact_warm_start_required(manifest):
-                            self._clear_staged_initial_states(input_dir)
-                            raise
-                        time_mismatch = True
-                        # Greppable token, so this rejection channel stays distinguishable
-                        # from the header-shape one in the recorded mark message.
-                        error_message = f"WARM_START_TIME_MISMATCH: {error.message}"
-                    else:
-                        raise
-                else:
+                if not state_uri:
                     self._flush_pending_corruption_marks(pending_mismatch_marks)
-                    _set_runtime_init_mode(manifest, 3)
+                    if _exact_warm_start_required(manifest):
+                        raise SHUDRuntimeError(
+                            "WARM_START_UNAVAILABLE",
+                            "Exact warm-start policy rejects a selected state without a readable URI.",
+                        )
+                    _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
                     self._sync_init_state_id(manifest)
                     return
 
-            message = error_message or "Initial state checksum mismatch."
-            rejections += 1
-            if time_mismatch:
-                time_mismatch_rejections += 1
-                last_time_mismatch_message = message
-            if state_id:
-                rejected_state_ids.add(state_id)
-                mark: dict[str, Any] = {
-                    "state_id": state_id,
-                    "message": message,
-                    "actual_checksum": actual_checksum,
-                    "expected_checksum": expected_checksum,
-                }
-                if time_mismatch:
-                    pending_mismatch_marks.append(mark)
-                else:
-                    self._mark_init_state_corrupted(
-                        state_id,
-                        message=message,
-                        actual_checksum=actual_checksum,
-                        expected_checksum=expected_checksum,
-                    )
-
-            if _exact_warm_start_required(manifest):
-                self._flush_pending_corruption_marks(pending_mismatch_marks)
                 self._clear_staged_initial_states(input_dir)
-                raise SHUDRuntimeError(
-                    "WARM_START_UNAVAILABLE",
-                    f"Exact warm-start state {state_id or state_uri} is unavailable: {message}",
+                staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(
+                    state_uri, input_dir
                 )
+                if staged_path is not None and (
+                    expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
+                ):
+                    try:
+                        self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
+                    except SHUDRuntimeError as error:
+                        if error.error_code == IC_TIME_SHIFT_HEADER_INVALID:
+                            # A snapshot whose IC header has no minute-time slot is a
+                            # CORRUPT SNAPSHOT, not a broken run: translate the injector's
+                            # fail-closed refusal into the same rejection channel a
+                            # checksum mismatch uses, so this candidate is marked and the
+                            # ladder below moves on to the next usable state (or cold
+                            # start).  Letting it propagate here would turn one bad
+                            # snapshot into a whole failed forecast, losing the
+                            # degradation ladder this loop exists to provide.
+                            error_message = error.message
+                        elif error.error_code == "WARM_START_TIME_MISMATCH":
+                            # #1431: same reasoning for a snapshot whose header time
+                            # disagrees with the valid_time it was recorded at -- it is not
+                            # the state it claims to be, i.e. one more corrupt candidate,
+                            # and a healthy neighbour in the index must still get its turn.
+                            # Under the exact-warm policy there is no ladder to walk, so the
+                            # historical whole-run failure is preserved verbatim (bare
+                            # re-raise: same code, message and traceback); only the
+                            # materialized IC is cleared first, matching the workspace
+                            # hygiene the exact-warm arm below already had.
+                            if _exact_warm_start_required(manifest):
+                                self._clear_staged_initial_states(input_dir)
+                                raise
+                            time_mismatch = True
+                            # Greppable token, so this rejection channel stays distinguishable
+                            # from the header-shape one in the recorded mark message.
+                            error_message = f"WARM_START_TIME_MISMATCH: {error.message}"
+                        else:
+                            raise
+                    else:
+                        self._flush_pending_corruption_marks(pending_mismatch_marks)
+                        _set_runtime_init_mode(manifest, 3)
+                        self._sync_init_state_id(manifest)
+                        return
 
-            next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
-            if next_state is None:
-                self._clear_staged_initial_states(input_dir)
-                if time_mismatch_rejections >= 2 and time_mismatch_rejections == rejections:
-                    # Unanimous plural time mismatch (#1431): nothing on this ladder was
-                    # rejected for any other reason, so this is systematic drift (a bad
-                    # re-key batch), not a corrupt snapshot -- fail the run loudly instead
-                    # of cold-starting.  The pending marks are deliberately NOT flushed:
-                    # the candidates stay usable so the next cycle walks the same ladder
-                    # and raises the same alarm until the drift is fixed.
+                message = error_message or "Initial state checksum mismatch."
+                rejected_identities.add(state_uri)
+                if time_mismatch:
+                    mismatch_identities.add(state_uri)
+                    last_time_mismatch_message = message
+                if state_id:
+                    rejected_state_ids.add(state_id)
+                    mark: dict[str, Any] = {
+                        "state_id": state_id,
+                        "message": message,
+                        "actual_checksum": actual_checksum,
+                        "expected_checksum": expected_checksum,
+                    }
+                    if time_mismatch:
+                        pending_mismatch_marks.append(mark)
+                    else:
+                        self._mark_init_state_corrupted(
+                            state_id,
+                            message=message,
+                            actual_checksum=actual_checksum,
+                            expected_checksum=expected_checksum,
+                        )
+
+                if _exact_warm_start_required(manifest):
+                    # The pending marks are flushed by the wrapper around this loop, which
+                    # covers every exception exit but the systemic escalate.
+                    self._clear_staged_initial_states(input_dir)
                     raise SHUDRuntimeError(
-                        WARM_START_TIME_MISMATCH_SYSTEMIC,
-                        f"Systematic warm-start time drift: all {rejections} warm-start "
-                        f"candidate(s) were rejected for a time mismatch "
-                        f"({time_mismatch_rejections} of {rejections} rejections). "
-                        f"Last rejection: {last_time_mismatch_message}",
+                        "WARM_START_UNAVAILABLE",
+                        f"Exact warm-start state {state_id or state_uri} is unavailable: {message}",
                     )
+
+                next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
+                if next_state is None:
+                    self._clear_staged_initial_states(input_dir)
+                    if len(mismatch_identities) >= 2 and mismatch_identities == rejected_identities:
+                        # Unanimous plural time mismatch (#1431): nothing on this ladder was
+                        # rejected for any other reason, so this is systematic drift (a bad
+                        # re-key batch), not a corrupt snapshot -- fail the run loudly instead
+                        # of cold-starting.  The pending marks are deliberately NOT flushed:
+                        # the candidates stay usable so the next cycle walks the same ladder
+                        # and raises the same alarm until the drift is fixed.
+                        raise SHUDRuntimeError(
+                            WARM_START_TIME_MISMATCH_SYSTEMIC,
+                            f"Systematic warm-start time drift: all {len(rejected_identities)} warm-start "
+                            f"candidate(s) were rejected for a time mismatch "
+                            f"({len(mismatch_identities)} of {len(rejected_identities)} rejections). "
+                            f"Last rejection: {last_time_mismatch_message}",
+                        )
+                    self._flush_pending_corruption_marks(pending_mismatch_marks)
+                    _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
+                    self._sync_init_state_id(manifest)
+                    return
+                _set_initial_state_from_snapshot(
+                    manifest,
+                    next_state,
+                    quality=assess_freshness(next_state.valid_time, before_time),
+                )
+        except SHUDRuntimeError as error:
+            # Deferred-mark invariant, by construction (#1431): the systemic escalate is the
+            # ONLY exit that withholds the pending marks.  Several exception exits inside the
+            # loop -- an unexpected materialization code, ``STATE_LOOKUP_FAILED`` from the
+            # snapshot lookup, ``WORKSPACE_PATH_UNSAFE`` from the staged-state clear, the
+            # exact-warm refusals -- would otherwise drop a QC record this ladder already
+            # earned, leaving the drifted snapshot usable with nothing recorded against it.
+            if error.error_code != WARM_START_TIME_MISMATCH_SYSTEMIC:
                 self._flush_pending_corruption_marks(pending_mismatch_marks)
-                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
-                self._sync_init_state_id(manifest)
-                return
-            _set_initial_state_from_snapshot(
-                manifest,
-                next_state,
-                quality=assess_freshness(next_state.valid_time, before_time),
-            )
+            raise
+        except Exception:
+            # Anything unstructured (an object-store or filesystem error) is likewise not the
+            # systemic signal, so the earned marks must not leave with it.
+            self._flush_pending_corruption_marks(pending_mismatch_marks)
+            raise
 
     def _consume_packaged_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
         """Consume the packaged calibrated ``*.cfg.ic`` or raise (#1164).
@@ -1765,7 +1799,13 @@ class SHUDRuntime:
 
         Called on every ``_stage_initial_state`` loop exit except the systemic-escalate
         raise, which withholds them on purpose so the drifted snapshots stay usable and
-        the next cycle re-raises the same alarm.
+        the next cycle re-raises the same alarm.  That "every" is true by construction,
+        not by enumeration: the three ``return`` exits call this directly, and the
+        try/except wrapped around the ladder loop flushes on the way out of ANY
+        propagating exception whose code is not
+        ``WARM_START_TIME_MISMATCH_SYSTEMIC`` -- including the exits that predate #1431
+        (an unexpected materialization code, ``STATE_LOOKUP_FAILED``,
+        ``WORKSPACE_PATH_UNSAFE``, the exact-warm refusals).
         """
 
         for mark in pending:

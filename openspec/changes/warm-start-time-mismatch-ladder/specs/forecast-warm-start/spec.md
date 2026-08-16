@@ -7,12 +7,13 @@
 The runtime SHALL treat a warm-start candidate snapshot rejected for a
 header/valid-time mismatch as one more corrupted snapshot on the
 degradation ladder rather than a whole-run failure, except under the
-exact-warm-start policy: the candidate is marked corrupted with a
-message carrying the greppable `WARM_START_TIME_MISMATCH:` token
-(distinguishable from the header-shape rejection channel), the ladder
-moves to the next usable state, and when no usable state remains the
-run falls back to the labeled cold start — unless every rejection in
-the run was a time mismatch and there were at least two of them, in
+exact-warm-start policy: on the degradation terminals the candidate is
+marked corrupted with a message carrying the greppable
+`WARM_START_TIME_MISMATCH:` token (distinguishable from the
+header-shape rejection channel), the ladder moves to the next usable
+state, and when no usable state remains the run falls back to the
+labeled cold start — unless every distinct rejected candidate in the
+run was a time mismatch and there were at least two of them, in
 which case the run SHALL fail with the dedicated
 `WARM_START_TIME_MISMATCH_SYSTEMIC` error code after clearing the
 staged initial states, preserving the fail-loud signal for systematic

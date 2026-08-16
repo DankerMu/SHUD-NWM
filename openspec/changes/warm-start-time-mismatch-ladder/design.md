@@ -30,10 +30,15 @@
    `rejections = 0` / `time_mismatch_rejections = 0` /
    `pending_mismatch_marks: list = []`；走到 `:1315` 拒绝通道时
    `rejections += 1`，mismatch 标志真时 `time_mismatch_rejections += 1`。
-   **URI-only 候选（`state_id` 为假）照常计入两计数**——是真实候选拒
-   绝；只可能出现在第 1 轮（后续候选均来自 `_next_usable_state` 必带
-   id），不破 unanimity/AC-2；无 QC 记录，故 escalate 消息必须带两计数
-   + 最后一条 mismatch 消息。
+   **计数按去重候选身份**（round-1 C1 订正：URI-only 首轮候选与
+   `_next_usable_state` 第 2 轮返回的 id 候选可能是同一份物理快照——
+   `if state_id:` 假分支不进 `rejected_state_ids`，同件被走两遍；按迭
+   代计数会让单个坏快照冒充 N=2 全一致误报 SYSTEMIC。修法 = 以
+   **resolved `state_uri`** 为身份对两计数去重（`(state_id or
+   state_uri)` 键在两几何下两轮键值不同、无法去重——fix pass 实测；
+   URI 是唯一跨轮稳定键，且拒绝通道处必非空、不同快照必不同 URI）；
+   verifier 已验证去重后落冷启动出口并 flush mark）。URI-only 拒绝无
+   QC 记录，故 escalate 消息必须带计数 + 最后一条 mismatch 消息。
 3. **mark 缓存（P1-1 裁决 (a)，忠实于 owner C「每 cycle 都响」）**：
    TIME_MISMATCH 拒绝的 `_mark_init_state_corrupted` 调用不即时落库，
    入 `pending_mismatch_marks`；checksum/形状拒绝的 mark 照旧即时。
