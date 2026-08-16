@@ -10,6 +10,15 @@ from workers.data_adapters.base import format_cycle_time
 
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+# The status domain a manual repair may TARGET, i.e. the rows a successful retry can supersede.
+# It is deliberately wider than ``FAILED_PIPELINE_STATUSES``: ``cancelled`` is a first-class
+# manual-retry source (``retry.MANUAL_RETRY_SOURCE_STATUSES``) and the scheduler's live-failure
+# predicates count it (``scheduler_state_manual_retry._job_row_is_live_failure``), so a repaired
+# ``cancelled`` row must be able to carry the repaired annotations those consumers read --
+# otherwise "a repaired row is not a repair target" holds on the consumer side only and a
+# superseded cancelled row stays a live target forever (#1294).  Every producer of
+# ``repair_status``/``active_blocker``/``repaired_stage_evidence`` filters on THIS constant.
+REPAIRABLE_PIPELINE_STATUSES = FAILED_PIPELINE_STATUSES | {"cancelled"}
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}
 MAX_CANDIDATE_STATE_TASK_RESULTS = 16
 
@@ -67,7 +76,7 @@ def _source_cycle_download_repair_state(
     if not source_cycle_jobs:
         return {}
 
-    failed_jobs = [job for job in source_cycle_jobs if str(job.get("status") or "") in FAILED_PIPELINE_STATUSES]
+    failed_jobs = [job for job in source_cycle_jobs if str(job.get("status") or "") in REPAIRABLE_PIPELINE_STATUSES]
     if not failed_jobs:
         return {"retry_count_jobs": source_cycle_jobs}
 

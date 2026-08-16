@@ -24,6 +24,12 @@
       `openspec archive`，**不在本 PR diff 内**。实现时核对 delta 与最终
       谓词语义一致即可。
 
+- [x] 1.4 repaired-annotation producer 门同域（round-3 F1，design D4）：
+      抽共享常量（`FAILED_PIPELINE_STATUSES ∪ {"cancelled"}`），
+      `chain_source_cycle.py` failed_jobs 门与 `chain_repository_state.py`
+      `_manual_stage_repair_state` 两处过滤改用该常量；「pending 占位形」
+      旁支不动；对注记全部读者做消费审计并报告逐一不变/受益。
+
 ## 2. 测试（判别锚，当前 1084 例零判别力）
 
 - [x] 2.1 臂 1 判别：`failed_stage="download"` +
@@ -51,6 +57,17 @@
       `test_cancelled_placeholder_shaped_row_blocks_the_pin_*`、
       `test_same_stage_cycle_marker_still_pins_when_the_candidates_own_row_is_cancelled`
       保持绿。
+
+- [x] 2.4 真实投影回归（round-3 F1，禁手搓注记）：经
+      `chain_source_cycle._source_cycle_download_repair_state`（或等价真实
+      投影）构造 state——(a) cancelled 目标行 + succeeded `_retry_1` 后继 +
+      指向目标行的 marker → 注记产出、拒钉、`new_attempt = previous+1`；
+      (b) failed 同形 → 拒钉（master 亲缘对照）；(c) cancelled 无修复后继 →
+      仍钉 marker `retry_count`；红证：(a) 在 producer 门修复前钉住陈旧
+      `retry_count`。
+- [x] 2.5 候选侧同构恢复锚：repaired 注记产出后 cancelled 候选行不再算
+      live failure（design D4 副作用），至少一例断言臂 2 恢复可开或
+      `_restarted_stage_family` 不计入该 stage。
 
 ## 3. 验证（Evidence Floor）
 

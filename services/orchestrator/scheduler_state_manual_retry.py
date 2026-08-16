@@ -346,6 +346,14 @@ def _job_row_is_live_failure(job: Mapping[str, Any]) -> bool:
     neither counts, at any status.  (The placeholder predicate is itself gated to
     ``pending``/``submission_failed``, exactly as the blocker scan applies it, so a cancelled row
     of placeholder shape is outside the gate and does count.)
+
+    The repaired exclusion only bites if the projection can actually PRODUCE that annotation for
+    every status in this domain, so the producers gate on the same domain named once as
+    ``chain_source_cycle.REPAIRABLE_PIPELINE_STATUSES``
+    (``chain_source_cycle._source_cycle_download_repair_state``,
+    ``chain_repository_state._candidate_manual_stage_repair_state``).  While they filtered repair
+    targets on the bare ``FAILED_PIPELINE_STATUSES`` set, a repaired ``cancelled`` row got no
+    annotation at all and this predicate read it as live forever (#1294 round-3).
     """
 
     if _pipeline_job_is_repaired_stage_evidence(job):

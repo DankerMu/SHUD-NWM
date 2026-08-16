@@ -23,6 +23,11 @@ blocker 谓词均含 `cancelled`）。运维对 `cancelled` 的 cycle-scope 行�
   docstring 同步改写。
 - 判别测试：marker 目标行 `cancelled` 时臂 1（同 stage）/臂 2（唯一失败）均
   钉 `retry_count`；既有回归护栏保持绿。
+- repaired-annotation producer 门同域（round-3 F1，design D4）：
+  `chain_source_cycle.py` 与 `chain_repository_state.py` 的 repair-target
+  过滤从裸 `FAILED_PIPELINE_STATUSES` 加宽到共享常量
+  `FAILED ∪ {"cancelled"}`，使「已被成功修复的 cancelled 行」获得 repaired
+  注记、不再被钉陈旧 attempt；同构治愈 #1287 侧候选盲点。
 - spec 措辞：本 change 的 MODIFIED delta 承载全部措辞变更（「still in a
   failed status」/「no longer failed (stale)」等改为 live-failure 口径）；
   主 spec 落库在 merge 后 `openspec archive`，不进本 PR diff。
@@ -33,9 +38,10 @@ blocker 谓词均含 `cancelled`）。运维对 `cancelled` 的 cycle-scope 行�
   transitions / orchestrator state machine，与兄弟 change
   `cycle-pin-live-failure-domain` 同口径）。Upstream suggested level: 缺省
   （scribe 手写 issue，无该字段）。
-- Repair intensity: **medium**（retry attempt 记账语义，但改动面窄、判别
-  期望值已由 issue 给出实测表；生产今天不可达——唯一写入方
-  `record_manual_repair` 零非测试调用方，随 #1186 接线才上线）。
+- Repair intensity: **high**（round-3 F1 升级：改动面扩展到共享投影
+  producer `chain_source_cycle.py` / `chain_repository_state.py`，属
+  shared helper behavior + evidence 链；Invariant Matrix 见 design.md。
+  初始 medium 记录保留于 git 历史；生产可达性仍受 #1186 门限）。
 - Risk packs:
   - state-machine/attempt-accounting: **selected** —— 钉值臂语义变更，判别
     测试锚定四个 failed 域状态 + cancelled + succeeded + 两个排除形。
@@ -59,7 +65,12 @@ blocker 谓词均含 `cancelled`）。运维对 `cancelled` 的 cycle-scope 行�
 
 ## Impact
 
-- `services/orchestrator/scheduler_state_manual_retry.py`（唯一实现点）
+- `services/orchestrator/scheduler_state_manual_retry.py`（消费端实现点）
+- `services/orchestrator/chain_source_cycle.py` /
+  `services/orchestrator/chain_repository_state.py`（repaired-annotation
+  producer 门，round-3 F1）
+- `services/orchestrator/scheduler_state_types.py`（或等价落点：共享
+  repair-target 域常量）
 - `tests/test_production_scheduler.py`（新增判别测试，复用
   `_decision_path_cycle_download_job` / `_decision_path_cycle_download_marker`）
 - `openspec/specs/job-retry-mechanism/spec.md`（merge 后 `openspec archive`

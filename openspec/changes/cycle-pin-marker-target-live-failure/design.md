@@ -50,10 +50,68 @@ marker 目标侧被显式声明为边界外（docstring 现记录该不对称并
   ``FAILED_PIPELINE_STATUSES`` vocabulary, #1294」句同步修正（该臂自身语义
   不动，只改它对本臂的引用描述）。
 
+### D4: repaired-annotation producer 门与 live-failure 域同源（round-3 F1 闭合）
+
+Round-3 复审证实：`repair_status="repaired"` / `active_blocker=False` /
+`repaired_stage_evidence` 的**全部写入方**都把 repair-target 过滤在裸
+`FAILED_PIPELINE_STATUSES` 上——
+
+- `chain_source_cycle.py`（`failed_jobs` 过滤 + 空即早退）
+- `chain_repository_state.py` `_manual_stage_repair_state`（retry 血缘成员
+  过滤 + 同 stage 旁排过滤，两处）
+
+于是 `cancelled` 行被成功 retry 修复后**拿不到任何 repaired 注记**：D1 的
+共享谓词只在消费端同源，排除合取项在生产投影上对 cancelled 恒不可满足，
+「repaired stage evidence … pins nothing」对 cancelled 是空头支票（HEAD 实测
+钉住陈旧 retry_count，master 拒绝）。
+
+裁定：把 producer 门加宽到与消费端同一 repair-target 域
+`FAILED_PIPELINE_STATUSES ∪ {"cancelled"}`（与
+`retry.MANUAL_RETRY_SOURCE_STATUSES`、blocker 谓词同口径），抽成共享常量
+（如 `REPAIRABLE_PIPELINE_STATUSES`）而非再写字面集合。副作用即收益：
+#1287 加宽的候选侧同一盲点（repaired 的 cancelled 候选行恒 live、关死臂 2、
+污染 `_restarted_stage_family`）由同一构造一并治愈——depth 不变量禁止拆分。
+「pending 占位形」旁支（`slurm_job_id` 空 + `retry_count>0`）保持原样不动。
+
 ### D3: hydro 语义不进本臂
 
 本臂判的是一行 job；hydro run 不是 job 行。`_state_hydro_run_is_live_failure`
 不参与 marker 目标判定（non-goal，与 issue 边界一致）。
+
+## Invariant Matrix
+
+Governing invariant: 共享 live-failure 谓词的每个合取项（status 减法、
+placeholder 门、repaired 排除）对 widened 域全体成员（含 cancelled）端到端
+可满足且有判别锚；「repaired/superseded 的行不是 repair target」在
+producer 与 consumer 两端同域。
+Source-of-truth identity/contract: repair-target status 域 =
+`FAILED_PIPELINE_STATUSES ∪ {"cancelled"}`（共享常量承载）。
+Surfaces:
+- Producers: `chain_source_cycle.py` failed_jobs 门；
+  `chain_repository_state.py` `_manual_stage_repair_state` 两处过滤
+- Validators/preflight: `_job_row_is_live_failure` 及两个消费者（本 change
+  已交付）
+- Storage/cache/query: journal `_compact_cycle_scope_job` 投影键含
+  status/retry_count/slurm_job_id（round-3 已核，两读路径等价，不改）
+- Public routes/entrypoints: 无直接路由；`_marker_event_pins_attempt` 唯一
+  内部入口（不改）
+- Frontend/downstream consumers: `scheduler_state_failure.py` 消费
+  new_attempt（不改）；repaired 注记读者 `_pipeline_job_is_repaired_stage_evidence`
+  / `_manual_retry_marker_repairs_historical_failure`（不改，行为随注记
+  可产出而自然恢复）
+- Failure paths/rollback/stale state: 陈旧 marker 钉已消耗 attempt 号 →
+  `skipped_duplicate_submission` 静默失效（#1201 家族）——修复的靶点
+- Evidence/audit/readiness: `repaired_stage_evidence` state 键随 producer
+  加宽对 cancelled 可产出（row-absent 臂受益，语义不改）
+Regression rows:
+- cancelled cycle-scope 行 + succeeded `_retry_1` 后继 + 指向该行的 marker
+  （真实投影产 state）→ 注记产出、`_job_row_is_live_failure=False`、拒钉、
+  `new_attempt = previous+1`
+- failed 同形 → 行为与 master 一致（既有护栏），拒钉
+- cancelled 无修复后继 + marker → 仍钉 marker retry_count（本 change 主判别）
+- 候选侧：repaired 的 cancelled 候选行不再算 live failure（臂 2 恢复可开，
+  `_restarted_stage_family` 不再计入其 stage）
+- 无 cancelled 行的既有形状 → producer 行为逐位不变（1417 例全绿）
 
 ## Risks / Trade-offs
 
