@@ -1438,7 +1438,7 @@ def _seed_station_rows(
             "basin_id": model["basin_id"],
             "basin_version_id": model["basin_version_id"],
             "project_name": project_name,
-            "source": "qhh.tsd.forc",
+            "source": f"{project_name}.tsd.forc",
             "source_file": str(tsd_forc_path),
             "source_sha256": tsd_forc_checksum,
             "shud_forcing_index": station.forcing_index,
@@ -1449,7 +1449,7 @@ def _seed_station_rows(
             "y": station.y,
             "z": station.z,
             "elevation_metadata": {
-                "source": "qhh.tsd.forc",
+                "source": f"{project_name}.tsd.forc",
                 "raw_z": station.z,
                 "normalized_missing_to_zero": station.z <= -9990,
             },
