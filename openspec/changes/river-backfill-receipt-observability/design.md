@@ -54,9 +54,13 @@ message change breaking existing message-anchored assertions.
    `BackfillStop("lock_contention", ...)` WITHOUT halving — halving
    reduces scan width, not lock wait; retrying against a held lock is
    the exact anti-pattern the duration-wall docstring warns about.
-   Reason text carries pgcode + the distinct remediation ("wait for an
-   ingest idle window or use --final-sweep's quiescence gate; lowering
-   batch_pages or raising the duration wall will not help").
+   Reason text carries pgcode + the distinct remediation (round-1 A
+   final wording: pause the ingest writer and wait for an idle window —
+   that pause is the whole remedy on terminal chunks, the only chunks a
+   plain --enforce lock stop can occur on; --final-sweep's quiescence
+   gate enforces the pause for the ACTIVE chunk only and is not a
+   terminal-chunk remedy; lowering batch_pages or raising the duration
+   wall will not help).
    New `_is_lock_contention(error)`: `getattr(error, "pgcode", None) in
    {"55P03", "40P01"}` (no message-string fallback — unlike 57014 there
    is no ambiguity channel to paper over; keep it narrow).

@@ -44,8 +44,10 @@ carve-out:
 - **Lock attribution**: SQLSTATE `55P03` (lock_not_available) and
   `40P01` (deadlock_detected) are classified into a NEW stop stage
   `lock_contention` (schema enum + runner + runbook fifth cause), with
-  remediation advice "wait for an ingest idle window / use
-  --final-sweep's quiescence gate" — distinct from `duration_wall`.
+  remediation advice "pause the ingest writer / wait for an idle window"
+  (the --final-sweep quiescence gate noted as enforcing that pause on
+  the ACTIVE chunk only — round-1 A wording) — distinct from
+  `duration_wall`.
   No halving retry on lock contention (halving does not reduce lock
   waits). The existing 57014 path is byte-unchanged.
 - **Carve-out (recorded, NOT delivered here)**: adopting `SET LOCAL
