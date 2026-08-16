@@ -52,8 +52,8 @@ manual_retry_marker、slurm_job_id、array_task_id、retry_count、job_id）
 | 键 | 取值 | 服务的残留 |
 |---|---|---|
 | `target_status` | `failed_job["status"]` | A-1（placeholder 状态半边）、A-3 写入时已非 failed 的 legacy 形 |
-| `target_repair_status` | `failed_job.get("repair_status")` | A-2 |
-| `target_active_blocker` | `failed_job.get("active_blocker")` | A-2（repaired 证据第二形态） |
+| `target_repair_status` | `failed_job.get("repair_status")` | **gate 合同键**（round-1 复审 F1 改判）：`repair_status` 是投影期注解，不进持久行（`_pipeline_job_row` 白名单），当前写入面**恒缺席**——A-2 未经此键在生产收口，归 D4「写入时已被注解 repaired」永久限定；写入面补注解方案路由 follow-up issue #1482 |
+| `target_active_blocker` | `failed_job.get("active_blocker")` | 同上（repaired 注解第二形态，同为投影期注解，同罪成对处置） |
 | `target_model_id` | `failed_job.get("model_id")` | C（model-ness） |
 | `target_slurm_job_id` | `failed_job.get("slurm_job_id")` | A-1（placeholder 无 slurm id 半边） |
 | `target_retry_count` | `failed_job.get("retry_count")` | A-1（placeholder 硬短路 `retry_count <= 0 → False`） |
@@ -151,7 +151,8 @@ pseudo-row 的 cycle-scope 判定不走 `_job_is_cycle_scope_row`（它读
 | 目标成功且 `completed_stage_evidence` 点名（仅 `_stage_after` 有后继的 stage） | 有（:314-315） | 已闭合（#1306 交付） |
 | 目标成功但被 winner-eviction 挤出 / copy-of-repaired 分支（payload 无 job_id）/ download·state_save_qc·publish 队列 stage（producer 恒 None，`chain_repository_state.py:251-256`） | 无 | **永久限定条款**进主 spec + 成对披露锚（over-pin 保留、如实钉住） |
 | 目标写入后被修复但 `repaired_stage_evidence` 未点名（winner 语义） | 无 | 同上，并入同一条款 |
-| **目标写入后被重新激活**（fixture review 残余风险 1：`submission_failed` 不在 `update_pipeline_job_status` 终态守卫内，:3424-3428，可能被 resubmit 回 ACTIVE——记录读 live、当前行 ACTIVE，twin refuse / 记录腿 pin） | 无 | 实现期核实 typed API 路径可达性（tasks 1.5）；可达则并入同一条款并在矩阵记录，不可达则记不可达理由 |
+| **目标写入后被重新激活**（fixture review 残余风险 1：`submission_failed` 不在 `update_pipeline_job_status` 终态守卫内，:3424-3428，可能被 resubmit 回 ACTIVE——记录读 live、当前行 ACTIVE，twin refuse / 记录腿 pin） | 无 | 实现期核实 typed API 路径可达性（tasks 1.5）；可达则并入同一条款并在矩阵记录，不可达则记不可达理由（实现实测：legacy-contract 可达，已并入） |
+| **目标写入时已被投影注解 repaired**（round-1 复审 F1：注解在 `payload = dict(job)` 副本上打（`chain_repository_state.py:200-203` / `chain_source_cycle.py:471-477`），写入者读持久行看不见；多 repaired + 单 winner 使「注解在、映射未点名」生产可构造） | 无（记录两键恒缺席） | 并入同一永久限定条款；`target_repair_status`/`target_active_blocker` 降级为 gate 合同键；写入面补注解属 D1 否决同量级扩张，路由 follow-up issue #1482 |
 
 理由：这些形的闭合需要 producer 域拓宽（D1 已否决，restart 路由耦合）
 或墓碑（已否决）。issue AC 的 escape hatch（「若判定不修，则搬进主 spec
@@ -189,9 +190,14 @@ docstring 与 spec 双限定「token 是文本推断非记录证据，上限于 
   （`tests/test_production_scheduler.py`，#1306 交付）：两分歧格
   `unsubmitted_placeholder` / `repaired_flag_not_named_by_the_state`
   期望值 `(False, True)` → `(False, False)`。**红-绿协议**：格子的
-  marker 构造改为携带生产写入面口径的 `target_*` details（与
-  `record_manual_repair` 逐键一致，测试内断言键集与写入面一致防漂移），
-  修前该构造仍 `(False, True)`（gate 不读新键）→ 红；修后收敛 → 绿。
+  marker 构造改为携带写入面口径的 `target_*` details，修前该构造仍
+  `(False, True)`（gate 不读新键）→ 红；修后收敛 → 绿。**收敛口径
+  修正（round-1 复审 F1）**：`unsubmitted_placeholder` 格是写入面可产
+  形的真收敛；`repaired_flag_not_named_by_the_state` 格的
+  `target_repair_status` 属 gate 合同键（写入面恒缺席），该格按 2.2
+  先例显式标注为域外合同锚，**不得**声称生产写入面收敛——A-2 的生产
+  人群归 D4「写入时已被注解 repaired」条款。防漂移断言只证键 schema
+  一致，不证可产值，docstring 不得作反向断言。
 - 写读全链路（integration pack）：真实 `record_manual_repair` 写 marker
   → 真实投影 + identity filter → 决策态上验证新键存活与判决——至少一条
   端到端锚，防「写了键但 sanitizer 没放行」类断裂。

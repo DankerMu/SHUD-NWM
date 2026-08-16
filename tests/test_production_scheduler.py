@@ -7958,12 +7958,23 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
 
 
 def _marker_target_row_details(job: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``target_*`` details ``record_manual_repair`` writes for ``job``, key for key.
+    """The ``target_*`` detail SCHEMA, filled from ``job`` the way the writer fills it.
 
     The key names are written out as literals on purpose: the matrix's anti-drift assertion
     compares this independently written set against the production tuple, which is the whole
     point of asserting it.  The omission rule is the writer's own -- ``None``/``""`` are absences
     and are not written, while ``0`` and ``False`` are recorded VALUES and are.
+
+    What this helper does NOT claim is that ``record_manual_repair`` can produce every value a
+    caller passes in.  Two of the eight keys are GATE CONTRACT keys rather than write-face keys:
+    ``repair_status`` and ``active_blocker`` are projection-time annotations, applied to a
+    ``dict(job)`` copy (``chain_repository_state.py:194-210``), and the journal's closed row
+    constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields -- so the
+    persisted row the writer reads never carries them and ``target_repair_status`` /
+    ``target_active_blocker`` are, on the current write face, always absent.  A fixture that
+    fills them anchors what the gate must do with such a record, not a marker production emits;
+    closing the write face is issue #1482, and the repaired-at-write-time population is a
+    disclosed permanent limitation (design D4) until it lands.
     """
 
     recorded = {
@@ -7980,7 +7991,8 @@ def _marker_target_row_details(job: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: A target row carrying a non-empty value in every recorded field, so the helper above yields
-#: its FULL key set for the writer-parity assertion.
+#: its FULL key set for the schema assertion.  It is a SCHEMA fixture, not a producible row: two
+#: of its fields are projection-time annotations the persisted row never carries (see the helper).
 _FULLY_RECORDED_TARGET_JOB = {
     "status": "failed",
     "repair_status": "repaired",
@@ -8020,7 +8032,12 @@ def _live_failure_closure_row_field_reads() -> set[str]:
 
 
 def _recorded_marker_details(job: Mapping[str, Any]) -> dict[str, Any]:
-    """``record_manual_repair``'s full target record for ``job``: stage evidence + ``target_*``."""
+    """A complete target record for ``job``: stage evidence + the ``target_*`` schema.
+
+    "Complete" is the GATE's completeness gate (``failed_stage`` and ``target_status`` both
+    present), not a claim about the write face -- see ``_marker_target_row_details`` for the two
+    keys the current writer can never emit.
+    """
 
     return {"failed_stage": job.get("stage"), **_marker_target_row_details(job)}
 
@@ -8087,15 +8104,23 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     The second axis is what the MARKER recorded (#1308).  ``legacy_marker`` is the marker shape
     written before the target record existed -- and every marker the SQL retry service writes --
     which must keep its verdicts bit for bit; ``record_borne_marker`` carries the target's
-    write-time record in ``record_manual_repair``'s own key set, which the gate rebuilds the row
-    from and decides with the resolved-row routing:
+    write-time record in the ``target_*`` schema, which the gate rebuilds the row from and
+    decides with the resolved-row routing:
 
-    * ``unsubmitted_placeholder`` -- legacy (False, True), record (False, False): the placeholder
-      shape is a submission-time ROW fact with no state-level projection, so only the record can
-      carry it across the row's deletion.
+    * ``unsubmitted_placeholder`` -- legacy (False, True), record (False, False): a REAL
+      convergence, write face included.  The placeholder shape is a submission-time ROW fact with
+      no state-level projection, every field of it is on the persisted row the writer reads, so
+      the record carries it across the row's deletion for markers production actually emits.
     * ``repaired_flag_not_named_by_the_state`` -- legacy (False, True), record (False, False):
-      ``repair_status: repaired`` on the row with no ``repaired_stage_evidence`` mapping naming
-      it; same story, the record carries the flag the state does not.
+      a DOMAIN-OUTSIDE contract anchor, labelled the same way the queue-stage success anchor is
+      (``test_record_borne_queue_stage_success_...``).  ``repair_status``/``active_blocker`` are
+      projection-time annotations that never reach the persisted rows ``record_manual_repair``
+      reads, so ``target_repair_status`` is always absent from a real marker and this cell states
+      what the gate owes such a record, NOT that the write face produces one.  The production
+      population -- a target already annotated repaired at write time, with the state's
+      ``repaired_stage_evidence`` naming some other winner -- still pins here where the twin
+      refuses, and is a disclosed permanent limitation (design D4); closing the write face is
+      issue #1482.
     * ``non_failed_named_by_completed_stage_evidence`` -- (False, False) on both: a succeeded
       target the state's ``completed_stage_evidence`` names by ``job_id`` is refused on both arms
       already (#1292), and the record refuses it a second way (status outside the live-failure
@@ -8179,12 +8204,16 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     assert bool(set(sanitized_details) & set(scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS)) is (
         records_target_row
     )
-    # Then anti-drift, twice over.  First half: the fixture's hand-written key set is the
-    # production writer's key set, so these cells cannot describe a marker the writer never
-    # produces.  Second half: that key set closes over every row field the shared live-failure
-    # predicate's transitive closure reads -- the placeholder predicate's six included -- so a
-    # predicate that starts reading a new field breaks this test instead of silently making the
-    # reconstruction a different row than the one recorded.
+    # Then anti-drift, twice over.  Both halves are about the record's SCHEMA, and neither
+    # claims the write face can produce every value: two of these keys are gate-contract keys
+    # the persisted row never carries (see ``_marker_target_row_details``), and which cells are
+    # write-face convergences is stated cell by cell above.  First half: the fixture's
+    # hand-written key names ARE the production key names, so a renamed or dropped key cannot
+    # pass unnoticed as a cell that quietly tests nothing.  Second half: that key set closes over
+    # every row field the shared live-failure predicate's transitive closure reads -- the
+    # placeholder predicate's six included -- so a predicate that starts reading a new field
+    # breaks this test instead of silently making the reconstruction a different row than the
+    # one recorded.
     assert set(_marker_target_row_details(_FULLY_RECORDED_TARGET_JOB)) == set(
         scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS
     )
@@ -8296,6 +8325,12 @@ def test_record_borne_staleness_converges_on_every_retry_suffix_geometry(
     Production mints one ``_retry_1`` layer and, on the node-27 archive shape, three stacked
     ones.  The placeholder predicate reads the id (its ``_retry_`` substring test) off the
     reconstruction, so the geometry reaches the verdict and has to be pinned on both shapes.
+
+    Same split as the residue matrix these two shapes come from: the placeholder cell is a
+    write-face convergence, and the ``repair_status`` cell is a gate-contract anchor on a record
+    the current writer cannot emit (the flag is a projection-time annotation; issue #1482, and
+    the production population is disclosed under design D4).  The geometry claim holds for both
+    either way -- it is about the id, not about who wrote the record.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -8577,6 +8612,11 @@ def test_post_write_fate_outside_the_state_mappings_still_pins_row_absent(
     "Unresolvable cycle-grammar marker pins with marker-record evidence", pinned as current
     behaviour rather than delivered parity -- closing it needs the completed-stage producer
     widened, which is refused because that mapping also drives restart routing.
+
+    The same clause carries one shape that is not about post-write fate at all: a target already
+    ANNOTATED repaired when the marker was written.  The annotation lives on the projection's row
+    copy, never on the persisted row the writer reads, so the record cannot carry it either
+    (issue #1482) and the gate pins there too.
     """
 
     candidate = _scheduler_candidate_fixture()

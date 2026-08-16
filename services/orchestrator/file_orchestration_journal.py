@@ -7092,6 +7092,14 @@ class FileJournalRetryService:
             # reader -- the target row's model is a different semantic axis).  Absent values are
             # not written, exactly as the sanitizer passes no empties; ``0`` and ``False`` are
             # recorded values and ARE written.
+            #
+            # ``failed_job`` is a PERSISTED row, so two of the eight keys are structurally
+            # unreachable from here: ``repair_status``/``active_blocker`` are annotations the
+            # candidate-state projection applies to a row copy and ``_pipeline_job_row`` has no
+            # such fields, so ``target_repair_status``/``target_active_blocker`` are never
+            # emitted.  The gate honours them if a record ever carries them; recording the
+            # annotation at write time is issue #1482, and until it lands a target already
+            # annotated repaired is a disclosed pin (design D4).
             for detail_key, row_field in MARKER_TARGET_ROW_DETAIL_FIELDS:
                 target_value = failed_job.get(row_field)
                 if target_value not in (None, ""):

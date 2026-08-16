@@ -334,7 +334,10 @@ drive the retry decision it was written to request.
   any job row but whose entity id carries the cycle-scope
   pipeline-job grammar (`job_cycle_<source>_<stamp>_...`, the shape
   left behind when a non-authoritative cohort master row is dropped
-  from the decision state or truncated from the row window) pins the
+  from the decision state or truncated from the row window) and
+  that does NOT carry its target's write-time record (a marker
+  WITH the record decides through the record-borne routing in its
+  own scenario below) pins the
   candidate's attempt exactly when the id's cycle is the candidate's
   own cycle AND the marker's recorded stage is the repair target —
   the stage evidence is the marker's own `failed_stage` detail,
@@ -408,21 +411,26 @@ drive the retry decision it was written to request.
   completion stages, which un-adopts the marker event entirely
   rather than falling back to id text — the pin gate's journal-path
   live domain is the submission stages)
-- **AND** a marker whose target the state-level repaired-stage
-  evidence names as its original failed job — or whose target the
-  state-level completed-stage evidence names as its completed job —
-  refuses the pin with the row absent exactly as the resolved-row
-  rule refuses it with the row present; those two mappings, plus
-  the marker's own write-time record, are the row-absent staleness
-  surfaces — and the target's POST-WRITE fate outside the two
-  mappings is a PERMANENT LIMITATION, disclosed rather than
-  delivered: a target that succeeded after the marker was written
-  and was evicted from the completed-stage evidence by a
+- **AND** for a model-less target, a marker whose target the
+  state-level repaired-stage evidence names as its original failed
+  job — or whose target the state-level completed-stage evidence
+  names as its completed job — refuses the pin with the row absent
+  exactly as the resolved-row rule refuses it with the row present
+  (a model-bearing record short-circuits past both mappings,
+  exactly as the resolved-row router does); those two mappings,
+  plus the marker's own write-time record, are the row-absent
+  staleness surfaces — and the target's POST-WRITE fate outside
+  the two mappings is a PERMANENT LIMITATION, disclosed rather
+  than delivered: a target that succeeded after the marker was
+  written and was evicted from the completed-stage evidence by a
   later-stage winner, or whose success projected through the
   repaired-copy branch (no `job_id` key), or whose stage has no
   successor in the forecast stage order (`download`,
   `state_save_qc`, `publish` queue targets), or that was repaired
-  after write without the repaired-stage evidence naming it, still
+  after write without the repaired-stage evidence naming it, or
+  that was already ANNOTATED repaired at write time (the
+  projection-time annotation never reaches the persisted rows the
+  writer reads), still
   pins here where the resolved-row rule would refuse — the
   completed-stage evidence producer is not widened to those stages
   because that mapping also drives restart routing; a target
@@ -430,11 +438,12 @@ drive the retry decision it was written to request.
   failure status back into the ACTIVE domain) belongs to the same
   limitation wherever that transition is producible
 - **AND** with the marker's stage differing from the candidate's
-  failed stage, the verdict falls through to the only-failure-left
-  arm — the same arm the resolved-row rule uses on a stage
-  mismatch — and, within the delivered domain, for a failed-status
-  target lands on the same verdict as the resolved-row rule on the
-  same state
+  failed stage, a marker WITHOUT the record falls through to the
+  only-failure-left arm — the same arm the resolved-row rule uses
+  on a stage mismatch — and, within the delivered domain, for a
+  failed-status target lands on the same verdict as the
+  resolved-row rule on the same state (a model-bearing record
+  pins on the stage mismatch itself, router parity)
 - **AND** markers with non-cycle-grammar entity ids keep the
   historical fail-open, a foreign-cycle id still never pins, and a
   stage-less marker keeps deciding through the loop-stripped id
@@ -464,7 +473,14 @@ drive the retry decision it was written to request.
   `target_retry_count`, no marker flag, no slurm or array id)
   refuses the pin, a repaired-flagged record
   (`target_repair_status` repaired or `target_active_blocker`
-  false) refuses the pin, and a record whose status is not in the
+  false) refuses the pin — those two flags are projection-time
+  annotations that never reach the persisted rows the
+  manual-repair writer reads, so like the success values below
+  this is the gate's contract on the record, not a shape the
+  current writer produces; a target already annotated repaired at
+  write time therefore still pins through its record, a disclosed
+  permanent limitation alongside the post-write fates — and a
+  record whose status is not in the
   live-failure domain (a succeeded
   `download`/`state_save_qc`/`publish` queue target included —
   no dependence on the completed-stage evidence, whose producer

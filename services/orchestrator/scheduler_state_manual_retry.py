@@ -57,8 +57,19 @@ _CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.*)")
 #: router needs to route.  ``job_id`` is the marker's own ``entity_id`` and is not recorded twice.
 #: A predicate that starts reading a new row field MUST gain a key here, or the reconstruction
 #: stops being the row it claims to be (anchored by the residue matrix's anti-drift assertions).
+#:
+#: Two of the eight are GATE CONTRACT keys the current writer cannot fill:
+#: ``repair_status``/``active_blocker`` are projection-time annotations applied to a row COPY
+#: (``chain_repository_state._annotate_repaired_pipeline_jobs``), and the journal's closed row
+#: constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields, so the
+#: persisted row ``record_manual_repair`` reads never carries them.  They stay in the tuple
+#: because the closure invariant is what makes the reconstruction a faithful row and because a
+#: record that DOES carry them must be honoured; a target already annotated repaired at write
+#: time therefore still pins here where the row-present twin refuses — a disclosed permanent
+#: limitation, with the write-face fix routed to #1482.
 MARKER_TARGET_ROW_DETAIL_FIELDS = (
     ("target_status", "status"),
+    # Gate-contract keys: see the note above — the current write face never emits these two.
     ("target_repair_status", "repair_status"),
     ("target_active_blocker", "active_blocker"),
     ("target_model_id", "model_id"),
@@ -344,8 +355,12 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
       the twin itself, so the shared ``_job_row_is_live_failure`` predicate answers on the
       recorded shape: a placeholder record, a repaired-flagged record and a record whose status
       is outside the live-failure domain refuse the pin exactly as the row-present twin refuses
-      the same row.  The two state-level staleness mappings stay in front of it, because they
-      answer a question the record cannot: the target's fate AFTER the marker was written.
+      the same row.  The middle one of those three is a contract on the record rather than a
+      shape the current writer emits (the repaired flags are projection-time annotations, absent
+      from the persisted rows the writer reads — see ``MARKER_TARGET_ROW_DETAIL_FIELDS``), as is
+      a success status (the writer only ever targets a failure).  The two state-level staleness
+      mappings stay in front of it, because they answer a question the record cannot: the
+      target's fate AFTER the marker was written.
 
     BACKSTOP LEG — no record, or a half record (the writer's own shape when the target row
     carries no stage: the empty value is not written and the sanitizer passes no empties).
@@ -356,11 +371,11 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
     therefore the same live-failure domain, the twin's arm 2 uses.
 
     Equivalence claim (delivered domain): for a marker carrying the record, this arm's verdict
-    equals the resolved-row routing's verdict on a row of exactly the recorded shape.  The
-    RECORD is a write-time snapshot, so the one divergence class left outside the claim is the
-    target's POST-WRITE fate, and only the part of it the two state mappings do not cover.  That
-    remainder is a PERMANENT LIMITATION, disclosed rather than delivered (spec: "Unresolvable
-    cycle-grammar marker pins with marker-record evidence"), and it is exactly:
+    equals the resolved-row routing's verdict on a row of exactly the recorded shape.  What the
+    record does not capture stays outside the claim, and that is a PERMANENT LIMITATION,
+    disclosed rather than delivered (spec: "Unresolvable cycle-grammar marker pins with
+    marker-record evidence").  The record is a write-time snapshot, so most of it is the
+    target's POST-WRITE fate — the part the two state mappings do not cover — and it is exactly:
 
     * the target succeeded after the write but the completed-stage evidence does not name it —
       a later-stage winner evicted it (``_best_completed_stage_success_evidence`` keeps one),
@@ -377,6 +392,12 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
       current-contract cohort MASTER row it is not (the typed API freezes ``status`` on ordinary
       upsert, the runtime transition needs an accepted submit outcome, and reclaim needs
       ``reservation_lost``).  Producible or not, it belongs to this same clause.
+
+    One member of the clause is not about post-write fate at all: the target was ALREADY
+    annotated repaired when the marker was written.  The annotation exists only on the
+    projection's row copy, so the writer cannot see it and the record cannot carry it (#1482) —
+    the record reads "live failure" for the same reason as the shapes above, and this arm pins
+    the same way.
 
     In every one of those shapes the record still reads "live failure" and this arm pins where
     the row-present twin, reading the row as it is NOW, would refuse.
