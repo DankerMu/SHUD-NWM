@@ -563,6 +563,119 @@ def test_state_checkpoint_tracker_captures_native_lake_checkpoint(tmp_path: Path
     assert tracker.missing_hours() == []
 
 
+def test_state_checkpoint_tracker_missing_hours_are_uncaptured_targets_only(tmp_path: Path) -> None:
+    """#1320: the invariant that made `install_recovered`'s re-entry guard dead.
+
+    Every hour `missing_hours()` yields is a key of `targets` that is absent from
+    `captured`, and the recovery loop is the only caller of `install_recovered`.
+    The deleted guard (`targets.get(hour) is None or hour in captured`) was
+    unreachable exactly while this holds, so a change that re-introduces a
+    reachable path must red this test before it reaches the guard-less install.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.missing_hours() == [6, 12]
+    for hour in tracker.missing_hours():
+        assert tracker.targets.get(hour) is not None
+        assert hour not in tracker.captured
+
+    (output_dir / "demo.cfg.ic.update").write_text("2 2 360.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == [12]
+    for hour in tracker.missing_hours():
+        assert tracker.targets.get(hour) is not None
+        assert hour not in tracker.captured
+
+
+def test_state_checkpoint_tracker_install_recovered_leaves_sibling_hours_missing(tmp_path: Path) -> None:
+    """#1320: capturing hour A must not mark hour B captured.
+
+    The other half of the re-entry guard's deadness: the recovery loop iterates
+    `missing_hours()` and installs one hour at a time, so a successful install
+    may only ever remove its OWN hour from the missing set.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = scratch / "demo.cfg.ic.update"
+    source.write_text("2 2 360.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.install_recovered(6, source, source_root=scratch) is True
+
+    assert sorted(tracker.captured) == [6]
+    assert tracker.missing_hours() == [12]
+    checkpoint_dir = output_dir / "state_checkpoints"
+    assert (checkpoint_dir / "demo.f006.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 360.000000")
+    assert not (checkpoint_dir / "demo.f012.cfg.ic.update").exists()
+    assert tracker.recovery_outcomes == {6: "recovered"}
+
+
+def test_state_checkpoint_tracker_records_gate_rejected_header_in_plain_decimal(tmp_path: Path) -> None:
+    """#1320: the gate-rejection rendering site is wired to the helper, not just
+    the observed trail.
+
+    Every other test that greps this outcome uses a relative minute (720/1440),
+    which `:g` and `_format_header_minute` render byte-identically — only an
+    epoch-form header tells the two apart, and it is the form the manifest
+    stores, so `gate_rejected(header=...)` must stay greppable against it.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = scratch / "demo.cfg.ic.update"
+    # Structurally complete, but the header is an epoch minute nowhere near the
+    # f006 target: the rerun ran and the header gate rejected it, so the outcome
+    # must name the rerun's OWN header.
+    source.write_text("2 2 29607840.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.install_recovered(6, source, source_root=scratch) is False
+
+    assert tracker.recovery_outcomes == {6: "gate_rejected(header=29607840)"}
+    assert tracker.missing_hours() == [6]
+    assert not (output_dir / "state_checkpoints" / "demo.f006.cfg.ic.update").exists()
+
+
+def test_state_checkpoint_tracker_recovery_outcome_summary_renders_every_recorded_hour(tmp_path: Path) -> None:
+    """#1320: the live path of the `recovery_outcome_summary` empty guard.
+
+    The guard is kept as a total-function contract, so the non-empty rendering
+    it guards — hour-sorted, one entry per recorded hour, accumulated lanes
+    joined by `+` — is what the failure message and the receipt actually carry.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.recovery_outcome_summary() == ""
+
+    tracker.record_recovery_outcome(12, "timeout")
+    tracker.record_recovery_outcome(6, "gate_rejected(no_state)")
+    tracker.record_recovery_outcome(6, "cfg_restore_failed")
+
+    assert tracker.recovery_outcome_summary() == (
+        "; recovery outcomes: f006=gate_rejected(no_state)+cfg_restore_failed, f012=timeout"
+    )
+
+
 def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
@@ -4332,7 +4445,7 @@ def test_run_shud_recovery_skips_only_the_hour_whose_cfg_write_fails(tmp_path: P
 
     assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
     assert "f006" in exc_info.value.message
-    assert "f012" not in exc_info.value.message.split("(")[0]
+    assert "f012" not in exc_info.value.message.split(";")[0]
     assert "f006=cfg_write_failed" in exc_info.value.message
     checkpoint_dir = output_dir / "state_checkpoints"
     # The other hour is still recovered, and the manifest is still written.
@@ -4741,6 +4854,183 @@ def test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers(tmp_
     # disk problem that did not happen.
     assert "state_checkpoints.json write failed" not in exc_info.value.message
     assert cfg_path.read_bytes() == cfg_before
+
+
+_WATCHER_HELD_SOLVER_STUB = '''
+import sys
+import time
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+if "state_checkpoint_recovery" in output_dir.parts:
+    # Recovery rerun: exits 0 leaving no state behind, so every missing hour
+    # ends as `gate_rejected(no_state)` and the run reaches the failure message.
+    print("The successful end.")
+    sys.exit(0)
+# Main solve: stay alive until the watcher signals it has sampled enough
+# headers, so the observed trail's length is set by the test rather than by how
+# many polls happen to fit in the solve.
+release = output_dir.parent / "watcher_sampled_enough"
+deadline = time.monotonic() + 20.0
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.005)
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 1440.000000\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n",
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+def test_execute_receipt_keeps_recovery_outcomes_when_the_observed_trail_is_long(tmp_path: Path) -> None:
+    """#1320: receipt truncation must sacrifice the observed trail, not the outcomes.
+
+    The task-outcome receipt keeps only the first
+    `TASK_OUTCOME_MESSAGE_MAX_LENGTH` characters of the failure message, and the
+    observed-header trail is the one unbounded field (it grows with run
+    duration — a 24h run at a 10-minute cadence measured a 901-char message).
+    With the trail in front, the per-hour recovery outcomes — the most
+    actionable field, and array accounting's only channel — were cut out of the
+    receipt entirely.
+    """
+
+    stub = tmp_path / "watcher_held_solver.py"
+    stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    run_id = manifest["run_id"]
+    workspace = tmp_path / "workspace" / "runs" / run_id
+    output_dir = workspace / "output"
+    real_read = runtime_module._read_cfg_ic_header_minute
+    sampled: list[float] = []
+
+    def _fresh_epoch_minute_per_poll(path: Path) -> float | None:
+        # A distinct epoch-form minute per watcher poll: the tracker records
+        # every change, so 60 polls put >512 chars of trail into the message.
+        if Path(path) != output_dir / "demo.cfg.ic.update":
+            return real_read(path)
+        sampled.append(29607840.0 + 60.0 * len(sampled))
+        if len(sampled) >= 60:
+            (workspace / "watcher_sampled_enough").write_text("go\n", encoding="utf-8")
+        return sampled[-1]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fresh_epoch_minute_per_poll)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.execute(manifest)
+
+    message = exc_info.value.message
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert len(message) > runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "recovery outcomes:" in message
+    # `_assert_attempt_failure_accounting` pins the pre-solve status sequence;
+    # this lane fails after `staged`/`running`, so the same three pieces of
+    # collateral are asserted against the sequence this lane really produces.
+    assert repository.statuses == ["created", "staged", "running", "failed"]
+    assert repository.failures[0][0] == "STATE_CHECKPOINTS_MISSING"
+    assert "STATE_CHECKPOINTS_MISSING" in (workspace / "logs" / "runtime_error.log").read_text(encoding="utf-8")
+    receipt = json.loads((workspace / "logs" / "task_outcome.json").read_text(encoding="utf-8"))
+    assert receipt["run_id"] == run_id
+    assert receipt["error_code"] == "STATE_CHECKPOINTS_MISSING"
+    assert len(receipt["error_message"]) == runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "recovery outcomes:" in receipt["error_message"]
+    assert "f006=gate_rejected(no_state)" in receipt["error_message"]
+    assert "f012=gate_rejected(no_state)" in receipt["error_message"]
+    # Epoch-form minutes stay greppable against the manifest's own values.
+    assert "observed cfg.ic.update header minutes: 29607840, 29607900" in message
+    assert "2.96078e+07" not in message
+
+
+def test_task_outcome_receipt_keeps_the_manifest_write_note_when_the_trail_is_long(tmp_path: Path) -> None:
+    """#1320: the manifest-write note is the OTHER bounded field ordered ahead
+    of the observed trail.
+
+    It is what tells the operator that the fallback diagnostic — the manifest
+    carrying the same trails — never landed either, so a receipt that keeps only
+    the unbounded trail leaves the miss unlocatable from both channels at once.
+    """
+
+    stub = tmp_path / "watcher_held_solver.py"
+    stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    real_read = runtime_module._read_cfg_ic_header_minute
+    real_write = runtime_module._write_text_no_follow
+    sampled: list[float] = []
+
+    def _fresh_epoch_minute_per_poll(path: Path) -> float | None:
+        if Path(path) != output_dir / "demo.cfg.ic.update":
+            return real_read(path)
+        sampled.append(29607840.0 + 60.0 * len(sampled))
+        if len(sampled) >= 60:
+            (workspace / "watcher_sampled_enough").write_text("go\n", encoding="utf-8")
+        return sampled[-1]
+
+    def _fail_manifest_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoints.json":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fresh_epoch_minute_per_poll)
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_manifest_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert len(exc_info.value.message) > runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    # The production truncation, on the production message (`execute()` runs
+    # exactly this call on a failed attempt).
+    runtime._write_task_outcome_receipt(log_dir, manifest["run_id"], exc_info.value)
+
+    receipt = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert len(receipt["error_message"]) == runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "state_checkpoints.json write failed" in receipt["error_message"]
+    assert "recovery outcomes:" in receipt["error_message"]
+
+
+def test_format_header_minute_renders_epoch_minutes_in_plain_decimal() -> None:
+    """#1320: `:g` rendered `29607840.0` as `2.96078e+07`, ungreppable against
+    the manifest, which stores the full-precision value."""
+
+    assert runtime_module._format_header_minute(29607840.0) == "29607840"
+    assert runtime_module._format_header_minute(1440.0) == "1440"
+    assert runtime_module._format_header_minute(720.0) == "720"
+
+
+def test_format_header_minute_keeps_non_integral_minutes_lossless() -> None:
+    """Header minutes are not integral by construction (`float(token)` of
+    whatever the header carries), so rounding them away is forbidden."""
+
+    assert runtime_module._format_header_minute(720.5) == "720.5"
+    assert runtime_module._format_header_minute(29607840.25) == "29607840.25"
+
+
+@pytest.mark.parametrize("minute", [float("nan"), float("inf"), float("-inf")])
+def test_format_header_minute_renders_non_finite_minutes_without_raising(minute: float) -> None:
+    """The bare `float(token)` parse admits nan/inf, and `int(nan)` raises: a
+    diagnostic rendering must never change the run's error code."""
+
+    assert runtime_module._format_header_minute(minute) == repr(minute)
 
 
 def test_run_shud_writes_witness_manifest_when_no_hours_are_requested(tmp_path: Path) -> None:

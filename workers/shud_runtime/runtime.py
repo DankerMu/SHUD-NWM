@@ -728,13 +728,19 @@ class SHUDRuntime:
             # lost the sampling race.
             missing = ", ".join(f"f{hour:03d}" for hour in missing_checkpoints)
             observed = checkpoint_tracker.observed_header_minutes
-            observed_text = ", ".join(f"{minute:g}" for minute in observed) if observed else "none"
+            observed_text = ", ".join(_format_header_minute(minute) for minute in observed) if observed else "none"
             manifest_note = f"; state_checkpoints.json write failed: {manifest_error}" if manifest_error else ""
+            # Suffix ORDER is truncation policy (#1320): the task-outcome receipt
+            # keeps only the first TASK_OUTCOME_MESSAGE_MAX_LENGTH characters, so
+            # the two bounded fields — one recovery outcome per missing hour, and
+            # the note saying the fallback manifest itself failed to land — must
+            # precede the observed trail, which is the only field that grows
+            # without bound (one entry per distinct header the watcher sampled).
             raise SHUDRuntimeError(
                 "STATE_CHECKPOINTS_MISSING",
-                f"SHUD did not emit requested restart checkpoints: {missing} "
-                f"(observed cfg.ic.update header minutes: {observed_text})"
-                f"{checkpoint_tracker.recovery_outcome_summary()}{manifest_note}",
+                f"SHUD did not emit requested restart checkpoints: {missing}"
+                f"{checkpoint_tracker.recovery_outcome_summary()}{manifest_note}"
+                f" (observed cfg.ic.update header minutes: {observed_text})",
             )
         if manifest_error is not None:
             # Nothing is missing: the manifest is no longer diagnostics but the
@@ -3377,6 +3383,25 @@ def _read_cfg_ic_header_minute(path: Path) -> float | None:
     return cfg_ic_header_minute_time(header)
 
 
+def _format_header_minute(minute: float) -> str:
+    """Render a header minute-time as lossless plain decimal for diagnostics.
+
+    ``:g`` collapses an epoch-form minute (``29607840.0``) to ``2.96078e+07``,
+    which no longer greps against the full-precision value the manifest stores,
+    and ``:.0f`` would silently round: header minutes are NOT integral by
+    construction, ``_read_cfg_ic_header_minute`` returns whatever float parses.
+    The non-finite check comes FIRST because that same bare parse admits
+    ``nan``/``inf`` and ``int(nan)`` raises — a diagnostic rendering must never
+    change the run's error code.
+    """
+
+    if not math.isfinite(minute):
+        return repr(minute)
+    if minute == int(minute):
+        return str(int(minute))
+    return repr(minute)
+
+
 def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     if not _regular_file_exists(path, containment_root=path.parent):
         return
@@ -3477,6 +3502,14 @@ class _StateCheckpointTracker:
     def recovery_outcome_summary(self) -> str:
         """Compact ``; recovery outcomes: f012=...`` suffix for the failure message."""
 
+        # Total-function contract, kept deliberately (#1320): the only call site
+        # today is the STATE_CHECKPOINTS_MISSING raise in ``run_shud``, which is
+        # reached only after ``_recover_missing_state_checkpoints`` ran, and
+        # every exit lane of that loop records an outcome for its hour — so
+        # ``recovery_outcomes`` is provably non-empty THERE and this branch is
+        # unreachable from it (mutation-probed in #1316 round 4; no need to
+        # re-run the probe). It stays because a future caller on a no-recovery
+        # path would otherwise render the degenerate ``"; recovery outcomes: "``.
         if not self.recovery_outcomes:
             return ""
         rendered = ", ".join(f"f{hour:03d}={self.recovery_outcomes[hour]}" for hour in sorted(self.recovery_outcomes))
@@ -3551,9 +3584,12 @@ class _StateCheckpointTracker:
         structurally complete. Returns whether the hour is now captured.
         """
 
-        target_info = self.targets.get(hour)
-        if target_info is None or hour in self.captured:
-            return hour in self.captured
+        # ``hour`` comes from ``missing_hours()``, which yields only ``targets``
+        # keys absent from ``captured``, so the subscript is the invariant rather
+        # than a lookup that can fail (pinned by
+        # ``test_state_checkpoint_tracker_missing_hours_are_uncaptured_targets_only``
+        # and its sibling-hour test).
+        target_info = self.targets[hour]
         source_header = _read_cfg_ic_header_minute(source_path)
         if source_header is None:
             # rc == 0 but the rerun left no readable state behind: distinct from
@@ -3585,7 +3621,7 @@ class _StateCheckpointTracker:
             # Carry the rerun's OWN header minute: "the engine ran and landed at
             # 1440 instead of 720" is a different bug report from "the engine
             # never produced a state".
-            self.record_recovery_outcome(hour, f"gate_rejected(header={source_header:g})")
+            self.record_recovery_outcome(hour, f"gate_rejected(header={_format_header_minute(source_header)})")
             return False
         self.captured[hour] = {
             "lead_hours": hour,
