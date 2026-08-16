@@ -44,7 +44,7 @@
 - [x] 4.5 Zero changes to `workers/forcing_producer/file_store.py`
       (diff inspection — #1359 lane).
 - [x] 4.6 Zero modifications to existing test assertions.
-- [ ] 4.7 Backfill follow-up issue filed (node-27 label): size the
-      already-persisted mislabeled non-default-project rows
-      (`met.met_station` GROUP BY over seed-lane rows) + remediation
-      decision; referenced in the PR body.
+- [x] 4.7 Backfill follow-up issue filed: #1480 (node-27 label; live
+      sizing already attached — 1709 mislabeled heihe rows + 386
+      correct qhh rows) + remediation decision routed; referenced in
+      the PR body.
