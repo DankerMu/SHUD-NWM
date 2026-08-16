@@ -112,6 +112,19 @@ Regression rows:
 - 候选侧：repaired 的 cancelled 候选行不再算 live failure（臂 2 恢复可开，
   `_restarted_stage_family` 不再计入其 stage）
 - 无 cancelled 行的既有形状 → producer 行为逐位不变（1417 例全绿）
+- **加宽使 cancelled 可达的非注记输出面（round-4 披露，全部为
+  cancelled↔failed 平价规范化，非新语义）**：
+  - 未修复的 cancelled-only cycle-download → 产出 `active_failure_job`、
+    state `failed_stage` 由 None 变 "download"（与 failed 腿一致；decision
+    state 经 aggregate scoping 剥离，无决策 delta 实测）
+  - 修复后的 cancelled cycle-download 进入 evidence 选取 if/elif → 与
+    failed 腿逐位一致（含 completed_stage_evidence/restart_stage 被
+    source-cycle 形 repaired 证据抢占——该抢占是 **pre-existing 缺陷**，
+    failed 腿在 master 同样表现，已路由 issue 跟踪）
+  - `_candidate_manual_stage_repair_state` 单赢家 `break` 使较新的
+    cancelled 修复可与较老的 failed 修复竞争——竞争本身与两条 failed
+    血缘时的 master 行为逐位相同，**单赢家挤占是 pre-existing 缺陷**，
+    已路由 issue 跟踪
 
 ## Risks / Trade-offs
 

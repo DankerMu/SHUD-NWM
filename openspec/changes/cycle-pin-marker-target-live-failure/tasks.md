@@ -18,8 +18,10 @@
       `_unresolvable_marker_entity_pins_attempt` docstring 中引用 #1294 的
       「narrower bare FAILED」句同步修正。
 - [x] 1.3 spec 措辞：本 change 的 MODIFIED delta 已含主 spec 的全部措辞变更
-      （「still in a failed status」、两处「no longer failed (stale)」、
-      scenario WHEN 与新增 cancelled 判别 AND 分支）；主 spec
+      （消费端：「still in a failed status」、两处「no longer failed
+      (stale)」、scenario WHEN 与新增 cancelled 判别 AND 分支；producer
+      端：候选投影按同一 repair-target 域产出 repaired 注记的 AND 分支，
+      round-4 G4 补）；主 spec
       `openspec/specs/job-retry-mechanism/spec.md` 的落库发生在 merge 后
       `openspec archive`，**不在本 PR diff 内**。实现时核对 delta 与最终
       谓词语义一致即可。
@@ -68,6 +70,15 @@
 - [x] 2.5 候选侧同构恢复锚：repaired 注记产出后 cancelled 候选行不再算
       live failure（design D4 副作用），至少一例断言臂 2 恢复可开或
       `_restarted_stage_family` 不计入该 stage。
+- [x] 2.6 cancelled↔failed 平价锚（round-4 G2/G3）：真实投影下——
+      (a) 修复后的 cancelled cycle-download 形（own forecast succeeded +
+      cancelled download + succeeded `_retry_1` + repair 事件 + raw
+      manifest）与同形 failed 腿的 state/decision 关键面逐位一致
+      （`repaired_stage_evidence`/`completed_stage_evidence`/
+      `restart_stage`/`previous_attempt`/`new_attempt`），锁住「平价而非
+      新语义」；(b) 未修复的 cancelled-only cycle-download →
+      `active_failure_job` 产出、state `failed_stage == "download"`，
+      与 failed 腿一致（G2 披露锚）。
 
 ## 3. 验证（Evidence Floor）
 

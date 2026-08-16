@@ -216,6 +216,18 @@ drive the retry decision it was written to request.
   placeholder-shaped row is outside the gate and stays a valid
   pinning marker target, exactly as the candidate-side scan counts
   it
+- **AND** the candidate-state projection SHALL produce the repaired
+  annotations (`repair_status`/`active_blocker`) and
+  `repaired_stage_evidence` over that same repair-target status
+  domain — the failed-pipeline statuses plus `cancelled` — so the
+  stale-target refusal above is producible for every status the
+  marker-target test reads: a `cancelled` row repaired by a later
+  succeeded retry carries the annotations exactly as a failed one
+  does, and every projection surface the widened domain makes
+  reachable for `cancelled` rows behaves exactly as its `failed`
+  twin already did (cancelled↔failed parity), including the
+  active-failure exposure of an unrepaired cancelled cycle row and
+  the evidence-selection paths a repaired cancelled row enters
 - **AND** when the candidate's own live failure is at a different
   stage, or the marker's resolved job is no longer a live failure
   (stale — resolved/succeeded, ACTIVE, repaired stage evidence, or

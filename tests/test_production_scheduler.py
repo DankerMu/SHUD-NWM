@@ -7084,6 +7084,200 @@ def test_projected_repaired_cancelled_candidate_row_reopens_the_only_failure_lef
     assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
 
 
+def _projected_repaired_cycle_download_facts(target_status: str) -> dict[str, Any]:
+    """Every observable of the repaired cycle-download shape, for one target status.
+
+    The rows are the round-3 F1 fixture: the candidate's own forecast succeeded, the cohort
+    download row is ``target_status``, a succeeded ``_retry_1`` carries the manual marker, the
+    ``record_manual_repair`` event links the two, and the forecast cycle carries a raw manifest
+    binding (without that binding ``chain_source_cycle`` refuses to call anything repaired).
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[
+            _projected_succeeded_own_forecast_job(),
+            _projected_cycle_download_job(status=target_status),
+            _projected_cycle_download_job(
+                job_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                status="succeeded",
+                error_code=None,
+                slurm_job_id="7101",
+                retry_count=4,
+                manual_retry_marker=True,
+                submitted_at="2026-05-21T06:12:00Z",
+                finished_at="2026-05-21T06:20:00Z",
+                updated_at="2026-05-21T06:20:00Z",
+            ),
+        ],
+        events=[
+            _projected_repair_event(
+                entity_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                previous_job_id=_PROJECTED_DOWNLOAD_JOB_ID,
+                retry_count=4,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            ),
+            _decision_path_cycle_download_marker(),
+        ],
+        forecast_cycle={
+            "cycle_id": "gfs_2026052106",
+            "source_id": "gfs",
+            "cycle_time": candidate.cycle_time_utc,
+            "status": "raw_complete",
+            "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+        },
+    )
+
+    target_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    # Sanity premise: the projection really RAN over this leg -- a degenerate shape that produced
+    # no annotation at all would make every parity assertion below vacuously true on both legs.
+    assert target_row["status"] == target_status
+    assert target_row["repair_status"] == "repaired"
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    return {
+        "repaired_stage_evidence": state.get("repaired_stage_evidence"),
+        "completed_stage_evidence": state.get("completed_stage_evidence", "<absent>"),
+        "restart_stage": state.get("restart_stage", "<absent>"),
+        "restart_from_stage": state.get("restart_from_stage", "<absent>"),
+        "failed_stage": state.get("failed_stage", "<absent>"),
+        "target_repair_status": target_row.get("repair_status"),
+        "target_active_blocker": target_row.get("active_blocker"),
+        "target_repaired_by_job_id": target_row.get("repaired_by_job_id"),
+        "new_attempt": scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0),
+        "payload_new_attempt": scheduler_module._manual_retry_payload(decision_state).get("new_attempt", "<absent>"),
+        "decision": (decision.action, decision.reason),
+        "decision_attempt": decision.evidence["retry_policy"]["attempt"],
+    }
+
+
+def test_projected_repaired_cancelled_cycle_download_is_bit_for_bit_the_failed_leg() -> None:
+    """#1294 round-4 G3: the newly reachable evidence-selection path is PARITY, not new semantics.
+
+    Widening the repaired-annotation producer to ``REPAIRABLE_PIPELINE_STATUSES`` makes a repaired
+    ``cancelled`` cohort download reach the source-cycle evidence-selection path that until now
+    only ``failed`` rows could reach.  This anchor measures both legs through the real projection
+    and requires every observable to be identical: the repaired evidence itself (stage + both job
+    ids), the ABSENCE of ``completed_stage_evidence`` / ``restart_stage`` / ``restart_from_stage``,
+    the nulled ``failed_stage``, the row-level annotations, the manual-retry attempt arithmetic and
+    the operator-visible decision.  Any future drift that gives ``cancelled`` its own behaviour on
+    this path reds here.
+
+    PRE-EXISTING DEFECT, deliberately locked as-is: a source-cycle ``repaired_stage_evidence``
+    carries no ``restart_stage``, so ``chain_repository_state`` takes the ``if`` branch and the
+    ``elif`` that would derive ``completed_stage_evidence`` from the succeeded own forecast row
+    never runs -- the resume-after-completed-stage evidence is SUPPRESSED.  That suppression is
+    not this change's doing: the ``failed`` leg has behaved exactly this way on master, bit for
+    bit, and it is routed as its own tracked issue.  This test locks the two legs to one
+    behaviour; it does NOT assert that the behaviour is correct.
+    """
+
+    cancelled_facts = _projected_repaired_cycle_download_facts("cancelled")
+    failed_facts = _projected_repaired_cycle_download_facts("failed")
+
+    # The evidence-selection path itself: same stage, same original/repairing job ids, same payload.
+    assert cancelled_facts["repaired_stage_evidence"] == failed_facts["repaired_stage_evidence"]
+    assert cancelled_facts["repaired_stage_evidence"]["stage"] == "download"
+    assert cancelled_facts["repaired_stage_evidence"]["original_failed_job_id"] == _PROJECTED_DOWNLOAD_JOB_ID
+    assert cancelled_facts["repaired_stage_evidence"]["repairing_retry_job_id"] == _PROJECTED_DOWNLOAD_RETRY_JOB_ID
+    # The suppressed half -- absent on BOTH legs, which is the whole point of the anchor.
+    assert cancelled_facts["completed_stage_evidence"] == "<absent>"
+    assert cancelled_facts["restart_stage"] == "<absent>"
+    assert cancelled_facts["restart_from_stage"] == "<absent>"
+    assert cancelled_facts["failed_stage"] is None
+    # And everything else the two legs expose, compared as one object so no observable is missed.
+    assert cancelled_facts == failed_facts
+
+
+def _projected_unrepaired_cycle_download_only_facts(target_status: str) -> dict[str, Any]:
+    """A cohort download row in ``target_status`` with no retry successor and no candidate rows."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[_projected_cycle_download_job(status=target_status)],
+        events=[],
+    )
+    decision_state = _decision_path_filtered_state(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    return {
+        "state": state,
+        "decision_state": decision_state,
+        "decision": (decision.action, decision.reason),
+        "decision_attempt": decision.evidence["retry_policy"]["attempt"],
+        "exposure": {
+            "failed_stage": state.get("failed_stage", "<absent>"),
+            "stage": state.get("stage", "<absent>"),
+            "error_code": state.get("error_code", "<absent>"),
+            "error_message": state.get("error_message", "<absent>"),
+            "retry_count": state.get("retry_count", "<absent>"),
+            "pipeline_truth_timestamp": state.get("pipeline_truth_timestamp", "<absent>"),
+            "shared_cycle_ambiguous_failure": state.get("shared_cycle_ambiguous_failure", "<absent>"),
+        },
+    }
+
+
+def test_projected_unrepaired_cancelled_only_cycle_download_exposure_matches_the_failed_leg() -> None:
+    """#1294 round-4 G2 disclosure anchor: the widened producer newly EXPOSES a cancelled cohort.
+
+    ``_source_cycle_download_repair_state`` picks its ``active_failure_job`` out of the same
+    ``REPAIRABLE_PIPELINE_STATUSES`` set, so a cohort download that is ``cancelled`` with no retry
+    successor now reaches a candidate that owns no rows of its own: pre-change that candidate's
+    state carried ``failed_stage=None`` (the bare-failed producer gate found no failure to report),
+    post-change it carries ``failed_stage="download"`` plus the row's error code, attempt count and
+    truth timestamp.  That is a real new state-level exposure and this anchor states it out loud:
+    every ``active_failure_job``-derived field is identical to the ``failed`` leg's, i.e. cancelled
+    is now reported as the failure it always was rather than being silently dropped.
+
+    Two asymmetries survive on purpose and are locked here so a future "cleanup" cannot erase them
+    unnoticed:
+
+    * the decision-state projection strips the state-level ``failed_stage``/``stage``/``error_code``
+      keys on BOTH legs, and the residual ``scheduler_state_failure._failed_stage`` fallback scans
+      job rows against the bare ``FAILED_PIPELINE_STATUSES`` -- so the cancelled leg still resolves
+      to ``None`` where the failed leg resolves to ``"download"``.  The cancelled leg is therefore
+      strictly MORE conservative on the decision path, never more aggressive.
+    * the operator-visible decision differs by reason only because a cancelled pipeline has its own
+      pre-existing arm (``manual_retry_required_after_cancelled``); that arm never consulted
+      ``failed_stage``, so the widened producer moves this decision not at all -- reverting the
+      producer constant to bare ``FAILED_PIPELINE_STATUSES`` leaves the cancelled leg deciding
+      exactly this, at exactly this attempt.
+    """
+
+    cancelled = _projected_unrepaired_cycle_download_only_facts("cancelled")
+    failed = _projected_unrepaired_cycle_download_only_facts("failed")
+
+    # Premise: no repair anywhere, so this is the ``active_failure_job`` path and not the repaired one.
+    for leg in (cancelled, failed):
+        assert "repaired_stage_evidence" not in leg["state"]
+        assert "completed_stage_evidence" not in leg["state"]
+
+    # The disclosure itself: the cancelled cohort is now exposed exactly as the failed one is.
+    assert cancelled["exposure"]["failed_stage"] == "download"
+    assert cancelled["exposure"] == failed["exposure"]
+    assert cancelled["state"]["pipeline_status"] == "cancelled"
+    assert failed["state"]["pipeline_status"] == "failed"
+
+    # Asymmetry 1: the decision state strips the exposure identically on both legs ...
+    for leg in (cancelled, failed):
+        assert "failed_stage" not in leg["decision_state"]
+        assert "stage" not in leg["decision_state"]
+        assert "error_code" not in leg["decision_state"]
+    # ... and the bare-failed row fallback keeps the cancelled leg the more conservative one.
+    assert scheduler_state_failure_module._failed_stage(cancelled["decision_state"]) is None
+    assert scheduler_state_failure_module._failed_stage(failed["decision_state"]) == "download"
+
+    # Asymmetry 2: the decision reason is the pre-existing cancelled arm, at the same attempt.
+    assert cancelled["decision"] == ("blocked", "manual_retry_required_after_cancelled")
+    assert failed["decision"] == ("blocked", "retry_limit_exhausted")
+    assert cancelled["decision_attempt"] == failed["decision_attempt"] == 4
+
+
 def test_cancelled_own_row_also_closes_the_unresolvable_cohort_master_pin() -> None:
     """Both consumers of the predicate share one domain -- the unresolvable arm included.
 
