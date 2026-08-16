@@ -64,7 +64,6 @@ jobs:
               - 'tests/test_node27_timeseries_decompression_replay.py'
               - 'tests/test_qhh_production_bootstrap.py'
               - 'tests/test_real_*.py'
-              - 'tests/test_worker_chain_smoke.py'
             frontend:
               - 'apps/frontend/**'
               - 'openapi/**'

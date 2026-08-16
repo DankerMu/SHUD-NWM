@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import re
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -128,7 +130,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
         repo_root=Path("."),
     )
 
-    assert selected == sorted(FILE_JOURNAL_READ_STATE_TESTS)
+    # The changed test file adds the selector meta-guards (#1254); the redirect
+    # itself is untouched — no whole legacy suite comes back.
+    assert selected == sorted({*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_select_ci_tests.py"})
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_production_scheduler.py" not in selected
 
@@ -139,14 +143,19 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
         repo_root=Path("."),
     )
 
-    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
+    # Focused nodes plus the selector meta-guards (#1254). The redirect intent —
+    # never the whole slow suite — survives: the meta-guard suite costs ~2.5s.
+    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_select_ci_tests.py"})
     assert "tests/test_orchestration_chain.py" not in selected
 
 
 def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() -> None:
     selected = select_tests(["tests/test_orchestration_chain.py"], repo_root=Path("."))
 
-    assert selected == ["tests/test_orchestration_chain.py"]
+    assert selected == [
+        "tests/test_orchestration_chain.py",
+        "tests/test_select_ci_tests.py",
+    ]
 
 
 def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
@@ -375,19 +384,22 @@ def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
     return ".".join(parts) or None
 
 
-def _imported_module_names(path: str) -> set[str]:
-    """Dotted module names the imports in ``path`` can refer to.
+def _parse_tracked(path: str) -> ast.Module:
+    return ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
 
-    All contract spellings collapse to the same dotted name here:
+
+def _module_names_from_nodes(path: str, nodes: Iterable[ast.AST]) -> set[str]:
+    """Dotted module names the import nodes of ``path`` can refer to.
+
+    All spellings collapse to the same dotted name here:
     ``from packages.common import node27_container_contract`` via the
     module+alias join, ``from packages.common.node27_container_contract import
     X`` via the module itself, and the relative spellings via the same joins
     once resolved against the importer's package path (see
     ``_import_from_base``) — so an in-package importer stays visible.
     """
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -397,6 +409,21 @@ def _imported_module_names(path: str) -> set[str]:
             names.add(base)
             names.update(f"{base}.{alias.name}" for alias in node.names)
     return names
+
+
+def _imported_module_names(path: str) -> set[str]:
+    """Every dotted module name imported anywhere in ``path``, nesting included."""
+    return _module_names_from_nodes(path, ast.walk(_parse_tracked(path)))
+
+
+def _top_level_imported_module_names(path: str, tree: ast.Module) -> set[str]:
+    """Dotted module names imported by ``path``'s module-level statements only.
+
+    Deliberately narrower than ``_imported_module_names``: a function-body
+    import runs when that one test runs, not at collection, and does not make
+    the file an importer suite of the module for selector-coverage purposes.
+    """
+    return _module_names_from_nodes(path, tree.body)
 
 
 def _resolved_script_modules(names: set[str], tracked_scripts: set[str]) -> set[str]:
@@ -536,6 +563,223 @@ def test_import_walk_resolves_relative_imports_against_importer_package(
         names = _imported_module_names(f"packages/common/{name}")
         assert CONTRACT_MODULE in names, f"{name}: relative import lost the contract module, got {sorted(names)}"
     assert _imported_module_names("packages/common/node27_recovery_overshoot.py") == set()
+
+
+# An importer carrying one of these at FILE level is skipped in the PR lane
+# (`-m "not e2e and not grib and not integration"`), contributes no assertions
+# there, and is therefore not required of the owning rule. `grib` is left out
+# because no tracked file-level `pytestmark` uses it; add it here the day one
+# does, rather than carrying a speculative third name.
+GATING_MARKER_NAMES = frozenset({"integration", "e2e"})
+
+# (module source path, dotted module, a known member of the derived importer
+# set). The third element is the anti-vacuity floor: a derivation that breaks
+# into silence — bad pathspec, AST regression, marker filter gone wide — must
+# fail loudly instead of passing on an empty set.
+GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
+    (
+        "packages/common/display_coverage.py",
+        "packages.common.display_coverage",
+        "tests/test_display_coverage_parallel.py",
+    ),
+    (
+        "services/slurm_gateway/real_backend.py",
+        "services.slurm_gateway.real_backend",
+        "tests/test_real_slurm_gateway.py",
+    ),
+)
+
+DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_integration.py"
+
+
+def _tracked_top_level_test_files() -> list[str]:
+    return [path for path in _tracked_python_files("tests") if fnmatch.fnmatch(path, "tests/test_*.py")]
+
+
+def _file_level_gating_markers(tree: ast.Module) -> set[str]:
+    """Gating marker names a module-level ``pytestmark`` assignment applies.
+
+    Read from the AST, not the file text: a `pytest.mark.integration` decorator
+    on one function gates that function, not the file, and a substring scan
+    cannot tell the two apart. Scalar, list and tuple ``pytestmark`` spellings
+    all collapse here, and a `pytest.mark.X(...)` call contributes ``X``.
+    """
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            value: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if value is None:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
+            continue
+        for element in ast.walk(value):
+            if (
+                isinstance(element, ast.Attribute)
+                and isinstance(element.value, ast.Attribute)
+                and element.value.attr == "mark"
+            ):
+                names.add(element.attr)
+    return names & GATING_MARKER_NAMES
+
+
+def _non_gated_top_level_importer_tests(module: str) -> set[str]:
+    """Tracked `tests/test_*.py` importing ``module`` at file level, un-gated."""
+    importers: set[str] = set()
+    for test_path in _tracked_top_level_test_files():
+        tree = _parse_tracked(test_path)
+        if module not in _top_level_imported_module_names(test_path, tree):
+            continue
+        if _file_level_gating_markers(tree):
+            continue
+        importers.add(test_path)
+    return importers
+
+
+def test_guarded_module_rules_cover_their_non_gated_importer_closure() -> None:
+    # Fourth recurrence of the same defect class (#1191 -> #1247 -> #1283 ->
+    # #1447): a rule is written without a "who imports this module" scan, the PR
+    # lane goes green on a partial selection, and the gap only shows up on the
+    # post-merge master full run. The importer set is DERIVED from the tracked
+    # tree here, never frozen, so a new importer suite reddens this test
+    # (pointing at the rule to extend) instead of falling out of the PR lane.
+    offenders: list[str] = []
+    for source_path, module, known_member in GUARDED_MODULE_CLOSURES:
+        assert Path(source_path).is_file(), f"guarded module source missing: {source_path}"
+        importers = _non_gated_top_level_importer_tests(module)
+        assert importers, f"{module}: derived no non-gated top-level importer suites"
+        assert known_member in importers, (
+            f"{module}: expected {known_member} among derived importers, got {sorted(importers)}"
+        )
+
+        selected = set(select_tests([source_path], repo_root=Path(".")))
+        missing = sorted(importers - selected)
+        if missing:
+            offenders.append(f"{source_path}: rule misses {module} importer suites {missing}")
+    assert not offenders, "guarded-module importer closure incomplete: " + "; ".join(offenders)
+
+
+def test_gated_display_coverage_importer_is_excluded_from_the_guarded_closure() -> None:
+    # The #1447 ruling, pinned: the one integration-marked importer on master
+    # skips in the PR lane, so requiring it in the rule buys constant skips and
+    # zero assertions. If its marker is ever dropped, the closure grows and the
+    # guard above starts demanding it — that is the intended coupling.
+    assert Path(DISPLAY_COVERAGE_GATED_IMPORTER).is_file()
+    tree = _parse_tracked(DISPLAY_COVERAGE_GATED_IMPORTER)
+
+    assert "packages.common.display_coverage" in _top_level_imported_module_names(
+        DISPLAY_COVERAGE_GATED_IMPORTER, tree
+    )
+    assert _file_level_gating_markers(tree) == {"integration"}
+    assert DISPLAY_COVERAGE_GATED_IMPORTER not in _non_gated_top_level_importer_tests(
+        "packages.common.display_coverage"
+    )
+    assert DISPLAY_COVERAGE_GATED_IMPORTER not in select_tests(
+        ["packages/common/display_coverage.py"], repo_root=Path(".")
+    )
+
+
+def test_top_level_import_walk_ignores_function_body_imports(tmp_path: Path) -> None:
+    # tests/test_analysis_pipeline.py and tests/test_gateway_reconcile.py reach
+    # real_backend only from inside a test body; treating those as importer
+    # suites would drag whole slow files into every gateway PR. Pin the
+    # distinction on a fixture instead of on those two files, which may move.
+    probe = tmp_path / "tests" / "test_probe.py"
+    probe.parent.mkdir()
+    probe.write_text(
+        "from services.slurm_gateway import real_backend\n"
+        "\n"
+        "def test_lazy() -> None:\n"
+        "    from packages.common import display_coverage\n"
+        "    assert display_coverage is not None\n",
+        encoding="utf-8",
+    )
+    rel = "tests/test_probe.py"
+    tree = ast.parse(probe.read_text(encoding="utf-8"), filename=rel)
+
+    top_level = _top_level_imported_module_names(rel, tree)
+    assert "services.slurm_gateway.real_backend" in top_level
+    assert "packages.common.display_coverage" not in top_level
+
+
+def test_file_level_gating_marker_detection_is_ast_shaped(tmp_path: Path) -> None:
+    # Substring guesswork would call all four of these gated. Only the first two
+    # gate the file; a per-function decorator and a non-gating file-level marker
+    # must leave the suite inside the closure.
+    sources = {
+        "scalar": ("pytestmark = pytest.mark.integration\n", {"integration"}),
+        "list": ("pytestmark = [pytest.mark.e2e, pytest.mark.real_disk]\n", {"e2e"}),
+        "decorator_only": (
+            "@pytest.mark.integration\ndef test_one() -> None:\n    pass\n",
+            set(),
+        ),
+        "non_gating": (
+            'pytestmark = pytest.mark.skipif(True, reason="x")\n',
+            set(),
+        ),
+    }
+    for name, (body, expected) in sources.items():
+        path = tmp_path / f"test_{name}.py"
+        path.write_text("import pytest\n" + body, encoding="utf-8")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        assert _file_level_gating_markers(tree) == expected, name
+
+
+def test_changed_test_file_also_selects_the_selector_meta_guards() -> None:
+    # #1254: the tree-derived meta-guards above are only worth having if they
+    # run on the PR class that can invalidate them — a PR touching test files.
+    selected = select_tests(["tests/test_node27_timeseries_compression_capture.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_node27_timeseries_compression_capture.py",
+        "tests/test_select_ci_tests.py",
+    ]
+
+
+def test_changed_selector_suite_selects_only_itself() -> None:
+    # Self-selection must not double up now that the meta-guard target is the
+    # same file.
+    assert select_tests(["tests/test_select_ci_tests.py"], repo_root=Path(".")) == [
+        "tests/test_select_ci_tests.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    ["tests/conftest.py", "tests/integration_helpers.py"],
+)
+def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str) -> None:
+    # The changed-test branch condition is wider than `tests/test_*.py`; the
+    # meta-guard accumulation is not. These two keep today's behavior exactly.
+    assert Path(changed_path).is_file()
+
+    assert select_tests([changed_path], repo_root=Path(".")) == [changed_path]
+
+
+def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # tmp-root selections go through the same global missing-target drop as any
+    # other stale target: the meta-guard is announced and dropped, not special
+    # cased. Pinned so the drop path is not re-litigated per target.
+    test_path = tmp_path / "tests" / "test_example.py"
+    test_path.parent.mkdir()
+    test_path.write_text("def test_example(): pass\n", encoding="utf-8")
+    assert not (tmp_path / "tests" / "test_select_ci_tests.py").exists()
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    assert select_tests(["tests/test_example.py"], repo_root=tmp_path) == ["tests/test_example.py"]
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "tests/test_select_ci_tests.py" in captured.err
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
