@@ -43,8 +43,9 @@ marker 目标侧被显式声明为边界外（docstring 现记录该不对称并
 
 - `_cycle_scope_marker_pins_attempt`：删除「The two sides of this rule do
   NOT share one status domain … tracked separately by #1294」段，改为记录
-  两侧同源于 `_job_row_is_live_failure`；row-absent 臂（#1292）仍窄域的
-  事实显式点名。
+  两侧同源于 `_job_row_is_live_failure`；row-absent 臂读不到行状态、按
+  state-level staleness 证据裁决（证据面更窄 ⇒ 部分形态钉得更宽）的分歧
+  事实显式点名，残留由 #1308 跟踪。
 - `_unresolvable_marker_entity_pins_attempt` docstring 中「narrower bare
   ``FAILED_PIPELINE_STATUSES`` vocabulary, #1294」句同步修正（该臂自身语义
   不动，只改它对本臂的引用描述）。

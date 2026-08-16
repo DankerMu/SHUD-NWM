@@ -37,7 +37,10 @@
 - [x] 2.3 回归护栏（参数化或逐例）：目标行
       `failed`/`permanently_failed`/`partially_failed`/`submission_failed`
       仍 `== 5`；目标行为 repaired stage evidence 或 unsubmitted auto-retry
-      placeholder 时仍不钉；`succeeded` 目标行仍不钉；
+      placeholder 时仍不钉；`succeeded` 目标行仍不钉；ACTIVE 目标行
+      （`pending`/`queued`/`submitted`/`running`，job_id 不带 `_retry_`
+      后缀以避开 placeholder 门）仍不钉——delta 新枚举的 ACTIVE-stale
+      条款的判别锚（round-1 C1）；
       `test_cancelled_own_forecast_blocks_cross_stage_cycle_marker_pin`、
       `test_failed_hydro_run_blocks_cycle_marker_pin_beside_succeeded_jobs`、
       `test_cancelled_placeholder_shaped_row_blocks_the_pin_*`、

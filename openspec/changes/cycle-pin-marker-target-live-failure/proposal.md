@@ -50,7 +50,8 @@ blocker 谓词均含 `cancelled`）。运维对 `cancelled` 的 cycle-scope 行�
 ## Non-Goals
 
 - `_state_has_candidate_scope_failed_job` 一侧（#1287 已合入，勿回改）。
-- `_unresolvable_marker_entity_pins_attempt` 的三项残留（#1292）。
+- `_unresolvable_marker_entity_pins_attempt` 的残留分歧（#1292 交付后由
+  #1308 跟踪）。
 - 最新 adopted marker 无 `retry_count` 的终止性（#1289）。
 - `_job_matches_candidate` 的 cycle-run_id 跨 model 采纳（#1288）。
 - hydro 语义进本臂（本臂判一行 job，hydro run 不是 job 行）。

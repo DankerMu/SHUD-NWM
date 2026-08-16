@@ -6550,16 +6550,28 @@ def test_failed_cycle_marker_target_statuses_keep_pinning(target_status: str) ->
             id="unsubmitted_auto_retry_placeholder",
         ),
         pytest.param({"status": "succeeded", "error_code": None}, id="succeeded"),
+        pytest.param({"status": "pending", "error_code": None}, id="active_pending"),
+        pytest.param({"status": "queued", "error_code": None}, id="active_queued"),
+        pytest.param({"status": "submitted", "error_code": None}, id="active_submitted"),
+        pytest.param({"status": "running", "error_code": None}, id="active_running"),
     ],
 )
 def test_stale_cycle_marker_targets_still_refuse_the_pin(target_overrides: dict[str, Any]) -> None:
     """Regression guard: the exclusions the widened domain keeps, on the marker-target side.
 
     A repaired stage-evidence row and an unsubmitted auto-retry placeholder keep a literal
-    failure status while carrying no blocking force anywhere else in this module, and a
-    succeeded row is not a failure at all -- none of the three is a repair target, so the
-    operator's counter (5) must stay out of the candidate's budget even though ``failed_stage``
-    names the target's own stage (arm 1 is only reached once the target is a live failure).
+    failure status while carrying no blocking force anywhere else in this module, a succeeded
+    row is not a failure at all, and an ACTIVE row is work still in flight -- none is a repair
+    target, so the operator's counter (5) must stay out of the candidate's budget even though
+    ``failed_stage`` names the target's own stage (arm 1 is only reached once the target is a
+    live failure).
+
+    The four ACTIVE statuses are the marker-target leg's oracle for the
+    ``status not in ACTIVE_PIPELINE_STATUSES`` conjunct: ``_manual_retry_blocking_pipeline_status``
+    spans the ACTIVE half too, so dropping that conjunct here would read an in-flight cycle
+    download as a live repair target and charge its counter to this candidate.  None of the four
+    ids carries a ``_retry_`` suffix, so the unsubmitted-placeholder gate is not what refuses
+    them -- only the ACTIVE subtraction is.
     """
 
     candidate = _scheduler_candidate_fixture()

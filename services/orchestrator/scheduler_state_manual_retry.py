@@ -468,9 +468,9 @@ def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str,
     asymmetry #1287 left, where this arm still tested the bare ``FAILED_PIPELINE_STATUSES``
     set and read a ``cancelled`` cohort master row as a stale target).  A ``cancelled`` target
     is therefore a valid repair target here exactly as it is a live failure there.  The
-    row-ABSENT arm (``_unresolvable_marker_entity_pins_attempt``) is the exception: with no row
-    to read it decides on state-level evidence and keeps its own narrower domain, tracked
-    separately by #1292.
+    row-ABSENT arm (``_unresolvable_marker_entity_pins_attempt``) is the exception: reading no row
+    status at all, it decides on state-level staleness evidence, whose narrower surface makes it
+    pin on shapes this row-present test refuses -- residue disclosed there, tracked by #1308.
     """
     if not _job_row_is_live_failure(job):
         return False

@@ -23,8 +23,11 @@ LIVE failure AND either the state's failed stage equals the
 resolved job's stage or the candidate has no live candidate-scoped
 failure of its own. The marker-target test and the candidate-scope
 scan read the SAME row-level live-failure domain (the row-absent
-arm for unresolvable marker entities keeps its own narrower
-domain, tracked separately by #1292): a status in the failure half of the
+arm for unresolvable marker entities reads no row status at all —
+it decides on state-level staleness evidence whose narrower
+surface makes it pin MORE than this row-present test on some
+shapes; that divergence is a disclosed residue tracked separately
+by #1308): a status in the failure half of the
 module's blocker STATUS domain — the failed-pipeline statuses plus
 `cancelled`, a `cancelled` row being a first-class manual-retry
 repair target on the marker side exactly as it is a live failure
