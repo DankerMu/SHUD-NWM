@@ -46,15 +46,22 @@ note (issue readiness was needs-triage on exactly this point).
   `scheduler_file_providers._sanitize_file_provider_scalar:2249`) redacts
   every s3/published-shaped `*_uri` deterministically on every pass, the
   write side strips placeholders back to `None`
-  (`_strip_redaction_placeholders:8500`), and the unredacted DB-backed read
+  (`_strip_redaction_placeholders:8502`), and the unredacted DB-backed read
   (`chain_repository_state.candidate_state:440`) is pinned off by
-  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`. Manual retry is only a partial
-  escape hatch: the guard has four call sites
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`. Manual retry is a per-arm escape
+  hatch (round-1 CAND-D correction — the fixture originally misattributed
+  the arms): the guard has four call sites
   (`scheduler_state_decision.py:237/:277/:298/:355`) and manual retry
-  (`:269`) pre-empts the last three, but the completed-stage arm (`:237`) —
-  the arm the copyback resume geometry actually rides — is evaluated BEFORE
-  it, so a withheld blocker from that arm is not cleared by a manual retry
-  request. Any real clearing mechanism depends on a copyback
+  (`:269`) pre-empts the last three. The geometries this change pins and
+  tests are failure-state candidates and ride `:277`/`:355` — for them a
+  manual retry request IS the operator escape hatch (it bypasses the blocker
+  and re-submits; the withheld reference itself is untouched, so the blocker
+  recurs if the retry fails again). Only the completed-stage resume arm
+  (`:237`, requires NO failure signal, hence disjoint from the tested
+  geometries) is evaluated before the manual-retry return and stays blocked
+  despite a marker — pinned by a test. A durable clearing mechanism (one
+  that clears the withheld reference rather than bypassing it, and covers
+  the `:237` arm) depends on a copyback
   write side that does not exist (out of scope per the issue's own boundary).
   What this change delivers is therefore: the probe never fires on
   placeholders, the blocker truthfully says cannot-determine instead of

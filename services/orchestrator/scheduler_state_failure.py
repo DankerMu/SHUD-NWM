@@ -643,14 +643,19 @@ def _missing_upstream_forecast_artifact_evidence(
         # substitute -- a surviving unredacted echo is of unknown provenance, and
         # probing it would bypass this ruling on the authoritative reference.
         #
-        # ``COPYBACK_SOURCE_WITHHELD`` has NO clearing path on the enabled DB-free
-        # public-read plane (that read redacts every s3/published-shaped ``*_uri``
-        # on every pass, the write side strips placeholders back to ``None``, and
-        # the unredacted DB-backed read is pinned off), and the completed-stage call
-        # site is evaluated before the manual-retry escape hatch.  Naming the
-        # blocker truthfully is what this change delivers; a clearing mechanism
-        # depends on a copyback write side that does not exist yet and is tracked in
-        # issue #1464.
+        # The DB-free public-read plane re-redacts the reference on every pass (the
+        # write side strips placeholders back to ``None`` and the unredacted
+        # DB-backed read is pinned off), so nothing an operator does CLEARS the
+        # withheld reference.  Whether they can BYPASS the blocker is per call site:
+        # manual retry (``scheduler_state_decision.py:269``) pre-empts the
+        # failure-state call sites (``:277``/``:355``), so a marker there flips the
+        # candidate to ``manual_retry_requested`` -- the blocker recurs on a renewed
+        # failure, but the operator is not stuck.  Only the completed-stage resume
+        # arm (``:237``, reachable solely with NO failure signal) runs before that
+        # return and stays blocked despite a marker; that arm has no operator path at
+        # all.  Naming the blocker truthfully is what this change delivers; a durable
+        # clearing mechanism depends on a copyback write side that does not exist yet
+        # and is tracked in issue #1464.
         if copyback_required:
             return (
                 _artifact_blocker_evidence(

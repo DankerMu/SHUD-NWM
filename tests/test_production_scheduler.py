@@ -12743,6 +12743,83 @@ def test_withheld_copyback_reference_shadows_a_lower_priority_alias_without_prob
     assert str(surviving_alias) not in probed
 
 
+def _withheld_copyback_manual_retry_marker(job_id: str) -> dict[str, Any]:
+    return _decision_path_manual_retry_marker(
+        entity_id=job_id,
+        retry_count=1,
+        previous_job_id=job_id,
+        details_model_id="model_a",
+    )
+
+
+@pytest.mark.parametrize("required_arm", ["restart_stage", "state_flag"])
+def test_manual_retry_pre_empts_the_withheld_copyback_blocker_on_failure_state_arms(
+    required_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D: "manual retry is not an escape hatch" is FALSE for the
+    # failure-state geometries this change pins.  They reach the guard at
+    # ``scheduler_state_decision.py:277``/``:355``, both AFTER the manual-retry
+    # return (``:269``), so a production-shaped marker pre-empts the blocker.  It
+    # bypasses rather than clears: the withheld reference is untouched, so the
+    # blocker returns if the resubmitted run fails again (the no-marker arm of this
+    # same geometry is pinned by the withheld-blocker test above).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm=required_arm)
+    state["pipeline_events"] = [
+        _withheld_copyback_manual_retry_marker("job_cycle_gfs_2026052106_forecast_model_a_forecast")
+    ]
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+
+
+def test_withheld_copyback_blocker_on_the_completed_stage_arm_survives_a_manual_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D, the other half: the completed-stage resume arm
+    # (``scheduler_state_decision.py:237``) is evaluated BEFORE the manual-retry
+    # return, so a marker does not pre-empt it.  This arm requires NO failure
+    # signal, which is exactly what makes it disjoint from the two arms above --
+    # and it is the arm the runbook routes to "report + #1464", since no operator
+    # channel reaches it.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    parse_job_id = "job_cycle_gfs_2026052106_forecast_model_a_parse"
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "copyback_source_uri": "[object-uri]",
+        "completed_stage_evidence": {
+            "restart_stage": "copyback",
+            "stage": "parse",
+            "status": "succeeded",
+            "job_id": parse_job_id,
+        },
+        "pipeline_jobs": [{**identity, "job_id": parse_job_id, "status": "succeeded", "stage": "parse"}],
+        "pipeline_events": [_withheld_copyback_manual_retry_marker(parse_job_id)],
+    }
+    # The disjointness premise, asserted rather than assumed.
+    assert scheduler_module._state_has_failure_signal(state) is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_WITHHELD"
+    assert decision.evidence["restart_stage"] == "copyback"
+
+
 # ---------------------------------------------------------------------------
 # #1402: the failure-state local artifact guard normalized its containment bases
 # (the resource-profile artifact roots and their env fallbacks) and the probed

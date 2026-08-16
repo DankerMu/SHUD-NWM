@@ -4,8 +4,8 @@
 
 Single function: `_missing_upstream_forecast_artifact_evidence` copyback leg,
 `services/orchestrator/scheduler_state_failure.py:618-677`. Helper
-`_is_withheld_uri_placeholder` (:935-943) already exists and is reused as-is.
-`_artifact_blocker_evidence` (:681) is reused unchanged (it already carries
+`_is_withheld_uri_placeholder` (:977-985) already exists and is reused as-is.
+`_artifact_blocker_evidence` (:723) is reused unchanged (it already carries
 reason/error_code/artifact_type/artifact_uri and sets
 `stable_classifier=error_code`).
 
@@ -49,13 +49,19 @@ sibling forcing leg and against the repair predicate — both pinned by tests.
    (`file_orchestration_journal.candidate_state:792` →
    `_sanitize_public_field:8549` →
    `scheduler_file_providers._sanitize_file_provider_scalar:2249`), the write
-   side strips placeholders to `None` (`_strip_redaction_placeholders:8500`),
-   the unredacted DB-backed read is pinned off, and manual retry pre-empts
-   only three of the guard's four call sites — the completed-stage arm
-   (`scheduler_state_decision.py:237`, the arm the copyback resume geometry
-   rides) runs before the manual-retry return (`:269`), while `:277`/`:298`/
-   `:355` run after it, which is what the live row-absent scenario's
-   "evaluated before the guard" wording refers to. The
+   side strips placeholders to `None` (`_strip_redaction_placeholders:8502`),
+   the unredacted DB-backed read is pinned off. Manual retry is a PER-ARM
+   escape hatch (round-1 CAND-D correction): the failure-state geometries
+   this change pins ride `:277`/`:355`, both after the manual-retry return
+   (`:269`), so a production-shaped manual-retry marker flips them to
+   `(retry, manual_retry_requested)` — consistent with the live row-absent
+   scenario's "evaluated before the guard" wording, which is scoped to
+   failure-state candidates. Only the completed-stage resume arm
+   (`scheduler_state_decision.py:237`, reachable solely with NO failure
+   signal) runs before the manual-retry return and stays blocked despite a
+   marker; that arm is pinned by a test. Manual retry bypasses rather than
+   clears (the withheld reference persists; the blocker recurs on a renewed
+   failure), and the `:237` arm has no operator path at all. The
    deliverable is truthful naming (cannot-determine, not determined-missing)
    plus a distinct code a future clearing mechanism can key on; the clearing
    mechanism itself is deferred to follow-up issue #1464 because it depends
@@ -71,7 +77,7 @@ sibling forcing leg and against the repair predicate — both pinned by tests.
    about placeholders and the redaction boundary is never bypassed (same
    phrasing the spec already uses for the forcing leg).
 6. **Alias resolution is NOT re-scanned past a placeholder** (fixture review
-   F3): `_first_artifact_uri` (:975-981) returns the first non-empty value in
+   F3): `_first_artifact_uri` (:1017-1023) returns the first non-empty value in
    container-major priority order, and a placeholder is non-empty, so it wins
    the resolution and shadows any real reference recorded under a
    lower-priority key/container. That is the intended ruling: a placeholder

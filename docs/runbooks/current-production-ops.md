@@ -1693,12 +1693,23 @@ probe ran and found nothing.
   packages, and this blocker names a copyback reference. Running it burns a cycle
   and clears nothing. The blocker is also refused by the missing-forcing repair
   authorization channel by design.
-- No operator clearing path exists today (the DB-free public read redacts the
-  reference on every pass and the manual-retry escape hatch is evaluated after
-  the call site this blocker rides). Defining one depends on a copyback write
-  side that does not exist yet; it is tracked in issue #1464. Until then, report
-  the occurrence — the geometry is latent in production and a live instance is
-  itself the signal.
+- Whether a manual retry request helps depends on which arm the candidate rides,
+  so check for a failure signal (failed pipeline status, failed hydro run, or a
+  failed job row) before choosing:
+  - **Failure-state candidate** (the common case, and the one this blocker's
+    regression tests pin): a manual retry request **does** pre-empt this blocker
+    and re-submits the candidate, exactly as it does for the missing-forcing
+    blockers. Note it **bypasses, not clears**: the withheld reference is
+    untouched, so if the resubmitted run fails again the blocker reappears on the
+    next pass.
+  - **Completed-stage resume candidate** (no failure signal at all; the state
+    carries `completed_stage_evidence` with a `copyback` restart stage): that arm
+    is evaluated *before* the manual-retry branch, so a manual retry request has
+    no effect and the candidate stays blocked. There is no operator clearing path
+    for this arm today — the DB-free public read re-redacts the reference on every
+    pass. Defining one depends on a copyback write side that does not exist yet;
+    it is tracked in issue #1464. Report the occurrence — the geometry is latent
+    in production and a live instance is itself the signal.
 
 ### 8.6 Heihe 底图和 DB 范围混用
 
