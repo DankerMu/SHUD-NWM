@@ -40,7 +40,12 @@
       placeholder 时仍不钉；`succeeded` 目标行仍不钉；ACTIVE 目标行
       （`pending`/`queued`/`submitted`/`running`，job_id 不带 `_retry_`
       后缀以避开 placeholder 门）仍不钉——delta 新枚举的 ACTIVE-stale
-      条款的判别锚（round-1 C1）；
+      条款的判别锚（round-1 C1）；钉住方向的 placeholder-门交互锚
+      （round-2 E1）：placeholder-SHAPED（`_retry_` 后缀 + 无 Slurm id）
+      但状态在门外的目标行仍钉 5——`cancelled` 形（本 PR 引入的翻转）与
+      `failed` 形（master 同判，同一不变量）各一例，均带
+      「placeholder 谓词为 False」前提断言；refuse 方向补
+      placeholder@`pending` 形（门内第二个状态）仍不钉；
       `test_cancelled_own_forecast_blocks_cross_stage_cycle_marker_pin`、
       `test_failed_hydro_run_blocks_cycle_marker_pin_beside_succeeded_jobs`、
       `test_cancelled_placeholder_shaped_row_blocks_the_pin_*`、

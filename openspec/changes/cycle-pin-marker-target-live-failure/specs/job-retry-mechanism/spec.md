@@ -209,7 +209,13 @@ drive the retry decision it was written to request.
   stage `download` beside the candidate's own failed forecast) and
   the only-failure-left arm (no failed stage, own jobs all
   succeeded) derive `new_attempt` 5, and the manual-retry payload
-  carries `new_attempt` 5
+  carries `new_attempt` 5; this holds even when the `cancelled`
+  target row is placeholder-SHAPED (a retry-suffixed id with no
+  Slurm id) — the placeholder gate is status-bound to
+  `pending`/`submission_failed`, so a cancelled or failed
+  placeholder-shaped row is outside the gate and stays a valid
+  pinning marker target, exactly as the candidate-side scan counts
+  it
 - **AND** when the candidate's own live failure is at a different
   stage, or the marker's resolved job is no longer a live failure
   (stale — resolved/succeeded, ACTIVE, repaired stage evidence, or

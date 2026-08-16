@@ -6537,26 +6537,105 @@ def test_failed_cycle_marker_target_statuses_keep_pinning(target_status: str) ->
     assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
 
 
+@pytest.mark.parametrize("target_status", ["cancelled", "failed"])
+def test_placeholder_shaped_cycle_marker_target_outside_the_gate_still_pins(target_status: str) -> None:
+    """Predicate-interaction guard: the placeholder gate is status-bound on the MARKER side too.
+
+    ``_job_is_unsubmitted_auto_retry_placeholder`` recognises a row only at ``pending`` /
+    ``submission_failed``; the retry-suffixed id and the absent Slurm ids are SHAPE, not verdict.
+    A cohort master row that reached ``cancelled`` or ``failed`` while carrying that shape is
+    therefore a live failure and a valid repair target -- exactly the reading the blocker scan and
+    the candidate-side twin give it
+    (``test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_the_blocker_scan``),
+    so refusing it here on shape alone would re-split the one row-level domain #1294 merged.
+
+    ``cancelled`` is the flip this change delivers; ``failed`` answers identically on master and is
+    kept beside it because a SHAPE-based (status-blind) placeholder exclusion bolted onto the
+    marker-target arm would take BOTH silently, and no other test covers the failed leg on a
+    placeholder-shaped id.  ``failed_stage`` names the target's own stage and the candidate's own
+    forecast row is a live failure, so arm 1 is the only arm open: the marker-target liveness test
+    is the only thing that can refuse this pin.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _decision_path_cycle_download_job(
+        job_id="job_cycle_gfs_2026052106_download_retry_1",
+        status=target_status,
+        retry_count=1,
+        slurm_job_id=None,
+        array_task_id=None,
+    )
+    marker = _decision_path_manual_retry_marker(
+        entity_id=str(target_job["job_id"]),
+        retry_count=5,
+        previous_job_id=str(target_job["job_id"]),
+        event_id=42,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), target_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise 1: the row really carries placeholder SHAPE -- it would trip the gate at an in-gate
+    # status -- so the test is not vacuously asserting the pin on an ordinary row id.
+    assert (
+        scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(
+            {**target_job, "status": "pending"}
+        )
+        is True
+    )
+    # Premise 2: at this status the gate does not fire, so the row is a LIVE failure.
+    assert scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(target_job) is False
+    assert scheduler_state_manual_retry_module._job_row_is_live_failure(target_job) is True
+    # Premise 3: the target row survives filtering, so the marker resolves to it and the verdict
+    # comes from the resolved-row rule -- not from the row-absent arm.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_cycle_gfs_2026052106_download_retry_1",
+    ]
+    assert decision_state["pipeline_jobs"][1]["status"] == target_status
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
 @pytest.mark.parametrize(
-    "target_overrides",
+    ("target_overrides", "placeholder_gate"),
     [
-        pytest.param({"repair_status": "repaired"}, id="repaired_stage_evidence"),
+        pytest.param({"repair_status": "repaired"}, False, id="repaired_stage_evidence"),
         pytest.param(
             {
                 "job_id": "job_cycle_gfs_2026052106_download_retry_1",
                 "status": "submission_failed",
                 "retry_count": 1,
             },
+            True,
             id="unsubmitted_auto_retry_placeholder",
         ),
-        pytest.param({"status": "succeeded", "error_code": None}, id="succeeded"),
-        pytest.param({"status": "pending", "error_code": None}, id="active_pending"),
-        pytest.param({"status": "queued", "error_code": None}, id="active_queued"),
-        pytest.param({"status": "submitted", "error_code": None}, id="active_submitted"),
-        pytest.param({"status": "running", "error_code": None}, id="active_running"),
+        pytest.param(
+            {
+                "job_id": "job_cycle_gfs_2026052106_download_retry_1",
+                "status": "pending",
+                "error_code": None,
+                "retry_count": 1,
+            },
+            True,
+            id="unsubmitted_auto_retry_placeholder_pending",
+        ),
+        pytest.param({"status": "succeeded", "error_code": None}, False, id="succeeded"),
+        pytest.param({"status": "pending", "error_code": None}, False, id="active_pending"),
+        pytest.param({"status": "queued", "error_code": None}, False, id="active_queued"),
+        pytest.param({"status": "submitted", "error_code": None}, False, id="active_submitted"),
+        pytest.param({"status": "running", "error_code": None}, False, id="active_running"),
     ],
 )
-def test_stale_cycle_marker_targets_still_refuse_the_pin(target_overrides: dict[str, Any]) -> None:
+def test_stale_cycle_marker_targets_still_refuse_the_pin(
+    target_overrides: dict[str, Any],
+    placeholder_gate: bool,
+) -> None:
     """Regression guard: the exclusions the widened domain keeps, on the marker-target side.
 
     A repaired stage-evidence row and an unsubmitted auto-retry placeholder keep a literal
@@ -6572,10 +6651,24 @@ def test_stale_cycle_marker_targets_still_refuse_the_pin(target_overrides: dict[
     download as a live repair target and charge its counter to this candidate.  None of the four
     ids carries a ``_retry_`` suffix, so the unsubmitted-placeholder gate is not what refuses
     them -- only the ACTIVE subtraction is.
+
+    ``placeholder_gate`` records WHY each param refuses, and is asserted as a premise so the
+    reason cannot silently change: only the two in-gate statuses of
+    ``_job_is_unsubmitted_auto_retry_placeholder`` trip it.  ``submission_failed`` is the
+    gate-only anchor (a non-ACTIVE status, so nothing else refuses it), while the ``pending``
+    placeholder is over-determined -- the ACTIVE subtraction refuses it too -- and is carried
+    because the delta enumerates the placeholder's own status pair, not because it discriminates
+    the gate on its own.  The pinning direction's placeholder-SHAPED counterpart (out-of-gate
+    ``cancelled``/``failed``) is
+    ``test_placeholder_shaped_cycle_marker_target_outside_the_gate_still_pins``.
     """
 
     candidate = _scheduler_candidate_fixture()
     target_job = _decision_path_cycle_download_job(**target_overrides)
+    assert (
+        scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(target_job)
+        is placeholder_gate
+    )
     marker = _decision_path_manual_retry_marker(
         entity_id=str(target_job["job_id"]),
         retry_count=5,
