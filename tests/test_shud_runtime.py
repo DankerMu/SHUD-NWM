@@ -621,6 +621,36 @@ def test_state_checkpoint_tracker_install_recovered_leaves_sibling_hours_missing
     assert tracker.recovery_outcomes == {6: "recovered"}
 
 
+def test_state_checkpoint_tracker_records_gate_rejected_header_in_plain_decimal(tmp_path: Path) -> None:
+    """#1320: the gate-rejection rendering site is wired to the helper, not just
+    the observed trail.
+
+    Every other test that greps this outcome uses a relative minute (720/1440),
+    which `:g` and `_format_header_minute` render byte-identically — only an
+    epoch-form header tells the two apart, and it is the form the manifest
+    stores, so `gate_rejected(header=...)` must stay greppable against it.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = scratch / "demo.cfg.ic.update"
+    # Structurally complete, but the header is an epoch minute nowhere near the
+    # f006 target: the rerun ran and the header gate rejected it, so the outcome
+    # must name the rerun's OWN header.
+    source.write_text("2 2 29607840.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.install_recovered(6, source, source_root=scratch) is False
+
+    assert tracker.recovery_outcomes == {6: "gate_rejected(header=29607840)"}
+    assert tracker.missing_hours() == [6]
+    assert not (output_dir / "state_checkpoints" / "demo.f006.cfg.ic.update").exists()
+
+
 def test_state_checkpoint_tracker_recovery_outcome_summary_renders_every_recorded_hour(tmp_path: Path) -> None:
     """#1320: the live path of the `recovery_outcome_summary` empty guard.
 
@@ -4925,6 +4955,57 @@ def test_execute_receipt_keeps_recovery_outcomes_when_the_observed_trail_is_long
     # Epoch-form minutes stay greppable against the manifest's own values.
     assert "observed cfg.ic.update header minutes: 29607840, 29607900" in message
     assert "2.96078e+07" not in message
+
+
+def test_task_outcome_receipt_keeps_the_manifest_write_note_when_the_trail_is_long(tmp_path: Path) -> None:
+    """#1320: the manifest-write note is the OTHER bounded field ordered ahead
+    of the observed trail.
+
+    It is what tells the operator that the fallback diagnostic — the manifest
+    carrying the same trails — never landed either, so a receipt that keeps only
+    the unbounded trail leaves the miss unlocatable from both channels at once.
+    """
+
+    stub = tmp_path / "watcher_held_solver.py"
+    stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    real_read = runtime_module._read_cfg_ic_header_minute
+    real_write = runtime_module._write_text_no_follow
+    sampled: list[float] = []
+
+    def _fresh_epoch_minute_per_poll(path: Path) -> float | None:
+        if Path(path) != output_dir / "demo.cfg.ic.update":
+            return real_read(path)
+        sampled.append(29607840.0 + 60.0 * len(sampled))
+        if len(sampled) >= 60:
+            (workspace / "watcher_sampled_enough").write_text("go\n", encoding="utf-8")
+        return sampled[-1]
+
+    def _fail_manifest_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoints.json":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fresh_epoch_minute_per_poll)
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_manifest_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert len(exc_info.value.message) > runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    # The production truncation, on the production message (`execute()` runs
+    # exactly this call on a failed attempt).
+    runtime._write_task_outcome_receipt(log_dir, manifest["run_id"], exc_info.value)
+
+    receipt = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert len(receipt["error_message"]) == runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "state_checkpoints.json write failed" in receipt["error_message"]
+    assert "recovery outcomes:" in receipt["error_message"]
 
 
 def test_format_header_minute_renders_epoch_minutes_in_plain_decimal() -> None:
