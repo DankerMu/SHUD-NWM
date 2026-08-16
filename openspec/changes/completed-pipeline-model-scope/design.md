@@ -34,10 +34,11 @@ and not _is_foreign_model_cycle_scope_job(
     候选行（谓词 docstring :8766-8767 已记载），不属本 issue 域。
 - 共享谓词 `_job_matches_candidate` 逐字不动（Non-Goals 第一条；#1288
   design D1 的证伪结论直接复用）。
-- 两条返回分支都被单点覆盖：`:564-565` 终态口径开关开（生产
+- 两条返回分支都被单点覆盖：`:575-576` 终态口径开关开（生产
   `forecast_state_save_qc`）时直接 `return has_terminal_completion`；
-  关时 `:566-567` hydro 完成优先、`:568` 仍落 has_terminal_completion——
-  合取项收窄对两分支同时生效，无需第二处改动。
+  关时 `:577-578` hydro 完成优先、`:579` 仍落 has_terminal_completion——
+  合取项收窄对两分支同时生效，无需第二处改动。（行号按实现后
+  HEAD——新增 gate 注释使原 :564 起整体下移 11 行。）
 
 否决备选（消费侧交叉校验）：同一判定要在 4 个消费面各写一遍、口径易漂移，
 且 gate 本身仍返回错误答案（issue 已裁）。
@@ -98,9 +99,10 @@ gate 级真值表 + 全量套件覆盖，不逐面重复造锚（不可达面明
 | 同上开关下 stage ∈ {parse, publish} | False | False（本就非终态） |
 | 他模型行在场 + 候选自身 hydro ∈ {failed, cancelled, created} + 自身 forecast 行 failed | True | **False** |
 | model-less cohort 完成行（run_id == cycle run id 及 `_<suffix>` 形；默认口径——生产口径下仅 state_save_qc 形为 True，publish/parse 本就 False） | True | True |
-| 候选自身具名 cycle-run 完成行 / 自身 fcst run_id 完成行（终态阶段按当前口径）/ 自身 hydro 完成（**仅默认口径**——生产口径 :564-565 先行返回，不看 hydro 完成臂） | True | True |
+| 候选自身具名 cycle-run 完成行 / 自身 fcst run_id 完成行（终态阶段按当前口径）/ 自身 hydro 完成（**仅默认口径**——生产口径 :575-576 先行返回，不看 hydro 完成臂） | True | True |
 | 他模型 stage=forecast succeeded（非终态） | False | False |
 | 同 fixture 下 `has_active_pipeline` / `active_slurm_jobs` | — | 逐字不变 |
+| **复合形（round-1 复审补）**：候选自身 hydro ∈ ACTIVE（如 created/running）+ 他模型完成行 + 无其他活跃 job 行 → `has_active_pipeline` | False（master 既有：他模型行经未收窄的局部 has_terminal_completion 抑制 hydro-active 臂，:534-540） | False（本 change 不动 active 面；行为锚如实钉住现状，跟进 issue #1472） |
 
 环境开关测试直接 `monkeypatch.setenv` 即可——
 `_compute_state_save_qc_terminal_enabled`（`chain_repository_state.py:71-72`）
@@ -132,10 +134,19 @@ Regression rows: 见 D5 真值表后四行 + D3 解冻三处同步。
 ## Risks / Trade-offs
 
 - 修后他模型完成行不再让候选判完成 → 此前被静默跳过的候选将真实触发
-  forecast——这是修复意图；若生产有依赖该误判的"顺带去重"，属用错 gate
-  （active 面才是去重闸，其行为不变）。
-- `has_active_pipeline` 内部 has_terminal_completion 仍含他模型完成行
-  （抑制 hydro-active 分支）——active 面语义，显式 Non-Goal，负向回归钉住。
+  forecast——这是修复意图。
+- **复合残留（round-1 复审改口径，verifier 裁定 DEFER + 跟进 issue）**：
+  `has_active_pipeline` 内部 has_terminal_completion 仍含他模型完成行、
+  抑制 hydro-active 分支（:534-540，master 既有，DB 对照
+  `chain_repository.py:57-95` 是纯 UNION、**无**抑制子句——journal/DB 在
+  该形上分叉）。修前「误判完成」恰好遮住这个洞；修后库 API trigger 腿
+  （`chain_forecast_trigger.py:242-251 → :134-137`，除测试外无生产调用方）
+  两闸同 False。生产 db-free scheduler 不受影响——candidate_state 决策在
+  `scheduler_state_decision.py:180-190` 按自身 hydro ACTIVE 先行 skip
+  （`scheduler_candidates.py:1039-1050`，先于 active gate）。旧措辞
+  「active 面才是去重闸、其行为不变所以接得住」**不成立**，已删。处置：
+  复合形行为锚如实钉 False + issue-scribe 跟进单 **#1472**（active 面抑制臂的
+  候选作用域化 / 与 DB 纯 UNION 语义对齐），本 change 不动 active 面。
 - 环境开关（`_compute_state_save_qc_terminal_enabled`）无缓存、每次读
   env（实测），测试 `monkeypatch.setenv` 即可，无陷阱。
 

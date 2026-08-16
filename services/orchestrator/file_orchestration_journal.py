@@ -731,7 +731,7 @@ class FileOrchestrationJournalRepository:
         #
         # The exclusion is deliberately scoped to this projection instead of the
         # shared row predicate `_job_matches_candidate`, and the completion gate
-        # carries a SECOND local copy of it (`has_completed_pipeline`, #1302) for
+        # carries a SECOND local application of it (`has_completed_pipeline`, #1302) for
         # the same reason: that predicate also feeds the cycle-level
         # duplicate-submission gates (`has_active_pipeline`,
         # `active_slurm_jobs`), whose DB counterparts match the cycle run id

@@ -35,8 +35,12 @@
       的「under the active contract」限定。）
 - [x] 2.5 不回归（候选自身，**默认口径**）：候选自身具名 cycle-run
       完成行、自身 `fcst_...` run_id 完成行、自身 hydro 完成，均仍
-      True（hydro 完成臂仅默认口径可达，:564-565）；他模型
+      True（hydro 完成臂仅默认口径可达，:575-576）；他模型
       stage=forecast（非终态）行仍 False（真值表 D5 第 6/7 行钉住）。
+- [x] 2.9 复合形行为锚（round-1 复审 F2）：候选自身 hydro ∈ ACTIVE
+      （用既有 [created] 参数形即可）+ 他模型完成行 + 无其他活跃 job 行
+      → `has_active_pipeline is False` 如实钉住 master 既有现状，
+      docstring 指向跟进 issue #1472。
 - [x] 2.6 消费面判别锚（trigger 面）：他模型完成行在场 → 候选不再走
       `chain_forecast_trigger.py:247-251` 的 completed-skip 腿（修前走，
       需 red-proof）。**构造口径（fixture review 裁定，防绕远路）**：

@@ -1646,7 +1646,7 @@ def test_foreign_model_completion_row_does_not_complete_under_production_termina
     """Same verdict under the production ``forecast_state_save_qc`` terminal contract.
 
     That contract returns ``has_terminal_completion`` directly
-    (``file_orchestration_journal.py:564-565``), so the narrowed conjunction is
+    (``file_orchestration_journal.py:575-576``), so the narrowed conjunction is
     the only thing standing between the foreign row and a ``True``.  The
     ``publish``/``parse`` rows answered ``False`` before this change too (they
     are not terminal under that contract) and must keep doing so.
@@ -1753,7 +1753,7 @@ def test_candidate_own_completion_evidence_still_completes_the_candidate(tmp_pat
     The candidate's own NAMED cycle-run row, its own ``fcst_...`` run-id row and
     its own completed hydro run are the three legal completion sources left after
     the foreign exclusion (the hydro arm is reachable under the default terminal
-    contract only — ``file_orchestration_journal.py:564-567``).
+    contract only — ``file_orchestration_journal.py:575-579``).
     """
 
     cycle_stamp = format_cycle_time(_dt("2026-06-28T00:00:00Z"))
@@ -1856,6 +1856,45 @@ def test_foreign_model_completion_row_leaves_the_duplicate_submission_gates_unch
         job.get("job_id")
         for job in repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
     ] == [foreign_active["job_id"]]
+
+
+def test_foreign_model_completion_row_suppresses_the_hydro_active_arm(tmp_path: Path) -> None:
+    """Behaviour anchor for a master-side hole this change deliberately leaves open.
+
+    ``has_active_pipeline`` keeps its own local ``has_terminal_completion``
+    (``file_orchestration_journal.py:534-540``) over the UNnarrowed shared row
+    predicate, so another model's completion row suppresses the hydro-active arm
+    and this candidate's ACTIVE hydro run answers ``False`` — while the DB
+    counterpart (``chain_repository.py:57-95``) is a plain UNION with no
+    suppression clause and answers ``True``.  The hole predates #1302 (which only
+    narrowed ``has_completed_pipeline``); before it, the completion gate's wrong
+    ``True`` happened to mask the shape.
+
+    This assertion PINS the current behaviour, it does not endorse it.  The fix
+    is issue #1472 — flip this assertion to ``True`` there, do not delete it.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[]),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
