@@ -11,8 +11,9 @@
 
 - [x] 0. 运行时探针（design Task 0 (a)-(e)；任一不符 → 停下重裁）。
 - [x] 1. 腿层：`:1298-1300` 转译臂扩展（exact-warm 清 staged 后裸
-  raise + token 前缀消息）+ 标志 while 体首行复位 + 双计数（URI-only
-  计入）+ pending mark 缓存与出口 flush 语义 + `:1333` 耗尽分派（≥2 且
+  raise + token 前缀消息）+ 标志 while 体首行复位 + 按 resolved
+  `state_uri` 去重的双身份集合 + pending mark 缓存与出口 flush 语义
+  （loop 外 wrapper 按构造成立）+ `:1333` 耗尽分派（≥2 且
   全 mismatch → `WARM_START_TIME_MISMATCH_SYSTEMIC`，先清 staged、不
   flush mark）+ `:60-68` 模块注释改真（design D1 全 7 条）。
 - [x] 2. 测试（design D3 seams 1-11）：阶梯续跑（含 mark flush 断言）/

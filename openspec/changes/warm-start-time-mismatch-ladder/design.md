@@ -43,9 +43,11 @@
    TIME_MISMATCH 拒绝的 `_mark_init_state_corrupted` 调用不即时落库，
    入 `pending_mismatch_marks`；checksum/形状拒绝的 mark 照旧即时。
    flush（逐个调 mark）发生在**除 systemic escalate 外的所有循环出
-   口**：`:1313` warm 成功 return 前、`:1287` 无 URI 冷启动 return 前、
-   `:1335` 耗尽冷启动 return 前、`:1327` exact-warm UNAVAILABLE raise
-   前。escalate 出口**不 flush**——快照保持 usable，下一 cycle 阶梯重
+   口**，按构造成立（round-1 C2 修订）：三个 return 出口（warm 成功 /
+   无 URI 冷启动 / 耗尽冷启动）直调 flush；loop 外 try/except wrapper
+   覆盖**任意**异常出口（含 exact-warm UNAVAILABLE、STATE_LOOKUP_FAILED、
+   WORKSPACE_PATH_UNSAFE、意外 materialization code），仅
+   `WARM_START_TIME_MISMATCH_SYSTEMIC` 例外。escalate 出口**不 flush**——快照保持 usable，下一 cycle 阶梯重
    走、再次 escalate，系统性信号持续（今日对照：mismatch 逃逸早于
    mark，快照保持 usable、每 cycle 都响；(a) 保住该性质）。循环终止只
    依赖内存 `rejected_state_ids`，不依赖落库 mark（review 已核实）。

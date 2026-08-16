@@ -31,9 +31,11 @@ TIME_MISMATCH 且 ≥2 个时，以专用 error code 整 run 失败。
   静默冷启动，systemic 信号只响一次；缓存后 escalate 出口不落 mark，快
   照保持 usable，下一 cycle 重走阶梯再次响——保住今日「每 cycle 都响」
   的性质，忠实于裁决 C）。
-- 循环记两计数（总拒绝数 / TIME_MISMATCH 拒绝数，URI-only 候选照常计
-  入）；阶梯耗尽（`:1333 next_state is None`）时：TIME_MISMATCH 拒绝
-  ≥2 且 == 总拒绝数 → `_clear_staged_initial_states` 后 raise 专用
+- 循环记两个**按 resolved `state_uri` 去重的候选身份集合**（总拒绝 /
+  TIME_MISMATCH 拒绝；round-1 C1：按迭代计数会让单个坏快照经 URI-only/
+  陈旧-id 两轮走冒充 N=2 全一致）；阶梯耗尽（`:1333 next_state is
+  None`）时：mismatch 身份集 ≥2 且 == 总拒绝身份集 →
+  `_clear_staged_initial_states` 后 raise 专用
   `WARM_START_TIME_MISMATCH_SYSTEMIC`（不 flush pending mark）；否则
   flush 后照旧冷启动。新码不注册 retry 集合——与旧码同档 permanent。
 - 其余零改动：`_verify_ic_time_consistency` 判据本身、checksum/形状两
