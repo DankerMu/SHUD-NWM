@@ -765,9 +765,27 @@ def _repair_missing_radiation_contexts(
             # rescue of models the plain selection already dropped, so aborting
             # the whole run over one of them would let an unrelated malformed
             # package (e.g. #1197's `23106\t6` IC on a basin that also lacks
-            # *.tsd.rl) block every healthy basin from publishing. The refusal is
-            # not silent: the model keeps its inventory row carrying
-            # ``invalid_required_files`` / ``missing_required_files``.
+            # *.tsd.rl) block every healthy basin from publishing.
+            #
+            # Scope of that relief: it only reaches models NOT already in the
+            # canonical registry. A skipped model that IS registered leaves the
+            # prospective registry short a row, which #1080's cutover gate
+            # classifies as a removal and refuses
+            # (``registry_cutover_removal_refused``) before canonical
+            # replacement — the refresh lane has no bypass, only this CLI's
+            # ``--allow-uncovered-cutover``. So for registered models the run
+            # still fails; what changed is that it fails at the gate, with the
+            # previous registry intact, instead of mid-publish.
+            # (Pinned by
+            # ``test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate``.)
+            #
+            # On the manual CLI lane the skip is not silent: with a persistent
+            # ``--work-dir`` the run's ``basins-inventory.json`` keeps the
+            # model's ``invalid_required_files`` / ``missing_required_files``.
+            # The refresh lane leaves no such trace — it deletes its run
+            # workspace every run (``scheduler_file_provider_refresh``'s
+            # ``_cleanup_run_workspace``) and its receipt does not list skipped
+            # models.
             if requested_slugs or requested_model_ids:
                 raise SchedulerRegistryPublishError(
                     "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",

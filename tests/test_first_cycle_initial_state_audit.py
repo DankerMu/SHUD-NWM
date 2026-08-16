@@ -886,10 +886,14 @@ def test_audit_verdict_table_requires_an_explicit_completeness_claim() -> None:
 
 MALFORMED_IC = b"23106\t6\n1\t0.1\t0.2\t0.3\t0.4\n"
 WELL_FORMED_IC = b"23106\t6\t29714400.000000\n1\t0.1\t0.2\t0.3\t0.4\n"
-#: The same malformed header carried by a production-sized body (~78 KiB here,
-#: megabytes in production).  The tier-(a) sweep must reach its verdict from the
-#: first line alone, without pulling the body across NFS.
+#: The same malformed header carried by a body many times the header bound
+#: (~72 KiB here — 26 + 4096*18 bytes — against hundreds of KiB in production).
+#: The tier-(a) sweep must reach its verdict from the first line alone, without
+#: pulling the body across NFS.
 LARGE_MALFORMED_IC = MALFORMED_IC + b"1\t0.1\t0.2\t0.3\t0.4\n" * 4096
+#: A first line that never ends: 8192 bytes of numeric tokens with no newline at
+#: all, so a bounded read can only ever hold a TRUNCATION of the header.
+HEADERLESS_OVERLONG_IC = b"1 " * 4096
 
 
 def test_audit_mirror_probe_fills_the_header_shape_verdict(tmp_path: Path) -> None:
@@ -1002,6 +1006,35 @@ def test_audit_inventory_sweep_keeps_the_inventory_verdict_when_the_object_is_un
     assert row["ic_qualification_source"] == "inventory"
 
 
+def test_audit_inventory_sweep_keeps_the_inventory_verdict_when_the_header_outruns_the_bound(
+    tmp_path: Path,
+) -> None:
+    """The other half of the bound: a truncated header may not manufacture a verdict.
+
+    ``read_bytes_limited_no_follow`` returns one sentinel byte past its bound, so
+    an IC object whose first line is longer than
+    :data:`audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES` hands the probe a PREFIX of the
+    header, not the header.  Counting tokens in that prefix would report a token
+    count the file does not have (here: "2049 numeric token(s)" for a 4096-token
+    line) and write that invented reason into a shipped receipt, so the probe
+    returns ``None`` and the inventory verdict stands untouched.
+    """
+    fixture = _Fixture(tmp_path)
+    ic_path = fixture.add_baseline_package_model(
+        "overlong_header", shud_input_name="overlong", ic_content=HEADERLESS_OVERLONG_IC
+    )
+    assert b"\n" not in ic_path.read_bytes()
+    assert ic_path.stat().st_size > audit.MAX_IC_HEADER_SHAPE_PROBE_BYTES
+    fixture.publish_registry()
+
+    assert audit.main(fixture.argv("--sources", "gfs")) == 0
+
+    row = _row(fixture.receipt(), "overlong_header", "gfs")
+    assert row["ic_qualified"] is True
+    assert row["ic_qualification_source"] == "inventory"
+    assert "numeric token(s)" not in str(row.get("detail") or "")
+
+
 def test_audit_receipt_limits_declare_the_inventory_tier_header_probe(tmp_path: Path) -> None:
     """closure F-B: the receipt contract stays truthful about what was probed."""
     fixture = _Fixture(tmp_path)
@@ -1038,9 +1071,10 @@ def test_audit_inventory_sweep_reads_only_the_header_and_hashes_nothing(
 ) -> None:
     """The tier-(a) sweep's cost, asserted in BYTES READ rather than in prose.
 
-    Production carries 51 inventory-shaped packages whose IC objects are megabytes
-    each; a sweep that re-read (let alone re-hashed) them whole would burn that IO
-    on every pass and would make the receipt's
+    Production carries 51 inventory-shaped packages, ~16 MB of IC object bytes per
+    full-probe pass (the figure :func:`audit._canonical_ic_header_shape_probe`'s own
+    docstring quotes); a sweep that re-read (let alone re-hashed) them whole would
+    burn that IO on every pass and would make the receipt's
     ``inventory_tier_package_objects_rehashed=false`` claim, the schema's
     ``inventory_tier_ic_header_probed`` description and this module's docstring
     untrue at once.  So this test instruments the audit's own reader and digest

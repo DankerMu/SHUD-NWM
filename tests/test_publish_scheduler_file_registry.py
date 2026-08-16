@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import weakref
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -856,27 +858,40 @@ def test_publish_all_basin_scheduler_registry_repairs_missing_radiation_model(
     assert {row["model_id"] for row in payload["models"]} == {"basins_qhh_shud", "basins_tailanhe_shud"}
 
 
-def _write_radiation_repair_pair(basins_root: Path) -> None:
-    """Real two-basin tree: healthy ``alpha`` + ``bravo`` that no repair can save.
+def _write_healthy_basin_pair(basins_root: Path) -> None:
+    """Real two-basin tree, both publishable.
 
-    ``bravo`` is missing ``*.tsd.rl`` (so the radiation repair picks it up, using
-    alpha's file as the template — the matcher keys on the ``*.tsd.lai`` header)
-    AND carries #1197's malformed ``23106\\t6`` IC header, which discovery refuses
-    on the repaired copy too.  Nothing about that refusal is bravo-specific: it is
-    the shape of "one basin in the tree is unpublishable for a reason the repair
-    does not address".
+    Both basins carry the same ``*.tsd.lai`` header, which is what the radiation
+    template matcher keys on, so alpha's ``*.tsd.rl`` is a valid template for
+    bravo once bravo loses its own.
     """
     from tests.test_basins_registry_import import _make_valid_model
 
     lai_header = "900\t18\t19810101\t20551201\t86400\n"
-    alpha_input = _make_valid_model(basins_root / "alpha", "alpha", sp_segment_count=2)
-    (alpha_input / "alpha.tsd.lai").write_text(f"{lai_header}lai\n", encoding="utf-8")
-    (alpha_input / "alpha.tsd.rl").write_text(f"{lai_header}radiation\n", encoding="utf-8")
+    for slug in ("alpha", "bravo"):
+        input_dir = _make_valid_model(basins_root / slug, slug, sp_segment_count=2)
+        (input_dir / f"{slug}.tsd.lai").write_text(f"{lai_header}lai\n", encoding="utf-8")
+        (input_dir / f"{slug}.tsd.rl").write_text(f"{lai_header}radiation\n", encoding="utf-8")
 
-    bravo_input = _make_valid_model(basins_root / "bravo", "bravo", sp_segment_count=2)
-    (bravo_input / "bravo.tsd.lai").write_text(f"{lai_header}lai\n", encoding="utf-8")
+
+def _break_bravo_beyond_repair(basins_root: Path) -> None:
+    """Make ``bravo`` unpublishable in a way the radiation repair cannot fix.
+
+    It loses ``*.tsd.rl`` (so the repair picks it up, using alpha's file as the
+    template) AND gains #1197's malformed ``23106\\t6`` IC header, which discovery
+    refuses on the repaired copy too.  Nothing about that refusal is bravo-specific:
+    it is the shape of "one basin in the tree is unpublishable for a reason the
+    repair does not address".
+    """
+    bravo_input = basins_root / "bravo" / "input" / "bravo"
     (bravo_input / "bravo.tsd.rl").unlink()
     (bravo_input / "bravo.cfg.ic").write_text("23106\t6\n1\t0.1\n", encoding="utf-8")
+
+
+def _write_radiation_repair_pair(basins_root: Path) -> None:
+    """Healthy ``alpha`` + ``bravo`` that no repair can save."""
+    _write_healthy_basin_pair(basins_root)
+    _break_bravo_beyond_repair(basins_root)
 
 
 def test_bulk_publish_skips_a_repaired_model_that_is_still_unpublishable(tmp_path: Path) -> None:
@@ -934,6 +949,89 @@ def test_explicitly_requested_unsalvageable_model_still_fails_closed(tmp_path: P
     details = excinfo.value.details
     assert details["basin_slug"] == "bravo"
     assert any("2 numeric token(s)" in reason for reason in details["invalid_required_files"])
+
+
+def test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate(
+    tmp_path: Path,
+) -> None:
+    """The bulk skip is NOT a licence to drop a model that is already published.
+
+    The two tests above cover the bootstrap shape (nothing registered yet), where
+    skipping bravo is the whole point.  Production's refresh lane runs the same
+    bulk publish behind #1080's registry-cutover gate, and there the skip means
+    something else: the canonical registry HAS ``basins_bravo_shud``, the
+    prospective one does not, so the gate classifies it as a removal and refuses
+    the whole canonical replacement (``registry_cutover_removal_refused``).  The
+    refresh lane has no bypass for that — only the manual CLI's
+    ``--allow-uncovered-cutover``.  So the skip's real terminal state, once a
+    basin has ever been published, is a failed run with the previous registry
+    intact, and this test pins that rather than the comment's word for it.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    registry_manifest = tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json"
+    object_store_root = tmp_path / "objects"
+
+    first = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work-bootstrap",
+    )
+    assert first["status"] == "published"
+    previous_bytes = registry_manifest.read_bytes()
+    assert {row["model_id"] for row in json.loads(previous_bytes)["models"]} == {
+        "basins_alpha_shud",
+        "basins_bravo_shud",
+    }
+
+    _break_bravo_beyond_repair(basins_root)
+
+    # Wire the real #1080 gate exactly as scheduler_file_provider_refresh does:
+    # the previous canonical bytes/digest snapshot taken before the run, no
+    # cutover declaration, real publish.
+    generated_at = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
+    classification: dict[str, Any] = {}
+
+    def precommit_provider_generation(
+        workspace: Path,
+        packages: Sequence[Mapping[str, Any]],
+        registry_models: Sequence[Mapping[str, Any]],
+    ) -> None:
+        refresh._registry_precommit_gate(
+            workspace,
+            packages,
+            registry_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=sha256_bytes(previous_bytes),
+            prospective_generated_at=generated_at,
+            cutover_declaration_env=None,
+            dry_run=False,
+            classification_sink=classification.update,
+        )
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        registry_script.publish_all_basin_scheduler_registry(
+            basins_root=basins_root,
+            registry_manifest=registry_manifest,
+            object_store_root=object_store_root,
+            object_store_prefix="s3://nhms",
+            work_dir=tmp_path / "work-refresh",
+            registry_generated_at=generated_at,
+            precommit_validator=precommit_provider_generation,
+        )
+
+    assert excinfo.value.error_code == "SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED"
+    assert excinfo.value.details["provider_reason"] == "registry_cutover_removal_refused"
+    assert excinfo.value.details["provider_phase"] == "precommit"
+    assert classification["removed"]["items"] == ["basins_bravo_shud"]
+    assert [entry["model_id"] for entry in classification["refused"]["items"]] == ["basins_bravo_shud"]
+    assert {entry["reason"] for entry in classification["refused"]["items"]} == {
+        "registry_cutover_removal_refused"
+    }
+    # Canonical registry survives untouched: alpha is not republished alone.
+    assert registry_manifest.read_bytes() == previous_bytes
 
 
 def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:
