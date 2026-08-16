@@ -1141,6 +1141,7 @@ def _run_probe(
 # reads the receipt at 3am.
 _SHORTFALL_DELETE_RACE_NOTE = (
     " Both diagnostic counts are zero, which is the signature of a concurrent DELETE "
+    "(or any concurrent write that moves rows out of the block range) "
     "between the candidate count and the UPDATE (two READ COMMITTED snapshots) rather "
     "than of referential rot: check the output parser's re-parse delete window for this "
     "chunk before escalating this as data corruption."
@@ -1409,8 +1410,10 @@ def _lock_contention_stop(
         "lock_contention",
         (
             f"{chunk.key} pages [{first_page},{last_page}) could not take its row locks "
-            f"(SQLSTATE {error.pgcode or 'unknown'}); wait for an ingest idle window, or use "
-            "--final-sweep with ingest paused so the quiescence gate vouches for the chunk. "
+            f"(SQLSTATE {error.pgcode or 'unknown'}); pause the ingest writer and wait for an "
+            "idle window, then rerun. A plain --enforce run only reaches terminal chunks, where "
+            "that pause is the whole remedy; --final-sweep's quiescence gate enforces the pause "
+            "for the active chunk only. "
             "Lowering batch_pages or raising the duration wall will not help: halving a range "
             "shortens the scan, not the lock wait."
         ),

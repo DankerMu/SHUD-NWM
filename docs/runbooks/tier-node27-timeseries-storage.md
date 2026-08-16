@@ -1958,8 +1958,9 @@ distinguished in `stop.stage`:
   `stop.unmatched_rows == 0` *and* `stop.unmappable_rows == 0` (the reason text
   says so explicitly), this is almost certainly not rot. The candidate count and
   the UPDATE are two READ COMMITTED snapshots of one transaction, so a DELETE
-  that commits between them — the output parser's re-parse delete window on a
-  terminal chunk is the routine channel — inflates the shortfall while leaving
+  that commits between them — or any concurrent write that moves rows out of the
+  block range; the output parser's re-parse delete window on a terminal chunk is
+  the routine channel — inflates the shortfall while leaving
   both diagnostics at zero, because they run after the UPDATE. Check that
   re-parse window first; if it explains the gap, simply re-run the backfill (the
   batch was rolled back and the cursor rewound, so it is retried intact). Only a
@@ -1969,11 +1970,18 @@ distinguished in `stop.stage`:
   `..._DURATION_WALL_MS`; do not loop the runner against a struggling database.
 - `lock_contention` — the batch UPDATE failed with SQLSTATE `55P03`
   (lock_not_available) or `40P01` (deadlock_detected); the SQLSTATE is in
-  `stop.reason`. This is an overlap problem, not a batch-size problem: wait for
-  an ingest idle window, or run `--final-sweep` with ingest paused so the
-  quiescence gate vouches for the chunk before the batch starts. Do **not** lower
+  `stop.reason`. This is an overlap problem, not a batch-size problem: pause the
+  ingest writer, wait out the idle window, then rerun. A plain `--enforce` run
+  only ever reaches *terminal* chunks, so on the routine path that pause (plus
+  waiting out the output parser's re-parse window on that chunk) is the whole
+  remedy — `--final-sweep` is **not** a terminal-chunk remedy; its quiescence
+  gate covers the *active* chunk only, and the flag stays what it is elsewhere
+  in this runbook, a cutover precondition. Do **not** lower
   `..._BATCH_PAGES` or raise `..._DURATION_WALL_MS` — halving a range shortens
   the scan, not the lock wait — and the runner deliberately does not retry.
+  `--probe` does not classify at all: a lock failure under `--probe` surfaces as
+  `failure.stage: "runner"` (with the exception class name on stderr), not as a
+  `stop.stage` receipt.
   Caveat on coverage: until `SET LOCAL lock_timeout` is adopted (a live-batch
   behaviour change that needs its own node-27 dry-run), a pure lock *wait* still
   runs out the statement timeout and is reported as `duration_wall`; only
