@@ -835,7 +835,9 @@ def test_seed_station_rows_provenance_follows_project_name(
         },
         stations=[station],
         project_name=project_name,
-        tsd_forc_path=tmp_path / f"{project_name}.tsd.forc",
+        # Filename deliberately decoupled from project_name: the seed lane takes
+        # the two as independent inputs, so a filename-derived source must fail.
+        tsd_forc_path=tmp_path / "input.tsd.forc",
         tsd_forc_checksum="sha",
     )
 
