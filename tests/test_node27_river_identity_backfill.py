@@ -422,6 +422,10 @@ def test_lock_contention_stops_under_its_own_stage_without_a_halving_retry(pgcod
     assert stop.stage == "lock_contention"
     assert pgcode in stop.reason
     assert "--final-sweep" in stop.reason
+    # A plain --enforce lock stop only ever happens on a terminal chunk, where the
+    # quiescence gate never runs, so the flag must stay scoped rather than be offered
+    # as the remedy: pin the scoping clause, not just the flag name.
+    assert "quiescence gate enforces the pause for the active chunk only" in stop.reason
     assert "Lowering batch_pages or raising the duration wall will not help" in stop.reason
     # No halving: one UPDATE attempt over the WHOLE requested range, rolled back
     # once, and the stop names that range rather than a half of it.
