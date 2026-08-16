@@ -114,7 +114,7 @@ The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NO
 
 ### Requirement: Forcing package station-index identity is basin-neutral and fails closed
 
-The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity.
+The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity. The declaration-source matching SHALL accept the same entry shapes the direct-grid consumer accepts for the identical manifest: a `./`-prefixed `relative_path` normalizes before the accepted-member intersection, and an entry that omits `relative_path` resolves through its `uri` relative to the forcing package root; an entry that is invalid or underivable under these rules is skipped, because the anchor is a best-effort resolver and SHALL NOT introduce a new fail-closed surface on the non-direct-grid lane.
 
 #### Scenario: canonical member published for every basin
 
@@ -154,6 +154,26 @@ The SHUD forcing package main station-index member SHALL carry the fixed basin-n
 
 - **WHEN** the real QHH model asset `data/Basins/qhh/input/qhh/qhh.tsd.forc` or its bootstrap tooling is exercised
 - **THEN** its QHH-specific naming and semantics are unchanged by this contract.
+
+#### Scenario: dot-prefixed manifest declaration still anchors the legacy member
+
+- **WHEN** a non-direct-grid staged filesystem carries both station-index members and the declaration source names the legacy member with a `./`-prefixed `relative_path` (a shape the direct-grid checksum lane already accepts)
+- **THEN** the anchor resolves the legacy member and the run does not silently fall back to the stale canonical member
+
+#### Scenario: uri-only manifest declaration still anchors the legacy member
+
+- **WHEN** the declaration source's entry for the legacy member omits `relative_path` and carries only a `uri` located under the forcing package root
+- **THEN** the anchor derives the member from the `uri` and resolves the legacy member
+
+#### Scenario: an underivable entry is skipped without failing the lane
+
+- **WHEN** a declaration-source entry is invalid or its `uri` is not under the forcing package root
+- **THEN** that entry is skipped, the anchor falls back to canonical-first when no other entry names exactly one accepted member, and no error is raised on the non-direct-grid lane
+
+#### Scenario: a declaration naming both accepted members still falls back
+
+- **WHEN** the declaration source names both accepted station-index members, in plain, dot-prefixed, or uri-only shapes
+- **THEN** the anchor returns no member and staging falls back to canonical-first, preserving the pre-existing ambiguity semantics
 
 ### Requirement: Station handoff provenance records the actually-resolved forcing-index member
 
