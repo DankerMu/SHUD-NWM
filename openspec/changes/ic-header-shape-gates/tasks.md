@@ -74,7 +74,7 @@
   `uv run pytest -q tests/test_shud_runtime.py` 全量全绿；
   `uv run ruff check .`；`openspec validate ic-header-shape-gates --strict
   --no-interactive`。
-- [ ] 9. AC 对照自审：issue #1197 六条 AC 逐条映射（AC-1 通知半边 =
+- [x] 9. AC 对照自审：issue #1197 六条 AC 逐条映射（AC-1 通知半边 =
   issue 评论已登记用户侧待办 + 0.0 占位显式记录，PR 不关闭 issue）；具名
   偏离（dg 门落点替换、state_cli 同型漏洞路由、注入器 ≥5 宽准入不对称、
   1-token 重判、生产门 tier-a metadata-only 限制、warm 路径降级转译）写
