@@ -555,10 +555,21 @@ class FileOrchestrationJournalRepository:
         )
         if hydro_run is not None and not hydro_run_matches:
             return False
+        # This gate answers a CANDIDATE-scoped question ("has THIS candidate
+        # completed"), so another model's named cycle-run row is not completion
+        # evidence here even though the shared row predicate (which also feeds
+        # the deliberately wider duplicate-submission gates) accepts it.  The DB
+        # counterpart reads `hydro.hydro_run` under a source/cycle/model
+        # three-key restriction (`chain_repository.py:98-111`) and never sees
+        # another model's job rows; this conjunct aligns the journal verdict's
+        # direction with it (#1302).  Model-less cohort rows stay cycle-wide.
         has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+            and not _is_foreign_model_cycle_scope_job(
+                job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            )
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
         )
         if chain_repository_state._compute_state_save_qc_terminal_enabled():
@@ -719,14 +730,30 @@ class FileOrchestrationJournalRepository:
         # (#1288).
         #
         # The exclusion is deliberately scoped to this projection instead of the
-        # shared row predicate `_job_matches_candidate`: that predicate also feeds
-        # the cycle-level duplicate-submission and completion gates
-        # (`has_active_pipeline`, `has_completed_pipeline`, `active_slurm_jobs`),
-        # and their DB counterparts match the cycle run id UNCONDITIONALLY
-        # (`chain_repository.py:74-79` and `:177-181`); `has_completed_pipeline`
-        # has no DB job-row counterpart at all (`chain_repository.py:97-109` reads
-        # `hydro.hydro_run` only).  Narrowing the shared predicate would therefore
-        # create a new journal/DB divergence and loosen those gates.
+        # shared row predicate `_job_matches_candidate`, and the completion gate
+        # carries a SECOND local application of it (`has_completed_pipeline`, #1302) for
+        # the same reason: that predicate also feeds the cycle-level
+        # duplicate-submission gates (`has_active_pipeline`,
+        # `active_slurm_jobs`), whose DB counterparts match the cycle run id
+        # UNCONDITIONALLY (`chain_repository.py:74-79` and `:177-181`), so those
+        # two gates keep answering wide.  That wide visibility is NOT uniformly
+        # permissive, and this paragraph is no warrant for leaving the active
+        # side alone: `has_active_pipeline` runs its own local
+        # `has_terminal_completion` over the same unnarrowed rows (`:534-536`),
+        # so on the composite shape — a foreign model's completion row beside
+        # this candidate's ACTIVE hydro run — the wide visibility INVERTS into a
+        # suppression of the hydro-active arm and the gate answers False, where
+        # the DB counterpart's plain UNION (`chain_repository.py:57-95`) has no
+        # such clause and answers True.  That divergence is issue #1472, pinned
+        # by `test_foreign_model_completion_row_suppresses_the_hydro_active_arm`.
+        # `has_completed_pipeline` has no DB
+        # job-row counterpart at all (`chain_repository.py:98-111` reads
+        # `hydro.hydro_run` only) — but that DB gate's source/cycle/model
+        # three-key restriction fixes the DIRECTION the journal side must answer
+        # in, which is why the exclusion belongs there too rather than being
+        # taken as licence for a wide answer.  Narrowing the shared predicate
+        # itself would still loosen the duplicate-submission gates and diverge
+        # from their DB counterparts.
         #
         # Rows and their `pipeline_job` events must leave in the SAME step: a
         # marker whose row is gone resolves to no job row and re-enters the attempt
