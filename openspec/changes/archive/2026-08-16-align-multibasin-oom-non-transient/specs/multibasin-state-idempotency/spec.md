@@ -1,29 +1,4 @@
-# multibasin-state-idempotency Specification
-
-## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
-## Requirements
-### Requirement: Database-backed candidate state
-
-The scheduler SHALL persist candidate and stage state in database-backed pipeline/hydro/met records and events, not only local filesystem state files.
-
-#### Scenario: terminal success skip
-
-WHEN a scan finds an existing pipeline job or hydro run for the same source/cycle/model/scenario in a terminal successful state
-THEN it skips the candidate and records the terminal-state reason.
-
-#### Scenario: hydro durable terminal skip
-
-WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, or `published`
-THEN the candidate is treated as terminal successful
-AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are not resubmitted by default
-AND the skip evidence records the durable hydro status that caused the skip.
-
-#### Scenario: active job skip
-
-WHEN a scan finds a submitted or running Slurm job for the same candidate
-THEN it checks current Slurm state
-AND skips resubmission while the job remains active.
+## MODIFIED Requirements
 
 ### Requirement: Resumable downstream failures
 
@@ -50,7 +25,7 @@ AND retry evidence records a classifier, reason code, attempt count, retry limit
 
 #### Scenario: transient array task retry
 
-WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, or timeout within retry limits (`OUT_OF_MEMORY` is NOT transient: per `job-retry-mechanism`'s Retry Guard — Non-Transient Error Exclusion it is a configuration error that takes the permanent-failure path with automatic retry refused)
+WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, or timeout within retry limits (out-of-memory is NOT transient: per `job-retry-mechanism`'s Retry Guard — Non-Transient Error Exclusion, `OUT_OF_MEMORY` is a configuration error that takes the permanent-failure path with automatic retry refused)
 THEN retry targets the failed task or candidate scope rather than rerunning successful sibling tasks
 AND persisted/evidence fields record the failure classifier, retry attempt, retry limit, stage/task identity, and reused successful sibling outputs.
 
@@ -79,4 +54,3 @@ WHEN the Slurm cancellation contract is unavailable, returns an error, or does n
 THEN the scheduler records cancellation proof-gap evidence in `ops.pipeline_event.details` or scheduler evidence
 AND preserves local job state instead of fabricating cancellation success
 AND does not submit replacement work in the same scheduler pass.
-

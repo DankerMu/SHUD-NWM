@@ -970,8 +970,8 @@ class SHUDRuntime:
         # production run manifest never carries ``forcing.files`` (the chain
         # assembler in services/orchestrator/chain_manifest_contracts.py emits
         # uri/checksum only), so run-manifest entries are the diagnostic lane
-        # fallback (scripts/create_qhh_shud_manifest.py writes them) and
-        # canonical-first inside the staging probe is the last resort.
+        # fallback (the diagnostic manifest helper under scripts/ writes them)
+        # and canonical-first inside the staging probe is the last resort.
         # ``_authoritative_package_manifest_checksum_entries`` is deliberately not
         # used here: it raises when the package manifest is absent, which would
         # newly fail-close the non-direct-grid lane.
