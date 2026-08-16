@@ -28,8 +28,11 @@ mixing.
 ## Key decisions
 
 1. **Non-raising wrapper, per-entry skip**: wrap the existing raising
-   normalizer in `try/except SHUDRuntimeError: continue` per entry (or a
-   `_or_none` variant). Rationale over the rejected try/except-whole-list
+   normalizer in a per-entry `try/except (SHUDRuntimeError, ValueError):
+   skip` (or a `_or_none` variant) — `ValueError` included because
+   `urlparse` inside `_object_key` raises it bare on a bracket-malformed
+   s3 authority (round-1 finding A; the two classes are disjoint, DG's
+   raising lane untouched). Rationale over the rejected try/except-whole-list
    alternative: one malformed entry must not blind the anchor to a valid
    sibling declaration. The wrapper reuses
    `_normalize_package_manifest_file_relative_path` VERBATIM as the single

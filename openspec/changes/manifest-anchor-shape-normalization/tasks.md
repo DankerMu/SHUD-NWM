@@ -4,7 +4,8 @@
 
 - [x] 1.1 Add a non-raising per-entry normalize-or-skip wrapper (reusing
       `_normalize_package_manifest_file_relative_path` verbatim; catches
-      `SHUDRuntimeError` only) and apply it inside
+      `SHUDRuntimeError` plus the bare `ValueError` that `urlparse` raises
+      on a bracket-malformed authority — round-1 finding A) and apply it inside
       `_manifest_declared_shud_forcing_index_member` before the
       accepted-member intersection.
 - [x] 1.2 Pass `forcing_uri` (`manifest["forcing"].get("forcing_uri")`) and
