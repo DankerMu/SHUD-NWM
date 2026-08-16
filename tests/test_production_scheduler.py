@@ -12563,6 +12563,545 @@ def test_copyback_source_workspace_local_path_blocks_even_when_file_exists(
     assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
 
 
+# ---------------------------------------------------------------------------
+# #1402: the failure-state local artifact guard normalized its containment bases
+# (the resource-profile artifact roots and their env fallbacks) and the probed
+# path with ``Path.resolve()``, which states the truth on NEITHER supported arm.
+# On <=3.12 (every production interpreter) a symlink-loop root raised an
+# errno-LESS ``RuntimeError`` that no handler in this lane catches, aborting the
+# whole ``run_once`` pass with zero evidence; on 3.13+ nothing raises and the
+# loop root became a phantom containment base, routing a filesystem fault either
+# to "check artifact placement" or -- worse -- to the rebuild channel that cannot
+# clear it.  The tests below use only primitives that behave identically on both
+# arms (strict ``os.path.realpath`` on a loop is ``OSError(ELOOP)`` everywhere),
+# so the same file is the cross-version oracle.
+# ---------------------------------------------------------------------------
+
+#: Every function the local artifact guard's normalization flows through.  AC-1
+#: forbids ``Path.resolve()`` in ALL of them, in either form.
+_ARTIFACT_GUARD_LANE_FUNCTIONS = (
+    "_artifact_uri_missing_status",
+    "_local_artifact_path",
+    "_local_artifact_path_is_allowed",
+    "_local_artifact_allowed_roots",
+    "_path_is_relative_to",
+    "_realpath_or_none",
+)
+
+_ARTIFACT_GUARD_ROOT_ENV_NAMES = (
+    "OBJECT_STORE_ROOT",
+    "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+    "NHMS_PUBLISHED_ARTIFACT_ROOT",
+)
+
+
+def _symlink_loop_dir(tmp_path: Path, name: str) -> Path:
+    """A real self-referential symlink loop, plus the kernel's own verdict on it."""
+
+    first = tmp_path / f"{name}-a"
+    second = tmp_path / f"{name}-b"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    # Independent oracle: the loop is genuinely uncanonicalizable, and the errno
+    # (not an exception TYPE, which differs per version) is what the fix reads.
+    with pytest.raises(OSError) as excinfo:
+        os.path.realpath(first, strict=True)
+    assert excinfo.value.errno == errno.ELOOP
+    return first
+
+
+def _artifact_guard_candidate(monkeypatch: pytest.MonkeyPatch, **roots: Path | str) -> Any:
+    """A candidate whose resource profile carries exactly the given artifact roots."""
+
+    for env_name in _ARTIFACT_GUARD_ROOT_ENV_NAMES:
+        monkeypatch.delenv(env_name, raising=False)
+    return replace(
+        _scheduler_candidate_fixture(),
+        resource_profile={key: str(value) for key, value in roots.items()},
+    )
+
+
+def _artifact_guard_lane_function_nodes() -> dict[str, ast.FunctionDef]:
+    source = Path(scheduler_state_failure_module.__file__ or "").read_text(encoding="utf-8")
+    return {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name in _ARTIFACT_GUARD_LANE_FUNCTIONS
+    }
+
+
+def _resolve_call_names(node: ast.AST) -> list[str]:
+    return [
+        child.func.attr
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "resolve"
+    ]
+
+
+def test_local_artifact_guard_lane_contains_no_path_resolve_call() -> None:
+    # AC-1: neither form of ``Path.resolve()`` survives anywhere in the lane --
+    # non-strict silently admits a loop on 3.13+, strict raises an errno-less
+    # ``RuntimeError`` on <=3.12.  Normalization goes through
+    # ``_realpath_or_none`` only.
+    lane = _artifact_guard_lane_function_nodes()
+
+    assert sorted(lane) == sorted(_ARTIFACT_GUARD_LANE_FUNCTIONS)
+    for name, node in lane.items():
+        assert _resolve_call_names(node) == [], f"{name} still calls .resolve()"
+
+
+def test_realpath_or_none_artifact_root_normalization_matrix(tmp_path: Path) -> None:
+    # #1402 D1 unit matrix on the single normalization helper.
+    existing = tmp_path / "existing-root"
+    existing.mkdir()
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    loop = _symlink_loop_dir(tmp_path, "matrix-loop")
+
+    # A real directory canonicalizes to itself (through any /var -> /private/var
+    # style platform symlink, exactly as the old resolve() did).
+    assert scheduler_state_failure_module._realpath_or_none(str(existing)) == Path(os.path.realpath(existing))
+    # ENOENT keeps the historical admitted semantics: a root may legitimately name
+    # a not-yet-created directory or an unmounted share, so it is normalized
+    # lexically rather than dropped.
+    assert scheduler_state_failure_module._realpath_or_none(str(not_created_yet)) == Path(
+        os.path.realpath(not_created_yet)
+    )
+    # Any other errno means the path cannot serve as a containment base -- and
+    # this must NOT raise.  ELOOP here; the non-loop errno arm is witnessed for
+    # real (not asserted by comment) on EACCES in
+    # ``test_local_artifact_guard_eacces_root_is_unresolvable_not_a_containment_base``.
+    assert scheduler_state_failure_module._realpath_or_none(str(loop)) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions, so EACCES cannot be provoked")
+def test_local_artifact_guard_eacces_root_is_unresolvable_not_a_containment_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The fail-closed arm is errno-scoped, not loop-scoped: #1402 D2 rules that
+    # every non-ENOENT errno (ELOOP, EACCES, ESTALE, ENOTDIR) lands on the same
+    # root-fault exit, which is the behaviour change the issue's recommended arm
+    # authorized and the runbook routes (an NFS ESTALE window looks exactly like
+    # this).  EACCES is the one non-loop errno provokable without a real NFS
+    # server, so it carries the whole class end to end here.
+    unreadable_parent = tmp_path / "unreadable-parent"
+    unreadable_parent.mkdir()
+    root = unreadable_parent / "object-store"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "summary.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}", encoding="utf-8")
+    unreadable_parent.chmod(0o000)
+    try:
+        # Independent oracle: the kernel really does refuse this canonicalization,
+        # with an errno other than ENOENT (so the admitted fallback is NOT taken).
+        with pytest.raises(OSError) as excinfo:
+            os.path.realpath(root, strict=True)
+        assert excinfo.value.errno == errno.EACCES
+
+        assert scheduler_state_failure_module._realpath_or_none(str(root)) is None
+
+        candidate = _artifact_guard_candidate(monkeypatch, object_store_root=root)
+        assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == ((), True)
+
+        assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(outside)) == (
+            True,
+            "local_artifact_root_unresolvable",
+        )
+    finally:
+        # Restore before pytest's tmp_path cleanup walks the tree.
+        unreadable_parent.chmod(0o700)
+
+
+def test_local_artifact_root_enoent_fallback_phantom_symlink_loop_residual(tmp_path: Path) -> None:
+    # Recorded residual (#1402 D2, same ruling as scheduler_preflight.py:539-543):
+    # a "<missing>/../<loop>" root fails strict resolution with ENOENT on the
+    # MISSING component, so the fallback arm admits it -- and non-strict realpath
+    # returns a path that still carries the loop.  It becomes a phantom lexical
+    # containment base.  What the fix guarantees is that it never RAISES: the old
+    # ``_path_is_relative_to`` re-resolved this value and blew up with an
+    # errno-less RuntimeError on <=3.12.
+    loop = _symlink_loop_dir(tmp_path, "phantom-loop")
+    phantom = tmp_path / "gone" / ".." / loop.name
+
+    admitted = scheduler_state_failure_module._realpath_or_none(str(phantom))
+
+    assert admitted == Path(os.path.realpath(loop.parent)) / loop.name
+    assert os.path.islink(admitted)
+    assert scheduler_state_failure_module._path_is_relative_to(admitted / "pkg.json", admitted) is True
+    assert scheduler_state_failure_module._path_is_relative_to(tmp_path / "elsewhere.json", admitted) is False
+
+
+def test_local_artifact_allowed_roots_flags_symlink_loop_root_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 1: on <=3.12 this call raised RuntimeError straight out of the whole
+    # decision path; on 3.13+ it returned the loop as a usable root.
+    loop = _symlink_loop_dir(tmp_path, "roots-loop")
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=loop)
+
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == ((), True)
+
+
+def test_local_artifact_allowed_roots_keeps_not_yet_created_root_admitted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 4: existing admitted semantics for a root that does not exist yet are a
+    # behaviour lock, not an accident -- tightening them would fail candidates
+    # during an object-store first start or an NFS mount race.
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=not_created_yet)
+
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == (
+        (Path(os.path.realpath(not_created_yet)),),
+        False,
+    )
+
+
+def test_local_artifact_allowed_roots_keeps_healthy_root_when_another_is_a_symlink_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 5: one faulty root must not poison the others; the flag records the
+    # fault instead of the root list swallowing it.
+    good = tmp_path / "good-root"
+    good.mkdir()
+    loop = _symlink_loop_dir(tmp_path, "mixed-loop")
+    candidate = _artifact_guard_candidate(
+        monkeypatch,
+        object_store_root=good,
+        object_store_copyback_root=loop,
+    )
+
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == (
+        (Path(os.path.realpath(good)),),
+        True,
+    )
+
+
+def _artifact_guard_geometry(tmp_path: Path) -> dict[str, Path]:
+    good = tmp_path / "good-root"
+    inside = good / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "elsewhere" / "summary.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}", encoding="utf-8")
+    loop = _symlink_loop_dir(tmp_path, "exit-table-loop")
+    path_loop = _symlink_loop_dir(tmp_path, "exit-table-path-loop")
+    return {
+        "good": good,
+        "inside": inside,
+        "outside": outside,
+        "loop": loop,
+        "under_loop": loop / "output" / "summary.json",
+        "loop_artifact": path_loop,
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "root_keys", "artifact_key", "expected"),
+    [
+        # D2 #1: unchanged behaviour -- contained by a resolvable root, so the
+        # existing-file probe decides (and a present file is NOT missing).
+        ("1_contained_by_resolvable_root", ("good",), "inside", (False, None)),
+        # D2 #2: the pre-existing reason, now narrowed to "every configured root
+        # resolved and the artifact really is outside them" (AC-4).
+        (
+            "2_outside_every_resolvable_root",
+            ("good",),
+            "outside",
+            (True, "local_artifact_path_outside_allowed_roots"),
+        ),
+        # D2 #3: a broken root never poisons a healthy root's containment verdict.
+        ("3_healthy_root_contains_despite_loop_root", ("good", "loop"), "inside", (False, None)),
+        # D2 #4: the new, distinguishable root fault -- non-null, so the authorized
+        # repair channel refuses it, and the runbook routes to the ROOT.
+        (
+            "4_loop_root_and_artifact_outside_healthy_roots",
+            ("good", "loop"),
+            "outside",
+            (True, "local_artifact_root_unresolvable"),
+        ),
+        # D2 #5a: the extreme form of #4 -- configured roots exist, none resolved.
+        ("5a_every_configured_root_unresolvable", ("loop",), "outside", (True, "local_artifact_root_unresolvable")),
+        # D2 #5b: NO root configured at all is a different (and common) shape whose
+        # historical verdict is deliberately unchanged.
+        ("5b_no_root_configured", (), "outside", (True, "local_artifact_path_outside_allowed_roots")),
+        # D2 #6: with every root healthy, an unresolvable PATH keeps the path-fault
+        # reason, so operators can tell the two classes apart.
+        (
+            "6_path_itself_unresolvable_with_healthy_roots",
+            ("good",),
+            "loop_artifact",
+            (True, "local_artifact_path_unresolvable"),
+        ),
+        # D2 #6, ordering carve-out: NO root configured CROSSED WITH a path that
+        # itself cannot be normalized lands on row #6, not on row 5b.  The exits
+        # are decided containment-by-a-resolvable-root -> root fault -> path
+        # fault -> outside/empty-roots, so 5b is only reachable once the path
+        # normalized.  This is a behaviour change
+        # against master, where the same combination raised RuntimeError through
+        # the whole chain on <=3.12 and reported
+        # ``local_artifact_path_outside_allowed_roots`` on 3.13+; both verdicts
+        # are non-null and refused by the repair channel alike, so only the
+        # operator routing text moves -- pinned here so it cannot drift silently.
+        (
+            "6b_no_root_configured_and_path_itself_unresolvable",
+            (),
+            "loop_artifact",
+            (True, "local_artifact_path_unresolvable"),
+        ),
+    ],
+)
+def test_local_artifact_guard_symlink_loop_exit_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    row: str,
+    root_keys: tuple[str, ...],
+    artifact_key: str,
+    expected: tuple[bool, str | None],
+) -> None:
+    # #1402 D2, row by row: the complete enumeration of the local leg's exits.
+    del row
+    geometry = _artifact_guard_geometry(tmp_path)
+    profile_keys = ("object_store_root", "object_store_copyback_root")
+    candidate = _artifact_guard_candidate(
+        monkeypatch,
+        **{profile_keys[index]: geometry[key] for index, key in enumerate(root_keys)},
+    )
+
+    assert (
+        scheduler_state_failure_module._artifact_uri_missing_status(
+            candidate,
+            str(geometry[artifact_key]),
+        )
+        == expected
+    )
+
+
+def test_local_artifact_guard_root_fault_outranks_path_fault_under_a_loop_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 3 + D2 priority rule: an artifact UNDER the loop root fails strict
+    # resolution for the very same reason the root does, so both faults are live
+    # at once.  The root fault wins -- and, crucially, this is no longer the
+    # ``(True, None)`` verdict that fed a filesystem fault to the rebuild channel.
+    geometry = _artifact_guard_geometry(tmp_path)
+    candidate = _artifact_guard_candidate(
+        monkeypatch,
+        object_store_root=geometry["good"],
+        object_store_copyback_root=geometry["loop"],
+    )
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        str(geometry["under_loop"]),
+    ) == (True, "local_artifact_root_unresolvable")
+
+
+def test_local_artifact_guard_admitted_and_resolvable_roots_coexist_with_a_loop_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Spec scenario 3 in its full geometry: the three root classes configured on
+    # ONE candidate at the same time -- a resolvable existing root, a
+    # not-yet-created root (ENOENT-admitted, the object-store-first-start / NFS
+    # mount-race shape) and a symlink loop root.  Neither surviving root's
+    # containment verdict may be poisoned by the faulty third, and the admitted
+    # root must still yield the null-reason absent verdict (the rebuild channel
+    # legitimately clears a genuinely-not-yet-written artifact).
+    good = tmp_path / "good-root"
+    inside = good / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("{}", encoding="utf-8")
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    under_not_created_yet = not_created_yet / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    loop = _symlink_loop_dir(tmp_path, "three-root-loop")
+    candidate = _artifact_guard_candidate(
+        monkeypatch,
+        object_store_root=good,
+        copyback_root=not_created_yet,
+        object_store_copyback_root=loop,
+    )
+
+    # Both healthy roots survive as containment bases, and the fault is recorded
+    # on the flag rather than swallowed by the root list.
+    assert scheduler_state_failure_module._local_artifact_allowed_roots(candidate) == (
+        (Path(os.path.realpath(good)), Path(os.path.realpath(not_created_yet))),
+        True,
+    )
+    # (a) Under the resolvable root, the existing file is simply present: the
+    # loop root does not turn a healthy candidate into a blocker.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(inside)) == (False, None)
+    # (b) Under the ENOENT-admitted root, the historical semantics hold: absent
+    # with a NULL reason, i.e. still routed to the authorized repair channel and
+    # not to the root fault.
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(under_not_created_yet)) == (
+        True,
+        None,
+    )
+
+
+def test_local_artifact_path_is_relative_to_is_lexical_with_normalization_at_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 10.  ``_path_is_relative_to`` is now purely lexical (its own re-resolve
+    # was the lane's last raising surface: an ENOENT-fallback root still carrying a
+    # loop made ``root.resolve(strict=False)`` throw an errno-less RuntimeError on
+    # <=3.12, which ``except ValueError`` cannot catch).  Being lexical it is, on
+    # its own, LOOSER -- a ``..`` escape reads as contained:
+    lane = _artifact_guard_lane_function_nodes()
+    assert _resolve_call_names(lane["_path_is_relative_to"]) == []
+    good = tmp_path / "good-root"
+    good.mkdir()
+    escaping = good / ".." / "elsewhere" / "summary.json"
+    assert scheduler_state_failure_module._path_is_relative_to(escaping, good) is True
+
+    # ...so the defence lives at the caller, which normalizes BOTH sides through
+    # ``_realpath_or_none`` before comparing.  The escape is still refused.
+    candidate = _artifact_guard_candidate(monkeypatch, object_store_root=good)
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(escaping)) == (
+        True,
+        "local_artifact_path_outside_allowed_roots",
+    )
+
+
+def test_copyback_symlink_loop_root_blocks_one_candidate_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 8 / AC-6, on the copyback leg through the real ``run_once`` path: a
+    # symlink-loop ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` used to abort the entire
+    # pass on <=3.12 (RuntimeError escaping ``_candidate_state_decision``,
+    # ``_build_candidates`` and ``run_once``'s only except arm) -- no candidates,
+    # no evidence, and ``run_continuous`` exiting.  Now the faulty candidate is
+    # blocked with the root-fault reason and its NEIGHBOUR still schedules.
+    loop_root = _symlink_loop_dir(tmp_path, "copyback-loop")
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(loop_root))
+    copyback_source = tmp_path / "elsewhere" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=_PerModelCandidateStateRepository(
+            {
+                "model_a": _copyback_downstream_failure_state(
+                    candidate,
+                    identity,
+                    copyback_source=copyback_source,
+                    error_code="NODE_FAILURE",
+                ),
+                "model_b": {},
+            }
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"]
+    assert [entry["model_id"] for entry in blocked] == ["model_a"]
+    assert blocked[0]["reason"] == "missing_copyback_source"
+    assert blocked[0]["state_evidence"]["artifact_guard"]["unsafe_reason"] == "local_artifact_root_unresolvable"
+    # The discriminating half: the pass kept going and the healthy neighbour was
+    # actually submitted, which is exactly what the aborting RuntimeError destroyed.
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [basin["model_id"] for call in orchestrator.calls for basin in call["basins"]] == ["model_b"]
+    # And evidence for the pass exists at all (the abort produced none).
+    assert result.evidence["counts"]["candidate_count"] == 2
+    # Spec scenario 1's last clause -- "per-tick evidence is still written" -- is
+    # about the ARTIFACT, not the in-memory counts: ``scheduler_runtime.py``
+    # (``:1417-1428``) has a live arm that swallows an evidence write failure and
+    # returns ``artifact_path=None`` with the counts fully populated, so the
+    # counts above cannot witness the write.  Assert the file exists on disk.
+    assert result.artifact_path is not None
+    assert result.artifact_path.exists()
+
+
+def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 9 / AC-3: the new reason is non-null, so the operator-authorized
+    # exact-cycle forcing repair refuses the blocker under the same doctrine as
+    # ``artifact_probe_error`` -- a rebuild cannot clear a symlink loop.  This must
+    # use the FORCING leg: the copyback leg's ``missing_copyback_source`` never
+    # reaches this gate (``scheduler_candidates.py:1614`` rejects it earlier as
+    # ``missing_forcing_blocker_contract_invalid``), so it cannot witness this AC.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    raw_root = tmp_path / "nfs-raw-loop-root"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    loop_root = _symlink_loop_dir(tmp_path, "forcing-loop")
+    for env_name in _ARTIFACT_GUARD_ROOT_ENV_NAMES:
+        monkeypatch.delenv(env_name, raising=False)
+    # The loop root is carried by the candidate's RESOURCE PROFILE rather than by
+    # ``OBJECT_STORE_ROOT``: the env var also seeds ``ProductionSchedulerConfig``,
+    # whose own unguarded ``path.resolve()`` (``scheduler_config.py:930``, a
+    # separate site outside this lane, tracked as #1423) would raise on <=3.12
+    # before the scheduler is even constructed.  The guard reads both sources
+    # identically.
+    profile = {
+        **_missing_forcing_repair_direct_grid_profile(),
+        "object_store_copyback_root": str(loop_root),
+    }
+    # A LOCAL recorded forcing package reference, so the guard takes the local leg
+    # (the witness derivation explicitly excludes local paths).
+    package_path = tmp_path / "forcing-elsewhere" / "forcing_package.json"
+    package_path.parent.mkdir(parents=True)
+    package_path.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    state = _missing_forcing_retry_state(
+        candidate,
+        raw_manifest=readiness,
+        forcing_package_uri=str(package_path),
+    )
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=raw_root,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a", resource_profile=profile)]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("a refused repair must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = (  # type: ignore[method-assign]
+        lambda *_args: _complete_missing_forcing_repair_warm_state()
+    )
+
+    result = scheduler.run_once()
+
+    entry = result.evidence["blocked_candidates"][0]
+    assert entry["reason"] == "missing_forcing_package_uri"
+    artifact_guard = entry["state_evidence"]["artifact_guard"]
+    assert artifact_guard["unsafe_reason"] == "local_artifact_root_unresolvable"
+    assert artifact_guard["artifact_exists"] is False
+    assert artifact_guard["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    repair = entry["state_evidence"]["missing_forcing_repair"]
+    assert repair["status"] == "rejected"
+    assert repair["reason"] == "forcing_artifact_reference_unsafe"
+    assert repair["unsafe_reason"] == "local_artifact_root_unresolvable"
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
 def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()
@@ -25579,6 +26118,27 @@ class RawCandidateStateRepository(FakeActiveRepository):
     ) -> dict[str, Any]:
         del source_id, cycle_time, model_id, run_id, forcing_version_id, candidate_id
         return dict(self.state)
+
+
+class _PerModelCandidateStateRepository(FakeActiveRepository):
+    """Per-model candidate states, so one faulty candidate can be told from its neighbour (#1402)."""
+
+    def __init__(self, states: Mapping[str, dict[str, Any]]) -> None:
+        super().__init__(active=False, completed=False)
+        self.states = {model_id: dict(state) for model_id, state in states.items()}
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any]:
+        del source_id, cycle_time, run_id, forcing_version_id, candidate_id
+        return dict(self.states.get(model_id, {}))
 
 
 class BoundedReadSequence(Sequence[Any]):
