@@ -10,20 +10,25 @@ A root that fails strict resolution with `ENOENT` is re-admitted through
 non-strict realpath normalization only after a loop-filtering re-check: the
 fallback value is strictly re-resolved, and only a second `ENOENT` (the root
 genuinely does not exist yet — a not-yet-created directory or an unmounted
-share) keeps the admitted verdict, byte-compatible with the pre-change
-resolved value. A fallback that still fails for any other reason — including
+share) or a clean strict re-resolution (a `<missing>/../<real>` form) keeps
+the admitted verdict, byte-compatible with the pre-change resolved value. A fallback that still fails for any other reason — including
 the `<missing>/../<loop>` phantom form whose fallback retains a symlink loop
 — is rejected. A root that fails strict resolution for any reason other than
 `ENOENT` (a symlink loop, a permission fault, a stale file handle, a
-non-directory component) is likewise rejected. Every rejection uses the
-existing reason `unresolvable_local_root` and feeds the existing
-unsafe-rejection wiring. Rejection is per-candidate: the rejected root SHALL
+non-directory component) is likewise rejected. Every rejection arising from
+strict resolution or its fallback uses the existing reason
+`unresolvable_local_root`; the non-absolute arm keeps its existing
+`relative_local_root` / `parent_traversal_local_root` reasons. Every
+rejection feeds the existing unsafe-rejection wiring. Rejection is
+per-candidate: the rejected root SHALL
 NOT enter that candidate's resolved set, comparable-roots overlap baseline,
 or submission-manifest contribution, and the rejection SHALL be recorded in
 the evidence's bounded `rejected` list — or accounted in the rejection
 counters when the evidence cap elides the entry; when no complete candidate
 remains, the submission fails with the structured error code
-`RETRY_RUNTIME_ROOTS_UNSAFE`. A value whose tilde expansion cannot be
+`RETRY_RUNTIME_ROOTS_UNSAFE` — absent a higher-precedence secret-bearing
+rejection, which keeps its existing `RETRY_RUNTIME_ROOTS_SECRET_BEARING`
+code. A value whose tilde expansion cannot be
 completed (an unknown user home) SHALL fail closed through the existing
 non-absolute rejection arm instead of raising.
 

@@ -109,14 +109,15 @@ def _local_runtime_root_safety(value: str) -> tuple[str | None, str]:
 | 3 | 绝对正常路径 | `(resolved, "ok")` | 同 | `(realpath, "ok")` byte-compat |
 | 4 | 绝对 ENOENT（root 尚未创建/NFS 未挂载） | `(词法 resolved, "ok")` | 同 | `(非 strict realpath, "ok")` byte-compat（admitted 语义保留，复查臂 ENOENT 再 admit） |
 | 4b | `"<missing>/../<real>"`（缺失分量先于存在目标） | `(<real>, "ok")` | 同 | `(<real>, "ok")`（复查 strict 成功，byte-compat） |
-| 5 | 绝对 symlink 环 | `(环路原样, "ok")` **fail-open 进 manifest** | RuntimeError 逃逸 | `(None, "unresolvable_local_root")` |
+| 5 | 绝对 symlink 环（纯环，如 `<loop>` 自身） | `(环路原样, "ok")` **fail-open 进 manifest** | RuntimeError 逃逸 | `(None, "unresolvable_local_root")` |
+| 5b | `"<loop>/../<real>"` / `"<loop>/.."`（环分量先于词法 `..` 弹出；round-1 review A3 实测补行） | `(<词法目标>, "ok")` **词法 admit** | **同——两臂均词法 admit**（≤3.12 不抛：`..` 弹出使环分量不被 stat） | `(None, "unresolvable_local_root")`（strict realpath 在环分量即 ELOOP）——**全版本 admit→reject 扩面**（行 5 两列仅对纯环形态成立）；语义正确非误伤：内核对该路径 `os.stat`/`open` 一律 ELOOP，旧 admit 的词法产物是下游必然 ELOOP 的 root（且 manifest 存原始字符串）；与行 6 一并具名入 PR 偏离记录 |
 | 6 | 绝对非 ENOENT errno（EACCES/ENOTDIR/ESTALE/EPERM） | **静默收编 `(路径, "ok")`** | **同——两臂都收编**（fixture review P2-1 实测更正：≤3.12 `Path.resolve(strict=False)` 仅 ELOOP 经 check_eloop 转 RuntimeError，其余 OSError 被内部 `p.stat()` except 吞掉，「部分抛型逃逸」不存在） | `(None, "unresolvable_local_root")`——**全版本 admit→reject 扩面**（非「3.13+ 补齐」）；issue 推荐臂授权「其余 errno」，且与同族 `scheduler_runtime_roots.py:410-416`（EACCES/EPERM→NOT_WRITABLE、ELOOP/ENOTDIR→UNSAFE_PATH 均 blocker）一致；具名入 PR 偏离记录 |
 | 7 | `~<未知用户>/...`（rider） | RuntimeError 逃逸 | 同 | `(None, "relative_local_root")`（展开失败非绝对，fail-closed） |
 | 8 | 含 NUL 字节（含 `~<NUL>` 前缀形态，closure check P2-A） | ValueError 逃逸 | 同 | `(None, "unresolvable_local_root")`（防御性，输入域外） |
 | 9 | phantom `"<missing>/../<loop>"` | `(带环值, "ok")` 收编 | **RuntimeError 逃逸（fail-closed 挡下提交）** | `(None, "unresolvable_local_root")`（loop-filtered admit 复查拒收；消除 D0 所述 ≤3.12 fail-open 退化） |
 | 9b | `"<missing>/../<非环故障>"`（复查非 ENOENT 非环，如 EACCES） | `(路径, "ok")` 收编 | 同 | `(None, "unresolvable_local_root")`（复查臂统一拒收非 ENOENT，closure check 实测存在） |
 
-下游语义（零代码改动，测试钉住）：行 5/6/8/9 → `unsafe_rejected` →
+下游语义（零代码改动，测试钉住）：行 5/5b/6/8/9/9b → `unsafe_rejected` →
 `RETRY_RUNTIME_ROOTS_UNSAFE` + `details.runtime_root_resolution` 携
 rejection（field/source/reason/value 形状同既有 parent-traversal 锁
 `tests/test_retry.py:1229-1232`）；该 root 不进
