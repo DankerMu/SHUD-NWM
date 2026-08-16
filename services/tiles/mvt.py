@@ -451,25 +451,55 @@ def postgis_tile_sql(layer: str) -> str:
             "variable": "variable IS NULL OR variable::text = ''",
             "valid_time": "valid_time IS NULL",
         }
+        # Fact predicates are on the integer surrogate keys / enum column (issue
+        # #1341, migration 000051). The caller still supplies text identity: each
+        # key is resolved by a scalar subquery the planner runs once as an
+        # InitPlan (one primary-key point lookup per authority table). An unknown
+        # identity makes the subquery NULL, the predicate unknown, and the query
+        # returns the same empty result the text predicates returned.
+        #
+        # `variable` is matched through enum_range rather than
+        # `:variable::hydro.river_variable` on purpose: a cast would turn an
+        # out-of-vocabulary literal into a 22P02 SQL error, while this form stays
+        # sargable and degrades to the empty result the text predicate produced.
+        #
+        # Text output is restored, so the wire contract is byte-identical: the
+        # equality-predicated identity columns echo their bound parameter (the
+        # predicate proves the row carries that exact value), river_segment_id
+        # comes from the core.river_segment authority join (now a single-key
+        # join -- river_segment_key encodes the (segment_id, network) pair), and
+        # unit/quality_flag/variable come from the enum columns whose labels are
+        # the old text values. `feature_id` therefore concatenates the same two
+        # text values as before.
         source_cte = """
-            SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
-                   ts.river_segment_id AS segment_id,
-                   ts.river_segment_id,
-                   ts.river_network_version_id,
-                   ts.basin_version_id,
-                   ts.value, ts.unit,
-                   ts.quality_flag,
-                   ts.run_id, ts.variable,
+            SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
+                   rs.river_segment_id AS segment_id,
+                   rs.river_segment_id,
+                   (:river_network_version_id)::text AS river_network_version_id,
+                   (:basin_version_id)::text AS basin_version_id,
+                   ts.value, ts.unit_e::text AS unit,
+                   ts.quality_flag_e::text AS quality_flag,
+                   (:run_id)::text AS run_id, ts.variable_e::text AS variable,
                    to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
                    rs.geom
             FROM hydro.river_timeseries ts
             JOIN core.river_segment rs
-              ON rs.river_segment_id = ts.river_segment_id
-             AND rs.river_network_version_id = ts.river_network_version_id
-            WHERE ts.run_id = :run_id
-              AND ts.basin_version_id = :basin_version_id
-              AND ts.river_network_version_id = :river_network_version_id
-              AND ts.variable = :variable
+              ON rs.river_segment_key = ts.river_segment_key
+            WHERE ts.run_key = (
+                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+                  )
+              AND ts.basin_version_key = (
+                      SELECT basin_version_key FROM core.basin_version
+                      WHERE basin_version_id = :basin_version_id
+                  )
+              AND ts.river_network_version_key = (
+                      SELECT river_network_version_key FROM core.river_network_version
+                      WHERE river_network_version_id = :river_network_version_id
+                  )
+              AND ts.variable_e = (
+                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                      WHERE e::text = :variable
+                  )
               AND ts.valid_time = :valid_time
         """
     elif layer == "hydro-national":
@@ -527,15 +557,22 @@ def postgis_tile_sql(layer: str) -> str:
         # layer. Otherwise each z/x/y request ranks every nationwide river_timeseries row
         # for the selected valid_time before clipping a tiny tile, which turns cache misses
         # into multi-second gateway risks.
+        # Identity-stats probe: same surrogate-key switch as the two data legs
+        # below (issue #1341). The DISTINCT ON sub-select already joins the
+        # authority tables, so the keys come out of the join it was doing
+        # anyway -- only core.river_network_version is added, because
+        # core.model_instance carries the network's text id but not its key.
         source_identity_stats_sql = """
             SELECT CASE WHEN EXISTS (
                 SELECT 1
                 FROM hydro.river_timeseries ts
                 JOIN (
                     SELECT DISTINCT ON (mi.river_network_version_id)
-                           h.run_id, mi.river_network_version_id
+                           h.run_key, rnv.river_network_version_key
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = mi.river_network_version_id
                     JOIN hydro.run_display_coverage rdc
                       ON rdc.run_id = h.run_id
                      AND rdc.segment_count > 0
@@ -545,8 +582,12 @@ def postgis_tile_sql(layer: str) -> str:
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
-                ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
-                WHERE ts.variable = :variable
+                ) lr ON lr.run_key = ts.run_key
+                    AND lr.river_network_version_key = ts.river_network_version_key
+                WHERE ts.variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
                   AND ts.valid_time = :valid_time
                 LIMIT 1
             ) THEN 1 ELSE 0 END AS source_identity_count
@@ -554,9 +595,12 @@ def postgis_tile_sql(layer: str) -> str:
         source_cte = """
             WITH latest_runs AS MATERIALIZED (
                 SELECT DISTINCT ON (mi.river_network_version_id)
-                       h.run_id, mi.river_network_version_id
+                       h.run_id, mi.river_network_version_id,
+                       h.run_key, rnv.river_network_version_key
                 FROM hydro.hydro_run h
                 JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = mi.river_network_version_id
                 JOIN hydro.run_display_coverage rdc
                   ON rdc.run_id = h.run_id
                  AND rdc.segment_count > 0
@@ -578,6 +622,7 @@ def postgis_tile_sql(layer: str) -> str:
             tile_segments AS MATERIALIZED (
                 SELECT rs.river_segment_id,
                        rs.river_network_version_id,
+                       rs.river_segment_key,
                        rs.stream_type
                 FROM core.river_segment rs
                 JOIN network_stream_max nsm
@@ -600,62 +645,76 @@ def postgis_tile_sql(layer: str) -> str:
                       )
                   )
             ),
+            -- typed_values and untyped_ranked are the SAME fact read under two
+            -- zoom branches (z>=9 vs z<9). Issue #1341 switches BOTH to the
+            -- surrogate keys in one step: leaving either leg on the text
+            -- predicates would make NULL-key legacy rows visible at one zoom
+            -- and invisible at the other for one and the same national
+            -- identity. Mixing text and key fact predicates here is forbidden.
             typed_values AS (
-                SELECT ts.river_segment_id,
-                       ts.river_network_version_id,
-                       ts.basin_version_id,
+                SELECT seg.river_segment_id,
+                       seg.river_segment_key,
+                       lr.river_network_version_id,
+                       ts.basin_version_key,
                        ts.value,
-                       ts.unit,
-                       ts.quality_flag,
-                       ts.run_id,
-                       ts.variable,
+                       ts.unit_e::text AS unit,
+                       ts.quality_flag_e::text AS quality_flag,
+                       lr.run_id,
+                       ts.variable_e::text AS variable,
                        ts.valid_time
                 FROM latest_runs lr
                 JOIN hydro.river_timeseries ts
-                  ON ts.run_id = lr.run_id
-                 AND ts.river_network_version_id = lr.river_network_version_id
+                  ON ts.run_key = lr.run_key
+                 AND ts.river_network_version_key = lr.river_network_version_key
                 JOIN tile_segments seg
-                  ON seg.river_segment_id = ts.river_segment_id
-                 AND seg.river_network_version_id = ts.river_network_version_id
-                WHERE ts.variable = :variable
+                  ON seg.river_segment_key = ts.river_segment_key
+                WHERE ts.variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
                   AND ts.valid_time = :valid_time
                   AND (:z >= 9 OR seg.stream_type IS NOT NULL)
             ),
             untyped_ranked AS (
-                SELECT ts.river_segment_id,
-                       ts.river_network_version_id,
-                       ts.basin_version_id,
+                SELECT seg.river_segment_id,
+                       seg.river_segment_key,
+                       lr.river_network_version_id,
+                       ts.basin_version_key,
                        ts.value,
-                       ts.unit,
-                       ts.quality_flag,
-                       ts.run_id,
-                       ts.variable,
+                       ts.unit_e::text AS unit,
+                       ts.quality_flag_e::text AS quality_flag,
+                       lr.run_id,
+                       ts.variable_e::text AS variable,
                        ts.valid_time,
                        CASE
                            WHEN ts.value IS NULL THEN NULL
                            ELSE PERCENT_RANK() OVER (
-                               PARTITION BY ts.river_network_version_id
+                               PARTITION BY ts.river_network_version_key
                                ORDER BY ts.value
                            )
                        END AS value_percent_rank
                 FROM latest_runs lr
                 JOIN hydro.river_timeseries ts
-                  ON ts.run_id = lr.run_id
-                 AND ts.river_network_version_id = lr.river_network_version_id
+                  ON ts.run_key = lr.run_key
+                 AND ts.river_network_version_key = lr.river_network_version_key
                 JOIN tile_segments seg
-                  ON seg.river_segment_id = ts.river_segment_id
-                 AND seg.river_network_version_id = ts.river_network_version_id
+                  ON seg.river_segment_key = ts.river_segment_key
                 WHERE :z < 9
                   AND seg.stream_type IS NULL
-                  AND ts.variable = :variable
+                  AND ts.variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
                   AND ts.valid_time = :valid_time
             ),
             selected_values AS (
-                SELECT river_segment_id, river_network_version_id, basin_version_id,
+                SELECT river_segment_id, river_segment_key, river_network_version_id,
+                       basin_version_key,
                        value, unit, quality_flag, run_id, variable, valid_time
                 FROM typed_values
                 UNION ALL
-                SELECT river_segment_id, river_network_version_id, basin_version_id,
+                SELECT river_segment_id, river_segment_key, river_network_version_id,
+                       basin_version_key,
                        value, unit, quality_flag, run_id, variable, valid_time
                 FROM untyped_ranked
                 WHERE value_percent_rank IS NOT NULL
@@ -671,7 +730,7 @@ def postgis_tile_sql(layer: str) -> str:
                    sv.river_segment_id AS segment_id,
                    sv.river_segment_id,
                    sv.river_network_version_id,
-                   sv.basin_version_id,
+                   bv.basin_version_id,
                    bv.basin_id,
                    sv.value,
                    sv.unit,
@@ -697,10 +756,16 @@ def postgis_tile_sql(layer: str) -> str:
                    END AS geom
             FROM selected_values sv
             JOIN core.river_segment rs
-              ON rs.river_segment_id = sv.river_segment_id
-             AND rs.river_network_version_id = sv.river_network_version_id
+              ON rs.river_segment_key = sv.river_segment_key
+            -- basin_version_id now comes from this join too (issue #1341); it
+            -- stays a LEFT JOIN so the row count is unchanged. A surviving row
+            -- always has a non-NULL basin_version_key that the dual write
+            -- resolved from this very table, and core.basin_version rows cannot
+            -- be deleted while hydro_run / model_instance / river_network_version
+            -- reference them, so the outer-join miss that would blank
+            -- basin_version_id is not a reachable state.
             LEFT JOIN core.basin_version bv
-              ON bv.basin_version_id = sv.basin_version_id
+              ON bv.basin_version_key = sv.basin_version_key
         """
     elif layer == "met-stations":
         required_property_checks = {
@@ -1221,14 +1286,31 @@ def valid_times_for_layer(
         if run_id is not None and (basin_version_id is None or river_network_version_id is None):
             raise ValueError("Concrete hydro valid-time discovery requires selected basin and river-network identity.")
         variable = "q_down"
+        # Issue #1341: both branches filter the fact table on the surrogate key /
+        # enum columns. The named-identity branch is a strict four-column
+        # equality prefix of migration 000051's integer discovery index followed
+        # by its valid_time DESC ordering -- the shape whose text-side plan flip
+        # is recorded in issue #1378. Unknown identity resolves to NULL and the
+        # branch returns no rows, exactly as the text predicates did.
         sql = (
             """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                WHERE run_id = :run_id
-                  AND basin_version_id = :basin_version_id
-                  AND river_network_version_id = :river_network_version_id
-                  AND variable = :variable
+                WHERE run_key = (
+                          SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+                      )
+                  AND basin_version_key = (
+                          SELECT basin_version_key FROM core.basin_version
+                          WHERE basin_version_id = :basin_version_id
+                      )
+                  AND river_network_version_key = (
+                          SELECT river_network_version_key FROM core.river_network_version
+                          WHERE river_network_version_id = :river_network_version_id
+                      )
+                  AND variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
                 ORDER BY valid_time DESC
                 LIMIT :limit
             """
@@ -1236,7 +1318,10 @@ def valid_times_for_layer(
             else """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                WHERE variable = :variable
+                WHERE variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
                 ORDER BY valid_time DESC
                 LIMIT :limit
             """

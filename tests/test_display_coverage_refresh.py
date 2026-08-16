@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from packages.common import display_coverage
+from tests.sql_shape_helpers import strip_scalar_subqueries
 
 _HEADER_ROW = {
     "run_id": "run-1",
@@ -109,10 +110,34 @@ def test_all_runs_mode_disables_pushdown() -> None:
 
 
 def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
+    """Both sample CTEs keep their scan pushdown; the river one now pushes keys.
+
+    Re-pinned by issue #1341. The ``scan_*`` parameters keep their text
+    semantics (they are still the run's scalar text identity, prefetched by the
+    header query), but the river predicate they feed is now on the surrogate
+    key, resolved inside the query. Dropping the guard entirely would seq-scan
+    a 730M-row hypertable, which is what this test exists to prevent, so the
+    key form is pinned just as literally as the text form was.
+    """
     sql = display_coverage._REFRESH_SQL
     assert "fst.forcing_version_id = %(scan_forcing_version_id)s" in sql
     assert "LOWER(fst.source_id) = %(scan_source_id_lower)s" in sql
     assert "fst.valid_time >= %(scan_display_start)s" in sql
-    assert "rt.run_id = %(scan_run_id)s" in sql
-    assert "rt.river_network_version_id = %(scan_river_network_version_id)s" in sql
+    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in sql
+    assert "WHERE run_id = %(scan_run_id)s)" in sql
+    assert "rt.river_network_version_key = (SELECT river_network_version_key" in sql
+    assert "= %(scan_river_network_version_id)s)" in sql
     assert "rt.valid_time <= %(scan_display_end)s" in sql
+
+    # Negative half: the fact table itself carries no text identity predicate.
+    outer_predicates = strip_scalar_subqueries(sql)
+    for forbidden in (
+        "rt.run_id",
+        "rt.basin_version_id",
+        "rt.river_network_version_id",
+        "rt.river_segment_id",
+        "rt.variable ",
+        "rt.variable=",
+        "rt.variable =",
+    ):
+        assert forbidden not in outer_predicates, forbidden
