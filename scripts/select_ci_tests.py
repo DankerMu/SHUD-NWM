@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 # The selector's own suite carries tracked-tree-derived meta-guards (same-name
 # script pairs, container-contract closure, guarded-module importer closure). A
 # PR that adds or moves a test file can invalidate any of them, so every changed
-# `tests/test_*.py` drags this suite along (~2.5s) instead of letting the guards
+# `tests/test_*.py` drags this suite along (~6s) instead of letting the guards
 # go unrun on exactly the change class they exist for.
 SELECTOR_META_GUARD_TEST = "tests/test_select_ci_tests.py"
 CHANGED_TEST_META_GUARD_PATTERN = "tests/test_*.py"

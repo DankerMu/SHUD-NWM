@@ -115,9 +115,11 @@ Issues: #1447 #1283 #1254 #1362 #1372 (one PR)
   `services/slurm_gateway/real_backend.py`. (#1447/#1283 boundary)
 - [x] `uv run ruff check .` — clean.
 - [x] Sibling audit: for each other `services/**`/`workers/**` directory
-  `PathTestRule`, list non-gated top-level importer suites not selected;
-  each entry either fixed here (only if trivially same-class) or recorded
-  with a deliberate-exclusion reason in the PR body. (#1283 acceptance)
+  `PathTestRule`, list non-gated top-level importer suites not selected.
+  Round-1 correction of this row's wording: most rows are DEFERRALS, not
+  deliberate exclusions — the audit table lives in the PR #1452 body and
+  its gaps are tracked in follow-up issue #1455 (fn-level-gated rows are
+  the recorded deliberate exclusions). (#1283 acceptance 4, routed)
 
 ## Non-goals (recorded)
 

@@ -144,7 +144,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
     )
 
     # Focused nodes plus the selector meta-guards (#1254). The redirect intent —
-    # never the whole slow suite — survives: the meta-guard suite costs ~2.5s.
+    # never the whole slow suite — survives: the meta-guard suite costs ~6s.
     assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_select_ci_tests.py"})
     assert "tests/test_orchestration_chain.py" not in selected
 
@@ -565,11 +565,16 @@ def test_import_walk_resolves_relative_imports_against_importer_package(
     assert _imported_module_names("packages/common/node27_recovery_overshoot.py") == set()
 
 
-# An importer carrying one of these at FILE level is skipped in the PR lane
-# (`-m "not e2e and not grib and not integration"`), contributes no assertions
-# there, and is therefore not required of the owning rule. `grib` is left out
-# because no tracked file-level `pytestmark` uses it; add it here the day one
-# does, rather than carrying a speculative third name.
+# An importer carrying one of these at FILE level contributes no assertions in
+# the PR lane and is therefore not required of the owning rule. The PR lane runs
+# bare `pytest -q <files>` with no `-m` expression (ci.yml, `unit-test-targeted`),
+# so the skipping comes from tests/conftest.py:74-88: pytest_collection_modifyitems
+# auto-skips `integration`, `e2e` and `grib` items unless the matching opt-in is
+# set (NHMS_RUN_E2E / NHMS_RUN_GRIB, and the integration service config). `grib`
+# is left out here only because no tracked file-level `pytestmark` uses it; add
+# it the day one does. `real_disk` and `timescaledb_210` must NEVER be added:
+# conftest declares them but does not auto-skip them, so such a suite really does
+# run its assertions in the PR lane and the owning rule must keep selecting it.
 GATING_MARKER_NAMES = frozenset({"integration", "e2e"})
 
 # (module source path, dotted module, a known member of the derived importer

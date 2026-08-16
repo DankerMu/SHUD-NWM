@@ -35,7 +35,7 @@ Project profile: NHMS (openspec/project-profile.md)
    rule (orchestrator/file-journal) already matched. Exact-equality
    assertions in the existing suite are updated to include the meta-guard
    file; the redirect intent ("don't run whole slow suites") is untouched
-   because the meta-guard suite costs ~2.5s. Rationale: conditional
+   because the meta-guard suite costs ~6s. Rationale: conditional
    accumulation ("only when nothing matched") would leave the guards
    unselected exactly when a redirect-listed test file is edited.
 2. **Traversal guards derive, never freeze** (#1447/#1283): a shared helper
@@ -53,7 +53,7 @@ Project profile: NHMS (openspec/project-profile.md)
    only files that exist in the tree. The issue also names
    `tests/test_river_ts_read_path_surrogate_keys_integration.py`, but that
    file exists only on unmerged PR #1443's branch (same deviation family as
-   decision 5); when #1443 merges, the traversal guard's marker filter
+   decision 5); if #1443 merges, the traversal guard's marker filter
    already excludes it mechanically.
 4. **#1372 fix is prose rewording, not allowlist**: the comment keeps its
    engineering content (run-manifest `forcing.files` entries are the
@@ -63,10 +63,16 @@ Project profile: NHMS (openspec/project-profile.md)
 5. **display_coverage rule is created fresh on master** (#1447 deviation
    from issue wording): the issue was filed against unmerged PR #1443's
    branch where an incomplete rule + false comment exist. On master neither
-   exists; this change creates the rule with an accurate comment. When
-   #1443 merges, the textual conflict in `select_ci_tests.py` forces manual
-   reconciliation, and the traversal guard mechanically requires its new
-   `tests/test_river_ts_read_path_surrogate_keys.py` to be added.
+   exists; this change creates the rule with an accurate comment.
+   Round-1 correction (verifier-confirmed): a trial `git merge-tree` against
+   #1443's branch merges CLEAN — no textual conflict — leaving TWO
+   `PathTestRule` entries for the same pattern whose tuples union (no
+   `stop_on_match`, no functional break, and the union already contains
+   #1443's new importer suite, so the traversal guard stays green). The
+   cost is silent: this rule's comment goes stale and coverage splits
+   across two rules. Folding them is a manual hygiene action; the
+   duplicate-pattern meta-guard that would make it loud is tracked in the
+   round-1 follow-up issue.
 
 ## Seams under test
 
