@@ -272,8 +272,9 @@ def test_runtime_malformed_ic_header_snapshot_degrades_instead_of_failing_the_ru
 
     The snapshot shape is deliberately a ONE-numeric-token header: a two-token
     header on a snapshot carrying a recorded valid_time hits the pre-existing
-    ``WARM_START_TIME_MISMATCH`` check first (unchanged by this change), so it
-    would not exercise this path at all.
+    ``WARM_START_TIME_MISMATCH`` check first, so it would exercise that check's
+    own rejection channel (which since #1431 degrades on the same ladder, with a
+    ``WARM_START_TIME_MISMATCH:``-tokened mark message) rather than this path.
     """
     object_root = tmp_path / "object-store"
     _write_runtime_inputs(object_root)
