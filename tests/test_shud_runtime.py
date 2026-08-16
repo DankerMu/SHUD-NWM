@@ -1999,6 +1999,12 @@ def test_runtime_non_direct_grid_unresolvable_declaration_is_skipped_not_raised(
         )
         payload["files"].append(_underivable_declaration(residual_entry))
         payload["files"].append({**residual_entry, "relative_path": f"../{residual_entry['relative_path']}"})
+        # Both of the skip wrapper's escape hatches, not just the unsafe-path one:
+        # neither key at all (the underivable branch's missing-uri error) and a
+        # uri whose bracket-malformed authority makes ``urlparse`` raise a bare
+        # ``ValueError`` rather than a ``SHUDRuntimeError``.
+        payload["files"].append({"role": "notes", "checksum": "x"})
+        payload["files"].append({"role": "notes2", "checksum": "x", "uri": "s3://buck[et/notes.txt"})
 
     checksums = _rewrite_package_manifest(object_root, checksums, transform=_inject_unresolvable)
     repository = FakeHydroRunRepository()

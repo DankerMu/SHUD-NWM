@@ -4026,7 +4026,10 @@ def _normalized_package_manifest_file_relative_path_or_none(
             forcing_uri=forcing_uri,
             object_store_prefix=object_store_prefix,
         )
-    except SHUDRuntimeError:
+    # ``ValueError`` too: uri derivation runs the entry through ``urlparse``,
+    # which raises a bare ``ValueError`` on a bracket-malformed authority
+    # (``s3://buck[et/...``) instead of a ``SHUDRuntimeError``.
+    except (SHUDRuntimeError, ValueError):
         return None
 
 
