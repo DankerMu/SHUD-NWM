@@ -34,7 +34,11 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
-NATIONAL_DISCHARGE_QUERY_VERSION = "active-basin-coverage-v2"
+# Bumped to v3 by #1341: the national discharge query shape changed (surrogate-key
+# fact predicates + transitional text pushdown conjuncts). The tile cache key does
+# not hash the SQL, so deploying a new shape without moving this generation would
+# keep serving pre-switch cached tiles and split the fleet between stale and fresh.
+NATIONAL_DISCHARGE_QUERY_VERSION = "surrogate-key-identity-v3"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -471,6 +475,23 @@ def postgis_tile_sql(layer: str) -> str:
         # unit/quality_flag/variable come from the enum columns whose labels are
         # the old text values. `feature_id` therefore concatenates the same two
         # text values as before.
+        #
+        # TRANSITIONAL PUSHDOWN PREDICATES (user-adjudicated remedy, #1341):
+        # compression still segments/orders compressed chunks by the TEXT
+        # columns (000047: segmentby run_id, river_network_version_id,
+        # river_segment_id; orderby variable, valid_time), and TimescaleDB
+        # 2.10.2 cannot push an integer-key predicate through that -- node-27
+        # measured the valid_times shape flip from Index Cond cost 4.8 to a
+        # full-decompression Seq Scan cost 598,280 on chunk 51. So every
+        # in-boundary fact query keeps a redundant TEXT predicate on exactly
+        # run_id / river_network_version_id / variable, AND-ed with its key or
+        # enum counterpart. They are strict no-ops for key-carrying rows (the
+        # #1339/#1340 equality audit is what makes that true) and can only
+        # narrow, never widen: NULL-key rows stay excluded by the key
+        # predicates. basin_version_id and river_segment_id are deliberately
+        # NOT in the sanctioned set, and no text column may join the fact
+        # table. All of these come out with the text columns in #1342, where a
+        # missed one fails loudly because the column is gone.
         source_cte = """
             SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
                    rs.river_segment_id AS segment_id,
@@ -485,17 +506,23 @@ def postgis_tile_sql(layer: str) -> str:
             FROM hydro.river_timeseries ts
             JOIN core.river_segment rs
               ON rs.river_segment_key = ts.river_segment_key
-            WHERE ts.run_key = (
+            -- transitional compressed-chunk pushdown aid, remove with #1342
+            WHERE ts.run_id = :run_id
+              AND ts.run_key = (
                       SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
                   )
               AND ts.basin_version_key = (
                       SELECT basin_version_key FROM core.basin_version
                       WHERE basin_version_id = :basin_version_id
                   )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.river_network_version_id = :river_network_version_id
               AND ts.river_network_version_key = (
                       SELECT river_network_version_key FROM core.river_network_version
                       WHERE river_network_version_id = :river_network_version_id
                   )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.variable = :variable
               AND ts.variable_e = (
                       SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                       WHERE e::text = :variable
@@ -582,9 +609,16 @@ def postgis_tile_sql(layer: str) -> str:
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
+                -- Key-only join. The national identity is chosen by the
+                -- sub-select, so run/network arrive as join columns rather than
+                -- bound constants; a text join equality buys no compressed-chunk
+                -- pushdown and text fact joins are forbidden outright, so the
+                -- only pushdown aid available on this surface is `variable`.
                 ) lr ON lr.run_key = ts.run_key
                     AND lr.river_network_version_key = ts.river_network_version_key
-                WHERE ts.variable_e = (
+                -- transitional compressed-chunk pushdown aid, remove with #1342
+                WHERE ts.variable = :variable
+                  AND ts.variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
                       )
@@ -650,7 +684,11 @@ def postgis_tile_sql(layer: str) -> str:
             -- surrogate keys in one step: leaving either leg on the text
             -- predicates would make NULL-key legacy rows visible at one zoom
             -- and invisible at the other for one and the same national
-            -- identity. Mixing text and key fact predicates here is forbidden.
+            -- identity. Both join the fact table on keys ONLY: the identity
+            -- comes from latest_runs, not from a bound constant, so a text join
+            -- equality would buy no compressed-chunk pushdown while being
+            -- exactly the text fact join the change forbids. `variable` is the
+            -- one sanctioned pushdown aid available here and both legs carry it.
             typed_values AS (
                 SELECT seg.river_segment_id,
                        seg.river_segment_key,
@@ -668,7 +706,9 @@ def postgis_tile_sql(layer: str) -> str:
                  AND ts.river_network_version_key = lr.river_network_version_key
                 JOIN tile_segments seg
                   ON seg.river_segment_key = ts.river_segment_key
-                WHERE ts.variable_e = (
+                -- transitional compressed-chunk pushdown aid, remove with #1342
+                WHERE ts.variable = :variable
+                  AND ts.variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
                       )
@@ -701,6 +741,8 @@ def postgis_tile_sql(layer: str) -> str:
                   ON seg.river_segment_key = ts.river_segment_key
                 WHERE :z < 9
                   AND seg.stream_type IS NULL
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND ts.variable = :variable
                   AND ts.variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
@@ -1292,21 +1334,31 @@ def valid_times_for_layer(
         # by its valid_time DESC ordering -- the shape whose text-side plan flip
         # is recorded in issue #1378. Unknown identity resolves to NULL and the
         # branch returns no rows, exactly as the text predicates did.
+        # The `run_id` / `river_network_version_id` / `variable` text conjuncts
+        # below are the transitional compressed-chunk pushdown aids (#1341);
+        # this is the shape node-27 measured collapsing to a 598,280-cost full
+        # decompression on chunk 51 without them. They go with #1342.
         sql = (
             """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                WHERE run_key = (
+                -- transitional compressed-chunk pushdown aid, remove with #1342
+                WHERE run_id = :run_id
+                  AND run_key = (
                           SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
                       )
                   AND basin_version_key = (
                           SELECT basin_version_key FROM core.basin_version
                           WHERE basin_version_id = :basin_version_id
                       )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND river_network_version_id = :river_network_version_id
                   AND river_network_version_key = (
                           SELECT river_network_version_key FROM core.river_network_version
                           WHERE river_network_version_id = :river_network_version_id
                       )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND variable = :variable
                   AND variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
@@ -1318,7 +1370,9 @@ def valid_times_for_layer(
             else """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                WHERE variable_e = (
+                -- transitional compressed-chunk pushdown aid, remove with #1342
+                WHERE variable = :variable
+                  AND variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
                       )

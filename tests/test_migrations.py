@@ -2,7 +2,11 @@ import re
 from pathlib import Path
 
 from packages.common.migrate import split_sql_statements
-from tests.sql_shape_helpers import strip_scalar_subqueries
+from tests.test_sql_shape_helpers import (
+    FORBIDDEN_TEXT_FACT_COLUMNS,
+    outer_predicates,
+    sql_literals,
+)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
 
@@ -364,10 +368,16 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     Re-pinned by issue #1341: the branch now filters on the surrogate keys, so
     the index it must match is 000051's integer one, not 000021's text one
     (which stays in the database for the out-of-boundary text readers — see
-    RETAINED_RIVER_TIMESERIES_INDEXES). The negative half of the pin runs on
-    the sub-select-stripped source: the key-resolution sub-selects legitimately
-    contain ``run_id = :run_id`` against the authority table, and a naive
-    substring check would therefore pass on code that never switched.
+    RETAINED_RIVER_TIMESERIES_INDEXES). The row-selection authority is the key
+    prefix; the sanctioned text conjuncts beside it are the transitional
+    compressed-chunk pushdown aids and do not participate in index matching
+    (this index has no text column), which is exactly why the four-column key
+    prefix still has to be spelled out here.
+
+    Both halves of the pin run on ``outer_predicates``: the key-resolution
+    sub-selects legitimately contain ``run_id = :run_id`` against the authority
+    table, and a raw-source check would therefore pass on code that never
+    switched.
     """
     migration = dict(_migration_sql())[SURROGATE_KEY_READ_INDEX_MIGRATION]
     text_migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
@@ -375,8 +385,9 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
         encoding="utf-8"
     )
     valid_time_source = mvt_source[
-        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
+        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def national_discharge_valid_times")
     ]
+    named_branch_sql, no_named_branch_sql = sql_literals(valid_time_source)
     hydro_columns = _index_columns_by_name(
         migration,
         "river_ts_selected_identity_key_valid_time_idx",
@@ -404,7 +415,7 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     )
 
     for expected in (
-        "WHERE run_key = (",
+        "AND run_key = (",
         "SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id",
         "AND basin_version_key = (",
         "SELECT basin_version_key FROM core.basin_version",
@@ -417,18 +428,30 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
         "WHERE e::text = :variable",
         "ORDER BY valid_time DESC",
     ):
-        assert expected in valid_time_source, expected
+        assert expected in named_branch_sql, expected
 
-    # Negative pin (never delete, only re-point): no text identity predicate
-    # may survive on the fact table in either branch of this function.
-    outer_predicates = strip_scalar_subqueries(valid_time_source)
-    for forbidden in (
-        "run_id = :run_id",
-        "basin_version_id = :basin_version_id",
-        "river_network_version_id = :river_network_version_id",
-        "variable = :variable",
-    ):
-        assert forbidden not in outer_predicates, forbidden
+    # The whole outer query, spelled out. Equality rather than a list of `in`
+    # checks: it pins the four key columns in the index's own order, pins each
+    # sanctioned text aid as ADJACENT to its counterpart (a pair split across
+    # the query stops being a self-evident no-op), and is red the moment any
+    # other predicate — text or key — appears.
+    assert outer_predicates(named_branch_sql) == (
+        "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
+        "WHERE run_id = :run_id AND run_key = "
+        "AND basin_version_key = "
+        "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
+        "AND variable = :variable AND variable_e = "
+        "ORDER BY valid_time DESC LIMIT :limit"
+    )
+
+    # Negative pin (never delete, only re-point): the text columns that
+    # compression does NOT let us push down stay off the fact table entirely,
+    # in either branch, and neither branch keeps the old IS-NULL-or-equals
+    # text guards.
+    for branch in (named_branch_sql, no_named_branch_sql):
+        outer = outer_predicates(branch)
+        for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
+            assert forbidden not in outer, forbidden
     assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
     assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
         valid_time_source

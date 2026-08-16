@@ -380,6 +380,15 @@ _COVERAGE_CTES = (
         -- Do not spell a psycopg2 placeholder inside a comment in this string:
         -- psycopg2 interpolates the entire statement, comments included, and
         -- an unbound name there raises at execute time.
+        -- The rt.run_id / rt.river_network_version_id / rt.variable conjuncts
+        -- below are the transitional compressed-chunk pushdown aids (#1341):
+        -- compression still segments compressed chunks by the text columns, so
+        -- a pure-key predicate cannot be pushed into them. Each sits in the
+        -- same conjunction as its key counterpart, so it only narrows, and all
+        -- of them are removed with the text columns in #1342. They are
+        -- CONSTANT-valued predicates on purpose; the join to candidate_runs is
+        -- key-only, because a text join equality is not pushdown material and
+        -- a text fact join is forbidden.
         river_sample_rows AS (
             SELECT
                 rt.run_key,
@@ -394,20 +403,23 @@ _COVERAGE_CTES = (
               ON cr.run_key = rt.run_key
              AND cr.basin_version_key = rt.basin_version_key
              AND cr.river_network_version_key = rt.river_network_version_key
-            WHERE rt.variable_e = 'q_down'::hydro.river_variable
+            WHERE rt.variable = 'q_down'
+              AND rt.variable_e = 'q_down'::hydro.river_variable
               AND rt.valid_time >= cr.display_start_time
               AND rt.valid_time <= cr.display_end_time
               AND (%(scan_run_id)s IS NULL
-                   OR rt.run_key = (SELECT run_key FROM hydro.hydro_run
-                                    WHERE run_id = %(scan_run_id)s))
+                   OR (rt.run_id = %(scan_run_id)s
+                       AND rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                         WHERE run_id = %(scan_run_id)s)))
               AND (%(scan_basin_version_id)s IS NULL
                    OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
                                               WHERE basin_version_id = %(scan_basin_version_id)s))
               AND (%(scan_river_network_version_id)s IS NULL
-                   OR rt.river_network_version_key = (SELECT river_network_version_key
-                                                      FROM core.river_network_version
-                                                      WHERE river_network_version_id
-                                                            = %(scan_river_network_version_id)s))
+                   OR (rt.river_network_version_id = %(scan_river_network_version_id)s
+                       AND rt.river_network_version_key = (SELECT river_network_version_key
+                                                           FROM core.river_network_version
+                                                           WHERE river_network_version_id
+                                                                 = %(scan_river_network_version_id)s)))
               AND (%(scan_display_start)s IS NULL
                    OR rt.valid_time >= %(scan_display_start)s)
               AND (%(scan_display_end)s IS NULL

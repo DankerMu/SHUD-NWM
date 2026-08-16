@@ -4,8 +4,7 @@
 
 ### Requirement: in-boundary river_timeseries readers SHALL filter by surrogate keys with field-identical external responses
 
-Display-boundary readers of `hydro.river_timeseries` SHALL place
-fact-table predicates only on the surrogate key and enum columns.
+Display-boundary readers of `hydro.river_timeseries` SHALL filter by the surrogate key and enum columns as the row-selection authority, and SHALL additionally retain redundant text pushdown predicates on exactly `run_id`, `river_network_version_id`, and `variable` — each conjoined (AND) with its key or enum counterpart — in every fact query whose plan can reach compressed chunks, as declared transitional aids for compressed-chunk `segmentby`/`orderby` predicate pushdown while compression settings remain text-based (user-adjudicated remedy, issue #1341 comment thread; removed together with the text-column drop in #1342, where any missed removal fails loudly because the columns are gone). These pushdown predicates are strict no-ops for key-carrying rows and MUST NOT widen results: NULL-key rows stay excluded by the key predicates. No other text column may appear as a fact predicate. The aids apply where the identity arrives as a bound literal; identity that reaches the fact table through an authority-table join stays key-joined only — text-column fact joins remain forbidden — so such query legs carry only the aids whose identity is bound (typically `variable` alone).
 This covers `services/tiles/mvt.py`,
 `packages/common/display_coverage.py`,
 `apps/api/routes/hydro_display.py`, and the identity-predicated
@@ -52,8 +51,19 @@ silent data loss.
   that the backfill runner cannot update
 - **THEN** key-filtered reads exclude those rows, the exclusion scope
   (chunk ranges, row counts, retention deadline) is recorded in the
-  delivery evidence, and no in-boundary reader silently mixes text
-  fallback predicates to compensate
+  delivery evidence, and no in-boundary reader re-admits NULL-key rows
+  through text predicates: the sanctioned transitional pushdown
+  predicates are conjunctive and can only narrow, never widen, the
+  key-filtered result
+
+#### Scenario: Transitional text pushdown predicates are bounded to the sanctioned set and paired with keys
+
+- **WHEN** an in-boundary fact query contains a text identity predicate
+- **THEN** that predicate is on `run_id`, `river_network_version_id`,
+  or `variable` only, appears in the same conjunction as its surrogate
+  key or enum counterpart, and no text predicate on
+  `basin_version_id` or `river_segment_id` (nor any text-column join
+  into the fact table) exists in any in-boundary read shape
 
 #### Scenario: Switched shapes are served by the integer index without text-read regression
 
@@ -63,3 +73,13 @@ silent data loss.
   integer index with no sequential scan of `hydro.river_timeseries`
   and latency no worse than the text-index baseline, while retained
   text indexes keep serving out-of-boundary text readers unchanged
+
+#### Scenario: Compressed-chunk portions keep predicate pushdown via the transitional text predicates
+
+- **WHEN** a switched query shape whose plan reaches a compressed chunk
+  (text-based `segmentby`/`orderby` settings still in force) runs with
+  the transitional pushdown predicates present
+- **THEN** the compressed-chunk portion of the plan shows an index or
+  filter condition on the compression-internal relation driven by the
+  text `segmentby`/`orderby` columns, not a full-decompression
+  sequential scan over all batches

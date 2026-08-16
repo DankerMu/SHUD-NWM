@@ -67,6 +67,24 @@
   `COUNT(DISTINCT river_segment_key)`（网络内 1:1，计数等值），汇总后
   join 权威表还原文本身份（join-and-reconstruct）；`candidate_runs`
   CTE 本就来自权威表，直接带键下推。
+- **混合下推谓词（round-1 P1 补救，用户裁定，issue #1341 评论在案）**：
+  压缩车道的 `compress_segmentby='run_id, river_network_version_id,
+  river_segment_id'` / `compress_orderby='variable, valid_time'`
+  （000047，文本三列）在 #1342 cutover 前不变；纯键谓词对压缩 chunk
+  零下推（键列不在 segmentby∪orderby，TSDB 2.10.2 无 sparse-minmax）
+  ——node-27 实测 valid_times 键形态对 chunk 51 从 Index Scan cost 4.8
+  翻转为全解压 Seq Scan cost 598,280（3.05M batches），display 预热
+  线程每 45s 触发即生产塌方。补救：**凡计划可达压缩 chunk 的 fact
+  查询，在键谓词同一合取（AND）中保留 `run_id` /
+  `river_network_version_id` / `variable` 三个冗余文本谓词**作为声明
+  的过渡期下推辅助。不变量：(a) 受批集合恰为这三列——`basin_version_id`
+  / `river_segment_id` 文本谓词与任何文本列 fact join 仍然禁止；
+  (b) 每个文本下推谓词必须与其键/枚举对应物成对出现在同一合取，
+  语义为带键行严格 no-op、NULL 键行仍由键谓词排除，只窄不宽；
+  (c) 随 #1342 删文本列一并移除——漏删即列不存在报错，显式失败而非
+  静默退化。范围判定从宽：display 边界内全部 `hydro.river_timeseries`
+  fact 读查询统一携带（含 scan 窗口常量折叠后可排除压缩 chunk 的
+  coverage 扫描——冗余无害且省去"哪条会命中"逐条论证的维护负担）。
 
 ## D2 索引（000051）
 
@@ -132,6 +150,11 @@
   选取的 latest ready run 均为 #1340 后新 run（cycle 12h 全流域滚
   动），用户可见面≈零；pre-flight 实测"每网络 selected run 是否含
   NULL 键行"兜底确认，若有流域会因此变暗则升级为 merge 门决策项。
+- **口径拆分（round-1 交叉观察修正）**：上述 "retention 08-20/08-27
+  收敛" 只对 **NULL 键行可见性**成立；**性能面不随 retention 收敛**
+  ——timer 恢复后新压缩 chunk 仍是文本 segmentby，纯键谓词的下推
+  缺失持续到 #1342 cutover。性能面的当期解是 D1 的混合下推谓词，
+  不是等 retention。PR body 影响面表述按此双口径书写。
 
 ## D4 部署顺序与逐字段等价证据（AC-2）
 
@@ -145,22 +168,53 @@
 - MVT tile：protobuf 编码对行序敏感，承诺**解码后 feature 集合相等**
   （properties 全字段 + 几何），不承诺 tile 字节相等——偏离口径先行
   声明。取样：hydro 图层 ≥2 流域 × ≥2 tile + hydro-national ≥2 zoom。
-- EXPLAIN (ANALYZE, BUFFERS) before/after 四形态：tile 点查、
+- **快照缓存旁路程序（round-1 P2 补钉）**：tile cache key 不含查询
+  形态，部署本身不失效缓存——pre/post 快照之间必须**清空
+  `map.tile_cache` 表与 `NHMS_MVT_FILE_CACHE_DIR` 文件缓存**（hydro
+  与 national 两图层都做），否则 post 快照可能读到 pre 代码的缓存
+  产物，等价性证据失真。配套：`NATIONAL_DISCHARGE_QUERY_VERSION`
+  常量随本 change 递增（查询形态变更即缓存世代变更，防部署后
+  stale/fresh 分裂窗口）。
+- EXPLAIN (ANALYZE, BUFFERS) before/after **六形态**：tile 点查、
   valid_times named-identity（#1378 基线对照）、coverage run 域扫描、
-  存在性探针。判据：切换后计划走 000051 索引、fact 表无 Seq Scan、
-  latency 不高于文本基线（#1378 形态应数量级改善）。
+  存在性探针、**national identity-stats 探针、national
+  typed_values/untyped_ranked 腿**（后两者是唯一有 000049 实测基线
+  的形状——Q1 10.4ms / Q8 2.9ms pkey fallback，且文本 pkey 对键形态
+  零可用前缀，退化风险最高，不测即盲区）。判据：切换后计划走
+  000051 索引、fact 表无 Seq Scan、latency 不高于文本基线（#1378
+  形态应数量级改善）。**每一形态至少含一次绑定命中压缩 chunk 的
+  valid_time**，其压缩段计划须显示文本 segmentby 下推（compression
+  内部关系上有 Index/Filter Cond），不得出现全解压 Seq Scan——这是
+  混合下推谓词的实机验收面。
 - deny-write（AC-5）与 `/`、`/ops` 浏览器 e2e（AC-4）照 C1-C4 惯例。
 
 ## D5 测试策略（Evidence Floor 映射）
 
-- unit：切换后 SQL 形态断言（谓词含键解析子查询、无文本列 fact 谓词、
-  ORDER BY 落文本表达式、feature_id 拼接不变）；OOV variable →空结果
-  路径；`scale_validation.py` plan_lines 新旧对齐。红证配对：新断言
-  在 pre-change 代码上必红（stash 法）。
+- unit：切换后 SQL 形态断言（谓词含键解析子查询、ORDER BY 落文本
+  表达式、feature_id 拼接不变）；文本谓词断言按混合口径重写：受批
+  下推三列必须与键对应物成对出现，`basin_version_id` /
+  `river_segment_id` 文本 fact 谓词与文本列 fact join 为负向钉子；
+  OOV variable →空结果路径；`scale_validation.py` plan_lines 新旧
+  对齐。红证配对：新断言在 pre-change 代码上必红（stash 法）。
+- **`tests/sql_shape_helpers.py` 是测试 oracle，本身必须有自测**
+  （round-1 P1 教训：`strip_scalar_subqueries` 把 CTE 开头
+  `(SELECT` 误当标量子查询整段剥除，5 条负向钉子在未切换 master 上
+  假绿）。要求：(a) 剥除逻辑区分标量子查询与 CTE/派生表开头，括号
+  配平跳过字符串字面量与注释；(b) helper 自测为真实 pytest 测试
+  函数（CTE 不剥、标量剥、字面量/注释穿越）；(c) 每条负向钉子对
+  master 源码红证复验；(d) helper-only diff 在
+  `scripts/select_ci_tests.py` 的选择规则下必须能带上消费方测试
+  文件（CHANGED_TEST_FILE_RULES 或等价机制），不得出现 exit 5 假红。
 - integration（real-db marker）：seed/dual-write 数据上，切换前后同
-  身份响应逐字段相等（JSON 字节等、tile 解码集合等）；未知 run_id /
-  OOV variable → 空结果非错误；NULL 键行（手工造旧形态行）对键读不
-  可见——**该行为是设计后果，测试把它钉成显式契约**。
+  身份响应逐字段相等（JSON 字节等、tile 解码集合等）；**national
+  图层与 hydro 图层同强度 oracle**——per-segment value/valid_time/
+  几何逐字段断言或 text-era source CTE 全行比对，不得只断言 run/
+  network 常量字段；未知 run_id / OOV variable → 空结果非错误；
+  NULL 键行（手工造旧形态行）对键读不可见——**该行为是设计后果，
+  测试把它钉成显式契约**；**coverage 刷新对全 NULL 键 legacy run 的
+  行为显式钉死**（segment_count 归零 + valid_time 边界丢失是切键后
+  的真实后果，测试独立断言该 run 的刷新结果，运维面在 runbook/
+  receipt 记录"legacy run 禁止无 `--skip-fresh` 重扫"）。
 - `uv run pytest -q` 定向 + `uv run ruff check .`；前端零改动，
   `check:api-types` 不触发（OpenAPI 零变更自证于 diff）。
 

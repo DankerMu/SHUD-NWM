@@ -67,9 +67,15 @@
 --
 -- Rollback: DROP INDEX CONCURRENTLY IF EXISTS
 -- hydro.river_ts_selected_identity_key_valid_time_idx; (a concurrent DROP is
--- allowed even though a concurrent CREATE is not). Reverting the reader code
--- alone is already a complete functional rollback -- the text columns and
--- text indexes are untouched by this file.
+-- allowed even though a concurrent CREATE is not). A durable rollback ALSO
+-- requires the bookkeeping half, exactly as 000049 records for its own drops:
+-- migrate.py keys public.schema_migrations.version on the FULL FILENAME and
+-- skips any migration already recorded there, so a manual DROP without
+--   DELETE FROM public.schema_migrations WHERE version = '000051_river_ts_surrogate_key_read_index.sql';
+-- leaves this file permanently "applied" and the index is never rebuilt by the
+-- next migrate.py run. Reverting the reader code alone is already a complete
+-- functional rollback -- the text columns and text indexes are untouched by
+-- this file.
 
 CREATE INDEX IF NOT EXISTS river_ts_selected_identity_key_valid_time_idx
     ON hydro.river_timeseries (

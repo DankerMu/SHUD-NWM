@@ -190,8 +190,45 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_display_publish_status_only.py",
         "tests/test_migrations.py",
         "tests/test_openapi_drift.py",
+        # Issue #1341 added the surrogate-key / transitional-pushdown shape
+        # pins for this exact file.
+        "tests/test_river_ts_read_path_surrogate_keys.py",
     ]
     assert not fallback_only_tests & set(selected)
+
+
+def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> None:
+    """A helper-only diff must run the pins that trust the helper.
+
+    ``tests/test_sql_shape_helpers.py`` is the oracle behind the #1341 negative
+    pins. Without this rule the diff self-selects only the helper, so an
+    over-eager stripper — the round-1 defect, which made five pins vacuous —
+    could land with every selected test green.
+    """
+    selected = select_tests(["tests/test_sql_shape_helpers.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_migrations.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+        "tests/test_sql_shape_helpers.py",
+    ]
+
+
+def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
+    """The #1341 switch touches three production files; all three must select the pins.
+
+    ``services/tiles/mvt.py`` had its rule extended above. The coverage scan
+    and the existence probe were matching only broad rules that do not include
+    the shape pins, so a diff dropping a pushdown pairing in either file went
+    unchallenged.
+    """
+    coverage_selected = select_tests(["packages/common/display_coverage.py"], repo_root=Path("."))
+    probe_selected = select_tests(["apps/api/routes/hydro_display.py"], repo_root=Path("."))
+
+    assert "tests/test_display_coverage_refresh.py" in coverage_selected
+    assert "tests/test_river_ts_read_path_surrogate_keys.py" in coverage_selected
+    assert "tests/test_river_ts_read_path_surrogate_keys.py" in probe_selected
 
 
 def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:

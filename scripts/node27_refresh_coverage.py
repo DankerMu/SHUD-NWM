@@ -11,6 +11,22 @@ byte-for-byte stand-in.
 Standalone and independent of the ingest scripts — call it after ingest, either
 per-run (``--run-id``) or for every parsed/finished QHH run (``--all``).
 
+.. warning::
+
+   **Never re-scan a legacy (pre-#1340) run.** Since issue #1341 the river
+   coverage scan selects rows by surrogate key, so a run whose
+   ``hydro.river_timeseries`` rows still carry NULL keys computes as
+   ``segment_count = 0``, ``river_sample_count = 0`` and NULL river valid-time
+   bounds — and the upsert OVERWRITES the correct text-era values it already
+   has, which drops the run out of latest-product readiness and off the
+   national tile. The exclusion itself is the recorded #1341 contract; losing
+   coverage that was already materialized is not.
+
+   Consequences: run ``--all`` **with** ``--skip-fresh`` (it leaves runs whose
+   coverage is already fresh untouched), and never point ``--run-id`` at a run
+   from before the #1340 dual write unless the #1341 backfill has since given
+   its rows keys. Recovery is a re-run after backfill; there is no undo.
+
 Examples::
 
     DATABASE_URL=postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms \\
@@ -47,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-fresh",
         action="store_true",
-        help="With --all, only refresh runs whose coverage is missing or stale (resumable).",
+        help=(
+            "With --all, only refresh runs whose coverage is missing or stale (resumable). "
+            "Required in practice since #1341: without it, legacy NULL-key runs are re-scanned "
+            "and their already-materialized coverage is overwritten with zeros."
+        ),
     )
     parser.add_argument("--progress", action="store_true", help="With --all, emit per-run progress to stderr.")
     parser.add_argument(

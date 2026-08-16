@@ -24,10 +24,20 @@ Scope: the questions a text-substring pin cannot answer.
   two UNION ALL legs selected by zoom. The same national identity must have
   the same NULL-key visibility at z<9 and at z>=9 — the failure a half-done
   switch produces.
+* **Per-segment payload, not just shared constants.** Every national row
+  carries the same run/network strings, so identity-only assertions cannot
+  distinguish a correct key join from one that pairs a segment's geometry with
+  another segment's value. The seeded segments have distinct values and
+  distinct geometries and are compared one by one against the seed constants
+  and ``core.river_segment``.
 * **Degradation, not error.** An unknown ``run_id`` and an out-of-vocabulary
   ``variable`` must both return the empty result the text predicates returned.
   The ``enum_range`` matcher is proved to be load-bearing by showing the cast
   it replaced really does raise on the same literal.
+* **What a coverage refresh does to an all-legacy run.** It zeroes the row the
+  text era had already materialized. That is a destructive operational
+  consequence rather than a design goal, so it is pinned here and documented
+  as a prohibition in ``scripts/node27_refresh_coverage.py``.
 """
 
 from __future__ import annotations
@@ -63,10 +73,19 @@ _VARIABLE = "q_down"
 # run_display_coverage row, so the national layer deterministically selects it.
 _KEYED_RUN_ID = "run-1341-keyed"
 _LEGACY_RUN_ID = "run-1341-legacy"
+# A run with NOTHING but pre-#1340 rows, plus the coverage row the text era
+# already materialized for it. It exists to pin what a coverage refresh does to
+# such a run after the switch (it zeroes it), which is the operational hazard
+# behind the `--skip-fresh` warning in scripts/node27_refresh_coverage.py.
+# Its cycle_time is the earliest of the three so the national layer's
+# DISTINCT ON still selects `_LEGACY_RUN_ID` and the zoom-split test is
+# unaffected.
+_ALL_LEGACY_RUN_ID = "run-1341-all-legacy"
 
 _T0 = datetime(2026, 6, 1, tzinfo=UTC)
 _T1 = _T0 + timedelta(hours=1)
 _LEGACY_ONLY_TIME = _T0 + timedelta(hours=2)
+_ALL_LEGACY_CYCLE = _T0 - timedelta(hours=1)
 
 # seg-a is the only segment with a source stream class, so at z<9 it is the
 # typed_values leg's row; seg-b/seg-c have none and go through untyped_ranked.
@@ -181,7 +200,7 @@ def _national_source_query(cte_body: str) -> str:
         )
         SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
                basin_version_id, basin_id, value, unit, quality_flag, run_id,
-               variable, valid_time
+               variable, valid_time, ST_AsEWKT(geom) AS geom_wkt
         FROM source_rows
         WHERE geom IS NOT NULL
         ORDER BY river_network_version_id, river_segment_id
@@ -251,7 +270,11 @@ def _seed(database_url: str) -> None:
                 """,
                 (_MODEL_ID, _BASIN_VERSION_ID, _NETWORK_ID),
             )
-            for run_id, cycle_time in ((_KEYED_RUN_ID, _T0), (_LEGACY_RUN_ID, _T1)):
+            for run_id, cycle_time in (
+                (_KEYED_RUN_ID, _T0),
+                (_LEGACY_RUN_ID, _T1),
+                (_ALL_LEGACY_RUN_ID, _ALL_LEGACY_CYCLE),
+            ):
                 cursor.execute(
                     """
                     INSERT INTO hydro.hydro_run
@@ -326,17 +349,47 @@ def _seed(database_url: str) -> None:
                     ),
                 )
 
-            # Only the legacy run is display-covered, so the national layer's
-            # DISTINCT ON deterministically selects the run that owns the
-            # NULL-key rows — the interesting case for the zoom split.
-            cursor.execute(
+            # `_ALL_LEGACY_RUN_ID`: every row in the pre-#1340 shape, for all
+            # three ordinary segments at both hours. Nothing about it is
+            # key-visible.
+            for segment_id, _stream_type, value in _SEGMENTS:
+                for lead, valid_time in enumerate((_T0, _T1)):
+                    cursor.execute(
+                        """
+                        INSERT INTO hydro.river_timeseries (
+                            run_id, basin_version_id, river_network_version_id, river_segment_id,
+                            valid_time, lead_time_hours, variable, value, unit, quality_flag)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'q_down', %s, 'm3/s', 'ok')
+                        """,
+                        (
+                            _ALL_LEGACY_RUN_ID,
+                            _BASIN_VERSION_ID,
+                            _NETWORK_ID,
+                            segment_id,
+                            valid_time,
+                            lead,
+                            value,
+                        ),
+                    )
+
+            # `_LEGACY_RUN_ID` is display-covered and has the latest
+            # cycle_time, so the national layer's DISTINCT ON deterministically
+            # selects the run that owns the NULL-key rows — the interesting
+            # case for the zoom split. `_ALL_LEGACY_RUN_ID` also carries a
+            # coverage row, materialized in the text era from its (then
+            # readable) rows; the refresh test asserts what happens to it now.
+            cursor.executemany(
                 """
                 INSERT INTO hydro.run_display_coverage
                     (run_id, segment_count, river_sample_count,
-                     river_valid_time_start, river_valid_time_end)
-                VALUES (%s, %s, %s, %s, %s)
+                     river_valid_time_start, river_valid_time_end,
+                     min_lead_time_hours, max_lead_time_hours)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (_LEGACY_RUN_ID, len(_SEGMENTS), len(_SEGMENTS), _T0, _LEGACY_ONLY_TIME),
+                (
+                    (_LEGACY_RUN_ID, len(_SEGMENTS), len(_SEGMENTS), _T0, _LEGACY_ONLY_TIME, 0, 0),
+                    (_ALL_LEGACY_RUN_ID, len(_SEGMENTS), len(_SEGMENTS) * 2, _T0, _T1, 0, 1),
+                ),
             )
     finally:
         connection.close()
@@ -588,6 +641,67 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
         assert row["feature_id"] == f"{_NETWORK_ID}::{row['river_segment_id']}"
 
 
+def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seeded: Any) -> None:
+    """Per-segment payload, not just the run/network constants both legs share.
+
+    Identity fields are the same string on every national row, so asserting
+    only those cannot tell a correct key join from one that pairs a segment's
+    geometry with another segment's value — precisely the failure mode of
+    swapping a two-column text join for a single surrogate key. The seed gives
+    the three segments distinct values (30/20/10) and distinct geometries, so
+    any mispairing shows up here.
+
+    Oracles are independent of the code under test: values come from the seed
+    constants, geometry straight from ``core.river_segment``. At z>=9 the layer
+    emits ``rs.geom`` unmodified, so that comparison is exact; the z<9 branch
+    simplifies, so only its value/identity payload is compared.
+    """
+    _url, session = seeded
+    query = _national_source_query(_source_cte_body("hydro-national"))
+
+    detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
+    detail = _rows(
+        session,
+        query,
+        {"variable": _VARIABLE, "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
+    )
+
+    expected_values = {segment_id: value for segment_id, _type, value in _SEGMENTS}
+    assert len(set(expected_values.values())) == len(expected_values), "values must be distinct to be diagnostic"
+    authority_geometry = {
+        row["river_segment_id"]: row["geom_wkt"]
+        for row in _rows(
+            session,
+            """
+            SELECT river_segment_id, ST_AsEWKT(geom) AS geom_wkt
+            FROM core.river_segment
+            WHERE river_network_version_id = :river_network_version_id
+            """,
+            {"river_network_version_id": _NETWORK_ID},
+        )
+    }
+    assert len(set(authority_geometry.values())) == len(_SEGMENTS) + 1, "geometries must be distinct too"
+
+    assert len(detail) == len(_SEGMENTS)
+    for row in detail:
+        segment_id = row["river_segment_id"]
+        assert float(row["value"]) == pytest.approx(expected_values[segment_id]), segment_id
+        assert row["geom_wkt"] == authority_geometry[segment_id], segment_id
+        assert row["valid_time"] == "2026-06-01T00:00:00Z", segment_id
+        assert row["segment_id"] == segment_id
+
+    # Non-vacuity for the valid_time predicate: the run the national layer
+    # selects (`_LEGACY_RUN_ID`) has key-carrying rows only at _T0, while its
+    # coverage window advertises _T1 as well. So the same query one hour later
+    # must come back empty rather than repeating the _T0 payload.
+    later = _rows(
+        session,
+        query,
+        {"variable": _VARIABLE, "valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y},
+    )
+    assert later == []
+
+
 # ---------------------------------------------------------------------------
 # display coverage
 # ---------------------------------------------------------------------------
@@ -620,3 +734,77 @@ def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows
     assert coverage["river_valid_time_end"] == _T1
     assert coverage["min_lead_time_hours"] == 0
     assert coverage["max_lead_time_hours"] == 1
+
+
+def test_refreshing_coverage_for_an_all_null_key_run_zeroes_what_the_text_era_stored(seeded: Any) -> None:
+    """The operational hazard, pinned rather than discovered in production.
+
+    Re-scanning a run whose rows are all pre-#1340 does not merely fail to find
+    them: ``coverage`` is built ``FROM candidate_runs`` with a LEFT JOIN to the
+    river rollup, so the run still produces a row — with ``COALESCE(..., 0)``
+    counts and NULL valid-time bounds — and the upsert overwrites the correct
+    values the text era had already materialized. That drops the run out of
+    latest-product readiness and off the national tile.
+
+    The exclusion itself is the recorded #1341 contract. Destroying coverage
+    that was already computed is not, which is why
+    ``scripts/node27_refresh_coverage.py`` now documents ``--skip-fresh`` as
+    mandatory and this test pins the behaviour it warns about.
+    """
+    url, _session = seeded
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT segment_count, river_sample_count,
+                       river_valid_time_start, river_valid_time_end,
+                       min_lead_time_hours, max_lead_time_hours
+                FROM hydro.run_display_coverage WHERE run_id = %s
+                """,
+                (_ALL_LEGACY_RUN_ID,),
+            )
+            before = dict(cursor.fetchone())
+
+            # Independent expectation: the text era saw all three segments at
+            # both hours, and that is exactly what the seeded row holds.
+            assert before["segment_count"] == len(_SEGMENTS)
+            assert before["river_sample_count"] == len(_SEGMENTS) * 2
+            assert before["river_valid_time_start"] == _T0
+            assert before["river_valid_time_end"] == _T1
+
+            # And the rows really are still in the table, text-readable.
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS n, COUNT(run_key) AS keyed
+                FROM hydro.river_timeseries WHERE run_id = %s
+                """,
+                (_ALL_LEGACY_RUN_ID,),
+            )
+            rows = dict(cursor.fetchone())
+        assert rows == {"n": len(_SEGMENTS) * 2, "keyed": 0}
+
+        assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID) is True
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT segment_count, river_sample_count,
+                       river_valid_time_start, river_valid_time_end,
+                       min_lead_time_hours, max_lead_time_hours
+                FROM hydro.run_display_coverage WHERE run_id = %s
+                """,
+                (_ALL_LEGACY_RUN_ID,),
+            )
+            after = dict(cursor.fetchone())
+    finally:
+        connection.close()
+
+    assert after == {
+        "segment_count": 0,
+        "river_sample_count": 0,
+        "river_valid_time_start": None,
+        "river_valid_time_end": None,
+        "min_lead_time_hours": None,
+        "max_lead_time_hours": None,
+    }

@@ -58,6 +58,30 @@
       契约、OOV 空结果、红证配对、**同一 national 身份在 z<9 与 z>=9
       两分支对 NULL 键行可见性一致**（两腿同切回归））
 
+### 1F. round-1 修复轮（8 项 verified findings，用户裁定混合谓词在案）
+
+- [x] 1F.1 (P1) `tests/sql_shape_helpers.py` 重写：`strip_scalar_
+      subqueries` 区分 CTE/派生表开头与标量子查询，括号配平跳过
+      字符串字面量与注释；真实 pytest 自测函数；5 条既有负向钉子
+      对 master 源码红证复验；`scripts/select_ci_tests.py` 选择规则
+      覆盖 helper-only diff（无 exit 5 假红）
+- [x] 1F.2 (P1, 用户裁定) 混合下推谓词落地（design D1 不变量 a/b/c）：
+      display 边界内全部 `hydro.river_timeseries` fact 读查询在键
+      谓词同一合取中保留 `run_id`/`river_network_version_id`/
+      `variable` 文本谓词，逐处代码注释标注 "#1342 删列时一并移除"；
+      unit 形态断言与负向钉子按混合口径重写（受批三列成对出现；
+      `basin_version_id`/`river_segment_id` 文本 fact 谓词禁入）
+- [x] 1F.3 (P2) coverage legacy run 刷新行为显式钉死：integration 用
+      `_LEGACY_RUN_ID` 独立断言 segment_count 归零 + valid_time 边界
+      丢失；ops 禁令（legacy run 不得无 `--skip-fresh` 重扫）进
+      runbook/receipt 记录
+- [x] 1F.4 (P2) `NATIONAL_DISCHARGE_QUERY_VERSION` 递增（查询形态
+      变更即缓存世代变更）
+- [x] 1F.5 (P2) national 图层 integration oracle 补强：per-segment
+      value/valid_time/几何逐字段断言或 text-era source CTE 全行
+      比对（与 hydro 图层同强度）
+- [x] 1F.6 (P3) 000051 回滚注释补 schema_migrations 全文件名记账行
+
 ## 2. 验证（Evidence Floor）
 
 - [ ] 2.1 `uv run pytest -q` 定向全绿；`uv run ruff check .` 通过
@@ -66,10 +90,15 @@
 - [ ] 2.3 diff 自证：写路径/回填 runner/forecast_store/tile_publisher/
       autopipeline 零触碰；OpenAPI 零变更；文本索引零删除
 - [ ] 2.4 node-27：pre/post 快照逐字段等价（JSON 字节等；MVT 解码
-      feature 集合等，采样 ≥2 流域 ×2 tile + national ≥2 zoom）（AC-2）
-- [ ] 2.5 node-27：EXPLAIN (ANALYZE, BUFFERS) 四形态 before/after——走
-      000051 索引、无 Seq Scan、latency 不退化；valid_times 形态对照
-      #1378 基线（AC-1）
+      feature 集合等，采样 ≥2 流域 ×2 tile + national ≥2 zoom）；
+      **快照间清空 `map.tile_cache` + `NHMS_MVT_FILE_CACHE_DIR`
+      （两图层），清理动作进 receipt**（AC-2，design D4 旁路程序）
+- [ ] 2.5 node-27：EXPLAIN (ANALYZE, BUFFERS) **六形态** before/after
+      （design D4 集合：tile 点查、valid_times named-identity、
+      coverage run 域扫描、存在性探针、national identity-stats、
+      national typed/untyped 腿）——走 000051 索引、无 Seq Scan、
+      latency 不退化；valid_times 形态对照 #1378 基线；**每形态含
+      压缩 chunk 命中绑定，压缩段显示文本 segmentby 下推**（AC-1）
 - [ ] 2.6 node-27：`/` 与 `/ops` 浏览器 e2e + MVT 渲染正常（AC-4）；
       deny-write 校验通过（AC-5）；定向真实 DB pytest（integration 子集）
 - [x] 2.7 issue-scribe 立"边界外 river_timeseries 文本读者改造"跟踪单，

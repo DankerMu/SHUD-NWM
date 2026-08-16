@@ -12,10 +12,29 @@ What these tests are for, and what they deliberately are not:
   actually return the same rows is answered by
   ``tests/test_river_ts_read_path_surrogate_keys_integration.py`` against a
   real PostgreSQL — a text-substring test can never answer it.
-* Each "the text predicate is gone" assertion runs on the sub-select-stripped
-  source (see ``tests/sql_shape_helpers.py``). The key-resolution sub-selects
-  contain ``WHERE run_id = :run_id`` against the AUTHORITY table by design; a
-  naive substring pin would go green on code that never switched a thing.
+* Every text-predicate assertion runs on ``outer_predicates`` (see
+  ``tests/test_sql_shape_helpers.py``): sub-selects stripped, comments removed,
+  whitespace collapsed. The key-resolution sub-selects contain ``WHERE run_id =
+  :run_id`` against the AUTHORITY table by design, so a raw-source pin goes
+  green on code that never switched a thing.
+
+The hybrid pushdown rule these pins encode (user-adjudicated, #1341): every
+in-boundary fact read keeps a redundant TEXT predicate on exactly ``run_id`` /
+``river_network_version_id`` / ``variable``, each AND-ed with its key or enum
+counterpart, for as long as compression segments compressed chunks by the text
+columns. So the pins are two-sided:
+
+* positive — each sanctioned text predicate sits in the SAME conjunction as
+  its counterpart (asserted as one adjacency substring, not two independent
+  ``in`` checks, which would pass with the pair split across the query);
+* negative — the referenced text column set EQUALS the sanctioned subset that
+  surface may carry, so both a forbidden column appearing and a pushdown aid
+  quietly vanishing are red.
+
+Surfaces whose identity arrives by join rather than as a bound constant (the
+two national legs and the national identity probe) can carry only ``variable``:
+a join equality is not pushdown material, and a text fact join is forbidden
+outright.
 """
 
 from __future__ import annotations
@@ -26,7 +45,14 @@ from pathlib import Path
 from packages.common import display_coverage
 from services.production_closure.scale_validation import QUERY_TARGETS
 from services.tiles.mvt import _mvt_tile_order_by, postgis_tile_sql
-from tests.sql_shape_helpers import strip_scalar_subqueries
+from tests.test_sql_shape_helpers import (
+    FORBIDDEN_TEXT_FACT_COLUMNS,
+    SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+    outer_predicates,
+    sql_from_python,
+    sql_literals,
+    text_fact_columns,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MVT_SOURCE = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="utf-8")
@@ -46,15 +72,16 @@ NETWORK_KEY_RESOLUTION = "SELECT river_network_version_key FROM core.river_netwo
 # a 500; enum_range simply matches nothing.
 ENUM_VARIABLE_RESOLUTION = "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e"
 
-# Text fact-table columns, as they appear qualified by each reader's alias.
-_TEXT_IDENTITY_COLUMNS = (
-    "run_id",
-    "basin_version_id",
-    "river_network_version_id",
-    "river_segment_id",
-    "variable",
-    "unit",
-    "quality_flag",
+# The sanctioned pushdown pairs, spelled the way each surface binds them.
+# Written as ONE substring per pair so the assertion is about adjacency in a
+# single conjunction, not about two literals existing somewhere in the query.
+BOUND_PARAM_PUSHDOWN_PAIRS = (
+    ("run_id", "ts.run_id = :run_id AND ts.run_key ="),
+    (
+        "river_network_version_id",
+        "ts.river_network_version_id = :river_network_version_id AND ts.river_network_version_key =",
+    ),
+    ("variable", "ts.variable = :variable AND ts.variable_e ="),
 )
 
 
@@ -73,17 +100,17 @@ def _identity_stats_cte(layer: str) -> str:
     return _slice(postgis_tile_sql(layer), "source_identity_stats AS (", "bounded_rows AS (")
 
 
-def _assert_no_text_fact_predicates(sql: str, alias: str) -> None:
-    """No ``<alias>.<text identity column>`` survives outside a sub-select.
+def _assert_text_fact_columns(sql: str, alias: str, expected: set[str], label: str) -> None:
+    """The surface's text fact-column references are EXACTLY ``expected``.
 
-    ``\\b`` after the column name is load-bearing: it keeps ``ts.variable``
-    from matching ``ts.variable_e`` (and ``ts.unit`` from ``ts.unit_e``), which
-    would make the pin unsatisfiable rather than discriminating.
+    Equality rather than "none of the forbidden ones": it is red both when a
+    forbidden column (``basin_version_id`` / ``river_segment_id`` / ``unit`` /
+    ``quality_flag``) reappears and when a sanctioned pushdown aid is silently
+    dropped, which would reintroduce the compressed-chunk collapse this change
+    was amended to avoid.
     """
-    outer = strip_scalar_subqueries(sql)
-    for column in _TEXT_IDENTITY_COLUMNS:
-        pattern = rf"\b{re.escape(alias)}\.{column}\b"
-        assert re.search(pattern, outer) is None, f"{alias}.{column} still read from the fact table"
+    assert expected <= set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), f"{label}: expectation exceeds the sanctioned set"
+    assert text_fact_columns(sql, alias) == expected, label
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +150,27 @@ def test_hydro_tile_resolves_text_identity_to_keys_and_restores_text_output() ->
     ):
         assert restored in source_cte, restored
 
-    _assert_no_text_fact_predicates(source_cte, "ts")
+    _assert_text_fact_columns(source_cte, "ts", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "hydro tile")
+
+
+def test_hydro_tile_carries_all_three_pushdown_aids_paired_with_their_keys() -> None:
+    """The tile point lookup binds every sanctioned column as a constant.
+
+    It is the one in-boundary surface that can carry all three, so it is where
+    the pairing rule is pinned hardest: each text conjunct must be immediately
+    followed by its key/enum counterpart in the same ``AND`` chain. A pair
+    split apart still reads the same rows but stops being self-evidently a
+    no-op, which is the whole argument for allowing the text predicate at all.
+    """
+    outer = outer_predicates(_source_cte("hydro"))
+
+    for column, pair in BOUND_PARAM_PUSHDOWN_PAIRS:
+        assert pair in outer, column
+    # Non-vacuity: the key predicates are the row-selection authority and the
+    # basin key — the one identity with no sanctioned text partner — is there
+    # on its own.
+    assert "AND ts.basin_version_key = AND" in outer
+    assert "AND ts.valid_time = :valid_time" in outer
 
 
 def test_hydro_tile_feature_id_concatenation_is_unchanged() -> None:
@@ -205,7 +252,11 @@ def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
         assert "ts.variable_e = (" in leg, name
         assert ENUM_VARIABLE_RESOLUTION in leg, name
         assert "ts.valid_time = :valid_time" in leg, name
-        _assert_no_text_fact_predicates(leg, "ts")
+        # Identity arrives from latest_runs, so `variable` is the only
+        # sanctioned aid this surface can bind as a constant; run/network must
+        # join on keys only.
+        _assert_text_fact_columns(leg, "ts", {"variable"}, name)
+        assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(leg), name
 
     # latest_runs hands both legs the keys AND the text it will echo back out,
     # from the authority join it was already doing.
@@ -233,6 +284,10 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
     assert typed_columns == untyped_columns, (typed_columns ^ untyped_columns)
     assert "ts.run_key" in typed_columns
     assert not any(column.endswith(("_id",)) for column in typed_columns), typed_columns
+    # The one sanctioned pushdown aid is on BOTH legs or neither: carrying it
+    # on one side only is the same visibility split by another route, since a
+    # text `variable` predicate can narrow away rows the other leg keeps.
+    assert "ts.variable" in typed_columns
 
     # Non-vacuity: the legs really are the two zoom branches, not a copy-paste
     # of one clause into a variable.
@@ -248,7 +303,8 @@ def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> N
     assert "ts.variable_e = (" in probe
     assert "h.run_key, rnv.river_network_version_key" in probe
     assert "JOIN core.river_network_version rnv" in probe
-    _assert_no_text_fact_predicates(probe, "ts")
+    _assert_text_fact_columns(probe, "ts", {"variable"}, "national identity probe")
+    assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(probe)
 
 
 def test_national_output_and_ordering_stay_on_restored_text_expressions() -> None:
@@ -277,20 +333,63 @@ def test_national_output_and_ordering_stay_on_restored_text_expressions() -> Non
 # ---------------------------------------------------------------------------
 
 
+def _valid_times_branch_sql() -> tuple[str, str]:
+    """The named-identity and no-identity SQL of ``valid_times_for_layer``.
+
+    Extracted through Python's parser, not by slicing text: the function's
+    prose comments contain apostrophes, and a raw SQL tokenizer run over them
+    silently swallows the queries (see the oracle module's self-tests).
+    """
+    valid_times = _slice(MVT_SOURCE, "def valid_times_for_layer", "def national_discharge_valid_times")
+    literals = sql_literals(valid_times)
+    assert len(literals) == 2, literals
+    named, no_named = literals
+    return named, no_named
+
+
+def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key() -> None:
+    """The #1378 shape: strict key prefix of 000051, plus the transitional aids.
+
+    This is the exact query node-27 measured flipping to a 598,280-cost full
+    decompression when it ran on keys alone, so the pairing is pinned here on
+    the unqualified spelling the single-table query uses.
+    """
+    named, _no_named = _valid_times_branch_sql()
+    outer = outer_predicates(named)
+
+    assert "WHERE run_id = :run_id AND run_key =" in outer
+    assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
+    assert "AND variable = :variable AND variable_e =" in outer
+    # basin_version_id has no sanctioned text partner: key only.
+    assert "AND basin_version_key = AND" in outer
+    assert "ORDER BY valid_time DESC" in outer
+    for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
+        assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
+
+
 def test_valid_times_no_named_identity_branch_also_filters_the_enum_column() -> None:
     """The unnamed branch has no production caller, but it is inside the boundary.
 
-    Leaving it on ``variable = :variable`` would violate the delta's "fact
-    predicates only on key/enum columns" wording and would break outright when
-    #1342 drops the text column.
+    Leaving it on ``variable = :variable`` alone would violate the delta's
+    "keys are the row-selection authority" wording and would silently start
+    returning NULL-key rows that the named branch excludes.
     """
-    valid_times = _slice(MVT_SOURCE, "def valid_times_for_layer", "def _valid_time_discovery")
-    no_named_branch = _slice(valid_times, "if run_id is not None", "def national_discharge_valid_times")
+    _named, no_named = _valid_times_branch_sql()
+    outer = outer_predicates(no_named)
 
-    assert "WHERE variable_e = (" in no_named_branch
-    assert ENUM_VARIABLE_RESOLUTION in no_named_branch
-    assert "WHERE variable = :variable" not in valid_times
-    assert "variable = :variable" not in strip_scalar_subqueries(valid_times)
+    assert "AND variable_e = (" in no_named
+    assert ENUM_VARIABLE_RESOLUTION in no_named
+    # Whole-query equality: this branch is short enough to pin exactly, which
+    # is the strongest form of "no predicate crept in".
+    assert outer == (
+        "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
+        "WHERE variable = :variable AND variable_e = "
+        "ORDER BY valid_time DESC LIMIT :limit"
+    )
+    # No identity predicate at all on this branch, text or key — it is the
+    # "any run" discovery shape and must not grow one by accident.
+    for column in ("run_id", "run_key", *FORBIDDEN_TEXT_FACT_COLUMNS):
+        assert re.search(rf"\b{column}\b", outer) is None, column
 
 
 def test_existence_probe_switches_to_keys_without_touching_its_404_contract() -> None:
@@ -301,7 +400,7 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     )
 
     assert "FROM hydro.river_timeseries" in probe
-    assert "WHERE run_key = (" in probe
+    assert "AND run_key = (" in probe
     assert RUN_KEY_RESOLUTION in probe
     assert "AND basin_version_key = (" in probe
     assert BASIN_KEY_RESOLUTION in probe
@@ -310,14 +409,15 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     assert "AND variable_e = (" in probe
     assert "AND valid_time = :valid_time" in probe
 
-    outer = strip_scalar_subqueries(probe)
-    for forbidden in (
-        "WHERE run_id = :run_id",
-        "AND basin_version_id = :basin_version_id",
-        "AND river_network_version_id = :river_network_version_id",
-        "AND variable = :variable",
-    ):
-        assert forbidden not in outer, forbidden
+    outer = outer_predicates(sql_from_python(probe))
+    assert outer == (
+        "SELECT 1 FROM hydro.river_timeseries "
+        "WHERE run_id = :run_id AND run_key = "
+        "AND basin_version_key = "
+        "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
+        "AND variable = :variable AND variable_e = "
+        "AND valid_time = :valid_time LIMIT 1"
+    )
 
     # The probe still binds the same five text parameters and still raises the
     # same 404 — the switch is invisible to the route.
@@ -349,7 +449,7 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "ON cr.run_key = rt.run_key" in sql
     assert "AND cr.basin_version_key = rt.basin_version_key" in sql
     assert "AND cr.river_network_version_key = rt.river_network_version_key" in sql
-    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable" in sql
+    assert "WHERE rt.variable = 'q_down'\n              AND rt.variable_e = 'q_down'::hydro.river_variable" in sql
 
     # Segment counting moves to the key. Within a network the mapping is 1:1,
     # so the count is unchanged; the key is additionally unique table-wide.
@@ -368,7 +468,32 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "hc.basin_version_id = cr.basin_version_id" in sql
     assert "hc.river_network_version_id = cr.river_network_version_id" in sql
 
-    _assert_no_text_fact_predicates(sql, "rt")
+    _assert_text_fact_columns(sql, "rt", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "coverage river scan")
+
+
+def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only() -> None:
+    """The coverage scan's aids are constants; its join to candidate_runs is not.
+
+    A ``cr.run_id = rt.run_id`` join equality looks like the same thing but is
+    not: it cannot be pushed into a compressed chunk, and it is exactly the
+    text fact join the delta forbids. The pushdown value here comes from the
+    ``scan_*`` constants, so the aids live inside those guards.
+    """
+    outer = outer_predicates(display_coverage._REFRESH_SQL)
+
+    assert "WHERE rt.variable = 'q_down' AND rt.variable_e = 'q_down'::hydro.river_variable" in outer
+    assert "(rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
+    assert (
+        "(rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
+    ) in outer
+    # basin_version_id is not sanctioned, so its guard is key-only.
+    assert "OR rt.basin_version_key = )" in outer
+    # Key-only join into the fact table.
+    assert (
+        "JOIN candidate_runs cr ON cr.run_key = rt.run_key "
+        "AND cr.basin_version_key = rt.basin_version_key "
+        "AND cr.river_network_version_key = rt.river_network_version_key WHERE"
+    ) in outer
 
 
 def test_coverage_sql_binds_only_parameters_the_refresh_actually_supplies() -> None:

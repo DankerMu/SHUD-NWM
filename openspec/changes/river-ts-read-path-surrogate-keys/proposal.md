@@ -21,7 +21,10 @@ named-identity 分支存在 1583x 计划翻转。本 issue 是 epic M2 的读取
   cycle 间歇窗口。文本索引**全部保留**（边界外读者 + 回滚安全；删除
   归 #1342）。`tests/test_migrations.py` RETAINED 索引集合同步。
 - **四个边界内读面**（issue In-Scope）fact 谓词切键、权威表 join 还原
-  文本输出，响应逐字段等价：
+  文本输出，响应逐字段等价；**同时保留 `run_id` /
+  `river_network_version_id` / `variable` 三个冗余文本下推谓词**
+  （与键谓词同一合取，压缩 chunk segmentby/orderby 下推辅助，
+  round-1 评审 P1 的用户裁定补救，#1342 删列时一并移除，design D1）：
   - `services/tiles/mvt.py`：hydro 图层 source CTE、hydro-national
     identity stats 探针与 **typed_values / untyped_ranked 两腿**
     （mvt.py:603-652，UNION ALL 同源，必须同切，禁混文本/键谓词）、
