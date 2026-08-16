@@ -13,17 +13,19 @@ unsafe reason is null. When the probe reports a non-null unsafe reason
 SHALL abstain: neither leg asserts manifest existence or absence, grants
 an automatic retry, nor lets an exception escape; the candidate flows to
 the remaining decision ladder, which alone determines the terminal — the
-legs invent no manual channel of their own, a transient failure whose
-restart geometry engages no ladder guard keeps its automatic retry from
-the generic rung, and geometries the fail-open verdict previously
-shielded from the ladder's own guards (a native-SHUD restart stage whose
-forcing reference the artifact guard fail-closes, or a permanent but
-remedy-permitted failure code) take those guards' existing blocked
-terminals — and the rest of the scheduling pass keeps running. When the probe determines presence or absence with a null
-unsafe reason, both legs keep their existing behavior byte-for-byte,
-including the recorded residual where a reference the probe cannot
-resolve counts as absent for the repair channel (a re-ingestion
-re-records it).
+legs invent no manual channel of their own, a transient failure within
+its retry budget whose state engages no higher ladder rung keeps its
+automatic retry from the generic rung, and geometries the fail-open
+verdict previously shielded from the ladder's own rungs take those
+rungs' existing terminals (a native-SHUD restart stage whose forcing
+reference the artifact guard fail-closes, a permanent failure code
+including remedy-permitted ones, a cancelled run, or an exhausted retry
+budget — each lands on the rung that already owned it) — and the rest
+of the scheduling pass keeps running. When the probe determines
+presence or absence with a null unsafe reason, both legs keep their
+existing behavior byte-for-byte, including the recorded residual where
+a reference the probe cannot resolve counts as absent for the repair
+channel (a re-ingestion re-records it).
 
 #### Scenario: An unconfigured store no longer vouches for manifest existence
 
@@ -38,9 +40,11 @@ re-records it).
 #### Scenario: Abstention does not convert guard-free transient failures to manual outcomes
 
 - **GIVEN** the same unconfigured-store geometry where the candidate's
-  failure classification is transient and within its retry budget, and
-  its restart geometry engages no ladder guard of its own (a
-  convert-stage restart with no forcing or copyback requirement)
+  failure classification is transient and within its retry budget, its
+  restart geometry engages no ladder guard of its own (a convert-stage
+  restart with no forcing or copyback requirement), and no higher
+  ladder rung (the permanent guard, the cancelled rung) claims the
+  state
 - **WHEN** the scheduler decides the candidate's state
 - **THEN** the decision remains an automatic retry from the generic
   retry rung — the legs' abstention itself invents no manual channel
@@ -53,13 +57,16 @@ re-records it).
   probes its forcing reference) or the failure code is permanent but
   remedy-permitted
 - **WHEN** the scheduler decides the candidate's state
-- **THEN** the terminal is that guard's existing blocked outcome
+- **THEN** the terminal is whichever ladder rung owns the geometry — for
+  these two pinned cases the guard's existing blocked outcome
   (`missing_forcing_package_uri` — carrying the unsafe reason when the
   fault is process-wide, an unconfigured root; a single-leaf probe fault
   leaves the guard's own probe verdict intact — or
-  `permanent_failure_guard`) — the same terminal the identical candidate
-  already received whenever the legs' structural gates did not hold, not
-  a new terminal introduced by the legs
+  `permanent_failure_guard`; a cancelled run or an exhausted retry
+  budget likewise keeps its own rung's terminal, the latter pinned by
+  the pass-containment scenario) — the same terminal the identical
+  candidate already received whenever the legs' structural gates did not
+  hold, not a new terminal introduced by the legs
 
 #### Scenario: An unconfigured store does not let the repair leg invent a verdict
 

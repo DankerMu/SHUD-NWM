@@ -16,11 +16,13 @@
   rung `retry_failed_candidate` 今日自动重试）改判人工 blocked——一次
   NFS 抖动冻住整批；且 repair 腿门集是 downstream 腿门集的真子集、rung
   序 repair 在前，unsafe 下 repair 腿必然吞并 downstream 腿。弃权 = 「腿
-  只有拿到真探针裁决才能 claim 候选」的极限收窄臂；对 restart 几何不触发
-  既有 guard 的瞬时子集可用性零回归，而被 fail-open 遮蔽的 forecast-
-  restart（forcing guard）与 permanent-remedy-permitted（`:371` guard）
-  几何则**去遮蔽**到各自既有 fail-closed blocked 终态——是既有 guard 终
-  态非新终态（round-1 C1 双反例实测 + repaired=False 对照组同终态）。
+  只有拿到真探针裁决才能 claim 候选」的极限收窄臂；对「预算内瞬时 × 无
+  更高 rung claim」子集可用性零回归，而被 fail-open 遮蔽的其余几何——
+  forecast-restart（forcing guard）、permanent 含 remedy-permitted
+  （`:371`）、cancelled（`:382`）、预算耗尽——**去遮蔽**到各自既有梯子
+  终态，是既有 rung 终态非新终态（round-1 C1 双反例实测 + repaired=
+  False 对照组同终态；cancelled/耗尽两格为 round-2 补充枚举，后者由
+  seam 4 run_once 用例钉住）。
 
 ## D1 — 修法（弃权设计）
 
@@ -53,7 +55,7 @@
 |---|---|---|---|
 | `(False, None)`（真探针判存在） | `return None`（照旧） | 照旧发 `manifest_exists: true` + 自动重试（逐字节不变） | downstream 自动重试（不变） |
 | `(True, None)`（真探针判缺失） | 照旧发修复证据（fresh 全链 reingestion，逐字节不变） | `return None`（照旧） | repair 自动重试（不变） |
-| `(True, "object_store_root_unconfigured")` | **弃权 `return None`**——与今日逐字节同（今日 fail-open「存在」→ not missing → 本就 None） | **弃权 `return None`**——行为变化本体：不再发假 `manifest_exists: true` + 自动重试 | 既有梯子按 rung 序：permanent（含 remedy-permitted 码，C1(b)）→ `:371` blocked；cancelled → `:382`；forecast-restart/copyback 几何 → `:390-400` forcing blocked 带 unsafe reason（#1365，C1(a)）；guard 不触发的瞬时 → `:398` 通用自动重试。guard 命中格为**去遮蔽**（repaired=False 对照组 master 同终态），非新终态 |
+| `(True, "object_store_root_unconfigured")` | **弃权 `return None`**——与今日逐字节同（今日 fail-open「存在」→ not missing → 本就 None） | **弃权 `return None`**——行为变化本体：不再发假 `manifest_exists: true` + 自动重试 | 既有梯子按 rung 序：permanent（含 remedy-permitted 码，C1(b)）→ `:371` blocked；cancelled → `:382`；forecast-restart/copyback 几何 → `:390-400` forcing blocked（root 臂带 unsafe reason，见 seam 2 限定；#1365，C1(a)）；guard 不触发的预算内瞬时 → `:398` 通用自动重试。guard 命中格为**去遮蔽**（repaired=False 对照组 master 同终态），非新终态 |
 | `(True, "artifact_probe_error")`（ObjectStoreError 被探针层容器化） | 弃权 `return None`（异常不逃逸） | 同左 | 同上；邻座照常评估、整趟不中止（缺陷 2 修复本体） |
 | `(True, None)` 经探针层 `(OSError, ValueError)` 残余臂 | 视同「真探针判缺失」发修复——#1365 D4 既有裁决：rebuild 会 re-record 该引用（fixture review 2(b) 复核成立），具名沿用不新裁 | `return None` | repair 自动重试 |
 
