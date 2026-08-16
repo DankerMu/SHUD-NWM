@@ -36,7 +36,13 @@ from services.orchestrator.chain import (
 )
 from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
 from tests.test_warm_start import FakeRuntimeRepository, FakeStateManager
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, _read_cfg_ic_header_minute
+from workers.shud_runtime.runtime import (
+    WARM_START_TIME_MISMATCH_SYSTEMIC,
+    SHUDRuntime,
+    SHUDRuntimeConfig,
+    SHUDRuntimeError,
+    _read_cfg_ic_header_minute,
+)
 
 
 def _dt(value: str) -> datetime:
@@ -629,6 +635,47 @@ def _consume_manifest(state: StateSnapshot, *, start_time: str, valid_time: str,
     }
 
 
+def _ic_bytes(header_time: str) -> bytes:
+    """A minimal native SHUD IC whose header minute-time is ``header_time``."""
+
+    return f"2 1 {_minute_time(header_time):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+
+
+def _publish_state(object_root: Path, state: StateSnapshot, content: bytes) -> None:
+    path = object_root / state.state_uri
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+class MarkRecordingStateManager(FakeStateManager):
+    """FakeStateManager that also records the corruption-mark MESSAGES (#1431).
+
+    The degradation ladder distinguishes its rejection channels only through the mark
+    message, so the token that separates a time mismatch from a header-shape refusal has
+    to be observable in the test double.
+    """
+
+    def __init__(self, snapshots: list[StateSnapshot]) -> None:
+        super().__init__(snapshots)
+        self.mark_messages: list[tuple[str, str]] = []
+
+    def mark_init_state_corrupted(
+        self,
+        state_id: str,
+        *,
+        message: str,
+        actual_checksum: str | None,
+        expected_checksum: str | None,
+    ) -> None:
+        self.mark_messages.append((state_id, message))
+        super().mark_init_state_corrupted(
+            state_id,
+            message=message,
+            actual_checksum=actual_checksum,
+            expected_checksum=expected_checksum,
+        )
+
+
 def test_consume_materializes_canonical_ic_to_project_name(tmp_path: Path) -> None:
     # The warm-start object is canonical state.cfg.ic; SHUD reads <project>.cfg.ic.
     t_next = "2026-05-02T00:00:00Z"
@@ -701,33 +748,56 @@ def test_exact_warm_state_unavailable_never_falls_back_to_cold_or_older_state(tm
     assert manifest["runtime"]["init_mode"] == 3
 
 
-def test_consume_warm_continuity_blocks_on_three_way_run_start_mismatch(tmp_path: Path) -> None:
-    # PRODUCTION-PATH three-way enforcement: the snapshot is consumed as the exact
-    # successor (valid_time == run start_time == T_{N+1}, quality=fresh), but the
-    # native .cfg.ic header minute-time disagrees with both. Warm-continuity demands
-    # snapshot valid_time == header == run start; the mismatch must be a recorded
-    # WARM_START_TIME_MISMATCH blocker on the production consume path, not a silent
-    # restart. (Reverting the production wiring of _check_three_way_time_consistency
-    # makes this test red.)
+def test_consume_warm_continuity_time_mismatch_degrades_to_next_usable_state(tmp_path: Path) -> None:
+    # PRODUCTION-PATH three-way enforcement, #1431 terminal semantics. The selected
+    # snapshot is consumed as the exact successor (valid_time == run start_time ==
+    # T_{N+1}, quality=fresh) but its native .cfg.ic header minute-time disagrees with
+    # both, so warm-continuity rejects it. Until #1431 that rejection killed the whole
+    # forecast cycle; it is now a CANDIDATE-level blocker: the drifted snapshot is
+    # marked corrupted through the corrupted-state channel (with the greppable
+    # WARM_START_TIME_MISMATCH: token so it stays distinguishable from the
+    # header-shape channel) and the ladder moves to the healthy neighbour, which the
+    # run consumes warm. What must NOT happen -- then or now -- is consuming the
+    # drifted snapshot at the wrong time.
     t_next = "2026-05-02T00:00:00Z"
     header_wrong = "2026-05-02T06:00:00Z"  # header off by 6h from snapshot/run-start
-    ic_content = f"2 1 {_minute_time(header_wrong):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
-    state = _ic_state(t_next, ic_content)
-    state_manager = FakeStateManager([state])
+    drifted_content = _ic_bytes(header_wrong)
+    drifted = _ic_state(t_next, drifted_content)
+    # Healthy neighbour: an older state whose header equals its own valid_time, i.e. the
+    # legitimate stale-reuse geometry the ladder is allowed to fall back to.
+    healthy_valid = "2026-05-01T00:00:00Z"
+    healthy_content = _ic_bytes(healthy_valid)
+    healthy = _ic_state(healthy_valid, healthy_content)
+    state_manager = MarkRecordingStateManager([drifted, healthy])
     runtime, object_root, workspace = _runtime(tmp_path, state_manager)
-    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
-    (object_root / state.state_uri).write_bytes(ic_content)
+    _publish_state(object_root, drifted, drifted_content)
+    _publish_state(object_root, healthy, healthy_content)
 
     # valid_time == start_time == T_{N+1} -> warm-continuity (exact successor).
-    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest = _consume_manifest(drifted, start_time=t_next, valid_time=t_next, quality="fresh")
     input_dir = workspace / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    with pytest.raises(Exception) as excinfo:
-        runtime._stage_initial_state(manifest, input_dir)
-    assert "WARM_START_TIME_MISMATCH" in str(getattr(excinfo.value, "error_code", "")) or "mismatch" in str(
-        excinfo.value
-    )
+    # No raise: one drifted snapshot no longer takes the cycle down with it.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] == healthy.state_id
+    assert manifest["runtime"]["init_mode"] == 3
+    project_ic = input_dir / "demo.cfg.ic"
+    assert project_ic.exists()
+    # The neighbour's header is re-stamped to the run start; the drifted 06:00Z header
+    # was never consumed.
+    assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(t_next))
+    assert round(_read_cfg_ic_header_minute(project_ic)) != round(_minute_time(header_wrong))
+    # The rejection is recorded on the drifted candidate only, with the greppable token.
+    assert state_manager.corrupted == [drifted.state_id]
+    marked_id, marked_message = state_manager.mark_messages[0]
+    assert marked_id == drifted.state_id
+    assert marked_message.startswith("WARM_START_TIME_MISMATCH: ")
+    assert "mismatch" in marked_message
+    # The deferred mark is flushed on the warm exit: the QC record is not lost.
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert state_manager.snapshots[healthy.state_id].usable_flag is True
 
 
 def test_consume_degraded_reuse_of_older_state_is_not_three_way_blocked(tmp_path: Path) -> None:
@@ -758,26 +828,201 @@ def test_consume_degraded_reuse_of_older_state_is_not_three_way_blocked(tmp_path
     assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(run_start))
 
 
-def test_consume_blocks_on_native_header_snapshot_mismatch(tmp_path: Path) -> None:
-    # Native IC header time disagrees with the recorded snapshot valid_time: blocker.
+def test_consume_lone_native_header_mismatch_degrades_to_labeled_cold_start(tmp_path: Path) -> None:
+    # Native IC header time disagrees with the recorded snapshot valid_time: still a
+    # blocker for THIS candidate, but with no other usable state the run degrades to the
+    # labeled cold start instead of failing (#1431 AC-2). Before #1431 this geometry
+    # failed the whole run; the invariant that survives is that the drifted artifact is
+    # never consumed at the wrong time.
     snapshot_valid = "2026-05-02T00:00:00Z"
     header_wrong = "2026-04-15T00:00:00Z"
-    ic_content = f"2 1 {_minute_time(header_wrong):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+    ic_content = _ic_bytes(header_wrong)
     state = _ic_state(snapshot_valid, ic_content)
-    state_manager = FakeStateManager([state])
+    state_manager = MarkRecordingStateManager([state])
     runtime, object_root, workspace = _runtime(tmp_path, state_manager)
-    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
-    (object_root / state.state_uri).write_bytes(ic_content)
+    _publish_state(object_root, state, ic_content)
 
     manifest = _consume_manifest(state, start_time=snapshot_valid, valid_time=snapshot_valid, quality="fresh")
     input_dir = workspace / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    with pytest.raises(Exception) as excinfo:
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # A single rejection is not a systemic signal: it is marked and flushed as one more
+    # corrupt snapshot.
+    assert state_manager.corrupted == [state.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[state.state_id].usable_flag is False
+    # Workspace hygiene: the materialized drifted IC is gone, so nothing downstream can
+    # pick it up as this run's initial condition.
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_unanimous_plural_time_mismatch_escalates_and_keeps_snapshots_usable(tmp_path: Path) -> None:
+    # #1431 AC-3: when EVERY candidate on the ladder (>= 2) is rejected for a time
+    # mismatch, the drift is systematic (a bad re-key batch), not one corrupt snapshot --
+    # the run fails loudly with the dedicated code instead of quietly cold-starting.
+    t_run = "2026-05-02T00:00:00Z"
+    first_content = _ic_bytes("2026-05-02T06:00:00Z")  # warm-continuity three-way drift
+    first = _ic_state(t_run, first_content)
+    second_content = _ic_bytes("2026-04-20T00:00:00Z")  # stale-reuse identity drift
+    second = _ic_state("2026-05-01T00:00:00Z", second_content)
+    state_manager = MarkRecordingStateManager([first, second])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, first, first_content)
+    _publish_state(object_root, second, second_content)
+
+    manifest = _consume_manifest(first, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
         runtime._stage_initial_state(manifest, input_dir)
-    assert "WARM_START_TIME_MISMATCH" in str(getattr(excinfo.value, "error_code", "")) or "mismatch" in str(
-        excinfo.value
+
+    error = excinfo.value
+    assert error.error_code == WARM_START_TIME_MISMATCH_SYSTEMIC
+    # Greppable from run evidence and carrying both counts plus the last rejection.
+    assert "2 of 2 rejections" in error.message
+    assert "WARM_START_TIME_MISMATCH: " in error.message
+    # No staged initial state is left behind on the escalate exit.
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+    # The marks are deliberately NOT persisted here: the snapshots stay usable so the
+    # next cycle walks the same ladder and rings the same alarm, instead of finding
+    # everything unusable and silently cold-starting.
+    assert state_manager.corrupted == []
+    assert state_manager.mark_messages == []
+    assert state_manager.snapshots[first.state_id].usable_flag is True
+    assert state_manager.snapshots[second.state_id].usable_flag is True
+
+
+@pytest.mark.parametrize("order", ["mismatch_first", "checksum_first"])
+def test_mixed_rejection_causes_keep_the_cold_start_fallback(tmp_path: Path, order: str) -> None:
+    # #1431: escalation requires UNANIMITY. A ladder exhausted by a mixture of checksum
+    # and time-mismatch rejections falls back to the labeled cold start exactly as it did
+    # before. Both orders are pinned: with the per-candidate mismatch flag reset in the
+    # wrong place, the mismatch_first case would leak a stale True into the checksum
+    # rejection and fake the unanimity that escalates.
+    t_run = "2026-05-02T00:00:00Z"
+    older_valid = "2026-05-01T00:00:00Z"
+    corrupt_bytes = b"not-a-cfg-ic"
+    if order == "mismatch_first":
+        first_content = _ic_bytes("2026-05-02T06:00:00Z")  # time mismatch
+        first = _ic_state(t_run, first_content)
+        second = _ic_state(older_valid, _ic_bytes(older_valid))  # checksum will not match
+        published = {first.state_id: first_content, second.state_id: corrupt_bytes}
+        mismatched_id = first.state_id
+    else:
+        first = _ic_state(t_run, _ic_bytes(t_run))  # checksum will not match
+        second_content = _ic_bytes("2026-04-20T00:00:00Z")  # time mismatch
+        second = _ic_state(older_valid, second_content)
+        published = {first.state_id: corrupt_bytes, second.state_id: second_content}
+        mismatched_id = second.state_id
+    state_manager = MarkRecordingStateManager([first, second])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, first, published[first.state_id])
+    _publish_state(object_root, second, published[second.state_id])
+
+    manifest = _consume_manifest(first, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No escalation: not every rejection was a time mismatch.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+    # Both rejections are recorded on the cold-start exit (the deferred mismatch mark is
+    # flushed there), and only the mismatch carries the token.
+    assert {state_id for state_id, _ in state_manager.mark_messages} == {first.state_id, second.state_id}
+    tokened = [state_id for state_id, message in state_manager.mark_messages if "WARM_START_TIME_MISMATCH" in message]
+    assert tokened == [mismatched_id]
+    assert state_manager.snapshots[first.state_id].usable_flag is False
+    assert state_manager.snapshots[second.state_id].usable_flag is False
+
+
+def test_exact_warm_start_time_mismatch_keeps_original_error_and_clears_staged(tmp_path: Path) -> None:
+    # #1431 AC-4: under the exact-warm-start policy there is no ladder to walk, so the
+    # historical failure is preserved byte-for-byte -- the ORIGINAL
+    # WARM_START_TIME_MISMATCH error propagates (not WARM_START_UNAVAILABLE, not the new
+    # systemic code, and not the token-prefixed ladder message), with no corruption mark.
+    # The only change is workspace hygiene: the materialized IC is cleared first, as the
+    # checksum arm of the same policy already did.
+    t_next = "2026-05-02T00:00:00Z"
+    ic_content = _ic_bytes("2026-05-02T06:00:00Z")
+    state = _ic_state(t_next, ic_content)
+    state_manager = MarkRecordingStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, state, ic_content)
+
+    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest["runtime"]["warm_start_policy"] = "exact_required"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+
+    error = excinfo.value
+    assert error.error_code == "WARM_START_TIME_MISMATCH"
+    assert "mismatch" in error.message
+    # The message is the verification's own, not the ladder's token-prefixed variant.
+    assert not error.message.startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.corrupted == []
+    assert state_manager.mark_messages == []
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_header_shape_rejection_mark_stays_distinguishable_from_time_mismatch(tmp_path: Path) -> None:
+    # #1429 regression face: a header with no minute-time slot still degrades through its
+    # own channel, and its mark message must NOT carry the #1431 time-mismatch token --
+    # the two corrupt-snapshot causes stay tellable apart in the QC record.
+    t_run = "2026-05-02T00:00:00Z"
+    malformed_content = b"23106\n1 0.1\n2 0.2\n1 0.0\n"
+    state = _ic_state(t_run, malformed_content)
+    state_manager = MarkRecordingStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, state, malformed_content)
+
+    manifest = _consume_manifest(state, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert state_manager.corrupted == [state.state_id]
+    assert "WARM_START_TIME_MISMATCH" not in state_manager.mark_messages[0][1]
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_systemic_time_mismatch_code_is_classified_exactly_like_the_original(tmp_path: Path) -> None:
+    # #1431 retry parity: the new terminal code is a permanent DATA defect, same as
+    # WARM_START_TIME_MISMATCH. Registering it as transient would open a retry loop that
+    # can only re-read the same drifted bytes.
+    del tmp_path
+    from services.orchestrator.retry import (
+        NON_TRANSIENT_ERROR_CODES,
+        TRANSIENT_ERROR_CODES,
+        classify_failure,
+        is_retryable_failure,
     )
+
+    assert WARM_START_TIME_MISMATCH_SYSTEMIC not in TRANSIENT_ERROR_CODES
+    assert WARM_START_TIME_MISMATCH_SYSTEMIC not in NON_TRANSIENT_ERROR_CODES
+    assert is_retryable_failure(WARM_START_TIME_MISMATCH_SYSTEMIC) is False
+
+    systemic = classify_failure(WARM_START_TIME_MISMATCH_SYSTEMIC, attempt=0, retry_limit=3)
+    original = classify_failure("WARM_START_TIME_MISMATCH", attempt=0, retry_limit=3)
+    assert {key: value for key, value in systemic.items() if key != "reason_code"} == {
+        key: value for key, value in original.items() if key != "reason_code"
+    }
+    assert systemic["retryable"] is False
+    assert systemic["permanent"] is True
 
 
 # ---------------------------------------------------------------------------
