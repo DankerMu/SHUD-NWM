@@ -1071,7 +1071,11 @@ class SHUDRuntime:
                     "(or clear the run's input workspace) and re-drive; this error code is "
                     "not retryable in place.",
                 )
-            declared_member = _manifest_declared_shud_forcing_index_member(checksum_entries)
+            declared_member = _manifest_declared_shud_forcing_index_member(
+                checksum_entries,
+                forcing_uri=str((manifest.get("forcing") or {}).get("forcing_uri") or ""),
+                object_store_prefix=self.config.object_store_prefix,
+            )
             staged_members = [
                 declared_member
                 if declared_member in staged_members
@@ -3959,6 +3963,9 @@ def normalize_staged_ic_negative_residuals(
 
 def _manifest_declared_shud_forcing_index_member(
     checksum_entries: Sequence[Mapping[str, Any]] | None,
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
 ) -> str | None:
     """Return the station-index member the package manifest names, if exactly one.
 
@@ -3972,17 +3979,55 @@ def _manifest_declared_shud_forcing_index_member(
     list (producer shape: ``role``/``relative_path``/``uri``/``checksum``); the
     non-SHUD entries there carry no ``relative_path`` and drop out of the
     accepted-member intersection.
+
+    Declaration shapes are read through the direct-grid parser
+    (``_normalize_package_manifest_file_relative_path``) so the two lanes cannot
+    drift apart on the same ``forcing_package.json``: a ``./``-prefixed
+    ``relative_path`` normalizes, and a missing one is derived from ``uri``
+    relative to ``forcing_uri``. Unlike the direct-grid lane this anchor never
+    fails closed — an unsafe or underivable entry is skipped, leaving its
+    siblings to resolve. An unavailable ``forcing_uri`` therefore only costs the
+    uri-derived entries; ``./`` normalization needs no uri context.
     """
 
-    declared = {
-        str(entry.get("relative_path") or "").strip()
-        for entry in checksum_entries or ()
-        if isinstance(entry, Mapping)
-    }
+    declared: set[str] = set()
+    for entry in checksum_entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        relative_path = _normalized_package_manifest_file_relative_path_or_none(
+            entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
+        )
+        if relative_path is not None:
+            declared.add(relative_path)
     matched = declared & set(SHUD_FORCING_INDEX_MEMBERS)
     if len(matched) == 1:
         return next(iter(matched))
     return None
+
+
+def _normalized_package_manifest_file_relative_path_or_none(
+    file_entry: Mapping[str, Any],
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
+) -> str | None:
+    """Best-effort ``_normalize_package_manifest_file_relative_path``: ``None`` on reject.
+
+    The non-direct-grid staging anchor is a resolver, not a gate, so it must not
+    gain a fail-closed surface; per-entry skipping (rather than wrapping the whole
+    list) keeps one malformed entry from blinding the anchor to a valid sibling.
+    """
+
+    try:
+        return _normalize_package_manifest_file_relative_path(
+            file_entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
+        )
+    except SHUDRuntimeError:
+        return None
 
 
 def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
