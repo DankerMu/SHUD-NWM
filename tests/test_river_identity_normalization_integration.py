@@ -253,10 +253,50 @@ def test_seven_fact_columns_have_no_stored_default_so_no_rewrite_happened(migrat
         assert row["attnotnull"] is False, f"{name} must stay nullable until cutover"
 
 
-def test_no_foreign_key_or_index_was_added_on_the_new_columns(migrated: Any) -> None:
-    """A foreign key on basin_version_key would make the cutover's compression
-    ALTER fail outright: TimescaleDB 2.10 requires FK columns to be covered by
-    segmentby, and basin_version_key is not in the target segmentby."""
+# The one index the migration chain is allowed to put on the normalized fact
+# columns, and its exact column tuple. Kept next to the test that enforces it so
+# a future migration cannot quietly widen the allowance by editing only the
+# assertion. Ordering is the index's own (`indkey`) order; the `valid_time DESC`
+# direction is pinned separately, against the migration text, in
+# tests/test_migrations.py.
+EXPECTED_NORMALIZED_COLUMN_INDEXES = {
+    "river_ts_selected_identity_key_valid_time_idx": [
+        "run_key",
+        "basin_version_key",
+        "river_network_version_key",
+        "variable_e",
+        "valid_time",
+    ],
+}
+
+
+def test_exactly_one_discovery_index_and_no_foreign_key_on_the_new_columns(migrated: Any) -> None:
+    """FK half: still zero. Index half: re-pinned from zero to exactly one.
+
+    Pin evolution — this assertion has been correct twice and means different
+    things each time:
+
+    * **#1339 era (zero-index).** 000050 added the seven columns and
+      deliberately added no index at all; its header (000050:79-84) defers the
+      whole index design to the read-path switch. "No index touches these
+      columns" was the mechanically checkable form of that deferral.
+    * **#1341 era (exactly-one-index), current.** 000051 delivers the deferred
+      design: one integer discovery index on ``(run_key, basin_version_key,
+      river_network_version_key, variable_e, valid_time DESC)``. A count of
+      zero is now the failure, so the pin moves to an exact enumeration rather
+      than being deleted — the property worth protecting was never "no
+      indexes", it was "no index nobody designed".
+    * **#1342 will revisit.** Dropping the text columns retires the retained
+      text indexes and may add or reshape key-side ones; whoever does that
+      updates ``EXPECTED_NORMALIZED_COLUMN_INDEXES`` and this note, and the
+      diff shows the decision.
+
+    The FK half is unchanged and must stay zero for a different reason: a
+    foreign key on ``basin_version_key`` would make the cutover's compression
+    ALTER fail outright, because TimescaleDB 2.10 requires FK columns to be
+    covered by segmentby and ``basin_version_key`` is not in the target
+    segmentby.
+    """
     assert _scalar(
         migrated,
         """
@@ -268,16 +308,32 @@ def test_no_foreign_key_or_index_was_added_on_the_new_columns(migrated: Any) -> 
         (list(NORMALIZED_COLUMNS),),
     ) == 0
 
-    assert _scalar(
-        migrated,
-        """
-        SELECT count(*) FROM pg_index i, pg_attribute a
-        WHERE i.indrelid = 'hydro.river_timeseries'::regclass
-          AND a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-          AND a.attname = ANY(%s)
-        """,
-        (list(NORMALIZED_COLUMNS),),
-    ) == 0
+    # Every index on the parent hypertable that references at least one
+    # normalized column, with its full column list. `indrelid = ...regclass`
+    # keeps per-chunk indexes out; `HAVING bool_or(...)` is what restricts the
+    # result to indexes this pin is about, while `array_agg` still reports the
+    # index's other columns so a tuple change is visible.
+    with migrated.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT ic.relname AS index_name,
+                   array_agg(a.attname ORDER BY k.ord) AS columns
+            FROM pg_index i
+            JOIN pg_class ic ON ic.oid = i.indexrelid
+            CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+            WHERE i.indrelid = 'hydro.river_timeseries'::regclass
+            GROUP BY ic.relname
+            HAVING bool_or(a.attname = ANY(%s))
+            """,
+            (list(NORMALIZED_COLUMNS),),
+        )
+        found = {row["index_name"]: list(row["columns"]) for row in cursor.fetchall()}
+
+    # Dict equality, not a membership check: a missing 000051 (empty result), a
+    # reordered or truncated column tuple, and a second index someone adds on
+    # these columns are each red, and the diff names which.
+    assert found == EXPECTED_NORMALIZED_COLUMN_INDEXES
 
 
 def test_enum_value_sets_cover_every_writer_and_seed_literal(migrated: Any) -> None:

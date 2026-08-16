@@ -67,6 +67,79 @@ def psycopg_connection(database_url: str) -> Iterator[Any]:
         connection.close()
 
 
+# Column order of the tuples `insert_river_timeseries_dual_written` accepts.
+RIVER_TIMESERIES_SEED_COLUMNS = (
+    "run_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "river_segment_id",
+    "valid_time",
+    "lead_time_hours",
+    "variable",
+    "value",
+    "unit",
+    "quality_flag",
+)
+
+
+def insert_river_timeseries_dual_written(cursor: Any, rows: list[tuple[Any, ...]]) -> None:
+    """Insert ``hydro.river_timeseries`` rows in the #1340 dual-write shape.
+
+    Callers pass the ten TEXT-era columns (see
+    ``RIVER_TIMESERIES_SEED_COLUMNS``); the four surrogate keys and three enum
+    columns are resolved here from the authority tables and from the row's own
+    text values, which is exactly what the #1340 writer does.
+
+    Seeding the old text-only shape stopped being a neutral choice at #1341:
+    display-boundary readers now select rows by surrogate key, so NULL-key rows
+    are invisible to them while the out-of-boundary text readers still see
+    them. A fixture that writes a shape production no longer writes turns any
+    fast-path-vs-fallback parity assertion into a false red. Tests that want
+    the legacy shape on purpose must say so by inserting it directly, and say
+    why (see ``tests/test_river_ts_read_path_surrogate_keys_integration.py``,
+    which does exactly that to pin the exclusion contract).
+
+    The authority joins are inner joins, so a typo'd segment or run id would
+    silently insert nothing; the row-count check turns that into a loud
+    failure at seed time rather than a mystifying empty result later.
+    """
+    execute_values(
+        cursor,
+        """
+        INSERT INTO hydro.river_timeseries (
+            run_id, basin_version_id, river_network_version_id, river_segment_id,
+            valid_time, lead_time_hours, variable, value, unit, quality_flag,
+            run_key, basin_version_key, river_network_version_key, river_segment_key,
+            variable_e, unit_e, quality_flag_e
+        )
+        SELECT v.run_id, v.basin_version_id, v.river_network_version_id, v.river_segment_id,
+               v.valid_time, v.lead_time_hours, v.variable, v.value, v.unit, v.quality_flag,
+               h.run_key, bv.basin_version_key, rnv.river_network_version_key, rs.river_segment_key,
+               v.variable::hydro.river_variable,
+               v.unit::hydro.river_unit,
+               v.quality_flag::hydro.river_quality_flag
+        FROM (VALUES %s) AS v (
+            run_id, basin_version_id, river_network_version_id, river_segment_id,
+            valid_time, lead_time_hours, variable, value, unit, quality_flag
+        )
+        JOIN hydro.hydro_run h ON h.run_id = v.run_id
+        JOIN core.basin_version bv ON bv.basin_version_id = v.basin_version_id
+        JOIN core.river_network_version rnv
+          ON rnv.river_network_version_id = v.river_network_version_id
+        JOIN core.river_segment rs
+          ON rs.river_network_version_id = v.river_network_version_id
+         AND rs.river_segment_id = v.river_segment_id
+        """,
+        rows,
+        page_size=max(len(rows), 1),
+    )
+    if cursor.rowcount != len(rows):
+        raise AssertionError(
+            f"river_timeseries seed inserted {cursor.rowcount} of {len(rows)} rows; "
+            "an authority row (run / basin_version / river_network_version / river_segment) is missing"
+        )
+
+
 def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -> None:
     if object_root is not None:
         state_path = object_root / "states" / "it126_model" / "2026050300" / "state.cfg.ic"
@@ -298,23 +371,8 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     CYCLE_ID,
                 ),
             )
-            execute_values(
+            insert_river_timeseries_dual_written(
                 cursor,
-                """
-                INSERT INTO hydro.river_timeseries (
-                    run_id,
-                    basin_version_id,
-                    river_network_version_id,
-                    river_segment_id,
-                    valid_time,
-                    lead_time_hours,
-                    variable,
-                    value,
-                    unit,
-                    quality_flag
-                )
-                VALUES %s
-                """,
                 [
                     (FORECAST_RUN_ID, BASIN_VERSION_ID, RIVER_NETWORK_VERSION_ID, f"{ISSUE_126_PREFIX}_seg_inside",
                      VALID_TIME_1, 1, "q_down", 180.0, "m3/s", "ok"),
