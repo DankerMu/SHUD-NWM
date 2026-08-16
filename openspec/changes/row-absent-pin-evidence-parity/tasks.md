@@ -38,11 +38,15 @@
 ## 2. 测试（先红后绿；写入面口径构造，禁手搓与生产写入面不一致的 details）
 
 - [x] 2.1 矩阵收敛主锚：`test_same_stage_marker_target_staleness_residue_matrix`
-      两分歧格构造改为携带写入面口径 `target_*` 键（**防漂移双断言**：
-      键集与 `record_manual_repair` 写入面一致 + 键集对
-      `_job_is_unsubmitted_auto_retry_placeholder`/共享谓词的读取字段
-      闭合，D2 闭包不变式），期望 `(False, True)` → `(False, False)`
-      （修前红：gate 不读新键仍 `(False, True)`）。
+      两分歧格构造改为携带写入面**键 schema** 的 `target_*` 键
+      （**防漂移双断言**：键 schema 与 `record_manual_repair` 一致 +
+      键集对 `_job_is_unsubmitted_auto_retry_placeholder`/共享谓词的
+      读取字段闭合，D2 闭包不变式——证 schema 不证可产值），期望
+      `(False, True)` → `(False, False)`（修前红）。**如实标注
+      （round-2 复审 P2-3）**：`unsubmitted_placeholder` 格为写入面
+      含内真收敛；`repaired_flag_not_named_by_the_state` 格的
+      `target_repair_status` 为域外合同锚（两合同键写入面恒缺席，
+      §2 纪律显式例外，生产人群归 D4 + #1482）。
 - [x] 2.2 A-4 队列 stage **防御性合同锚**（fixture review P2-1 定性）：
       download / state_save_qc / publish 各一形「记录形状良构、
       `target_status ∈ 成功态`」→ row-absent refuse 与 row-present twin
@@ -53,7 +57,8 @@
       锚的对象是 gate 对记录的合同而非写入面可产形；写入后才 succeeded
       的真实人群归 2.5 披露锚 + D4 条款。
 - [x] 2.3 A-5 后缀几何：`_retry_1` 与 `..._retry_1_retry_2_retry_3` 两种
-      entity_id 在 A-1/A-2 + 记录携带形下同样收敛。
+      entity_id 在 A-1（写入面含内）与 A-2 合同锚形 + 记录携带形下
+      同样收敛（几何主张与谁写记录无关；A-2 格域外口径同 2.1 标注）。
 - [x] 2.4 C 成对用例：model-bearing `job_cycle_*` 目标 cross-stage
       （F5′ 形）与 same-stage（staleness 映射点名形）各一对——
       row-present 路由器 pin 与 row-absent 记录腿 pin 一致（修前

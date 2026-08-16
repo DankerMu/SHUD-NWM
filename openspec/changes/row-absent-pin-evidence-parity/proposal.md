@@ -17,8 +17,9 @@ compaction 使 pin gate 活域只剩提交阶段，该事实只存在于散文�
 - **方向裁定（issue 推荐采纳，design D1）**：沿用 #1306 的 `failed_stage`
   机制，把剩余 row-borne 证据搬进 marker 自己的记录——
   `file_orchestration_journal.record_manual_repair` 的事件 `details`
-  追加目标行写入时字段：`target_status` / `target_repair_status` /
-  `target_active_blocker` / `target_model_id` / `target_slurm_job_id`
+  追加目标行写入时字段 **8 键**：`target_status` / `target_repair_status` /
+  `target_active_blocker` / `target_model_id` / `target_slurm_job_id` /
+  `target_retry_count` / `target_manual_retry_marker` / `target_array_task_id`
   （键名避开 `stage`/`job_type` 两个 record-stage 消费键与
   `model_id` 这个 attribution 消费键，design D2）；
   `scheduler_state_identity_filter` retry-event 白名单同步放行。
@@ -39,7 +40,10 @@ compaction 使 pin gate 活域只剩提交阶段，该事实只存在于散文�
   details、不被采信）；spec 尾句按「journal 活域 = 提交阶段」限定并修正
   「keeps the disclosed id-token backstop」的不实括注。
 - 残留矩阵测试两格 `(False, True)` → `(False, False)` 收敛（红-绿协议：
-  由生产行为驱动，非测试改动）。
+  由生产行为驱动，非测试改动）。**收敛口径（round-1/2 复审改判）**：
+  `unsubmitted_placeholder` 格为写入面含内真收敛；repaired-flag 格为
+  gate 域外合同锚——两合同键（`target_repair_status`/`target_active_blocker`）
+  是投影期注解、当前写入面恒缺席，A-2 生产人群归 D4 永久限定 + #1482。
 - AC 中「`unresolvable-marker-evidence-equivalence` design.md Residues
   随之更新」按其归档冻结裁定（tasks.md:33-40）处置：**归档不回改**，
   最终裁定（哪些收口、哪些转永久限定）由本 change 的 design + 主 spec
@@ -68,7 +72,7 @@ compaction 使 pin gate 活域只剩提交阶段，该事实只存在于散文�
     测试；DB 路径 SQL retry service marker 属 legacy 形（无新字段）走
     backstop，如实记载。
   - security/auth、file IO、performance: not selected —— 无权限/IO/热
-    路径面（details 增 5 个标量键，evidence 体积可忽略）。
+    路径面（details 增 8 个标量键，evidence 体积可忽略）。
 
 ## Non-Goals
 
@@ -90,7 +94,7 @@ compaction 使 pin gate 活域只剩提交阶段，该事实只存在于散文�
 - `services/orchestrator/file_orchestration_journal.py`
   （`record_manual_repair` details 扩展；D 项测试锚只读参照 compaction）
 - `services/orchestrator/scheduler_state_identity_filter.py`
-  （retry-event details 白名单追加 5 键）
+  （retry-event details 白名单追加 8 键）
 - `tests/test_production_scheduler.py`（残留矩阵扩格与收敛、legacy
   backstop 合同、B 上限用例）
 - `tests/test_file_orchestration_journal.py`（写读全链路 + D 项锚）

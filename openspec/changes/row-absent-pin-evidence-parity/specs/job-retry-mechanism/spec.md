@@ -386,9 +386,11 @@ drive the retry decision it was written to request.
   WITHOUT the record keeps the previous delivered domain (failed-
   status targets that are neither unsubmitted auto-retry
   placeholders nor repaired-flagged, or targets a state mapping
-  names with an exact entity-id match); the only divergence class
-  left OUTSIDE both is the target's POST-WRITE fate beyond the two
-  state mappings, enumerated as a permanent limitation below
+  names with an exact entity-id match); the divergence classes
+  left OUTSIDE both are the target's POST-WRITE fate beyond the
+  two state mappings and the write-time shapes the record cannot
+  carry (the projection-annotation keys the current writer never
+  produces, #1482), enumerated as a permanent limitation below
 - **AND** the journal marker event written by a manual repair
   carries the failed job's stage as a `failed_stage` detail AND the
   target row's write-time shape as `target_status`,
@@ -397,7 +399,11 @@ drive the retry decision it was written to request.
   `target_manual_retry_marker`, and `target_array_task_id` details
   — a key set that closes over EVERY row field the shared
   live-failure predicate's transitive closure reads (the
-  placeholder predicate alone reads six), with key names chosen to
+  placeholder predicate alone reads six; `target_repair_status`
+  and `target_active_blocker` are gate-contract keys the CURRENT
+  writer never fills — those flags are projection-time annotations
+  absent from the persisted rows it reads, #1482), with key names
+  chosen to
   avoid the candidate-state record-stage reader's
   `stage`/`job_type` keys and the attribution reader's `model_id`
   key (the target's model is a different semantic axis from the

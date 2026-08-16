@@ -121,8 +121,10 @@ key would strip the evidence on exactly the path it serves」，新键沿用。
      映射对 model-bearing 不再先行拒绝（row-present 路由器就是这么做的）。
    - pseudo-row model-less → `_cycle_scope_marker_pins_attempt(state,
      pseudo_row)`——内嵌 `_job_row_is_live_failure(pseudo_row)`（共享
-     谓词，经 D2 闭包不变式其全部读取字段都有替身）→ A-1/A-2 与写入时
-     非 live 形收敛 by construction。
+     谓词，经 D2 闭包不变式其全部读取字段都有替身）→ A-1 与写入时
+     非 live 形收敛 by construction；A-2 仅在 gate 合同层收敛（两
+     合同键写入面恒缺席，round-1 复审 F1 改判，生产人群归 D4 +
+     #1482）。
    - state 级两条 staleness 映射精确点名（:312-315）**保留在
      model-less 腿**，覆盖写入后命运（D4）——refusal 与 pseudo-row
      refusal 是并集。
@@ -138,12 +140,14 @@ pseudo-row 的 cycle-scope 判定不走 `_job_is_cycle_scope_row`（它读
 
 **等价性主张（新 delivered domain）**：携带记录的 marker，其 row-absent
 判决与「同一目标行以记录快照的形状在场时」的 row-present 判决**同构**；
-唯一保留的分歧类 = 写入后命运（D4）。
+保留的分歧类 = 写入后命运 + 记录携带不了的写入时形（投影注解两键，
+#1482）——两类统一由 D4 条款枚举。
 
-### D4: 写入后命运（post-write fate）—— 永久限定条款
+### D4: 永久限定条款——写入后命运 + 记录携带不了的写入时形
 
-记录是写入时快照，twin 读的是当前行。写入后目标行状态变化、随后行被删
-的形，row-absent 侧依赖两条 state 映射：
+记录是写入时快照，twin 读的是当前行；另有一类（表末行）是写入**时**的
+投影注解、记录结构性携带不了（round-2 复审 P2-1 扩名）。row-absent 侧
+依赖两条 state 映射：
 
 | 写入后命运 | state 替身 | 终裁 |
 |---|---|---|
@@ -213,7 +217,8 @@ docstring 与 spec 双限定「token 是文本推断非记录证据，上限于 
 
 Governing invariant: row-absent pin 判决对「记录携带的写入时形状」与
 row-present 路由对「同形状在场行」的判决同构；分歧只允许存在于写入后
-命运且必须被 spec 永久限定条款逐形枚举。
+命运与记录携带不了的写入时形（投影注解两键，#1482），且必须被 spec
+永久限定条款逐形枚举。
 Source-of-truth identity/contract: 目标行形状证据 = marker 记录的
 `target_*` 键族（写入面 `record_manual_repair` 唯一产生，sanitizer
 白名单唯一放行面，pin gate 唯一消费）；行级 live-failure 域 =
