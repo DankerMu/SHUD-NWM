@@ -1024,8 +1024,9 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
             # distinguishable from "probed, determined absent"
             # (``unsafe_reason=None``); same doctrine as the sidecar tier's
             # ``store_unconfigured``.  ``_object_manifest_is_missing`` itself is
-            # left untouched: its raw-manifest repair-lane callers have different
-            # fail-open consequences and are out of scope.
+            # left untouched, and since #1393 routed the two raw-manifest repair
+            # legs through this probe as well it has exactly one caller left --
+            # the ``_object_manifest_is_missing`` line just below.
             return True, "object_store_root_unconfigured"
         try:
             return _object_manifest_is_missing(candidate, value), None
@@ -1343,7 +1344,15 @@ def _missing_raw_manifest_repair_evidence(
         return None
     if not _has_successful_download_stage(state):
         return None
-    if not _object_manifest_is_missing(candidate, str(manifest_uri)):
+    manifest_missing, probe_unsafe_reason = _artifact_uri_missing_status(candidate, str(manifest_uri))
+    # #1393: this leg used to call ``_object_manifest_is_missing`` bare, so an
+    # unconfigured store fail-OPENED ("present") and an ``ObjectStoreError`` from a
+    # symlinked/stale probe target escaped the whole scheduling pass.  Routing
+    # through the unified probe inherits both containments; a non-null unsafe
+    # reason means NO probe verdict was reached, so the leg ABSTAINS rather than
+    # claiming the candidate -- the ladder below still offers it the generic retry
+    # (transient) or the permanent/cancelled/forcing terminals it already had.
+    if probe_unsafe_reason is not None or not manifest_missing:
         return None
     failure = _failure_policy_payload(state)
     # #1313 D3: consulted AFTER the structural gates above (so healthy/running
@@ -1403,7 +1412,13 @@ def _repaired_raw_manifest_downstream_retry_evidence(
         return None
     if not _is_raw_manifest_object_uri(str(manifest_uri)):
         return None
-    if _object_manifest_is_missing(candidate, str(manifest_uri)):
+    manifest_missing, probe_unsafe_reason = _artifact_uri_missing_status(candidate, str(manifest_uri))
+    # #1393, mirror of the repair leg above: a non-null unsafe reason means the
+    # probe never ran, so this leg must NOT vouch for the manifest.  Claiming here
+    # was the sharper half of the defect -- an unconfigured store emitted
+    # ``manifest_exists: true`` plus ``automatic_retry_allowed: true`` from a probe
+    # that had never executed.  Abstain instead; the ladder decides.
+    if probe_unsafe_reason is not None or manifest_missing:
         return None
     repair_download = _latest_successful_download_stage(state)
     if repair_download is None:
