@@ -88,10 +88,16 @@ Project profile: NHMS
 6. **Known unknown-default codes accepted knowingly** (recorded, not
    remediated here): the production catch-all `SLURM_JOB_FAILED` is
    test-pinned OFF both classification lists
-   (tests/test_real_slurm_gateway.py:1029-1036), and several
-   classifier-recognized stage codes (e.g. `SHUD_FAILED`, minted
-   `{STAGE}_FAILED` codes) are likewise on neither list. Under spec.md's
-   literal rule they land in the `unknown_error_code_defaulted_non_transient`
+   (tests/test_real_slurm_gateway.py:1029-1036), and other codes on neither
+   list reach persisted `error_code` too: `SHUD_FAILED`
+   (classifier-recognized at retry.py:217, never minted) and the persisted
+   `{JOB_TYPE}_{STATUS}` mints (chain_forecast_execution.py,
+   chain_runtime_utils.py). (The reader-synthesized `{STAGE}_FAILED`
+   defaults in scheduler_state_failure.py live on the decision-5-exempt
+   sink-free path and produce NO warning traffic — they are out of this
+   accounting.) Under spec.md's
+   literal rule the persisted ones land in the
+   `unknown_error_code_defaulted_non_transient`
    branch and emit the "add to classification list" warning — for
    `SLURM_JOB_FAILED` that advice is unactionable by design. This is the
    spec-mandated behavior and this change implements it verbatim; tests pin
