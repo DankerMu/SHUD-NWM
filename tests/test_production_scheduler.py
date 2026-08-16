@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import errno
 import hashlib
+import inspect
 import json
 import os
 import pwd
@@ -7956,8 +7957,85 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
 
 
+def _marker_target_row_details(job: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``target_*`` details ``record_manual_repair`` writes for ``job``, key for key.
+
+    The key names are written out as literals on purpose: the matrix's anti-drift assertion
+    compares this independently written set against the production tuple, which is the whole
+    point of asserting it.  The omission rule is the writer's own -- ``None``/``""`` are absences
+    and are not written, while ``0`` and ``False`` are recorded VALUES and are.
+    """
+
+    recorded = {
+        "target_status": job.get("status"),
+        "target_repair_status": job.get("repair_status"),
+        "target_active_blocker": job.get("active_blocker"),
+        "target_model_id": job.get("model_id"),
+        "target_slurm_job_id": job.get("slurm_job_id"),
+        "target_retry_count": job.get("retry_count"),
+        "target_manual_retry_marker": job.get("manual_retry_marker"),
+        "target_array_task_id": job.get("array_task_id"),
+    }
+    return {key: value for key, value in recorded.items() if value not in (None, "")}
+
+
+#: A target row carrying a non-empty value in every recorded field, so the helper above yields
+#: its FULL key set for the writer-parity assertion.
+_FULLY_RECORDED_TARGET_JOB = {
+    "status": "failed",
+    "repair_status": "repaired",
+    "active_blocker": True,
+    "model_id": "model_a",
+    "slurm_job_id": "880123",
+    "retry_count": 2,
+    "manual_retry_marker": True,
+    "array_task_id": 3,
+}
+#: Row fields the live-failure closure reads that the record does not carry under that name.
+_MARKER_TARGET_RECORD_FIELDS_COVERED_ELSEWHERE = {
+    # The marker's own ``entity_id`` IS the target's job id; the reconstruction takes it from
+    # there rather than recording it twice.
+    "job_id",
+    # The two alternate spellings in ``_job_status_text``'s field chain.  The record mirrors the
+    # canonical ``status`` and the reconstruction writes exactly that key, so the chain resolves.
+    "pipeline_status",
+    "job_status",
+}
+_ROW_FIELD_READ_RE = re.compile(r"""job\.get\(\s*["']([a-z_]+)["']""")
+
+
+def _live_failure_closure_row_field_reads() -> set[str]:
+    """Every row field the shared live-failure predicate's transitive closure reads."""
+
+    return {
+        field
+        for function in (
+            scheduler_state_manual_retry_module._job_row_is_live_failure,
+            scheduler_state_manual_retry_module._job_status_text,
+            scheduler_state_rows_module._pipeline_job_is_repaired_stage_evidence,
+            scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder,
+        )
+        for field in _ROW_FIELD_READ_RE.findall(inspect.getsource(function))
+    }
+
+
+def _recorded_marker_details(job: Mapping[str, Any]) -> dict[str, Any]:
+    """``record_manual_repair``'s full target record for ``job``: stage evidence + ``target_*``."""
+
+    return {"failed_stage": job.get("stage"), **_marker_target_row_details(job)}
+
+
+@pytest.mark.parametrize("records_target_row", [False, True], ids=["legacy_marker", "record_borne_marker"])
 @pytest.mark.parametrize(
-    ("suffix", "target_overrides", "names_completed_stage_evidence", "expected_pins", "expected_attempts"),
+    (
+        "suffix",
+        "target_overrides",
+        "names_completed_stage_evidence",
+        "legacy_pins",
+        "legacy_attempts",
+        "record_pins",
+        "record_attempts",
+    ),
     [
         (
             "_retry_2",
@@ -7965,10 +8043,12 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
             False,
             (False, True),
             (1, 5),
+            (False, False),
+            (1, 1),
         ),
-        ("", {"repair_status": "repaired"}, False, (False, True), (1, 5)),
-        ("", {"status": "succeeded", "error_code": None}, True, (False, False), (1, 1)),
-        ("", {}, False, (True, True), (5, 5)),
+        ("", {"repair_status": "repaired"}, False, (False, True), (1, 5), (False, False), (1, 1)),
+        ("", {"status": "succeeded", "error_code": None}, True, (False, False), (1, 1), (False, False), (1, 1)),
+        ("", {}, False, (True, True), (5, 5), (True, True), (5, 5)),
     ],
     ids=[
         "unsubmitted_placeholder",
@@ -7981,8 +8061,11 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     suffix: str,
     target_overrides: dict[str, Any],
     names_completed_stage_evidence: bool,
-    expected_pins: tuple[bool, bool],
-    expected_attempts: tuple[int, int],
+    legacy_pins: tuple[bool, bool],
+    legacy_attempts: tuple[int, int],
+    record_pins: tuple[bool, bool],
+    record_attempts: tuple[int, int],
+    records_target_row: bool,
 ) -> None:
     """Executable ledger of WHICH twin refusals survive the row's deletion, and which do not.
 
@@ -8001,19 +8084,33 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     the row is still there) against the unresolvable arm (reached after the identity filter
     deletes it).
 
-    * ``unsubmitted_placeholder`` -- (False, True): the placeholder shape is a submission-time
-      ROW fact with no state-level projection.  Residue 1, disclosed not delivered.
-    * ``repaired_flag_not_named_by_the_state`` -- (False, True): ``repair_status: repaired`` on
-      the row with no ``repaired_stage_evidence`` mapping naming it.  Residue 1.
-    * ``non_failed_named_by_completed_stage_evidence`` -- (False, False): DELIVERED.  A
-      succeeded target the state's ``completed_stage_evidence`` names by ``job_id`` is refused
-      on both arms; before that conjunct existed the row-absent half pinned 5 here.
-    * ``plain_failed_control`` -- (True, True): the equivalence case.  It is what proves the
-      three rows above are decided by their own shape and not by the geometry.
+    The second axis is what the MARKER recorded (#1308).  ``legacy_marker`` is the marker shape
+    written before the target record existed -- and every marker the SQL retry service writes --
+    which must keep its verdicts bit for bit; ``record_borne_marker`` carries the target's
+    write-time record in ``record_manual_repair``'s own key set, which the gate rebuilds the row
+    from and decides with the resolved-row routing:
+
+    * ``unsubmitted_placeholder`` -- legacy (False, True), record (False, False): the placeholder
+      shape is a submission-time ROW fact with no state-level projection, so only the record can
+      carry it across the row's deletion.
+    * ``repaired_flag_not_named_by_the_state`` -- legacy (False, True), record (False, False):
+      ``repair_status: repaired`` on the row with no ``repaired_stage_evidence`` mapping naming
+      it; same story, the record carries the flag the state does not.
+    * ``non_failed_named_by_completed_stage_evidence`` -- (False, False) on both: a succeeded
+      target the state's ``completed_stage_evidence`` names by ``job_id`` is refused on both arms
+      already (#1292), and the record refuses it a second way (status outside the live-failure
+      domain).
+    * ``plain_failed_control`` -- (True, True) on both: the equivalence case.  It is what proves
+      the three rows above are decided by their own shape and not by the geometry, and on the
+      record axis it also proves a recorded ``retry_count`` of ``0`` is written rather than
+      dropped as an absence.
     """
 
     cohort_job = {**_unresolvable_cohort_master_job(stage="convert", suffix=suffix), **target_overrides}
     cohort_job_id = cohort_job["job_id"]
+    expected_pins = record_pins if records_target_row else legacy_pins
+    expected_attempts = record_attempts if records_target_row else legacy_attempts
+    marker_details = _recorded_marker_details(cohort_job) if records_target_row else {}
     candidate = _scheduler_candidate_fixture()
     state_overrides: dict[str, Any] = {}
     if names_completed_stage_evidence:
@@ -8033,16 +8130,16 @@ def test_same_stage_marker_target_staleness_residue_matrix(
             "restart_stage": "forcing",
             "restart_from_stage": "forcing",
         }
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(marker_details)
     state = _decision_path_state(
         candidate,
-        events=[
-            _decision_path_manual_retry_marker(
-                entity_id=cohort_job_id,
-                retry_count=5,
-                previous_job_id=cohort_job_id,
-                event_id=42,
-            )
-        ],
+        events=[marker],
         jobs=[_decision_path_own_forecast_job(), cohort_job],
         failed_stage="convert",
         **state_overrides,
@@ -8072,6 +8169,575 @@ def test_same_stage_marker_target_staleness_residue_matrix(
         scheduler_module._manual_retry_new_attempt(state, previous_attempt=0),
         scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0),
     ) == expected_attempts
+
+    # Everything below is asserted AFTER the verdict on purpose: a gate that stops honouring
+    # the record must fail on the verdict above, not on a premise about the record's plumbing.
+    # First, the record really did reach that gate through the real sanitizer -- or really is
+    # absent, on the legacy axis.
+    sanitized_details = decision_state["pipeline_events"][0]["details"]
+    assert {key: sanitized_details[key] for key in marker_details if key in sanitized_details} == marker_details
+    assert bool(set(sanitized_details) & set(scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS)) is (
+        records_target_row
+    )
+    # Then anti-drift, twice over.  First half: the fixture's hand-written key set is the
+    # production writer's key set, so these cells cannot describe a marker the writer never
+    # produces.  Second half: that key set closes over every row field the shared live-failure
+    # predicate's transitive closure reads -- the placeholder predicate's six included -- so a
+    # predicate that starts reading a new field breaks this test instead of silently making the
+    # reconstruction a different row than the one recorded.
+    assert set(_marker_target_row_details(_FULLY_RECORDED_TARGET_JOB)) == set(
+        scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS
+    )
+    recorded_row_fields = {
+        row_field for _detail_key, row_field in scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_FIELDS
+    }
+    assert _live_failure_closure_row_field_reads() <= (
+        recorded_row_fields | _MARKER_TARGET_RECORD_FIELDS_COVERED_ELSEWHERE
+    )
+
+
+@pytest.mark.parametrize("stage", ["download", "state_save_qc", "publish"])
+def test_record_borne_queue_stage_success_refuses_the_pin_with_no_state_mapping_to_read(stage: str) -> None:
+    """Defensive contract of the gate ON THE RECORD, for the stages no mapping can ever name.
+
+    ``chain_repository_state._completed_stage_success_evidence`` returns None unless
+    ``_stage_after`` resolves a successor, so a ``download`` / ``state_save_qc`` / ``publish``
+    target can never be named by the completed-stage mapping -- the state-level surface simply
+    does not exist for these three.  Before the record, that made them the disclosed over-pin
+    class; with the record the refusal comes from the recorded STATUS, no mapping needed.
+
+    Construction note, an explicit exception to this section's write-face discipline: a
+    ``succeeded`` target is OUTSIDE ``record_manual_repair``'s source domain (it only ever picks
+    a row in ``MANUAL_RETRY_SOURCE_STATUSES``), so this fixture is not a shape the writer
+    produces.  It anchors the gate's contract on a record it may be handed, not a claim about
+    the writer; the real population -- a target that succeeds AFTER the marker was written --
+    keeps pinning here and is pinned as a disclosed limitation by
+    ``test_post_write_fate_outside_the_state_mappings_still_pins_row_absent``.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage=stage),
+        "status": "succeeded",
+        "error_code": None,
+        "slurm_job_id": 880123,
+    }
+    cohort_job_id = cohort_job["job_id"]
+    legacy_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    recorded_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=43,
+    )
+    recorded_marker["details"].update(_recorded_marker_details(cohort_job))
+    state = _decision_path_state(
+        candidate,
+        events=[recorded_marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage=stage,
+    )
+    legacy_state = _decision_path_state(
+        candidate,
+        events=[legacy_marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage=stage,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    legacy_decision_state = _decision_path_filtered_state(candidate, legacy_state)
+
+    # Premise: this stage really is outside the completed-stage producer's domain, the state
+    # carries no such mapping, the row is gone from the decision state, and arm 2 is closed by
+    # the candidate's own live forecast failure -- so nothing but the record can refuse.
+    assert chain_repository_state_module._stage_after(stage) is None
+    assert "completed_stage_evidence" not in decision_state
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, False)
+    # The contrast that proves the record is what refuses: the same state and the same target,
+    # decided by a marker that recorded nothing, still pins on the id token.
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            legacy_decision_state, legacy_decision_state["pipeline_events"][0]
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize("suffix", _UNRESOLVABLE_SUFFIX_SHAPES)
+@pytest.mark.parametrize(
+    "target_overrides",
+    [
+        {"status": "submission_failed", "retry_count": 2, "slurm_job_id": None},
+        {"repair_status": "repaired"},
+    ],
+    ids=["unsubmitted_placeholder", "repaired_flag_not_named_by_the_state"],
+)
+def test_record_borne_staleness_converges_on_every_retry_suffix_geometry(
+    suffix: str,
+    target_overrides: dict[str, Any],
+) -> None:
+    """The record's verdict must not depend on how many retry layers the entity id stacks.
+
+    Production mints one ``_retry_1`` layer and, on the node-27 archive shape, three stacked
+    ones.  The placeholder predicate reads the id (its ``_retry_`` substring test) off the
+    reconstruction, so the geometry reaches the verdict and has to be pinned on both shapes.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {**_unresolvable_cohort_master_job(stage="convert", suffix=suffix), **target_overrides}
+    cohort_job_id = cohort_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(cohort_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="convert",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert cohort_job_id.endswith(suffix)
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, False)
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+
+
+def _model_bearing_cycle_grammar_job(*, stage: str, model_id: str = "model_a", **overrides: Any) -> dict[str, Any]:
+    """A ``job_cycle_*`` row that NAMES a model: cycle grammar, candidate scope.
+
+    ``_job_is_cycle_scope_row`` requires an empty ``model_id``, so this row is not cycle scope
+    and the router short-circuits it to an unconditional pin with the row present
+    (``_marker_event_pins_attempt`` :495-496).  Its entity id still carries the cycle grammar,
+    so with the row gone the marker lands on the row-absent arm all the same -- which is the
+    whole asymmetry #1308 closes.
+    """
+
+    job = {
+        "job_id": f"job_cycle_gfs_2026052106_{stage}",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "model_id": model_id,
+        "stage": stage,
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+@pytest.mark.parametrize(
+    ("target_stage", "state_overrides"),
+    [
+        ("convert", {}),
+        (
+            "forecast",
+            {
+                "repaired_stage_evidence": {
+                    "original_failed_job_id": "job_cycle_gfs_2026052106_forecast",
+                    "repairing_retry_job_id": "job_cycle_gfs_2026052106_forecast_retry_1",
+                }
+            },
+        ),
+    ],
+    ids=["cross_stage", "same_stage_named_by_the_repaired_mapping"],
+)
+def test_model_bearing_record_pins_on_both_arms(
+    target_stage: str,
+    state_overrides: dict[str, Any],
+) -> None:
+    """A model-bearing target pins with the row present; the record must pin without it too.
+
+    With the row present the router never reaches the cycle-scope rule: a row naming a model is
+    candidate scope, so the marker pins unconditionally -- cross-stage, and even where a state
+    staleness mapping names the target.  With the row gone (row-window truncation drops rows
+    while the event window keeps the marker) the row-absent arm used to apply cycle-scope logic
+    to it and silently discard the operator's pinned attempt: under-pin in the twin's own
+    direction.  The record closes it by routing model-bearing records exactly as the router
+    routes model-bearing rows, ahead of the staleness mappings.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage=target_stage)
+    target_job_id = target_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    row_present_state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), target_job],
+        failed_stage="forecast",
+        **state_overrides,
+    )
+    row_absent_state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job()],
+        failed_stage="forecast",
+        **state_overrides,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, row_absent_state)
+
+    # Premise: the row-present half really routes through the ROUTER's unconditional arm (the
+    # target is present and is not a cycle-scope row), the row-absent half really lost it, and
+    # arm 2 is closed throughout by the candidate's own live forecast failure -- so a pin can
+    # only come from the model-bearing short-circuit.
+    assert scheduler_state_manual_retry_module._job_is_cycle_scope_row(target_job) is False
+    assert target_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert decision_state["run_id"] == "fcst_gfs_2026052106_model_a"
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        row_present_state, row_present_state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (True, True)
+    assert scheduler_module._manual_retry_new_attempt(row_present_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    # Asserted after the verdict, so a gate that ignores the record fails on the verdict: the
+    # record did survive sanitization, and it names the candidate's own model.
+    assert decision_state["pipeline_events"][0]["details"]["target_model_id"] == "model_a"
+
+
+def test_record_naming_a_foreign_model_never_pins_row_absent() -> None:
+    """The model-bearing short-circuit is a fail-CLOSED conjunction, not a truthiness test.
+
+    A record naming some other model is exactly the shape #1288/#1302 defend against -- the row
+    was excluded from this candidate's state and only its event survived.  Pinning on any
+    non-empty ``target_model_id`` would hand this candidate another model's attempt number
+    through the back door the row exclusion just closed.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage="forecast", model_id="model_b")
+    target_job_id = target_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job()],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: same geometry as the pinning twin above -- the marker's stage IS the state's
+    # failed stage, so on the delivered backstop this marker pins and only the model comparison
+    # can refuse it.
+    assert decision_state["failed_stage"] == target_job["stage"]
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            decision_state, decision_state["pipeline_events"][0]
+        )
+        is False
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert decision_state["pipeline_events"][0]["details"]["target_model_id"] == "model_b"
+
+
+def test_model_bearing_record_pins_when_no_model_scoped_row_survives_the_window() -> None:
+    """The candidate's own model comes off its RUN ID, never off the rows that survived.
+
+    Row-window truncation is one of the two mechanisms that produce the row-absent arm, and it
+    can leave a candidate state with no ``model_id``-bearing job row at all -- which makes the
+    row-derived model set (``_candidate_model_ids``) EMPTY.  Deriving the comparison from that
+    set would make the model-bearing conjunction permanently false on exactly the states this
+    arm exists for, resurrecting the under-pin.  The run id's tail is the source instead, and it
+    is read as the WHOLE tail: production model ids carry underscores (``model_a``), so a
+    ``[^_]+`` capture would truncate it to ``model`` and never match.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage="convert")
+    target_job_id = target_job["job_id"]
+    # A model-LESS row on the candidate's own run id: candidate scope (so arm 2 stays closed)
+    # and contributing nothing to the row-derived model set.
+    own_job = {
+        "job_id": "job_model_a_forecast",
+        "run_id": candidate.run_id,
+        "model_id": None,
+        "stage": "forecast",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:20:00Z",
+    }
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[own_job],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: no surviving row names any model, the marker's record names ``model_a``, the
+    # candidate's run id ends in ``model_a``, arm 2 is closed, and the marker's stage is NOT the
+    # state's failed stage -- so only the model-bearing short-circuit can pin.
+    assert scheduler_state_manual_retry_module._candidate_model_ids(decision_state) == set()
+    assert decision_state["run_id"].endswith("_model_a")
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+    assert decision_state["failed_stage"] != target_job["stage"]
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            decision_state, decision_state["pipeline_events"][0]
+        )
+        is True
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+@pytest.mark.parametrize(
+    ("stage", "state_overrides"),
+    [
+        (
+            "convert",
+            {
+                "completed_stage_evidence": {
+                    "status": "succeeded",
+                    "stage": "forcing",
+                    "job_type": "produce_forcing_array",
+                    "job_id": "job_cycle_gfs_2026052106_forcing_cohort_ff00ff00ff00_forcing",
+                    "restart_stage": "forecast",
+                    "restart_from_stage": "forecast",
+                }
+            },
+        ),
+        ("download", {}),
+    ],
+    ids=["winner_eviction", "queue_stage_with_no_producer"],
+)
+def test_post_write_fate_outside_the_state_mappings_still_pins_row_absent(
+    stage: str,
+    state_overrides: dict[str, Any],
+) -> None:
+    """Disclosure anchor: the record is a WRITE-TIME snapshot, so post-write fate can diverge.
+
+    Both shapes are the same story -- the target succeeded after the marker was written, and
+    the state carries no mapping that names it: in ``winner_eviction`` a later stage's success
+    took the single ``completed_stage_evidence`` slot
+    (``_best_completed_stage_success_evidence`` keeps one winner), and in
+    ``queue_stage_with_no_producer`` the producer can never name a ``download`` target at all.
+    The row-present twin reads the row as it is NOW and refuses; the row-absent arm reads the
+    record and pins.  This is the permanent limitation clause of the spec scenario
+    "Unresolvable cycle-grammar marker pins with marker-record evidence", pinned as current
+    behaviour rather than delivered parity -- closing it needs the completed-stage producer
+    widened, which is refused because that mapping also drives restart routing.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    write_time_job = _unresolvable_cohort_master_job(stage=stage)
+    cohort_job_id = write_time_job["job_id"]
+    current_job = {**write_time_job, "status": "succeeded", "error_code": None, "slurm_job_id": 880123}
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(write_time_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), current_job],
+        failed_stage=stage,
+        **state_overrides,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the record says ``failed`` while the row says ``succeeded``, and no state mapping
+    # names this target.
+    assert decision_state["pipeline_events"][0]["details"]["target_status"] == "failed"
+    assert current_job["status"] == "succeeded"
+    assert (
+        scheduler_state_manual_retry_module._state_completed_stage_evidence_names_job(
+            decision_state, cohort_job_id
+        )
+        is False
+    )
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, True)
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+def test_half_record_marker_decides_exactly_as_the_same_legacy_marker() -> None:
+    """A half record is not a record: it must fall back, bit for bit, to the legacy arm.
+
+    ``record_manual_repair`` still produces this shape whenever the target row carries no stage
+    -- the empty value is not written and the sanitizer passes no empties through -- so the
+    completeness gate is ``target_status`` AND ``failed_stage``, both present.  With only half
+    of it the gate cannot rebuild the row it claims to (no stage to compare, and a reconstruction
+    that answered the live-failure question without one would be a different rule), so the
+    marker decides through the delivered backstop, id token included, exactly as a marker that
+    recorded nothing at all.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage="convert", suffix="_retry_2"),
+        "status": "submission_failed",
+        "retry_count": 2,
+        "slurm_job_id": None,
+        "stage": None,
+    }
+    cohort_job_id = cohort_job["job_id"]
+
+    def _state_for(marker: dict[str, Any]) -> dict[str, Any]:
+        return _decision_path_filtered_state(
+            candidate,
+            _decision_path_state(
+                candidate,
+                events=[marker],
+                jobs=[_decision_path_own_forecast_job()],
+                failed_stage="convert",
+            ),
+        )
+
+    half_record_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    half_record_marker["details"].update(_recorded_marker_details(cohort_job))
+    legacy_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    half_record_state = _state_for(half_record_marker)
+    legacy_state = _state_for(legacy_marker)
+
+    # Premise: the record really is a HALF one -- the status half survived sanitization, the
+    # stage half was never written because the row carried no stage.
+    half_record_details = half_record_state["pipeline_events"][0]["details"]
+    assert half_record_details["target_status"] == "submission_failed"
+    assert "failed_stage" not in half_record_details
+
+    half_record_verdict = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        half_record_state, half_record_state["pipeline_events"][0]
+    )
+    legacy_verdict = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        legacy_state, legacy_state["pipeline_events"][0]
+    )
+
+    assert half_record_verdict == legacy_verdict is True
+    assert scheduler_module._manual_retry_new_attempt(
+        half_record_state, previous_attempt=0
+    ) == scheduler_module._manual_retry_new_attempt(legacy_state, previous_attempt=0) == 5
+
+
+def test_stage_less_legacy_marker_pins_on_an_id_token_the_target_row_never_carried() -> None:
+    """The token backstop's ceiling, pinned as accepted behaviour rather than closed.
+
+    The cohort master's id ends in the ``download`` token while the row's ``stage`` field says
+    ``convert`` -- production ids embed several stage tokens, so the two disagree routinely.  A
+    stage-less legacy marker has nothing but that text, so it pins a ``download`` repair here
+    where the twin, reading the row's stage FIELD, refuses.  The ceiling is capped to the legacy
+    marker set plus the half records the current writer still produces: every marker written
+    with a full record decides on the record instead.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage="download"),
+        "stage": "convert",
+    }
+    cohort_job_id = cohort_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the id token and the row's stage field really do disagree, the marker records
+    # neither, and arm 2 is closed by the candidate's own live failure.
+    assert cohort_job_id.endswith("_download")
+    assert cohort_job["stage"] == "convert"
+    assert "failed_stage" not in decision_state["pipeline_events"][0]["details"]
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, True)
 
 
 def test_completed_stage_named_succeeded_target_refuses_the_pin_with_and_without_its_row() -> None:

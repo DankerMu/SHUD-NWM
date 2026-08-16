@@ -18,6 +18,7 @@ from services.orchestrator import chain_repository_state as chain_repository_sta
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
+from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator.chain import SlurmClientError
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
@@ -33,6 +34,7 @@ from tests.test_production_scheduler import (
     FakeAdapter,
     _dt,
     _model,
+    _scheduler_candidate_fixture,
     _set_db_free_scheduler_env,
     _write_db_free_file_provider_fixtures,
     _write_db_free_raw_manifest_fixture,
@@ -3356,6 +3358,178 @@ def test_file_journal_manual_repair_marker_event_records_the_failed_stage(tmp_pa
     # The key name is load-bearing: ``details.stage`` is read by the candidate-state
     # record-stage reader, ``details.failed_stage`` is read by no record-stage consumer.
     assert "stage" not in event["details"]
+
+
+_MARKER_RECORD_CYCLE_TIME = _dt("2026-05-21T06:00:00Z")
+
+
+def _cohort_marker_journal(
+    journal_root: Path,
+    *,
+    stage: str = "download",
+    job_id: str | None = None,
+    status: str = "failed",
+    retry_count: int = 4,
+) -> FileOrchestrationJournalRepository:
+    """One cycle's journal: a cohort master at ``stage``, the candidate's own row, one marker.
+
+    The cohort master is model-less on the cycle run id -- the row a manual repair of a cycle
+    stage targets, and the row both row-absence mechanisms take away from the decision state.
+    Its timestamps are older than the candidate's own row on purpose, so a job window of one
+    truncates exactly it while the event window keeps its marker.  The marker is written by the
+    real ``record_manual_repair``, so its ``details`` are the production write face, not a
+    hand-built approximation of it.
+    """
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    cycle_stamp = format_cycle_time(_MARKER_RECORD_CYCLE_TIME)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": job_id or f"job_cycle_gfs_{cycle_stamp}_{stage}",
+            "run_id": f"cycle_gfs_{cycle_stamp}",
+            "cycle_id": cycle_id_for("gfs", _MARKER_RECORD_CYCLE_TIME),
+            "job_type": "download_source_cycle",
+            "model_id": None,
+            "stage": stage,
+            "status": status,
+            "error_code": "SLURM_TIMEOUT",
+            "retry_count": retry_count,
+            "idempotency_key": f"gfs:gfs_{cycle_stamp}:cohort:{stage}",
+            "created_at": "2026-05-21T06:00:00Z",
+            "updated_at": "2026-05-21T06:05:00Z",
+            "finished_at": "2026-05-21T06:05:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_model_a_forecast",
+            "run_id": f"fcst_gfs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("gfs", _MARKER_RECORD_CYCLE_TIME),
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "stage": "forecast",
+            "status": "pending",
+            "retry_count": 0,
+            "idempotency_key": f"gfs:gfs_{cycle_stamp}:basin_a:forecast",
+            "created_at": "2026-05-21T07:00:00Z",
+            "updated_at": "2026-05-21T07:10:00Z",
+        }
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    service.record_manual_repair(f"cycle_gfs_{cycle_stamp}", trusted_internal=True)
+    return repository
+
+
+@pytest.mark.parametrize(
+    ("job_id", "status", "retry_count", "expected_pin", "expected_attempt"),
+    [
+        (None, "failed", 4, True, 5),
+        ("job_cycle_gfs_2026052106_download_retry_2", "submission_failed", 2, False, 1),
+    ],
+    ids=["live_failure_record_pins", "unsubmitted_placeholder_record_refuses"],
+)
+def test_file_journal_manual_repair_target_record_decides_the_pin_end_to_end(
+    tmp_path: Path,
+    job_id: str | None,
+    status: str,
+    retry_count: int,
+    expected_pin: bool,
+    expected_attempt: int,
+) -> None:
+    """Write face to decision state, with no hand-built marker anywhere in between.
+
+    ``record_manual_repair`` writes the target's shape, the projection truncates the target row
+    out of the job window, the identity filter sanitizes the surviving event, and the pin gate
+    rebuilds the row from what is left.  Both cells share every input but the target row's own
+    shape: a live failure pins the operator's ``retry_count``, and a row that is really an
+    unsubmitted auto-retry placeholder (``submission_failed``, a ``_retry_<n>`` id, a positive
+    retry count, no Slurm binding) refuses it exactly as the row-present twin refuses that row --
+    the shape whose evidence used to die with the row.
+
+    The placeholder cell is a genuine write-face shape, not a constructed one:
+    ``submission_failed`` is in ``MANUAL_RETRY_SOURCE_STATUSES``, so the manual repair really
+    does select such a row as its target.
+    """
+
+    repository = _cohort_marker_journal(
+        tmp_path / "journal",
+        job_id=job_id,
+        status=status,
+        retry_count=retry_count,
+    )
+    target_job_id = job_id or "job_cycle_gfs_2026052106_download"
+    state = _candidate_state(repository, cycle_time=_MARKER_RECORD_CYCLE_TIME, job_limit=1)
+    assert state is not None
+    candidate = _scheduler_candidate_fixture()
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision_state = scheduler_module._candidate_state_decision_state(state, evidence)
+    marker_event = decision_state["pipeline_events"][0]
+    details = marker_event["details"]
+
+    # Premise: the target row really was truncated away, its marker really survived, and the
+    # record really came through the sanitizer intact.
+    assert target_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert marker_event["entity_id"] == target_job_id
+    assert details["target_status"] == status
+    assert details["target_retry_count"] == retry_count
+    # ``False`` is a recorded value, not an absence: the writer writes it and the sanitizer
+    # passes it through, which is what keeps a marker-flagged row out of the placeholder gate.
+    assert details["target_manual_retry_marker"] is False
+    # The pre-existing whitelist keys are untouched by the new ones.
+    assert details["failed_stage"] == "download"
+    assert details["retry_count"] == retry_count + 1
+    assert details["previous_job_id"] == target_job_id
+    assert details["trigger"] == "manual"
+    assert details["manual_retry_marker"] is True
+    assert details["prior_failure_reason"] == "SLURM_TIMEOUT"
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(decision_state, marker_event)
+        is expected_pin
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == expected_attempt
+
+
+@pytest.mark.parametrize(
+    ("stage", "keeps_details"),
+    [("parse", False), ("state_save_qc", False), ("publish", False), ("download", True)],
+)
+def test_file_journal_completion_stage_compaction_unadopts_the_cycle_marker(
+    tmp_path: Path,
+    stage: str,
+    keeps_details: bool,
+) -> None:
+    """The pin gate's journal-path live domain is the SUBMISSION stages, and this is why.
+
+    ``_compact_cycle_scope_event`` drops ``details`` wholesale from a model-less cycle-scope
+    event at a completion stage (``_CYCLE_SCOPE_COMPLETION_STAGES``: parse / state_save_qc /
+    publish), as an evidence-size guard.  A marker event without ``details`` fails
+    ``_manual_retry_marker_shape``, so it is never ADOPTED at all -- it does not fall back to
+    the id-token backstop, it stops being a marker.  Everything the marker recorded, stage
+    evidence and target record alike, goes with it.  The submission-stage control proves the
+    compaction is what does it rather than the fixture.
+    """
+
+    repository = _cohort_marker_journal(tmp_path / "journal", stage=stage)
+    state = _candidate_state(repository, cycle_time=_MARKER_RECORD_CYCLE_TIME)
+    assert state is not None
+    marker_event = next(
+        event for event in state["pipeline_events"] if event["entity_id"].startswith("job_cycle_")
+    )
+
+    assert stage in journal_module._CYCLE_SCOPE_COMPLETION_STAGES or keeps_details
+    assert bool(marker_event.get("details")) is keeps_details
+    assert (
+        scheduler_state_manual_retry_module._manual_retry_marker_shape(marker_event) is keeps_details
+    )
+    assert (
+        scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, marker_event)
+        is keeps_details
+    )
+    if keeps_details:
+        assert marker_event["details"]["failed_stage"] == stage
+        assert marker_event["details"]["target_status"] == "failed"
 
 
 def test_file_journal_manual_repair_marker_event_survives_terminal_stage_gating(
