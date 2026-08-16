@@ -648,14 +648,14 @@ def _missing_upstream_forecast_artifact_evidence(
         # DB-backed read is pinned off), so nothing an operator does CLEARS the
         # withheld reference.  Whether they can BYPASS the blocker is per call site:
         # manual retry (``scheduler_state_decision.py:269``) pre-empts the
-        # failure-state call sites (``:277``/``:355``), so a marker there flips the
-        # candidate to ``manual_retry_requested`` -- the blocker recurs on a renewed
-        # failure, but the operator is not stuck.  Only the completed-stage resume
-        # arm (``:237``, reachable solely with NO failure signal) runs before that
-        # return and stays blocked despite a marker; that arm has no operator path at
-        # all.  Naming the blocker truthfully is what this change delivers; a durable
-        # clearing mechanism depends on a copyback write side that does not exist yet
-        # and is tracked in issue #1464.
+        # failure-state call sites (``:277``/``:298``/``:355``), so a marker there
+        # flips the candidate to ``manual_retry_requested`` -- the blocker recurs on
+        # a renewed failure, but the operator is not stuck.  Only the completed-stage
+        # resume arm (``:237``, reachable solely with NO failure signal) runs before
+        # that return and stays blocked despite a marker; that arm has no operator
+        # path at all.  Naming the blocker truthfully is what this change delivers;
+        # a durable clearing mechanism depends on a copyback write side that does not
+        # exist yet and is tracked in issue #1464.
         if copyback_required:
             return (
                 _artifact_blocker_evidence(

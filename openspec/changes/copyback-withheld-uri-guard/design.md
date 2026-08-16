@@ -3,9 +3,9 @@
 ## Change surface
 
 Single function: `_missing_upstream_forecast_artifact_evidence` copyback leg,
-`services/orchestrator/scheduler_state_failure.py:618-677`. Helper
-`_is_withheld_uri_placeholder` (:977-985) already exists and is reused as-is.
-`_artifact_blocker_evidence` (:723) is reused unchanged (it already carries
+`services/orchestrator/scheduler_state_failure.py:618-682`. Helper
+`_is_withheld_uri_placeholder` (:982-990) already exists and is reused as-is.
+`_artifact_blocker_evidence` (:728) is reused unchanged (it already carries
 reason/error_code/artifact_type/artifact_uri and sets
 `stable_classifier=error_code`).
 
@@ -77,7 +77,7 @@ sibling forcing leg and against the repair predicate — both pinned by tests.
    about placeholders and the redaction boundary is never bypassed (same
    phrasing the spec already uses for the forcing leg).
 6. **Alias resolution is NOT re-scanned past a placeholder** (fixture review
-   F3): `_first_artifact_uri` (:1017-1023) returns the first non-empty value in
+   F3): `_first_artifact_uri` (:1022-1028) returns the first non-empty value in
    container-major priority order, and a placeholder is non-empty, so it wins
    the resolution and shadows any real reference recorded under a
    lower-priority key/container. That is the intended ruling: a placeholder
