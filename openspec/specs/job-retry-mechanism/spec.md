@@ -175,6 +175,24 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
 - **WHEN** the repository test suite runs
 - **THEN** a test SHALL read this requirement's non-transient code list from the spec text and assert that `OUT_OF_MEMORY` appears there, is a member of the orchestrator's non-transient classification set, and is absent from every transient classification surface (`TRANSIENT_ERROR_CODES` and the scheduler-state transient retry-reason set), so that a reopened spec-code drift on this code fails the suite rather than surviving to review
 
+#### Scenario: auto_retry_skipped payload rides the permanently_failed event
+
+- **WHEN** the guard blocks automatic retry for a non-transient or unknown error code and marks the job permanently failed
+- **THEN** the `auto_retry_skipped` payload is merged into the existing `permanently_failed` pipeline event's `details_json` (no separate event type), constructed by a single shared helper consumed by both the DB plane and the file-journal plane so the reason literals have exactly one source
+
+#### Scenario: the auto_retry_skipped key appears iff a recorded error code is classification-blocked
+
+- **WHEN** a job is marked permanently failed because its TRANSIENT error code exhausted the retry budget, or because it reached permanent failure with no recorded error code
+- **THEN** the `permanently_failed` event's `details_json` does NOT contain the `auto_retry_skipped` key — the key appears if and only if a recorded error code was blocked by classification; the keyless cases (no recorded code vs. retries exhausted) are distinguished from each other by the existing `failure.limit_exhausted` / `failure.reason_code` fields
+- **AND** a job with a NON-TRANSIENT recorded error code carries the key even when its attempt count also exceeds the retry limit (classification blocks first)
+
+#### Scenario: db-free scheduler plane disposition
+
+- **WHEN** the db-free scheduler plane handles a guard-blocked failure
+- **THEN** the portion flowing through `FileJournalRetryService` emits the payload via the file-journal sink
+- **AND** the pure-adjudication path (`scheduler_state_failure._failure_policy_payload`) remains sink-free per its `pipeline_event_writes_proven_absent` evidence contract and is NOT required to write pipeline events
+- **AND** the unknown-code warning obligation is likewise exempted on the pure-adjudication path (it is re-evaluated every scheduler pass with no append anchor; the single warning is emitted where the mark event lands, at the file-journal sink)
+
 ### Requirement: Max Retries Exhausted — Permanent Failure
 
 When all automatic retries are exhausted, the job MUST be marked as permanently failed and an alert triggered.
