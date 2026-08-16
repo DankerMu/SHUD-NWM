@@ -147,6 +147,13 @@ CONNECT_TIMEOUT_SEC = 10
 QUERY_TIMEOUT_MS = 30_000
 SENDMAIL_TIMEOUT_SEC = 60
 
+#: How much of a killed sendmail's stderr is folded into the recorded error.
+#: The SMTP shim's own session budget (``SESSION_BUDGET_SEC``, 45 s) normally
+#: fires first and exits 69 with its stage, so this wall is the fallback for a
+#: shim that itself hung — the tail is whatever attribution it managed to print
+#: before the SIGKILL, and the receipt is a JSON line, not a log dump.
+SENDMAIL_STDERR_TAIL_CHARS = 500
+
 #: Return code recorded when the mail chain itself fails before/around the
 #: sendmail process (message build, encode, an unexpected runner error).
 #: ``EX_SOFTWARE`` from sysexits, chosen for its meaning ("internal software
@@ -933,7 +940,15 @@ def default_sendmail_runner(argv: list[str], message: str) -> SendResult:
     except OSError as error:
         return SendResult(returncode=127, error=f"sendmail invocation failed: {error}")
     except subprocess.TimeoutExpired as error:
-        return SendResult(returncode=124, error=f"sendmail timed out: {error}")
+        # ``capture_output`` populates ``error.stderr`` (bytes, or None when the
+        # child printed nothing). Whatever the shim wrote before being killed —
+        # typically its ``SMTP-FAILED stage=...`` line — is the only stage
+        # attribution this path can ever carry, and it used to be dropped.
+        tail = (error.stderr or b"").decode("utf-8", "replace").strip()
+        timed_out = f"sendmail timed out: {error}"
+        if tail:
+            timed_out = f"{timed_out} | sendmail stderr: {tail[-SENDMAIL_STDERR_TAIL_CHARS:]}"
+        return SendResult(returncode=124, error=timed_out)
     except Exception as error:  # noqa: BLE001 - whole-class containment, see docstring
         return SendResult(
             returncode=SEND_INTERNAL_FAILURE_RC,

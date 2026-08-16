@@ -20,20 +20,26 @@ artifacts instead of dying in the pipe.
 Config is environment-only (``NHMS_SMTP_HOST`` / ``PORT`` / ``USER`` /
 ``PASS``); credentials are never accepted on argv, and ``NHMS_SMTP_PASS`` is
 never interpolated into any output on any path — ``login()`` is its only
-reader.
+reader. The whole session is additionally bounded by ``SESSION_BUDGET_SEC``
+(45 s, overridable with ``NHMS_SMTP_SESSION_BUDGET_SEC``) — see
+``_SessionBudget`` for why a per-operation socket timeout is not a bound.
 
-Exit codes: 0 accepted · 64 usage/config · 69 delivery failure ·
-70 contained internal failure (whole-class, never a traceback — the lane
-parses stderr, and a traceback on a monitoring lane is a silent monitor).
+Exit codes: 0 accepted · 64 usage/config · 69 delivery failure (including
+session-budget expiry) · 70 contained internal failure (whole-class, never a
+traceback — the lane parses stderr, and a traceback on a monitoring lane is a
+silent monitor).
 """
 
 from __future__ import annotations
 
 import email.policy
+import math
 import os
+import signal
 import smtplib
 import ssl
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -43,6 +49,14 @@ from typing import Any
 DEFAULT_HOST = "smtp.163.com"
 DEFAULT_PORT = 465
 SMTP_TIMEOUT_SEC = 30.0
+
+#: Wall-clock ceiling for the whole SMTP session, kept strictly below the
+#: lane's ``SENDMAIL_TIMEOUT_SEC = 60`` SIGKILL wall in
+#: ``scripts/node27_frontier_stall_alert.py`` so the shim always reports its own
+#: stage instead of dying anonymously as rc=124. Overridable per deployment
+#: with ``NHMS_SMTP_SESSION_BUDGET_SEC`` — that env var is the single point
+#: where the two constants are re-aligned; a test pins the margin.
+SESSION_BUDGET_SEC = 45.0
 
 EXIT_OK = 0
 EXIT_USAGE = 64
@@ -57,6 +71,90 @@ _SEVEN_BIT_CTES = frozenset({"base64", "quoted-printable"})
 
 class _UsageError(Exception):
     """Bad argv / bad env / no recipients — nothing was connected to."""
+
+
+class _SessionBudgetExceeded(Exception):
+    """The session budget expired. Deliberately NOT an ``OSError`` subclass:
+    the stage ladder's ``except OSError`` arms would swallow it and report the
+    expiry as an ordinary per-stage failure, losing ``reason=session-budget``.
+    Carries its budget so the containment net in ``main`` can print the same
+    structured line without re-deriving stage/host."""
+
+    def __init__(self, budget: _SessionBudget) -> None:
+        super().__init__(f"session budget {budget.seconds:g}s exceeded at stage {budget.stage}")
+        self.budget = budget
+
+
+class _SessionBudget:
+    """One-shot ``SIGALRM`` deadline for the entire session (issue #1375).
+
+    ``SMTP_TIMEOUT_SEC`` is PER OPERATION: every blocking read restarts it, so a
+    session with its ~8 round trips can legitimately run 8×30 s, and a peer that
+    dribbles one byte every 29 s resets it forever. Only the lane's 60 s SIGKILL
+    then ends the session — anonymously, mid-DATA, leaving the operator an
+    rc=124 with no stage. ``setitimer(ITIMER_REAL)`` raises in-band from
+    whatever blocking call is in flight, so the ``stage`` this object carries is
+    still available to report.
+    """
+
+    def __init__(self, seconds: float, host: str) -> None:
+        self.seconds = seconds
+        self.host = host
+        self.stage = "connect"
+        self.tripped = False
+        self._started = time.monotonic()
+        self._previous: Any = None
+        self._armed = False
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    def remaining(self) -> float:
+        return self.seconds - self.elapsed()
+
+    def failure_line(self) -> str:
+        return (
+            f"SMTP-FAILED stage={self.stage} host={self.host} reason=session-budget"
+            f" elapsed={self.elapsed():.3f}s budget={self.seconds:g}s"
+        )
+
+    def arm(self) -> None:
+        """Best effort. ``signal.signal`` raises ``ValueError`` off the main
+        thread; degrade to the per-operation cap alone rather than crashing, and
+        stay silent about it — the lane logs this stderr verbatim, so a warning
+        line here would be indistinguishable from an SMTP evidence line."""
+
+        try:
+            previous = signal.signal(signal.SIGALRM, self._fire)
+        except (ValueError, OSError):
+            return
+        self._previous = previous
+        try:
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        except (ValueError, OSError):
+            signal.signal(signal.SIGALRM, previous)
+            return
+        self._armed = True
+
+    def _fire(self, _signum: int, _frame: Any) -> None:
+        self.tripped = True
+        raise _SessionBudgetExceeded(self)
+
+    def disarm(self) -> None:
+        """Stop the timer BEFORE touching the handler, and step through
+        ``SIG_IGN`` on the way back: restoring ``SIG_DFL`` while the timer
+        expires concurrently kills the process with 142 and zero stderr — the
+        one failure shape this whole mechanism exists to prevent."""
+
+        if not self._armed:
+            return
+        self._armed = False
+        previous = self._previous if self._previous is not None else signal.SIG_DFL
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGALRM, previous)
 
 
 def _oneline(value: object) -> str:
@@ -116,6 +214,23 @@ def _config(env: Mapping[str, str]) -> tuple[str, int, str, str]:
     if not (env.get("NHMS_SMTP_PASS") or ""):
         raise _UsageError("missing required environment variable NHMS_SMTP_PASS")
     return host, port, user, env["NHMS_SMTP_PASS"]
+
+
+def _budget_seconds(env: Mapping[str, str]) -> float:
+    """Validated like ``NHMS_SMTP_PORT``: a typo is a config error, not a
+    silent fallback to the default — an operator who set the budget to align it
+    with a changed lane wall must hear that the value did not take."""
+
+    raw = (env.get("NHMS_SMTP_SESSION_BUDGET_SEC") or "").strip()
+    if not raw:
+        return SESSION_BUDGET_SEC
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise _UsageError(f"NHMS_SMTP_SESSION_BUDGET_SEC is not a number: {raw!r}") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise _UsageError(f"NHMS_SMTP_SESSION_BUDGET_SEC must be a positive number of seconds: {raw!r}")
+    return seconds
 
 
 def _check_sender(message: EmailMessage, user: str) -> None:
@@ -239,9 +354,21 @@ def _recipients(message: EmailMessage) -> list[str]:
     return list(seen)
 
 
+def _report_wire_outcome(host: str, refused: Mapping[str, Any], recipients: Sequence[str]) -> int:
+    """What the server said, once ``send_message`` has returned."""
+
+    if refused:
+        detail = " ".join(f"{addr}={_oneline(code)}" for addr, code in sorted(refused.items()))
+        print(f"SMTP-PARTIAL-REFUSAL host={host} refused={len(refused)} {detail}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    print(f"SMTP-ACCEPTED host={host} code=250 recipients={len(recipients)}", file=sys.stderr)
+    return EXIT_OK
+
+
 def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_factory: SmtpFactory) -> int:
     _check_argv(argv)
     host, port, user, password = _config(env)
+    budget = _SessionBudget(_budget_seconds(env), host)
     message = parse_message(stdin_bytes)
     recipients = _recipients(message)
     if not recipients:
@@ -249,49 +376,72 @@ def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_f
     _check_sender(message, user)
     del message["Bcc"]  # blind carbon copy stays in the envelope, not on the wire
 
-    stage = "connect"
-    try:
-        smtp = smtp_factory(host, port, SMTP_TIMEOUT_SEC)
-    except OSError as error:  # smtplib.SMTPException subclasses OSError
-        print(f"SMTP-FAILED stage={stage} host={host} error={type(error).__name__}: {_oneline(error)}",
-              file=sys.stderr)
-        return EXIT_UNAVAILABLE
+    # ``None`` until ``send_message`` returns, the refused map afterwards. A
+    # budget expiry with this bound must NOT unsay the 250 that already came
+    # back over the wire — same invariant as the teardown's blanket except.
+    wire_outcome: dict[str, Any] | None = None
+    reported: int | None = None
+    budget.arm()  # after config: a usage error needs no alarm
     try:
         try:
-            stage = "ehlo"
-            # Explicit EHLO before AUTH: ``esmtp_features`` (8BITMIME) must be
-            # known before the body is prepared. ``ehlo()`` records its response
-            # even when it fails, which disables smtplib's own HELO fallback —
-            # so mirror that fallback here instead of losing it.
-            code, _greeting = smtp.ehlo()
-            if not 200 <= code <= 299:
-                smtp.helo()
-            stage = "login"
-            smtp.login(user, password)
-            stage = "send"
-            mail_options = _prepare_for_wire(message, eightbit_ok=bool(smtp.has_extn("8bitmime")))
-            # Envelope sender must be the authenticated account: 163 rejects a
-            # mismatch. The From HEADER is left exactly as the lane built it —
-            # operator config (NHMS_ALERT_EMAIL_FROM) owns making them agree,
-            # and ``_check_sender`` already refused the config where they don't.
-            refused = smtp.send_message(
-                message, from_addr=user, to_addrs=recipients, mail_options=mail_options
-            )
-        except OSError as error:
-            print(f"SMTP-FAILED stage={stage} host={host} error={type(error).__name__}: {_oneline(error)}",
+            # Per-op cap kept under the session budget. At the shipped values
+            # this is just SMTP_TIMEOUT_SEC (30 < 45) — the min() only bites
+            # when the env override sets a budget below the per-op timeout.
+            # SIGALRM, not this, is the enforcement.
+            smtp = smtp_factory(host, port, min(SMTP_TIMEOUT_SEC, budget.remaining()))
+        except OSError as error:  # smtplib.SMTPException subclasses OSError
+            print(f"SMTP-FAILED stage={budget.stage} host={host} error={type(error).__name__}: {_oneline(error)}",
                   file=sys.stderr)
             return EXIT_UNAVAILABLE
-        if refused:
-            detail = " ".join(f"{addr}={_oneline(code)}" for addr, code in sorted(refused.items()))
-            print(f"SMTP-PARTIAL-REFUSAL host={host} refused={len(refused)} {detail}", file=sys.stderr)
-            return EXIT_UNAVAILABLE
-        print(f"SMTP-ACCEPTED host={host} code=250 recipients={len(recipients)}", file=sys.stderr)
-        return EXIT_OK
-    finally:
         try:
-            smtp.quit()
-        except Exception:  # noqa: BLE001 - a botched teardown must not unsay a 250
-            pass
+            try:
+                budget.stage = "ehlo"
+                # Explicit EHLO before AUTH: ``esmtp_features`` (8BITMIME) must be
+                # known before the body is prepared. ``ehlo()`` records its response
+                # even when it fails, which disables smtplib's own HELO fallback —
+                # so mirror that fallback here instead of losing it.
+                code, _greeting = smtp.ehlo()
+                if not 200 <= code <= 299:
+                    smtp.helo()
+                budget.stage = "login"
+                smtp.login(user, password)
+                budget.stage = "send"
+                mail_options = _prepare_for_wire(message, eightbit_ok=bool(smtp.has_extn("8bitmime")))
+                # Envelope sender must be the authenticated account: 163 rejects a
+                # mismatch. The From HEADER is left exactly as the lane built it —
+                # operator config (NHMS_ALERT_EMAIL_FROM) owns making them agree,
+                # and ``_check_sender`` already refused the config where they don't.
+                wire_outcome = smtp.send_message(
+                    message, from_addr=user, to_addrs=recipients, mail_options=mail_options
+                )
+            except OSError as error:
+                print(f"SMTP-FAILED stage={budget.stage} host={host} error={type(error).__name__}: {_oneline(error)}",
+                      file=sys.stderr)
+                return EXIT_UNAVAILABLE
+            reported = _report_wire_outcome(host, wire_outcome, recipients)
+            return reported
+        finally:
+            try:
+                if budget.tripped:
+                    # The peer already proved it will not answer in time; QUIT
+                    # is another round trip against the same wall. Drop the
+                    # socket instead. The alarm stays armed either way, so a
+                    # hanging quit() on the normal path is bounded too — and
+                    # this blanket except is what keeps a printed 250 said.
+                    smtp.close()
+                else:
+                    smtp.quit()
+            except Exception:  # noqa: BLE001 - a botched teardown must not unsay a 250
+                pass
+    except _SessionBudgetExceeded:
+        if reported is not None:
+            return reported
+        if wire_outcome is not None:
+            return _report_wire_outcome(host, wire_outcome, recipients)
+        print(budget.failure_line(), file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    finally:
+        budget.disarm()
 
 
 def main(
@@ -307,6 +457,12 @@ def main(
     except _UsageError as error:
         print(f"SMTP-CONFIG-ERROR {_oneline(error)}", file=sys.stderr)
         return EXIT_USAGE
+    except _SessionBudgetExceeded as error:
+        # ``_run`` handles its own expiry; this covers the one window it cannot
+        # cover from the inside — the alarm firing inside its own disarm
+        # sequence. A budget expiry must never read as SMTP-INTERNAL-ERROR.
+        print(error.budget.failure_line(), file=sys.stderr)
+        return EXIT_UNAVAILABLE
     except Exception as error:  # noqa: BLE001 - whole-class containment, see module docstring
         print(f"SMTP-INTERNAL-ERROR {type(error).__name__}: {_oneline(error)}", file=sys.stderr)
         return EXIT_INTERNAL
