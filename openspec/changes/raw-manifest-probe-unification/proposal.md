@@ -33,8 +33,10 @@ pre-existing，PR #1390 fixture 显式 non-goal、代码注释 `:1027-1028` 写�
 - **显式定性（fixture review 两轮重裁终态：unsafe 时两腿弃权）**：
   `unsafe_reason` 非 null 时两条腿一律 `return None`——腿只有拿到真探
   针裁决（`unsafe is None`）才能 claim 候选。弃权后候选走既有决策梯子
-  （permanent guard / cancelled / forcing block / generic retry 原样），
-  瞬时失败保留自动重试。**这是对 issue 解决思路「降级为带 reason 的
+  （permanent guard / cancelled / forcing block / generic retry 原样）：
+  guard 不触发的瞬时失败保留自动重试；被 fail-open 遮蔽的 forecast-
+  restart / permanent-remedy-permitted 几何去遮蔽到既有 guard blocked
+  终态（见 design D2 终态列）。**这是对 issue 解决思路「降级为带 reason 的
   blocked/manual 通道」建议臂的具名偏离**，理由 = fixture round-2 P1 可
   用性实测：repair 腿在 unsafe 下剩余门极弱（任意非 source-cycle 失败 +
   raw uri + 有过成功 download + 非 permanent 即放行），fail-closed 人工

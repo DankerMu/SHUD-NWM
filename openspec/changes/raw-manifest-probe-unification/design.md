@@ -16,7 +16,11 @@
   rung `retry_failed_candidate` 今日自动重试）改判人工 blocked——一次
   NFS 抖动冻住整批；且 repair 腿门集是 downstream 腿门集的真子集、rung
   序 repair 在前，unsafe 下 repair 腿必然吞并 downstream 腿。弃权 = 「腿
-  只有拿到真探针裁决才能 claim 候选」的极限收窄臂，可用性零回归。
+  只有拿到真探针裁决才能 claim 候选」的极限收窄臂；对 restart 几何不触发
+  既有 guard 的瞬时子集可用性零回归，而被 fail-open 遮蔽的 forecast-
+  restart（forcing guard）与 permanent-remedy-permitted（`:371` guard）
+  几何则**去遮蔽**到各自既有 fail-closed blocked 终态——是既有 guard 终
+  态非新终态（round-1 C1 双反例实测 + repaired=False 对照组同终态）。
 
 ## D1 — 修法（弃权设计）
 
@@ -49,7 +53,7 @@
 |---|---|---|---|
 | `(False, None)`（真探针判存在） | `return None`（照旧） | 照旧发 `manifest_exists: true` + 自动重试（逐字节不变） | downstream 自动重试（不变） |
 | `(True, None)`（真探针判缺失） | 照旧发修复证据（fresh 全链 reingestion，逐字节不变） | `return None`（照旧） | repair 自动重试（不变） |
-| `(True, "object_store_root_unconfigured")` | **弃权 `return None`**——与今日逐字节同（今日 fail-open「存在」→ not missing → 本就 None） | **弃权 `return None`**——行为变化本体：不再发假 `manifest_exists: true` + 自动重试 | 既有梯子：permanent → `:371` blocked；cancelled → `:382`；forcing 几何 → `:390-400` blocked 带 reason（#1365）；瞬时 → `:398` 通用自动重试（**可用性零回归**） |
+| `(True, "object_store_root_unconfigured")` | **弃权 `return None`**——与今日逐字节同（今日 fail-open「存在」→ not missing → 本就 None） | **弃权 `return None`**——行为变化本体：不再发假 `manifest_exists: true` + 自动重试 | 既有梯子按 rung 序：permanent（含 remedy-permitted 码，C1(b)）→ `:371` blocked；cancelled → `:382`；forecast-restart/copyback 几何 → `:390-400` forcing blocked 带 unsafe reason（#1365，C1(a)）；guard 不触发的瞬时 → `:398` 通用自动重试。guard 命中格为**去遮蔽**（repaired=False 对照组 master 同终态），非新终态 |
 | `(True, "artifact_probe_error")`（ObjectStoreError 被探针层容器化） | 弃权 `return None`（异常不逃逸） | 同左 | 同上；邻座照常评估、整趟不中止（缺陷 2 修复本体） |
 | `(True, None)` 经探针层 `(OSError, ValueError)` 残余臂 | 视同「真探针判缺失」发修复——#1365 D4 既有裁决：rebuild 会 re-record 该引用（fixture review 2(b) 复核成立），具名沿用不新裁 | `return None` | repair 自动重试 |
 
@@ -67,8 +71,16 @@
 
 1. root 未配置 × downstream 几何：不再发 `manifest_exists: true`/
    `automatic_retry_allowed: true`；候选决策来自后续梯子（AC-1 行为面）。
-2. root 未配置 × 瞬时失败码（如 SLURM_TIMEOUT 预算内）：决策仍为自动重
-   试（`retry_failed_candidate`）——**round-2 P1 可用性回归锁**。
+2. root 未配置 × 瞬时失败码（如 SLURM_TIMEOUT 预算内）× guard 不触发的
+   convert-restart：决策仍为自动重试（`retry_failed_candidate`）——
+   **round-2 P1 可用性回归锁**。**去遮蔽钉格**（round-1 C1）：同几何 ×
+   forecast-restart → `blocked/missing_forcing_package_uri`；× INVALID_
+   MANIFEST（permanent-remedy-permitted）→ `blocked/permanent_failure_
+   guard`（两 unsafe reason 各钉）。限定（实测）：forcing guard 的
+   `artifact_guard.unsafe_reason` 仅在 root 未配置臂出现（进程级故障波
+   及 forcing key 自身探针）；probe-error 是单叶故障，forcing key 自身
+   正常裁决、`unsafe_reason: None`——弃权腿不留证据的 AC-1 具名限制在
+   此可见。
 3. root 未配置 × repair 几何（manifest 真缺失）：repair 腿弃权、无存在断
    言；D2 具名限制钉一格（AC-2 偏离臂）。
 4. `ObjectStoreError`（symlink 探针目标构造 `SafeFilesystemError`）×

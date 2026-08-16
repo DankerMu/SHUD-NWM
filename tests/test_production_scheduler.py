@@ -20519,6 +20519,16 @@ def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+#: ``job_type`` a production writer emits for the failed downstream job of each
+#: stage this geometry is built at.  The raw-manifest legs match the failed job on
+#: ``stage`` alone, but keeping the pair consistent stops the fixture from
+#: describing a state no writer can produce.
+_RAW_MANIFEST_FAILED_JOB_TYPES = {
+    "convert": "convert_canonical",
+    "forecast": "run_shud_forecast_array",
+}
+
+
 def _raw_manifest_geometry_state(
     candidate: Any,
     *,
@@ -20526,6 +20536,7 @@ def _raw_manifest_geometry_state(
     retry_count: int = 1,
     retry_limit: int = 3,
     repaired: bool = False,
+    failed_stage: str = "convert",
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """State matching the raw-manifest repair (or repaired-downstream) geometry.
@@ -20533,8 +20544,17 @@ def _raw_manifest_geometry_state(
     ``repaired=False`` is channel (a): a manifest probed missing after a
     previously successful download.  ``repaired=True`` is channel (b): a repair
     download that finished AFTER the failed downstream job.
+
+    ``failed_stage`` moves the failed downstream job (and the state's own
+    ``failed_stage``) between the stages the raw-manifest legs admit.  The default
+    ``"convert"`` reproduces the original hard-coded geometry byte for byte, so
+    every pre-existing caller is unchanged; ``"forecast"`` is the native-SHUD
+    restart geometry, which is the only one whose restart plan makes the ladder's
+    forcing-package rung applicable (#1393 round-1 C1: with a single stage pinned,
+    the abstention seam could not see the terminals that legitimately flip).
     """
 
+    failed_job_type = _RAW_MANIFEST_FAILED_JOB_TYPES[failed_stage]
     jobs: list[dict[str, Any]] = [
         {
             "job_id": "job_cycle_gfs_2026052106_download",
@@ -20546,12 +20566,12 @@ def _raw_manifest_geometry_state(
             "finished_at": "2026-05-21T06:02:00Z",
         },
         {
-            "job_id": "job_cycle_gfs_2026052106_convert",
+            "job_id": f"job_cycle_gfs_2026052106_{failed_stage}",
             "run_id": "cycle_gfs_2026052106",
             "cycle_id": candidate.cycle_id,
             "status": "failed",
-            "stage": "convert",
-            "job_type": "convert_canonical",
+            "stage": failed_stage,
+            "job_type": failed_job_type,
             "error_code": error_code,
             "retry_count": retry_count,
             "finished_at": "2026-05-21T06:03:00Z",
@@ -20582,7 +20602,7 @@ def _raw_manifest_geometry_state(
         },
         "pipeline_jobs": jobs,
         "pipeline_status": "failed",
-        "failed_stage": "convert",
+        "failed_stage": failed_stage,
         "error_code": error_code,
         "retry_count": retry_count,
         "retry_limit": retry_limit,
@@ -21378,6 +21398,42 @@ def _apply_raw_manifest_unsafe_geometry(
         raise AssertionError(f"unhandled unsafe reason: {unsafe_reason}")
 
 
+def _healthy_raw_manifest_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw manifest is a real, readable file.
+
+    The control half of the de-shadowing grid: with a genuine probe verdict of
+    "present" the repaired-downstream leg claims the candidate, which is exactly
+    the claim that used to be issued -- from a probe that never ran -- whenever the
+    store was unconfigured or the probe object unreadable.  Nothing is stubbed
+    here, so the shadow it demonstrates is the production one.
+    """
+
+    object_store_root = tmp_path / "healthy-object-store"
+    manifest_path = object_store_root / _RECORDED_RAW_MANIFEST_URI
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b'{"source_id": "gfs"}')
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    return object_store_root
+
+
+#: Whether the ladder's forcing rung can NAME the unsafe reason depends on which
+#: key was unsafe, and the two abstention reasons differ there.
+#: ``object_store_root_unconfigured`` is a property of the process -- no root at
+#: all -- so every key reports it, including the forcing package manifest the rung
+#: probes.  ``artifact_probe_error`` is a property of ONE leaf (the symlinked raw
+#: manifest), so the forcing rung's own key still reaches a genuine "probed,
+#: determined absent" verdict and the guard records ``unsafe_reason: None``.
+#:
+#: That NULL is the recorded AC-1 limitation made visible rather than a leak: an
+#: abstaining leg deposits no evidence, so the raw manifest's own reason never
+#: reaches the terminal.  Both arms still flip the terminal, which is the property
+#: under test.
+_FORCING_GUARD_UNSAFE_REASONS: dict[str, str | None] = {
+    "object_store_root_unconfigured": "object_store_root_unconfigured",
+    "artifact_probe_error": None,
+}
+
+
 def _assert_raw_manifest_geometry_is_unsafe(candidate: Any, unsafe_reason: str) -> None:
     assert scheduler_state_failure_module._artifact_uri_missing_status(
         candidate,
@@ -21462,6 +21518,110 @@ def test_raw_manifest_abstention_keeps_transient_failures_on_automatic_retry(
     assert decision.reason == "retry_failed_candidate"
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
     assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_unshadows_forcing_guard_for_forecast_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2's de-shadowing grid, first geometry (round-1 C1).  The availability
+    # lock above pins the stage whose terminal must NOT move; on its own it reads
+    # as "abstention changes nothing", which is false.  A ``forecast`` restart
+    # needs a forcing package, so the ladder's forcing rung applies to it -- and
+    # that rung sits BELOW the raw-manifest legs.  While a leg claims the
+    # candidate the rung never runs; once the leg abstains the rung runs and
+    # blocks fail-closed.  Losing that would mean the change silently converted a
+    # blocked-on-missing-forcing candidate into an automatic retry.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        failed_stage="forecast",
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    # Control: a real root with a real manifest -- the leg has a verdict, claims
+    # the candidate, and shadows the forcing rung.
+    _healthy_raw_manifest_root(monkeypatch, tmp_path)
+    shadowed = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert shadowed is not None
+    assert (shadowed.action, shadowed.reason) == ("retry", "retry_downstream_after_raw_repair")
+    assert shadowed.evidence["raw_manifest_repair"]["manifest_exists"] is True
+    assert shadowed.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+    # Same state, unsafe probe: the leg abstains and the rung it was shadowing
+    # takes the decision.
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert decision.evidence["restart_stage"] == "forecast"
+    # The leg deposited nothing: no existence claim survives into the terminal.
+    assert "raw_manifest_repair" not in decision.evidence
+    guard = decision.evidence["artifact_guard"]
+    assert guard["artifact_type"] == "forcing_package_uri"
+    assert guard["artifact_exists"] is False
+    assert guard["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert guard["unsafe_reason"] == _FORCING_GUARD_UNSAFE_REASONS[unsafe_reason]
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_unshadows_permanent_guard_for_remedy_permitted_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2's de-shadowing grid, second geometry (round-1 C1), and the behaviour
+    # face of seam 9.  ``INVALID_MANIFEST`` is permanent, but re-ingesting the raw
+    # input IS causal for it, so the raw-manifest legs are permitted to overwrite
+    # the classification (#1313).  That permission is the shadow: only a leg with
+    # a real probe verdict may use it, and when the probe never ran the #1313
+    # permanent guard must reassert itself -- an operator ticket, not a silent
+    # automatic retry of a malformed input.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="INVALID_MANIFEST",
+        repaired=True,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    # Control: with a verdict the leg exercises its remedy permission.
+    _healthy_raw_manifest_root(monkeypatch, tmp_path)
+    shadowed = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert shadowed is not None
+    assert (shadowed.action, shadowed.reason) == ("retry", "retry_downstream_after_raw_repair")
+    assert shadowed.evidence["failure"]["permanent"] is False
+    assert shadowed.evidence["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
+    assert shadowed.evidence["retry_policy"]["manual_retry_required"] is False
+
+    # Same state, unsafe probe: no verdict, so no permission to overwrite.
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert "raw_manifest_repair" not in decision.evidence
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["failure"]["reason_code"] == "INVALID_MANIFEST"
+    assert decision.evidence["failure"]["classifier"] == "malformed_input"
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
 def test_unconfigured_store_does_not_let_the_repair_leg_invent_a_verdict(

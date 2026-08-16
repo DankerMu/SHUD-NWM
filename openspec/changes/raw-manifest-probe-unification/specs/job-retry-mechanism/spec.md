@@ -12,10 +12,14 @@ unsafe reason is null. When the probe reports a non-null unsafe reason
 (no object-store root configured, or a contained probe fault), both legs
 SHALL abstain: neither leg asserts manifest existence or absence, grants
 an automatic retry, nor lets an exception escape; the candidate flows to
-the remaining decision ladder unchanged — a transient failure keeps its
-existing automatic retry, a permanent or cancelled failure keeps its
-existing blocked terminal — and the rest of the scheduling pass keeps
-running. When the probe determines presence or absence with a null
+the remaining decision ladder, which alone determines the terminal — the
+legs invent no manual channel of their own, a transient failure whose
+restart geometry engages no ladder guard keeps its automatic retry from
+the generic rung, and geometries the fail-open verdict previously
+shielded from the ladder's own guards (a native-SHUD restart stage whose
+forcing reference the artifact guard fail-closes, or a permanent but
+remedy-permitted failure code) take those guards' existing blocked
+terminals — and the rest of the scheduling pass keeps running. When the probe determines presence or absence with a null
 unsafe reason, both legs keep their existing behavior byte-for-byte,
 including the recorded residual where a reference the probe cannot
 resolve counts as absent for the repair channel (a re-ingestion
@@ -31,14 +35,31 @@ re-records it).
   `automatic_retry_allowed: true` is produced by the raw-manifest legs;
   the candidate's decision comes from the remaining ladder
 
-#### Scenario: Abstention does not convert transient failures to manual outcomes
+#### Scenario: Abstention does not convert guard-free transient failures to manual outcomes
 
 - **GIVEN** the same unconfigured-store geometry where the candidate's
-  failure classification is transient and within its retry budget
+  failure classification is transient and within its retry budget, and
+  its restart geometry engages no ladder guard of its own (a
+  convert-stage restart with no forcing or copyback requirement)
 - **WHEN** the scheduler decides the candidate's state
 - **THEN** the decision remains an automatic retry from the generic
-  retry rung — abstention never downgrades a previously automatic
-  recovery to a manual channel
+  retry rung — the legs' abstention itself invents no manual channel
+
+#### Scenario: Abstention un-shadows the ladder's own guards rather than overriding them
+
+- **GIVEN** the unconfigured-store geometry where the fail-open verdict
+  previously let the downstream leg claim the candidate, and either the
+  restart stage is the native-SHUD forecast stage (so the artifact guard
+  probes its forcing reference) or the failure code is permanent but
+  remedy-permitted
+- **WHEN** the scheduler decides the candidate's state
+- **THEN** the terminal is that guard's existing blocked outcome
+  (`missing_forcing_package_uri` — carrying the unsafe reason when the
+  fault is process-wide, an unconfigured root; a single-leaf probe fault
+  leaves the guard's own probe verdict intact — or
+  `permanent_failure_guard`) — the same terminal the identical candidate
+  already received whenever the legs' structural gates did not hold, not
+  a new terminal introduced by the legs
 
 #### Scenario: An unconfigured store does not let the repair leg invent a verdict
 
