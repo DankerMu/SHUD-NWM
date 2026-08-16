@@ -1947,17 +1947,39 @@ point.
   precondition, not routine operation — and it refuses unless it first observes
   the chunk's write counters frozen across an observation window.
 
-**Fail-closed stops.** A `stopped` receipt is not a completed run. Four causes,
+**Fail-closed stops.** A `stopped` receipt is not a completed run. Five causes,
 distinguished in `stop.stage`:
 
 - `shortfall` — the batch found more sentinel candidates than it could update.
   `stop.unmatched_rows` counts rows no authority row resolves (referential rot);
   `stop.unmappable_rows` counts text values outside the enums. Both are data
   decisions: escalate, do not widen the enum or invent an authority row to make
-  the runner proceed.
+  the runner proceed. **First check the double-zero case:** when
+  `stop.unmatched_rows == 0` *and* `stop.unmappable_rows == 0` (the reason text
+  says so explicitly), this is almost certainly not rot. The candidate count and
+  the UPDATE are two READ COMMITTED snapshots of one transaction, so a DELETE
+  that commits between them — the output parser's re-parse delete window on a
+  terminal chunk is the routine channel — inflates the shortfall while leaving
+  both diagnostics at zero, because they run after the UPDATE. Check that
+  re-parse window first; if it explains the gap, simply re-run the backfill (the
+  batch was rolled back and the cursor rewound, so it is retried intact). Only a
+  non-zero diagnostic count is a data-corruption escalation.
 - `duration_wall` — a batch exceeded the wall even after one halved-range retry.
   Lower `NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES` or raise
   `..._DURATION_WALL_MS`; do not loop the runner against a struggling database.
+- `lock_contention` — the batch UPDATE failed with SQLSTATE `55P03`
+  (lock_not_available) or `40P01` (deadlock_detected); the SQLSTATE is in
+  `stop.reason`. This is an overlap problem, not a batch-size problem: wait for
+  an ingest idle window, or run `--final-sweep` with ingest paused so the
+  quiescence gate vouches for the chunk before the batch starts. Do **not** lower
+  `..._BATCH_PAGES` or raise `..._DURATION_WALL_MS` — halving a range shortens
+  the scan, not the lock wait — and the runner deliberately does not retry.
+  Caveat on coverage: until `SET LOCAL lock_timeout` is adopted (a live-batch
+  behaviour change that needs its own node-27 dry-run), a pure lock *wait* still
+  runs out the statement timeout and is reported as `duration_wall`; only
+  deadlocks (`40P01`) reach this stage today. So a `duration_wall` stop on a
+  chunk that ingest may still be touching deserves one look at lock waits before
+  it is treated as slowness.
 - `ingest_not_quiescent` — `--final-sweep` was asked to touch the active chunk
   while its write counters were still moving. Nothing was written. Complete the
   ingest pause (step 1 of the cutover sequence in 4.6.3), confirm it, and rerun;

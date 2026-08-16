@@ -29,6 +29,7 @@ from tests.river_identity_backfill_fakes import (
     RUNNER_SOURCE_PATH,
     UNCOMPRESSED_GUARD,
     FakeConnection,
+    LockUnavailable,
     QueryCancelled,
     chunk,
     config,
@@ -377,6 +378,92 @@ def test_single_page_range_cannot_be_halved_and_stops_immediately() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. Lock contention: its own stage, and emphatically not a retry
+# ---------------------------------------------------------------------------
+
+
+def test_lock_contention_is_classified_on_sqlstate_only_never_on_the_message() -> None:
+    """``lc_messages`` is a server setting. A message match would classify on a
+    server running English and silently stop classifying on any other, which is
+    the failure mode of a check that looks like it works."""
+    assert backfill._is_lock_contention(LockUnavailable("55P03"))
+    assert backfill._is_lock_contention(LockUnavailable("40P01"))
+
+    class LockShapedTextOnly(Exception):
+        def __str__(self) -> str:
+            return "could not obtain lock on row in relation river_timeseries"
+
+    assert not backfill._is_lock_contention(LockShapedTextOnly())
+    # The duration wall keeps its own error class: aliasing the two is the
+    # misdiagnosis this stage exists to end.
+    assert not backfill._is_lock_contention(QueryCancelled())
+
+
+@pytest.mark.parametrize("pgcode", ["55P03", "40P01"])
+def test_lock_contention_stops_under_its_own_stage_without_a_halving_retry(pgcode: str) -> None:
+    """Halving a range shortens the scan, not the wait for a lock somebody else
+    holds, so the duration-wall remedy is wrong in both directions here: the
+    retry just queues for the same lock, and the advice sends the operator to
+    tune batch_pages against a problem that has nothing to do with batch size."""
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
+            ("UPDATE ONLY", lambda s, p: LockUnavailable(pgcode)),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill._run_one_batch_with_retry(connection, target, settings, 0, 100)
+
+    stop = excinfo.value
+    assert stop.stage == "lock_contention"
+    assert pgcode in stop.reason
+    assert "--final-sweep" in stop.reason
+    assert "Lowering batch_pages or raising the duration wall will not help" in stop.reason
+    # No halving: one UPDATE attempt over the WHOLE requested range, rolled back
+    # once, and the stop names that range rather than a half of it.
+    assert len(statements(connection, "UPDATE ONLY")) == 1
+    assert connection.rollbacks == 1
+    assert stop.detail["first_page"] == 0
+    assert stop.detail["last_page"] == 100
+
+
+def test_a_lock_taken_during_the_halved_retry_also_stops_as_lock_contention() -> None:
+    """The halved attempt is a second, independent batch: it can meet a lock the
+    first attempt did not. Classifying only the first attempt would report this
+    run as duration_wall on the strength of the attempt that was slow."""
+    target = chunk("c1", days_old=30)
+    attempts: list[int] = []
+
+    def update_handler(sql: str, params: Any) -> Any:
+        attempts.append(len(attempts))
+        return QueryCancelled() if len(attempts) == 1 else LockUnavailable("40P01")
+
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("SELECT count(*)", lambda s, p: {"fetchone": (3,)}),
+            ("UPDATE ONLY", update_handler),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill._run_one_batch_with_retry(connection, target, settings, 0, 100)
+
+    stop = excinfo.value
+    assert stop.stage == "lock_contention"
+    assert "40P01" in stop.reason
+    # The halved range is what hit the lock, and it is what the stop reports.
+    assert len(statements(connection, "UPDATE ONLY")) == 2
+    assert stop.detail["last_page"] == 50
+    assert connection.rollbacks == 2
+
+
+# ---------------------------------------------------------------------------
 # 4. Chunk-level skips: compressed and active
 # ---------------------------------------------------------------------------
 
@@ -589,6 +676,53 @@ def test_shortfall_stops_the_run_and_names_both_causes_separately() -> None:
     assert stop.detail["updated_rows"] == 91
     # The partial batch must NOT be recorded as progress.
     assert connection.commits == 0
+    # Named causes, so no concurrent-DELETE hedge (see the two tests below).
+    assert "concurrent DELETE" not in stop.reason
+
+
+def test_a_double_zero_shortfall_names_the_concurrent_delete_signature() -> None:
+    """A shortfall with both diagnostics at zero is not referential rot: the
+    diagnostic counts run AFTER the update, so rows a concurrent transaction
+    deleted between the candidate count and the UPDATE are already out of range
+    and leave both at zero. Routing that to the runbook's "escalate as data
+    corruption" spends an incident on the parser's ordinary re-parse window."""
+    target = chunk("c1", days_old=30, pages=4)
+    connection = _shortfall_connection(candidates=100, updated=91, unmatched=0, unmappable=0)
+    settings = config(Path("/tmp"), enforce=True)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    stop = excinfo.value
+    assert stop.stage == "shortfall"
+    assert "concurrent DELETE" in stop.reason
+    assert "re-parse delete window" in stop.reason
+    # Message only: the stop stays fail-closed, nothing commits, and the
+    # rolled-back range is rewound so re-entry retries it intact.
+    assert stop.detail["unmatched_rows"] == 0
+    assert stop.detail["unmappable_rows"] == 0
+    assert connection.commits == 0
+    assert connection.rollbacks >= 1
+    assert stop.descriptor is not None
+    assert stop.descriptor["next_page"] == 0
+
+
+def test_a_shortfall_with_a_non_zero_diagnostic_omits_the_race_signature() -> None:
+    """The signature is a discriminator, not a disclaimer. Appending it to a
+    stop that already counted unresolvable rows would talk an operator out of a
+    real escalation."""
+    target = chunk("c1", days_old=30, pages=4)
+    connection = _shortfall_connection(candidates=100, updated=91, unmatched=0, unmappable=9)
+    settings = config(Path("/tmp"), enforce=True)
+
+    with pytest.raises(backfill.BackfillStop) as excinfo:
+        backfill.process_chunk(connection, target, settings, cursor_budget=[10])
+
+    stop = excinfo.value
+    assert stop.stage == "shortfall"
+    assert stop.detail["unmappable_rows"] == 9
+    assert "concurrent DELETE" not in stop.reason
+    assert stop.reason.endswith("Refusing to record this as progress.")
 
 
 def test_a_stop_mid_chunk_keeps_the_committed_batches_accounting() -> None:

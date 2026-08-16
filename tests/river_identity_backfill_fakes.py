@@ -114,6 +114,19 @@ class QueryCancelled(Exception):
         return "canceling statement due to statement timeout"
 
 
+class LockUnavailable(Exception):
+    """Stand-in for psycopg2's LockNotAvailable (55P03) / DeadlockDetected (40P01).
+
+    The message is deliberately not lock-shaped: the runner classifies these on
+    SQLSTATE alone, and a fake that also spelled "lock" in its text could not
+    tell a pgcode match from a message match.
+    """
+
+    def __init__(self, pgcode: str) -> None:
+        super().__init__(f"SQLSTATE {pgcode}")
+        self.pgcode = pgcode
+
+
 class FakeCursor:
     """Cursor that answers by SQL-substring match and records every call."""
 
