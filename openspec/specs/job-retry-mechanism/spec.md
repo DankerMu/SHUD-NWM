@@ -394,12 +394,26 @@ that resolves to a cycle-scope pipeline job — a model-less job row
 whose `run_id` carries the `cycle_<source>_<stamp>` grammar (a
 model-less row with a candidate-run `fcst_...` id is NOT
 cycle-scope) — SHALL pin the derived attempt only when that cycle
-stage's failure is the repair target: the resolved job is still in
-a failed status AND either the state's failed stage equals the
+stage's failure is the repair target: the resolved job is still a
+LIVE failure AND either the state's failed stage equals the
 resolved job's stage or the candidate has no live candidate-scoped
-failure of its own. The live-failure domain matches the failure
-half of the module's blocker STATUS domain, not the narrower
-failed-pipeline status set alone — read from candidate-scope job
+failure of its own. The marker-target test and the candidate-scope
+scan read the SAME row-level live-failure domain (the row-absent
+arm for unresolvable marker entities reads no row status at all —
+it decides on state-level staleness evidence whose narrower
+surface makes it pin MORE than this row-present test on some
+shapes; that divergence is a disclosed residue tracked separately
+by #1308): a status in the failure half of the
+module's blocker STATUS domain — the failed-pipeline statuses plus
+`cancelled`, a `cancelled` row being a first-class manual-retry
+repair target on the marker side exactly as it is a live failure
+on the candidate side — excluding ACTIVE statuses, with repaired
+stage-evidence rows and unsubmitted auto-retry placeholders never
+counting; the marker-target test and the candidate-scope scan
+derive from one shared row predicate so the two sides cannot
+drift. The candidate-side live-failure domain matches that same
+failure half of the module's blocker STATUS domain, not the
+narrower failed-pipeline status set alone — read from candidate-scope job
 rows and the candidate's own hydro run only (the blocker scan's
 state-level `pipeline_status` and pipeline-event sources are not
 live-failure sources here: a top-level failed `pipeline_status`
@@ -420,7 +434,10 @@ placeholder gate and counts, exactly as the blocker scan treats
 it. In every other case — a candidate-scoped live failure
 (pipeline failed or cancelled, or hydro) where the failed stage
 does not name the resolved job's stage, or a marker whose resolved
-job is no longer failed (stale) — the derived
+job is no longer a live failure (stale — resolved/succeeded, still
+ACTIVE, repaired stage evidence, or an unsubmitted auto-retry
+placeholder; NOT a `cancelled` row, which stays a valid marker
+target) — the derived
 `new_attempt` falls back to
 the candidate's own `previous_attempt + 1`, and the
 attempt-derivation scan is terminal at the newest adopted marker:
@@ -550,9 +567,11 @@ drive the retry decision it was written to request.
 
 #### Scenario: Cycle-scope job marker pins only when its stage is the repair target
 
-- **WHEN** a manual retry event targets a still-failed cycle-scope
-  pipeline job (`model_id` empty and `run_id` in the
-  `cycle_<source>_<stamp>` grammar) and that cycle stage's failure
+- **WHEN** a manual retry event targets a cycle-scope pipeline job
+  (`model_id` empty and `run_id` in the `cycle_<source>_<stamp>`
+  grammar) that is still a live failure — a failed-pipeline or
+  `cancelled` status, not ACTIVE, and not a repaired stage-evidence
+  row or unsubmitted auto-retry placeholder — and that cycle stage's failure
   is what the candidate decision repairs — the failed stage matches
   the job's stage, or the candidate has no live candidate-scoped
   failure of its own (the production cohort-download shape)
@@ -560,8 +579,35 @@ drive the retry decision it was written to request.
   `retry_count`, so the operator's cycle-level manual retry stays
   effective and the minted retry identity does not reuse a consumed
   attempt number
+- **AND** a `cancelled` cycle-scope marker target pins exactly as a
+  failed one does: with the marker's `retry_count` 5 and the
+  candidate's `previous_attempt` 0, both the same-stage arm (failed
+  stage `download` beside the candidate's own failed forecast) and
+  the only-failure-left arm (no failed stage, own jobs all
+  succeeded) derive `new_attempt` 5, and the manual-retry payload
+  carries `new_attempt` 5; this holds even when the `cancelled`
+  target row is placeholder-SHAPED (a retry-suffixed id with no
+  Slurm id) — the placeholder gate is status-bound to
+  `pending`/`submission_failed`, so a cancelled or failed
+  placeholder-shaped row is outside the gate and stays a valid
+  pinning marker target, exactly as the candidate-side scan counts
+  it
+- **AND** the candidate-state projection SHALL produce the repaired
+  annotations (`repair_status`/`active_blocker`) and
+  `repaired_stage_evidence` over that same repair-target status
+  domain — the failed-pipeline statuses plus `cancelled` — so the
+  stale-target refusal above is producible for every status the
+  marker-target test reads: a `cancelled` row repaired by a later
+  succeeded retry carries the annotations exactly as a failed one
+  does, and every projection surface the widened domain makes
+  reachable for `cancelled` rows behaves exactly as its `failed`
+  twin already did (cancelled↔failed parity), including the
+  active-failure exposure of an unrepaired cancelled cycle row and
+  the evidence-selection paths a repaired cancelled row enters
 - **AND** when the candidate's own live failure is at a different
-  stage, or the marker's resolved job is no longer failed (stale),
+  stage, or the marker's resolved job is no longer a live failure
+  (stale — resolved/succeeded, ACTIVE, repaired stage evidence, or
+  an unsubmitted auto-retry placeholder),
   the derived `new_attempt` falls back to `previous_attempt + 1`;
   the pin refusal itself charges nothing, but when the candidate's
   own failed stage resolves to a canonical downstream stage the
