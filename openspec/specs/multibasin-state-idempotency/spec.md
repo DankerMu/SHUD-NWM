@@ -50,7 +50,7 @@ AND retry evidence records a classifier, reason code, attempt count, retry limit
 
 #### Scenario: transient array task retry
 
-WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, timeout, or out-of-memory within retry limits
+WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, or timeout within retry limits (`OUT_OF_MEMORY` is NOT transient: per `job-retry-mechanism`'s Retry Guard — Non-Transient Error Exclusion it is a configuration error that takes the permanent-failure path with automatic retry refused)
 THEN retry targets the failed task or candidate scope rather than rerunning successful sibling tasks
 AND persisted/evidence fields record the failure classifier, retry attempt, retry limit, stage/task identity, and reused successful sibling outputs.
 

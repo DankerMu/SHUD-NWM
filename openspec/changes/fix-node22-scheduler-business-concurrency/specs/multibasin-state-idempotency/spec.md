@@ -76,9 +76,9 @@ states.
 #### Scenario: transient array task retry
 
 WHEN an array task fails with a transient Slurm/runtime classification such as
-node failure, preemption, or timeout within retry limits (out-of-memory is NOT
+node failure, preemption, or timeout within retry limits (`OUT_OF_MEMORY` is NOT
 transient: per `job-retry-mechanism`'s Retry Guard — Non-Transient Error
-Exclusion, `OUT_OF_MEMORY` is a configuration error that takes the
+Exclusion it is a configuration error that takes the
 permanent-failure path with automatic retry refused)
 THEN retry targets the failed task or candidate scope rather than rerunning
 successful sibling tasks
