@@ -82,5 +82,6 @@
 - [x] 6.5 Zero modifications to existing test assertions beyond the two
       enumerated authorizations (4.6 extension, 4.8 stage-set update);
       57014 path byte-unchanged (diff inspection).
-- [ ] 6.6 Follow-up issue for `SET LOCAL lock_timeout` adoption +
-      node-27 dry-run filed and referenced in the PR body.
+- [x] 6.6 Follow-up issue for `SET LOCAL lock_timeout` adoption +
+      node-27 dry-run filed (#1476, label node-27) and referenced in the
+      PR body.
