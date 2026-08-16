@@ -406,6 +406,32 @@ class RetryService:
         self.store.session.refresh(retry_job)
         return retry_job
 
+    @staticmethod
+    def _auto_retry_skipped_details(error_code: str | None) -> dict | None:
+        """Return the auto_retry_skipped payload when a job is blocked by error
+        classification, or None when the job was stopped by retry-limit exhaustion.
+
+        Used by mark_permanently_failed to distinguish the two permanent-failure
+        paths so that audit consumers can filter on ``auto_retry_skipped`` without
+        having to reverse-engineer the ``failure`` sub-object.
+        """
+        if error_code in NON_TRANSIENT_ERROR_CODES:
+            return {"auto_retry_skipped": True, "reason": "non_transient_error", "error_code": error_code}
+        if error_code not in TRANSIENT_ERROR_CODES:
+            # Unknown error code — spec.md:171 requires a warning log here too.
+            import logging
+            logging.getLogger(__name__).warning(
+                "unknown error_code %r defaulted to non-transient — add to classification list",
+                error_code,
+            )
+            return {
+                "auto_retry_skipped": True,
+                "reason": "unknown_error_code_defaulted_non_transient",
+                "error_code": error_code,
+            }
+        # Transient error that exhausted its retry budget — not classification-blocked.
+        return None
+
     def mark_permanently_failed(self, job: PipelineJob) -> PipelineJob:
         if job.status == "permanently_failed":
             return job
@@ -421,18 +447,22 @@ class RetryService:
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
         self.store.session.flush()
+        details: dict = {
+            "final_retry_count": job.retry_count,
+            "last_error": last_error,
+            "failure": classification,
+            "automatic_retry_stopped": True,
+        }
+        skipped = self._auto_retry_skipped_details(last_error)
+        if skipped is not None:
+            details.update(skipped)
         self.store.insert_event(
             entity_type="pipeline_job",
             entity_id=job.job_id,
             event_type="permanently_failed",
             status_from=status_from,
             status_to="permanently_failed",
-            details={
-                "final_retry_count": job.retry_count,
-                "last_error": last_error,
-                "failure": classification,
-                "automatic_retry_stopped": True,
-            },
+            details=details,
         )
         return job
 
