@@ -128,9 +128,13 @@ Regression rows:
 
 ## Risks / Trade-offs
 
-- 触发面今天生产不可达（`record_manual_repair` 零非测试调用方），修复属
-  「#1186 接线前的预闭合」；风险集中在回归面——由 tasks 2.3 的护栏矩阵与
-  #1287 判别对覆盖。
+- 可达性分两层：**marker-pin 消费臂**（`_cycle_scope_marker_pins_attempt`
+  对 cycle-scope 行的钉值）受 #1186 接线门限——marker 写入方
+  `record_manual_repair` 今天零非测试调用方；**D4 的 producer 加宽随
+  merge 即生效**——cancelled 行经现网 cancel 路由（`POST /runs/{id}/cancel`）
+  与 RetryService 手动重试即可产出，其输出面变化见上文披露行，实测无
+  decision delta。风险集中在回归面——由 tasks 2.3 的护栏矩阵、2.4/2.6 的
+  真实投影与平价锚、#1287 判别对覆盖。
 - `_restarted_stage_family` 消费 `_job_is_live_candidate_scope_failure`：
   抽取重构若误动 cycle-scope 排除层，tasks 2.2（own jobs 全 succeeded 时
   臂 2 仍钉）即红。

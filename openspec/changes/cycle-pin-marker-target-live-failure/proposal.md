@@ -41,7 +41,8 @@ blocker 谓词均含 `cancelled`）。运维对 `cancelled` 的 cycle-scope 行�
 - Repair intensity: **high**（round-3 F1 升级：改动面扩展到共享投影
   producer `chain_source_cycle.py` / `chain_repository_state.py`，属
   shared helper behavior + evidence 链；Invariant Matrix 见 design.md。
-  初始 medium 记录保留于 git 历史；生产可达性仍受 #1186 门限）。
+  初始 medium 记录保留于 git 历史。可达性分层：marker-pin 消费臂受
+  #1186 门限，producer 加宽随 merge 即生效——见 design Risks）。
 - Risk packs:
   - state-machine/attempt-accounting: **selected** —— 钉值臂语义变更，判别
     测试锚定四个 failed 域状态 + cancelled + succeeded + 两个排除形。
