@@ -343,7 +343,7 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
     the two arms are one rule by construction:
 
     * a model-BEARING record short-circuits to an unconditional pin exactly as the router does
-      for a non-cycle-scope row (:495-496) — cross-stage and same-stage alike, and ahead of the
+      for a non-cycle-scope row (:608-609) — cross-stage and same-stage alike, and ahead of the
       two staleness mappings, because that is what the router does.  The comparison is
       fail-CLOSED and its source is deliberate: the candidate's own model comes off the TAIL of
       the state's ``run_id`` (``fcst_<source>_<stamp>_<model_id>``), never from the surviving job

@@ -8371,7 +8371,7 @@ def _model_bearing_cycle_grammar_job(*, stage: str, model_id: str = "model_a", *
 
     ``_job_is_cycle_scope_row`` requires an empty ``model_id``, so this row is not cycle scope
     and the router short-circuits it to an unconditional pin with the row present
-    (``_marker_event_pins_attempt`` :495-496).  Its entity id still carries the cycle grammar,
+    (``_marker_event_pins_attempt`` :608-609).  Its entity id still carries the cycle grammar,
     so with the row gone the marker lands on the row-absent arm all the same -- which is the
     whole asymmetry #1308 closes.
     """
