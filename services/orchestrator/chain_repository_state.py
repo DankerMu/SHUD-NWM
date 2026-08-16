@@ -12,6 +12,9 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+# Aliased, not restated: this module writes the same repaired annotations
+# ``chain_source_cycle`` does, so both producers must gate on ONE repair-target domain (#1294).
+REPAIRABLE_PIPELINE_STATUSES = chain_source_cycle.REPAIRABLE_PIPELINE_STATUSES
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 _FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc")
@@ -357,7 +360,7 @@ def _candidate_manual_stage_repair_state(
         failed_jobs = [
             job
             for job in chain
-            if str(job.get("status") or "") in FAILED_PIPELINE_STATUSES
+            if str(job.get("status") or "") in REPAIRABLE_PIPELINE_STATUSES
             or (
                 str(job.get("status") or "") == "pending"
                 and job.get("slurm_job_id") in (None, "")
@@ -377,7 +380,7 @@ def _candidate_manual_stage_repair_state(
             if _pipeline_job_truth_sort_key(job) > retry_truth:
                 continue
             status = str(job.get("status") or "")
-            if status in FAILED_PIPELINE_STATUSES or (
+            if status in REPAIRABLE_PIPELINE_STATUSES or (
                 status == "pending"
                 and job.get("slurm_job_id") in (None, "")
                 and _coerce_int(job.get("retry_count"), default=0) > 0
