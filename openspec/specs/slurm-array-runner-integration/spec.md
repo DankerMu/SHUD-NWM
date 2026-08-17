@@ -53,6 +53,14 @@ AND on a database-backed run that exercises the db-free-lane containment checks 
 AND an allowed root that remains merely missing after canonicalization (ENOENT) is never treated as unsafe and never escapes configuration construction or the storage preflight as an unhandled exception on any runtime
 AND blocker paths obey the runtime-root preflight's existing evidence-safe masking discipline.
 
+#### Scenario: unresolvable general storage root at configuration construction
+
+WHEN a database-backed runtime configures an object-store, published-artifact, log, runtime, or temp root — a root that is not a containment base for other configured paths — whose final path component cannot be canonically resolved for a reason other than absence (for example a symlink loop)
+THEN scheduler configuration construction never aborts: the configuration layer hands down the non-strict canonicalised value without adjudicating, producing the same canonical form and the same subsequent verdict across supported CPython versions
+AND when Slurm execution is enabled, for such roots consulted by the storage preflight (object-store, log, and runtime roots), the storage preflight records the corresponding unsafe-path storage preflight blocker and rejects submission before creating Slurm jobs
+AND a root that is merely missing (ENOENT) keeps the existing construction-time semantics — configuration construction performs no existence validation and the canonicalised value is identical to the previous non-strict resolution product
+AND on db-free runtimes the same inputs keep the existing graceful-degradation behavior unchanged.
+
 #### Scenario: safe template and environment export
 
 WHEN the scheduler submits through the real or mock Slurm gateway

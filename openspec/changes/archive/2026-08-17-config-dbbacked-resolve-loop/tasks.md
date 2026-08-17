@@ -43,7 +43,7 @@
 - [x] 3.4 issue Verification 步骤 4（≤3.12 臂缺陷消解）：隔离环境 3.11 下
       环路 `OBJECT_STORE_ROOT` 构造成功打印字段值，不再抛 RuntimeError
       （命令形态见 design D4，勿用裸 `uv run --python 3.11`）。
-- [ ] 3.5 node-27 oracle（3.11.15，≤3.12 臂真实运行面）：新增测试于
+- [x] 3.5 node-27 oracle（3.11.15，≤3.12 臂真实运行面）：新增测试于
       node-27 `uv run pytest -q tests/test_production_scheduler.py -k
       <新测试选择器>` 全绿（merge 后亦可，按 #1419 3.5 先例记录 receipt）。
 - [x] 3.6 PR body 裁定记录（issue 验收第 2 条 + fixture review P1-1/P2-4，
