@@ -3000,3 +3000,152 @@ def test_literal_path_scan_excludes_the_meta_guard_suite_that_lists_paths_as_dat
     probe.write_text(f"SAMPLE = {support_modules!r}\n", encoding="utf-8")
 
     assert set(_literal_path_consumer_index(suites=[str(probe)])) == set(support_modules)
+
+
+# The idiom classes the shared-tree guard below bars. `setattr` is deliberately
+# ABSENT from the call-name set: that set matches attribute callees too, and
+# `monkeypatch.setattr` is legitimate here — the bare-name set catches the
+# canonical `setattr(node, "parent", p)` without touching it.
+_TREE_LOCATION_FIXUP_CALLS = frozenset({"fix_missing_locations", "copy_location", "increment_lineno"})
+_TREE_GENERIC_MUTATOR_CALLS = frozenset({"setattr", "delattr"})
+_TREE_MUTATING_LIST_METHODS = frozenset({"append", "extend", "insert", "remove", "pop", "clear"})
+
+
+def _base_name(base: ast.expr) -> str | None:
+    """The trailing name of a class base (`Rewriter` / `ast.Rewriter`), or ``None``."""
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return None
+
+
+def _tree_mutation_offenders(tree: ast.Module) -> list[str]:
+    """``"line N: <construct>"`` for every tree-mutation idiom in ``tree``.
+
+    Six rule classes, matched on AST node classes only (a regex over source
+    would match the same words inside strings and comments):
+
+    (i) an ``Attribute`` in ``Store``/``Del`` context — ONE rule covering every
+    assignment form (plain, augmented, annotated, tuple/starred, ``for``,
+    ``with``, comprehension targets) plus attribute ``del``;
+    (ii) a ``Store``/``Del`` ``Subscript`` whose base is an ``Attribute``
+    (``tree.body[0] = x``); a ``Name`` base (``cache[key] = tree``) is not a
+    tree edit;
+    (iii) a class with a DIRECT base named ``*NodeTransformer``;
+    (iv) a call to ``fix_missing_locations``/``copy_location``/
+    ``increment_lineno``, bare or attribute callee;
+    (v) a BARE-name ``setattr``/``delattr`` call;
+    (vi) a mutating list-method call on an ``Attribute`` receiver
+    (``tree.body.append(x)``); a ``Name`` receiver (``offenders.append(x)``) is
+    ordinary local list building.
+
+    The scan is a tripwire, not a proof: an attribute-callee ``setattr`` alias,
+    mutation inside an imported helper, an INDIRECT ``NodeTransformer``
+    subclass and ``exec``-built code all evade it.
+    """
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del):
+            verb = "stores into" if isinstance(node.ctx, ast.Store) else "deletes"
+            offenders.append(f"line {node.lineno}: {verb} attribute .{node.attr}")
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Store | ast.Del)
+            and isinstance(node.value, ast.Attribute)
+        ):
+            verb = "stores into" if isinstance(node.ctx, ast.Store) else "deletes"
+            offenders.append(f"line {node.lineno}: {verb} subscript of attribute .{node.value.attr}")
+        elif isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                name = _base_name(base)
+                if name is not None and name.endswith("NodeTransformer"):
+                    offenders.append(f"line {node.lineno}: class {node.name} subclasses {name}")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id in _TREE_GENERIC_MUTATOR_CALLS:
+                    offenders.append(f"line {node.lineno}: calls bare {node.func.id}()")
+                elif node.func.id in _TREE_LOCATION_FIXUP_CALLS:
+                    offenders.append(f"line {node.lineno}: calls {node.func.id}()")
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in _TREE_LOCATION_FIXUP_CALLS:
+                    offenders.append(f"line {node.lineno}: calls {node.func.attr}()")
+                elif node.func.attr in _TREE_MUTATING_LIST_METHODS and isinstance(node.func.value, ast.Attribute):
+                    offenders.append(
+                        f"line {node.lineno}: calls .{node.func.attr}() on attribute .{node.func.value.attr}"
+                    )
+    return offenders
+
+
+def test_meta_guard_suite_never_mutates_the_shared_parse_tree() -> None:
+    """This suite's own source may not edit an AST in place.
+
+    ``_parse_tracked`` hands every consumer the SAME ``ast.Module`` instance on
+    a cache hit (archived change ``ci-selector-parse-memoization``, design
+    decision 4), and its safety rests entirely on "every consumer only reads".
+    One in-place edit — a ``node.parent`` annotation, a ``NodeTransformer``
+    rewrite, a ``fix_missing_locations`` fixup — would silently change what
+    every OTHER derivation in this file sees of that same file, with no other
+    test able to notice. Issue #1511 turns that one-time audit into this
+    standing assertion.
+
+    The scan is zero-tolerance and cannot tell an AST node from any other
+    object, so a legitimate non-AST attribute assignment reds it too: that is
+    intended friction in a meta-guard module — an explicit allowlist entry,
+    decided in review, not a silent edit.
+    """
+    offenders = _tree_mutation_offenders(_parse_tracked(SELECTOR_META_GUARD_TEST))
+
+    assert offenders == [], (
+        f"{SELECTOR_META_GUARD_TEST} mutates an AST tree, which every other derivation shares: {offenders}"
+    )
+
+
+# The offending code lives in string literals, which are `ast.Constant` in this
+# module's own tree — so these arms cannot trip the guard above. They are
+# standing tests, not one-shot evidence: a helper that rots into always-empty
+# reds here instead of passing an audit that only ever ran once.
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param("node.parent = x\n", "line 1: stores into attribute .parent", id="attribute-store"),
+        pytest.param(
+            "tree.body[0] = x\n",
+            "line 1: stores into subscript of attribute .body",
+            id="subscript-over-attribute-base",
+        ),
+        pytest.param(
+            "class Rewriter(ast.NodeTransformer):\n    pass\n",
+            "line 1: class Rewriter subclasses NodeTransformer",
+            id="node-transformer-base",
+        ),
+        pytest.param(
+            "ast.fix_missing_locations(tree)\n",
+            "line 1: calls fix_missing_locations()",
+            id="location-fixup-call",
+        ),
+        pytest.param('setattr(node, "parent", parent)\n', "line 1: calls bare setattr()", id="bare-setattr"),
+        pytest.param(
+            "tree.body.append(node)\n",
+            "line 1: calls .append() on attribute .body",
+            id="list-method-on-attribute-receiver",
+        ),
+    ],
+)
+def test_tree_mutation_offenders_names_each_barred_idiom(source: str, expected: str) -> None:
+    assert _tree_mutation_offenders(ast.parse(source)) == [expected]
+
+
+def test_tree_mutation_offenders_passes_the_legal_lookalikes() -> None:
+    # The three shapes this module actually contains and must keep: an
+    # attribute-callee `setattr` (`monkeypatch.setattr`), a subscript assign
+    # over a Name base (`_PARSE_CACHE[key] = tree`), and append-family calls on
+    # a local list. All three read like the barred idioms and none mutates a
+    # shared tree.
+    source = (
+        "monkeypatch.setattr(target, value)\n"
+        "cache[key] = tree\n"
+        "offenders.append(offender)\n"
+    )
+
+    assert _tree_mutation_offenders(ast.parse(source)) == []
