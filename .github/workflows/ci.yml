@@ -247,6 +247,25 @@ jobs:
         run: |
           if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then
             python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
+            if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then
+              echo "Selection collapsed to the selector meta-guard — also running collect-only smoke (import/syntax across suite)"
+              echo "::warning title=Unit Tests selection collapsed to the selector meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted test file, tests/ support module, or a selector-development diff); that suite ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
+              {
+                echo "## Unit Tests: selection collapsed to the selector meta-guard"
+                echo ""
+                echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."
+                echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"
+                echo "check across the whole suite) ran in addition, because a diff of this shape can"
+                echo "break cross-test imports that the targeted run never touches."
+              } >> "$GITHUB_STEP_SUMMARY"
+              # Redirect, never pipe: see the count == 0 branch below.
+              if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+                tail -n 5 collect-only.log
+              else
+                cat collect-only.log
+                exit 1
+              fi
+            fi
           else
             echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"
             echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"
