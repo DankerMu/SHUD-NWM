@@ -16,7 +16,13 @@
       fallback byte-for-byte.
 - [ ] 1.2 Every routed target verified existing + file-level
       non-gated at authoring time (the guard re-checks from the tree
-      thereafter).
+      thereafter). Runtime evidence: the issue's nine suites 549
+      tests / collect ~0.4-0.7 s; tests/__init__.py's three suites
+      measured 454 passed in 40.18 s local (fixture re-review) —
+      inside the lane budget. The tests/__init__.py rule entry
+      carries a comment explaining why a 0-byte package file has a
+      rule (`from tests import X` importers join its derived set by
+      the package-aliasing authority).
 
 ## 2. Guard
 
@@ -82,8 +88,8 @@
       naturally-green pins).
 - [ ] 5.3 `git ls-files '*.py' | xargs uv run ruff check` clean.
 - [ ] 5.4 `openspec validate ci-selector-support-module-importer-routing
-      --strict --no-interactive` passes; MODIFIED block difflib
-      clean apart from the surgical clause rescope.
+      --strict --no-interactive` passes; BOTH MODIFIED blocks difflib
+      clean apart from the surgical rescopes.
 - [ ] 5.5 Whole-tree selection diff vs master: delta = exactly the
       four routed support modules (list in PR body).
 - [ ] 5.6 Issue #1487 acceptance checkboxes each mapped to a test or

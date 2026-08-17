@@ -113,7 +113,7 @@ the other three (fixture-review P1-1 ruling).
    and the generated `CLAUDE.md`/`AGENTS.md` currently say the
    collapse fires for PRs that "只改 tests/ 支持模块如 conftest.py".
    Amend minimally: the collapse example remains true for conftest.py
-   (compensated, still collapsing) and 0-importer support files; add
+   (scope carve-out, still collapsing) and 0-importer support files; add
    the qualifier that importer-bearing support modules now select
    their importer suites instead. The three carriers MUST stay
    byte-identical on this line (existing repo invariant).

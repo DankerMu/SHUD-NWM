@@ -104,7 +104,10 @@ ci.yml's `check=True` renders as a misleading failure — and SHALL
 instead map to its routed non-gated importer suites plus the selector
 meta-guard suite when a support-module rule routes it (see
 "Support-module changes MUST select their non-gated importer
-suites"), or to exactly the selector meta-guard suite otherwise, so
+suites"), or to exactly the selector meta-guard suite for support
+modules with no derived non-gated importer suites and for the
+recorded carve-outs (a module with derived importers but no rule is
+the closure guard's red state, not a licensed selection), so
 the emitted selection
 always consists of collectible test files. The suite-vs-support
 classification is basename-shaped at any depth and MUST equal pytest's
@@ -137,7 +140,8 @@ the meta-guards exactly like a top-level one.
 - **THEN** the selector output never contains the support file itself
   — it is the routed importer suites plus
   `tests/test_select_ci_tests.py` for rule-routed support modules,
-  and exactly `tests/test_select_ci_tests.py` for the rest (including
+  and exactly `tests/test_select_ci_tests.py` for modules without
+  derived importers and for the recorded carve-outs (including
   `tests/conftest.py`) — and a tree-derived invariant test covers
   every current and future support module without hardcoding names
 
