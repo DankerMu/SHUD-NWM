@@ -49,11 +49,15 @@ negatives missing real mutation idioms — not blast radius).
    attribute-inclusive call-name list (iv) — this Name-only rule
    honors it;
    (vi) Call of a mutating list-method name (`append` / `extend` /
-   `insert` / `remove` / `pop` / `clear`) whose receiver is an
-   `Attribute` (e.g. `tree.body.append(x)`) — the module's 14
-   append-family calls all have `Name` receivers today; a future
-   legitimate attribute-receiver call reds the guard and forces an
-   explicit allowlist entry, same intended-friction stance as (i).
+   `insert` / `remove` / `pop` / `clear` / `sort` / `reverse` —
+   round-1 C1 completed the set: `dir(list) - dir(tuple)` non-dunder
+   minus non-mutating `copy` is exactly these eight, and the dunder
+   mutators route to rules (i)/(ii), so the enumeration IS the
+   general class the spec names) whose receiver is an `Attribute`
+   (e.g. `tree.body.append(x)`) — the module's append-family calls
+   all have `Name` receivers today; a future legitimate
+   attribute-receiver call reds the guard and forces an explicit
+   allowlist entry, same intended-friction stance as (i).
 2. **Guard test**: parse the suite's own source through
    `_parse_tracked(SELECTOR_META_GUARD_TEST)` (fixture-review Note-5:
    the module's existing single source for its own path, already
@@ -67,16 +71,24 @@ negatives missing real mutation idioms — not blast radius).
    (fixture-review P1-1: a tripwire helper that rots into
    always-empty must red something in-tree — otherwise the
    audit-in-PR-body failure mode this change exists to kill just
-   moves up one level). One parametrized red test over the six rule
-   classes (in-memory `ast.parse` of literal sources: the offending
+   moves up one level). One parametrized red test with PER-MEMBER
+   pinning (round-1 C3: the verifier's full kill matrix showed 7
+   helper sub-paths — bare-name fixup branch, `_base_name`'s Name
+   branch, both Del ctx arms, and the multi-member set entries —
+   survive coarse one-per-rule params; per-member params make every
+   deletable path kill ≥1 test): 20 params — the 6 rule-class
+   originals plus bare-name fixup, `copy_location`,
+   `increment_lineno`, attribute del, subscript del, bare-Name
+   `NodeTransformer` base, bare `delattr`, and the 7 remaining list
+   mutators (in-memory `ast.parse` of literal sources: the offending
    code lives inside string constants, which are `ast.Constant` in
-   the real module's own tree, so the arms cannot self-trip) each
-   asserting the offender line + construct is named; one clean-source
-   test (containing `monkeypatch.setattr(...)`, a Name-base
-   subscript assign, and a Name-receiver `append`) asserting zero
-   offenders — the no-false-positive pins for :2945, :499-style and
+   the real module's own tree, so the arms cannot self-trip) — each
+   asserting the offender line + construct; one clean-source test
+   (containing `monkeypatch.setattr(...)`, a Name-base subscript
+   assign, and a Name-receiver `append`) asserting zero offenders —
+   the no-false-positive pins for :2945, :499-style and
    append-family code. Final count: 123 existing + 3 new test
-   functions (guard + parametrized red arm + clean arm).
+   functions = 145 node ids (guard + 20 red params + clean arm).
 4. **No new module-level work at import time**: the guard parses
    inside the test body only; collect-only lanes pay nothing new.
 

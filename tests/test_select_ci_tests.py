@@ -3008,7 +3008,14 @@ def test_literal_path_scan_excludes_the_meta_guard_suite_that_lists_paths_as_dat
 # canonical `setattr(node, "parent", p)` without touching it.
 _TREE_LOCATION_FIXUP_CALLS = frozenset({"fix_missing_locations", "copy_location", "increment_lineno"})
 _TREE_GENERIC_MUTATOR_CALLS = frozenset({"setattr", "delattr"})
-_TREE_MUTATING_LIST_METHODS = frozenset({"append", "extend", "insert", "remove", "pop", "clear"})
+# Derived as a closure, not a hand-picked sample: the non-dunder names in
+# `set(dir(list)) - set(dir(tuple))` minus the one non-mutating member (`copy`)
+# is exactly these eight. The dunder mutators are covered by the other rules —
+# `+=` is an AugAssign (rule i), `[0]=` / `[:]=` / `del [0]` are Store/Del
+# subscripts (rule ii).
+_TREE_MUTATING_LIST_METHODS = frozenset(
+    {"append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse"}
+)
 
 
 def _base_name(base: ast.expr) -> str | None:
@@ -3108,27 +3115,75 @@ def test_meta_guard_suite_never_mutates_the_shared_parse_tree() -> None:
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
+        # (i) attribute Store / Del.
         pytest.param("node.parent = x\n", "line 1: stores into attribute .parent", id="attribute-store"),
+        pytest.param("del node.parent\n", "line 1: deletes attribute .parent", id="attribute-del"),
+        # (ii) Store / Del subscript over an attribute base.
         pytest.param(
             "tree.body[0] = x\n",
             "line 1: stores into subscript of attribute .body",
             id="subscript-over-attribute-base",
         ),
         pytest.param(
+            "del tree.body[0]\n",
+            "line 1: deletes subscript of attribute .body",
+            id="subscript-del-over-attribute-base",
+        ),
+        # (iii) both base spellings — `import ast` and `from ast import ...`.
+        pytest.param(
             "class Rewriter(ast.NodeTransformer):\n    pass\n",
             "line 1: class Rewriter subclasses NodeTransformer",
-            id="node-transformer-base",
+            id="node-transformer-attribute-base",
         ),
+        pytest.param(
+            "class Rewriter(NodeTransformer):\n    pass\n",
+            "line 1: class Rewriter subclasses NodeTransformer",
+            id="node-transformer-bare-name-base",
+        ),
+        # (iv) every fixup name, in both callee spellings.
         pytest.param(
             "ast.fix_missing_locations(tree)\n",
             "line 1: calls fix_missing_locations()",
-            id="location-fixup-call",
+            id="location-fixup-attribute-callee",
         ),
+        pytest.param(
+            "fix_missing_locations(tree)\n",
+            "line 1: calls fix_missing_locations()",
+            id="location-fixup-bare-callee",
+        ),
+        pytest.param("ast.copy_location(new, old)\n", "line 1: calls copy_location()", id="copy-location-call"),
+        pytest.param("ast.increment_lineno(tree)\n", "line 1: calls increment_lineno()", id="increment-lineno-call"),
+        # (v) both bare generic mutators.
         pytest.param('setattr(node, "parent", parent)\n', "line 1: calls bare setattr()", id="bare-setattr"),
+        pytest.param('delattr(node, "parent")\n', "line 1: calls bare delattr()", id="bare-delattr"),
+        # (vi) every member of the mutating list-method closure.
         pytest.param(
             "tree.body.append(node)\n",
             "line 1: calls .append() on attribute .body",
-            id="list-method-on-attribute-receiver",
+            id="list-method-append",
+        ),
+        pytest.param(
+            "tree.body.extend(nodes)\n",
+            "line 1: calls .extend() on attribute .body",
+            id="list-method-extend",
+        ),
+        pytest.param(
+            "tree.body.insert(0, node)\n",
+            "line 1: calls .insert() on attribute .body",
+            id="list-method-insert",
+        ),
+        pytest.param(
+            "tree.body.remove(node)\n",
+            "line 1: calls .remove() on attribute .body",
+            id="list-method-remove",
+        ),
+        pytest.param("tree.body.pop()\n", "line 1: calls .pop() on attribute .body", id="list-method-pop"),
+        pytest.param("tree.body.clear()\n", "line 1: calls .clear() on attribute .body", id="list-method-clear"),
+        pytest.param("tree.body.sort()\n", "line 1: calls .sort() on attribute .body", id="list-method-sort"),
+        pytest.param(
+            "tree.body.reverse()\n",
+            "line 1: calls .reverse() on attribute .body",
+            id="list-method-reverse",
         ),
     ],
 )
