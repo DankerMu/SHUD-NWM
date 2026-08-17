@@ -137,6 +137,14 @@ behavior invariant is structural).
    an idempotent same-content replace (verified then via difflib:
    archive must produce zero live-spec diff). Live-spec edits are
    orchestrator-owned, consistent with the openspec-edit boundary.
+   REBASE-FRESHNESS OBLIGATION (round-1 CAND-1, CONFIRMED): the
+   byte-identity is against a moving target — git reports NO
+   conflict when master edits the same requirement blocks (proven:
+   #1420 advanced both blocks mid-PR; merge-tree was clean while
+   archive would have deleted #1420's normative text). Therefore
+   the 3/3 difflib byte-identity check MUST be re-run after every
+   merge/rebase of master into this branch, and once more at chore
+   time before `openspec archive`.
 
 ## Must preserve
 
