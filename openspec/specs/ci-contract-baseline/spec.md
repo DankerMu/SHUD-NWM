@@ -208,6 +208,10 @@ forward-looking policy — it forecloses unbounded transitive growth
 for `real_backend`) while today's top-level-import fixed point equals
 the one-hop set, and both derivation and bound rationale live in the
 selector test suite, never as frozen lists.
+Modules under the nine audited directory paths are additionally
+governed by the requirement "Directory-rule importer gaps MUST be
+dispositioned as selections or reasoned exclusions", which owns the
+normative disposition rule for their direct-importer gaps.
 
 #### Scenario: production-module change selects its importer suites
 
@@ -365,4 +369,35 @@ The selector test suite's gating-marker exclusion set (`GATING_MARKER_NAMES`) SH
 - **WHEN** the derivation runs against today's conftest
 - **THEN** `real_disk` and `timescaledb_210` are not in the derived
   auto-skip set, and the suite asserts their absence explicitly
+
+### Requirement: Directory-rule importer gaps MUST be dispositioned as selections or reasoned exclusions
+
+For every tracked module under the nine audited directory paths (`workers/output_parser`, `workers/data_adapters`, `workers/forcing_producer`, `workers/shud_runtime`, `workers/model_registry`, `services/orchestrator`, `services/slurm_gateway`, `services/tile_publisher`, `services/production_closure` — including modules owned by earlier stop-rules rather than the directory rules themselves), a mechanized selector-suite guard SHALL derive the non-gated top-level importer suites the selector does not select for that module (node-id-only selection counts as a gap) and fail unless each such gap pair is either closed by a rule or present in an explicit exclusion table whose entries carry a reason token from {`fn-gated`, `redirect`, `edge-consumer`, `runtime-budget`} — where `fn-gated` denotes gating invisible to the file-level marker filter (function-level markers or environment opt-ins), established at disposition time by a recorded measurement in which the suite executed zero assertions, `edge-consumer` entries are guard-checked to be selected by at least one rule whose pattern does not match the excluded module, and `redirect` entries are guard-checked to still reach the suite via node-qualified ids in the module's own selection — and a stale exclusion (a pair that no longer derives as a gap) SHALL also fail the guard, so the audit that previously lived in a PR body can never rot silently again.
+
+#### Scenario: an undispositioned gap reds the suite
+
+- **WHEN** a non-gated test suite imports a directory-rule-owned
+  module at top level and neither a rule selects it nor an exclusion
+  entry names the pair
+- **THEN** the disposition guard fails, naming the module and suite
+
+#### Scenario: a stale exclusion reds the suite
+
+- **WHEN** an exclusion entry's pair no longer derives as a gap
+  (the rule now selects it, or the module/suite left the tree)
+- **THEN** the disposition guard fails, naming the stale entry
+
+#### Scenario: reasoned exclusions satisfy the guard by token and liveness
+
+- **WHEN** a gap pair is present in the exclusion table with a valid
+  reason token and the pair still derives as a gap (for
+  `edge-consumer`: and a rule not matching the module selects the
+  suite; for `redirect`: and the module's selection reaches the suite
+  via node-qualified ids)
+- **THEN** the guard passes for that pair — the guard checks token
+  validity, pair liveness, and the structural
+  `edge-consumer`/`redirect` conditions only; `fn-gated`/
+  `runtime-budget` truthfulness is anchored by the recorded
+  measurement table in the delivering PR, not re-executed by the
+  guard
 
