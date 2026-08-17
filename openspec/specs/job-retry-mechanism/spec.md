@@ -157,6 +157,7 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
 
 - **WHEN** a `pipeline_job` fails with one of the following error codes:
   - `SLURM_TIMEOUT` — Slurm walltime exceeded
+  - `SLURM_DEADLINE` — Slurm `--deadline` scheduling window closed before completion (transient scheduling failure)
   - `NODE_FAILURE` — compute node crashed or became unreachable
   - `STORAGE_WRITE_FAILED` — transient storage I/O error
   - `SBATCH_SUBMISSION_FAILED` — sbatch command returned non-zero (transient Slurm scheduler issue)
