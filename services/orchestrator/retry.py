@@ -18,6 +18,7 @@ from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineEvent, PipelineJob, PipelineStore
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
 from services.slurm_gateway.models import SubmitJobRequest
@@ -38,6 +39,13 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
 }
+# The `{STAGE}_FAILED` members are derived from the canonical downstream stage domain
+# (openspec change retry-stage-failure-classification, #1462) so that adding a stage to
+# `DOWNSTREAM_RESTART_STAGES` classifies its minted failure code here too, instead of
+# leaving a production-mainline code on neither list.  Deliberately a closed-domain
+# derivation and NOT an `endswith("_FAILED")` predicate: a suffix rule would swallow
+# `SLURM_JOB_FAILED`, which openspec change slurm-error-code-transient-coverage pins onto
+# NEITHER list, as well as the transient `SBATCH_SUBMISSION_FAILED` / `STORAGE_WRITE_FAILED`.
 NON_TRANSIENT_ERROR_CODES: set[str] = {
     "INVALID_MANIFEST",
     "MALFORMED_INPUT",
@@ -48,7 +56,16 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
     "TEMPLATE_NOT_ALLOWED",
     "MANIFEST_SCHEMA_INVALID",
     "WARM_START_CHECKPOINT_RETRY",
-}
+    # SHUD runtime family (classifier `shud_runtime_failure`): rerunning the same
+    # configuration does not converge.
+    "SHUD_FAILED",
+    "FAILED_RUN",
+    "RUNTIME_FAILED",
+    # Task-level codes minted alongside the stage family by the scheduler-state reader.
+    "STATE_SAVE_QC_TASK_FAILED",
+    "PARSE_TASK_FAILED",
+    "PUBLISH_TASK_FAILED",
+} | {f"{stage.upper()}_FAILED" for stage in DOWNSTREAM_RESTART_STAGES}
 AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON = "non_transient_error"
 AUTO_RETRY_SKIPPED_UNKNOWN_REASON = "unknown_error_code_defaulted_non_transient"
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]

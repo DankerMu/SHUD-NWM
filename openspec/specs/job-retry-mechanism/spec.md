@@ -149,6 +149,19 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
   - `TEMPLATE_NOT_ALLOWED` — sbatch template rejected by security policy
   - `MANIFEST_SCHEMA_INVALID` — manifest file fails JSON schema validation
   - `OUT_OF_MEMORY` — Slurm OOM kill (configuration error: memory_gb too low for workload, not transient)
+  - `SHUD_FAILED` — SHUD runtime failure; rerunning the same configuration does not converge (classifier: `shud_runtime_failure`)
+  - `FAILED_RUN` — SHUD runtime failure, legacy spelling (same family as `SHUD_FAILED`)
+  - `RUNTIME_FAILED` — SHUD runtime failure, legacy spelling (same family as `SHUD_FAILED`)
+  - `CONVERT_FAILED` — downstream stage failure, minted as `{STAGE}_FAILED` over the canonical downstream stage domain
+  - `FORCING_FAILED` — downstream stage failure (same minted family)
+  - `FORECAST_FAILED` — downstream stage failure (same minted family)
+  - `PARSE_FAILED` — downstream stage failure (same minted family)
+  - `STATE_SAVE_QC_FAILED` — downstream stage failure (same minted family)
+  - `PUBLISH_FAILED` — downstream stage failure (same minted family)
+  - `COPYBACK_FAILED` — downstream stage failure (same minted family)
+  - `STATE_SAVE_QC_TASK_FAILED` — task-level downstream failure code
+  - `PARSE_TASK_FAILED` — task-level downstream failure code
+  - `PUBLISH_TASK_FAILED` — task-level downstream failure code
 - **THEN** the Orchestrator MUST NOT schedule an automatic retry
 - **THEN** the Orchestrator SHALL mark the job as permanently failed immediately
 - **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "non_transient_error", "error_code": "<code>"}`
@@ -170,6 +183,11 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
 - **THEN** the Orchestrator SHALL treat it as non-transient and MUST NOT schedule an automatic retry
 - **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "unknown_error_code_defaulted_non_transient", "error_code": "<code>"}`
 - **THEN** the Orchestrator SHALL log a warning: `"unknown error_code '<code>' defaulted to non-transient — add to classification list"`
+
+#### Scenario: Stage-failure codes track the canonical downstream stage domain
+
+- **WHEN** the canonical downstream restart stage domain (`DOWNSTREAM_RESTART_STAGES`) contains a stage
+- **THEN** the non-transient classification set SHALL contain that stage's minted failure code `{STAGE}_FAILED`, derived mechanically from the domain constant rather than maintained as a hand-copied list, so a future canonical stage cannot mint an unclassified production-mainline code
 
 #### Scenario: Classification parity between this requirement and code is test-anchored
 
@@ -1273,9 +1291,10 @@ with the shared classification).
 
 - **WHEN** a candidate with durable SHUD output fails a downstream stage
   with a genuinely recorded code that is non-transient (e.g.
-  `OUTPUT_INCOMPLETE`) or unknown and defaulted non-transient (e.g. a
-  recorded `PARSE_FAILED`, `SLURM_JOB_FAILED`), or whose retry budget is
-  exhausted
+  `OUTPUT_INCOMPLETE`, or a recorded `PARSE_FAILED` since the
+  stage-failure family joined the non-transient list) or unknown and
+  defaulted non-transient (e.g. a recorded `SLURM_JOB_FAILED`), or whose
+  retry budget is exhausted
 - **THEN** the downstream-resume channel SHALL NOT emit a resume decision;
   a recorded transient code within budget SHALL keep the existing resume
   behavior unless the state explicitly marks the failure permanent

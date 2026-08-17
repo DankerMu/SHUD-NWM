@@ -17,6 +17,8 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
+from services.orchestrator import retry as retry_module
+from services.orchestrator import scheduler_state_types
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import (
     NON_TRANSIENT_ERROR_CODES,
@@ -37,7 +39,7 @@ from services.orchestrator.retry import (
     is_retryable_failure,
     is_transient_error,
 )
-from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES, TRANSIENT_RETRY_REASON_CODES
 
 _JOB_RETRY_SPEC_PATH = Path(__file__).resolve().parents[1] / "openspec" / "specs" / "job-retry-mechanism" / "spec.md"
 _SERVICES_ROOT = Path(__file__).resolve().parents[1] / "services"
@@ -55,8 +57,11 @@ _CODE_ONLY_NON_TRANSIENT_ERROR_CODES = frozenset(
     {"MALFORMED_INPUT", "POLICY_BLOCKED", "WARM_START_CHECKPOINT_RETRY"}
 )
 # Production catch-all codes that sit on NEITHER classification list, so the guard
-# defaults them non-transient and warns.  See the pinning test below.
-_UNLISTED_PRODUCTION_ERROR_CODES = ("SLURM_JOB_FAILED", "SHUD_FAILED")
+# defaults them non-transient and warns.  See the pinning test below.  `SHUD_FAILED`
+# left this tuple when openspec change retry-stage-failure-classification (#1462) moved
+# the SHUD runtime family onto the classified list, so the tuple now guards the
+# `SLURM_JOB_FAILED` ruling alone.
+_UNLISTED_PRODUCTION_ERROR_CODES = ("SLURM_JOB_FAILED",)
 
 
 def _unknown_error_code_warning(error_code: str) -> str:
@@ -105,9 +110,11 @@ def test_spec_and_code_classify_out_of_memory_as_non_transient() -> None:
 def test_non_transient_classification_set_is_a_documented_superset_of_the_spec_list() -> None:
     """The spec list is a SUBSET of the code set on purpose, and the gap is enumerated.
 
-    Equality would be wrong: `job-retry-mechanism` names the six codes whose
-    non-transient handling it governs, while the orchestrator additionally blocks
-    three codes of its own.  Pinning `spec ⊆ code` plus the exact extras keeps both
+    Equality would be wrong: `job-retry-mechanism` names the nineteen codes whose
+    non-transient handling it governs (six original + the thirteen classified by
+    openspec change retry-stage-failure-classification, #1462), while the orchestrator
+    additionally blocks three codes of its own — that code-only remainder is unchanged
+    by #1462.  Pinning `spec ⊆ code` plus the exact extras keeps both
     drift directions loud — a spec code dropped from the set, and a set member
     quietly removed (which would otherwise just shrink the parameterized cases).
     """
@@ -117,6 +124,24 @@ def test_non_transient_classification_set_is_a_documented_superset_of_the_spec_l
     assert spec_codes <= NON_TRANSIENT_ERROR_CODES
     assert NON_TRANSIENT_ERROR_CODES - spec_codes == set(_CODE_ONLY_NON_TRANSIENT_ERROR_CODES)
     assert NON_TRANSIENT_ERROR_CODES & TRANSIENT_ERROR_CODES == set()
+
+
+def test_stage_failure_codes_track_the_canonical_downstream_stage_domain() -> None:
+    """A stage added to the canonical domain must not mint an unclassified code.
+
+    The claim is deliberately narrow (openspec change
+    retry-stage-failure-classification): a runtime assertion cannot tell a derived
+    comprehension from a hand-copied literal, so this pins set INCLUSION of the whole
+    minted family plus the import edge from `retry` back to the domain constant.  The
+    substance rides on the inclusion assertion — appending a stage to
+    `DOWNSTREAM_RESTART_STAGES` reds this test unless its `{STAGE}_FAILED` code is
+    classified too.
+    """
+
+    stage_family = {f"{stage.upper()}_FAILED" for stage in DOWNSTREAM_RESTART_STAGES}
+
+    assert stage_family <= NON_TRANSIENT_ERROR_CODES
+    assert retry_module.DOWNSTREAM_RESTART_STAGES is scheduler_state_types.DOWNSTREAM_RESTART_STAGES
 
 
 def test_transient_classification_surfaces_carry_the_same_codes() -> None:
@@ -404,18 +429,18 @@ def test_unlisted_production_error_codes_default_to_the_unknown_reason_and_warn(
     error_code: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Knowing acceptance: real production codes ride the unknown-default branch.
+    """Knowing acceptance: a real production code rides the unknown-default branch.
 
-    `SLURM_JOB_FAILED` is the gateway's catch-all for terminal Slurm states
-    (pinned onto neither classification list by
-    tests/test_real_slurm_gateway.py) and `SHUD_FAILED` is a code
-    `failure_classifier` recognises without either list carrying it.  Both
-    therefore produce reason `unknown_error_code_defaulted_non_transient` and the
-    "add to classification list" warning on every permanent failure — which is
-    exactly what spec.md's unknown-code scenario prescribes, so #1314 accepts it
-    rather than silencing it.  Whether these codes should join a classification
-    list is a classification change, out of scope here and tracked in issue #1462;
-    this test exists so that decision cannot be made by accident.
+    `SLURM_JOB_FAILED` is the gateway's catch-all for terminal Slurm states, pinned
+    onto neither classification list by tests/test_real_slurm_gateway.py, so it
+    produces reason `unknown_error_code_defaulted_non_transient` and the "add to
+    classification list" warning on every permanent failure — which is exactly what
+    spec.md's unknown-code scenario prescribes, so #1314 accepts it rather than
+    silencing it.  `SHUD_FAILED` shared this tuple until openspec change
+    retry-stage-failure-classification (#1462) classified the SHUD runtime family and
+    the canonical stage-failure family, so the tuple — and this test — now guard the
+    `SLURM_JOB_FAILED` ruling alone; that ruling stands and cannot be reversed by
+    accident.
     """
 
     assert error_code not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)

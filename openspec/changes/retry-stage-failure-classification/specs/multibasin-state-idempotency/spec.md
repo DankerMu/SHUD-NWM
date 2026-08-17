@@ -1,29 +1,6 @@
-# multibasin-state-idempotency Specification
+# multibasin-state-idempotency delta
 
-## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
-## Requirements
-### Requirement: Database-backed candidate state
-
-The scheduler SHALL persist candidate and stage state in database-backed pipeline/hydro/met records and events, not only local filesystem state files.
-
-#### Scenario: terminal success skip
-
-WHEN a scan finds an existing pipeline job or hydro run for the same source/cycle/model/scenario in a terminal successful state
-THEN it skips the candidate and records the terminal-state reason.
-
-#### Scenario: hydro durable terminal skip
-
-WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, or `published`
-THEN the candidate is treated as terminal successful
-AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are not resubmitted by default
-AND the skip evidence records the durable hydro status that caused the skip.
-
-#### Scenario: active job skip
-
-WHEN a scan finds a submitted or running Slurm job for the same candidate
-THEN it checks current Slurm state
-AND skips resubmission while the job remains active.
+## MODIFIED Requirements
 
 ### Requirement: Resumable downstream failures
 
@@ -79,4 +56,3 @@ WHEN the Slurm cancellation contract is unavailable, returns an error, or does n
 THEN the scheduler records cancellation proof-gap evidence in `ops.pipeline_event.details` or scheduler evidence
 AND preserves local job state instead of fabricating cancellation success
 AND does not submit replacement work in the same scheduler pass.
-
