@@ -137,6 +137,11 @@ SLURM_STATE_MAP = {
     "OUT_OF_MEMORY": SlurmJobStatus.FAILED,
     "PREEMPTED": SlurmJobStatus.FAILED,
     "DEADLINE": SlurmJobStatus.FAILED,
+    # BOOT_FAIL is terminal for accounting purposes, so it also decides the
+    # file-cohort task projection in reconcile._file_cohort_task_projections, which
+    # reads this map without a default: before the entry existed a BOOT_FAIL array
+    # task stalled on outcome "unverified" and left the cohort accounting incomplete.
+    "BOOT_FAIL": SlurmJobStatus.FAILED,
     "CANCELLED": SlurmJobStatus.CANCELLED,
 }
 
@@ -145,10 +150,19 @@ def map_slurm_error_code(raw_state: str) -> str:
     normalized = _normalize_slurm_state(raw_state)
     if normalized == "TIMEOUT":
         return "SLURM_TIMEOUT"
-    if normalized in {"NODE_FAIL", "PREEMPTED"}:
+    if normalized in {"NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}:
         return "NODE_FAILURE"
     if normalized == "OUT_OF_MEMORY":
         return "OUT_OF_MEMORY"
+    if normalized == "DEADLINE":
+        # Distinct from SLURM_TIMEOUT: the job did not burn its walltime, the
+        # --deadline scheduling window closed on it.  Same transient class, different
+        # operator remedy (reschedule in the next cycle window).
+        return "SLURM_DEADLINE"
+    # REVOKED (federation-only) and SPECIAL_EXIT (never observed on this control
+    # plane) stay deliberately unmapped: either one appearing means an unexpected
+    # deployment shape, and the generic unknown code is what stops automatic resume
+    # and routes the failure to an operator.
     return "SLURM_JOB_FAILED"
 
 

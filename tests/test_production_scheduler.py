@@ -22630,7 +22630,7 @@ def test_downstream_resume_refuses_recorded_non_transient_codes(error_code: str)
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
-@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED"])
+@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED", "SLURM_DEADLINE"])
 def test_downstream_resume_keeps_recorded_transient_codes(error_code: str) -> None:
     # Seam 4, complement: a recorded transient code within budget resumes exactly
     # as before this change.
@@ -22646,12 +22646,15 @@ def test_downstream_resume_keeps_recorded_transient_codes(error_code: str) -> No
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
 
 
-def test_downstream_resume_refuses_recorded_transient_code_with_exhausted_budget() -> None:
-    # Seam 11, channel (c) half.
+@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "SLURM_DEADLINE"])
+def test_downstream_resume_refuses_recorded_transient_code_with_exhausted_budget(error_code: str) -> None:
+    # Seam 11, channel (c) half.  The dedicated reason comes from the SECOND
+    # transient surface (TRANSIENT_RETRY_REASON_CODES), so a code registered on only
+    # the retry surface would land on permanent_failure_guard here instead.
     candidate = _scheduler_candidate_fixture()
     state = _durable_downstream_failure_state(
         candidate,
-        error_code="NODE_FAILURE",
+        error_code=error_code,
         retry_count=3,
         retry_limit=3,
     )
@@ -22795,7 +22798,7 @@ def test_recorded_permanent_code_with_top_level_retryable_is_refused_by_both_sur
 
 
 @pytest.mark.usefixtures("recorded_forcing_package_present")
-@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "PARSE_TASK_FAILED", "SLURM_TIMEOUT"])
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "PARSE_TASK_FAILED", "SLURM_TIMEOUT", "SLURM_DEADLINE"])
 def test_missing_forecast_output_recompute_channel_is_unchanged(error_code: str) -> None:
     # Seam 10: the output-absence recompute channel declares ``remedy="exempt"``
     # and is deliberately NOT wired to the shared judgement -- recomputing an

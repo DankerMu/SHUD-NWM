@@ -31,7 +31,10 @@ from services.orchestrator.retry import (
     _retry_submission_manifest,
     _RetrySubmissionJob,
     auto_retry_skipped_details,
+    classify_failure,
     compute_backoff_seconds,
+    failure_classifier,
+    is_retryable_failure,
     is_transient_error,
 )
 from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
@@ -114,6 +117,53 @@ def test_non_transient_classification_set_is_a_documented_superset_of_the_spec_l
     assert spec_codes <= NON_TRANSIENT_ERROR_CODES
     assert NON_TRANSIENT_ERROR_CODES - spec_codes == set(_CODE_ONLY_NON_TRANSIENT_ERROR_CODES)
     assert NON_TRANSIENT_ERROR_CODES & TRANSIENT_ERROR_CODES == set()
+
+
+def test_transient_classification_surfaces_carry_the_same_codes() -> None:
+    """Transient membership lives on two surfaces and they must not diverge.
+
+    `retry.TRANSIENT_ERROR_CODES` drives auto-retry and downstream resume;
+    `scheduler_state_types.TRANSIENT_RETRY_REASON_CODES` drives the exhausted-budget
+    reason and the recompute channel.  A code on only one is a half-transient code,
+    so the sets are pinned equal — a future divergence has to be a deliberate edit.
+    """
+
+    assert TRANSIENT_ERROR_CODES == TRANSIENT_RETRY_REASON_CODES
+    assert TRANSIENT_ERROR_CODES & NON_TRANSIENT_ERROR_CODES == set()
+
+
+def test_slurm_deadline_is_transient_on_every_classification_surface() -> None:
+    assert "SLURM_DEADLINE" in TRANSIENT_ERROR_CODES
+    assert "SLURM_DEADLINE" in TRANSIENT_RETRY_REASON_CODES
+    assert is_transient_error("SLURM_DEADLINE") is True
+    assert is_retryable_failure("SLURM_DEADLINE") is True
+    assert failure_classifier("SLURM_DEADLINE") == "transient_slurm_runtime"
+
+    failure = classify_failure("SLURM_DEADLINE", attempt=1, retry_limit=3)
+
+    assert failure["permanent"] is False
+    assert failure["retryable"] is True
+
+
+def test_slurm_job_failed_stays_deliberately_unregistered() -> None:
+    """The gateway catch-all is a true unknown, not a classification gap.
+
+    Registering it anywhere would either spin auto-retry on deterministic
+    application failures or replace the `unknown_error_code_defaulted_non_transient`
+    audit reason with `non_transient_error`, losing the "needs operator adjudication"
+    signal.  See openspec change slurm-error-code-transient-coverage.
+    """
+
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_RETRY_REASON_CODES
+    assert failure_classifier("SLURM_JOB_FAILED") == "unknown_failure"
+    assert classify_failure("SLURM_JOB_FAILED", attempt=0, retry_limit=3)["permanent"] is True
+    assert auto_retry_skipped_details("SLURM_JOB_FAILED") == {
+        "auto_retry_skipped": True,
+        "reason": "unknown_error_code_defaulted_non_transient",
+        "error_code": "SLURM_JOB_FAILED",
+    }
 
 
 def test_transient_error_classification() -> None:
