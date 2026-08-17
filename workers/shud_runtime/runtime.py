@@ -1940,8 +1940,10 @@ class SHUDRuntime:
         declare is removed from the staged tree.
 
         Deletion-scope contract: the deletion set is exactly
-        ``SHUD_FORCING_INDEX_MEMBERS`` minus what the manifest declares — at most
-        one file, and never anything outside that two-member set.  Prior-attempt
+        ``SHUD_FORCING_INDEX_MEMBERS`` minus what the manifest declares — one
+        file in the normal exactly-one-declared shape, both members when the
+        manifest declares none (which then fails closed on the missing
+        membership), and never anything outside that two-member set.  Prior-attempt
         station CSVs and unrelated staged files are left alone: they are either
         overwritten by this staging or adjudicated by the checksum/read paths.
         Indiscriminate clearing of the input workspace is an explicit non-goal.

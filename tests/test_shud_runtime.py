@@ -1719,14 +1719,18 @@ def _seed_direct_grid_attempt_one_residue(
     tmp_path: Path,
     object_root: Path,
     runtime: SHUDRuntime,
+    *,
+    index_member: str = LEGACY_SHUD_FORCING_INDEX_MEMBER,
 ) -> tuple[dict[str, str], Path]:
-    """Run one legacy-member direct-grid staging and return its checksums + input dir.
+    """Run one direct-grid staging of ``index_member`` and return its checksums + input dir.
 
-    The staged ``shud/qhh.tsd.forc`` this leaves behind IS the prior-attempt
+    The staged ``shud/<index_member>`` this leaves behind IS the prior-attempt
     residue: ``input/<project>`` is reused verbatim by the next attempt of the
     same run_id (deterministic run_id, ``chain_forecast_state.py``), so a later
-    attempt that declares only the canonical member meets both identities on
-    disk.
+    attempt that declares only the *other* accepted member meets both identities
+    on disk. Either member can be the residue — the migration runs canonical-ward
+    in production, but the deletion set is the manifest's complement, not a
+    hardcoded name, so both directions are exercised.
 
     Attempt N is driven through the real staging entry point rather than a full
     ``prepare_workspace`` because it is modelled as failing *after* forcing
@@ -1741,7 +1745,7 @@ def _seed_direct_grid_attempt_one_residue(
         object_root,
         lineage={"forcing_mapping_mode": "direct_grid"},
         station_ids=(1,),
-        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+        index_member=index_member,
     )
     manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
@@ -1753,46 +1757,62 @@ def _seed_direct_grid_attempt_one_residue(
         forcing_context=runtime._prepare_forcing_package_context(manifest),
     )
 
-    assert (input_dir / "alias-a" / "shud" / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
+    assert (input_dir / "alias-a" / "shud" / index_member.rsplit("/", 1)[-1]).is_file()
     return checksums, input_dir
 
 
+@pytest.mark.parametrize(
+    "residue_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["residue-legacy", "residue-canonical"],
+)
 def test_runtime_direct_grid_prior_attempt_index_residue_self_heals_before_staging(
     tmp_path: Path,
+    residue_member: str,
 ) -> None:
     """AC1 (#1355): a re-drive across the identity migration heals itself instead of deadlocking.
 
-    Attempt N stages the legacy member into the reused input workspace and then
+    Attempt N stages ``residue_member`` into the reused input workspace and then
     fails (simulated here by simply re-driving). Attempt N+1's package manifest
-    declares only the canonical member. Before the fix the filesystem ambiguity
-    gate saw both members and raised the non-retryable
+    declares only the other accepted member. Before the fix the filesystem
+    ambiguity gate saw both members and raised the non-retryable
     ``DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`` — for that run_id, forever, until a
     human deleted the file on the compute node. Now staging deletes the
     undeclared member first, and the run consumes the freshly declared one
     (longitude 777, not the residue's 100).
+
+    Both directions run because the deletion target is the manifest's
+    complement, not a name: hardcoding the legacy member as the thing to delete
+    satisfies the production-ward direction alone.
     """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     _write_single_station_direct_grid_sp_att(object_root)
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
-    checksums, input_dir = _seed_direct_grid_attempt_one_residue(tmp_path, object_root, runtime)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=residue_member,
+    )
     model_input_dir = input_dir / "alias-a"
+    declared_member = _other_index_member(residue_member)
 
     migrated = _repoint_package_manifest_index_member(
         object_root,
         checksums,
-        member=CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+        member=declared_member,
         longitude=777,
     )
     attempt_two = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(migrated))
-    assert _declared_package_manifest_index_members(object_root) == {CANONICAL_SHUD_FORCING_INDEX_MEMBER}
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
 
     runtime.prepare_workspace(attempt_two, input_dir)
 
     staged_shud_dir = model_input_dir / "shud"
-    assert (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).is_file()
-    assert not (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert (staged_shud_dir / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (staged_shud_dir / residue_member.rsplit("/", 1)[-1]).exists()
     tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
     assert "1\t777\t30\t1\t1\t1\tforcing.csv" in tsd_forc
     assert repository.statuses == []
@@ -1963,30 +1983,44 @@ def test_runtime_non_direct_grid_staging_leaves_residual_index_member_alive(
     assert "777" not in tsd_forc
 
 
-def test_runtime_direct_grid_legacy_only_package_hygiene_is_a_no_op(
+@pytest.mark.parametrize(
+    "declared_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["declares-legacy", "declares-canonical"],
+)
+def test_runtime_direct_grid_single_member_package_hygiene_is_a_no_op(
     tmp_path: Path,
+    declared_member: str,
 ) -> None:
-    """AC4 (#1355) legacy regression: a declared member is never a deletion target.
+    """AC4 (#1355) no-regression: a declared member is never a deletion target.
 
-    A historical legacy-only package re-driven over its own prior-attempt
-    staging must behave bit-for-bit as before: the declared legacy member is
-    kept (the deletion set is its complement, and the absent canonical member
-    is a ``missing_ok`` no-op).
+    A single-member package re-driven over its own prior-attempt staging must
+    behave bit-for-bit as before: the declared member is kept (the deletion set
+    is its complement, and the absent other member is a ``missing_ok`` no-op).
+    Run for both identities so the anchor pins preservation of *whichever*
+    member the manifest declares, not of one hardcoded name — the legacy
+    direction alone is the historical-package regression, the canonical
+    direction is the post-migration steady state.
     """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     _write_single_station_direct_grid_sp_att(object_root)
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
-    checksums, input_dir = _seed_direct_grid_attempt_one_residue(tmp_path, object_root, runtime)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=declared_member,
+    )
     model_input_dir = input_dir / "alias-a"
     manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
-    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
 
     runtime.prepare_workspace(manifest, input_dir)
 
-    assert (model_input_dir / "shud" / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
-    assert not (model_input_dir / "shud" / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert (model_input_dir / "shud" / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (model_input_dir / "shud" / _other_index_member(declared_member).rsplit("/", 1)[-1]).exists()
     tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
     assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
     assert repository.statuses == []

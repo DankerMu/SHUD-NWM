@@ -74,6 +74,12 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
   零个（direct-grid）→ `DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`，报错文本列出两个可接受身份；
   manifest 声明的成员在对象树中缺席 → `FORCING_CHECKSUM_READ_FAILED` 点名声明成员（不是 size-limit 码）。
   单一事实源为 `packages/common/shud_forcing_contract.py`。
+- **direct-grid staging 卫生（#1355）**：`input/<project>` 在同一 run_id 的各次 attempt 间复用，故 direct-grid
+  staging 写入前先删除本次 checksum 校验后的 package manifest **未声明**的可接受索引成员——跨 #1176 身份迁移
+  重跑时，上一 attempt 残留的另一身份就此自愈，不再让文件系统层的并存把该 run_id 永久卡死。删除失败以
+  **不自动重试**的 `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` 终止本次 attempt（目录形/软链形残留由
+  `unlink_no_follow` 直接拒绝，落同一码），绝不在残留之上继续 staging；卫生之后仍并存的照旧两层 fail-closed。
+  删除集恒为 `{canonical, legacy}` 减去 manifest 声明的部分，不触碰工作区其余任何文件。
 - **非 direct-grid staging 的残余成员**：该路径是全前缀递归拷贝且 producer 从不清理，原地在
   pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按声明源
   回退链解析：package manifest 发布非空 `files` 列表时以它为准，否则退到 run-manifest 的诊断

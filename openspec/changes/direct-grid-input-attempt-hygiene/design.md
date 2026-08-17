@@ -8,7 +8,9 @@
 `_prepare_attempt_output_dir` :488-555 样板）语义最干净，但每 attempt 重拷全量
 model package + forcing 包（NFS 实打实 I/O），失去「复用 staging 加速重试」
 现有性质，规模 S→M+，且需先量化 re-stage 成本——否决。定向卫生只删
-`SHUD_FORCING_INDEX_MEMBERS` 补集（至多 1 个文件），保留其余 staging 复用。
+`SHUD_FORCING_INDEX_MEMBERS` 中本次 manifest 未声明的成员——常态（声明恰一
+成员）至多 1 个文件，零声明形删除两个（见 D6）；永不越出该两元素集合。
+保留其余 staging 复用。
 
 ## D2 插入点：`_stage_direct_grid_directory_artifact` 写入循环之前
 
@@ -49,10 +51,18 @@ for member in SHUD_FORCING_INDEX_MEMBERS:
   staging 写入 `_write_staged_bytes(..., root=destination)` 同一约束根）；
   symlink 形残留：`unlink_no_follow` **拒绝**（safe_fs.py:394 "Refusing to
   unlink symlink"），与目录形（:396）同样落
-  `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` fail-loud；这不构成新的自
-  锁死——歧义门用 `_regular_file_exists`（runtime.py:1059）判定，symlink
-  残留本就不计入 `staged_members`（fail-loud，不静默跳过、不降级为警告
-  ——**无两分支**，#1164 `_clear_packaged_initial_states` :1593-1618 样板）。
+  `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` fail-loud。**非文件形的
+  修前/修后对照（round-1 复审 C1 改判，如实记账）**：symlink 形修前**已经**
+  永久致命——`_regular_file_exists` 经 `stat_no_follow` 对 symlink 直接抛
+  `SafeFilesystemError`、重编为 `WORKSPACE_PATH_UNSAFE`（runtime.py:2595-2596
+  / safe_fs.py:257-258），从不返回 False——修后只是换成本 change 的 typed
+  码，无新增自锁死；目录形修前**良性**（`_regular_file_exists` 返回 False、
+  不计入 `staged_members`、staging 照常），修后**有意**转为不可重试
+  fail-loud——这是对被篡改几何的新收紧，人群仅限带外写入（三条生产写入
+  路径都不产 symlink/目录形成员），接受该权衡：fail-closed 是正确姿态，
+  「忽略非文件形」恰是被禁止的两分支（fail-loud，不静默跳过、不降级为
+  警告——**无两分支**，#1164 `_clear_packaged_initial_states` :1593-1618
+  样板）。
 - 失败编码：捕获 `SafeFilesystemError` / `OSError` → 重抛专用 typed 码
   `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`，消息含成员相对路径与原始
   错误；attempt 经 `execute()` 的统一 except 面（:469-486）落 failure log +
