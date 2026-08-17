@@ -130,9 +130,13 @@ distinguishable GitHub-output field and the `Unit Tests` job SHALL run
 the targeted selection AND the labeled full-tree collect-only smoke,
 whose labeling on this branch MUST NOT claim zero assertions were
 executed; a PR whose only backend change deletes a test file (or
-touches only a `tests/` support module) thereby keeps the
-import-surface guard it had before the meta-guard accumulation
-existed.
+touches only a `tests/` support module without derived non-gated
+importer suites) thereby keeps the import-surface guard it had
+before the meta-guard accumulation existed. Support modules WITH
+derived non-gated importer suites are governed by the requirement
+"Support-module changes MUST select their non-gated importer
+suites", which routes them to assertion-level targets instead of
+this collapse path.
 
 #### Scenario: collect-only fallback is labeled as zero assertions
 
@@ -261,7 +265,14 @@ A changed `tests/` Python file whose BASENAME matches neither
 `integration_helpers.py`, or `__init__.py`) SHALL NOT self-select —
 pytest returns `NO_TESTS_COLLECTED` (exit 5) for such a target, which
 ci.yml's `check=True` renders as a misleading failure — and SHALL
-instead map to the selector meta-guard suite, so the emitted selection
+instead map to its routed non-gated importer suites plus the selector
+meta-guard suite when a support-module rule routes it (see
+"Support-module changes MUST select their non-gated importer
+suites"), or to exactly the selector meta-guard suite for support
+modules with no derived non-gated importer suites and for the
+recorded carve-outs (a module with derived importers but no rule is
+the closure guard's red state, not a licensed selection), so
+the emitted selection
 always consists of collectible test files. The suite-vs-support
 classification is basename-shaped at any depth and MUST equal pytest's
 own collection rule (`testpaths = ["tests"]`, default `python_files` =
@@ -290,10 +301,13 @@ the meta-guards exactly like a top-level one.
 - **WHEN** a PR changes only `tests/conftest.py` (or any tracked
   `tests/` Python file whose basename matches neither `test_*.py`
   nor `*_test.py`)
-- **THEN** the selector output is exactly `tests/test_select_ci_tests.py`
-  — never the support file itself — and a tree-derived invariant test
-  covers every current and future support module without hardcoding
-  names
+- **THEN** the selector output never contains the support file itself
+  — it is the routed importer suites plus
+  `tests/test_select_ci_tests.py` for rule-routed support modules,
+  and exactly `tests/test_select_ci_tests.py` for modules without
+  derived importers and for the recorded carve-outs (including
+  `tests/conftest.py`) — and a tree-derived invariant test covers
+  every current and future support module without hardcoding names
 
 #### Scenario: nested test suites are suites, not support files
 
@@ -400,4 +414,48 @@ For every tracked module under the nine audited directory paths (`workers/output
   `runtime-budget` truthfulness is anchored by the recorded
   measurement table in the delivering PR, not re-executed by the
   guard
+
+### Requirement: Support-module changes MUST select their non-gated importer suites
+
+For every tracked non-suite Python module under `tests/` (classified by the selector's canonical `is_test_suite_path` predicate), the targeted-test selector SHALL select the module's derived non-gated top-level importer suites plus the selector meta-guard suite (derivation authority: the selector test suite's mechanical importer derivation over the tracked tree, including its deliberate package-`__init__`-to-package aliasing, never a frozen list), and a selector-suite closure guard SHALL fail naming the module and missing suite whenever a derived importer suite is absent from the selection — with exactly two carve-outs, both guard-checked: modules on the explicit issue-scope carve-out allowlist (`tests/integration_helpers.py`, `tests/conftest.py` — recorded with their measured partial external coverage, not claimed as full compensation) are exempt only while each allowlisted path appears verbatim inside the `database:` paths-filter block of `.github/workflows/ci.yml`, and modules deriving zero importer suites SHALL keep selecting exactly the selector meta-guard suite, so a support-module-only PR runs assertion-level targets whenever import-derived assertion-level coverage exists in the tree (subprocess-consumed helpers such as `tests/mock_shud_omp.py`, executed via the runtime's `[sys.executable, <path>]` lane rather than imported, are invisible to this derivation and remain a recorded gap).
+
+#### Scenario: importer-bearing support modules select real suites
+
+- **WHEN** a PR's only backend change is
+  `tests/fixtures/mapping_builder/in_memory_grid_snapshot.py`,
+  `tests/slurm_template_helpers.py`,
+  `tests/river_identity_backfill_fakes.py`, or `tests/__init__.py`
+- **THEN** the selection includes that module's derived non-gated
+  importer suites (5, 2, 2, and 3 suites respectively at authoring
+  time) plus the selector meta-guard suite, `meta_guard_only` is
+  false, and the targeted lane executes real assertions
+
+#### Scenario: closure completeness is mechanized
+
+- **WHEN** a new non-gated suite importing a routed support module at
+  top level is added to the tree without extending the module's rule
+- **THEN** the closure guard fails, naming the module and the missing
+  suite
+
+#### Scenario: carve-out modules keep their recorded scope boundary
+
+- **WHEN** the changed path is `tests/integration_helpers.py` or
+  `tests/conftest.py`
+- **THEN** the selector's routing is unchanged (meta-guard fallback)
+  per the recorded issue-scope carve-out — whose comment carries the
+  measured partial coverage from ci.yml's `database` filter starting
+  `real-db-integration` — and the guard reds if an allowlisted path
+  is no longer listed inside that filter block, forcing the
+  carve-out to be re-decided
+
+#### Scenario: zero-importer support modules keep the collapse route
+
+- **WHEN** the changed path is a tracked non-suite `tests/` module
+  with no derived non-gated importer suite (e.g.
+  `tests/mock_shud_omp.py` — whose subprocess consumers are invisible
+  to the import derivation, a recorded gap —
+  or `tests/fixtures/mapping_builder/keliya/build.py`)
+- **THEN** the selection is exactly the selector meta-guard suite,
+  preserving the meta-guard-only collapse and its full-tree
+  collect-only smoke
 
