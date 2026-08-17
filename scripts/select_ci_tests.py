@@ -506,15 +506,16 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                     if rule.stop_on_match:
                         break
             if not matched_changed_test:
-                # A `tests/` Python file that is not itself a `test_*.py` suite
-                # (conftest.py, integration_helpers.py, a fixtures/ builder) is
-                # not collectible: `pytest -q <it>` returns NO_TESTS_COLLECTED
-                # (exit 5), which ci.yml's `check=True` renders as a misleading
-                # red carrying zero assertion information (#1453). Such a path
-                # maps to the meta-guard suite instead, so every emitted target
-                # is a collectible test file; the meta-guard-only collapse then
-                # arms ci.yml's full-tree collect-only smoke (#1454) over the
-                # import surface such a support module can break.
+                # A `tests/` Python file that `is_test_suite_path` does not call
+                # a suite (conftest.py, integration_helpers.py, a fixtures/
+                # builder) is not collectible: `pytest -q <it>` returns
+                # NO_TESTS_COLLECTED (exit 5), which ci.yml's `check=True`
+                # renders as a misleading red carrying zero assertion
+                # information (#1453). Such a path maps to the meta-guard suite
+                # instead, so every emitted target is a collectible test file;
+                # the meta-guard-only collapse then arms ci.yml's full-tree
+                # collect-only smoke (#1454) over the import surface such a
+                # support module can break.
                 selected.add(path if is_test_suite else SELECTOR_META_GUARD_TEST)
             # Unconditional, redirect or not: a redirect fires exactly when a
             # changed test file is swapped for focused nodes, which is also when
