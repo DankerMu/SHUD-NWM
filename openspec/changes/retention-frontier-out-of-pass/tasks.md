@@ -76,6 +76,6 @@
 - [x] 3.2 `uv run ruff check .` 通过。
 - [x] 3.3 `openspec validate retention-frontier-out-of-pass --strict
       --no-interactive` 通过。
-- [ ] 3.4 面 B 裁定双载体一致性人工对读（design D4 / spec delta 场景）；
+- [x] 3.4 面 B 裁定双载体一致性人工对读（design D4 / spec delta 场景）；
       issue 评论作为 PR body 的转述，不作为 evidence 项（fixture review
       P2-4）。
