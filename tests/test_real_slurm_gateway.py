@@ -16,7 +16,6 @@ from jinja2.exceptions import SecurityError
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
-from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -1039,11 +1038,9 @@ def test_slurm_error_codes_align_with_retry_sets() -> None:
     assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
-    # Transient membership has two surfaces; a code carried by only one is a
-    # half-transient code (resume allowed, but an exhausted budget then reports
-    # permanent_failure_guard instead of retry_limit_exhausted).
-    assert TRANSIENT_ERROR_CODES == TRANSIENT_RETRY_REASON_CODES
-    assert "SLURM_JOB_FAILED" not in TRANSIENT_RETRY_REASON_CODES
+    # Transient membership has a second surface (scheduler_state_types
+    # .TRANSIENT_RETRY_REASON_CODES); it is pinned in tests/test_retry.py, which
+    # already owns that import, so this file stays scoped to retry.py.
 
 
 @pytest.mark.parametrize(
