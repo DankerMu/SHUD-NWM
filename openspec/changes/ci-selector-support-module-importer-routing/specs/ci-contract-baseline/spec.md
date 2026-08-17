@@ -156,7 +156,7 @@ the meta-guards exactly like a top-level one.
 
 ### Requirement: Support-module changes MUST select their non-gated importer suites
 
-For every tracked non-suite Python module under `tests/` (classified by the selector's canonical `is_test_suite_path` predicate), the targeted-test selector SHALL select the module's derived non-gated top-level importer suites plus the selector meta-guard suite (derivation authority: the selector test suite's mechanical importer derivation over the tracked tree, including its deliberate package-`__init__`-to-package aliasing, never a frozen list), and a selector-suite closure guard SHALL fail naming the module and missing suite whenever a derived importer suite is absent from the selection — with exactly two carve-outs, both guard-checked: modules on the explicit issue-scope carve-out allowlist (`tests/integration_helpers.py`, `tests/conftest.py` — recorded with their measured partial external coverage, not claimed as full compensation) are exempt only while each allowlisted path appears verbatim inside the `database:` paths-filter block of `.github/workflows/ci.yml`, and modules deriving zero importer suites SHALL keep selecting exactly the selector meta-guard suite, so a support-module-only PR runs assertion-level targets whenever assertion-level coverage exists in the tree.
+For every tracked non-suite Python module under `tests/` (classified by the selector's canonical `is_test_suite_path` predicate), the targeted-test selector SHALL select the module's derived non-gated top-level importer suites plus the selector meta-guard suite (derivation authority: the selector test suite's mechanical importer derivation over the tracked tree, including its deliberate package-`__init__`-to-package aliasing, never a frozen list), and a selector-suite closure guard SHALL fail naming the module and missing suite whenever a derived importer suite is absent from the selection — with exactly two carve-outs, both guard-checked: modules on the explicit issue-scope carve-out allowlist (`tests/integration_helpers.py`, `tests/conftest.py` — recorded with their measured partial external coverage, not claimed as full compensation) are exempt only while each allowlisted path appears verbatim inside the `database:` paths-filter block of `.github/workflows/ci.yml`, and modules deriving zero importer suites SHALL keep selecting exactly the selector meta-guard suite, so a support-module-only PR runs assertion-level targets whenever import-derived assertion-level coverage exists in the tree (subprocess-consumed helpers such as `tests/mock_shud_omp.py`, executed via the runtime's `[sys.executable, <path>]` lane rather than imported, are invisible to this derivation and remain a recorded gap).
 
 #### Scenario: importer-bearing support modules select real suites
 
@@ -191,8 +191,9 @@ For every tracked non-suite Python module under `tests/` (classified by the sele
 
 - **WHEN** the changed path is a tracked non-suite `tests/` module
   with no derived non-gated importer suite (e.g.
-  `tests/mock_shud_omp.py`,
-  `tests/fixtures/mapping_builder/keliya/build.py`)
+  `tests/mock_shud_omp.py` — whose subprocess consumers are invisible
+  to the import derivation, a recorded gap —
+  or `tests/fixtures/mapping_builder/keliya/build.py`)
 - **THEN** the selection is exactly the selector meta-guard suite,
   preserving the meta-guard-only collapse and its full-tree
   collect-only smoke
