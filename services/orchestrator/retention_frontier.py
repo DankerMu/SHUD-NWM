@@ -68,17 +68,25 @@ class FrontierReadResult:
 
 
 def max_age_from_env() -> timedelta:
-    """Freshness cap for the latest receipt, from env with a 24h default."""
+    """Freshness cap for the latest receipt, from env with a 24h default.
+
+    Total by contract: empty, zero, negative, non-numeric and out-of-range hour
+    counts all fall back to the default. An hour count past ``timedelta``'s
+    range raises OverflowError rather than ValueError, and this is called from
+    the CLI outside its ValueError guard, so an unguarded construction would
+    leave the operator a bare traceback instead of a cleanup payload.
+    """
+    default = timedelta(hours=DEFAULT_MAX_AGE_HOURS)
     value = os.getenv(FRONTIER_MAX_AGE_ENV)
-    hours = DEFAULT_MAX_AGE_HOURS
-    if value is not None and value.strip() != "":
-        try:
-            parsed = int(value.strip())
-        except ValueError:
-            parsed = DEFAULT_MAX_AGE_HOURS
-        if parsed > 0:
-            hours = parsed
-    return timedelta(hours=hours)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        hours = int(value.strip())
+        if hours <= 0:
+            return default
+        return timedelta(hours=hours)
+    except (ValueError, OverflowError):
+        return default
 
 
 def read_latest_pass_frontier(
@@ -115,7 +123,11 @@ def _read_latest_pass_frontier(
     if selected is None:
         return _unavailable("no_readable_receipt")
     path, started_at, payload = selected
-    if now.astimezone(UTC) - started_at > max_age:
+    # Two-sided: a receipt dated in the future (clock jump, hand-copied
+    # artifact) always wins selection, so a one-sided check would keep it
+    # "fresh" forever. It is staled rather than skipped during selection --
+    # skipping would silently fall back to an older receipt and hide the fault.
+    if abs(now.astimezone(UTC) - started_at) > max_age:
         return _unavailable("receipt_stale", path=path, started_at=started_at)
 
     retention = payload.get("retention")

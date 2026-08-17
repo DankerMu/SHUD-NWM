@@ -178,6 +178,64 @@ def test_stale_receipt_is_unavailable(evidence_dir: Path) -> None:
     assert result.active_lower_bound is None
 
 
+def test_future_dated_receipt_is_stale_not_trusted(evidence_dir: Path) -> None:
+    """Freshness is two-sided (review round-1 B).
+
+    A clock jump or a hand-copied receipt can carry a ``started_at`` in the
+    future. Such a receipt always wins selection, so a one-sided check would
+    let it stay "fresh" forever -- and its null bound would masquerade as a
+    healthy pass mirror while wall-clock deletion runs unprotected.
+    """
+    path = _write_receipt(
+        evidence_dir,
+        "pass-future",
+        started_at=NOW + timedelta(hours=25),
+        retention=_completed(None),
+    )
+
+    result = _read(evidence_dir)
+
+    assert (result.status, result.reason) == ("unavailable", "receipt_stale")
+    assert result.receipt_path == str(path)
+    assert result.active_lower_bound is None
+
+
+def test_future_dated_receipt_within_the_cap_is_still_fresh(evidence_dir: Path) -> None:
+    """Small forward skew is tolerated symmetrically, not treated as a fault."""
+    _write_receipt(
+        evidence_dir,
+        "pass-skewed",
+        started_at=NOW + timedelta(hours=1),
+        retention=_completed(BOUND),
+    )
+
+    result = _read(evidence_dir)
+
+    assert result.status == "ok"
+    assert result.active_lower_bound == BOUND
+
+
+def test_future_receipt_is_selected_then_staled_not_skipped(evidence_dir: Path) -> None:
+    """A future receipt must not silently fall back to an older one.
+
+    Skipping it at selection time would hide the clock fault behind a
+    plausible-looking older bound; selecting it and calling it stale surfaces
+    the fault as a blocker.
+    """
+    _write_receipt(evidence_dir, "pass-genuine", started_at=NOW, retention=_completed(BOUND))
+    future = _write_receipt(
+        evidence_dir,
+        "pass-future",
+        started_at=NOW + timedelta(days=3),
+        retention=_completed(None),
+    )
+
+    result = _read(evidence_dir)
+
+    assert (result.status, result.reason) == ("unavailable", "receipt_stale")
+    assert result.receipt_path == str(future)
+
+
 def test_receipt_exactly_at_the_freshness_cap_is_still_fresh(evidence_dir: Path) -> None:
     _write_receipt(evidence_dir, "pass-1", started_at=NOW - MAX_AGE, retention=_completed(BOUND))
 
@@ -337,10 +395,16 @@ def test_max_age_defaults_to_24_hours(monkeypatch: pytest.MonkeyPatch) -> None:
     assert max_age_from_env() == timedelta(hours=DEFAULT_MAX_AGE_HOURS)
 
 
-@pytest.mark.parametrize("value", ["", "0", "-3", "abc"])
+@pytest.mark.parametrize("value", ["", "0", "-3", "abc", "9" * 30])
 def test_max_age_falls_back_to_the_default_for_unusable_values(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
+    """Parsing is total: an hour count past timedelta's range is unusable, not fatal.
+
+    ``9`` * 30 parses as an int but overflows ``timedelta`` -- an OverflowError
+    is not a ValueError, so an unguarded construction escapes both CLI
+    entrypoints as a bare traceback (review round-1 A).
+    """
     monkeypatch.setenv(FRONTIER_MAX_AGE_ENV, value)
 
     assert max_age_from_env() == timedelta(hours=DEFAULT_MAX_AGE_HOURS)

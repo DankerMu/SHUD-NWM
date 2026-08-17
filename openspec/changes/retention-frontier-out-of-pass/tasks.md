@@ -67,6 +67,15 @@
       逐位回归（既有用例不改断言）；`enabled=false` ⇒ status=disabled 零
       删除；`dry_run=true` ⇒ targets 照常收集、零 rmtree；summary 含
       anchor 块（mode/decision/residual_risk 三键钉值）。
+- [x] 2.8 review round-1 修复锚（A/B + 覆盖缺口）：
+      (a) 未来 started_at receipt ⇒ `receipt_stale` 强制 dry-run（含
+      「未来伪 receipt + 真实新鲜 receipt 并存，in-flight 目录存活」形，
+      B 的复现即测试）；(b) env 溢出值（30 个 9）⇒ 回落默认 24h，两入口
+      无 traceback；(c) click 与 argparse 各补一条 ok-bound `--execute`
+      端到端：bound 以下目录真删、bound 上目录存活记
+      `pipeline_frontier_exempt`；(d) CLI 层断
+      `payload["frontier"]["source"] == "receipt:<原 source>"`（ok bound
+      形）。
 
 ## 3. 验证（Evidence Floor）
 

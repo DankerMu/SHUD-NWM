@@ -233,6 +233,91 @@ def test_cleanup_argparse_entrypoint_forces_dry_run_without_receipt(
     assert aged.exists()
 
 
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cleanup_execute_deletes_below_bound_and_exempts_above_it(
+    env: dict[str, Path], capsys: pytest.CaptureFixture[str], entrypoint: str
+) -> None:
+    """The ok-bound execute path, end to end through each entrypoint."""
+    bound = (NOW - timedelta(days=20)).replace(minute=0, second=0, microsecond=0)
+    in_flight = _write_cycle(env["store"], "raw", "gfs", _cycle_name(bound))
+    below_bound = _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(bound))
+
+    run = cli._click_main if entrypoint == "click" else cli._argparse_main
+    rc = run(["cleanup", "--retention-days", "14", "--execute"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert in_flight.exists()
+    assert not below_bound.exists()
+    assert payload["dry_run"] is False
+    assert "frontier_blocker" not in payload
+    assert payload["counts"]["deleted"] == 1
+    assert payload["deleted"][0]["key"] == f"raw/gfs/{_cycle_name(NOW - timedelta(days=40))}"
+    assert "pipeline_frontier_exempt" in _skipped_reasons(payload)
+    # The bound and its receipt-derived source label are both readable from the
+    # retention frontier block, not only from the payload's own top-level label.
+    assert payload["frontier"]["active_lower_bound"] == bound.isoformat()
+    assert payload["frontier"]["source"] == "receipt:scheduler_pass"
+    assert payload["frontier"]["protected_count"] == 1
+    assert payload["frontier_source"] == "receipt:scheduler_pass"
+
+
+def test_cleanup_execute_with_future_dated_receipt_forces_dry_run(
+    env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A future-dated receipt must not outrank a genuine one and delete silently.
+
+    Reproduces review round-1 finding B: the bogus receipt wins selection on
+    ``started_at``, and under a one-sided freshness check it never goes stale,
+    so its null bound reads as a healthy pass mirror and the in-flight cycle
+    protected by the genuine receipt is deleted.
+    """
+    bound = (NOW - timedelta(days=20)).replace(minute=0, second=0, microsecond=0)
+    in_flight = _write_cycle(env["store"], "raw", "gfs", _cycle_name(bound))
+    _write_receipt(env["evidence_dir"], "pass-genuine", started_at=NOW, retention=_retention_block(bound))
+    bogus = _write_receipt(
+        env["evidence_dir"],
+        "pass-future",
+        started_at=NOW + timedelta(days=2),
+        retention=_retention_block(None),
+    )
+
+    rc = cli._click_main(["cleanup", "--retention-days", "14", "--execute"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert in_flight.exists()
+    assert payload["dry_run"] is True
+    assert payload["frontier_blocker"]["reason"] == "receipt_stale"
+    assert payload["frontier_blocker"]["receipt_path"] == str(bogus)
+    assert payload["counts"]["deleted"] == 0
+    assert "frontier_source" not in payload
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cleanup_survives_an_overflowing_freshness_cap(
+    env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """An unusable freshness cap falls back to the default, not a traceback."""
+    monkeypatch.setenv("NHMS_RETENTION_FRONTIER_MAX_AGE_HOURS", "9" * 30)
+    bound = (NOW - timedelta(days=20)).replace(minute=0, second=0, microsecond=0)
+    _write_cycle(env["store"], "raw", "gfs", _cycle_name(bound))
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(bound))
+
+    run = cli._click_main if entrypoint == "click" else cli._argparse_main
+    rc = run(["cleanup", "--retention-days", "14"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    # The 24h default applied, so this fresh receipt still reads as ok.
+    assert payload["frontier_source"] == "receipt:scheduler_pass"
+    assert "frontier_blocker" not in payload
+
+
 def test_cleanup_entrypoints_agree_on_frontier_exempt_fixture(
     env: dict[str, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
