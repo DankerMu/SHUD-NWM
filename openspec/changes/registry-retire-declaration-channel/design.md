@@ -110,8 +110,12 @@ retirement。
   removed 都被声明时不再因 removal 拒。
 - **generation 绑定**（`:2779-2785`）对 retire 逐字适用：declaration 的
   generation 必须等于本趟 prospective generation——prospective 少了 bravo
-  行，generation 内容哈希随之变化，运维须按新 generation 写声明（与
-  drift cutover 流程同形，dry_run 先取 generation 再写 declaration）。
+  行，generation 内容哈希随之变化，运维须按新 generation 写声明。取值口径
+  （round-1 F-A 裁定）：**从被拒 receipt 的
+  `registry_classification.generation` 拷**，与 `old_checksum` 同源一张
+  receipt；dry_run **不可**用作取值来源——id-only 分类的 prospective 行没有
+  checksum，其 generation 不是真实 publish 绑定的值，故该分支该键恒 `null`
+  （与 `new_registry_sha256=None if dry_run` 同形）。
   过期窗口/cycle 对齐（`:2528-2540`）同样共用，零新代码。
 
 ## D3 — 证据层：removal 拒因的 skip-cause 判据
@@ -161,7 +165,13 @@ retirement。
   - **显式拒 `retired_total > removed_total`（F4，只紧不松）**：⊆ 按
     items 做而 items 有 `MAX_COLLECTION_ITEMS=256` 截断（`:2619-2627`），
     空/截断 items 下「⊆ 恒真 + 灌大 total 压低 refused 下界」是真实伪造
-    口——total 级不等式与 items 级 ⊆ 双钉。
+    口。**两者都不足以单独封口（round-1 F-B 修正）**：真正堵住「灌 total +
+    清空 items」的是 `_validate_group_totals` 的诚实截断形状钉
+    （`truncated=true` ⇒ `len(items) == MAX_COLLECTION_ITEMS`，写入侧按构造
+    成立）。超过 256 行时 receipt 只能点名前 256 条，其余行**按结构无法逐条
+    验证**——这是固有残余，该形状钉把伪造面压回这个窗口内，而不是消灭它。
+    refused 下界的扣减量因此按桶是否截断分流：未截断按 `retired ∩ removed`
+    点名扣减，截断时回落到 `retired_total`（否则诚实的 >256 退役形会被误拒）。
   - `expected_min_refused = (removed_total - retired_total) +
     max(package_changed_total - declared_total, 0)`（前项经上一条保证
     ≥0，无需再钳）。
@@ -262,7 +272,8 @@ audit 块族、`test_publish_scheduler_file_registry.py` 既有断言。
 - I4 generation 绑定/过期窗口/cycle 对齐/字节上限对 retire 逐项适用
   （共用同一实现，禁止旁路）。
 - I5 对账公式扩展只紧不松：previous-side 等式不变、items ⊆ 约束 +
-  `retired_total <= removed_total` 显式不等式双钉（前项因此 ≥0 无需钳位）、
+  `retired_total <= removed_total` 显式不等式 + 诚实截断形状钉三者合力
+  （前项因此 ≥0 无需钳位；>256 行的逐条不可验证是固有残余，见 D4）、
   id-only 新桶恒 0。
 - I9 两遍法顺序无关性：matched retirement 入桶与否不依赖 removed 迭代序
   （requirement 明句 + D6 格 11 钉测）。

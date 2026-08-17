@@ -1122,8 +1122,13 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
     admits the removal, the refresh publishes, canonical loses exactly bravo's
     row, and alpha publishes normally.
 
-    The first (refused) run stands in for the runbook's dry-run step: it is how
-    an operator reads the prospective generation the declaration must bind to.
+    The first (refused) run is the runbook's step 2, executed the way an
+    operator executes it: a real refresh that fails closed, whose receipt
+    carries BOTH values the declaration needs — the generation
+    (``registry_classification.generation``) and the previous canonical
+    ``old_checksum`` (on the removal refusal row).  The test reads them from the
+    classification exactly as the runbook says to, so a regression that stops
+    publishing the generation reddens here instead of stranding an operator.
     """
     basins_root = tmp_path / "Basins"
     _write_healthy_basin_pair(basins_root)
@@ -1145,7 +1150,6 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
 
     generated_at = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
     classification: dict[str, Any] = {}
-    prospective_models: list[dict[str, Any]] = []
     declaration_env: dict[str, str] = {}
 
     def precommit_provider_generation(
@@ -1153,7 +1157,6 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
         packages: Sequence[Mapping[str, Any]],
         registry_models: Sequence[Mapping[str, Any]],
     ) -> None:
-        prospective_models[:] = [dict(row) for row in registry_models]
         refresh._registry_precommit_gate(
             workspace,
             packages,
@@ -1179,19 +1182,27 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
         )
     assert excinfo.value.details["provider_reason"] == "registry_cutover_removal_refused"
 
+    # Step 2 of the runbook: both declaration inputs come off THIS receipt.
+    refused_generation = classification["generation"]
+    assert refused_generation is not None
+    refused_removal = next(
+        item
+        for item in classification["refused"]["items"]
+        if item["reason"] == "registry_cutover_removal_refused"
+    )
+    assert refused_removal["old_checksum"] == previous_rows["basins_bravo_shud"]["package_checksum"]
+
     declaration = tmp_path / "retire-declaration.json"
     declaration.write_text(
         json.dumps(
             {
                 "schema_version": "nhms.scheduler.registry_package_cutover.v1",
                 "generated_at": "2026-08-16T00:00:00Z",
-                "generation": refresh._prospective_registry_generation(
-                    prospective_models, generated_at=generated_at
-                ),
+                "generation": refused_generation,
                 "entries": [
                     {
                         "model_id": "basins_bravo_shud",
-                        "old_checksum": previous_rows["basins_bravo_shud"]["package_checksum"],
+                        "old_checksum": refused_removal["old_checksum"],
                         "new_checksum": None,
                         "effective_cycle_utc": "2026-08-16T12:00:00Z",
                         "transition_mode": "retire",
@@ -1225,6 +1236,10 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
     assert retired[0]["old_checksum"] == previous_rows["basins_bravo_shud"]["package_checksum"]
     assert retired[0]["new_checksum"] is None
     assert retired[0]["transition_mode"] == "retire"
+    # The generation the operator copied off the refusal is the one the
+    # accepting run bound to — that identity is what makes the runbook loop
+    # terminate instead of chasing a moving value.
+    assert classification["generation"] == refused_generation
 
 
 def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:

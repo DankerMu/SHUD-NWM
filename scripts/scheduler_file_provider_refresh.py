@@ -152,6 +152,12 @@ REGISTRY_MODEL_NESTED_IDENTITY_FIELDS = (
 # corpus.
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 MAX_MODEL_ID_LENGTH = 128
+# The prospective registry generation as recorded on a classification receipt
+# (#1433 round-1 F-A).  Same corpus as the declaration schema's `generation`
+# field (schemas/scheduler_registry_package_cutover.schema.json:16) so an
+# operator can copy the receipt value straight into a declaration.
+GENERATION_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+MAX_GENERATION_LENGTH = 128
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_COLLECTION_ITEMS = 256
 MAX_STRING_LENGTH = 512
@@ -1895,7 +1901,10 @@ CLASSIFICATION_MODES = frozenset({"id_only", "full"})
 # `reconstruct_primary_receipt` / `validate_current_receipt` read on-disk
 # receipts written before the bucket existed, and a required key would
 # retroactively invalidate every one of them.
-_CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode", "declared_retirements"})
+# `generation` (round-1 F-A) is optional for the same reason: it is the value an
+# operator must copy into a declaration, and receipts written before it existed
+# are honest, not tampered.
+_CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode", "declared_retirements", "generation"})
 # #1433: skip-cause evidence keys copied onto a `registry_cutover_removal_refused`
 # entry when bulk publish reported the model as skipped.  Same key names the
 # publisher's not-publishable diagnostics use
@@ -1940,6 +1949,17 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
     if "mode" in classification:
         mode = classification.get("mode")
         if not isinstance(mode, str) or mode not in CLASSIFICATION_MODES:
+            raise ValueError("receipt_classification_invalid")
+    if "generation" in classification:
+        generation = classification.get("generation")
+        # Explicit null is the id-only shape (no meaningful generation); a
+        # present string must be copy-pasteable into a declaration.
+        if generation is not None and (
+            not isinstance(generation, str)
+            or not generation
+            or len(generation) > MAX_GENERATION_LENGTH
+            or GENERATION_PATTERN.fullmatch(generation) is None
+        ):
             raise ValueError("receipt_classification_invalid")
     for hash_field in ("previous_registry_sha256", "new_registry_sha256"):
         value = classification.get(hash_field)
@@ -2020,6 +2040,7 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
             },
             optional_keys=set(),
             transition_modes=CUTOVER_RETIRE_TRANSITION_MODES,
+            null_keys=frozenset({"new_checksum"}),
         )
     _enforce_registry_classification_reconciliation(
         classification, outcome=outcome, reason=reason
@@ -2096,16 +2117,18 @@ def _enforce_registry_classification_reconciliation(
             raise ValueError("receipt_classification_invalid")
         return items
 
-    def _optional_group(group_name: str) -> tuple[int, list[Any]]:
+    def _optional_group(group_name: str) -> tuple[int, list[Any], bool]:
         """#1433: read a bucket that legacy receipts do not carry.
 
-        An absent bucket reads as ``(0, [])`` — pre-#1433 receipts on disk are
-        honest, not tampered.  A PRESENT bucket is validated exactly as strictly
-        as a required one.
+        An absent bucket reads as ``(0, [], False)`` — pre-#1433 receipts on
+        disk are honest, not tampered.  A PRESENT bucket is validated exactly as
+        strictly as a required one.
         """
         if group_name not in classification:
-            return 0, []
-        return _total(group_name), _items(group_name)
+            return 0, [], False
+        group = classification.get(group_name)
+        truncated = isinstance(group, Mapping) and group.get("truncated") is True
+        return _total(group_name), _items(group_name), truncated
 
     added_total = _total("added")
     unchanged_total = _total("unchanged")
@@ -2130,11 +2153,15 @@ def _enforce_registry_classification_reconciliation(
         raise ValueError("receipt_classification_invalid")
 
     # #1433: the same containment for the retirement bucket, plus a total-level
-    # inequality.  The `⊆` check runs on items, which truncate at
-    # MAX_COLLECTION_ITEMS, so an emptied item list with an inflated total would
-    # otherwise satisfy containment vacuously while deflating the refused lower
-    # bound below.  Both must hold.
-    retired_total, retired_items = _optional_group("declared_retirements")
+    # inequality.  Neither is sufficient alone: `⊆` runs on items, which
+    # truncate at MAX_COLLECTION_ITEMS, and the total bounds the rows the items
+    # cannot name.  What actually closes the "inflate the total, empty the
+    # items" forgery is the honest-truncation shape rule in
+    # `_validate_group_totals` (round-1 F-B); above 256 rows a residue remains
+    # by construction — see the note there.
+    retired_total, retired_items, retired_truncated = _optional_group(
+        "declared_retirements"
+    )
     retired_ids = {
         item.get("model_id") for item in retired_items if isinstance(item, Mapping)
     }
@@ -2189,6 +2216,11 @@ def _enforce_registry_classification_reconciliation(
         # never admit a retirement either.  A present bucket must read zero; an
         # absent one already does.
         if retired_total != 0:
+            raise ValueError("receipt_classification_invalid")
+        # Round-1 F-A: the id-only writer pins `generation` to None (the value
+        # would come from checksum-less rows), so a non-null generation on an
+        # id-only classification is forged.  Absent reads as None.
+        if classification.get("generation") is not None:
             raise ValueError("receipt_classification_invalid")
         if mode is None:
             # Legacy outcome-keyed fallback: behavior frozen as it was before
@@ -2309,9 +2341,19 @@ def _enforce_registry_classification_reconciliation(
     # (#1433) + every package_changed entry not in declared_cutovers + every
     # entry rejected by declaration_invalid.  The declaration_invalid slice is
     # unbounded (may include the synthetic `__declaration__` marker) so we
-    # assert only the lower bound.  `retired_total <= removed_total` is already
-    # enforced above, so the first term cannot go negative.
-    expected_min_refused = (removed_total - retired_total) + max(
+    # assert only the lower bound.
+    #
+    # Round-1 F-B: deduct the NAMED retirements when the bucket is untruncated
+    # (an id claimed but absent from `removed` deducts nothing), and fall back
+    # to the total once truncation makes naming impossible — an honest run with
+    # more than 256 retirements lists only 256 of them, and deducting the
+    # intersection there would refuse a receipt the writer built correctly.
+    # Either way `retired_total <= removed_total` is enforced above, so the
+    # first term cannot go negative.
+    retired_deduction = (
+        retired_total if retired_truncated else len(retired_ids & removed_ids)
+    )
+    expected_min_refused = (removed_total - retired_deduction) + max(
         package_changed_total - declared_total, 0
     )
     if refused_total < expected_min_refused:
@@ -2329,6 +2371,21 @@ def _enforce_registry_classification_reconciliation(
 
 
 def _validate_group_totals(group: Mapping[str, Any], items: Sequence[Any]) -> None:
+    """Bind a classification group's `total`/`truncated` to its `items`.
+
+    Round-1 F-B: a truncated group must carry a FULL item list.  ``to_receipt``
+    truncates at exactly ``MAX_COLLECTION_ITEMS``, so ``truncated=true`` with a
+    short (or emptied) list has no legal writer — and without this rule a forger
+    could wipe the items, inflate the total, and deflate a lower bound that is
+    computed from totals.  Same shape #1144 already pins on the id-only
+    ``refused`` bucket, applied at both call sites (so the identical hole in
+    ``declared_cutovers`` closes with it).
+
+    The residue is inherent and deliberate: above ``MAX_COLLECTION_ITEMS`` the
+    receipt can only name the first 256 rows, so the rows beyond the cap stay
+    unverifiable by item.  This rule bounds the forgery to that window instead
+    of leaving it unbounded.
+    """
     total = group.get("total")
     truncated = group.get("truncated")
     if not isinstance(total, int) or isinstance(total, bool) or total < 0:
@@ -2336,6 +2393,8 @@ def _validate_group_totals(group: Mapping[str, Any], items: Sequence[Any]) -> No
     if total < len(items) or not isinstance(truncated, bool):
         raise ValueError("receipt_classification_invalid")
     if truncated is not (total > len(items)):
+        raise ValueError("receipt_classification_invalid")
+    if truncated and len(items) != MAX_COLLECTION_ITEMS:
         raise ValueError("receipt_classification_invalid")
 
 
@@ -2346,6 +2405,7 @@ def _validate_object_group(
     optional_keys: set[str],
     reason_enum: frozenset[str] | None = None,
     transition_modes: frozenset[str] = CUTOVER_TRANSITION_MODES,
+    null_keys: frozenset[str] = frozenset(),
 ) -> None:
     if not isinstance(group, Mapping) or set(group) != _CLASSIFICATION_GROUP_KEYS:
         raise ValueError("receipt_classification_invalid")
@@ -2368,13 +2428,20 @@ def _validate_object_group(
                 ):
                     # Same corpus as the schema (see MODEL_ID_PATTERN).
                     raise ValueError("receipt_classification_invalid")
-            elif name in {"old_checksum", "new_checksum"} and value is not None:
-                if (
-                    not isinstance(value, str)
-                    or len(value) != 64
-                    or any(character not in "0123456789abcdef" for character in value)
-                ):
-                    raise ValueError("receipt_classification_invalid")
+            elif name in {"old_checksum", "new_checksum"}:
+                if name in null_keys:
+                    # Round-1 F-C: this bucket's contract pins the field to
+                    # null, so a hex value here is a forged row — the schema
+                    # says the same and both must reject the same corpus.
+                    if value is not None:
+                        raise ValueError("receipt_classification_invalid")
+                elif value is not None:
+                    if (
+                        not isinstance(value, str)
+                        or len(value) != 64
+                        or any(character not in "0123456789abcdef" for character in value)
+                    ):
+                        raise ValueError("receipt_classification_invalid")
             elif name == "reason":
                 if reason_enum is not None and value not in reason_enum:
                     raise ValueError("receipt_classification_invalid")
@@ -2714,6 +2781,13 @@ class _RegistryClassification:
     # validator has to select the same branch — reading the terminal outcome
     # instead misroutes every dry_run that fails AFTER the gate.
     mode: str = "full"
+    # Round-1 F-A: the prospective generation this classification bound to.  It
+    # is what an operator must copy into a cutover/retire declaration, and the
+    # refusal receipt was previously the one place that did NOT carry it — the
+    # runbook had to send operators to a dry_run, which classifies a DIFFERENT
+    # model set.  Stays None on the id-only path, where the value would be
+    # derived from checksum-less rows (same rule as `new_registry_sha256`).
+    generation: str | None = None
     added: list[str] = dataclass_field(default_factory=list)
     unchanged: list[str] = dataclass_field(default_factory=list)
     removed: list[str] = dataclass_field(default_factory=list)
@@ -2741,6 +2815,7 @@ class _RegistryClassification:
             "previous_model_count": self.previous_model_count,
             "prospective_model_count": int(self.prospective_model_count),
             "mode": self.mode,
+            "generation": self.generation,
             "added": id_group(sorted(self.added)),
             "unchanged": id_group(sorted(self.unchanged)),
             "removed": id_group(sorted(self.removed)),
@@ -2840,6 +2915,10 @@ def _classify_registry(
     result = _RegistryClassification(
         previous_registry_sha256=previous_sha256,
         new_registry_sha256=None if dry_run else new_sha256,
+        # Round-1 F-A: publish the generation the declaration must bind to.  The
+        # id-only path derives it from rows that carry no checksums, so the
+        # value would not be the one a real refresh binds — omit it there.
+        generation=None if dry_run else generation,
     )
     prospective_by_id: dict[str, Mapping[str, Any]] = {}
     for row in prospective:

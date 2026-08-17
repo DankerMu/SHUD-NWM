@@ -567,7 +567,10 @@ declaration"（只有当没有 `package_changed`/`removed` 时才允许）。**s
 前 12 位，**不含**任何 wall-clock 分量）。相同 model set 的重跑 refresh 得到 byte-
 identical 的 generation string，所以"先看被拒 receipt -> 拷 generation 到 declaration ->
 重跑 refresh"这个循环里，第二次 refresh 一定能匹配 declaration；只有 prospective
-model set 真正变了，generation 才会变（这时也必须重新出 declaration）。
+model set 真正变了，generation 才会变（这时也必须重新出 declaration）。被拒 receipt
+直接带这个值：`registry_classification.generation`（#1433 起）。dry_run receipt 该键
+为 `null`——id-only 分类的 prospective 行没有 checksum，其 generation 不是真实
+publish 绑定的那个值，**不要从 dry-run 拷**。
 
 操作流程（手动 CLI 路径）：先看被拒 receipt -> 拷 generation / old/new checksum 到
 declaration -> 提交 declaration 到 mode-0600 路径 ->
@@ -583,11 +586,21 @@ declaration -> 提交 declaration 到 mode-0600 路径 ->
 
 1. 停 timer：`systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
    再按上面的成对 status 判据确认 oneshot service 也已退出。
-2. 跑一次 `--dry-run` 取本趟 prospective 的 `generation`（dry_run 不评估 removal，
-   所以它**不会**复现那条拒绝，只用来拿 generation）。
+2. 跑一趟**真实 refresh**（不加 `--dry-run`）。它会以
+   `registry_cutover_removal_refused` 拒——canonical 字节不变、零发布，这正是
+   本次要解决的那条拒绝——然后从这张被拒 receipt 的
+   `registry_classification.generation` 拷出本趟 prospective 的 generation。
+   **不要用 `--dry-run` 取这个值**：dry_run 走 id-only 分类（prospective 行只有
+   id、没有 checksum），既不评估 removal，其 `generation` 也不是真实 publish 会
+   绑定的那个值——receipt 里该键为 `null`。
+   ```bash
+   jq -r '.registry_classification.generation' <receipt>
+   ```
 3. 写 declaration，entry 形：`model_id` = 要退役的行、`old_checksum` = **previous
-   canonical 那一行**的 `package_checksum`（从被拒 receipt 的 refusal entry
-   `old_checksum` 直接拷）、`new_checksum: null`、`transition_mode: "retire"`、
+   canonical 那一行**的 `package_checksum`（与上一步 generation 同源——都从这张
+   被拒 receipt 拷，`old_checksum` 取 `registry_classification.refused` 里那条
+   `registry_cutover_removal_refused` 行）、`new_checksum: null`、
+   `transition_mode: "retire"`、
    `effective_cycle_utc` 对齐 00:00/12:00 UTC 且在窗口内。generation 绑定、过期
    窗口、cycle 对齐、256 KiB 上限对 retire 逐条同样适用，没有任何 retire 专用豁免。
 4. 跑一趟 refresh（timer 路径同样受 gate 审计）。
