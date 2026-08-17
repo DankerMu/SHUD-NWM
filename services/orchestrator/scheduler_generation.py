@@ -140,7 +140,11 @@ CUTOVER_DECLARATION_SCHEMA_VERSION = "nhms.scheduler.registry_package_cutover.v1
 #: declaration file cannot exhaust scheduler memory before validation.
 MAX_CUTOVER_DECLARATION_BYTES = 256 * 1024
 
-CUTOVER_TRANSITION_MODES = frozenset({"replace"})
+#: Mirrors the publisher constant and the schema enum.  ``"retire"`` (#1433) is
+#: accepted so a retirement declaration does not invalidate the whole shared
+#: file for this consumer; retirement entries are skipped during normalization
+#: below because they derive no generation.
+CUTOVER_TRANSITION_MODES = frozenset({"replace", "retire"})
 
 #: Allowed cycle hours for a declared cutover ``effective_cycle_utc``.  This
 #: MUST mirror the publisher constant (``CUTOVER_CYCLE_HOURS`` in
@@ -812,6 +816,17 @@ def load_cutover_declaration(
                 "_load_error_index": index,
             }
         seen_model_ids.add(model_id)
+        if str(entry["transition_mode"]).strip() == "retire":
+            # #1433: a retirement declares that a model LEAVES the canonical
+            # registry; it carries no new package, so it can never bind a
+            # candidate here.  Skip it before the checksum normalization below
+            # turns its ``null`` ``new_checksum`` into the string ``"None"``,
+            # and after the duplicate-id check above so a duplicated id is
+            # still caught.  The entry is not added to ``normalized_entries``,
+            # so ``match_declaration_entry`` never returns it and the
+            # ``_declaration_load_evidence`` entry count reflects the entries
+            # this consumer acts on, not the file's line count.
+            continue
         old_checksum = str(entry["old_checksum"]).strip()
         new_checksum = str(entry["new_checksum"]).strip()
         effective_cycle = _parse_effective_cycle(entry["effective_cycle_utc"])

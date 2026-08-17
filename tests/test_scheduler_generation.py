@@ -528,6 +528,84 @@ def test_match_declaration_entry_returns_none_for_unknown_model(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
+# #1433: the shared declaration may now carry `retire` entries.  This consumer
+# derives nothing from them, but it MUST NOT be disabled by their presence.
+# ---------------------------------------------------------------------------
+
+
+def _retire_entry(model_id: str = "model_r") -> dict[str, Any]:
+    return {
+        "model_id": model_id,
+        "old_checksum": OLD_CHECKSUM,
+        "new_checksum": None,
+        "effective_cycle_utc": "2026-07-06T12:00:00Z",
+        "transition_mode": "retire",
+    }
+
+
+def test_consumer_transition_modes_match_the_shared_schema_enum() -> None:
+    """The consumer's copy of the constant is the schema enum, not a subset:
+    a mode the schema admits must not turn the whole shared file into a
+    ``_load_error`` here."""
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/scheduler_registry_package_cutover.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    schema_enum = set(
+        schema["properties"]["entries"]["items"]["properties"]["transition_mode"]["enum"]
+    )
+
+    assert set(generation.CUTOVER_TRANSITION_MODES) == schema_enum
+
+
+def test_declaration_with_a_retire_entry_still_loads_and_matches_replace_entries(
+    tmp_path: Path,
+) -> None:
+    """#1433/I8: a retirement in the file must not cost the replace entry its
+    binding — before the tolerant skip, the consumer failed the WHOLE file with
+    ``declaration_entry_transition_mode_invalid`` and every candidate fell to
+    ``block_declaration_missing`` / ``block_declaration_stale``."""
+    path = _write_declaration(tmp_path, extra_entries=[_retire_entry()])
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert declaration is not None
+    assert "_load_error" not in declaration
+    entry = generation.match_declaration_entry(declaration, model_id="model_a")
+    assert entry is not None
+    assert entry["transition_mode"] == "replace"
+    assert entry["new_checksum"] == NEW_CHECKSUM
+
+
+def test_retire_entries_never_match_and_never_produce_none_strings(
+    tmp_path: Path,
+) -> None:
+    """The retirement is skipped before checksum normalization, so no candidate
+    can bind it and no ``"None"`` string reaches generation derivation."""
+    path = _write_declaration(tmp_path, extra_entries=[_retire_entry()])
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert generation.match_declaration_entry(declaration, model_id="model_r") is None
+    assert [entry["model_id"] for entry in declaration["entries"]] == ["model_a"]
+    assert "None" not in json.dumps(declaration, default=str)
+
+
+def test_a_retire_entry_does_not_hide_a_duplicate_model_id(tmp_path: Path) -> None:
+    """The skip sits AFTER the duplicate-id check, so a file that names one
+    model twice is still rejected even when the duplicate is a retirement."""
+    path = _write_declaration(
+        tmp_path, extra_entries=[_retire_entry(model_id="model_a")]
+    )
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert declaration["_load_error"] == "declaration_entry_model_id_invalid"
+
+
+# ---------------------------------------------------------------------------
 # T7: §8.9 scheduler-level regression — NHMS_REQUIRE_FORECAST_WARM_START=false
 # must NOT admit a declaration-less cutover / missing predecessor / wrong-
 # generation checkpoint.  End-to-end through _strict_warm_start_for_candidate.
