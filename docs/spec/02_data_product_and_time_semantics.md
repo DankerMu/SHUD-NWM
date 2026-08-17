@@ -122,6 +122,12 @@ SHUD 主站点索引成员 `shud/stations.tsd.forc`（canonical，流域中性�
 主站点索引成员名是纯运输身份，不得当作 forcing 数据的流域证据（#1176）：producer 只发布 canonical 名，消费方按下列分层规则解析 `{canonical, legacy}`。
 
 - **并存**：direct-grid 消费方在 package manifest 与解包后的文件系统两层均 fail-closed（`DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`）。
+  但文件系统层的并存先由 staging 卫生自愈（#1355）：direct-grid staging 写入前，把本次 checksum 校验后的
+  package manifest **未声明**的可接受索引成员从复用的 `input/<project>` 中删除，因此上一 attempt 残留的
+  另一身份不再把该 run_id 永久卡死；删除失败则以**不自动重试**的 `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`
+  终止本次 attempt，绝不在残留之上继续 staging。卫生之后文件系统仍并存的（成因只能是白名单
+  staging 之外的带外写入），文件系统门照旧 fail-closed；manifest 自身声明两成员则**更早**在
+  manifest 门 fail-closed（先于卫生与 staging）。
 - **全缺**：只在 direct-grid staging 层 fail-closed（`DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`）；manifest 门空命中维持返回空列表。
 - **非 direct-grid**：该路径是全前缀拷贝，可合法留有原地再生产的残余成员——多成员按声明源回退链解析（package manifest 非空 `files` → run-manifest 诊断 `forcing.files`；所选源恰一命名可接受成员则用之，否则 canonical 兜底），全缺维持既有内部 forcing 回退。
 - **manifest 声明的成员在对象树中缺席**：以 `FORCING_CHECKSUM_READ_FAILED` 点名该成员 fail-closed，而非 size-limit 码。

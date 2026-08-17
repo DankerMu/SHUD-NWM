@@ -1358,7 +1358,13 @@ def test_runtime_direct_grid_stages_either_accepted_station_index_member(
 
 
 def test_runtime_direct_grid_manifest_declaring_both_index_members_fails_closed(tmp_path: Path) -> None:
-    """B4 (#1176): canonical + legacy in one manifest is fail-closed ambiguity."""
+    """B4 (#1176) / AC2 (#1355): canonical + legacy in one manifest is fail-closed ambiguity.
+
+    This is real package contamination, not workspace residue, so the #1355
+    staging hygiene must not mask it: the manifest gate runs in
+    ``_prepare_forcing_package_context``, upstream of any staging, and still
+    raises.
+    """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(
@@ -1458,10 +1464,15 @@ def test_runtime_direct_grid_manifest_gate_returns_empty_without_index_member(tm
 
 
 def test_runtime_direct_grid_both_index_files_staged_on_disk_fails_closed(tmp_path: Path) -> None:
-    """B5 (#1176): the filesystem probe adjudicates independently of the manifest.
+    """B5 (#1176) / defense in depth (#1355): the filesystem probe adjudicates independently.
 
-    A stray second index file that the manifest never declared (e.g. shipped
-    inside the model package) must not let the runtime silently pick one.
+    Since #1355 the direct-grid staging deletes any undeclared accepted member
+    before writing, so residue — including a stray copy smuggled in by the model
+    package, which is staged earlier — can no longer reach this gate. What
+    survives the hygiene is a write that bypassed the allowlisted staging
+    entirely, which is exactly what calling ``_prepare_shud_project_forcing``
+    directly on a hand-built tree models. The gate stays, and its message now
+    points at that out-of-band writer instead of at prior-attempt residue.
     """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
@@ -1497,6 +1508,11 @@ def test_runtime_direct_grid_both_index_files_staged_on_disk_fails_closed(tmp_pa
     assert exc_info.value.error_code == "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS"
     assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
     assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    # The hypothesis is the out-of-band writer, and the remediation is to report
+    # the workspace — not the pre-#1355 "a prior attempt left this; hand-delete it".
+    assert "out-of-band write" in exc_info.value.message
+    assert "most likely cause is a prior attempt" not in exc_info.value.message
+    assert "manually remove" not in exc_info.value.message
     assert not (model_input_dir / "alias-a.tsd.forc").exists()
 
 
@@ -1640,6 +1656,432 @@ def test_runtime_direct_grid_manifest_declared_member_absent_from_object_tree_fa
 
     assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
     assert declared_member in exc_info.value.message
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def _write_single_station_direct_grid_sp_att(object_root: Path) -> None:
+    """Point every element's FORC ownership at station 1.
+
+    ``_write_basins_package`` ships FORC ids {2, 3}, which a one-station
+    direct-grid package fails on (``DIRECT_GRID_FORCING_OWNERSHIP_RANGE``) long
+    before anything about staging hygiene is observable.
+    """
+    (
+        object_root
+        / "models"
+        / "basins_basin_a_shud"
+        / "vbasins-test"
+        / "package"
+        / "alias-a.sp.att"
+    ).write_text(
+        "2\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t1\n"
+        "2\t0\t0\t0\t1\n",
+        encoding="utf-8",
+    )
+
+
+def _repoint_package_manifest_index_member(
+    object_root: Path,
+    checksums: dict[str, str],
+    *,
+    member: str,
+    longitude: int,
+) -> dict[str, str]:
+    """Re-publish the forcing package so its only station-index member is ``member``.
+
+    Models the #1176 identity migration landing between two attempts of one
+    run_id: the object tree drops the previous identity and the package manifest
+    declares the new one. ``longitude`` distinguishes the new member's rows, so
+    the staged ``{project}.tsd.forc`` reveals which member was actually consumed.
+    """
+    entry = _write_residual_index_member(object_root, member, longitude=longitude)
+    for other in SHUD_FORCING_INDEX_MEMBERS:
+        if other != member:
+            (_forcing_shud_object_dir(object_root) / other.rsplit("/", 1)[-1]).unlink(missing_ok=True)
+
+    def _transform(payload: dict[str, Any]) -> None:
+        payload["files"] = [
+            file_entry
+            for file_entry in payload["files"]
+            if file_entry.get("relative_path") not in set(SHUD_FORCING_INDEX_MEMBERS)
+        ] + [entry]
+
+    return {
+        **_rewrite_package_manifest(object_root, checksums, transform=_transform),
+        "tsd_relative_path": member,
+        "tsd_checksum": entry["checksum"],
+    }
+
+
+def _seed_direct_grid_attempt_one_residue(
+    tmp_path: Path,
+    object_root: Path,
+    runtime: SHUDRuntime,
+    *,
+    index_member: str = LEGACY_SHUD_FORCING_INDEX_MEMBER,
+) -> tuple[dict[str, str], Path]:
+    """Run one direct-grid staging of ``index_member`` and return its checksums + input dir.
+
+    The staged ``shud/<index_member>`` this leaves behind IS the prior-attempt
+    residue: ``input/<project>`` is reused verbatim by the next attempt of the
+    same run_id (deterministic run_id, ``chain_forecast_state.py``), so a later
+    attempt that declares only the *other* accepted member meets both identities
+    on disk. Either member can be the residue — the migration runs canonical-ward
+    in production, but the deletion set is the manifest's complement, not a
+    hardcoded name, so both directions are exercised.
+
+    Attempt N is driven through the real staging entry point rather than a full
+    ``prepare_workspace`` because it is modelled as failing *after* forcing
+    staging and *before* station-CSV consumption — the staged-checksum
+    verification and initial-state staging both sit in that window. Re-driving a
+    direct-grid attempt that got all the way through consumption is blocked by a
+    separate, pre-existing gate (``DIRECT_GRID_STATION_FILENAME_COLLISION``
+    refuses to overwrite the station CSV it copied to the model input root last
+    attempt), which is its own defect and not what #1355 adjudicates.
+    """
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_artifact(
+        manifest["forcing"]["forcing_uri"],
+        input_dir / "alias-a",
+        forcing_context=runtime._prepare_forcing_package_context(manifest),
+    )
+
+    assert (input_dir / "alias-a" / "shud" / index_member.rsplit("/", 1)[-1]).is_file()
+    return checksums, input_dir
+
+
+@pytest.mark.parametrize(
+    "residue_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["residue-legacy", "residue-canonical"],
+)
+def test_runtime_direct_grid_prior_attempt_index_residue_self_heals_before_staging(
+    tmp_path: Path,
+    residue_member: str,
+) -> None:
+    """AC1 (#1355): a re-drive across the identity migration heals itself instead of deadlocking.
+
+    Attempt N stages ``residue_member`` into the reused input workspace and then
+    fails (simulated here by simply re-driving). Attempt N+1's package manifest
+    declares only the other accepted member. Before the fix the filesystem
+    ambiguity gate saw both members and raised the non-retryable
+    ``DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`` — for that run_id, forever, until a
+    human deleted the file on the compute node. Now staging deletes the
+    undeclared member first, and the run consumes the freshly declared one
+    (longitude 777, not the residue's 100).
+
+    Both directions run because the deletion target is the manifest's
+    complement, not a name: hardcoding the legacy member as the thing to delete
+    satisfies the production-ward direction alone.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=residue_member,
+    )
+    model_input_dir = input_dir / "alias-a"
+    declared_member = _other_index_member(residue_member)
+
+    migrated = _repoint_package_manifest_index_member(
+        object_root,
+        checksums,
+        member=declared_member,
+        longitude=777,
+    )
+    attempt_two = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(migrated))
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
+
+    runtime.prepare_workspace(attempt_two, input_dir)
+
+    staged_shud_dir = model_input_dir / "shud"
+    assert (staged_shud_dir / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (staged_shud_dir / residue_member.rsplit("/", 1)[-1]).exists()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t777\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert repository.statuses == []
+
+
+def test_runtime_direct_grid_hygiene_deletes_only_the_accepted_index_member_set(
+    tmp_path: Path,
+) -> None:
+    """AC (#1355) deletion-scope contract: hygiene touches nothing but the index members.
+
+    Indiscriminate clearing of the reused input workspace is an explicit
+    non-goal — it would destroy the model package / IC staging assumptions and
+    the triage evidence. Prior-attempt station CSVs and unrelated staged files
+    survive; only the undeclared accepted station-index member goes.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(tmp_path, object_root, runtime)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    (staged_shud_dir / "forcing_099.csv").write_text("prior attempt station csv\n", encoding="utf-8")
+    (staged_shud_dir / "unrelated.txt").write_text("operator note\n", encoding="utf-8")
+
+    migrated = _repoint_package_manifest_index_member(
+        object_root,
+        checksums,
+        member=CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+        longitude=777,
+    )
+    attempt_two = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(migrated))
+
+    runtime.prepare_workspace(attempt_two, input_dir)
+
+    assert not (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert (staged_shud_dir / "forcing_099.csv").read_text(encoding="utf-8") == "prior attempt station csv\n"
+    assert (staged_shud_dir / "unrelated.txt").read_text(encoding="utf-8") == "operator note\n"
+
+
+def _direct_grid_canonical_only_attempt(
+    tmp_path: Path,
+    object_root: Path,
+) -> tuple[dict[str, Any], Path]:
+    """Publish a canonical-only direct-grid package and return its manifest + input dir.
+
+    The staged tree is left empty on purpose so a caller can plant exactly the
+    undeclared legacy residue shape it wants hygiene to trip over.
+    """
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    (input_dir / "alias-a" / "shud").mkdir(parents=True)
+    return manifest, input_dir
+
+
+@pytest.mark.parametrize("residue_shape", ["directory", "symlink"], ids=["directory", "symlink"])
+def test_runtime_direct_grid_undeletable_index_residue_fails_loud(
+    tmp_path: Path,
+    residue_shape: str,
+) -> None:
+    """AC3 (#1355): residue the unlink primitive refuses ends the attempt, it does not degrade.
+
+    ``unlink_no_follow`` refuses both directories and symlinks outright
+    (``packages/common/safe_fs.py``). There is no two-way branch here (#1164
+    ``_clear_packaged_initial_states`` is the exemplar): staging must not
+    proceed on top of residue it could not remove.
+    """
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_canonical_only_attempt(tmp_path, object_root)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    if residue_shape == "directory":
+        residue.mkdir()
+    else:
+        residue.symlink_to(staged_shud_dir / "elsewhere.tsd.forc")
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    # Staging stopped at the hygiene failure: this attempt's declared member was
+    # never written on top of the residue.
+    assert not (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_index_residue_unlink_io_error_fails_loud(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3 (#1355) I/O shape: a raw ``OSError`` from the unlink is re-coded, not swallowed."""
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_canonical_only_attempt(tmp_path, object_root)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).write_text("residue\n", encoding="utf-8")
+
+    def _raise_oserror(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(runtime_module, "unlink_no_follow", _raise_oserror)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert "read-only file system" in exc_info.value.message
+    assert not (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
+
+
+def test_direct_grid_residue_cleanup_failed_is_not_auto_retryable() -> None:
+    """AC3 (#1355) retry stance: a file that will not unlink will not unlink on a retry.
+
+    Only ``TRANSIENT_ERROR_CODES`` is pinned. Whether the code also gets
+    registered in ``NON_TRANSIENT_ERROR_CODES`` is deliberately left open — this
+    change does not touch ``retry.py``, so the code takes its unknown-code
+    default of non-transient.
+    """
+    from services.orchestrator.retry import TRANSIENT_ERROR_CODES
+
+    assert "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED" not in TRANSIENT_ERROR_CODES
+
+
+def test_runtime_non_direct_grid_staging_leaves_residual_index_member_alive(
+    tmp_path: Path,
+) -> None:
+    """AC4 (#1355) lane isolation: the hygiene never reaches non-direct-grid staging.
+
+    Non-direct-grid staging goes through ``_stage_directory_artifact``'s
+    whole-prefix copy and never enters the direct-grid variant, so a residual
+    member there stays a legitimate steady state resolved by the manifest
+    anchor. This is the explicit counter-example to the direct-grid deletion.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    residue.write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t777\t30\t1\t1\t1\tforcing.csv\n",
+        encoding="utf-8",
+    )
+    assert _declared_package_manifest_index_members(object_root) == {CANONICAL_SHUD_FORCING_INDEX_MEMBER}
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert residue.is_file()
+    tsd_forc = (input_dir / "alias-a" / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert "777" not in tsd_forc
+
+
+@pytest.mark.parametrize(
+    "declared_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["declares-legacy", "declares-canonical"],
+)
+def test_runtime_direct_grid_single_member_package_hygiene_is_a_no_op(
+    tmp_path: Path,
+    declared_member: str,
+) -> None:
+    """AC4 (#1355) no-regression: a declared member is never a deletion target.
+
+    A single-member package re-driven over its own prior-attempt staging must
+    behave bit-for-bit as before: the declared member is kept (the deletion set
+    is its complement, and the absent other member is a ``missing_ok`` no-op).
+    Run for both identities so the anchor pins preservation of *whichever*
+    member the manifest declares, not of one hardcoded name — the legacy
+    direction alone is the historical-package regression, the canonical
+    direction is the post-migration steady state.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=declared_member,
+    )
+    model_input_dir = input_dir / "alias-a"
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (model_input_dir / "shud" / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (model_input_dir / "shud" / _other_index_member(declared_member).rsplit("/", 1)[-1]).exists()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert repository.statuses == []
+
+
+def test_runtime_direct_grid_zero_declared_index_member_deletes_residue_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """AC (#1355) zero-declared anchor: absence must not be papered over by residue.
+
+    A manifest declaring no accepted station-index member used to *succeed* on a
+    reused workspace, because ``_stage_standard_shud_forcing`` found the prior
+    attempt's member on disk and silently ran the model on stale forcing. With
+    the deletion set being the whole two-member set, the residue is gone and the
+    absence surfaces as the fail-closed
+    ``DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`` it always should have been.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    # Ownership matches the residue's single station on purpose: without it the
+    # pre-fix behaviour would trip a downstream .sp.att check instead of showing
+    # what this anchor is about — a run that completes on stale forcing.
+    _write_single_station_direct_grid_sp_att(object_root)
+    _write_forcing(object_root)
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    manifest_content = json_bytes({"lineage": {"forcing_mapping_mode": "direct_grid"}, "files": []})
+    (forcing_dir / "forcing_package.json").write_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(
+        {
+            "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
+            "manifest_checksum": sha256_bytes(manifest_content),
+            "tsd_checksum": "",
+            "csv_checksum": "",
+        }
+    )
+    manifest["forcing"]["files"] = []
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    residue.write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\tforcing.csv\n",
+        encoding="utf-8",
+    )
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING"
+    assert not residue.exists()
     assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 

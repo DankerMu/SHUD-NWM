@@ -1065,11 +1065,13 @@ class SHUDRuntime:
                     "Staged SHUD forcing package contains more than one station-index member "
                     f"in {shud_dir}: {', '.join(staged_members)}; refusing to guess which one "
                     "is authoritative. Direct-grid staging copies only manifest-allowlisted "
-                    "members, so the most likely cause is a prior attempt that staged a "
-                    "different station-index identity into this reused run input workspace "
-                    "(prior-attempt residue). Remediation: manually remove the stale member "
-                    "(or clear the run's input workspace) and re-drive; this error code is "
-                    "not retryable in place.",
+                    "members, and it deletes every undeclared accepted station-index member "
+                    "before writing (#1355), so prior-attempt residue can no longer be the "
+                    "cause: the most likely cause is an out-of-band write into this run "
+                    "input workspace, outside that allowlisted staging. Remediation: report "
+                    "this workspace for inspection instead of hand-deleting the extra member "
+                    "— the out-of-band writer, not the leftover file, is the defect; this "
+                    "error code is not retryable in place.",
                 )
             declared_member = _manifest_declared_shud_forcing_index_member(
                 checksum_entries,
@@ -1924,7 +1926,59 @@ class SHUDRuntime:
         *,
         forcing_context: _ForcingPackageContext,
     ) -> None:
+        """Stage the manifest-allowlisted direct-grid members over a reused input workspace.
+
+        #1355: ``input/<project>`` is reused across every attempt of a run_id, and
+        this staging only ever *wrote* allowlisted members, never deleting any.  A
+        re-drive that crosses the #1176 identity migration therefore left the prior
+        attempt's station-index member beside this attempt's, which the filesystem
+        ambiguity gate in :meth:`_stage_standard_shud_forcing` (correctly) refuses,
+        deadlocking every later attempt of that run_id until a human deletes the
+        file on the compute node.  So this staging opens with declared-member
+        anchored hygiene: before writing anything, every accepted station-index
+        member that THIS attempt's checksum-verified package manifest does not
+        declare is removed from the staged tree.
+
+        Deletion-scope contract: the deletion set is exactly
+        ``SHUD_FORCING_INDEX_MEMBERS`` minus what the manifest declares — one
+        file in the normal exactly-one-declared shape, both members when the
+        manifest declares none (which then fails closed on the missing
+        membership), and never anything outside that two-member set.  Prior-attempt
+        station CSVs and unrelated staged files are left alone: they are either
+        overwritten by this staging or adjudicated by the checksum/read paths.
+        Indiscriminate clearing of the input workspace is an explicit non-goal.
+
+        Fail-LOUD, no two-way branch (#1164 :meth:`_clear_packaged_initial_states`
+        is the exemplar): a deletion that cannot be completed re-codes as
+        ``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`` and ends the attempt rather
+        than staging on top of residue.  Directory-form and symlink-form residue
+        are refused by ``unlink_no_follow`` itself and land on that same code.
+        The orchestrator does not auto-retry it: the code is deliberately absent
+        from ``TRANSIENT_ERROR_CODES`` (a file that cannot be unlinked will not
+        unlink on a retry either), so it takes ``retry.py``'s unknown-code default
+        of non-transient.  Whether it is also registered in
+        ``NON_TRANSIENT_ERROR_CODES`` is left open on purpose — ``retry.py`` is
+        unchanged by this change.
+        """
+
         object_root = Path(self.config.object_store_root)
+        declared_index_members = {
+            str(entry["relative_path"])
+            for entry in forcing_context.checksum_entries
+            if str(entry["relative_path"]) in SHUD_FORCING_INDEX_MEMBERS
+        }
+        for member in SHUD_FORCING_INDEX_MEMBERS:
+            if member in declared_index_members:
+                continue
+            member_path = destination / Path(*PurePosixPath(member).parts)
+            try:
+                unlink_no_follow(member_path, containment_root=destination, missing_ok=True)
+            except (SafeFilesystemError, OSError) as error:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                    f"Undeclared staged SHUD station-index member {member} could not be removed "
+                    f"from the run input workspace before direct-grid staging: {error}",
+                ) from error
         staged_relative_paths: set[str] = set()
         for file_entry in forcing_context.checksum_entries:
             relative_posix = str(file_entry["relative_path"])
