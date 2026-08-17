@@ -114,7 +114,7 @@ The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NO
 
 ### Requirement: Forcing package station-index identity is basin-neutral and fails closed
 
-The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity. The declaration-source matching SHALL accept the same entry shapes the direct-grid consumer accepts for the identical manifest: a `./`-prefixed `relative_path` normalizes before the accepted-member intersection, and an entry that omits `relative_path` resolves through its `uri` relative to the forcing package root; an entry that is invalid or underivable under these rules is skipped, because the anchor is a best-effort resolver and SHALL NOT introduce a new fail-closed surface on the non-direct-grid lane.
+The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Before writing any member, direct-grid staging SHALL delete from the staged tree every accepted station-index member that this attempt's checksum-verified package manifest does not declare — prior-attempt workspace residue self-heals instead of poisoning the run — deleting nothing outside the accepted-member set; a residue deletion that fails SHALL terminate the attempt loudly with the dedicated typed error `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` instead of continuing to stage. Ambiguity that survives this hygiene — a manifest declaring more than one accepted member, or a staged filesystem still carrying more than one accepted member after hygiene — remains fail-closed. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing, and SHALL NOT delete residual members. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity. The declaration-source matching SHALL accept the same entry shapes the direct-grid consumer accepts for the identical manifest: a `./`-prefixed `relative_path` normalizes before the accepted-member intersection, and an entry that omits `relative_path` resolves through its `uri` relative to the forcing package root; an entry that is invalid or underivable under these rules is skipped, because the anchor is a best-effort resolver and SHALL NOT introduce a new fail-closed surface on the non-direct-grid lane.
 
 #### Scenario: canonical member published for every basin
 
@@ -128,17 +128,31 @@ The SHUD forcing package main station-index member SHALL carry the fixed basin-n
 - **THEN** the runtime resolves, checksums, and stages it exactly as before the migration
 - **AND** existing object-store packages are not rewritten.
 
+#### Scenario: prior-attempt workspace residue self-heals at direct-grid staging
+
+- **WHEN** a direct-grid run's reused input workspace carries a staged station-index member from a prior attempt that this attempt's checksum-verified package manifest does not declare (for example a pre-migration `shud/qhh.tsd.forc` under a manifest that declares only `shud/stations.tsd.forc`)
+- **THEN** direct-grid staging deletes the undeclared accepted member before writing any member, the staging completes without `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`, and the staged tree holds exactly the declared station-index member
+- **AND** the deletion is confined to the accepted station-index member set: prior-attempt station CSVs and files outside that set are not deleted.
+
+#### Scenario: residue deletion failure fails loud with a dedicated typed code
+
+- **WHEN** the pre-staging deletion of an undeclared accepted station-index member fails (for example the member path is a directory, or the unlink raises an I/O error)
+- **THEN** the attempt terminates with the typed error `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` naming the member, staging does not continue past the failure
+- **AND** the orchestrator does not auto-retry it: the code is not in `TRANSIENT_ERROR_CODES`.
+
 #### Scenario: ambiguous index membership fails closed
 
-- **WHEN** a direct-grid package manifest lists more than one station-index member from the {canonical, legacy} set, or a direct-grid package's staged filesystem contains both files
+- **WHEN** a direct-grid package manifest lists more than one station-index member from the {canonical, legacy} set, or a direct-grid staged filesystem still contains both files after the pre-staging hygiene
 - **THEN** the runtime raises the fail-closed error `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS` naming the conflicting members
-- **AND** no fallback member selection is attempted.
+- **AND** no fallback member selection is attempted
+- **AND** the filesystem-level message attributes the surviving ambiguity to writes outside the manifest-allowlisted staging (out-of-band writes), not to prior-attempt residue, which the hygiene has already removed.
 
 #### Scenario: non-direct-grid staging resolves a residual second member by manifest
 
 - **WHEN** a non-direct-grid package's staged filesystem contains both station-index files, as a full-prefix copy can after a pre-migration prefix is re-produced in place
 - **THEN** the runtime resolves the member to stage from the first available declaration source — the checksum-verified package manifest's `files` list when it publishes a non-empty one, otherwise the run manifest's diagnostic `forcing.files` entries — staging the member that source names when it names exactly one accepted member, and the canonical member otherwise
-- **AND** the run does not fail on the residual member.
+- **AND** the run does not fail on the residual member
+- **AND** the residual member is not deleted: the pre-staging hygiene applies only to the direct-grid lane.
 
 #### Scenario: missing index membership fails closed for direct-grid
 
