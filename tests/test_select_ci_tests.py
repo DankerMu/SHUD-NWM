@@ -199,7 +199,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # What this pins is the ROUTING: an orchestrator module no narrow or stop
     # rule owns falls through to the broad `services/orchestrator/**` rule and
     # gets exactly that rule's targets — nothing more, and no core-smoke
-    # fallback. The list grew from 5 to 28 in #1455 and stays FROZEN here as a
+    # fallback. The list grew from 5 to 28 in #1455, and to 30 in #1407 (the two
+    # frontier suites, 46 tests in 0.42s together — noise against the lane it
+    # joins), and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -209,6 +211,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     selected = select_tests(["services/orchestrator/retry.py"], repo_root=Path("."))
 
     assert selected == [
+        "tests/test_cli_cleanup_frontier.py",
         "tests/test_cli_publish_qdown.py",
         "tests/test_e2e_m3.py",
         "tests/test_file_orchestration_journal.py",
@@ -224,6 +227,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
+        "tests/test_retention_frontier.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
         "tests/test_run_tree_copyback.py",

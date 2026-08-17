@@ -12,3 +12,20 @@ NODE27_RAW_RETENTION_LOCK_PATH=/tmp/node27-raw-retention.lock
 NODE27_RAW_RETENTION_SOURCES=GFS,IFS
 # Relative to the latest displayable forecast cycle, not the host clock.
 NODE27_RAW_RETENTION_DAYS=14
+
+# Rollout/rollback gates (issue #1407). Both default to today's execute-only
+# behaviour, so leaving them unset changes nothing:
+#   NODE27_RAW_RETENTION_ENABLED   (default true)  false => summary status
+#       "disabled", zero deletions.
+#   NODE27_RAW_RETENTION_PLAN_ONLY (default false) true  => targets are still
+#       collected and reported, no tree is removed.
+# These supersede the env half of the execute-only decision (commit 9c1625ee,
+# "no longer expose NODE27_RAW_RETENTION_DRY_RUN") rather than break it: the
+# --dry-run/--execute CLI flags stay removed and the defaults keep production
+# deleting. The plan-only gate deliberately does NOT reuse the old
+# NODE27_RAW_RETENTION_DRY_RUN name, because that variable defaulted to true --
+# a leftover `NODE27_RAW_RETENTION_DRY_RUN=true` line in a live config would
+# silently return production to zero deletions, exactly the failure 9c1625ee
+# removed. Under the new name any leftover line is inert.
+# NODE27_RAW_RETENTION_ENABLED=true
+# NODE27_RAW_RETENTION_PLAN_ONLY=false

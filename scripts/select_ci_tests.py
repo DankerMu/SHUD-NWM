@@ -172,7 +172,9 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
 )
 
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_cli_cleanup_frontier.py",
     "tests/test_cli_publish_qdown.py",
+    "tests/test_retention_frontier.py",
     "tests/test_scheduler_backfill.py",
 )
 
@@ -507,6 +509,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
+            "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_file_orchestration_journal.py",
             "tests/test_file_orchestration_journal_read_cache.py",
@@ -518,6 +521,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_replay_lineage.py",
             "tests/test_retention.py",
+            "tests/test_retention_frontier.py",
             "tests/test_retry.py",
             "tests/test_retry_cancel_consistency.py",
             "tests/test_run_tree_copyback.py",

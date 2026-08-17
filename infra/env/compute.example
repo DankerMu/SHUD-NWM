@@ -221,3 +221,19 @@ NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 NHMS_RETENTION_ENABLED=true
 NHMS_RETENTION_DRY_RUN=false
 NHMS_RETENTION_DAYS=14
+# Manual `cleanup` runs outside a scheduler pass have no in-memory frontier, so
+# since issue #1407 they read the active lower bound from the newest pass
+# receipt under NHMS_SCHEDULER_EVIDENCE_ROOT. A receipt whose start time is
+# more than this many hours away from now -- in either direction, so a clock
+# jump cannot mint a permanently "fresh" receipt -- is not trusted (default 24:
+# passes run on a minutes-scale loop, so a day of silence means the pipeline is
+# stopped and deletion should wait). An unusable value here (zero, negative,
+# non-numeric, or out of range) falls back to the default rather than failing.
+# When the frontier is unknown for any reason -- no receipt, no frontier block,
+# a pass whose retention was disabled or errored, a malformed bound, or a read
+# error -- cleanup is forced into dry-run and prints the blocker reason; it
+# never falls back to unprotected wall-clock deletion, and there is no bypass
+# flag. Recovery for the "pass retention did not run" case: run one pass with
+# NHMS_RETENTION_ENABLED=true + NHMS_RETENTION_DRY_RUN=true (deletes nothing,
+# records the frontier). Pass-side retention is unaffected by this setting.
+# NHMS_RETENTION_FRONTIER_MAX_AGE_HOURS=24
