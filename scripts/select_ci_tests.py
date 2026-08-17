@@ -16,12 +16,28 @@ from pathlib import Path, PurePosixPath
 # test suite under `tests/` drags this suite along (~6s) instead of letting the
 # guards go unrun on exactly the change class they exist for.
 SELECTOR_META_GUARD_TEST = "tests/test_select_ci_tests.py"
-# Matched against the BASENAME, not the repo-relative path: `tests/pkg/test_x.py`
-# is every bit as collectible as `tests/test_x.py`, and a `tests/test_*.py` path
-# match would classify it as a support module — losing its self-selection AND
-# skipping the meta-guard accumulation on a PR that changes a test file. One
-# predicate decides both, so the two can never drift apart.
-CHANGED_TEST_SUITE_BASENAME_PATTERN = "test_*.py"
+# pytest's own collection rule, mirrored: BOTH default `python_files` patterns,
+# matched against the BASENAME (which is how pytest itself matches a slash-free
+# pattern). Two hand-derivations of this predicate were wrong in a row — first
+# path-shaped (`tests/test_*.py`, which reads `tests/pkg/test_y.py` as a support
+# module), then a single pattern (which reads `tests/x_test.py` as one). Both
+# misclassifications cost a real suite its self-selection AND the meta-guard
+# accumulation. tests/test_select_ci_tests.py now anchors this list to what
+# pytest actually collects, so the next drift reddens instead of shipping.
+CHANGED_TEST_SUITE_BASENAME_PATTERNS: tuple[str, ...] = ("test_*.py", "*_test.py")
+
+
+def is_test_suite_path(path: str) -> bool:
+    """True iff pytest would collect tests from ``path`` by name.
+
+    The single classification decision in this module: it feeds changed-test
+    self-selection AND the meta-guard accumulation, and the selector's test
+    suite imports it rather than restating the patterns, so no caller can drift
+    from pytest independently of the anchor test.
+    """
+    name = PurePosixPath(path).name
+    return any(fnmatch.fnmatch(name, pattern) for pattern in CHANGED_TEST_SUITE_BASENAME_PATTERNS)
+
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_api.py",
@@ -479,7 +495,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
-            is_test_suite = fnmatch.fnmatch(PurePosixPath(path).name, CHANGED_TEST_SUITE_BASENAME_PATTERN)
+            is_test_suite = is_test_suite_path(path)
             matched_changed_test = False
             for rule in CHANGED_TEST_FILE_RULES:
                 if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):

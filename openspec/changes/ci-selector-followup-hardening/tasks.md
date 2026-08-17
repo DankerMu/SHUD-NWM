@@ -140,16 +140,16 @@
       pin is the nested-suite test.
 ## R2. Retro invariant-closure pass (gate @ round 4, shape depth)
 
-- [ ] R2.1 Predicate completed to BOTH pytest default `python_files`
+- [x] R2.1 Predicate completed to BOTH pytest default `python_files`
       patterns: selector classification + test-side support-module
       derivation treat basename `test_*.py` OR `*_test.py` as suite;
       single shared predicate discipline kept.
-- [ ] R2.2 Pytest-anchor test (the invariant closure): build a tmp
+- [x] R2.2 Pytest-anchor test (the invariant closure): build a tmp
       tree with `test_x.py`, `x_test.py`, nested variants, and a
       support file; run `pytest --collect-only` on it; assert the
       selector's suite-classification equals pytest's collected set —
       the predicate can no longer drift from pytest silently.
-- [ ] R2.3 `*_test.py` sibling pin next to the nested-suite pin
+- [x] R2.3 `*_test.py` sibling pin next to the nested-suite pin
       (self-selects + meta-guards accumulate).
 - [x] R2.4 (orchestrator) Fixture-wide mechanical stale-phrase sweep:
       grep over proposal/design/tasks/spec for path-shaped predicate

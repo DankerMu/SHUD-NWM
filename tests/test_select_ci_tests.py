@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import re
 import subprocess
+import sys
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,7 @@ import pytest
 
 from scripts.select_ci_tests import (
     CHANGED_TEST_FILE_RULES,
+    CHANGED_TEST_SUITE_BASENAME_PATTERNS,
     CORE_SMOKE_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
@@ -21,6 +23,7 @@ from scripts.select_ci_tests import (
     PATH_TEST_RULES,
     SELECTOR_META_GUARD_TEST,
     PathTestRule,
+    is_test_suite_path,
     main,
     select_tests,
 )
@@ -980,18 +983,19 @@ def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str)
 def _tracked_tests_support_modules() -> list[str]:
     """Tracked `tests/**.py` that pytest cannot collect as a suite.
 
-    BASENAME-shaped, and deliberately NOT `_tracked_top_level_test_files()`:
-    that helper matches the repo-relative path against `tests/test_*.py` for the
-    importer-closure domain, which would count a nested `tests/pkg/test_x.py` as
-    a support module here and cement the misclassification this test is supposed
-    to catch. Derived independently of the selector's own predicate, so a bug in
-    that predicate reddens this test instead of moving its expectation.
+    Deliberately NOT `_tracked_top_level_test_files()`: that helper matches the
+    repo-relative path against `tests/test_*.py` for the importer-closure
+    domain, which would count a nested `tests/pkg/test_x.py` as a support module
+    here and cement the misclassification this test exists to catch.
+
+    It calls the selector's own `is_test_suite_path` rather than restating the
+    pattern list. That looks like the expectation moving with the bug, and it
+    would be — except the anchor test below ties that predicate to what pytest
+    ACTUALLY collects. A second hand-written mirror is what produced two wrong
+    derivations in a row (path-shaped, then single-pattern); one predicate with
+    an external oracle is the version that cannot drift quietly.
     """
-    return sorted(
-        path
-        for path in _tracked_python_files("tests")
-        if not fnmatch.fnmatch(PurePosixPath(path).name, "test_*.py")
-    )
+    return sorted(path for path in _tracked_python_files("tests") if not is_test_suite_path(path))
 
 
 def test_every_tracked_tests_support_module_selects_only_the_meta_guard_suite() -> None:
@@ -1032,6 +1036,123 @@ def test_nested_test_suite_self_selects_and_drags_the_meta_guards(tmp_path: Path
     selected = select_tests(["tests/pkg/test_nested_probe.py"], repo_root=tmp_path)
 
     assert selected == ["tests/pkg/test_nested_probe.py", SELECTOR_META_GUARD_TEST]
+
+
+def test_suffix_named_test_suite_self_selects_and_drags_the_meta_guards(tmp_path: Path) -> None:
+    # `x_test.py` is pytest's OTHER default `python_files` pattern, and the
+    # first basename predicate covered only `test_*.py` — so this shape was
+    # classified as a support module, its assertions never ran on a PR that
+    # changed it, and the tree-derived invariant test above would have cemented
+    # that the day someone added one. Zero tracked instances today; the pin is
+    # what keeps the second pattern from being dropped again.
+    suffix_named = tmp_path / "tests" / "gateway_probe_test.py"
+    suffix_named.parent.mkdir()
+    suffix_named.write_text("def test_gateway_probe(): pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+    selected = select_tests(["tests/gateway_probe_test.py"], repo_root=tmp_path)
+
+    assert selected == ["tests/gateway_probe_test.py", SELECTOR_META_GUARD_TEST]
+
+
+def test_nested_suffix_named_test_suite_self_selects_and_drags_the_meta_guards(tmp_path: Path) -> None:
+    # Both axes at once — nested directory AND suffix naming — because the two
+    # previous derivations each got exactly one axis right.
+    nested = tmp_path / "tests" / "pkg" / "gateway_probe_test.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("def test_gateway_probe(): pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+    selected = select_tests(["tests/pkg/gateway_probe_test.py"], repo_root=tmp_path)
+
+    assert selected == ["tests/pkg/gateway_probe_test.py", SELECTOR_META_GUARD_TEST]
+
+
+# Probe tree for the pytest anchor: every naming shape whose classification the
+# selector has to get right, each carrying a trivial test function so that being
+# uncollected is a statement about the NAME, never about the contents.
+# `helper.py` and `testing_helpers.py` are the discriminators — both define a
+# `test_*` function, and pytest still ignores them, so a predicate that looked at
+# file contents (or at a "starts with test" prefix) would disagree here.
+PYTEST_COLLECTION_PROBE_FILES: tuple[str, ...] = (
+    "tests/test_x.py",
+    "tests/x_test.py",
+    "tests/pkg/test_y.py",
+    "tests/pkg/y_test.py",
+    "tests/helper.py",
+    "tests/testing_helpers.py",
+    "tests/conftest.py",
+)
+
+
+def _pytest_collected_files(tree_root: Path) -> set[str]:
+    """Repo-relative files pytest collects at least one test from under ``tree_root``.
+
+    Runs the real collector under THIS repo's ini options (`-c pyproject.toml`),
+    not pytest's bare defaults, so that a future `python_files` override in
+    pyproject is what the anchor tracks. `--rootdir` is the probe tree, which
+    makes the reported node ids relative to it and keeps the repo's own
+    conftest.py out of the run (the tree is not below the repo).
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-c",
+            str(Path("pyproject.toml").resolve()),
+            "--rootdir",
+            str(tree_root),
+            "-p",
+            "no:cacheprovider",
+            # zarr's pytest plugin costs ~1s to import and has no bearing on
+            # name-based collection; ini options (including any future
+            # `python_files` override) still come from -c above.
+            "-p",
+            "no:zarr",
+            str(tree_root),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tree_root,
+    )
+    assert completed.returncode == 0, f"probe collection failed:\n{completed.stdout}\n{completed.stderr}"
+    return {line.split("::", 1)[0].strip() for line in completed.stdout.splitlines() if "::" in line}
+
+
+def test_selector_suite_classification_equals_pytest_collection(tmp_path: Path) -> None:
+    # THE closure. Twice now the suite-vs-support predicate was derived by hand
+    # from a reading of pytest's behavior, and twice it was incomplete — each
+    # time costing a real suite its self-selection and the meta-guard
+    # accumulation, and each time invisible because no test compared the
+    # predicate to the thing it was mirroring. This one does: it asks pytest
+    # what it collects and asserts the selector agrees, file for file. A third
+    # drift (new `python_files` pattern upstream, a pyproject override, a
+    # predicate edit) reddens here instead of shipping.
+    for relative in PYTEST_COLLECTION_PROBE_FILES:
+        probe = tmp_path / relative
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        body = "" if relative.endswith("conftest.py") else "def test_probe(): pass\n"
+        probe.write_text(body, encoding="utf-8")
+
+    collected = _pytest_collected_files(tmp_path)
+    classified = {relative for relative in PYTEST_COLLECTION_PROBE_FILES if is_test_suite_path(relative)}
+
+    assert collected, "probe tree collected nothing — the anchor would pass vacuously"
+    assert classified == collected, (
+        "selector suite-classification drifted from pytest collection: "
+        f"selector-only {sorted(classified - collected)}, pytest-only {sorted(collected - classified)}"
+    )
+
+
+def test_selector_suite_patterns_equal_the_effective_pytest_python_files(pytestconfig: pytest.Config) -> None:
+    # Second floor under the anchor above, covering patterns the probe tree does
+    # not happen to exercise: the pattern LIST itself must be the effective
+    # `python_files`, read from the running config rather than from pytest's
+    # documented defaults (which an ini override would silently displace).
+    assert tuple(pytestconfig.getini("python_files")) == CHANGED_TEST_SUITE_BASENAME_PATTERNS
 
 
 def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
