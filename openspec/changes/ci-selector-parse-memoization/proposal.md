@@ -26,6 +26,16 @@ debt.
   cwd aliasing (chdir + same-named relative spelling must yield the
   tmp_path content, not the cached repo parse) and staleness
   (rewrite with distinct stat identity must be re-observed).
+- Session-end cache clear: a guarded `pytest_unconfigure` hook in
+  `tests/conftest.py` (the repo's ONLY conftest — repo-wide blast
+  radius, `sys.modules`-guarded no-op when the selector suite was
+  never imported) clears `_PARSE_CACHE` + `gc.collect()`, removing a
+  measured ~8.4 s CPython finalization tail that neither an in-module
+  autouse fixture (never fires under `--collect-only`) nor atexit
+  (fires too late) can remove. Recorded CI consequence:
+  `tests/conftest.py` sits in ci.yml's `database` paths-filter, so
+  this PR triggers one `real-db-integration` run when marked ready
+  (design decision 1, second amendment).
 - Before/after evidence: wall-clock and actual `ast.parse` counts
   (~10^4 → order of tracked-file count ~10^2).
 - Spec delta: ADDED requirement in `ci-contract-baseline` pinning
@@ -46,6 +56,7 @@ parametrize (recorded as possible separate follow-up).
 ## Impact
 
 - `tests/test_select_ci_tests.py` (cache + 2 guard tests),
+  `tests/conftest.py` (session-end clear hook),
   `openspec/specs/ci-contract-baseline/spec.md` (delta).
 - Closes #1504. Verification per its `Verification:` field:
   `uv run pytest -q tests/test_select_ci_tests.py` (before/after
