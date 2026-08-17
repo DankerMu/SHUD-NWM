@@ -809,6 +809,10 @@ def test_state_index_copyback_replace_uncertain_reports_commit_uncertain_code(
     assert error_info.value.code != "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert error_info.value.details["error_reason"] == "provider_replace_uncertain"
     assert error_info.value.details["object_key"] == "scheduler/state-index/index-last.json"
+    # The message must name the phase that produced the verdict, not a single
+    # hardcoded raise point: this is the state-manager carrier, not the lock
+    # release the pre-#1364 text claimed.
+    assert "phase=replace_uncertain" in error_info.value.message
     assert seam.writes == 1
     # The commit is a fact, not an inference: the replace landed before the
     # durability confirmation failed.
@@ -882,6 +886,9 @@ def test_state_index_copyback_precommit_replace_failure_stays_fail_closed(
     # `provider_replace_failed` is outside the state manager's reason remap, so
     # it survives verbatim into the event details.
     assert error_info.value.details["error_reason"] == "provider_replace_failed"
+    # Mirror of the uncertain test: the fail-closed message must not carry the
+    # uncertain wording, so swapping the two branch messages cannot pass both.
+    assert "may have committed" not in error_info.value.message
     assert seam.writes == 1
     assert fixture.destination_index.read_bytes() == before
 

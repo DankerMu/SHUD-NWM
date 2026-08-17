@@ -113,7 +113,13 @@ def copyback_run_trees(
                 # discriminator is "not provably pre-commit", the same proof
                 # philosophy the replay tool refuses on: only an audited
                 # pre-commit raise point shows the shared index unchanged, so
-                # any future phase lands on the safe side by default.
+                # any future phase lands on the safe side by default.  The
+                # no-phase bucket lands on the fail-closed code, which is safe
+                # not because a missing phase proves anything but because every
+                # no-phase `_state_index_error` raise point in the merge call
+                # graph sits before the destination compare-and-swap (audited
+                # in this change's design D1); a future post-CAS raise MUST
+                # carry a phase to land in the uncertain bucket.
                 # `provider_restored_previous` (phase postcommit) is uncertain
                 # too: the rollback verified, but the merged bytes were
                 # briefly visible to concurrent readers, and the operator's
