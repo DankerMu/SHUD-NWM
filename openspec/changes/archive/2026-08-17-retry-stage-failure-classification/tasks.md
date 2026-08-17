@@ -11,7 +11,7 @@
       (`SLURM_JOB_FAILED` must stay out).
 - [x] 1.2 Prove behavior invariance on the final head: grep shows
       `NON_TRANSIENT_ERROR_CODES`'s only production consumer is the
-      reason ternary (retry.py:150); `is_retryable_failure` reads
+      reason ternary (retry.py:167 at final head); `is_retryable_failure` reads
       the transient list only; recorded in the PR body.
 
 ## 2. Spec delta
@@ -69,10 +69,12 @@
       tests/test_real_slurm_gateway.py
       tests/test_file_orchestration_journal.py` green (P2-2 added
       the third file; counts before/after recorded — test_retry
-      125 → 151 measured (fixture-review Note-2 predicted 150; the
-      −1 from the unlisted-codes parametrize shrinking 2→1 offsets
-      against the +1 new derivation pin), file-journal +26; the spec-driven parametrize's growth is the structural
-      red/green).
+      125 → 151 measured, +26 = spec-driven parametrize 6→19 (+13)
+      + set-driven parametrize 9→22 (+13) + unlisted-codes
+      parametrize 2→1 (−1) + new derivation pin (+1); fixture-review
+      Note-2's 150 prediction had the −1 but not the +1 pin.
+      file-journal +26 (two spec-driven points, each 6→19); the
+      spec-driven parametrize's growth is the structural red/green).
 - [x] 4.2 `git ls-files '*.py' | xargs uv run ruff check` clean.
 - [x] 4.3 `openspec validate retry-stage-failure-classification
       --strict --no-interactive` valid; difflib per block: guard
