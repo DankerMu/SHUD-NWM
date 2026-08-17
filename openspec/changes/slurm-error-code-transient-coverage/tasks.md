@@ -89,4 +89,4 @@
       pytest -q tests/test_real_slurm_gateway.py
       tests/test_production_scheduler.py'` 通过，结果记入 issue/PR；若失败
       立即 hotfix follow-up。
-- [ ] 3.6 D4 受影响面四处硬写点 + 五处调用点核对结论记录（PR body）。
+- [x] 3.6 D4 受影响面四处硬写点 + 五处调用点核对结论记录（PR body）。
