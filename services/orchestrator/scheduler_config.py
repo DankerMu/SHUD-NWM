@@ -927,7 +927,23 @@ def _safe_preserve_final_component(path: Path) -> Path:
 
 def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path:
     if not db_free_required:
-        return path.resolve()
+        try:
+            return Path(os.path.realpath(path, strict=True))
+        except OSError:
+            # Same paradigm as _optional_config_path
+            # (scheduler_runtime_roots.py:576-590): classification belongs to
+            # the storage preflight, not to config construction, so hand the
+            # canonicalised value down and let _storage_root_check report
+            # SLURM_PREFLIGHT_<FIELD>_UNSAFE_PATH on every supported CPython
+            # instead of aborting the whole process on <=3.12.
+            #
+            # A single non-strict os.path.realpath() covers every strict
+            # failure: it never raises on 3.11-3.14 and reproduces the product
+            # of the old non-strict Path.resolve() verbatim -- POSIX order,
+            # symlinks first and `..` afterwards. Splitting on errno would buy
+            # nothing, because both would-be lanes converge on this same
+            # product (design D1).
+            return Path(os.path.realpath(path))
     try:
         return path.resolve(strict=False)
     except (OSError, RuntimeError):

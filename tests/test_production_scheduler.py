@@ -14772,9 +14772,9 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     # The loop root is carried by the candidate's RESOURCE PROFILE rather than by
     # ``OBJECT_STORE_ROOT``: the env var also seeds ``ProductionSchedulerConfig``,
     # whose own unguarded ``path.resolve()`` (``scheduler_config.py:930``, a
-    # separate site outside this lane, tracked as #1423) would raise on <=3.12
-    # before the scheduler is even constructed.  The guard reads both sources
-    # identically.
+    # separate site outside this lane) used to raise on <=3.12 before the
+    # scheduler was even constructed -- fixed under #1423, whose section below
+    # owns that seam.  The guard reads both sources identically.
     profile = {
         **_missing_forcing_repair_direct_grid_profile(),
         "object_store_copyback_root": str(loop_root),
@@ -14820,6 +14820,166 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     assert repair["reason"] == "forcing_artifact_reference_unsafe"
     assert repair["unsafe_reason"] == "local_artifact_root_unresolvable"
     assert result.evidence["counts"]["submitted_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #1423: the db-backed arm of ``_resolve_config_path_for_mode``
+# (``scheduler_config.py:928-930``) called ``path.resolve()`` bare.  On <=3.12 --
+# every production interpreter (CI 3.11, node-27 3.11.15, node-22 3.12.7) -- a
+# symlink loop in a configured root aborted ``ProductionSchedulerConfig``
+# construction with an errno-LESS ``RuntimeError``, so no preflight and no
+# blocker ever ran; on 3.13+ the same value was silently adopted as a field.
+# The fix adopts the paradigm its sibling ``_optional_config_path`` settled in
+# PR #1349: strict realpath, one non-strict realpath fallback for every strict
+# failure, and classification left to the storage preflight.
+#
+# The construction invariant below is deliberately narrow: it covers a loop in
+# the FINAL segment of a root that is not a containment base for other
+# configured paths.  ``WORKSPACE_ROOT`` / lock / evidence still abort in
+# ``_confined_path`` (``scheduler_runtime_roots.py:558``) and parent-segment
+# loops still abort in the preserve-final helpers (``:597`` / ``:604``); those
+# three sites are outside this issue and tracked separately, which is why the
+# parent-loop shapes below are exercised on the helper directly.
+# ---------------------------------------------------------------------------
+
+
+def _db_backed_config_resolve(path: Path) -> Path:
+    return scheduler_config_module._resolve_config_path_for_mode(path, db_free_required=False)
+
+
+def test_db_backed_config_resolve_canonicalises_unresolvable_paths_without_raising(tmp_path: Path) -> None:
+    # #1423 D4 decision table, db-backed arm.  Every expected value is built
+    # from the canonicalised tmp_path rather than from a second realpath() call
+    # on the same input, and every one of them holds on 3.11 through 3.14.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    existing = tmp_path / "existing-root"
+    existing.mkdir()
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    loop = _symlink_loop_dir(tmp_path, "config-loop")
+    parent_loop = _symlink_loop_dir(tmp_path, "parent-loop")
+
+    # A real directory canonicalises to itself, through any /var -> /private/var
+    # style platform symlink, exactly as the old resolve() did.
+    assert _db_backed_config_resolve(existing) == canonical_tmp / "existing-root"
+    # ENOENT keeps the historical semantics: configuration construction performs
+    # no existence validation, and the product is the old non-strict
+    # Path.resolve() product verbatim (that call raises on no supported CPython,
+    # so this equality is version-agnostic).
+    assert _db_backed_config_resolve(not_created_yet) == canonical_tmp / "nfs-not-mounted-yet"
+    assert _db_backed_config_resolve(not_created_yet) == not_created_yet.resolve()
+    # ELOOP is where the old bare resolve() aborted the process on <=3.12.  The
+    # loop is handed down canonicalised instead, for the storage preflight to
+    # classify.
+    assert _db_backed_config_resolve(loop) == canonical_tmp / "config-loop-a"
+    # Parent-segment loop: helper-direct only (the construction chain aborts
+    # earlier, in the preserve-final helpers, which #1423 does not touch).
+    assert (
+        _db_backed_config_resolve(parent_loop / "child" / "tail")
+        == canonical_tmp / "parent-loop-a" / "child" / "tail"
+    )
+    # The differential shape: strict resolution stops at ENOENT on the missing
+    # `gone` component, and the non-strict fallback collapses `..` onto the loop
+    # itself -- the exact input where Path.resolve() raised on <=3.12 while
+    # returning this value on 3.13+.
+    assert (
+        _db_backed_config_resolve(tmp_path / "gone" / ".." / "parent-loop-a" / "leaf")
+        == canonical_tmp / "parent-loop-a" / "leaf"
+    )
+
+
+def test_db_free_config_resolve_arm_keeps_graceful_degradation_for_symlink_loop(tmp_path: Path) -> None:
+    # Control for the arm #1423 declares out of scope (#1400 territory): its
+    # `except (OSError, RuntimeError)` fallback hands back the configured path
+    # untouched, and the fix must not drift it.
+    loop = _symlink_loop_dir(tmp_path, "db-free-control-loop")
+
+    assert scheduler_config_module._resolve_config_path_for_mode(loop, db_free_required=True) == loop
+
+
+@pytest.mark.parametrize(
+    ("root_env", "field_name"),
+    [("OBJECT_STORE_ROOT", "object_store_root"), ("LOG_ROOT", "log_root")],
+)
+def test_db_backed_config_construction_survives_symlink_loop_storage_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_env: str,
+    field_name: str,
+) -> None:
+    # The main anchor: on <=3.12 this construction raised an errno-less
+    # RuntimeError before any preflight could speak.  Both roots here are
+    # env-driven and neither is a containment base for another configured path.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, f"{field_name}-loop")
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("SLURM_SHARED_LOG_ROOT", raising=False)
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("LOG_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv(root_env, str(loop))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert getattr(config, field_name) == Path(os.path.realpath(tmp_path)) / loop.name
+
+
+def test_db_backed_config_construction_keeps_missing_storage_root_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # ENOENT zero-regression at the construction seam: a root may legitimately
+    # name a not-yet-created directory or an unmounted share, so construction
+    # neither validates existence nor changes the value it used to produce.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(not_created_yet))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert config.object_store_root == Path(os.path.realpath(tmp_path)) / "nfs-not-mounted-yet"
+    assert config.object_store_root == not_created_yet.resolve()
+    assert not config.object_store_root.exists()
+
+
+def test_slurm_preflight_blocks_symlink_loop_object_store_root_built_by_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The end-to-end half of the #1423 ruling: construction hands the loop down
+    # without adjudicating, and the storage preflight -- which reads the kernel
+    # errno, not an exception type -- owns the verdict and rejects submission
+    # before any Slurm job is created.  Identical on every supported CPython.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = _symlink_loop_dir(tmp_path, "object-store-loop")
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=loop,
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.object_store_root == Path(os.path.realpath(tmp_path)) / loop.name
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    object_store_blockers = [blocker for blocker in preflight["blockers"] if blocker["field"] == "object_store_root"]
+    assert [blocker["code"] for blocker in object_store_blockers] == [
+        "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_UNSAFE_PATH"
+    ]
+    object_store_check = preflight["checks"]["storage_roots"]["object_store_root"]
+    assert object_store_check["contained"] is False
+    assert object_store_check["compute_node_visible"] is False
 
 
 # ---------------------------------------------------------------------------
