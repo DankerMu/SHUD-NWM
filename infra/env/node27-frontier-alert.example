@@ -112,6 +112,12 @@ NHMS_SMTP_USER=alerts@example.com
 # code containing  $ ` " \  is not safe for both readers; 163 codes are
 # alphanumeric, so leave it unquoted.
 NHMS_SMTP_PASS=REPLACE_ME_163_AUTH_CODE
+# Whole-session wall clock for one SMTP submission, default 45 s. Must stay
+# STRICTLY BELOW the alerter's 60 s sendmail SIGKILL (SENDMAIL_TIMEOUT_SEC) —
+# a value >= 60 is refused at config time (exit 64, nothing connected), because
+# the SIGKILL would then land first and the failure would lose its stage.
+# Leave it unset unless that wall itself changes; this is the alignment point.
+# NHMS_SMTP_SESSION_BUDGET_SEC=45
 # Reminder: NHMS_ALERT_EMAIL_FROM above must carry this same address (address
 # part only; a display name in front of it is fine) — 163 rejects a From header
 # that differs from the authenticated account, the shim leaves the header

@@ -2120,3 +2120,72 @@ def test_state_and_receipt_are_written_with_owner_only_mode(tmp_path: Path) -> N
 
     assert os.stat(config.state_path).st_mode & 0o777 == 0o600
     assert os.stat(config.receipt_path).st_mode & 0o777 == 0o600
+
+
+# ---------------------------------------------------------------------------
+# B34 (#1375) — a SIGKILLed sendmail keeps whatever attribution it printed.
+# ---------------------------------------------------------------------------
+
+
+def _timing_out_run(stderr: bytes | None):
+    """``subprocess.run`` raising the way it does when the wall fires. Faking it
+    at the process boundary is the only way to reach this arm without actually
+    waiting out ``SENDMAIL_TIMEOUT_SEC``."""
+
+    def run(*_args: Any, **_kwargs: Any):
+        raise subprocess.TimeoutExpired(
+            cmd=["/usr/sbin/sendmail", "-t", "-i"],
+            timeout=alerter.SENDMAIL_TIMEOUT_SEC,
+            stderr=stderr,
+        )
+
+    return run
+
+
+def test_b34_a_killed_sendmail_folds_its_stderr_into_the_recorded_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``capture_output=True`` fills ``TimeoutExpired.stderr``, and it used to be
+    thrown away: the receipt then said only 'sendmail timed out', which cannot
+    tell 'never reached 163' from 'message half-pushed'."""
+
+    shim_line = "SMTP-FAILED stage=send host=smtp.163.com error=TimeoutError: timed out"
+    monkeypatch.setattr(alerter.subprocess, "run", _timing_out_run(shim_line.encode("utf-8") + b"\n"))
+
+    result = alerter.default_sendmail_runner(["/usr/sbin/sendmail", "-t", "-i"], "body")
+
+    assert result.returncode == 124
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.startswith("sendmail timed out: ")
+    assert shim_line in result.error
+
+
+def test_b34_a_killed_sendmail_that_printed_nothing_keeps_the_bare_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The main case, and the reason the shim's own budget exists: the child was
+    killed mid-hang with nothing on stderr. No empty ' | ' tail then."""
+
+    monkeypatch.setattr(alerter.subprocess, "run", _timing_out_run(None))
+
+    result = alerter.default_sendmail_runner(["/usr/sbin/sendmail", "-t", "-i"], "body")
+
+    assert result.returncode == 124
+    assert result.error is not None
+    assert result.error.startswith("sendmail timed out: ")
+    assert "sendmail stderr" not in result.error
+
+
+def test_b34_the_folded_stderr_tail_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The receipt is a JSON record an operator reads, not a log sink: a child
+    that spewed megabytes must not be pasted into it whole."""
+
+    noise = b"x" * 20_000 + b"\nSMTP-FAILED stage=login host=smtp.163.com\n"
+    monkeypatch.setattr(alerter.subprocess, "run", _timing_out_run(noise))
+
+    result = alerter.default_sendmail_runner(["/usr/sbin/sendmail", "-t", "-i"], "body")
+
+    assert result.error is not None
+    assert len(result.error) < 1_000
+    assert "SMTP-FAILED stage=login" in result.error  # the TAIL is what is kept
