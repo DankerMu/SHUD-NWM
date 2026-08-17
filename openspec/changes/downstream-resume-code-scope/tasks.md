@@ -61,6 +61,6 @@
 - [x] 3.3 `openspec validate downstream-resume-code-scope --strict
       --no-interactive` 通过。
 - [x] 3.4 events 裁决复核（结论已闭合于 D2 第 4 点，fixture review P2-6
-      实证：event-only 码经 chain_repository_state.py:846-848 投影顶层 +
+      实证：event-only 码经 chain_repository_state.py:845-847 投影顶层 +
       chain_source_cycle.py:685,693 兜底）：复核该结论在实现 HEAD 仍成立
       并记 PR body 一行；不重开裁决。

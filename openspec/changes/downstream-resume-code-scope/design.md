@@ -65,7 +65,7 @@ def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
 4. **events 不参与分域——已闭合的裁决（fixture review P2-6 实证）**：
    event-only 的失败码在生产里不会只留在 event——
    `candidate_state_from_rows` 把 `_candidate_failed_task_from_events`
-   的结果投影到顶层 `error_code`（chain_repository_state.py:846-848），
+   的结果投影到顶层 `error_code`（chain_repository_state.py:845-847），
    且该路径对 error_code 有 `or "NODE_FAILURE"` 兜底
    （chain_source_cycle.py:685,693）：failed_task 成立则顶层码必非空。
    「当前失败码只存在于 event、job 与顶层皆无」在现有写入面上无真实形；
