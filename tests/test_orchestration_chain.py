@@ -2944,8 +2944,8 @@ def test_copyback_commit_uncertain_failure_reaches_the_pipeline_event(
         del kwargs
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
-            "State-index copyback merge may have committed; provider lock release failed "
-            "after the compare-and-swap.",
+            "State-index copyback merge may have committed; the failure arose at or past the "
+            "destination compare-and-swap (phase=release_uncertain).",
             {
                 "object_key": "scheduler/state-index/index-last.json",
                 "error": "provider_lock_release_failed",
