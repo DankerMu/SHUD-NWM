@@ -416,11 +416,16 @@ LIVE failure AND either the state's failed stage equals the
 resolved job's stage or the candidate has no live candidate-scoped
 failure of its own. The marker-target test and the candidate-scope
 scan read the SAME row-level live-failure domain (the row-absent
-arm for unresolvable marker entities reads no row status at all —
-it decides on state-level staleness evidence whose narrower
-surface makes it pin MORE than this row-present test on some
-shapes; that divergence is a disclosed residue tracked separately
-by #1308): a status in the failure half of the
+arm for unresolvable marker entities reads the target row's
+write-time shape off the MARKER'S OWN RECORD when the marker
+carries it, reconstructing the target and running the same
+resolved-row ROUTING over the reconstruction — a model-bearing
+record short-circuits to a pin exactly as the router does, a
+model-less record runs this row-level domain; only markers
+written without that record fall back to state-level staleness
+evidence alone, and only the target's POST-WRITE fate outside the
+two state mappings remains a disclosed divergence — see the
+record-borne scenario below): a status in the failure half of the
 module's blocker STATUS domain — the failed-pipeline statuses plus
 `cancelled`, a `cancelled` row being a first-class manual-retry
 repair target on the marker side exactly as it is a live failure
@@ -724,7 +729,10 @@ drive the retry decision it was written to request.
   any job row but whose entity id carries the cycle-scope
   pipeline-job grammar (`job_cycle_<source>_<stamp>_...`, the shape
   left behind when a non-authoritative cohort master row is dropped
-  from the decision state or truncated from the row window) pins the
+  from the decision state or truncated from the row window) and
+  that does NOT carry its target's write-time record (a marker
+  WITH the record decides through the record-borne routing in its
+  own scenario below) pins the
   candidate's attempt exactly when the id's cycle is the candidate's
   own cycle AND the marker's recorded stage is the repair target —
   the stage evidence is the marker's own `failed_stage` detail,
@@ -760,44 +768,150 @@ drive the retry decision it was written to request.
   stage evidence, whether it comes from the marker's recorded
   `failed_stage` detail or from the loop-stripped id token backstop
 - **AND** every cross-arm equivalence claim in this scenario reads
-  within the DELIVERED DOMAIN, stated once here as a literal
-  transcription of the two delivered claim families: model-less
-  (cycle-scope) targets — a model-bearing `job_cycle`-grammar row
-  short-circuits the resolved-row router to a pin, and no
-  row-absent evidence surface carries model-ness — that EITHER are
-  failed-status targets that are neither unsubmitted auto-retry
-  placeholders nor repaired-flagged, OR are targets a state mapping
-  names with an exact entity-id match (the repaired-stage
-  evidence's original failed job id, or the completed-stage
-  evidence's job id — the latter existing only for stages with a
-  successor in the forecast stage order); every shape outside this
-  domain is a disclosed residue, not a delivered identity
+  within the DELIVERED DOMAIN, which is now split by what the
+  marker itself recorded: a marker carrying its target's write-time
+  record (the `target_*` details below) is decided by
+  reconstructing the target from that record and running the SAME
+  resolved-row routing over the reconstruction — a model-bearing
+  target pins unconditionally exactly as the resolved-row router
+  does, and a model-less target answers through the cycle-scope pin
+  rule's shared row-level live-failure domain (placeholder and
+  repaired-flag exclusions included) — so on everything the record
+  captures the two arms are the same rule by construction; a marker
+  WITHOUT the record keeps the previous delivered domain (failed-
+  status targets that are neither unsubmitted auto-retry
+  placeholders nor repaired-flagged, or targets a state mapping
+  names with an exact entity-id match); the divergence classes
+  left OUTSIDE both are the target's POST-WRITE fate beyond the
+  two state mappings and the write-time shapes the record cannot
+  carry (the projection-annotation keys the current writer never
+  produces, #1482), enumerated as a permanent limitation below
 - **AND** the journal marker event written by a manual repair
-  carries the failed job's stage as a `failed_stage` detail — a key
-  the candidate-state record-stage reader does not consume (so
-  terminal-stage gating never drops the marker event itself) and
-  one the identity-filter event sanitizer preserves on retry
-  events — so markers written from now on decide by record rather
-  than id text wherever their details survive to adoption (the
-  journal read path's completion-stage compaction domain keeps the
-  disclosed id-token backstop)
-- **AND** a marker whose target the state-level repaired-stage
-  evidence names as its original failed job — or whose target the
-  state-level completed-stage evidence names as its completed job —
-  refuses the pin with the row absent exactly as the resolved-row
-  rule refuses it with the row present, within the delivered
-  domain; those two mapping-named sub-shapes are the only staleness
-  classes with row-absent evidence
+  carries the failed job's stage as a `failed_stage` detail AND the
+  target row's write-time shape as `target_status`,
+  `target_repair_status`, `target_active_blocker`,
+  `target_model_id`, `target_slurm_job_id`, `target_retry_count`,
+  `target_manual_retry_marker`, and `target_array_task_id` details
+  — a key set that closes over EVERY row field the shared
+  live-failure predicate's transitive closure reads (the
+  placeholder predicate alone reads six; `target_repair_status`
+  and `target_active_blocker` are gate-contract keys the CURRENT
+  writer never fills — those flags are projection-time annotations
+  absent from the persisted rows it reads, #1482), with key names
+  chosen to
+  avoid the candidate-state record-stage reader's
+  `stage`/`job_type` keys and the attribution reader's `model_id`
+  key (the target's model is a different semantic axis from the
+  marker's attributed model), zero and false being recorded values
+  rather than absences — all preserved by the
+  identity-filter event sanitizer on retry events — so markers
+  written from now on decide by record rather than id text
+  wherever their details survive to adoption (on the journal read
+  path the completion-stage compaction drops those details
+  wholesale for model-less cycle-scope queue events at the
+  completion stages, which un-adopts the marker event entirely
+  rather than falling back to id text — the pin gate's journal-path
+  live domain is the submission stages)
+- **AND** for a model-less target, a marker whose target the
+  state-level repaired-stage evidence names as its original failed
+  job — or whose target the state-level completed-stage evidence
+  names as its completed job — refuses the pin with the row absent
+  exactly as the resolved-row rule refuses it with the row present
+  (a model-bearing record short-circuits past both mappings,
+  exactly as the resolved-row router does); those two mappings,
+  plus the marker's own write-time record, are the row-absent
+  staleness surfaces — and the target's POST-WRITE fate outside
+  the two mappings is a PERMANENT LIMITATION, disclosed rather
+  than delivered: a target that succeeded after the marker was
+  written and was evicted from the completed-stage evidence by a
+  later-stage winner, or whose success projected through the
+  repaired-copy branch (no `job_id` key), or whose stage has no
+  successor in the forecast stage order (`download`,
+  `state_save_qc`, `publish` queue targets), or that was repaired
+  after write without the repaired-stage evidence naming it, or
+  that was already ANNOTATED repaired at write time (the
+  projection-time annotation never reaches the persisted rows the
+  writer reads), still
+  pins here where the resolved-row rule would refuse — the
+  completed-stage evidence producer is not widened to those stages
+  because that mapping also drives restart routing; a target
+  re-activated after write (resubmitted out of a non-terminal
+  failure status back into the ACTIVE domain) belongs to the same
+  limitation wherever that transition is producible
 - **AND** with the marker's stage differing from the candidate's
-  failed stage, the verdict falls through to the only-failure-left
-  arm — the same arm the resolved-row rule uses on a stage
-  mismatch — and, within the delivered domain, for a failed-status
-  target lands on the same verdict as the resolved-row rule on the
-  same state
+  failed stage, a marker WITHOUT the record falls through to the
+  only-failure-left arm — the same arm the resolved-row rule uses
+  on a stage mismatch — and, within the delivered domain, for a
+  failed-status target lands on the same verdict as the
+  resolved-row rule on the same state (a model-bearing record
+  pins on the stage mismatch itself, router parity)
 - **AND** markers with non-cycle-grammar entity ids keep the
   historical fail-open, a foreign-cycle id still never pins, and a
   stage-less marker keeps deciding through the loop-stripped id
-  token
+  token — a TEXT inference, not recorded evidence, capped to the
+  legacy set of markers written before the `failed_stage` detail
+  existed PLUS the half records the current writer still produces
+  when the target row carries no stage (the empty value is not
+  written and the sanitizer does not pass empties through): the
+  token's stage may not be the stage the target row actually
+  carried, and that ceiling is pinned as accepted behavior, not
+  closed
+
+#### Scenario: Record-borne target evidence gives the row-absent arm resolved-row parity
+
+- **WHEN** a manual retry marker written by `record_manual_repair`
+  carries its target's write-time record (`target_status` and the
+  marker's `failed_stage` detail both present — a half record
+  missing either falls back to the delivered backstop arm, id-token
+  inference included; the remaining `target_*` keys present when
+  the target row carried them) and the marker's target row is
+  absent from the decision state (identity-filter deletion or
+  row-window truncation)
+- **THEN** for a MODEL-LESS record the pin verdict equals the
+  resolved-row router's verdict on a row of exactly the recorded
+  shape: an unsubmitted auto-retry placeholder record
+  (`pending`/`submission_failed` status, `_retry_<n>` id, positive
+  `target_retry_count`, no marker flag, no slurm or array id)
+  refuses the pin, a repaired-flagged record
+  (`target_repair_status` repaired or `target_active_blocker`
+  false) refuses the pin — those two flags are projection-time
+  annotations that never reach the persisted rows the
+  manual-repair writer reads, so like the success values below
+  this is the gate's contract on the record, not a shape the
+  current writer produces; a target already annotated repaired at
+  write time therefore still pins through its record, a disclosed
+  permanent limitation alongside the post-write fates — and a
+  record whose status is not in the
+  live-failure domain (a succeeded
+  `download`/`state_save_qc`/`publish` queue target included —
+  no dependence on the completed-stage evidence, whose producer
+  never names those stages; such success values lie outside the
+  manual-repair writer's own source domain and this clause is the
+  gate's contract on the record, not a claim the writer produces
+  them) refuses the pin — each exactly as the row-present twin
+  refuses the same shape
+- **AND** a model-bearing record whose `target_model_id` names the
+  candidate's OWN model — read off the tail of the state's own
+  candidate run id (`fcst_<source>_<stamp>_<model_id>`, everything
+  after the stamp, model ids carrying underscores of their own),
+  never derived from the surviving job rows, so row-window
+  truncation cannot blind the comparison — pins unconditionally,
+  cross-stage and same-stage alike, even when a state staleness
+  mapping names the target — exactly as the resolved-row router
+  short-circuits a model-bearing row to a pin — so the
+  operator-pinned `retry_count` is honored on both sides, while a
+  record naming any OTHER model, or a state whose run id yields no
+  model, fails closed and never pins
+- **AND** the verdicts hold for stacked-suffix entity ids
+  (`..._retry_1` and `..._retry_1_retry_2_retry_3` alike)
+- **AND** a marker without the record — legacy markers, and every
+  marker written by the SQL retry service — keeps the delivered
+  backstop verdicts bit for bit
+- **AND** the identity-filter event sanitizer preserves the
+  `target_*` details on retry events end to end: a marker written
+  by `record_manual_repair`, projected into the candidate state and
+  filtered onto the decision state, still carries them at the pin
+  gate
 
 #### Scenario: Newest adopted marker without retry_count terminates the attempt scan
 
