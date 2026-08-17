@@ -267,6 +267,32 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # One-hop extension of the guarded-module closure (#1455): three tracked
+        # non-test modules import real_backend at file level
+        # (services/orchestrator/reconcile.py,
+        # services/production_closure/slurm_validation.py,
+        # services/slurm_gateway/mock_backend.py), and their own non-gated
+        # top-level importer suites were not selected by the
+        # `services/slurm_gateway/**` rule above. This rule is deliberately
+        # narrow — only a real_backend.py PR pays the extra ~20s; every other
+        # slurm_gateway path keeps today's seven targets. The set is DERIVED
+        # from the tracked tree by tests/test_select_ci_tests.py, never frozen
+        # there, so a new one-hop importer suite reddens the guard.
+        # tests/test_gateway_reconcile.py is a one-hop member too but already
+        # rides the `services/slurm_gateway/**` rule; it is not repeated here.
+        "services/slurm_gateway/real_backend.py",
+        (
+            "tests/test_production_e2e_validation.py",
+            "tests/test_production_met_validation.py",
+            "tests/test_production_object_store_validation.py",
+            "tests/test_production_ops_validation.py",
+            "tests/test_production_readiness_validation.py",
+            "tests/test_production_scale_validation.py",
+            "tests/test_production_slurm_validation.py",
+            "tests/test_reconcile_sacct_parse.py",
+        ),
+    ),
+    PathTestRule(
         "services/tile_publisher/**",
         (
             "tests/test_tile_publisher.py",
@@ -448,6 +474,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
+            is_test_file_name = fnmatch.fnmatch(path, CHANGED_TEST_META_GUARD_PATTERN)
             matched_changed_test = False
             for rule in CHANGED_TEST_FILE_RULES:
                 if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
@@ -458,11 +485,20 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                     if rule.stop_on_match:
                         break
             if not matched_changed_test:
-                selected.add(path)
+                # A `tests/` Python file that is not itself a `test_*.py` suite
+                # (conftest.py, integration_helpers.py, a fixtures/ builder) is
+                # not collectible: `pytest -q <it>` returns NO_TESTS_COLLECTED
+                # (exit 5), which ci.yml's `check=True` renders as a misleading
+                # red carrying zero assertion information (#1453). Such a path
+                # maps to the meta-guard suite instead, so every emitted target
+                # is a collectible test file; the meta-guard-only collapse then
+                # arms ci.yml's full-tree collect-only smoke (#1454) over the
+                # import surface such a support module can break.
+                selected.add(path if is_test_file_name else SELECTOR_META_GUARD_TEST)
             # Unconditional, redirect or not: a redirect fires exactly when a
             # changed test file is swapped for focused nodes, which is also when
             # the meta-guards most need to run.
-            if fnmatch.fnmatch(path, CHANGED_TEST_META_GUARD_PATTERN):
+            if is_test_file_name:
                 selected.add(SELECTOR_META_GUARD_TEST)
             continue
         matched = False
@@ -551,10 +587,21 @@ def _test_target_exists(target: str, *, repo_root: Path) -> bool:
 
 
 def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
+    # `meta_guard_only` is a SHAPE property of the FINAL (post missing-target
+    # filter) selection, not a claim about evidence provenance: it is true iff
+    # the only target left is the selector's own suite. That covers the PR whose
+    # single backend change deletes a `tests/test_*.py` (self-selection dropped
+    # by the filter, meta-guard survives) and the #1453 support-module mapping —
+    # both lost the full-tree import smoke they used to get — and it also fires
+    # for selector-development PRs whose diff-specific target simply IS this
+    # suite. That last class is accepted rather than special-cased: the cost is
+    # one extra collection pass on exactly the PR class that changes the gate.
+    meta_guard_only = list(tests) == [SELECTOR_META_GUARD_TEST]
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(f"count={len(tests)}\n")
         handle.write(f"tests={' '.join(tests)}\n")
         handle.write(f"tests_json={json.dumps(list(tests), separators=(',', ':'))}\n")
+        handle.write(f"meta_guard_only={'true' if meta_guard_only else 'false'}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

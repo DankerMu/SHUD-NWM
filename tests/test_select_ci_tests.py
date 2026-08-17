@@ -4,7 +4,8 @@ import ast
 import fnmatch
 import re
 import subprocess
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -18,6 +19,8 @@ from scripts.select_ci_tests import (
     FILE_JOURNAL_READ_STATE_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    SELECTOR_META_GUARD_TEST,
+    PathTestRule,
     main,
     select_tests,
 )
@@ -575,7 +578,98 @@ def test_import_walk_resolves_relative_imports_against_importer_package(
 # it the day one does. `real_disk` and `timescaledb_210` must NEVER be added:
 # conftest declares them but does not auto-skip them, so such a suite really does
 # run its assertions in the PR lane and the owning rule must keep selecting it.
+# All of that is mechanically anchored to conftest by
+# test_gating_marker_names_anchor_to_the_conftest_auto_skip_set (#1455): this set
+# plus the recorded `grib` absence must EQUAL the AST-derived auto-skip set, so a
+# conftest that starts or stops auto-skipping a marker forces a visible decision
+# here instead of silently desynchronising the two.
 GATING_MARKER_NAMES = frozenset({"integration", "e2e"})
+
+# Deliberate absence from GATING_MARKER_NAMES: conftest auto-skips `grib`, but no
+# tracked file carries it as a file-level `pytestmark`, so excluding grib-marked
+# suites from an owning rule would today only lose coverage. Move it into
+# GATING_MARKER_NAMES the day a file-level user appears.
+DELIBERATELY_UNGATED_AUTO_SKIP_MARKERS = frozenset({"grib"})
+
+# Registered in conftest.pytest_configure but NOT auto-skipped: suites carrying
+# these really do run their assertions in the PR lane, so they must never leak
+# into the exclusion set.
+NEVER_AUTO_SKIPPED_MARKERS = frozenset({"real_disk", "timescaledb_210"})
+
+CONFTEST_PATH = "tests/conftest.py"
+
+
+def _conftest_auto_skip_markers(source: str) -> set[str]:
+    """Marker names ``pytest_collection_modifyitems`` auto-skips, from its AST.
+
+    ``source`` is the conftest TEXT, not a path, so red evidence can feed a
+    modified copy in memory without touching the tracked file. The shape read
+    here is conftest's own: ``if "<marker>" in item.keywords and <reason>``
+    membership tests inside the hook — NOT ``get_closest_marker``. A derivation
+    that finds nothing means the hook was rewritten into a shape this function
+    no longer understands; that fails loudly rather than returning an empty set
+    that would silently make every marker look non-gating.
+    """
+    tree = ast.parse(source, filename=CONFTEST_PATH)
+    hook = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "pytest_collection_modifyitems"
+        ),
+        None,
+    )
+    assert hook is not None, "tests/conftest.py no longer defines pytest_collection_modifyitems"
+
+    markers: set[str] = set()
+    for node in ast.walk(hook):
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1 or not isinstance(node.ops[0], ast.In):
+            continue
+        if not (isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)):
+            continue
+        container = node.comparators[0]
+        if isinstance(container, ast.Attribute) and container.attr == "keywords":
+            markers.add(node.left.value)
+    assert markers, (
+        "derived no auto-skipped markers from pytest_collection_modifyitems: "
+        'the hook no longer uses `"<marker>" in item.keywords` membership tests'
+    )
+    return markers
+
+
+def test_gating_marker_names_anchor_to_the_conftest_auto_skip_set() -> None:
+    # GATING_MARKER_NAMES decides which importer suites the guarded-module guard
+    # is allowed to skip requiring. Its truth lives in tests/conftest.py, which
+    # nothing forced it to track. An EQUALITY is the binding assertion here: a
+    # difference/subset framing stays green if conftest STOPS auto-skipping
+    # `e2e`, which would wrongly keep excluding suites that really run.
+    derived = _conftest_auto_skip_markers(Path(CONFTEST_PATH).read_text(encoding="utf-8"))
+
+    assert derived == GATING_MARKER_NAMES | DELIBERATELY_UNGATED_AUTO_SKIP_MARKERS, (
+        f"conftest auto-skip set drifted: derived {sorted(derived)}, "
+        f"recorded {sorted(GATING_MARKER_NAMES | DELIBERATELY_UNGATED_AUTO_SKIP_MARKERS)}"
+    )
+    assert not NEVER_AUTO_SKIPPED_MARKERS & derived, (
+        f"markers wrongly derived as auto-skipped: {sorted(NEVER_AUTO_SKIPPED_MARKERS & derived)}"
+    )
+    assert not NEVER_AUTO_SKIPPED_MARKERS & GATING_MARKER_NAMES
+
+
+def test_conftest_auto_skip_derivation_reads_membership_tests_and_fails_loudly() -> None:
+    # The seam that makes the anchor falsifiable without touching the tracked
+    # conftest: a dropped marker reds the equality, and a hook rewritten to a
+    # shape this derivation cannot read fails loudly instead of returning an
+    # empty set (which would silently disarm the anchor and the closure guard).
+    source = Path(CONFTEST_PATH).read_text(encoding="utf-8")
+
+    without_e2e = source.replace('if "e2e" in item.keywords and e2e_skip_reason:', "if e2e_skip_reason and False:")
+    assert without_e2e != source
+    assert _conftest_auto_skip_markers(without_e2e) == {"integration", "grib"}
+
+    rewritten = source.replace(" in item.keywords", " in item.nodeid")
+    assert rewritten != source
+    with pytest.raises(AssertionError, match="derived no auto-skipped markers"):
+        _conftest_auto_skip_markers(rewritten)
 
 # (module source path, dotted module, a known member of the derived importer
 # set). The third element is the anti-vacuity floor: a derivation that breaks
@@ -595,6 +689,12 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
 )
 
 DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_integration.py"
+
+# Anti-vacuity floor for the one-hop extension (#1455): this suite pins the
+# sacct parsing constants that services/orchestrator/reconcile.py consumes, and
+# reconcile.py is what imports real_backend at file level — the suite itself
+# never names real_backend, so a direct-importer-only derivation cannot see it.
+REAL_BACKEND_ONE_HOP_MEMBER = "tests/test_reconcile_sacct_parse.py"
 
 
 def _tracked_top_level_test_files() -> list[str]:
@@ -646,6 +746,85 @@ def _non_gated_top_level_importer_tests(module: str) -> set[str]:
     return importers
 
 
+def _dotted_module_name(path: str) -> str:
+    return str(PurePosixPath(path).with_suffix("")).replace("/", ".")
+
+
+def _tracked_non_test_modules() -> list[str]:
+    """The one-hop derivation domain: every tracked `.py` outside `tests/**`.
+
+    Pinned as the domain so the derivation is deterministic — not "whatever
+    happens to be importable", not the process's sys.modules.
+    """
+    return [path for path in _tracked_python_files("*.py") if not path.startswith("tests/")]
+
+
+def _one_hop_importer_modules(module: str, *, domain: Sequence[str] | None = None) -> set[str]:
+    """Tracked non-test modules importing ``module`` at file level — ONE hop.
+
+    Deliberately NOT recursive. The bound is forward-looking policy, not a
+    measurement: today the top-level-edge fixed point already equals this set,
+    so recursing buys nothing, while an unbounded walk is what turns one
+    guarded module into a PR lane running most of the suite. ``domain`` is a
+    parameter so the non-recursion property is testable on a fixture tree.
+
+    Top-level edges only, at BOTH levels (module->module here, test->module in
+    ``_non_gated_top_level_importer_tests``): a function-body import runs when
+    that one function runs, not at collection, so it never contributes — which
+    is exactly why the function-body exclusion pin below stays green.
+    """
+    paths = _tracked_non_test_modules() if domain is None else list(domain)
+    importers: set[str] = set()
+    for path in paths:
+        if _dotted_module_name(path) == module:
+            continue
+        if module in _top_level_imported_module_names(path, _parse_tracked(path)):
+            importers.add(path)
+    return importers
+
+
+def _one_hop_importer_tests(module: str, *, domain: Sequence[str] | None = None) -> set[str]:
+    """Non-gated importer suites contributed by ``module``'s one-hop importers."""
+    contributed: set[str] = set()
+    for hop_path in _one_hop_importer_modules(module, domain=domain):
+        contributed |= _non_gated_top_level_importer_tests(_dotted_module_name(hop_path))
+    return contributed
+
+
+def test_one_hop_importer_derivation_does_not_recurse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The bound is the whole point of decision 4, so pin it on a fixture tree
+    # instead of on today's tracked graph (which happens to have no second hop
+    # and would let a recursive implementation pass unnoticed).
+    package = tmp_path / "services" / "probe"
+    package.mkdir(parents=True)
+    (package / "guarded.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "first_hop.py").write_text("from services.probe import guarded\n", encoding="utf-8")
+    (package / "second_hop.py").write_text("from services.probe import first_hop\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    domain = ["services/probe/guarded.py", "services/probe/first_hop.py", "services/probe/second_hop.py"]
+
+    assert _one_hop_importer_modules("services.probe.guarded", domain=domain) == {"services/probe/first_hop.py"}
+    assert _one_hop_importer_modules("services.probe.first_hop", domain=domain) == {"services/probe/second_hop.py"}
+
+
+def test_one_hop_extension_reaches_suites_no_direct_importer_scan_can_see() -> None:
+    # Anti-vacuity + coverage for the hop itself: without it this suite is
+    # invisible to the guard (it imports reconcile, not real_backend) and a
+    # real_backend-only PR never runs the sacct parsing assertions its
+    # constants feed. Derived, never frozen: if reconcile.py stops importing
+    # real_backend at file level, this reddens rather than rotting green.
+    module = "services.slurm_gateway.real_backend"
+
+    assert REAL_BACKEND_ONE_HOP_MEMBER not in _non_gated_top_level_importer_tests(module)
+    assert REAL_BACKEND_ONE_HOP_MEMBER in _one_hop_importer_tests(module)
+    assert REAL_BACKEND_ONE_HOP_MEMBER in select_tests(
+        ["services/slurm_gateway/real_backend.py"], repo_root=Path(".")
+    )
+
+
 def test_guarded_module_rules_cover_their_non_gated_importer_closure() -> None:
     # Fourth recurrence of the same defect class (#1191 -> #1247 -> #1283 ->
     # #1447): a rule is written without a "who imports this module" scan, the PR
@@ -653,17 +832,26 @@ def test_guarded_module_rules_cover_their_non_gated_importer_closure() -> None:
     # post-merge master full run. The importer set is DERIVED from the tracked
     # tree here, never frozen, so a new importer suite reddens this test
     # (pointing at the rule to extend) instead of falling out of the PR lane.
+    # The required set is direct importers UNION the one-hop contribution
+    # (#1455): a module that imports the guarded module at file level carries
+    # its behavior into its own importer suites, and those were falling out of
+    # the PR lane (8 of them for real_backend). One hop only — see
+    # _one_hop_importer_modules for why the bound is policy, not a measurement.
+    # For display_coverage the hop contributes nothing today (its single one-hop
+    # module, scripts/node27_refresh_coverage.py, has no non-gated top-level
+    # importer suite), so the union is derived rather than asserted per module.
     offenders: list[str] = []
     for source_path, module, known_member in GUARDED_MODULE_CLOSURES:
         assert Path(source_path).is_file(), f"guarded module source missing: {source_path}"
-        importers = _non_gated_top_level_importer_tests(module)
-        assert importers, f"{module}: derived no non-gated top-level importer suites"
-        assert known_member in importers, (
-            f"{module}: expected {known_member} among derived importers, got {sorted(importers)}"
+        direct = _non_gated_top_level_importer_tests(module)
+        assert direct, f"{module}: derived no non-gated top-level importer suites"
+        assert known_member in direct, (
+            f"{module}: expected {known_member} among derived importers, got {sorted(direct)}"
         )
+        required = direct | _one_hop_importer_tests(module)
 
         selected = set(select_tests([source_path], repo_root=Path(".")))
-        missing = sorted(importers - selected)
+        missing = sorted(required - selected)
         if missing:
             offenders.append(f"{source_path}: rule misses {module} importer suites {missing}")
     assert not offenders, "guarded-module importer closure incomplete: " + "; ".join(offenders)
@@ -760,10 +948,38 @@ def test_changed_selector_suite_selects_only_itself() -> None:
 )
 def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str) -> None:
     # The changed-test branch condition is wider than `tests/test_*.py`; the
-    # meta-guard accumulation is not. These two keep today's behavior exactly.
+    # meta-guard accumulation is not, and neither is self-selection any more.
+    # A support module used to select ITSELF, which pytest answers with
+    # NO_TESTS_COLLECTED (exit 5) and ci.yml's check=True turns into a
+    # misleading, zero-assertion red (#1453). It now maps to the meta-guard
+    # suite. The pin's original intent survives unchanged: a support-file change
+    # still spills nothing — no whole suite, no core smoke, exactly one target.
     assert Path(changed_path).is_file()
 
-    assert select_tests([changed_path], repo_root=Path(".")) == [changed_path]
+    assert select_tests([changed_path], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+
+
+def _tracked_tests_support_modules() -> list[str]:
+    """Tracked `tests/**.py` that pytest cannot collect as a suite."""
+    return sorted(set(_tracked_python_files("tests")) - set(_tracked_top_level_test_files()))
+
+
+def test_every_tracked_tests_support_module_selects_only_the_meta_guard_suite() -> None:
+    # Derived from the tracked tree, never frozen: the class is not just
+    # conftest.py/integration_helpers.py/__init__.py but every non-suite module
+    # under tests/ (fixture builders, fakes, template helpers), and a support
+    # module added tomorrow is covered the moment it lands. Each must map to a
+    # COLLECTIBLE target, or ci.yml's check=True red carries no assertion
+    # information at all.
+    support_modules = _tracked_tests_support_modules()
+    assert support_modules, "expected tracked tests/ modules that are not test_*.py suites"
+
+    offenders = [
+        f"{path}: selected {selected}"
+        for path in support_modules
+        if (selected := select_tests([path], repo_root=Path("."))) != [SELECTOR_META_GUARD_TEST]
+    ]
+    assert not offenders, "tests/ support modules must map to the meta-guard suite: " + "; ".join(offenders)
 
 
 def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
@@ -809,6 +1025,69 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
 
 
+INTENTIONAL_DUPLICATE_PATTERNS = frozenset({"services/orchestrator/scheduler.py"})
+
+
+def _duplicated_rule_patterns(rules: Sequence[PathTestRule]) -> set[str]:
+    """Patterns appearing more than once in ``rules`` — parameterized on purpose.
+
+    Taking the rule list as an argument is what lets the collision below be
+    simulated on a constructed list instead of on the live table.
+    """
+    counts = Counter(rule.pattern for rule in rules)
+    return {pattern for pattern, count in counts.items() if count > 1}
+
+
+def test_path_rule_duplicate_patterns_are_allowlisted_decisions() -> None:
+    # A pattern listed twice splits rule ownership: the second entry's targets
+    # are easy to miss when reading the first, and a `stop_on_match=True` entry
+    # earlier in the table can silently amputate the later one. Today exactly
+    # one duplicate is deliberate — services/orchestrator/scheduler.py carries a
+    # narrow non-stop entry plus a stop-on-match layering — so duplication must
+    # be an allowlisted decision, not an accident.
+    duplicates = _duplicated_rule_patterns(PATH_TEST_RULES)
+
+    unexplained = sorted(duplicates - INTENTIONAL_DUPLICATE_PATTERNS)
+    assert not unexplained, (
+        f"unallowlisted duplicate PATH_TEST_RULES patterns {unexplained}: "
+        "consolidate the entries, or record the layering in INTENTIONAL_DUPLICATE_PATTERNS"
+    )
+    # Anti-rot in the other direction: an allowlist entry that stopped being
+    # duplicated is a stale exemption waiting to hide the next accident.
+    stale = sorted(INTENTIONAL_DUPLICATE_PATTERNS - duplicates)
+    assert not stale, f"INTENTIONAL_DUPLICATE_PATTERNS members that are no longer duplicated: {stale}"
+
+
+def test_duplicate_pattern_guard_flags_an_unmerged_sibling_collision() -> None:
+    # #1443 adds a second packages/common/display_coverage.py entry. On merge it
+    # would split that module's ownership across two rules with nothing saying
+    # so. Simulated on a constructed list — the live table stays untouched — so
+    # the day it lands the guard above reds by name instead of going quiet.
+    collision_pattern = "packages/common/display_coverage.py"
+    would_be_merged = (
+        *PATH_TEST_RULES,
+        PathTestRule(collision_pattern, ("tests/test_display_coverage_refresh.py",)),
+    )
+
+    duplicates = _duplicated_rule_patterns(would_be_merged)
+
+    assert collision_pattern in duplicates
+    assert collision_pattern not in INTENTIONAL_DUPLICATE_PATTERNS
+    assert sorted(duplicates - INTENTIONAL_DUPLICATE_PATTERNS) == [collision_pattern]
+
+
+def test_changed_test_rule_duplicates_stay_out_of_the_guard_domain() -> None:
+    # CHANGED_TEST_FILE_RULES duplicates its patterns by design (#1254): the
+    # same changed test file gets different focused targets depending on which
+    # surface files moved with it, expressed through only_when_any_changed. The
+    # guard is deliberately scoped to PATH_TEST_RULES, so record the exemption
+    # as a fact about the table rather than as silence.
+    duplicates = _duplicated_rule_patterns(CHANGED_TEST_FILE_RULES)
+
+    assert duplicates == {"tests/test_orchestration_chain.py", "tests/test_production_scheduler.py"}
+    assert all(rule.only_when_any_changed for rule in CHANGED_TEST_FILE_RULES)
+
+
 # The first six inputs below sit inside ci.yml's `backend` paths-filter (so the
 # "Unit Tests" gate opens) yet map to no test file, leaving the job in its
 # collect-only, zero-assertion branch. Those six PIN that route-C contract —
@@ -821,6 +1100,12 @@ def test_select_tests_ignores_docs_only_changes() -> None:
 # remaining classes belong to a future route-A/B (selector-widening or
 # empty-selection-fails) decision. Flipping any of them must change a visible
 # assertion here.
+# Note the classes that are NOT here any more: a PR deleting a `tests/test_*.py`
+# and a PR touching only a `tests/` support module both leave a one-element
+# selection (the meta-guard suite), so they never reached this empty-selection
+# branch and lost the full-tree collect-only smoke they used to get. #1454's
+# `meta_guard_only` output field is what runs the smoke for them, in addition to
+# the targeted run — this branch's own semantics are untouched.
 @pytest.mark.parametrize(
     "changed_path",
     [
@@ -888,6 +1173,111 @@ def test_main_writes_json_github_output(tmp_path: Path) -> None:
     output = output_file.read_text(encoding="utf-8")
     assert "count=1\n" in output
     assert 'tests_json=["tests/test_two_node_docker_runtime.py"]\n' in output
+
+
+def _github_output_fields(tmp_path: Path, changed: Sequence[str], *, repo_root: Path) -> dict[str, str]:
+    changed_file = tmp_path / "changed.txt"
+    output_file = tmp_path / "github-output.txt"
+    changed_file.write_text("".join(f"{path}\n" for path in changed), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "--changed-file",
+                str(changed_file),
+                "--repo-root",
+                str(repo_root),
+                "--github-output",
+                str(output_file),
+            ]
+        )
+        == 0
+    )
+    return dict(
+        line.split("=", 1)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+
+
+def test_github_output_flags_the_deleted_test_file_meta_guard_collapse(tmp_path: Path) -> None:
+    # The class #1254 silently created: before it, a PR whose only backend
+    # change deletes a test file selected nothing and got ci.yml's full-tree
+    # collect-only smoke; after it, the unconditional meta-guard accumulation
+    # survives the missing-target filter, so count is 1 and the smoke is lost —
+    # even though a deletion is exactly what breaks cross-test imports. The flag
+    # is computed on the POST-filter list, which is what makes this shape
+    # visible at all.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
+    assert not (tmp_path / "tests" / "test_gone.py").exists()
+
+    fields = _github_output_fields(tmp_path, ["tests/test_gone.py"], repo_root=tmp_path)
+
+    assert fields["count"] == "1"
+    assert fields["tests"] == SELECTOR_META_GUARD_TEST
+    assert fields["meta_guard_only"] == "true"
+
+
+def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None:
+    fields = _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
+
+    assert fields["tests"] == SELECTOR_META_GUARD_TEST
+    assert fields["meta_guard_only"] == "true"
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    ["scripts/select_ci_tests.py", "tests/test_select_ci_tests.py"],
+)
+def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path, changed_path: str) -> None:
+    # Accepted shape-not-provenance semantics (design decision 2): these diffs
+    # have the meta-guard suite as their diff-specific target, so they fire the
+    # flag and pay one extra collection pass. Special-casing them would trade a
+    # two-line predicate for a provenance rule on exactly the PR class that
+    # rewrites the gate — the class least well served by a subtle exemption.
+    fields = _github_output_fields(tmp_path, [changed_path], repo_root=Path("."))
+
+    assert fields["meta_guard_only"] == "true"
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected_count"),
+    [
+        # Two targets: the changed suite plus the accumulated meta-guard.
+        ("tests/test_orchestration_chain.py", "2"),
+        # Empty selection: route C, whose own collect-only branch is unchanged.
+        ("docs/runbooks/current-production-ops.md", "0"),
+    ],
+)
+def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
+    tmp_path: Path,
+    changed_path: str,
+    expected_count: str,
+) -> None:
+    fields = _github_output_fields(tmp_path, [changed_path], repo_root=Path("."))
+
+    assert fields["count"] == expected_count
+    assert fields["meta_guard_only"] == "false"
+
+
+def test_ci_workflow_consumes_the_meta_guard_only_output(tmp_path: Path) -> None:
+    # String coupling across a boundary no test can execute: the field is
+    # written by Python and read by a shell condition in a workflow file. Either
+    # side can be renamed alone and nothing else notices — the smoke would just
+    # stop running, silently, which is the exact failure mode #1454 exists to
+    # end. Anchored to the targeted job's block so a mention in an unrelated
+    # job cannot satisfy it.
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    start = workflow.index("\n  unit-test-targeted:")
+    end = workflow.index("\n  frontend-build:", start)
+    targeted_job = workflow[start:end]
+
+    assert "steps.targeted.outputs.meta_guard_only" in targeted_job
+    assert "--collect-only" in targeted_job
+    # ...and the producing side emits that exact key, read from behavior rather
+    # than from the selector's source text.
+    assert "meta_guard_only" in _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
 
 
 def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
