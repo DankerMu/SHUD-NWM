@@ -104,7 +104,8 @@ exploding toward the 64-suite fixed point).
    mapping (`== [SELECTOR_META_GUARD_TEST]`), keeping its original
    non-spill intent via the unchanged accumulation-pattern check; a
    NEW tree-derived invariant test enumerates
-   `_tracked_python_files("tests")` minus basename-`test_*.py` matches
+   `_tracked_python_files("tests")` minus suite basenames (both
+   pytest `python_files` patterns, via the shared selector predicate)
    (today exactly the 8 files listed under Verified facts) and
    asserts each selects exactly `[SELECTOR_META_GUARD_TEST]` —
    future support modules are covered without name hardcoding, and
@@ -235,7 +236,9 @@ exploding toward the 64-suite fixed point).
    misclassification (a nested suite would be treated as a support
    module, losing self-selection AND the meta-guard accumulation), so
    the selector's predicate became basename-shaped
-   (`CHANGED_TEST_SUITE_BASENAME_PATTERN`) — a one-surface change;
+   (`CHANGED_TEST_SUITE_BASENAME_PATTERNS` / `is_test_suite_path`
+   after the retro pass completed it to both pytest patterns) — a
+   one-surface change;
    `_tracked_top_level_test_files` is untouched, it feeds the
    importer-closure domain. Route-A/B
    empty-selection policy stays #1182-family property (#1454's smoke

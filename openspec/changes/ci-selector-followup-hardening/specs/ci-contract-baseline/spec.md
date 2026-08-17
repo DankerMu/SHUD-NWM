@@ -180,7 +180,8 @@ the meta-guards exactly like a top-level one.
 #### Scenario: tests support files map to a collectible selection
 
 - **WHEN** a PR changes only `tests/conftest.py` (or any tracked
-  `tests/` Python file whose basename does not match `test_*.py`)
+  `tests/` Python file whose basename matches neither `test_*.py`
+  nor `*_test.py`)
 - **THEN** the selector output is exactly `tests/test_select_ci_tests.py`
   — never the support file itself — and a tree-derived invariant test
   covers every current and future support module without hardcoding
