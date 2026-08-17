@@ -6,8 +6,14 @@ This script only targets source raw data under:
     <object-store-root>/raw/<source>/<YYYYMMDDHH>
 
 It deliberately does not touch canonical, forcing, runs, published products, or
-static grids. Production retention always deletes aged raw cycles after safety
+static grids. Production retention deletes aged raw cycles after safety
 preflight and emits bounded JSON evidence for operator review.
+
+Two environment gates exist for staged rollout and rollback and default to the
+execute-only behaviour: ``NODE27_RAW_RETENTION_ENABLED`` (default true) and
+``NODE27_RAW_RETENTION_PLAN_ONLY`` (default false). The cutoff anchor is the
+display watermark, not the pipeline frontier; every summary discloses that
+choice and its residual risk in its ``anchor`` block (issue #1407).
 """
 
 from __future__ import annotations
@@ -23,10 +29,21 @@ from typing import Any, Iterable
 
 from packages.common.display_watermark import fetch_display_watermark
 
-SCHEMA_VERSION = "nhms.node27_raw_retention.production.v2"
+SCHEMA_VERSION = "nhms.node27_raw_retention.production.v3"
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_SOURCES = ("gfs", "ifs")
 CYCLE_NAME_LENGTH = 10
+
+# Anchor disclosure (issue #1407 / design D4). This process keeps the display
+# watermark as its cutoff anchor instead of the pipeline frontier used by the
+# out-of-pass cleanup CLI: the scheduler pass receipts and journal live on
+# node-22 private /scratch, which node-27 cannot reach, and publishing the
+# frontier across nodes needs a shared-store write surface that is out of scope
+# here. The residual risk is disclosed in every summary rather than left
+# implicit.
+ANCHOR_MODE = "display_watermark"
+ANCHOR_DECISION = "issue-1407-keep-watermark-anchor"
+ANCHOR_RESIDUAL_RISK = "backfill cycles older than watermark - retention_days are unprotected"
 
 
 @dataclass(frozen=True)
@@ -35,6 +52,11 @@ class RawRetentionConfig:
     retention_days: int
     sources: frozenset[str]
     summary_path: Path | None
+    # Env gates (issue #1407 / design D5). Defaults reproduce the execute-only
+    # behaviour byte for byte; they exist for staged rollout and rollback, and
+    # deliberately have no CLI flags (the ones 9c1625ee removed stay removed).
+    enabled: bool = True
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +77,13 @@ def _env_int(name: str, *, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _split_sources(raw: str | None) -> frozenset[str]:
@@ -137,6 +166,12 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
             retention_days=retention_days,
             sources=sources,
             summary_path=summary_path,
+            enabled=_env_flag("NODE27_RAW_RETENTION_ENABLED", default=True),
+            # Deliberately not the retired NODE27_RAW_RETENTION_DRY_RUN name: that
+            # one defaulted to true, so a leftover line in node-27's live config
+            # would silently return production to zero deletions. Under the new
+            # name any such leftover line is inert.
+            dry_run=_env_flag("NODE27_RAW_RETENTION_PLAN_ONLY", default=False),
         ),
         [],
     )
@@ -215,32 +250,52 @@ def run_retention(
     started_at = now.astimezone(UTC)
     reference_time = (reference_time or started_at).astimezone(UTC)
     cutoff = reference_time - timedelta(days=config.retention_days)
-    targets, skipped = collect_targets(config, now=reference_time)
-    planned = [_target_payload(target) for target in targets]
-    deleted: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    freed_bytes = 0
-    for target, payload in zip(targets, planned, strict=True):
-        try:
-            shutil.rmtree(target.path)
-        except OSError as error:
-            failed.append({**payload, "error": str(error)})
-            continue
-        deleted.append(payload)
-        freed_bytes += int(payload["size_bytes"])
-    finished_at = datetime.now(UTC)
-    return {
+    base = {
         "schema_version": SCHEMA_VERSION,
-        "status": "completed",
         "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "finished_at": finished_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reference_time": reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "object_store_root": str(config.object_store_root),
         "raw_root": str(config.object_store_root / "raw"),
         "sources": sorted(config.sources),
         "retention_days": config.retention_days,
         "cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "execution_mode": "production_execute",
+        "enabled": config.enabled,
+        "dry_run": config.dry_run,
+        "anchor": _anchor_disclosure(reference_time),
+    }
+    if not config.enabled:
+        return {
+            **base,
+            "status": "disabled",
+            "finished_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "execution_mode": "disabled",
+            "counts": {"planned": 0, "deleted": 0, "skipped": 0, "failed": 0},
+            "planned": [],
+            "deleted": [],
+            "skipped": [],
+            "failed": [],
+            "freed_bytes": 0,
+        }
+    targets, skipped = collect_targets(config, now=reference_time)
+    planned = [_target_payload(target) for target in targets]
+    deleted: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    freed_bytes = 0
+    if not config.dry_run:
+        for target, payload in zip(targets, planned, strict=True):
+            try:
+                shutil.rmtree(target.path)
+            except OSError as error:
+                failed.append({**payload, "error": str(error)})
+                continue
+            deleted.append(payload)
+            freed_bytes += int(payload["size_bytes"])
+    finished_at = datetime.now(UTC)
+    return {
+        **base,
+        "status": "completed",
+        "finished_at": finished_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "execution_mode": "plan_only" if config.dry_run else "production_execute",
         "counts": {
             "planned": len(planned),
             "deleted": len(deleted),
@@ -252,6 +307,17 @@ def run_retention(
         "skipped": skipped,
         "failed": failed,
         "freed_bytes": freed_bytes,
+    }
+
+
+def _anchor_disclosure(reference_time: datetime) -> dict[str, Any]:
+    """Say in the summary which anchor bounded this run, and what it misses."""
+    return {
+        "mode": ANCHOR_MODE,
+        "reference_time": reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "frontier_active_lower_bound": None,
+        "decision": ANCHOR_DECISION,
+        "residual_risk": ANCHOR_RESIDUAL_RISK,
     }
 
 
