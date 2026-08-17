@@ -34,7 +34,7 @@ RealSlurmGateway SHALL map raw Slurm terminal states to stable control-plane err
 
 - **WHEN** `sacct` reports a terminal failure state without a specific mapping (including bare `FAILED`, states normalized to `UNKNOWN`, and unadopted states such as `REVOKED` or `SPECIAL_EXIT`)
 - **THEN** the pipeline job MUST persist the stable generic error code `SLURM_JOB_FAILED`
-- **AND** that code is deliberately registered on no classification surface — neither transient set, nor the non-transient set: failure classification reports it as an unknown failure, and automatic downstream resume refuses it with the unknown-code-defaulted-non-transient skip reason, as the job-retry-mechanism unknown-code default prescribes, so the cycle waits for operator adjudication instead of burning retry budget on a possibly-deterministic failure
+- **AND** that code is deliberately registered on no classification surface — neither transient set, nor the non-transient set: failure classification reports it as an unknown failure, and automatic retry and downstream resume refuse it as the job-retry-mechanism unknown-code default prescribes (the skip-reason and refusal-reason literals live in that spec's requirements, not here), so the cycle waits for operator adjudication instead of burning retry budget on a possibly-deterministic failure
 - **AND** raw Slurm state metadata MUST be preserved for that adjudication
 
 #### Scenario: Poll timeout is persisted
