@@ -1906,6 +1906,87 @@ def _directory_rule_audit_modules() -> list[str]:
     return sorted(modules)
 
 
+def _importer_equivalence_offenders(
+    *,
+    modules: Sequence[str],
+    index: dict[str, set[str]],
+    authority: Callable[[str], set[str]] = _non_gated_top_level_importer_tests,
+) -> list[str]:
+    """Dotted modules where the executed index and the authority helper disagree.
+
+    Both sides are parameters so the divergence can be shown on constructed data
+    — the tracked tree agrees today, and a pin whose red arm needs a mutated tree
+    is a pin nobody re-runs.
+    """
+    offenders: list[str] = []
+    for module in modules:
+        expected = authority(module)
+        actual = index.get(module, set())
+        if expected != actual:
+            offenders.append(f"{module}: authority helper {sorted(expected)} != executed index {sorted(actual)}")
+    return offenders
+
+
+EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE = 3
+
+
+def _importer_equivalence_sample() -> list[str]:
+    """Dotted names the equivalence pin compares — derived, never a frozen list.
+
+    Every tracked `tests/` support module is in: that is the live domain of the
+    closure guard, which reads the index for exactly these. The production half
+    comes off the head of the already-sorted `_directory_rule_audit_modules()`
+    (159 modules, 0.07 s) rather than the #1455 gap-map universe, which by
+    construction only contains modules the index ALREADY reports an importer for
+    — biased away from the regression this pin exists to catch, an index that
+    quietly stops seeing a module.
+    """
+    support = [_dotted_module_name(path) for path in _tracked_tests_support_modules()]
+    production = [
+        _dotted_module_name(path)
+        for path in _directory_rule_audit_modules()[:EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE]
+    ]
+    return support + production
+
+
+def test_importer_index_equals_the_per_module_authority_helper() -> None:
+    # #1499: one relation, two implementations —
+    # `_non_gated_top_level_importer_tests` is the semantic authority and
+    # `_non_gated_top_level_importer_index` is the affordable executed form that
+    # the #1487 closure guard and the #1455 disposition guard both run on. The
+    # claim that they agree lived only in a docstring, so widening a marker
+    # filter or an import predicate on one side moved two guards' domains with
+    # nothing to say so. One index build for the whole comparison; the helper is
+    # the expensive side (it re-parses every test file per call), which is why
+    # the production sample is a head slice rather than the whole directory
+    # audit.
+    sample = _importer_equivalence_sample()
+    assert len(sample) > EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE, "sample lost its support-module half"
+    index = _non_gated_top_level_importer_index()
+
+    offenders = _importer_equivalence_offenders(modules=sample, index=index)
+    assert not offenders, "importer derivation authority and executed index disagree:\n  " + "\n  ".join(offenders)
+    # Anti-vacuity: two derivations that both return nothing agree perfectly.
+    assert any(index.get(module) for module in sample), f"no sampled module derives any importer suite: {sample}"
+
+
+def test_importer_equivalence_pin_reds_when_the_two_derivations_diverge() -> None:
+    # Constructed on both sides, tracked tree untouched: the pin's content is the
+    # comparison, not today's agreement. The failure must print BOTH sets — "the
+    # derivations diverge" alone leaves the next reader unable to tell which side
+    # moved, which is the whole question when one of them gates two guards.
+    module = "packages.common.probe"
+    kept_by_the_helper = "tests/test_probe_authority.py"
+
+    offenders = _importer_equivalence_offenders(
+        modules=[module],
+        index={module: set()},
+        authority=lambda _module: {kept_by_the_helper},
+    )
+
+    assert offenders == [f"{module}: authority helper {[kept_by_the_helper]} != executed index []"]
+
+
 def _selection_for_module(module_path: str) -> set[str]:
     return set(select_tests([module_path], repo_root=Path(".")))
 
@@ -2309,11 +2390,17 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
+    # The literal-path half (#1498): this pair exists only because
+    # test_shud_runtime.py carries the exact string "tests/mock_shud_omp.py" and
+    # runs it as a subprocess. It imports nothing from the module, so a
+    # derivation that loses the consumption edge empties this anchor and reds
+    # here rather than quietly re-collapsing the module.
+    ("tests/mock_shud_omp.py", "tests/test_shud_runtime.py"),
 )
 
-# At least this many support modules must derive a non-empty importer set (6 of 8
-# today). A pure "universe non-empty" floor survives a derivation that collapses
-# to a single lucky module.
+# At least this many support modules must derive a non-empty consumer set (7 of 8
+# today — 6 by import, plus mock_shud_omp by literal path). A pure "universe
+# non-empty" floor survives a derivation that collapses to a single lucky module.
 MIN_SUPPORT_MODULES_WITH_IMPORTERS = 3
 
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -2323,18 +2410,124 @@ _DATABASE_FILTER_KEY = "\n            database:\n"
 _NEXT_FILTER_KEY_LINE = re.compile(r"^ {12}\S", re.MULTILINE)
 
 
-def _derived_support_module_importers(modules: Sequence[str]) -> dict[str, set[str]]:
-    """``module path -> derived non-gated top-level importer suites``.
+# The literal-path scan source deliberately EXCLUDES this suite (#1498): it
+# enumerates support-module paths as DATA — routing anchors, the carve-out
+# allowlist, guard fixtures — so scanning it would register it as a "consumer" of
+# every support module, empty the zero-consumer domain the collapse route is
+# asserted on, and neuter the anti-vacuity floor. The edge would carry no
+# information either way: the meta-guard rider already joins every routed
+# selection. Pinned by
+# test_literal_path_scan_excludes_the_meta_guard_suite_that_lists_paths_as_data.
+LITERAL_CONSUMER_SCAN_EXCLUSIONS = frozenset({SELECTOR_META_GUARD_TEST})
 
-    Semantic authority is `_non_gated_top_level_importer_tests` — same predicate,
-    same file-level marker filter, same package-`__init__`-to-package aliasing
-    (which is why `tests/__init__.py` derives the three suites that spell
-    `from tests import ...`). It is EXECUTED through the inverted index because
-    the per-module helper re-parses every test file on each call: 8 calls
-    measured 8.35 s against 0.99 s for one index pass, for an identical result.
+
+def _literal_path_consumer_index(
+    *,
+    suites: Sequence[str] | None = None,
+    targets: Sequence[str] | None = None,
+) -> dict[str, set[str]]:
+    """Inverted index: support-module PATH -> non-gated suites consuming it by literal.
+
+    The second edge kind (#1498). `tests/mock_shud_omp.py` is a mock CLI that
+    `workers/shud_runtime/runtime.py` runs as `[sys.executable, <path>, *args]`;
+    no suite imports it, so an import-only derivation reads it as 0-importer and
+    collapses a mock-only PR to the meta-guard while every assertion depending on
+    its output contract sits unrun. A suite carrying the module's exact
+    repo-relative path as a string constant is consuming it, and that is an edge.
+
+    Keyed by repo-relative PATH, not by dotted name: these modules are executed,
+    not imported, so a dotted name is the wrong identity for them.
+
+    EXACT full-path equality only. Basename or suffix matching is rejected: it
+    would manufacture phantom edges (any string ending in `build.py`) and force
+    spurious rules. The accepted cost is the mirror-image false negative — a
+    future consumer spelling `Path(__file__).parent / "mock_shud_omp.py"`
+    materializes no full-path constant and derives no edge. All live consumption
+    sites today spell the full literal.
+
+    Same shape as `_non_gated_top_level_importer_index`: one AST pass over the
+    tracked top-level suites, same file-level gating-marker filter (a
+    file-gated consumer would skip in the PR lane, so routing it buys constant
+    skips). Implemented ONCE, index-form only, with no per-module authority twin
+    — that split is exactly what #1499 had to pin after the fact.
+
+    Both parameters are seams for constructed red evidence; the defaults are the
+    tracked tree minus `LITERAL_CONSUMER_SCAN_EXCLUSIONS`.
+    """
+    scanned = (
+        [path for path in _tracked_top_level_test_files() if path not in LITERAL_CONSUMER_SCAN_EXCLUSIONS]
+        if suites is None
+        else list(suites)
+    )
+    wanted = set(_tracked_tests_support_modules() if targets is None else targets)
+    index: dict[str, set[str]] = {}
+    for test_path in scanned:
+        tree = _parse_tracked(test_path)
+        if _file_level_gating_markers(tree):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in wanted:
+                index.setdefault(node.value, set()).add(test_path)
+    return index
+
+
+def _derived_support_module_importers(modules: Sequence[str]) -> dict[str, set[str]]:
+    """``module path -> derived non-gated consumer suites``, both edge kinds.
+
+    Semantic authority for the IMPORT half is
+    `_non_gated_top_level_importer_tests` — same predicate, same file-level
+    marker filter, same package-`__init__`-to-package aliasing (which is why
+    `tests/__init__.py` derives the three suites that spell `from tests import
+    ...`). It is EXECUTED through the inverted index because the per-module
+    helper re-parses every test file on each call: 8 calls measured 8.35 s
+    against 0.99 s for one index pass, for an identical result (equivalence
+    pinned by test_importer_index_equals_the_per_module_authority_helper).
+
+    UNIONED with the literal-path consumption half (#1498), which is where a
+    subprocess-executed module like `tests/mock_shud_omp.py` becomes visible. The
+    union happens HERE and only here: `_non_gated_top_level_importer_index`'s
+    return value stays purely import-derived because the #1455 disposition guard
+    and the #1499 equivalence pin both consume it raw.
     """
     index = _non_gated_top_level_importer_index()
-    return {module: index.get(_dotted_module_name(module), set()) for module in modules}
+    consumers = _literal_path_consumer_index()
+    return {
+        module: index.get(_dotted_module_name(module), set()) | consumers.get(module, set()) for module in modules
+    }
+
+
+def _zero_consumer_support_modules() -> list[str]:
+    """Support modules reaching no suite by EITHER edge kind — the collapse route."""
+    modules = _tracked_tests_support_modules()
+    derived = _derived_support_module_importers(modules)
+    return sorted(module for module in modules if not derived[module])
+
+
+def _zero_consumer_collapse_params() -> list[object]:
+    """`pytest.param` cases for the collapse route, derived from the tracked tree.
+
+    An empty derived set is a LEGAL terminal state — every support module
+    consumed by something — but the two obvious spellings both fail it: a bare
+    `assert sample` false-reds a legal tree, and a zero-case parametrize deletes
+    the guard without leaving a trace in the run. So it collapses to one
+    skip-marked case naming the decision that is then owed.
+
+    Collection-time cost: this runs one import-index build plus one literal-path
+    scan (~2 s) whenever the module is collected, including under ci.yml's
+    full-tree `--collect-only` smoke.
+    """
+    sample = _zero_consumer_support_modules()
+    if not sample:
+        return [
+            pytest.param(
+                "",
+                marks=pytest.mark.skip(
+                    reason="zero-consumer domain is empty — collapse-route guard needs re-decision"
+                ),
+                id="<no-zero-consumer-support-module>",
+            )
+        ]
+    return [pytest.param(module) for module in sample]
 
 
 def _support_module_closure_offenders(
@@ -2343,15 +2536,25 @@ def _support_module_closure_offenders(
     derived: dict[str, set[str]],
     select: Callable[[str], set[str]] | None = None,
     carveouts: frozenset[str] = ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES,
+    consumer_edges: dict[str, set[str]] | None = None,
 ) -> list[str]:
-    """Support modules whose selection does not match their derived importers.
+    """Support modules whose selection does not match their derived consumers.
 
     Every input is a parameter so each failure mode below is provable on
     constructed data — a derived map carrying a suite no rule routes, a selection
     callable that adds a target to a 0-importer module, an empty carve-out set —
     without mutating a tracked file or a module global.
+
+    ``consumer_edges`` is the LABEL source only, defaulting to the real
+    literal-path index: a missing pair reads "literal-path consumer suite" when
+    that is how the suite reaches the module and "importer suite" otherwise, so
+    the reader knows which derivation to go look at. The derived sets still come
+    exclusively from ``derived``, which keeps the every-input-is-a-parameter
+    property intact — the label source is itself a parameter, and a constructed
+    pair absent from it simply falls back to the import wording.
     """
     resolve = _selection_for_module if select is None else select
+    labels = _literal_path_consumer_index() if consumer_edges is None else consumer_edges
     offenders: list[str] = []
     for module in modules:
         if module in carveouts:
@@ -2360,7 +2563,12 @@ def _support_module_closure_offenders(
         selection = resolve(module)
         if importers:
             offenders.extend(
-                f"{module} -> {suite}: derived non-gated importer suite is not selected"
+                f"{module} -> {suite}: "
+                + (
+                    "literal-path consumer suite is not selected"
+                    if suite in labels.get(module, set())
+                    else "derived non-gated importer suite is not selected"
+                )
                 for suite in sorted(importers - selection)
             )
         elif selection != {SELECTOR_META_GUARD_TEST}:
@@ -2444,12 +2652,45 @@ def test_support_module_closure_guard_reds_on_a_missing_importer_suite() -> None
     assert offenders == [f"{module} -> {newcomer}: derived non-gated importer suite is not selected"]
 
 
+def test_support_module_closure_guard_reds_on_a_dropped_consumption_edge() -> None:
+    # The #1498 rot direction: a subprocess consumer lands (or the mock's rule is
+    # dropped) and the module re-collapses to the meta-guard while every
+    # assertion depending on its output contract sits unrun. Constructed
+    # selection, tracked tree untouched.
+    #
+    # The wording is the point of the consumer_edges label parameter: a reader
+    # who greps the named suite for an import of the module finds none and
+    # concludes the guard is broken. "literal-path consumer suite" sends them to
+    # the right derivation.
+    module = "tests/mock_shud_omp.py"
+    derived = _derived_support_module_importers([module])
+    assert derived[module], "mock_shud_omp derives no consumer suites — the union lost its literal-path half"
+
+    offenders = _support_module_closure_offenders(
+        modules=[module],
+        derived=derived,
+        select=lambda _module: {SELECTOR_META_GUARD_TEST},
+    )
+
+    assert offenders == [
+        f"{module} -> {suite}: literal-path consumer suite is not selected" for suite in sorted(derived[module])
+    ]
+
+
 def test_support_module_closure_guard_reds_on_a_gratuitous_zero_importer_selection() -> None:
     # The other direction, and the reason branch (c) is an EQUALITY: a module
-    # nothing imports must keep the one-element collapse that arms ci.yml's
-    # full-tree collect-only smoke (#1454). Widening it to unrelated suites
-    # trades that smoke for whatever the rule happened to name.
-    module = "tests/mock_shud_omp.py"
+    # nothing reaches — by import OR by literal path — must keep the one-element
+    # collapse that arms ci.yml's full-tree collect-only smoke (#1454). Widening
+    # it to unrelated suites trades that smoke for whatever the rule happened to
+    # name.
+    #
+    # The module is DERIVED rather than named: mock_shud_omp.py stood here until
+    # #1498 gave the derivation its literal-path edge and moved it off this
+    # route. Any zero-consumer module proves the branch; if the tree ever has
+    # none (a legal terminal state) the branch is proven on a constructed path,
+    # since select_tests maps any unrouted non-suite `tests/` path to the
+    # meta-guard, which is the collapse under test.
+    module = next(iter(_zero_consumer_support_modules()), "tests/fixtures/zero_consumer_probe.py")
     unrelated = "tests/test_gateway.py"
 
     def selects_something_extra(module_path: str) -> set[str]:
@@ -2556,16 +2797,87 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     assert selected != {SELECTOR_META_GUARD_TEST}
 
 
-@pytest.mark.parametrize(
-    "module_path",
-    ["tests/mock_shud_omp.py", "tests/fixtures/mapping_builder/keliya/build.py"],
-)
+@pytest.mark.parametrize("module_path", _zero_consumer_collapse_params())
 def test_zero_importer_support_modules_keep_the_meta_guard_collapse(module_path: str) -> None:
-    # Issue #1487's acceptance names an example set for this route; the fixture
-    # review corrected it, because `tests/__init__.py` derives three importer
-    # suites under the repo's package-aliasing authority and is ROUTED. These two
-    # are the tree's actual 0-importer support modules.
+    # Issue #1487's acceptance named an example set for this route; the fixture
+    # review corrected it once (`tests/__init__.py` derives three importer suites
+    # under the repo's package-aliasing authority and is ROUTED), and #1498
+    # corrected it again — mock_shud_omp.py left this sample the moment its
+    # subprocess consumption became a derived edge. Hardcoding is what made both
+    # corrections necessary, so the sample is now derived from the same union the
+    # guard uses. Today it is exactly
+    # tests/fixtures/mapping_builder/keliya/build.py: no suite imports it and no
+    # scanned suite carries its path, matching its own docstring — "The test
+    # suite reads the checked-in files directly and never invokes this script."
     assert Path(module_path).is_file()
     assert module_path not in {rule.pattern for rule in SUPPORT_MODULE_TEST_RULES}
 
     assert select_tests([module_path], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+
+
+def test_zero_consumer_collapse_sample_stays_visible_when_the_domain_empties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every support module having a consumer is a legal terminal state, and the
+    # sample above is derived, so that state silently collects ZERO cases —
+    # the collapse-route guard would disappear from the run with nothing saying
+    # it had. The fallback is dead code until that day, which is precisely why it
+    # is exercised here rather than trusted.
+    monkeypatch.setattr(f"{__name__}._zero_consumer_support_modules", list)
+
+    params = _zero_consumer_collapse_params()
+
+    assert len(params) == 1
+    marks = params[0].marks
+    assert [mark.name for mark in marks] == ["skip"]
+    assert "needs re-decision" in marks[0].kwargs["reason"]
+
+
+def test_literal_path_consumption_edges_route_the_subprocess_only_mock() -> None:
+    # #1498's acceptance. The gap it closes, asserted from both sides: the import
+    # authority sees NOTHING here (nothing imports a mock CLI), and the module is
+    # nevertheless consumed by three suites that hand its path to
+    # `[sys.executable, <path>]`. Derived, not read off the rule table — a rule
+    # extension that stops matching the derivation reds in the closure guard.
+    module = "tests/mock_shud_omp.py"
+
+    consumers = _literal_path_consumer_index().get(module, set())
+
+    assert _non_gated_top_level_importer_tests(_dotted_module_name(module)) == set()
+    assert consumers == {
+        "tests/test_shud_runtime.py",
+        "tests/test_direct_grid_e2e.py",
+        "tests/test_e2e.py",
+    }
+
+    selected = set(select_tests([module], repo_root=Path(".")))
+    assert consumers <= selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_literal_path_scan_excludes_the_meta_guard_suite_that_lists_paths_as_data(tmp_path: Path) -> None:
+    # The exclusion is a correctness requirement, not tidiness. This suite spells
+    # support-module paths as DATA — routing anchors, the carve-out allowlist,
+    # guard fixtures — and a scanner cannot tell "path as subject" from "path as
+    # datum". Scanning it would make it a consumer of nearly every support
+    # module, which empties the zero-consumer domain the collapse route is
+    # asserted on and leaves the anti-vacuity floor counting phantoms.
+    excluded = _literal_path_consumer_index()
+    assert not [module for module, suites in excluded.items() if SELECTOR_META_GUARD_TEST in suites]
+
+    unexcluded = _literal_path_consumer_index(suites=_tracked_top_level_test_files())
+    phantom = sorted(module for module, suites in unexcluded.items() if SELECTOR_META_GUARD_TEST in suites)
+    fabricated = sorted(set(phantom) - set(excluded))
+    assert fabricated, (
+        "this suite no longer spells support-module paths as data, which is the "
+        f"only reason the exclusion exists (phantom edges: {phantom})"
+    )
+
+    # The mechanism itself, on a constructed file so the claim does not rest on
+    # which paths this suite happens to spell today: a module whose source lists
+    # the paths becomes a "consumer" of every one of them.
+    support_modules = _tracked_tests_support_modules()
+    probe = tmp_path / "test_paths_as_data.py"
+    probe.write_text(f"SAMPLE = {support_modules!r}\n", encoding="utf-8")
+
+    assert set(_literal_path_consumer_index(suites=[str(probe)])) == set(support_modules)

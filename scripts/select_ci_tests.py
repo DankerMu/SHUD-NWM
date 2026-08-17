@@ -271,6 +271,26 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_live_evidence.py",
         ),
     ),
+    PathTestRule(
+        # A mock SHUD CLI nothing imports: workers/shud_runtime/runtime.py runs it
+        # as `[sys.executable, <path>, *args]`, so the consumption edge is the
+        # exact literal `"tests/mock_shud_omp.py"` in the consumer's source, not
+        # an import. An import-only derivation reads this module as 0-importer and
+        # collapses it to the meta-guard, running none of the assertions that
+        # depend on the mock's output contract (#1498). The three suites below are
+        # its derived literal-path consumers; measured 251 passed in ~27 s for the
+        # first two, inside the lane budget. HONEST LIMIT: test_e2e.py's
+        # consumption sits inside function-level `@pytest.mark.e2e` tests that
+        # auto-skip in the PR lane, so that file contributes ZERO mock assertions
+        # there — it is routed because the edge exists in the tree and closure
+        # integrity is what the guard derives, not because it executes the mock.
+        "tests/mock_shud_omp.py",
+        (
+            "tests/test_shud_runtime.py",
+            "tests/test_direct_grid_e2e.py",
+            "tests/test_e2e.py",
+        ),
+    ),
 )
 
 
