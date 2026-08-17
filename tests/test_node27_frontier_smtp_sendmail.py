@@ -192,6 +192,34 @@ def _run(
     return shim.main(list(argv), stdin_bytes, dict(env), factory)
 
 
+@pytest.fixture(autouse=True)
+def sigalrm_stays_pristine() -> Any:
+    """Autouse for this whole module: no test may leave SIGALRM state behind.
+
+    The budget tests arm a real one-shot ``setitimer`` in the pytest process. A
+    leaked alarm does not fail the test that leaked it — it fires minutes later,
+    inside whatever unrelated test happens to be running (in a full-suite run
+    this file is followed by ~98 more), and lands there as a
+    ``_SessionBudgetExceeded`` naming a stage from a session that ended long
+    ago. Per-file CI stays green while master's full run breaks somewhere else.
+
+    Repair AND report, in that order: repairing alone would quietly absorb the
+    next real leak, and reporting alone would leave the alarm ticking through
+    the rest of the session.
+    """
+
+    baseline = signal.getsignal(signal.SIGALRM)
+    yield
+    timer = signal.getitimer(signal.ITIMER_REAL)
+    handler = signal.getsignal(signal.SIGALRM)
+    if timer != (0.0, 0.0):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    if handler != baseline:
+        signal.signal(signal.SIGALRM, baseline)
+    assert timer == (0.0, 0.0), f"test left a live SIGALRM timer: {timer}"
+    assert handler == baseline, f"test left SIGALRM handler {handler!r}, not {baseline!r}"
+
+
 # ---------------------------------------------------------------------------
 # Happy path.
 # ---------------------------------------------------------------------------
@@ -1305,10 +1333,19 @@ def test_b34_an_expiry_at_the_disarm_call_itself_keeps_the_250(
 
     monkeypatch.setattr(shim._SessionBudget, "disarm", raising_disarm)
     smtp = FakeSMTP()
+    previous = signal.getsignal(signal.SIGALRM)
 
-    rc = _run(["-t", "-i"], _message(), _env(), _factory(smtp, []))
+    try:
+        rc = _run(["-t", "-i"], _message(), _env(), _factory(smtp, []))
 
-    _, err = _output(capsys)
-    assert rc == 0
-    assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
-    assert "session-budget" not in err
+        _, err = _output(capsys)
+        assert rc == 0
+        assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+        assert "session-budget" not in err
+    finally:
+        # Patching ``disarm`` away removed the only code that stops the timer,
+        # so this run really does leave a live 45 s alarm and the discarded
+        # budget's handler behind — the one test in this file that must clean up
+        # after itself, or the alarm fires into some later test's process.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

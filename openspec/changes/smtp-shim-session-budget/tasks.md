@@ -105,6 +105,13 @@
       <= 0.30 (existing :553 default pin untouched).
 - [x] R1.7 TEV-3 (Note): `elapsed=` substring asserted in an existing
       budget-expiry test.
+- [x] R1.8 round-2 (P1, test-state leak): the raising_disarm test patched
+      away the only code that stops the timer, leaking a live 45 s
+      SIGALRM + the discarded budget's `_fire` handler into the pytest
+      process (per-file CI green, master's full run poisoned). In-body
+      try/finally cleanup in that test + module-level autouse guard
+      fixture that repairs THEN reports any SIGALRM state a test leaves
+      behind.
 - CORR-2 verdict: CONFIRMED but DISCARD (lane consumes `accepted[-1]`;
   receipt provably undamaged). Optional zero-cost reorder
   (mark reported before printing) only if the region is touched
