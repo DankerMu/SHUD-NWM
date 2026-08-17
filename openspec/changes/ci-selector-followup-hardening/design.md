@@ -85,8 +85,10 @@ exploding toward the 64-suite fixed point).
 ## Key decisions
 
 1. **#1453 fix lives in the selector, not ci.yml** (issue's
-   recommended route): in the changed-test branch, a path matching
-   `tests/**.py` but NOT `tests/test_*.py` skips self-selection and
+   recommended route): in the changed-test branch, a `tests/` Python
+   path whose BASENAME does not match `test_*.py` (round-1 R1.1
+   corrected the predicate from path-shaped to basename-shaped —
+   mirroring pytest's own collection rule) skips self-selection and
    instead `selected.add(SELECTOR_META_GUARD_TEST)`. Rationale: the
    selector's output contract becomes "every emitted file-level target
    is a collectible test file", which ci.yml's `check=True` relies on;
@@ -99,7 +101,7 @@ exploding toward the 64-suite fixed point).
    mapping (`== [SELECTOR_META_GUARD_TEST]`), keeping its original
    non-spill intent via the unchanged accumulation-pattern check; a
    NEW tree-derived invariant test enumerates
-   `_tracked_python_files("tests")` minus `tests/test_*.py` matches
+   `_tracked_python_files("tests")` minus basename-`test_*.py` matches
    (today exactly the 8 files listed under Verified facts) and
    asserts each selects exactly `[SELECTOR_META_GUARD_TEST]` —
    future support modules are covered without name hardcoding, and

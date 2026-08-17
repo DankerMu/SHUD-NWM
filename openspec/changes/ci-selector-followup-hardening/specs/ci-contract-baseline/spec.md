@@ -148,13 +148,17 @@ test suite (`tests/test_select_ci_tests.py`) whenever any
 tracked-tree-derived meta-guards run on exactly the PR class that can
 invalidate them, while preserving changed-test self-selection and the
 existing redirect-rule semantics.
-A changed `tests/` Python file NOT matching `tests/test_*.py` (a
-support module such as `conftest.py`, `integration_helpers.py`, or
-`__init__.py`) SHALL NOT self-select — pytest returns
-`NO_TESTS_COLLECTED` (exit 5) for such a target, which ci.yml's
-`check=True` renders as a misleading failure — and SHALL instead map to
-the selector meta-guard suite, so the emitted selection always consists
-of collectible test files.
+A changed `tests/` Python file whose BASENAME does not match
+`test_*.py` (a support module such as `conftest.py`,
+`integration_helpers.py`, or `__init__.py`) SHALL NOT self-select —
+pytest returns `NO_TESTS_COLLECTED` (exit 5) for such a target, which
+ci.yml's `check=True` renders as a misleading failure — and SHALL
+instead map to the selector meta-guard suite, so the emitted selection
+always consists of collectible test files. The suite-vs-support
+classification is basename-shaped at any depth, mirroring pytest's own
+collection rule (`testpaths = ["tests"]`, default `python_files`): a
+nested `tests/<pkg>/test_*.py` suite self-selects and drags the
+meta-guards exactly like a top-level one.
 
 #### Scenario: standalone changed test file selects the meta-guards
 
@@ -174,11 +178,18 @@ of collectible test files.
 #### Scenario: tests support files map to a collectible selection
 
 - **WHEN** a PR changes only `tests/conftest.py` (or any tracked
-  `tests/` Python file not matching `tests/test_*.py`)
+  `tests/` Python file whose basename does not match `test_*.py`)
 - **THEN** the selector output is exactly `tests/test_select_ci_tests.py`
   — never the support file itself — and a tree-derived invariant test
   covers every current and future support module without hardcoding
   names
+
+#### Scenario: nested test suites are suites, not support files
+
+- **WHEN** a PR adds or changes a nested `tests/<pkg>/test_*.py` suite
+- **THEN** the suite self-selects (its assertions run in the PR lane)
+  and the selector meta-guards accumulate, identically to a top-level
+  `tests/test_*.py` change
 
 ## ADDED Requirements
 

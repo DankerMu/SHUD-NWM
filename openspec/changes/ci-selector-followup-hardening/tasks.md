@@ -128,6 +128,16 @@
 - [x] R1.8 (ride-along) "five uncompensated support files" corrected
       to SIX in proposal.md + design.md (8 files − 2 database-filter
       compensated).
+- [x] R1.9 (closure P2, orchestrator in-place) spec delta + design
+      decision-1 wording moved to the basename-shaped predicate
+      (four spec places + design :89/:102) with a new nested-suite
+      scenario; tasks 1.1/1.3 above retain their original path-shaped
+      phrasing as HISTORY of the pre-R1.1 shape — R1.1 supersedes
+      them, this line is the pointer. Closure Note (b) recorded: the
+      class-boundary assert at tests/test_select_ci_tests.py:1013 is
+      tautological by construction (derivation already filters
+      basename matches); harmless, kept — the falsifiable boundary
+      pin is the nested-suite test.
 - DEFER (recorded): helper→importer gate-strength challenge
   (CONFIRMED; history has zero helper-only PRs, fixture rung-1
   records the conditional trade and its revisit trigger has not
