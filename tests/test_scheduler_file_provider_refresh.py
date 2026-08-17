@@ -7068,6 +7068,41 @@ def test_declaration_transition_modes_match_the_schema_enum() -> None:
     )
 
 
+def test_receipt_generation_corpus_matches_the_declaration_schema() -> None:
+    """The receipt's `generation` and the declaration's must be ONE corpus.
+
+    The operator's move is a copy-paste: read
+    `registry_classification.generation` off a refusal receipt, write it into a
+    declaration.  If the declaration schema ever narrows its `generation` field
+    and the receipt side does not, the receipt keeps publishing values the
+    declaration rejects — a silent drift that looks like an operator error.
+    Same relation pin as the transition-mode enum above, across all three
+    sites: runtime constants, declaration schema, receipt schema."""
+    declaration_generation = refresh._CUTOVER_DECLARATION_SCHEMA["properties"]["generation"]
+    receipt_generation = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/scheduler_file_provider_refresh_receipt.schema.json"
+        ).read_text()
+    )["properties"]["registry_classification"]["properties"]["generation"]
+    receipt_string_branch = next(
+        branch for branch in receipt_generation["oneOf"] if branch.get("type") == "string"
+    )
+
+    assert declaration_generation["pattern"] == refresh.GENERATION_PATTERN.pattern
+    assert declaration_generation["maxLength"] == refresh.MAX_GENERATION_LENGTH
+    # The runtime's non-empty check is this minLength; keep them in step.
+    assert declaration_generation["minLength"] == 1
+    assert receipt_string_branch == {
+        "type": "string",
+        "minLength": declaration_generation["minLength"],
+        "maxLength": declaration_generation["maxLength"],
+        "pattern": declaration_generation["pattern"],
+    }
+    # And the receipt side additionally admits the id-only null.
+    assert {"type": "null"} in receipt_generation["oneOf"]
+
+
 @pytest.mark.parametrize(
     ("entry", "accepted"),
     [

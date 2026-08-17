@@ -3029,7 +3029,10 @@ def _classify_registry(
         refuse_declaration(model_id, declaration_entries[model_id])
     if not generation_matches:
         # Attach a synthetic marker so operators see the generation mismatch
-        # without leaking either canonical string publicly.
+        # without echoing the DECLARATION's value back.  The prospective side is
+        # deliberately public since round-1 F-A (`classification.generation`) —
+        # it is what the operator has to write into the declaration; what stays
+        # out of the receipt is the stale value they wrote last time.
         result.refused.append(
             {
                 "model_id": "__declaration__",
