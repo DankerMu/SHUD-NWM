@@ -2104,8 +2104,8 @@ shim 的退出码即投递事实：0 = 目的地提交服务器**同步**回了 
 （`SMTP-FAILED stage=connect|ehlo|login|send ...`，其中会话预算到期那条带
 `reason=session-budget elapsed=<s> budget=<s>`，或部分收件人被拒的
 `SMTP-PARTIAL-REFUSAL ...`）；64 = 配置/用法错（缺 `NHMS_SMTP_USER` /
-`NHMS_SMTP_PASS`、端口非法、`NHMS_SMTP_SESSION_BUDGET_SEC` 非正数、正文无收件人、
-From 与认证账号不一致）；70 = 内部故障
+`NHMS_SMTP_PASS`、端口非法、`NHMS_SMTP_SESSION_BUDGET_SEC` 非正数或 ≥60s、正文无
+收件人、From 与认证账号不一致）；70 = 内部故障
 兜底（整类 contained，永不吐 traceback）。全部非零都会被告警器当作发送失败记进
 receipt 与 JSONL，下一 tick 按 §10.5 的重试语义重来。TLS 是**验证过的**
 `ssl.create_default_context()`——`SMTP_SSL` 的缺省 context 是 `CERT_NONE` + 不校验
@@ -2121,16 +2121,29 @@ receipt 与 JSONL，下一 tick 按 §10.5 的重试语义重来。TLS 是**验�
    `SMTP-FAILED stage=<stage> ... reason=session-budget` 并退 69，随后用
    `close()` 而不是 `quit()` 拆链路（不再多一次往返）。要改用
    `NHMS_SMTP_SESSION_BUDGET_SEC`（正数秒）——这是与下面那道 60s 墙**唯一的对齐
-   点**，两个常数的间距有测试盯着。
+   点**。该 env **必须严格小于 60s**：`SESSION_BUDGET_CEILING_SEC = 60.0` 把
+   ≥60 的值直接判成配置错（rc=64，连都不连），否则 SIGKILL 先到、stage 又丢，
+   等于把改动前的几何悄悄装回来。默认值与这道天花板都有跨模块测试盯着
+   （shim 不 import 告警器：它是被绝对路径 exec 的，依赖方向是 lane → shim，
+   常数是镜像的，测试就是校准点）。
 3. **告警器 60s 墙**（`SENDMAIL_TIMEOUT_SEC`，`subprocess` SIGKILL）：只是兜底，
    正常情况轮不到它——第 2 层先退。
 
-**rc=124 且 receipt 里没有 `SMTP-FAILED stage=` 行**，读法是：**shim 自己挂死了**
-（不是投递失败——投递失败会带 stage）。此时**信可能已经投出去**：RFC 5321 的收尾点
-一旦被服务器接收，投递责任就已转移，250 只是没能回到我们这边。下一 tick 会按设计
-重发（§10.5 的重试语义），所以 operator 可能看到一封重复告警——这是**刻意选的**
-过报方向，不要按"重复发信"去查 bug。receipt 的 `error` 里若带
-`| sendmail stderr: ...` 尾巴，那是 shim 被 kill 前来得及打印的内容，优先按它定位。
+**"没收到 250" ≠ "没投出去"**。RFC 5321 的收尾点一旦被服务器接收，投递责任就已
+转移；我们只是没等到那个 250。所以下面**三种**记录都要按"**信可能已经投出去**"读：
+
+- `rc=124` 且 receipt 里**没有** `SMTP-FAILED stage=` 行 —— **shim 自己挂死了**
+  （不是投递失败，投递失败会带 stage），连自己那行都没来得及打；
+- `rc=69` + `SMTP-FAILED stage=send ... reason=session-budget` —— 会话预算在
+  DATA 中途开了闸；
+- `rc=69` + `SMTP-FAILED stage=send ... error=TimeoutError`（或别的 socket 超时）
+  —— 同一个窗口，只是这次是单次操作先超时。
+
+其余 stage（`connect`/`ehlo`/`login`）的失败**确实**证明没投出去。三种"可能已投"
+的情况下，下一 tick 都会按设计重发（§10.5 的重试语义），operator 可能因此收到一封
+重复告警——这是**刻意选的**过报方向，不要按"重复发信"去查 bug。receipt 的 `error`
+里若带 `| sendmail stderr: ...` 尾巴，那是 shim 被 kill 前来得及打印的内容，优先按
+它定位。
 
 163 会拒绝 From 头与认证账号不一致的信，而 shim **不改** From 头——所以
 `NHMS_ALERT_EMAIL_FROM` 的**地址部分必须等于** `NHMS_SMTP_USER`（display-name

@@ -58,6 +58,15 @@ SMTP_TIMEOUT_SEC = 30.0
 #: where the two constants are re-aligned; a test pins the margin.
 SESSION_BUDGET_SEC = 45.0
 
+#: Hard ceiling for that override, mirroring the lane's ``SENDMAIL_TIMEOUT_SEC``
+#: (60 s). A budget at or above the wall is not a budget: the SIGKILL lands
+#: first and the pre-#1375 geometry — rc=124, no stage, message possibly
+#: delivered — is silently back. Refused as a config error instead. The lane
+#: constant is mirrored, not imported: this shim is exec'd by absolute path
+#: with no package context, and the dependency direction is lane → shim. A test
+#: importing both modules pins the mirror.
+SESSION_BUDGET_CEILING_SEC = 60.0
+
 EXIT_OK = 0
 EXIT_USAGE = 64
 EXIT_UNAVAILABLE = 69
@@ -104,7 +113,8 @@ class _SessionBudget:
         self.tripped = False
         self._started = time.monotonic()
         self._previous: Any = None
-        self._armed = False
+        self._installed = False  # this object owns the SIGALRM handler
+        self._armed = False  # ... and the timer is running
 
     def elapsed(self) -> float:
         return time.monotonic() - self._started
@@ -125,14 +135,14 @@ class _SessionBudget:
         line here would be indistinguishable from an SMTP evidence line."""
 
         try:
-            previous = signal.signal(signal.SIGALRM, self._fire)
+            self._previous = signal.signal(signal.SIGALRM, self._fire)
         except (ValueError, OSError):
             return
-        self._previous = previous
+        self._installed = True
         try:
             signal.setitimer(signal.ITIMER_REAL, self.seconds)
         except (ValueError, OSError):
-            signal.signal(signal.SIGALRM, previous)
+            self._restore()
             return
         self._armed = True
 
@@ -140,21 +150,40 @@ class _SessionBudget:
         self.tripped = True
         raise _SessionBudgetExceeded(self)
 
+    def _restore(self) -> None:
+        """Hand SIGALRM back to whoever had it, exactly once, and only if this
+        object ever took it — an unarmed budget (off the main thread) must not
+        install ``SIG_DFL`` over a handler it never owned."""
+
+        if not self._installed:
+            return
+        self._installed = False
+        signal.signal(signal.SIGALRM, self._previous if self._previous is not None else signal.SIG_DFL)
+
     def disarm(self) -> None:
         """Stop the timer BEFORE touching the handler, and step through
         ``SIG_IGN`` on the way back: restoring ``SIG_DFL`` while the timer
         expires concurrently kills the process with 142 and zero stderr — the
-        one failure shape this whole mechanism exists to prevent."""
+        one failure shape this whole mechanism exists to prevent.
 
-        if not self._armed:
-            return
-        self._armed = False
-        previous = self._previous if self._previous is not None else signal.SIG_DFL
+        Deliberately exception-safe end to end. The alarm is still armed while
+        this runs — that is the point, a hanging ``quit()`` must stay bounded —
+        so the expiry can land INSIDE the disarm itself. Letting it out would
+        print a session-budget failure after the caller had already printed the
+        250 the server gave us (round-1 CORR-1). It has nothing left to
+        interrupt anyway: the timer is one-shot and has, by definition, just
+        fired. The restore runs on every path, including that one.
+        """
+
         try:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            if self._armed:
+                self._armed = False
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        except _SessionBudgetExceeded:
+            pass
         finally:
-            signal.signal(signal.SIGALRM, previous)
+            self._restore()
 
 
 def _oneline(value: object) -> str:
@@ -230,6 +259,12 @@ def _budget_seconds(env: Mapping[str, str]) -> float:
         raise _UsageError(f"NHMS_SMTP_SESSION_BUDGET_SEC is not a number: {raw!r}") from None
     if not math.isfinite(seconds) or seconds <= 0:
         raise _UsageError(f"NHMS_SMTP_SESSION_BUDGET_SEC must be a positive number of seconds: {raw!r}")
+    if seconds >= SESSION_BUDGET_CEILING_SEC:
+        raise _UsageError(
+            f"NHMS_SMTP_SESSION_BUDGET_SEC must stay below the alerter's"
+            f" {SESSION_BUDGET_CEILING_SEC:g}s sendmail wall, otherwise the SIGKILL arrives first and"
+            f" the failure loses its stage: {raw!r}"
+        )
     return seconds
 
 
@@ -387,8 +422,12 @@ def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_f
             # Per-op cap kept under the session budget. At the shipped values
             # this is just SMTP_TIMEOUT_SEC (30 < 45) — the min() only bites
             # when the env override sets a budget below the per-op timeout.
-            # SIGALRM, not this, is the enforcement.
-            smtp = smtp_factory(host, port, min(SMTP_TIMEOUT_SEC, budget.remaining()))
+            # SIGALRM, not this, is the enforcement. The floor matters for the
+            # same small budgets: a non-positive timeout is a ValueError out of
+            # socket.create_connection, i.e. a budget path surfacing as
+            # SMTP-INTERNAL-ERROR rc=70. The alarm is already armed and will
+            # end the session on its own terms.
+            smtp = smtp_factory(host, port, max(0.001, min(SMTP_TIMEOUT_SEC, budget.remaining())))
         except OSError as error:  # smtplib.SMTPException subclasses OSError
             print(f"SMTP-FAILED stage={budget.stage} host={host} error={type(error).__name__}: {_oneline(error)}",
                   file=sys.stderr)
@@ -441,7 +480,14 @@ def _run(argv: Sequence[str], stdin_bytes: bytes, env: Mapping[str, str], smtp_f
         print(budget.failure_line(), file=sys.stderr)
         return EXIT_UNAVAILABLE
     finally:
-        budget.disarm()
+        try:
+            budget.disarm()
+        except _SessionBudgetExceeded:
+            # ``disarm`` contains its own expiry; this covers the instruction
+            # that CALLS it, where the alarm would land in this frame instead.
+            # Swallowing keeps the return already in flight — and the evidence
+            # line already printed for it — exactly as it was.
+            pass
 
 
 def main(

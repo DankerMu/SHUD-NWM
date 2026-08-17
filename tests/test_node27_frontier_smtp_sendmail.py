@@ -903,9 +903,16 @@ class SleepySMTP(FakeSMTP):
 def test_b34_session_budget_stays_clear_of_the_lane_wall() -> None:
     """The two constants live in different files and were introduced by
     different commits with incompatible dimensions (per-op vs wall clock).
-    Either one drifting alone must go red here, not on node-27 at 03:00."""
+    Either one drifting alone must go red here, not on node-27 at 03:00.
+
+    The ceiling is the same mirror for the ENV OVERRIDE: the shim deliberately
+    does not import the alerter (it is exec'd by absolute path, and the
+    dependency runs lane → shim), so this test is the only place the two files
+    are compared."""
 
     assert shim.SESSION_BUDGET_SEC + 10 <= alerter.SENDMAIL_TIMEOUT_SEC
+    assert shim.SESSION_BUDGET_CEILING_SEC <= alerter.SENDMAIL_TIMEOUT_SEC
+    assert shim.SESSION_BUDGET_SEC < shim.SESSION_BUDGET_CEILING_SEC
 
 
 def test_b34_accumulated_per_operation_waits_hit_the_session_budget(
@@ -947,6 +954,7 @@ def test_b34_a_peer_blocked_mid_operation_is_interrupted_by_the_budget(
     assert "SMTP-FAILED stage=send" in err
     assert "reason=session-budget" in err
     assert "host=smtp.163.com" in err
+    assert "elapsed=" in err  # how long the peer held us is half the diagnosis
     assert elapsed < FOREVER_SEC / 2.5, "the blocking call was waited out instead of interrupted"
     assert smtp.sent == []  # the fake never got past its own sleep
 
@@ -1135,3 +1143,172 @@ def test_b34_a_budget_trip_in_the_disarm_window_is_still_the_structured_line(
     assert err.strip().count("\n") == 0
     assert "SMTP-FAILED stage=send host=smtp.163.com reason=session-budget" in err
     assert "SMTP-INTERNAL-ERROR" not in err
+
+
+# ---------------------------------------------------------------------------
+# B34/R1 — round-1 findings: the disarm window, the override ceiling, and the
+# pins the first pass left the mechanism without.
+# ---------------------------------------------------------------------------
+
+
+def _widen_the_disarm_window(monkeypatch: pytest.MonkeyPatch, seconds: float = 1.0) -> None:
+    """Hold the shim inside ``disarm`` long enough for the alarm to land there.
+
+    The real window is the handful of instructions between "the timer is still
+    armed" and "the timer is off" — deliberately armed, so a hanging QUIT stays
+    bounded. Stretching the ``setitimer(…, 0)`` call is the only way to schedule
+    an expiry into it; the sleep is interrupted by the very alarm it is waiting
+    for, so it costs microseconds when the containment works.
+    """
+
+    real_setitimer = signal.setitimer
+
+    def stalling_setitimer(which: int, value: float, *rest: float) -> Any:
+        if value == 0:
+            time.sleep(seconds)
+        return real_setitimer(which, value, *rest)
+
+    monkeypatch.setattr(shim.signal, "setitimer", stalling_setitimer)
+
+
+def test_b34_an_expiry_inside_the_disarm_does_not_unsay_the_250(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-1 CORR-1: the disarm ran with the alarm still armed but outside the
+    arm that handles it, so an expiry there escaped to ``main``'s backstop and
+    printed SMTP-FAILED + rc=69 AFTER the SMTP-ACCEPTED — the lane then records
+    a failure for a message the server took, and retries it next tick."""
+
+    before = signal.getsignal(signal.SIGALRM)
+    _widen_the_disarm_window(monkeypatch)
+    smtp = SleepySMTP(block_at="send", seconds=BUDGET_SEC / 2)
+
+    rc = _run(["-t", "-i"], _message(), _env(NHMS_SMTP_SESSION_BUDGET_SEC=BUDGET), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0
+    assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+    assert "session-budget" not in err
+    assert signal.getsignal(signal.SIGALRM) == before
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_b34_the_disarm_hands_sigalrm_back_through_sig_ign(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The SIG_IGN step is invisible from inside the process — deleting it keeps
+    every other test green while re-opening the race it exists for: restoring
+    the previous handler (SIG_DFL, in the lane) while the timer expires
+    concurrently kills the shim with 142 and ZERO stderr, which is total
+    evidence loss on a monitoring lane."""
+
+    before = signal.getsignal(signal.SIGALRM)
+    real_signal = signal.signal
+    installed: list[Any] = []
+
+    def recording_signal(signum: int, handler: Any) -> Any:
+        installed.append(handler)
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(shim.signal, "signal", recording_signal)
+
+    rc = _run(["-t", "-i"], _message(), _env(), _factory(FakeSMTP(), []))
+
+    _output(capsys)
+    assert rc == 0
+    assert signal.SIG_IGN in installed, "the handler was restored without the SIG_IGN interposition"
+    assert installed.index(signal.SIG_IGN) < installed.index(before)  # IGN first, then the restore
+    assert installed[-1] == before
+
+
+@pytest.mark.parametrize("budget", ["60", "60.0", "90", "3600", "1e9"])
+def test_b34_a_budget_at_or_above_the_lane_wall_is_refused(
+    budget: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-1 INT-1: positivity alone let an operator set 90 and quietly
+    restore the pre-#1375 geometry — the lane's SIGKILL lands first, the stage
+    is lost again, and the constants-only guard test cannot see it because no
+    constant moved."""
+
+    rc = _run(
+        ["-t", "-i"], _message(), _env(NHMS_SMTP_SESSION_BUDGET_SEC=budget), _exploding_factory()
+    )
+
+    _, err = _output(capsys)
+    assert rc == 64
+    assert err.strip().count("\n") == 0
+    assert err.startswith("SMTP-CONFIG-ERROR ")
+    assert "NHMS_SMTP_SESSION_BUDGET_SEC" in err
+    assert f"{shim.SESSION_BUDGET_CEILING_SEC:g}s" in err  # the operator is told the ceiling
+
+
+def test_b34_a_budget_just_under_the_ceiling_is_accepted(capsys: pytest.CaptureFixture[str]) -> None:
+    """The ceiling refuses '>= the wall', not 'anything the operator raised':
+    stretching the budget to 59 s is a legitimate deployment choice."""
+
+    calls: list[tuple[str, int, float]] = []
+
+    rc = _run(["-t", "-i"], _message(), _env(NHMS_SMTP_SESSION_BUDGET_SEC="59"), _factory(FakeSMTP(), calls))
+
+    _, err = _output(capsys)
+    assert rc == 0
+    assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+    assert calls[0][2] == shim.SMTP_TIMEOUT_SEC  # 30 < 59, so the per-op cap is the binding one
+
+
+def test_b34_a_small_budget_caps_the_per_operation_timeout(capsys: pytest.CaptureFixture[str]) -> None:
+    """The min() is a no-op at the shipped values, which is where the existing
+    factory pin looks — so it needs pinning in the regime where it is not: a
+    30 s socket timeout under a sub-second budget would let one operation
+    outlive the whole session."""
+
+    calls: list[tuple[str, int, float]] = []
+
+    rc = _run(["-t", "-i"], _message(), _env(NHMS_SMTP_SESSION_BUDGET_SEC=BUDGET), _factory(FakeSMTP(), calls))
+
+    _output(capsys)
+    assert rc == 0
+    assert 0 < calls[0][2] <= BUDGET_SEC
+
+
+def test_b34_an_exhausted_budget_still_hands_the_factory_a_positive_timeout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The clock starts before the message is parsed, so a tiny budget can be
+    spent before the socket is even asked for. A non-positive timeout is a
+    ValueError out of ``socket.create_connection`` — i.e. a BUDGET path
+    arriving as SMTP-INTERNAL-ERROR rc=70, which the contract forbids. The
+    alarm is armed by then and ends the session on its own terms."""
+
+    monkeypatch.setattr(shim._SessionBudget, "remaining", lambda _self: -5.0)
+    calls: list[tuple[str, int, float]] = []
+
+    rc = _run(["-t", "-i"], _message(), _env(), _factory(FakeSMTP(), calls))
+
+    _, err = _output(capsys)
+    assert rc == 0, err
+    assert calls[0][2] == 0.001
+    assert "SMTP-INTERNAL-ERROR" not in err
+
+
+def test_b34_an_expiry_at_the_disarm_call_itself_keeps_the_250(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``disarm`` contains the expiry from its own first instruction onward; the
+    instruction that CALLS it is in the caller's frame, one bytecode earlier and
+    outside that reach. Nothing can schedule a signal onto a single instruction,
+    so the delivery is injected as ``disarm`` raising. The 250 already printed,
+    and the exit code already in flight for it, must both stand."""
+
+    def raising_disarm(self: Any) -> None:
+        raise shim._SessionBudgetExceeded(self)
+
+    monkeypatch.setattr(shim._SessionBudget, "disarm", raising_disarm)
+    smtp = FakeSMTP()
+
+    rc = _run(["-t", "-i"], _message(), _env(), _factory(smtp, []))
+
+    _, err = _output(capsys)
+    assert rc == 0
+    assert err.strip() == "SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1"
+    assert "session-budget" not in err
