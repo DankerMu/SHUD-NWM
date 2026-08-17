@@ -1729,11 +1729,11 @@ uses GIS segment ids directly, some segments can appear to have no flow.
 
 判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
 调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带两个
-`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（pre-commit fail-closed，
-另含尚未分流的 `replace_uncertain` 族，见下面的判读口径）或
-`OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193，index 可能已提交）——
-`details.details.error` 是具体的 reason（provider_atomic 或 state-manager 的都可能；
-`..._COMMIT_UNCERTAIN` 另有 `details.details.error_reason`）：
+`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（纯 pre-commit fail-closed：
+index 未被改动，按"未提交"幂等重跑）或
+`OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193/#1364，index 可能已提交）——
+两个 code 的 `details.details` 均含 `error_reason`（具体的 reason，provider_atomic 或
+state-manager 的都可能），`details.details.error` 是异常文本：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
@@ -1750,18 +1750,18 @@ uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entrie
 判读口径：
 
 - `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（事件里嵌套的
-  `details.details.error_reason` 一般是 `provider_lock_release_failed`）—— **shared index
-  可能已经提交**：CAS 之后 provider 锁释放才失败，锁范围内的写已经做完。**不得**按
-  "未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已包含本批 entry、
-  以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再幂等重跑 stage
-  或走下面的 replay 补账；出现收缩就按下面 exit 3 的
-  `destination_entries_lost_after_merge` 分支停手。
-- `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED` 覆盖 pre-commit fail-closed，**以及尚未分流的
-  `replace_uncertain` 族**（`provider_replace_uncertain`/`provider_postread_failed`：分流只认
-  phase 为 `release_uncertain` 的 ProviderAtomicError，这两个被包成 StateManagerError 后仍落
-  `..._FAILED`，此时 index 可能已提交；replay 侧同样按 commit-uncertain 处理）。看到
-  `..._FAILED` 且 `details.details.error` 是这两个 reason 之一时，同样先核 shared index 的
-  `entry_count` 再处置；其余 `..._FAILED` 才按"未提交"幂等重跑。
+  `details.details.error_reason` 是 destination CAS 之后三族——释放不确定 / 替换不确定 /
+  postcommit——的 reason 之一：
+  `provider_lock_release_failed`（CAS 之后锁释放失败）/`provider_replace_uncertain`
+  （替换已执行、持久化或身份确认失败）/`provider_postread_failed`（CAS 后回读失败且未
+  回滚）/`provider_restored_previous`（回读失败但回滚已校验成功））—— **shared index
+  可能已经提交**：这几族的 raise point 全部在 destination CAS 之后，锁范围内的写已经
+  做完。**不得**按"未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已
+  包含本批 entry、以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再
+  幂等重跑 stage 或走下面的 replay 补账；出现收缩就按下面 exit 3 的
+  `destination_entries_lost_after_merge` 分支停手。`provider_restored_previous` 是其中
+  唯一 destination 已被 provider 回滚为旧字节的形，`entry_count` 预期**不含**本批
+  entry——核对确认后按幂等重跑处置，仍不得跳过核对（新 entry 曾短暂可见）。
 - `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
   **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
   `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。

@@ -7,7 +7,7 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from packages.common.provider_atomic import ProviderAtomicError
@@ -104,27 +104,39 @@ def copyback_run_trees(
                     authoritative_run_ids=unique_run_ids,
                 )
             except (ProviderAtomicError, StateManagerError) as error:
-                if isinstance(error, ProviderAtomicError) and error.phase == "release_uncertain":
-                    # The provider lock releases only after the destination
-                    # compare-and-swap, so this failure says "the shared index
-                    # may already hold the merged entries".  Reporting it as
-                    # the fail-closed code would push a possible commit back
-                    # into the "nothing happened" bucket and send the operator
-                    # bisection the wrong way (#1193); the phase, not the
-                    # reason, is the discriminator so future release-period
-                    # reasons land in the same bucket.
+                # The merge classifies itself: every provider raise point past
+                # the destination compare-and-swap carries a phase saying so,
+                # and it reaches here under either of two carriers -- the bare
+                # provider error (lock release, #1193) or the state-manager
+                # error that rewraps it with the phase kept in its evidence
+                # (the whole replace/postread/rollback family, #1364).  The
+                # discriminator is "not provably pre-commit", the same proof
+                # philosophy the replay tool refuses on: only an audited
+                # pre-commit raise point shows the shared index unchanged, so
+                # any future phase lands on the safe side by default.
+                # `provider_restored_previous` (phase postcommit) is uncertain
+                # too: the rollback verified, but the merged bytes were
+                # briefly visible to concurrent readers, and the operator's
+                # next step -- check the shared entry_count -- is the same.
+                phase = getattr(error, "phase", None)
+                if phase is None:
+                    evidence = getattr(error, "evidence", None)
+                    if isinstance(evidence, Mapping):
+                        phase = evidence.get("phase")
+                error_reason = getattr(error, "reason", None)
+                if phase is not None and phase != "precommit":
                     raise RunTreeCopybackError(
                         "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
                         (
-                            "State-index copyback merge may have committed; provider lock "
-                            "release failed after the compare-and-swap."
+                            "State-index copyback merge may have committed; the failure arose at "
+                            f"or past the destination compare-and-swap (phase={phase})."
                         ),
-                        {"object_key": object_key, "error": str(error), "error_reason": error.reason},
+                        {"object_key": object_key, "error": str(error), "error_reason": error_reason},
                     ) from error
                 raise RunTreeCopybackError(
                     "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
                     "State-index copyback merge failed closed.",
-                    {"object_key": object_key, "error": str(error)},
+                    {"object_key": object_key, "error": str(error), "error_reason": error_reason},
                 ) from error
             summary = {
                 "file_count": 1,

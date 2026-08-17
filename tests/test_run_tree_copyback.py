@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
@@ -11,6 +12,8 @@ import pytest
 from packages.common import provider_atomic as provider_atomic_module
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
     StateManagerError,
@@ -537,6 +540,10 @@ def test_state_index_copyback_same_timestamp_semantic_conflict_fails_closed(tmp_
 
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert "state_snapshot_index_copyback_conflict" in error_info.value.details["error"]
+    # No self-described phase at all: every raise point of this reason is
+    # before the destination compare-and-swap, so it keeps the fail-closed
+    # code, and the reason is now legible under that code too (#1364).
+    assert error_info.value.details["error_reason"] == "state_snapshot_index_copyback_conflict"
     assert destination_index.read_bytes() == before
     assert (
         copyback_root / "states/gfs/model_a/conflict/state.cfg.ic"
@@ -596,6 +603,9 @@ def test_state_index_copyback_checkpoint_failure_preserves_shared_index(
         )
 
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    # An error carrying neither reason nor phase still gets the key, so the
+    # details shape is the same under both codes.
+    assert error_info.value.details["error_reason"] is None
     assert destination_index.read_bytes() == before
     assert not (copyback_root / "states/gfs/model_a/private/state.cfg.ic").exists()
 
@@ -665,6 +675,217 @@ def test_state_index_copyback_lock_release_failure_reports_commit_uncertain_code
     assert (copyback_root / "states/gfs/model_a/private/state.cfg.ic").read_bytes() == private_content
 
 
+class _StateIndexCopybackFixture:
+    """The lock-release test's two-root fixture, reused by the CAS injections.
+
+    ``destination_exists=False`` is the bootstrap shape: the shared index is
+    absent, so the provider's post-CAS failure has no previous content to roll
+    back to and the destination necessarily keeps the merged bytes.
+    """
+
+    def __init__(self, tmp_path: Path, *, destination_exists: bool = True) -> None:
+        self.run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+        self.object_root = tmp_path / "object-store"
+        self.copyback_root = tmp_path / "shared-object-store"
+        _write_run(self.object_root, self.run_id)
+        private_store = LocalObjectStore(self.object_root, "s3://nhms")
+        self.private_content = _valid_state_bytes(b"private")
+        self.shared_content = _valid_state_bytes(b"shared")
+        private_uri = private_store.write_bytes_atomic(
+            "states/gfs/model_a/private/state.cfg.ic", self.private_content
+        )
+        shared_uri = private_store.write_bytes_atomic(
+            "states/gfs/model_a/shared/state.cfg.ic", self.shared_content
+        )
+        LocalObjectStore(self.copyback_root, "s3://nhms").write_bytes_atomic(
+            "states/gfs/model_a/shared/state.cfg.ic", self.shared_content
+        )
+        self.source_index = self.object_root / "scheduler/state-index/index-last.json"
+        self.destination_index = self.copyback_root / "scheduler/state-index/index-last.json"
+        publish_state_snapshot_index(
+            [
+                {
+                    **_state_entry("private-state", private_uri, self.private_content, "2026-06-27T01:00:00Z"),
+                    "run_id": self.run_id,
+                }
+            ],
+            self.source_index,
+            object_store_root=self.object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+        )
+        if destination_exists:
+            publish_state_snapshot_index(
+                [_state_entry("shared-state", shared_uri, self.shared_content, "2026-06-27T00:00:00Z")],
+                self.destination_index,
+                object_store_root=self.copyback_root,
+                object_store_prefix="s3://nhms",
+                generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
+            )
+
+    def run(self) -> None:
+        copyback_run_trees(
+            object_store_root=self.object_root,
+            copyback_root=self.copyback_root,
+            run_ids=[self.run_id],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+
+    def published_state_ids(self) -> set[str]:
+        payload = json.loads(self.destination_index.read_text(encoding="utf-8"))
+        return {entry["state_id"] for entry in payload["entries"]}
+
+
+class _DestinationWriteSeam:
+    """Fails the destination compare-and-swap with a chosen failure kind.
+
+    The helper is shared with every other provider write, so the injection is
+    filtered to the destination index path.  ``kind="indeterminate"`` lets the
+    real replace land first, which is what makes "the shared index already
+    holds the merged entries" an assertable fact rather than a claim.
+    """
+
+    def __init__(self, destination: Path, *, kind: str) -> None:
+        self._destination = destination
+        self._kind = kind
+        self.writes = 0
+
+    def __call__(self, path: Path, content: bytes, **kwargs: object) -> Path:
+        if Path(path) != self._destination:
+            return atomic_write_bytes_no_follow(path, content, **kwargs)
+        self.writes += 1
+        if self._kind == "indeterminate":
+            atomic_write_bytes_no_follow(path, content, **kwargs)
+            raise SafeFilesystemError(f"directory fsync failed for {path}", kind="indeterminate")
+        raise SafeFilesystemError(f"failed to write {path}", kind=self._kind)
+
+
+class _PostCasReadBackSeam:
+    """Fails the read-back that follows a real destination compare-and-swap.
+
+    ``capture_provider_preimage`` also serves the source-side snapshot read, so
+    the injection is filtered to the destination index path, and it is armed
+    only once a destination write has returned: on that path the captures run
+    as pre-merge snapshot, CAS preimage, then post-CAS read-back, and only the
+    last one is past the commit.  It fires once so the provider's own
+    post-rollback capture still runs for real and can verify the restore.
+    """
+
+    def __init__(self, destination: Path) -> None:
+        self._destination = destination
+        self._armed = False
+        self.failures = 0
+
+    def write(self, path: Path, content: bytes, **kwargs: object) -> Path:
+        result = atomic_write_bytes_no_follow(path, content, **kwargs)
+        if Path(path) == self._destination:
+            self._armed = True
+        return result
+
+    def capture(self, path: Path, **kwargs: object) -> ProviderPreimage:
+        if self._armed and self.failures == 0 and Path(path) == self._destination:
+            self.failures += 1
+            raise OSError(errno.EIO, "Input/output error")
+        return capture_provider_preimage(path, **kwargs)
+
+
+def test_state_index_copyback_replace_uncertain_reports_commit_uncertain_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1364: the destination compare-and-swap's own uncertain family reaches
+    # the copyback rewrapped as a StateManagerError, never as a bare
+    # ProviderAtomicError, so a carrier-typed discriminator misses it and files
+    # a merge that really did commit under the fail-closed code -- the exact
+    # inversion of the operator bisection #1193 exists to protect.
+    fixture = _StateIndexCopybackFixture(tmp_path)
+    seam = _DestinationWriteSeam(fixture.destination_index, kind="indeterminate")
+    monkeypatch.setattr(provider_atomic_module, "atomic_write_bytes_no_follow", seam)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        fixture.run()
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert error_info.value.code != "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert error_info.value.details["error_reason"] == "provider_replace_uncertain"
+    assert error_info.value.details["object_key"] == "scheduler/state-index/index-last.json"
+    assert seam.writes == 1
+    # The commit is a fact, not an inference: the replace landed before the
+    # durability confirmation failed.
+    assert fixture.published_state_ids() == {"private-state", "shared-state"}
+
+
+def test_state_index_copyback_postread_failure_reports_commit_uncertain_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bootstrap shape: with no previous destination content the provider cannot
+    # roll back, so `provider_postread_failed` is raised with the merged bytes
+    # left in place.
+    fixture = _StateIndexCopybackFixture(tmp_path, destination_exists=False)
+    seam = _PostCasReadBackSeam(fixture.destination_index)
+    monkeypatch.setattr(provider_atomic_module, "atomic_write_bytes_no_follow", seam.write)
+    monkeypatch.setattr(provider_atomic_module, "capture_provider_preimage", seam.capture)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        fixture.run()
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert error_info.value.details["error_reason"] == "provider_postread_failed"
+    assert seam.failures == 1
+    assert fixture.published_state_ids() == {"private-state"}
+
+
+def test_state_index_copyback_verified_rollback_reports_commit_uncertain_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rollback verifies (phase "postcommit"), yet the merged bytes were
+    # briefly visible to concurrent readers, so this stays commit-uncertain --
+    # the same verdict the replay tool gives by excluding the reason from its
+    # pre-commit allowlist.  The operator's next step is unchanged: check the
+    # shared entry_count, which here must show the batch absent.
+    fixture = _StateIndexCopybackFixture(tmp_path)
+    before = fixture.destination_index.read_bytes()
+    seam = _PostCasReadBackSeam(fixture.destination_index)
+    monkeypatch.setattr(provider_atomic_module, "atomic_write_bytes_no_follow", seam.write)
+    monkeypatch.setattr(provider_atomic_module, "capture_provider_preimage", seam.capture)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        fixture.run()
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert error_info.value.details["error_reason"] == "provider_restored_previous"
+    assert seam.failures == 1
+    assert fixture.destination_index.read_bytes() == before
+    assert fixture.published_state_ids() == {"shared-state"}
+
+
+def test_state_index_copyback_precommit_replace_failure_stays_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other half of the discriminator: a rewrapped StateManagerError whose
+    # phase is "precommit" must keep the fail-closed code.  A discriminator
+    # written as "any phase at all" would pass every uncertain case above while
+    # flipping this one, which is precisely the reason the replay tool refuses
+    # on -- the two operator surfaces would disagree again.
+    fixture = _StateIndexCopybackFixture(tmp_path)
+    before = fixture.destination_index.read_bytes()
+    seam = _DestinationWriteSeam(fixture.destination_index, kind="io")
+    monkeypatch.setattr(provider_atomic_module, "atomic_write_bytes_no_follow", seam)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        fixture.run()
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    # `provider_replace_failed` is outside the state manager's reason remap, so
+    # it survives verbatim into the event details.
+    assert error_info.value.details["error_reason"] == "provider_replace_failed"
+    assert seam.writes == 1
+    assert fixture.destination_index.read_bytes() == before
+
+
 def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
@@ -731,6 +952,7 @@ def test_state_index_copyback_split_root_checksum_failure_preserves_shared_index
 
     assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
     assert "state_snapshot_index_object_checksum_mismatch" in error_info.value.details["error"]
+    assert error_info.value.details["error_reason"] == "state_snapshot_index_object_checksum_mismatch"
     assert destination_index.read_bytes() == before
     assert (
         copyback_root / "states/gfs/model_a/shared/state.cfg.ic"
