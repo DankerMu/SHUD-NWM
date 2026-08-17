@@ -19,7 +19,9 @@
   `workers/shud_runtime/runtime.py:2881`
   `[sys.executable, executable, *args]`. Exact literal
   `"tests/mock_shud_omp.py"` appears in three tracked top-level
-  suites, none file-level gated:
+  suites OUTSIDE the excluded meta-guard suite (four including it —
+  the exclusion in decision 1 is what makes it three), none
+  file-level gated:
   `tests/test_shud_runtime.py` (:234 shared `_runtime()` helper +
   :933/:970/:1093 …), `tests/test_direct_grid_e2e.py` (:206,:238),
   `tests/test_e2e.py` (:901). `test_e2e.py`'s e2e gating is
@@ -27,7 +29,7 @@
   pytestmark, so the file-level filter authority (the same one the
   import derivation uses) includes it; its e2e functions auto-skip
   in the PR lane (measured whole file: 4 collected / 2 passed /
-  2 skipped / 1.4 s).
+  2 skipped / 0.29 s).
 - Suite costs: test_shud_runtime + test_direct_grid_e2e = 251
   passed / ~27 s; test_e2e whole file 2 passed / 2 skipped / 0.29 s.
   Lane total well under budget. HONEST LIMIT (fixture-review P2-3):
@@ -86,8 +88,18 @@
    equality needs NO new vocabulary: mock_shud_omp's union is
    non-empty so it moves to branch (b); keliya/build.py stays in
    (c). The guard failure message distinguishes edge kind ("importer
-   suite" vs "literal-path consumer suite") for the reader, nothing
-   more.
+   suite" vs "literal-path consumer suite") for the reader —
+   RULED (iteration-2 P2-1, option b-parameterized):
+   `_support_module_closure_offenders` gains an optional
+   `consumer_edges` parameter DEFAULTING to the real literal-path
+   index, used ONLY for choosing the label wording; the derived
+   sets still come exclusively from the `derived` parameter, so the
+   existing exact-message test at :2432-2442 stays green (a
+   constructed newcomer absent from `consumer_edges` falls back to
+   the "importer suite" wording) and tasks 3.2's red arm gets the
+   consumer-suite wording for real literal edges. The docstring's
+   "every input is a parameter" property is preserved — the label
+   source is itself a parameter.
 3. **Scope of the literal scan**: targets are tracked non-suite
    `tests/` module paths ONLY (the 8 support modules' repo-relative
    paths). Production modules are out of domain — the #1455
@@ -112,8 +124,18 @@
    Today that derives exactly
    `tests/fixtures/mapping_builder/keliya/build.py`; the keliya
    determination (docstring + zero references) recorded in a
-   comment. The anti-vacuity floor "≥3 modules with non-zero
-   derived" now counts 7 of 8 — update the recorded figure.
+   comment. EMPTY-SET VISIBILITY (iteration-2 P2-2): if the derived
+   zero-consumer set ever becomes empty (every support module has
+   consumers — a legal terminal state), the parametrize must not
+   silently collect zero cases: emit one
+   `pytest.param(..., marks=pytest.mark.skip(reason="zero-consumer
+   domain is empty — collapse-route guard needs re-decision"))`
+   fallback, never a bare `assert sample` (which would false-red the
+   legal state) and never a silent vanish. The anti-vacuity floor
+   "≥3 modules with non-zero derived" now counts 7 of 8 — update
+   the recorded figure. Collection-time cost of the derived sample
+   (~1 s index + literal scan) also lands on the full-tree
+   collect-only smoke lane — record it in the 5.1 wall-clock note.
 6. **Equivalence pin (#1499)**: one test, sample = all tracked
    non-suite `tests/` support modules (derived) + the first N (e.g.
    3) sorted modules from `_directory_rule_audit_modules()` (159

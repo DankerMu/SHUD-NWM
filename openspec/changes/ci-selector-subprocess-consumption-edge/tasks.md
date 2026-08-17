@@ -14,7 +14,10 @@
       only in `_derived_support_module_importers`.
 - [ ] 1.2 `_derived_support_module_importers` = import index ∪
       literal index per module; guard failure message distinguishes
-      edge kind; branch (c) semantics unchanged.
+      edge kind via an optional `consumer_edges` label-source
+      parameter defaulting to the real literal index (label only;
+      derived sets stay parameter-driven — the exact-message test
+      at :2432-2442 stays green); branch (c) semantics unchanged.
 - [ ] 1.3 Fifth `SUPPORT_MODULE_TEST_RULES` entry:
       tests/mock_shud_omp.py → test_shud_runtime +
       test_direct_grid_e2e + test_e2e (comment: subprocess
@@ -24,7 +27,9 @@
       file; routed for closure integrity).
 - [ ] 1.4 0-consumer parametrize sample → DERIVED from the tree
       (union-empty modules; today exactly keliya/build.py,
-      determination recorded); anti-vacuity figure 6→7 of 8;
+      determination recorded); empty-set visibility per design
+      decision 5 (skip-marked fallback param, never bare assert,
+      never silent zero-collection); anti-vacuity figure 6→7 of 8;
       known-member anchors gain mock_shud_omp→test_shud_runtime.
 - [ ] 1.5 Rewrite
       `test_support_module_closure_guard_reds_on_a_gratuitous_zero_importer_selection`
@@ -68,7 +73,9 @@
 ## 5. Evidence Floor
 
 - [ ] 5.1 `uv run pytest -q tests/test_select_ci_tests.py` green
-      (115 → after; guard + pin wall-clocks reported).
+      (115 → after; guard + pin wall-clocks reported, incl. the
+      collection-time cost the derived parametrize adds to the
+      collect-only smoke lane).
 - [ ] 5.2 Red evidence per 2.2/3.2 (honest labels for naturally
       green pins).
 - [ ] 5.3 `git ls-files '*.py' | xargs uv run ruff check` clean.
