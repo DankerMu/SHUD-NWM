@@ -52,8 +52,8 @@ stage codes, not 5.
 
 ## What Changes
 
-- `NON_TRANSIENT_ERROR_CODES` (services/orchestrator/retry.py:40)
-  gains 13 members:
+- `NON_TRANSIENT_ERROR_CODES` (services/orchestrator/retry.py:49 at
+  final head) gains 13 members:
   - SHUD trio: `SHUD_FAILED`, `FAILED_RUN`, `RUNTIME_FAILED`
     (rerunning the same configuration does not converge; classifier
     already groups them as `shud_runtime_failure`);
@@ -70,7 +70,7 @@ stage codes, not 5.
     `PUBLISH_TASK_FAILED` (scheduler_state_failure.py:377-379).
 - BEHAVIOR INVARIANT (proof obligation, not a hope):
   `NON_TRANSIENT_ERROR_CODES` has exactly ONE production consumer —
-  the audit-reason ternary at retry.py:150. `is_retryable_failure`
+  the audit-reason ternary at retry.py:167 (final head). `is_retryable_failure`
   == `is_transient_error` (transient list only), so permanence,
   backoff, downstream-resume and every gate are untouched; the 13
   codes already defaulted to non-transient behavior. What changes:

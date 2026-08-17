@@ -9,7 +9,7 @@ behavior invariant is structural).
 - Primary risk: classification semantics drift — accidentally
   changing RETRY BEHAVIOR instead of audit labels. Mitigated
   structurally: `NON_TRANSIENT_ERROR_CODES`'s only production
-  consumer is the reason ternary (retry.py:150, grep-verified);
+  consumer is the reason ternary (retry.py:167 at final head, grep-verified);
   `is_retryable_failure` reads the transient list only. Evidence
   floor requires re-proving the single-consumer fact on the final
   head.
