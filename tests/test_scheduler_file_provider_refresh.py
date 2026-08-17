@@ -6633,3 +6633,781 @@ def test_failed_id_only_receipt_keeps_the_single_declaration_refusal() -> None:
             reason="registry_cutover_declaration_invalid",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# #1433: declared retirement channel — `_classify_registry` decision grid
+# ---------------------------------------------------------------------------
+
+
+_CLASSIFY_GENERATED_AT = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+
+
+def _retire_entry(model_id: str, old_checksum: str) -> dict[str, object]:
+    return {
+        "model_id": model_id,
+        "old_checksum": old_checksum,
+        "new_checksum": None,
+        "effective_cycle_utc": "2026-07-15T00:00:00Z",
+        "transition_mode": "retire",
+    }
+
+
+def _replace_entry(model_id: str, old_checksum: str, new_checksum: str) -> dict[str, object]:
+    return {
+        "model_id": model_id,
+        "old_checksum": old_checksum,
+        "new_checksum": new_checksum,
+        "effective_cycle_utc": "2026-07-15T00:00:00Z",
+        "transition_mode": "replace",
+    }
+
+
+def _declaration_payload(
+    *, generation: str, entries: list[dict[str, object]]
+) -> dict[str, object]:
+    """In-memory declaration exactly as `_load_cutover_declaration` returns it."""
+    return {
+        "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+        "generated_at": "2026-07-14T12:00:00Z",
+        "generation": generation,
+        "entries": entries,
+    }
+
+
+def _classify(
+    *,
+    previous: list[dict[str, object]] | None,
+    prospective: list[dict[str, object]],
+    entries: list[dict[str, object]] | None = None,
+    generation: str | None = None,
+    dry_run: bool = False,
+    skipped_models: dict[str, dict[str, object]] | None = None,
+) -> tuple[Any, str | None]:
+    """Direct `_classify_registry` call with a matching-generation declaration."""
+    resolved_generation = refresh._prospective_registry_generation(
+        prospective, generated_at=_CLASSIFY_GENERATED_AT
+    )
+    declaration = (
+        None
+        if entries is None
+        else _declaration_payload(
+            generation=generation if generation is not None else resolved_generation,
+            entries=entries,
+        )
+    )
+    return refresh._classify_registry(
+        previous=previous,
+        prospective=prospective,
+        previous_sha256=None if previous is None else "1" * 64,
+        new_sha256="2" * 64,
+        generation=resolved_generation,
+        declaration=declaration,
+        dry_run=dry_run,
+        skipped_models=skipped_models,
+    )
+
+
+def _refusal_reasons(result: Any) -> list[tuple[str, str]]:
+    return sorted((item["model_id"], item["reason"]) for item in result.refused)
+
+
+def test_classify_grid_cell1_matching_retire_entry_admits_the_removal() -> None:
+    """Grid 1: the removal enters `declared_retirements` and nothing refuses."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-102", "b" * 64)],
+    )
+
+    assert reason is None
+    assert result.removed == ["basin-102"]
+    assert result.refused == []
+    assert result.declared_retirements == [
+        {
+            "model_id": "basin-102",
+            "old_checksum": "b" * 64,
+            "new_checksum": None,
+            "effective_cycle_utc": "2026-07-15T00:00:00Z",
+            "transition_mode": "retire",
+        }
+    ]
+
+
+def test_classify_grid_cell2_retire_entry_with_wrong_old_checksum_is_invalid() -> None:
+    """Grid 2: the checksum mismatch poisons the declaration, and the removal
+    produces exactly ONE refusal row (no extra `removal_refused` for it)."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-102", "9" * 64)],
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.declared_retirements == []
+    assert _refusal_reasons(result) == [
+        ("basin-102", "registry_cutover_declaration_invalid")
+    ]
+
+
+def test_classify_grid_cell3_removal_without_any_entry_keeps_the_1080_refusal() -> None:
+    """Grid 3: #1080's fail-closed removal refusal is untouched."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(previous=previous, prospective=prospective)
+
+    assert reason == "registry_cutover_removal_refused"
+    assert result.declared_retirements == []
+    assert result.refused == [
+        {
+            "model_id": "basin-102",
+            "old_checksum": "b" * 64,
+            "new_checksum": None,
+            "reason": "registry_cutover_removal_refused",
+        }
+    ]
+
+
+def test_classify_grid_cell4_replace_entry_on_a_removed_model_refuses_twice() -> None:
+    """Grid 4: a `replace` entry naming a removed model is BOTH an unknown-id
+    declaration error (rule 1) and an undeclared removal (rule 4) — two rows."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_replace_entry("basin-102", "b" * 64, "c" * 64)],
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.declared_retirements == []
+    assert _refusal_reasons(result) == [
+        ("basin-102", "registry_cutover_declaration_invalid"),
+        ("basin-102", "registry_cutover_removal_refused"),
+    ]
+
+
+def test_classify_grid_cell5_retiring_a_still_published_model_is_invalid() -> None:
+    """Grid 5: a retirement can only name a model that is actually leaving."""
+    previous = [_registry_row("basin-101", "a" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-101", "a" * 64)],
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.removed == []
+    assert result.declared_retirements == []
+    assert _refusal_reasons(result) == [
+        ("basin-101", "registry_cutover_declaration_invalid")
+    ]
+
+
+def test_classify_grid_cell6_retiring_a_never_canonical_model_is_invalid() -> None:
+    """Grid 6: retiring a row that was never in the previous canonical set."""
+    previous = [_registry_row("basin-101", "a" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-999", "b" * 64)],
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.declared_retirements == []
+    assert _refusal_reasons(result) == [
+        ("basin-999", "registry_cutover_declaration_invalid")
+    ]
+
+
+def test_classify_grid_cell7_retire_entry_inherits_the_generation_binding() -> None:
+    """Grid 7: the #1080 generation binding applies to retirements verbatim."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-102", "b" * 64)],
+        generation="manifest-deadbeefcafe",
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.declared_retirements == []
+    assert ("__declaration__", "registry_cutover_declaration_invalid") in _refusal_reasons(
+        result
+    )
+
+
+def test_classify_grid_cell8_declared_and_undeclared_removals_split() -> None:
+    """Grid 8: one removal is admitted, the other keeps failing closed, and the
+    run's reason is the removal refusal (not declaration-invalid)."""
+    previous = [
+        _registry_row("basin-101", "a" * 64),
+        _registry_row("basin-102", "b" * 64),
+        _registry_row("basin-103", "c" * 64),
+    ]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-102", "b" * 64)],
+    )
+
+    assert reason == "registry_cutover_removal_refused"
+    assert [item["model_id"] for item in result.declared_retirements] == ["basin-102"]
+    assert _refusal_reasons(result) == [
+        ("basin-103", "registry_cutover_removal_refused")
+    ]
+
+
+def test_classify_grid_cell9_dry_run_never_evaluates_a_retirement() -> None:
+    """Grid 9: the id-only early return is untouched — no removal, no bucket."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [{"model_id": "basin-101", "basin_id": "basin-basin-101"}]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[_retire_entry("basin-102", "b" * 64)],
+        dry_run=True,
+    )
+
+    assert reason is None
+    assert result.mode == "id_only"
+    assert result.removed == []
+    assert result.declared_retirements == []
+    assert result.refused == []
+
+
+def test_classify_grid_cell10_poison_from_another_rule_blocks_the_retirement() -> None:
+    """Grid 10: an unrelated invalid entry (rule 1) means the declaration is not
+    valid as a whole, so the otherwise-legal retirement is refused, not booked."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        entries=[
+            _replace_entry("basin-777", "a" * 64, "c" * 64),
+            _retire_entry("basin-102", "b" * 64),
+        ],
+    )
+
+    assert reason == "registry_cutover_declaration_invalid"
+    assert result.declared_retirements == []
+    assert _refusal_reasons(result) == [
+        ("basin-102", "registry_cutover_declaration_invalid"),
+        ("basin-777", "registry_cutover_declaration_invalid"),
+    ]
+
+
+def test_classify_grid_cell11_retire_poison_is_order_independent() -> None:
+    """Grid 11: one bad retirement poisons the declaration for the good one, and
+    the outcome does not depend on the order the removals are iterated in.
+
+    The single-pass shape rule 2 uses would book the good retirement whenever it
+    happened to be visited first — for a destructive row deletion that is not
+    acceptable, so rule 4 settles the poison bit before anything enters the
+    bucket."""
+    rows = {
+        "basin-102": _registry_row("basin-102", "b" * 64),
+        "basin-103": _registry_row("basin-103", "c" * 64),
+    }
+    prospective = [_registry_row("basin-101", "a" * 64)]
+    entries = [
+        _retire_entry("basin-102", "b" * 64),  # honest
+        _retire_entry("basin-103", "9" * 64),  # wrong old_checksum
+    ]
+
+    payloads = []
+    for order in (("basin-102", "basin-103"), ("basin-103", "basin-102")):
+        previous = [_registry_row("basin-101", "a" * 64)] + [rows[name] for name in order]
+        result, reason = _classify(
+            previous=previous, prospective=prospective, entries=entries
+        )
+        assert reason == "registry_cutover_declaration_invalid"
+        assert result.declared_retirements == []
+        payloads.append(result.to_receipt())
+
+    assert payloads[0] == payloads[1]
+    assert _refusal_reasons_from_receipt(payloads[0]) == [
+        ("basin-102", "registry_cutover_declaration_invalid"),
+        ("basin-103", "registry_cutover_declaration_invalid"),
+    ]
+
+
+def _refusal_reasons_from_receipt(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    return sorted(
+        (item["model_id"], item["reason"]) for item in payload["refused"]["items"]
+    )
+
+
+def test_removal_refusal_carries_skip_cause_evidence_when_publish_skipped_it() -> None:
+    """#1433 evidence layer: the refusal says WHY the row disappeared."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={
+            "basin-102": {
+                "status": "partial",
+                "missing_required_files": ["*.tsd.rl"],
+                "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+            }
+        },
+    )
+
+    assert reason == "registry_cutover_removal_refused"
+    assert result.refused == [
+        {
+            "model_id": "basin-102",
+            "old_checksum": "b" * 64,
+            "new_checksum": None,
+            "reason": "registry_cutover_removal_refused",
+            "status": "partial",
+            "missing_required_files": ["*.tsd.rl"],
+            "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+        }
+    ]
+    refresh._validate_object_group(
+        result.to_receipt()["refused"],
+        required_keys={"model_id", "reason"},
+        optional_keys={"old_checksum", "new_checksum"} | set(refresh._SKIP_CAUSE_KEYS),
+        reason_enum=refresh.REGISTRY_CUTOVER_REFUSAL_REASONS,
+    )
+
+
+def test_removal_refusal_of_a_deleted_directory_omits_the_skip_cause_keys() -> None:
+    """#1433 discriminator: no inventory row means the model directory is gone,
+    and the refusal must NOT invent skip-cause keys for it."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    skipped, _ = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={"basin-102": {"status": "partial"}},
+    )
+    deleted, _ = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={"basin-999": {"status": "partial"}},
+    )
+
+    assert set(skipped.refused[0]) >= set(refresh._SKIP_CAUSE_KEYS)
+    assert set(deleted.refused[0]) & set(refresh._SKIP_CAUSE_KEYS) == set()
+    assert deleted.refused[0]["reason"] == "registry_cutover_removal_refused"
+
+
+def test_skip_cause_evidence_is_bounded_on_the_write_side() -> None:
+    """The lists are operator-data; both caps are applied where the row is
+    written, so an oversized inventory row cannot blow the receipt bounds."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+
+    result, _ = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={
+            "basin-102": {
+                "status": "x" * (refresh.MAX_STRING_LENGTH + 10),
+                "missing_required_files": [
+                    f"file-{index}" for index in range(refresh.MAX_COLLECTION_ITEMS + 20)
+                ],
+                "invalid_required_files": ["y" * (refresh.MAX_STRING_LENGTH + 10)],
+            }
+        },
+    )
+
+    refusal = result.refused[0]
+    assert len(refusal["status"]) == refresh.MAX_STRING_LENGTH
+    assert len(refusal["missing_required_files"]) == refresh.MAX_COLLECTION_ITEMS
+    assert len(refusal["invalid_required_files"][0]) == refresh.MAX_STRING_LENGTH
+    refresh._validate_value_bounds(result.to_receipt())
+
+
+# ---------------------------------------------------------------------------
+# #1433: declaration schema / loader
+# ---------------------------------------------------------------------------
+
+
+def test_declaration_transition_modes_match_the_schema_enum() -> None:
+    """The publisher constant and the schema enum are one corpus.
+
+    (The consumer's copy of the constant is pinned to the same enum by
+    ``tests/test_scheduler_generation.py``.)
+    """
+    schema_enum = set(
+        refresh._CUTOVER_DECLARATION_SCHEMA["properties"]["entries"]["items"][
+            "properties"
+        ]["transition_mode"]["enum"]
+    )
+    assert schema_enum == set(refresh.CUTOVER_TRANSITION_MODES)
+    assert set(refresh.CUTOVER_REPLACE_TRANSITION_MODES) | set(
+        refresh.CUTOVER_RETIRE_TRANSITION_MODES
+    ) == schema_enum
+    assert not set(refresh.CUTOVER_REPLACE_TRANSITION_MODES) & set(
+        refresh.CUTOVER_RETIRE_TRANSITION_MODES
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "accepted"),
+    [
+        pytest.param(
+            {"transition_mode": "retire", "new_checksum": None}, True, id="retire_null"
+        ),
+        pytest.param(
+            {"transition_mode": "retire", "new_checksum": "c" * 64},
+            False,
+            id="retire_with_checksum",
+        ),
+        pytest.param(
+            {"transition_mode": "replace", "new_checksum": None},
+            False,
+            id="replace_without_checksum",
+        ),
+        pytest.param(
+            {"transition_mode": "replace", "new_checksum": "c" * 64},
+            True,
+            id="replace_hex",
+        ),
+    ],
+)
+def test_declaration_loader_mirrors_the_schema_mode_checksum_pairing(
+    tmp_path: Path, entry: dict[str, object], accepted: bool
+) -> None:
+    """The mode/checksum conditional binds in BOTH the schema and the loader."""
+    declaration = _write_declaration(
+        tmp_path,
+        generation="manifest-abcdef123456",
+        entries=[
+            {
+                "model_id": "basin-101",
+                "old_checksum": "a" * 64,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                **entry,
+            }
+        ],
+    )
+    now = refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+
+    if accepted:
+        payload = refresh._load_cutover_declaration(str(declaration), now=now)
+        assert payload["entries"][0]["transition_mode"] == entry["transition_mode"]
+        refresh._CUTOVER_DECLARATION_VALIDATOR.validate(payload)
+    else:
+        with pytest.raises(refresh.RefreshError) as info:
+            refresh._load_cutover_declaration(str(declaration), now=now)
+        assert info.value.reason == "registry_cutover_declaration_invalid"
+        with pytest.raises(jsonschema.ValidationError):
+            refresh._CUTOVER_DECLARATION_VALIDATOR.validate(
+                json.loads(declaration.read_text())
+            )
+
+
+def test_existing_replace_only_declaration_file_still_loads_verbatim(
+    tmp_path: Path,
+) -> None:
+    """Forward-compat anchor: the v1 file operators already write is unchanged."""
+    declaration = _write_declaration(
+        tmp_path,
+        generation="manifest-abcdef123456",
+        entries=[
+            {
+                "model_id": "basin-101",
+                "old_checksum": "a" * 64,
+                "new_checksum": "c" * 64,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                "transition_mode": "replace",
+            }
+        ],
+    )
+
+    payload = refresh._load_cutover_declaration(
+        str(declaration), now=refresh.datetime(2026, 7, 14, 12, tzinfo=refresh.UTC)
+    )
+
+    assert payload["schema_version"] == "nhms.scheduler.registry_package_cutover.v1"
+    assert payload["entries"][0]["new_checksum"] == "c" * 64
+
+
+def test_committed_declaration_example_validates_against_its_schema() -> None:
+    """CI pairs `<base>.example.json` with `<base>.schema.json`; keep them green
+    here too so a schema edit that orphans the example fails locally first."""
+    example = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/examples/scheduler_registry_package_cutover.example.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    refresh._CUTOVER_DECLARATION_VALIDATOR.validate(example)
+
+    modes = {entry["transition_mode"] for entry in example["entries"]}
+    assert modes == {"replace", "retire"}
+
+
+# ---------------------------------------------------------------------------
+# #1433: retirement-aware reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _retirement_classification(
+    *,
+    removed: list[str],
+    retired: list[str],
+    refused_total: int,
+    retired_total: int | None = None,
+    mode: str | None = "full",
+    include_bucket: bool = True,
+) -> dict[str, Any]:
+    """Full-mode classification with `previous = unchanged + removed`."""
+    unchanged = ["basin-101"]
+    classification: dict[str, Any] = {
+        "previous_registry_sha256": "1" * 64,
+        "new_registry_sha256": "2" * 64,
+        "previous_model_count": len(unchanged) + len(removed),
+        "prospective_model_count": len(unchanged),
+        "added": {"items": [], "total": 0, "truncated": False},
+        "unchanged": {
+            "items": unchanged,
+            "total": len(unchanged),
+            "truncated": False,
+        },
+        "removed": {"items": removed, "total": len(removed), "truncated": False},
+        "package_changed": {"items": [], "total": 0, "truncated": False},
+        "refused": {
+            "items": [
+                {
+                    "model_id": model_id,
+                    "old_checksum": None,
+                    "new_checksum": None,
+                    "reason": "registry_cutover_removal_refused",
+                }
+                for model_id in removed
+                if model_id not in retired
+            ],
+            "total": refused_total,
+            "truncated": False,
+        },
+        "declared_cutovers": {"items": [], "total": 0, "truncated": False},
+    }
+    classification["refused"]["truncated"] = refused_total > len(
+        classification["refused"]["items"]
+    )
+    if include_bucket:
+        items = [
+            {
+                "model_id": model_id,
+                "old_checksum": "b" * 64,
+                "new_checksum": None,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                "transition_mode": "retire",
+            }
+            for model_id in retired
+        ]
+        total = len(items) if retired_total is None else retired_total
+        classification["declared_retirements"] = {
+            "items": items,
+            "total": total,
+            "truncated": total > len(items),
+        }
+    if mode is not None:
+        classification["mode"] = mode
+    return classification
+
+
+def test_reconciliation_accepts_an_honest_retirement_receipt() -> None:
+    """A fully declared removal is NOT refused, and the lower bound knows it."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=["basin-102"], refused_total=0
+    )
+
+    refresh._validate_registry_classification_field(
+        _classification_receipt(classification, outcome="published", reason="success")
+    )
+
+
+def test_reconciliation_rejects_a_retirement_outside_the_removed_set() -> None:
+    """Forged bucket: retiring a row this run never removed."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=["basin-102"], refused_total=0
+    )
+    classification["declared_retirements"]["items"][0]["model_id"] = "basin-999"
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="published", reason="success"
+            )
+        )
+
+
+def test_reconciliation_rejects_retired_total_above_removed_total() -> None:
+    """F4: an inflated total with an emptied item list would satisfy `⊆`
+    vacuously and deflate the refused lower bound — the total-level inequality
+    is what closes it."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=[], retired_total=5, refused_total=0
+    )
+    assert classification["declared_retirements"]["items"] == []
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="published", reason="success"
+            )
+        )
+
+
+def test_reconciliation_keeps_the_refused_lower_bound_for_undeclared_removals() -> None:
+    """Two removals, one retired: the other still has to be refused."""
+    honest = _retirement_classification(
+        removed=["basin-102", "basin-103"], retired=["basin-102"], refused_total=1
+    )
+    refresh._validate_registry_classification_field(
+        _classification_receipt(
+            honest, outcome="failed", reason="registry_cutover_removal_refused"
+        )
+    )
+
+    forged = _retirement_classification(
+        removed=["basin-102", "basin-103"], retired=["basin-102"], refused_total=0
+    )
+    forged["refused"]["items"] = []
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(forged, outcome="published", reason="success")
+        )
+
+
+def test_reconciliation_reads_a_legacy_receipt_without_the_bucket() -> None:
+    """I7: pre-#1433 receipts on disk carry no bucket and must still validate."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=[], refused_total=1, include_bucket=False
+    )
+    assert "declared_retirements" not in classification
+
+    refresh._validate_registry_classification_field(
+        _classification_receipt(
+            classification, outcome="failed", reason="registry_cutover_removal_refused"
+        )
+    )
+
+
+def test_reconciliation_rejects_a_retirement_on_an_id_only_classification() -> None:
+    """id-only never evaluates removals, so it can never declare a retirement."""
+    classification = _mode_classification(
+        mode="id_only",
+        previous_sha="1" * 64,
+        previous_count=2,
+        added=[],
+        unchanged=["basin-101"],
+        removed=[],
+        prospective_count=1,
+    )
+    classification["declared_retirements"] = {
+        "items": [
+            {
+                "model_id": "basin-102",
+                "old_checksum": "b" * 64,
+                "new_checksum": None,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                "transition_mode": "retire",
+            }
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_registry_classification_field(
+            _classification_receipt(
+                classification, outcome="failed", reason="provider_invalid"
+            )
+        )
+
+
+def test_receipt_schema_and_runtime_admit_the_same_retirement_bucket() -> None:
+    """The on-disk schema and `_validate_receipt` accept the same receipt."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=["basin-102"], refused_total=0
+    )
+    receipt = _receipt_with_classification(
+        classification, outcome="published", reason="success"
+    )
+
+    refresh._validate_receipt(receipt)
+    _receipt_schema_validator().validate(receipt)
+
+
+def test_a_retire_row_smuggled_into_declared_cutovers_is_rejected() -> None:
+    """Per-bucket transition modes: `declared_cutovers` admits `replace` only."""
+    classification = _retirement_classification(
+        removed=[], retired=[], refused_total=0, include_bucket=False
+    )
+    classification["package_changed"] = {
+        "items": [
+            {"model_id": "basin-101", "old_checksum": "a" * 64, "new_checksum": "c" * 64}
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+    classification["declared_cutovers"] = {
+        "items": [
+            {
+                "model_id": "basin-101",
+                "old_checksum": "a" * 64,
+                "new_checksum": "c" * 64,
+                "effective_cycle_utc": "2026-07-15T00:00:00Z",
+                "transition_mode": "retire",
+            }
+        ],
+        "total": 1,
+        "truncated": False,
+    }
+    classification["unchanged"] = {"items": [], "total": 0, "truncated": False}
+    classification["previous_model_count"] = 1
+    receipt = _receipt_with_classification(
+        classification, outcome="published", reason="success"
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_receipt(receipt)
+    with pytest.raises(jsonschema.ValidationError):
+        _receipt_schema_validator().validate(receipt)
+
+
+def test_a_replace_row_smuggled_into_declared_retirements_is_rejected() -> None:
+    """The mirror image: `declared_retirements` admits `retire` only."""
+    classification = _retirement_classification(
+        removed=["basin-102"], retired=["basin-102"], refused_total=0
+    )
+    classification["declared_retirements"]["items"][0]["transition_mode"] = "replace"
+    classification["declared_retirements"]["items"][0]["new_checksum"] = "c" * 64
+    receipt = _receipt_with_classification(
+        classification, outcome="published", reason="success"
+    )
+
+    with pytest.raises(ValueError, match="receipt_classification_invalid"):
+        refresh._validate_receipt(receipt)
+    with pytest.raises(jsonschema.ValidationError):
+        _receipt_schema_validator().validate(receipt)

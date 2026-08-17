@@ -499,15 +499,22 @@ replace 前对 prospective vs 上一份 canonical `manifest-last.json` 做逐行
 outcome 都必须带）。分类桶：`added`（prospective 有、previous 无）、`unchanged`
 （同 `model_id` 且 `model_package_uri` / `manifest_uri` / `package_checksum` 逐字节
 相等）、`package_changed`（同 `model_id`，`package_checksum` 不同）、`removed`
-（previous 有、prospective 无）、`refused`、`declared_cutovers`。三个 refusal 原因均在
+（previous 有、prospective 无）、`refused`、`declared_cutovers`、
+`declared_retirements`（#1433：被 retire 声明放行的 removal，是 `removed` 的子集，
+不进 `refused`；老 receipt 没有这个桶，按 0 读）。三个 refusal 原因均在
 canonical replace 前退出、非零：
 
 - `registry_cutover_undeclared`：某个已存在 `model_id` 的 `package_checksum` 变了但没有
   匹配的 cutover declaration。先看 `registry_classification.refused` 找到具体 model 与
   old/new checksum；确认漂移是有意后按下述格式提交 declaration，再重跑。
 - `registry_cutover_removal_refused`：previous canonical 里的某个 `model_id` 在
-  prospective 里消失。#1080 不允许 removal；需要下线一个流域走单独的 declared workflow，
-  否则不要动 `NHMS_BASINS_ROOT` 里的对应目录。
+  prospective 里消失。触发面**不只是**「动了 `NHMS_BASINS_ROOT` 里的目录」——已注册
+  model 的包变 invalid（`*.cfg.ic` 头部畸形、缺 `*.tsd.rl` 且无模板可修等）会被 bulk
+  publish 合法 skip，prospective 因此少一行，同样判 removal；而 `--dry-run` 预览
+  **看不到**这条拒绝（dry_run 不评估 removal）。两形靠 refusal entry 区分（#1433）：
+  带 `status` / `missing_required_files` / `invalid_required_files` 三键 = 包变 invalid
+  被 skip（键值就是 publisher 的 not-publishable 判据）；无这三键 = model 目录真没了。
+  合法下线走下面的 **retire declaration 恢复顺序**；不打算下线就修包后重跑。
 - `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
   原因：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 指向的文件不存在 / 不可读（已被删除或
   轮转走）、schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
@@ -566,7 +573,43 @@ model set 真正变了，generation 才会变（这时也必须重新出 declara
 declaration -> 提交 declaration 到 mode-0600 路径 ->
 `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑 refresh。
 `effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
-`[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+`[now-24h, now+168h]` 区间。`transition_mode` 有两个值：`replace`（换包，
+`new_checksum` 必须是 64 位 hex）和 `retire`（下线一行，`new_checksum` 必须显式写
+`null`——缺键与 `null` 语义不同，schema 两条 if/then 钉死这个配对）。
+
+**退役一个 model（retire declaration 恢复顺序，#1433，首选路径）**：这是
+`registry_cutover_removal_refused` 的正规出口，无论 removal 来自「删了目录」还是
+「包变 invalid 被 skip」。全程适用 #1104 并发禁令。
+
+1. 停 timer：`systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
+   再按上面的成对 status 判据确认 oneshot service 也已退出。
+2. 跑一次 `--dry-run` 取本趟 prospective 的 `generation`（dry_run 不评估 removal，
+   所以它**不会**复现那条拒绝，只用来拿 generation）。
+3. 写 declaration，entry 形：`model_id` = 要退役的行、`old_checksum` = **previous
+   canonical 那一行**的 `package_checksum`（从被拒 receipt 的 refusal entry
+   `old_checksum` 直接拷）、`new_checksum: null`、`transition_mode: "retire"`、
+   `effective_cycle_utc` 对齐 00:00/12:00 UTC 且在窗口内。generation 绑定、过期
+   窗口、cycle 对齐、256 KiB 上限对 retire 逐条同样适用，没有任何 retire 专用豁免。
+4. 跑一趟 refresh（timer 路径同样受 gate 审计）。
+5. 核对 receipt：`registry_classification.declared_retirements` 里有这一行、
+   `refused` 里没有它、`outcome: "published"`。注意声明的是**整份文件**：任何一条
+   entry 无效（generation 不符、checksum 不符、retire 了一个还在发布的 model）都会
+   让本趟**一条 retirement 也不入桶**，全部按 `registry_cutover_declaration_invalid`
+   拒——退役是破坏性动作，不做「部分放行」。
+6. 删 declaration（systemd 路径是删掉 EnvironmentFile 里那整行，见下），恢复 timer。
+
+留在原地的 retire declaration 与 replace declaration 一样会过期并拖停每日管线，
+清理纪律完全相同。
+
+**遗留路径降级（`--allow-uncovered-cutover`）**：手动 CLI 的 bypass 仍然可用，但
+**仅当 declaration 通道不可用时**才用（例如连 dry-run 都跑不起来）。它依旧是审计
+红旗：要记 bypass 理由 + 双端 SHA-256 + 事后 declaration 复位。常规退役一律走上面
+的 retire declaration。
+
+**共享消费者提示（#1433）**：同一份 declaration 文件也被 scheduler 侧
+（`services/orchestrator/scheduler_generation.py`）读。retire entry 对它无意义，
+被容忍-跳过：并存的 replace entry 照常匹配，retire entry 永不匹配任何候选。恢复
+顺序不需要为 scheduler 侧加步骤，但要知道这个文件是两边共享的。
 
 **systemd 路径（timer/service，#1095 起可用）**：wrapper
 `scripts/scheduler_file_provider_refresh_once.sh` 把 EnvironmentFile 当数据解析并只接受固定
@@ -626,7 +669,8 @@ lifetime），中途修改 declaration 文件不会被生效，直到下一次 s
 manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就
 不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或
 显式一次性 recovery 时使用 `--allow-uncovered-cutover` 跳过（会在 stderr 打印 WARNING）。
-常规运维必须走 declaration + 重跑，绝不 default 到 bypass。
+常规运维必须走 declaration + 重跑，绝不 default 到 bypass；退役一行走 retire
+declaration（见上），bypass 仅在 declaration 通道不可用时才动。
 
 **并发禁令（#1104，operator-gated）**：`nhms-scheduler-file-provider-refresh.timer`
 或其 oneshot service 处于活跃状态时，**严禁**运行 manual publisher CLI。CLI 路径

@@ -167,6 +167,7 @@ def publish_all_basin_scheduler_registry(
     workspace_budget: WorkspaceBudget | None = None,
     max_contexts: int | None = None,
     cutover_gate: Mapping[str, Any] | None = None,
+    skipped_model_sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     audited_cutover_gate = normalize_cutover_gate_audit(cutover_gate)
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
@@ -197,6 +198,7 @@ def publish_all_basin_scheduler_registry(
         inventory,
         basin_slugs=basin_slugs,
         model_ids=model_ids,
+        skipped_model_sink=skipped_model_sink,
     )
     contexts = [PublishContext(model=model, inventory_path=inventory_path) for model in selected_models]
     if max_contexts is not None and len(contexts) > max_contexts:
@@ -218,6 +220,7 @@ def publish_all_basin_scheduler_registry(
                 already_selected_model_ids={str(model.get("model_id")) for model in selected_models},
                 resource_validator=resource_validator,
                 workspace_budget=workspace_budget,
+                skipped_model_sink=skipped_model_sink,
             )
         )
         if max_contexts is not None and len(contexts) + len(repaired_radiation_contexts) > max_contexts:
@@ -629,11 +632,42 @@ def package_version_for_model(
     return version
 
 
+def _record_skipped_model(
+    sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None,
+    model: Mapping[str, Any],
+) -> None:
+    """Hand one skipped inventory row to the caller's sink (#1433).
+
+    A bulk run silently drops models it cannot publish.  When the model is
+    already in the canonical registry that skip surfaces downstream as a
+    registry removal, and the refresh gate needs the reason to tell "package
+    turned invalid" from "the model directory is gone".  The keys mirror the
+    not-publishable details this module already raises with, so operators read
+    one vocabulary on both lanes.  Selection itself is unchanged: this is a
+    read-only out-sink.
+    """
+    if sink is None:
+        return
+    model_id = str(model.get("model_id") or "")
+    if not model_id:
+        return
+    sink(
+        {
+            model_id: {
+                "status": model.get("status"),
+                "missing_required_files": model.get("missing_required_files") or [],
+                "invalid_required_files": model.get("invalid_required_files") or [],
+            }
+        }
+    )
+
+
 def _select_publishable_models(
     inventory: Mapping[str, Any],
     *,
     basin_slugs: Sequence[str],
     model_ids: Sequence[str],
+    skipped_model_sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     models = inventory.get("models")
     if not isinstance(models, Sequence) or isinstance(models, str | bytes | bytearray):
@@ -661,6 +695,7 @@ def _select_publishable_models(
         if requested_model_ids and model_id not in requested_model_ids:
             continue
         if model.get("status") != "valid" or model.get("default_publish_eligible") is not True:
+            _record_skipped_model(skipped_model_sink, model)
             if _is_missing_tsd_rl_only(model):
                 continue
             if requested_slugs or requested_model_ids:
@@ -704,6 +739,7 @@ def _repair_missing_radiation_contexts(
     already_selected_model_ids: set[str],
     resource_validator: Callable[[Path], None] | None = None,
     workspace_budget: WorkspaceBudget | None = None,
+    skipped_model_sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None = None,
 ) -> list[PublishContext]:
     requested_slugs = {str(value) for value in basin_slugs if str(value)}
     requested_model_ids = {str(value) for value in model_ids if str(value)}
@@ -748,6 +784,7 @@ def _repair_missing_radiation_contexts(
         if workspace_budget is not None:
             workspace_budget.rescan()
         if not repair_performed(repair):
+            _record_skipped_model(skipped_model_sink, model)
             if requested_slugs or requested_model_ids:
                 raise SchedulerRegistryPublishError(
                     "SCHEDULER_REGISTRY_MISSING_RADIATION_REPAIR_FAILED",
@@ -758,6 +795,10 @@ def _repair_missing_radiation_contexts(
         repaired_inventory = discover_basins_inventory(repaired_root)
         repaired_model = _find_inventory_model(repaired_inventory, model_id)
         if repaired_model.get("status") != "valid" or repaired_model.get("default_publish_eligible") is not True:
+            # The repaired row is the accurate one: it already reflects the
+            # rescued *.tsd.rl, so what it still reports is what actually
+            # blocks publication (#1433 evidence).
+            _record_skipped_model(skipped_model_sink, repaired_model)
             # Same split as the missing-template branch above, and as
             # ``_select_publishable_models``: an EXPLICITLY requested model that
             # cannot be published fails closed, but on a bulk (unfiltered) run
@@ -772,20 +813,22 @@ def _repair_missing_radiation_contexts(
             # prospective registry short a row, which #1080's cutover gate
             # classifies as a removal and refuses
             # (``registry_cutover_removal_refused``) before canonical
-            # replacement — the refresh lane has no bypass, only this CLI's
-            # ``--allow-uncovered-cutover``. So for registered models the run
-            # still fails; what changed is that it fails at the gate, with the
-            # previous registry intact, instead of mid-publish.
+            # replacement. So for registered models the run still fails; what
+            # changed is that it fails at the gate, with the previous registry
+            # intact, instead of mid-publish.
             # (Pinned by
             # ``test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate``.)
+            # #1433 gave that refusal a declared way out: a
+            # ``transition_mode: "retire"`` declaration entry admits the removal
+            # on the refresh lane, so this CLI's ``--allow-uncovered-cutover``
+            # is no longer the only exit.
             #
             # On the manual CLI lane the skip is not silent: with a persistent
             # ``--work-dir`` the run's ``basins-inventory.json`` keeps the
             # model's ``invalid_required_files`` / ``missing_required_files``.
-            # The refresh lane leaves no such trace — it deletes its run
-            # workspace every run (``scheduler_file_provider_refresh``'s
-            # ``_cleanup_run_workspace``) and its receipt does not list skipped
-            # models.
+            # The refresh lane gets the same rows through
+            # ``skipped_model_sink`` (#1433), which the gate copies onto the
+            # removal refusal.
             if requested_slugs or requested_model_ids:
                 raise SchedulerRegistryPublishError(
                     "SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE",

@@ -216,7 +216,8 @@
         "removed": {"$ref": "#/$defs/model_id_group"},
         "package_changed": {"$ref": "#/$defs/checksum_group"},
         "refused": {"$ref": "#/$defs/refused_group"},
-        "declared_cutovers": {"$ref": "#/$defs/declared_cutover_group"}
+        "declared_cutovers": {"$ref": "#/$defs/declared_cutover_group"},
+        "declared_retirements": {"$ref": "#/$defs/declared_retirement_group"}
       }
     }
   },
@@ -293,7 +294,10 @@
                   "registry_cutover_declaration_invalid"
                 ],
                 "maxLength": 64
-              }
+              },
+              "status": {"type": "string", "maxLength": 512},
+              "missing_required_files": {"$ref": "#/$defs/skip_cause_files"},
+              "invalid_required_files": {"$ref": "#/$defs/skip_cause_files"}
             }
           }
         },
@@ -325,6 +329,42 @@
               "new_checksum": {"$ref": "#/$defs/package_checksum"},
               "effective_cycle_utc": {"type": "string", "format": "date-time", "maxLength": 64},
               "transition_mode": {"enum": ["replace"]}
+            }
+          }
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "skip_cause_files": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"type": "string", "maxLength": 512}
+    },
+    "declared_retirement_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "model_id",
+              "old_checksum",
+              "new_checksum",
+              "effective_cycle_utc",
+              "transition_mode"
+            ],
+            "properties": {
+              "model_id": {"$ref": "#/$defs/model_id"},
+              "old_checksum": {"$ref": "#/$defs/package_checksum"},
+              "new_checksum": {"type": "null"},
+              "effective_cycle_utc": {"type": "string", "format": "date-time", "maxLength": 64},
+              "transition_mode": {"enum": ["retire"]}
             }
           }
         },

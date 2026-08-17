@@ -1034,6 +1034,199 @@ def test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate
     assert registry_manifest.read_bytes() == previous_bytes
 
 
+def test_undeclared_removal_refusal_carries_the_skip_cause_evidence(
+    tmp_path: Path,
+) -> None:
+    """#1433 branch (a): the refusal above stays fail-closed AND says why.
+
+    Same bulk skip, same refusal, previous canonical bytes intact, nothing
+    published — the only addition is that the refusal entry now carries the
+    inventory row the publisher skipped on (``status`` /
+    ``missing_required_files`` / ``invalid_required_files``), so an operator can
+    tell an invalid package from a deleted model directory without digging
+    through a workspace the refresh lane deletes.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    registry_manifest = tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json"
+    object_store_root = tmp_path / "objects"
+
+    registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work-bootstrap",
+    )
+    previous_bytes = registry_manifest.read_bytes()
+
+    _break_bravo_beyond_repair(basins_root)
+
+    generated_at = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
+    classification: dict[str, Any] = {}
+    skipped_models: dict[str, Mapping[str, Any]] = {}
+
+    def precommit_provider_generation(
+        workspace: Path,
+        packages: Sequence[Mapping[str, Any]],
+        registry_models: Sequence[Mapping[str, Any]],
+    ) -> None:
+        refresh._registry_precommit_gate(
+            workspace,
+            packages,
+            registry_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=sha256_bytes(previous_bytes),
+            prospective_generated_at=generated_at,
+            cutover_declaration_env=None,
+            dry_run=False,
+            classification_sink=classification.update,
+            now=generated_at,
+            skipped_models=skipped_models,
+        )
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        registry_script.publish_all_basin_scheduler_registry(
+            basins_root=basins_root,
+            registry_manifest=registry_manifest,
+            object_store_root=object_store_root,
+            object_store_prefix="s3://nhms",
+            work_dir=tmp_path / "work-refresh",
+            registry_generated_at=generated_at,
+            precommit_validator=precommit_provider_generation,
+            skipped_model_sink=skipped_models.update,
+        )
+
+    assert excinfo.value.details["provider_reason"] == "registry_cutover_removal_refused"
+    assert registry_manifest.read_bytes() == previous_bytes
+    assert classification["declared_retirements"]["total"] == 0
+    refusal = classification["refused"]["items"][0]
+    assert refusal["model_id"] == "basins_bravo_shud"
+    assert refusal["reason"] == "registry_cutover_removal_refused"
+    assert refusal["status"] == "partial"
+    # The row is the POST-repair one: the radiation repair restored bravo's
+    # ``*.tsd.rl`` from alpha's template, so what is left is what actually
+    # blocks the publish — the malformed IC header.
+    assert refusal["missing_required_files"] == []
+    assert any("2 numeric token(s)" in reason for reason in refusal["invalid_required_files"])
+
+
+def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
+    tmp_path: Path,
+) -> None:
+    """#1433: the retire declaration is the way out of the removal deadlock.
+
+    Same tree, same gate wiring, and the same bulk skip as the refusal test
+    above.  The only difference is a declaration naming ``basins_bravo_shud``
+    with ``transition_mode: "retire"`` and ``new_checksum: null``: the gate then
+    admits the removal, the refresh publishes, canonical loses exactly bravo's
+    row, and alpha publishes normally.
+
+    The first (refused) run stands in for the runbook's dry-run step: it is how
+    an operator reads the prospective generation the declaration must bind to.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    registry_manifest = tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json"
+    object_store_root = tmp_path / "objects"
+
+    registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work-bootstrap",
+    )
+    previous_bytes = registry_manifest.read_bytes()
+    previous_rows = {row["model_id"]: row for row in json.loads(previous_bytes)["models"]}
+    assert set(previous_rows) == {"basins_alpha_shud", "basins_bravo_shud"}
+
+    _break_bravo_beyond_repair(basins_root)
+
+    generated_at = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
+    classification: dict[str, Any] = {}
+    prospective_models: list[dict[str, Any]] = []
+    declaration_env: dict[str, str] = {}
+
+    def precommit_provider_generation(
+        workspace: Path,
+        packages: Sequence[Mapping[str, Any]],
+        registry_models: Sequence[Mapping[str, Any]],
+    ) -> None:
+        prospective_models[:] = [dict(row) for row in registry_models]
+        refresh._registry_precommit_gate(
+            workspace,
+            packages,
+            registry_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=sha256_bytes(previous_bytes),
+            prospective_generated_at=generated_at,
+            cutover_declaration_env=declaration_env.get("path"),
+            dry_run=False,
+            classification_sink=classification.update,
+            now=generated_at,
+        )
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        registry_script.publish_all_basin_scheduler_registry(
+            basins_root=basins_root,
+            registry_manifest=registry_manifest,
+            object_store_root=object_store_root,
+            object_store_prefix="s3://nhms",
+            work_dir=tmp_path / "work-undeclared",
+            registry_generated_at=generated_at,
+            precommit_validator=precommit_provider_generation,
+        )
+    assert excinfo.value.details["provider_reason"] == "registry_cutover_removal_refused"
+
+    declaration = tmp_path / "retire-declaration.json"
+    declaration.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.scheduler.registry_package_cutover.v1",
+                "generated_at": "2026-08-16T00:00:00Z",
+                "generation": refresh._prospective_registry_generation(
+                    prospective_models, generated_at=generated_at
+                ),
+                "entries": [
+                    {
+                        "model_id": "basins_bravo_shud",
+                        "old_checksum": previous_rows["basins_bravo_shud"]["package_checksum"],
+                        "new_checksum": None,
+                        "effective_cycle_utc": "2026-08-16T12:00:00Z",
+                        "transition_mode": "retire",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    declaration_env["path"] = str(declaration)
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work-retire",
+        registry_generated_at=generated_at,
+        precommit_validator=precommit_provider_generation,
+    )
+
+    assert summary["status"] == "published"
+    published_rows = json.loads(registry_manifest.read_text(encoding="utf-8"))["models"]
+    assert {row["model_id"] for row in published_rows} == {"basins_alpha_shud"}
+    assert classification["removed"]["items"] == ["basins_bravo_shud"]
+    assert classification["refused"]["total"] == 0
+    retired = classification["declared_retirements"]["items"]
+    assert [entry["model_id"] for entry in retired] == ["basins_bravo_shud"]
+    assert retired[0]["old_checksum"] == previous_rows["basins_bravo_shud"]["package_checksum"]
+    assert retired[0]["new_checksum"] is None
+    assert retired[0]["transition_mode"] == "retire"
+
+
 def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:
     input_dir = _write_soil_alpha_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
 

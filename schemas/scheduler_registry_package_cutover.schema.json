@@ -31,10 +31,35 @@
         "properties": {
           "model_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"},
           "old_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "new_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "new_checksum": {
+            "anyOf": [
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              {"type": "null"}
+            ]
+          },
           "effective_cycle_utc": {"type": "string", "format": "date-time", "maxLength": 64},
-          "transition_mode": {"enum": ["replace"]}
-        }
+          "transition_mode": {"enum": ["replace", "retire"]}
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"transition_mode": {"const": "retire"}},
+              "required": ["transition_mode"]
+            },
+            "then": {"properties": {"new_checksum": {"type": "null"}}}
+          },
+          {
+            "if": {
+              "properties": {"transition_mode": {"const": "replace"}},
+              "required": ["transition_mode"]
+            },
+            "then": {
+              "properties": {
+                "new_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
+        ]
       }
     }
   }

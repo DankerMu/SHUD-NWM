@@ -34,6 +34,7 @@
     "docs/runbooks/current-production-ops.md",
     "packages/common/state_manager.py",
     "services/orchestrator/scheduler_candidates.py",
+    "services/orchestrator/scheduler_generation.py",
     "services/orchestrator/scheduler_state_failure.py",
     "tests/test_production_scheduler.py",
     "tests/test_retry.py",

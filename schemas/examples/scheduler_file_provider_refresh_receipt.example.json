@@ -117,6 +117,7 @@
     "removed": {"items": [], "total": 0, "truncated": false},
     "package_changed": {"items": [], "total": 0, "truncated": false},
     "refused": {"items": [], "total": 0, "truncated": false},
-    "declared_cutovers": {"items": [], "total": 0, "truncated": false}
+    "declared_cutovers": {"items": [], "total": 0, "truncated": false},
+    "declared_retirements": {"items": [], "total": 0, "truncated": false}
   }
 }

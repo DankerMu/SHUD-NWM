@@ -105,7 +105,13 @@ REGISTRY_CUTOVER_REFUSAL_REASONS = frozenset(
 )
 CUTOVER_SCHEMA_VERSION = "nhms.scheduler.registry_package_cutover.v1"
 REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
-CUTOVER_TRANSITION_MODES = frozenset({"replace"})
+CUTOVER_TRANSITION_MODES = frozenset({"replace", "retire"})
+# Per-bucket transition modes (#1433).  The declaration-level constant above is
+# the union the loader accepts; each classification bucket admits exactly one
+# mode, so a forged `"retire"` row inside `declared_cutovers` (or the reverse)
+# is rejected by `_validate_object_group` instead of riding the union.
+CUTOVER_REPLACE_TRANSITION_MODES = frozenset({"replace"})
+CUTOVER_RETIRE_TRANSITION_MODES = frozenset({"retire"})
 CUTOVER_DECLARATION_ENV = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
 MAX_CUTOVER_DECLARATION_BYTES = 256 * 1024
 CUTOVER_PAST_TOLERANCE = timedelta(hours=24)
@@ -766,6 +772,15 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 nonlocal registry_classification
                 registry_classification = payload
 
+            # #1433: bulk publish drops models it cannot publish; when such a
+            # model is already canonical the gate sees a removal and has to say
+            # why the row went missing.  The publisher feeds those rows here
+            # before it calls the precommit callback below.
+            skipped_models: dict[str, Mapping[str, Any]] = {}
+
+            def _skipped_model_sink(rows: Mapping[str, Mapping[str, Any]]) -> None:
+                skipped_models.update(rows)
+
             def precommit_provider_generation(
                 workspace: Path,
                 packages: Sequence[Mapping[str, Any]],
@@ -782,6 +797,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     cutover_declaration_env=cutover_declaration_env,
                     dry_run=dry_run,
                     classification_sink=_classification_sink,
+                    skipped_models=skipped_models,
                 )
                 readiness_entries, readiness_derivation = derive_catalog_bound_readiness_entries(
                     registry_models,
@@ -877,6 +893,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     workspace_budget=workspace_budget,
                     max_contexts=MAX_ORPHANS,
                     cutover_gate=runner_cutover_gate_audit,
+                    skipped_model_sink=_skipped_model_sink,
                 )
 
             if not dry_run and config.worker_registry_uri is not None:
@@ -1874,7 +1891,17 @@ _CLASSIFICATION_GROUP_KEYS = frozenset({"items", "total", "truncated"})
 # on-disk receipts written before #1140 (`reconstruct_primary_receipt` /
 # `validate_current_receipt`), which carry no such key.
 CLASSIFICATION_MODES = frozenset({"id_only", "full"})
-_CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode"})
+# #1433: `declared_retirements` joins `mode` as OPTIONAL for the same reason —
+# `reconstruct_primary_receipt` / `validate_current_receipt` read on-disk
+# receipts written before the bucket existed, and a required key would
+# retroactively invalidate every one of them.
+_CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode", "declared_retirements"})
+# #1433: skip-cause evidence keys copied onto a `registry_cutover_removal_refused`
+# entry when bulk publish reported the model as skipped.  Same key names the
+# publisher's not-publishable diagnostics use
+# (`publish_scheduler_file_registry.py:675`) so operators read one vocabulary.
+_SKIP_CAUSE_LIST_KEYS = frozenset({"missing_required_files", "invalid_required_files"})
+_SKIP_CAUSE_KEYS = frozenset({"status"}) | _SKIP_CAUSE_LIST_KEYS
 
 
 def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
@@ -1965,7 +1992,7 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
     _validate_object_group(
         refused,
         required_keys={"model_id", "reason"},
-        optional_keys={"old_checksum", "new_checksum"},
+        optional_keys={"old_checksum", "new_checksum"} | set(_SKIP_CAUSE_KEYS),
         reason_enum=REGISTRY_CUTOVER_REFUSAL_REASONS,
     )
     declared = classification.get("declared_cutovers")
@@ -1979,7 +2006,21 @@ def _validate_registry_classification_field(receipt: Mapping[str, Any]) -> None:
             "transition_mode",
         },
         optional_keys=set(),
+        transition_modes=CUTOVER_REPLACE_TRANSITION_MODES,
     )
+    if "declared_retirements" in classification:
+        _validate_object_group(
+            classification.get("declared_retirements"),
+            required_keys={
+                "model_id",
+                "old_checksum",
+                "new_checksum",
+                "effective_cycle_utc",
+                "transition_mode",
+            },
+            optional_keys=set(),
+            transition_modes=CUTOVER_RETIRE_TRANSITION_MODES,
+        )
     _enforce_registry_classification_reconciliation(
         classification, outcome=outcome, reason=reason
     )
@@ -2000,9 +2041,14 @@ def _enforce_registry_classification_reconciliation(
     * ``added + unchanged + package_changed == prospective_count``.
     * ``declared_cutovers`` model_ids are a subset of ``package_changed``
       model_ids.
-    * ``refused`` covers every ``removed`` entry, every ``package_changed``
-      entry not in ``declared_cutovers``, and every ``declaration_invalid``
-      entry (including synthetic ``__declaration__`` markers).
+    * ``declared_retirements`` (#1433, optional bucket — legacy receipts read
+      as empty) model_ids are a subset of ``removed`` model_ids AND
+      ``declared_retirements.total <= removed.total``; the bucket is empty in
+      id-only mode.
+    * ``refused`` covers every ``removed`` entry not admitted by a declared
+      retirement, every ``package_changed`` entry not in ``declared_cutovers``,
+      and every ``declaration_invalid`` entry (including synthetic
+      ``__declaration__`` markers).
     * id-only mode (``classification.mode == "id_only"``, i.e. the dry_run
       partition of ``_classify_registry``; legacy receipts with no ``mode``
       key fall back to ``outcome == "dry_run"``): ``package_changed`` may
@@ -2050,6 +2096,17 @@ def _enforce_registry_classification_reconciliation(
             raise ValueError("receipt_classification_invalid")
         return items
 
+    def _optional_group(group_name: str) -> tuple[int, list[Any]]:
+        """#1433: read a bucket that legacy receipts do not carry.
+
+        An absent bucket reads as ``(0, [])`` — pre-#1433 receipts on disk are
+        honest, not tampered.  A PRESENT bucket is validated exactly as strictly
+        as a required one.
+        """
+        if group_name not in classification:
+            return 0, []
+        return _total(group_name), _items(group_name)
+
     added_total = _total("added")
     unchanged_total = _total("unchanged")
     removed_total = _total("removed")
@@ -2070,6 +2127,21 @@ def _enforce_registry_classification_reconciliation(
     if not declared_ids <= package_changed_ids:
         # `declared_cutovers ⊆ package_changed` per spec — any declared row
         # must also be listed in `package_changed`.
+        raise ValueError("receipt_classification_invalid")
+
+    # #1433: the same containment for the retirement bucket, plus a total-level
+    # inequality.  The `⊆` check runs on items, which truncate at
+    # MAX_COLLECTION_ITEMS, so an emptied item list with an inflated total would
+    # otherwise satisfy containment vacuously while deflating the refused lower
+    # bound below.  Both must hold.
+    retired_total, retired_items = _optional_group("declared_retirements")
+    retired_ids = {
+        item.get("model_id") for item in retired_items if isinstance(item, Mapping)
+    }
+    removed_ids = {item for item in _items("removed") if isinstance(item, str)}
+    if not retired_ids <= removed_ids:
+        raise ValueError("receipt_classification_invalid")
+    if retired_total > removed_total:
         raise ValueError("receipt_classification_invalid")
 
     prospective_count = classification.get("prospective_model_count")
@@ -2112,6 +2184,11 @@ def _enforce_registry_classification_reconciliation(
         # id-only classification: prospective rows have no checksum, so
         # package_changed/declared_cutovers stay empty by construction.
         if package_changed_total != 0 or declared_total != 0:
+            raise ValueError("receipt_classification_invalid")
+        # #1433: the id-only path returns before the removal loop, so it can
+        # never admit a retirement either.  A present bucket must read zero; an
+        # absent one already does.
+        if retired_total != 0:
             raise ValueError("receipt_classification_invalid")
         if mode is None:
             # Legacy outcome-keyed fallback: behavior frozen as it was before
@@ -2228,11 +2305,13 @@ def _enforce_registry_classification_reconciliation(
     if added_total + unchanged_total + package_changed_total != prospective_count:
         raise ValueError("receipt_classification_invalid")
 
-    # refused equals every removed entry + every package_changed entry not
-    # in declared_cutovers + every entry rejected by declaration_invalid.
-    # The declaration_invalid slice is unbounded (may include the synthetic
-    # `__declaration__` marker) so we assert only the lower bound.
-    expected_min_refused = removed_total + max(
+    # refused equals every removed entry NOT admitted by a declared retirement
+    # (#1433) + every package_changed entry not in declared_cutovers + every
+    # entry rejected by declaration_invalid.  The declaration_invalid slice is
+    # unbounded (may include the synthetic `__declaration__` marker) so we
+    # assert only the lower bound.  `retired_total <= removed_total` is already
+    # enforced above, so the first term cannot go negative.
+    expected_min_refused = (removed_total - retired_total) + max(
         package_changed_total - declared_total, 0
     )
     if refused_total < expected_min_refused:
@@ -2266,6 +2345,7 @@ def _validate_object_group(
     required_keys: set[str],
     optional_keys: set[str],
     reason_enum: frozenset[str] | None = None,
+    transition_modes: frozenset[str] = CUTOVER_TRANSITION_MODES,
 ) -> None:
     if not isinstance(group, Mapping) or set(group) != _CLASSIFICATION_GROUP_KEYS:
         raise ValueError("receipt_classification_invalid")
@@ -2299,7 +2379,19 @@ def _validate_object_group(
                 if reason_enum is not None and value not in reason_enum:
                     raise ValueError("receipt_classification_invalid")
             elif name == "transition_mode":
-                if value not in CUTOVER_TRANSITION_MODES:
+                if value not in transition_modes:
+                    raise ValueError("receipt_classification_invalid")
+            elif name in _SKIP_CAUSE_LIST_KEYS:
+                # #1433 skip-cause evidence: bounded list of bounded strings.
+                # The writer applies the same two caps.
+                if (
+                    not isinstance(value, list)
+                    or len(value) > MAX_COLLECTION_ITEMS
+                    or any(
+                        not isinstance(entry, str) or len(entry) > MAX_STRING_LENGTH
+                        for entry in value
+                    )
+                ):
                     raise ValueError("receipt_classification_invalid")
             elif isinstance(value, str):
                 if len(value) > MAX_STRING_LENGTH:
@@ -2538,7 +2630,21 @@ def _load_cutover_declaration(
             raise RefreshError("registry_cutover_declaration_invalid")
         if cycle < now - CUTOVER_PAST_TOLERANCE or cycle > now + CUTOVER_FUTURE_TOLERANCE:
             raise RefreshError("registry_cutover_declaration_invalid")
-        if str(entry.get("transition_mode")) not in CUTOVER_TRANSITION_MODES:
+        transition_mode = str(entry.get("transition_mode"))
+        if transition_mode not in CUTOVER_TRANSITION_MODES:
+            raise RefreshError("registry_cutover_declaration_invalid")
+        # Mirror the schema's mode/checksum conditionals in code (#1433) so a
+        # payload that reached here through a stale validator still fails
+        # closed: a retirement declares no new package, a replacement must.
+        new_checksum = entry.get("new_checksum")
+        if transition_mode == "retire":
+            if new_checksum is not None:
+                raise RefreshError("registry_cutover_declaration_invalid")
+        elif (
+            not isinstance(new_checksum, str)
+            or len(new_checksum) != 64
+            or any(character not in "0123456789abcdef" for character in new_checksum)
+        ):
             raise RefreshError("registry_cutover_declaration_invalid")
     return payload
 
@@ -2614,6 +2720,9 @@ class _RegistryClassification:
     package_changed: list[dict[str, str]] = dataclass_field(default_factory=list)
     refused: list[dict[str, Any]] = dataclass_field(default_factory=list)
     declared_cutovers: list[dict[str, Any]] = dataclass_field(default_factory=list)
+    # #1433: removals admitted by a `transition_mode: "retire"` declaration
+    # entry — a subset of `removed` that carries no refusal.
+    declared_retirements: list[dict[str, Any]] = dataclass_field(default_factory=list)
 
     def to_receipt(self) -> dict[str, Any]:
         def id_group(values: Sequence[str]) -> dict[str, Any]:
@@ -2641,6 +2750,9 @@ class _RegistryClassification:
             "refused": obj_group(sorted(self.refused, key=lambda item: item["model_id"])),
             "declared_cutovers": obj_group(
                 sorted(self.declared_cutovers, key=lambda item: item["model_id"])
+            ),
+            "declared_retirements": obj_group(
+                sorted(self.declared_retirements, key=lambda item: item["model_id"])
             ),
         }
 
@@ -2683,6 +2795,32 @@ def _rows_have_identical_identity(
     return True
 
 
+def _skip_cause_evidence(
+    skipped_models: Mapping[str, Mapping[str, Any]] | None, model_id: str
+) -> dict[str, Any] | None:
+    """Return bounded skip-cause evidence for ``model_id`` (or ``None``).
+
+    ``None`` means bulk publish never reported the model as skipped — the
+    removal is a disappeared model directory rather than an unpublishable
+    package, and the refusal entry carries no skip-cause keys.  That absence is
+    the discriminator operators read (#1433).
+    """
+    row = (skipped_models or {}).get(model_id)
+    if not isinstance(row, Mapping):
+        return None
+
+    def _bounded_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item)[:MAX_STRING_LENGTH] for item in value[:MAX_COLLECTION_ITEMS]]
+
+    return {
+        "status": str(row.get("status") or "")[:MAX_STRING_LENGTH],
+        "missing_required_files": _bounded_list(row.get("missing_required_files")),
+        "invalid_required_files": _bounded_list(row.get("invalid_required_files")),
+    }
+
+
 def _classify_registry(
     *,
     previous: Sequence[Mapping[str, Any]] | None,
@@ -2692,6 +2830,7 @@ def _classify_registry(
     generation: str,
     declaration: Mapping[str, Any] | None,
     dry_run: bool,
+    skipped_models: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[_RegistryClassification, str | None]:
     """Return (classification, refusal_reason).
 
@@ -2789,12 +2928,22 @@ def _classify_registry(
             }
         )
 
-    # 1. Any declaration entry whose model_id is not part of the prospective
-    #    registry is invalid — an operator cannot cutover an unknown model.
+    # 1. Every declaration entry must name a model this refresh can act on.
+    #    A `replace` entry must be in the prospective registry — an operator
+    #    cannot cutover an unknown model.  A `retire` entry (#1433) is
+    #    validated against the REMOVAL set instead: by definition its model is
+    #    absent from the prospective registry, so the prospective membership
+    #    test would reject every legal retirement.  Retiring a model that is
+    #    still being published, or one that was never canonical, is invalid.
+    removed_ids = set(result.removed)
     unknown_declaration_ids = [
         model_id
-        for model_id in declaration_entries
-        if model_id not in prospective_by_id
+        for model_id, entry in declaration_entries.items()
+        if (
+            model_id not in removed_ids
+            if str(entry.get("transition_mode") or "") == "retire"
+            else model_id not in prospective_by_id
+        )
     ]
     declaration_invalid = bool(unknown_declaration_ids) or not generation_matches
     for model_id in unknown_declaration_ids:
@@ -2849,24 +2998,74 @@ def _classify_registry(
             }
         )
 
-    # 4. Removals are refused — deliberate decommission is out of scope for
-    #    #1080 and must go through a separate declared workflow.
+    # 4. Removals are admissible ONLY through a declared retirement (#1433);
+    #    every other removal stays refused exactly as #1080 required.
+    #
+    #    Two passes, deliberately stricter than rule 2's single pass: rule 2
+    #    lets an early valid row into `declared_cutovers` before a later entry
+    #    invalidates the declaration, which is tolerable because a replacement
+    #    only swaps a checksum.  Dropping a canonical row is destructive, so
+    #    admission must not depend on the iteration order of `removed`: pass 1
+    #    settles the poison bit, pass 2 admits only when the declaration is
+    #    valid as a whole.
+    matched_retirements: list[tuple[str, Mapping[str, Any]]] = []
+    unmatched_removals: list[str] = []
     for model_id in result.removed:
-        result.refused.append(
+        entry = declaration_entries.get(model_id)
+        if entry is None or str(entry.get("transition_mode") or "") != "retire":
+            # No entry at all, or a `replace` entry naming this model (already
+            # refused by rule 1 as an unknown id): the removal itself is
+            # undeclared.
+            unmatched_removals.append(model_id)
+            continue
+        previous_checksum = (
+            str(previous_by_id[model_id].get("package_checksum") or "") or None
+        )
+        if str(entry.get("old_checksum")) != previous_checksum:
+            # Same semantics as rule 2's checksum mismatch: poison the
+            # declaration and refuse the ENTRY.  This removal gets exactly one
+            # refusal row — no additional `removal_refused` row for it.
+            declaration_invalid = True
+            refuse_declaration(model_id, entry)
+            continue
+        matched_retirements.append((model_id, entry))
+
+    for model_id, entry in matched_retirements:
+        if declaration_invalid:
+            # A declaration invalidated by ANY entry (rule 1, rule 2, or a
+            # sibling retirement) admits no retirement in this run.
+            refuse_declaration(model_id, entry)
+            continue
+        result.declared_retirements.append(
             {
                 "model_id": model_id,
-                "old_checksum": str(previous_by_id[model_id].get("package_checksum") or "") or None,
+                "old_checksum": str(entry.get("old_checksum") or "") or None,
                 "new_checksum": None,
-                "reason": "registry_cutover_removal_refused",
+                "effective_cycle_utc": str(entry.get("effective_cycle_utc") or ""),
+                "transition_mode": str(entry.get("transition_mode") or ""),
             }
         )
+
+    for model_id in unmatched_removals:
+        refusal: dict[str, Any] = {
+            "model_id": model_id,
+            "old_checksum": str(previous_by_id[model_id].get("package_checksum") or "") or None,
+            "new_checksum": None,
+            "reason": "registry_cutover_removal_refused",
+        }
+        # #1433: when bulk publish reported the model as skipped, say WHY the
+        # row disappeared.  Only removal refusals carry this evidence.
+        evidence = _skip_cause_evidence(skipped_models, model_id)
+        if evidence is not None:
+            refusal.update(evidence)
+        result.refused.append(refusal)
 
     # Decide the single refusal reason to raise (declaration-invalid takes
     # priority so operators see the schema problem first, then removal, then
     # undeclared drift).
     if declaration_invalid:
         return result, "registry_cutover_declaration_invalid"
-    if result.removed:
+    if unmatched_removals:
         return result, "registry_cutover_removal_refused"
     if undeclared:
         return result, "registry_cutover_undeclared"
@@ -2885,6 +3084,7 @@ def _registry_precommit_gate(
     dry_run: bool,
     classification_sink: Callable[[dict[str, Any]], None],
     now: datetime | None = None,
+    skipped_models: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Precommit gate.
 
@@ -2939,6 +3139,7 @@ def _registry_precommit_gate(
         generation=prospective_generation,
         declaration=declaration,
         dry_run=dry_run,
+        skipped_models=skipped_models,
     )
     if declaration_load_error is not None:
         # Surface the file-level load failure without needing the operator to
