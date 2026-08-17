@@ -1,29 +1,6 @@
-# multibasin-state-idempotency Specification
+# Delta: multibasin-state-idempotency (downstream-resume-code-scope)
 
-## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
-## Requirements
-### Requirement: Database-backed candidate state
-
-The scheduler SHALL persist candidate and stage state in database-backed pipeline/hydro/met records and events, not only local filesystem state files.
-
-#### Scenario: terminal success skip
-
-WHEN a scan finds an existing pipeline job or hydro run for the same source/cycle/model/scenario in a terminal successful state
-THEN it skips the candidate and records the terminal-state reason.
-
-#### Scenario: hydro durable terminal skip
-
-WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, or `published`
-THEN the candidate is treated as terminal successful
-AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are not resubmitted by default
-AND the skip evidence records the durable hydro status that caused the skip.
-
-#### Scenario: active job skip
-
-WHEN a scan finds a submitted or running Slurm job for the same candidate
-THEN it checks current Slurm state
-AND skips resubmission while the job remains active.
+## MODIFIED Requirements
 
 ### Requirement: Resumable downstream failures
 
@@ -37,7 +14,7 @@ AND does not rerun native SHUD unless configured to force rerun.
 
 #### Scenario: recorded non-transient downstream failure is guarded, not resumed
 
-WHEN SHUD output exists but the downstream failure carries a genuinely recorded error code that is non-transient (e.g. `OUTPUT_INCOMPLETE` or a recorded `PARSE_FAILED`, classified non-transient since the stage-failure family joined the non-transient list), unknown and defaulted non-transient (e.g. a recorded `SLURM_JOB_FAILED`), or over its retry budget
+WHEN SHUD output exists but the downstream failure carries a genuinely recorded error code that is non-transient (e.g. `OUTPUT_INCOMPLETE`), unknown and defaulted non-transient (e.g. a recorded `PARSE_FAILED`, `SLURM_JOB_FAILED`), or over its retry budget
 THEN the downstream-resume channel refuses to resume
 AND absent another legitimate channel claim (e.g. a genuinely changed model package under `job-retry-mechanism`) the candidate moves to the permanent-failure guard with automatic retry refused, where resumption requires an explicit operator retry action, consistent with the permanent failure guard scenario of this spec
 
