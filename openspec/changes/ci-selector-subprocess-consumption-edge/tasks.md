@@ -15,7 +15,8 @@
 - [x] 1.2 `_derived_support_module_importers` = import index ∪
       literal index per module; guard failure message distinguishes
       edge kind via an optional `consumer_edges` label-source
-      parameter defaulting to the real literal index (label only;
+      parameter defaulting lazily to the real literal index (built
+      only when an offender message needs it — round-1 fix; label only;
       derived sets stay parameter-driven — the exact-message test
       at :2432-2442 stays green); branch (c) semantics unchanged.
 - [x] 1.3 Fifth `SUPPORT_MODULE_TEST_RULES` entry:
@@ -68,7 +69,9 @@
       parenthetical retired; derived 0-consumer example; new
       subprocess-consumption scenario without PR-lane execution
       overclaim (P2-3); "closure completeness" WHEN broadened to
-      both edge kinds (P2-5)); byte-faithful otherwise.
+      both edge kinds (P2-5) with the import half keeping its
+      "at top level" qualifier (round-1 P2 — dropping it overclaims
+      function-body imports)); byte-faithful otherwise.
 
 ## 5. Evidence Floor
 

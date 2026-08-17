@@ -224,7 +224,7 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
 # — import/syntax only, zero assertions (#1453/#1454). For a support module that
 # real suites import at file level, that lane is blind to exactly the breakage a
 # fixture edit causes, so #1487 routes such a module to its non-gated top-level
-# importer suites instead. Exact paths, no globs: four entries, and
+# importer suites instead. Exact paths, no globs: five entries, and
 # tests/test_select_ci_tests.py DERIVES the required sets from the tracked tree
 # (never freezes them), so a new importer suite reddens the closure guard naming
 # the module and the missing suite. `tests/integration_helpers.py` and

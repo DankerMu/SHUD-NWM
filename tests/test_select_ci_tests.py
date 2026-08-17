@@ -1930,8 +1930,8 @@ def _importer_equivalence_offenders(
 EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE = 3
 
 
-def _importer_equivalence_sample() -> list[str]:
-    """Dotted names the equivalence pin compares — derived, never a frozen list.
+def _importer_equivalence_sample() -> tuple[list[str], list[str]]:
+    """``(support half, production half)`` — derived, never a frozen list.
 
     Every tracked `tests/` support module is in: that is the live domain of the
     closure guard, which reads the index for exactly these. The production half
@@ -1940,13 +1940,18 @@ def _importer_equivalence_sample() -> list[str]:
     construction only contains modules the index ALREADY reports an importer for
     — biased away from the regression this pin exists to catch, an index that
     quietly stops seeing a module.
+
+    Returned as two halves rather than one concatenation so the pin can check
+    each against its own source: a support half shrinking and a production head
+    slice emptying are different regressions, and a single length floor over the
+    union passes through both.
     """
     support = [_dotted_module_name(path) for path in _tracked_tests_support_modules()]
     production = [
         _dotted_module_name(path)
         for path in _directory_rule_audit_modules()[:EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE]
     ]
-    return support + production
+    return support, production
 
 
 def test_importer_index_equals_the_per_module_authority_helper() -> None:
@@ -1960,8 +1965,24 @@ def test_importer_index_equals_the_per_module_authority_helper() -> None:
     # the expensive side (it re-parses every test file per call), which is why
     # the production sample is a head slice rather than the whole directory
     # audit.
-    sample = _importer_equivalence_sample()
-    assert len(sample) > EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE, "sample lost its support-module half"
+    #
+    # Sample integrity is checked per half, each against a source independent of
+    # the tree derivation that built it: the support half must still contain
+    # every module SUPPORT_MODULE_TEST_RULES routes (a tracked table, so an 8->1
+    # shrink in `_tracked_tests_support_modules` reds here instead of shrinking
+    # the compared domain in silence), and the production head slice must still
+    # be the full slice.
+    support, production = _importer_equivalence_sample()
+    sample = support + production
+    routed = {_dotted_module_name(rule.pattern) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert routed <= set(support), (
+        "support half no longer covers every module the routing table routes, missing "
+        f"{sorted(routed - set(support))}"
+    )
+    assert len(production) == EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE, (
+        f"production half is {production}, expected {EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE} modules "
+        "off the head of the directory-rule audit"
+    )
     index = _non_gated_top_level_importer_index()
 
     offenders = _importer_equivalence_offenders(modules=sample, index=index)
@@ -2552,9 +2573,14 @@ def _support_module_closure_offenders(
     exclusively from ``derived``, which keeps the every-input-is-a-parameter
     property intact — the label source is itself a parameter, and a constructed
     pair absent from it simply falls back to the import wording.
+
+    That default index is a full-tree AST scan (~2 s), so it is built LAZILY, on
+    the first offender that needs a label: a green run has no offenders and pays
+    nothing, while a run that produces one still labels off the real index, so
+    the wording is exactly what it was when the build was eager.
     """
     resolve = _selection_for_module if select is None else select
-    labels = _literal_path_consumer_index() if consumer_edges is None else consumer_edges
+    labels = consumer_edges
     offenders: list[str] = []
     for module in modules:
         if module in carveouts:
@@ -2562,14 +2588,20 @@ def _support_module_closure_offenders(
         importers = derived.get(module, set())
         selection = resolve(module)
         if importers:
+            missing = sorted(importers - selection)
+            if not missing:
+                continue
+            if labels is None:
+                labels = _literal_path_consumer_index()
+            literal_consumers = labels.get(module, set())
             offenders.extend(
                 f"{module} -> {suite}: "
                 + (
                     "literal-path consumer suite is not selected"
-                    if suite in labels.get(module, set())
+                    if suite in literal_consumers
                     else "derived non-gated importer suite is not selected"
                 )
-                for suite in sorted(importers - selection)
+                for suite in missing
             )
         elif selection != {SELECTOR_META_GUARD_TEST}:
             offenders.append(

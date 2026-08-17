@@ -19,9 +19,9 @@ For every tracked non-suite Python module under `tests/` (classified by the sele
 
 #### Scenario: closure completeness is mechanized
 
-- **WHEN** a new non-gated suite importing, or carrying the exact
-  repo-relative literal path of, a routed support module is added to
-  the tree without extending the module's rule
+- **WHEN** a new non-gated suite importing a routed support module at
+  top level, or carrying its exact repo-relative literal path, is
+  added to the tree without extending the module's rule
 - **THEN** the closure guard fails, naming the module and the missing
   suite
 

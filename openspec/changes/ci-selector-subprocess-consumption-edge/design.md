@@ -165,11 +165,13 @@
    module; (d) ONE new scenario for subprocess-consumed routing
    whose wording does NOT claim PR-lane execution for
    function-gated consumers (P2-3); (e) the "closure completeness
-   is mechanized" scenario's WHEN broadens to "importing, or
-   carrying the repo-relative literal path of, a routed support
-   module" (P2-5 — the original rot direction, a NEW consumer
+   is mechanized" scenario's WHEN broadens to "importing a routed
+   support module at top level, or carrying its exact repo-relative
+   literal path" (P2-5 — the original rot direction, a NEW consumer
    appearing without a rule extension, must be covered for both
-   edge kinds). Byte-faithful otherwise (difflib zero substantive
+   edge kinds; the "at top level" qualifier is KEPT — round-1 review
+   caught that dropping it overclaims function-body imports, which
+   the top-level-only import walk deliberately ignores). Byte-faithful otherwise (difflib zero substantive
    deletions beyond the surgical spots).
 
 ## Must preserve
@@ -224,9 +226,21 @@ tracked mutation.
   comment (exact-literal edges only; the alternative substring
   matching buys false positives). The 10 live sites all use the
   full literal.
-- Wall-clock: the literal scan must ride the SAME single AST pass as
-  the import index (collect string constants alongside imports), not
-  a second parse of 190 files.
+- Wall-clock: the plan required the literal scan to ride the SAME
+  single AST pass as the import index. RECORDED DEVIATION (round-1
+  P2 ruling): the implementation keeps `_literal_path_consumer_index()`
+  as a separate single-purpose pass — merging it into
+  `_non_gated_top_level_importer_index()` would restructure a function
+  whose exact return value is doubly pinned (#1499 equivalence pin,
+  #1455 disposition guard), and memoizing `_parse_tracked` interacts
+  with tests that chdir into tmp_path and parse same-named fixture
+  paths. Cost is contained instead by making the closure guard's
+  `consumer_edges` label default LAZY (built only when a module with
+  missing suites actually needs labeling; the 3 label-free call sites
+  now pay zero scans — measured 14→11 full-tree literal scans,
+  22.3 s→16.7 s scan time; the other 3 call sites produce offenders
+  and legitimately build the real label index), and whole-suite parse
+  memoization is routed as a follow-up issue.
 - Do not let the union leak into `_directory_rule_importer_map`
   (#1455 domain) — support-module paths never appear there, but keep
   the union scoped to `_derived_support_module_importers`.
