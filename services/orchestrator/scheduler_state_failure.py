@@ -265,7 +265,7 @@ def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
     then the failed stage's own failed job row.  Events never participate: an
     event-only code has no production shape, because ``candidate_state_from_rows``
     projects a ``failed_task`` event to the top-level ``error_code``
-    (chain_repository_state.py:846-848) with a ``NODE_FAILURE`` fallback
+    (chain_repository_state.py:845-847) with a ``NODE_FAILURE`` fallback
     (chain_source_cycle.py:685,693), so a failed_task always leaves a non-empty
     top-level code for the first carrier above to find.
 
@@ -403,13 +403,17 @@ def _downstream_retry_evidence(
     if _force_native_shud_rerun(state):
         return None
     # #1313 D4: the ``{STAGE}_FAILED`` default below is READER-SYNTHESIZED -- it is
-    # fabricated here when the failing stage records no error code, and is therefore
+    # fabricated here when the state records no error code at all, and is therefore
     # not evidence under the spec's unknown-code clause.  Whether the code the
     # classification rests on was genuinely recorded decides which domain the
-    # downstream-resume judgement applies.  #1420 scopes "recorded" to the CURRENT
-    # failure's own carriers: a stale code left elsewhere in the state (a recovered
-    # stage's row, a retry-history key) describes a different failure and is not
-    # evidence for this split -- it still reaches the reason-code text below.
+    # downstream-resume judgement applies.  #1420 scopes THAT DOMAIN -- not the
+    # fabrication condition, which stays the broad scan -- to the current failure's
+    # own carriers: a stale code left elsewhere in the state (a recovered stage's
+    # row, a retry-history key) describes a different failure and is no evidence for
+    # the split, yet ``_failure_policy_payload`` still finds it for the reason-code
+    # text.  The two conditions therefore name different sets: a candidate can sit in
+    # the placeholder domain with a classification resting on that stale code rather
+    # than on a fabricated default.
     recorded_error_code = _downstream_recorded_error_code(state)
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
     if _cold_start_quarantined_failure(failure):
@@ -1392,8 +1396,11 @@ def _downstream_failure_restartable(failure: Mapping[str, Any], *, code_recorded
     ``code_recorded`` splits the judgement by EVIDENCE SOURCE (#1313 D4).  A
     genuinely recorded code is governed by the spec's permanence clause -- a
     permanent or unknown-default-non-transient code refuses the resume, a
-    transient code keeps it.  A reader-synthesized ``{STAGE}_FAILED`` placeholder
-    is not evidence under that clause and keeps its pre-#1313 behaviour.
+    transient code keeps it.  ``code_recorded=False`` means the failing stage
+    recorded no code of its own (#1420) -- the ``failure`` payload may still carry
+    a reader-synthesized ``{STAGE}_FAILED`` default OR a stale code the broad
+    reason-code scan found elsewhere; neither is evidence under that clause, so
+    both keep the pre-#1313 behaviour.
     """
 
     if failure.get("limit_exhausted") is True:

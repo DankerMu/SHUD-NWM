@@ -115,14 +115,27 @@ pipeline_status 为 terminal success，会先被
   无对应新场景，故收窄其占位域场景 WHEN。
 - **`job-retry-mechanism`「Pre-Guard Evidence Channels Consult
   Permanence」**（:1206-1313）：整 requirement 照抄，修改两处
-  （fixture review P2-2）——(i) recorded-code scoping 段："(defaults
-  fabricated when the state records no error code)" 收窄为 "(defaults
-  fabricated when the failing stage itself records no error code — stale
-  codes from recovered stages or retry-history keys are not evidence for
-  the domain split)"；(ii) 占位域场景「Synthesized placeholder codes keep
-  existing downstream behavior」的 WHEN 同步收窄（"records no error code
-  **for the failing stage itself** (stale codes elsewhere ... do not
-  count)"）。除此两处外场景逐字不动。
+  （fixture review P2-2；round-1 复审据此再校准措辞）——(i) recorded-code
+  scoping 段：**捏造条件逐字保留** "(defaults fabricated when the state
+  records no error code at all)"，另起一句写域条件 "The clause's
+  recorded-code domain is scoped to codes recorded by the failing stage
+  itself — stale codes from recovered stages or retry-history keys are not
+  evidence for the domain split, even though they still supply the
+  reason-code text."；(ii) 占位域场景「Synthesized placeholder codes keep
+  existing downstream behavior」的 WHEN 同步收窄为**非合取**形："records no
+  error code for the failing stage itself (stale codes elsewhere ... do not
+  count, even when such a stale code still supplies the classification's
+  reason code), so the classification rests on no code this failure recorded
+  — a stage-derived placeholder the reader synthesizes when the state
+  carries no code at all"；THEN 逐字不动。除此两处外场景逐字不动。
+- **「捏造条件 ≠ 分域条件」（round-1 CONFIRMED P2 的成因）**：本 change 后
+  两者是不同集合——分域按当前失败自身取景（新 helper），而
+  `{STAGE}_FAILED` 默认是否真被合成仍由 `_failure_policy_payload`
+  （`:186` `_state_error_code(state) or default_error_code`）的全扫描决定。
+  几何 A 即两者分叉的实证：落占位域，但 `reason_code` 是陈旧的
+  `CONVERT_CANONICAL_FAILED`（tests/test_production_scheduler.py:23128
+  钉住）。凡描述该 clause 的文本（spec 两载体、`:405` 注释、
+  `_downstream_failure_restartable` docstring）都不得把两者写成同一条件。
 - **归档顺序约束（fixture review P2-4）**：
   `openspec/changes/fix-node22-scheduler-business-concurrency` 存在同
   requirement「Resumable downstream failures」的**陈旧** MODIFIED delta

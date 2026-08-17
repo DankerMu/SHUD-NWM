@@ -9,11 +9,17 @@ Every db-free decision-ladder evidence channel that can emit an automatic-retry 
 The permanent-failure guard remains consulted at emitting return points
 (never as an unconditional pre-pass). The recorded-code scoping governs the
 downstream-resume channel's unknown-code clause only: reader-synthesized
-placeholder codes (defaults fabricated when the failing stage itself records no error code — stale codes from recovered stages or retry-history keys are not evidence for the domain split)
+placeholder codes (defaults fabricated when the state records no error code at all)
 are not evidence under that clause and keep their existing behavior,
 including the existing classifier-based refusals; the raw-manifest and
 model-package channels consult the judgement for every permanent
-classification, recorded code or not.
+classification, recorded code or not. The clause's recorded-code domain is
+scoped to codes recorded by the failing stage itself — stale codes from
+recovered stages or retry-history keys are not evidence for the domain split,
+even though they still supply the reason-code text. The fabrication condition
+and the domain condition are therefore different sets: a failure whose own
+stage recorded nothing sits in the placeholder domain even when a stale code
+elsewhere supplies its classification.
 
 This requirement carves out deliberate, recorded exceptions to "Retry
 Guard — Non-Transient Error Exclusion" (and, where noted, to the
@@ -85,8 +91,10 @@ with the shared classification).
 
 - **WHEN** a downstream failure state records no error code for the failing
   stage itself (stale codes elsewhere in the state — recovered stages,
-  retry-history keys — do not count) and the reader synthesizes a
-  stage-derived placeholder for classification
+  retry-history keys — do not count, even when such a stale code still
+  supplies the classification's reason code), so the classification rests on
+  no code this failure recorded — a stage-derived placeholder the reader
+  synthesizes when the state carries no code at all
 - **THEN** the downstream-resume decision SHALL behave exactly as before
   this change — the unknown-code clause governs recorded codes, not
   reader-fabricated defaults
