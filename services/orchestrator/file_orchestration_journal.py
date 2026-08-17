@@ -113,6 +113,7 @@ from services.orchestrator.scheduler_file_providers import (
     _sanitize_file_provider_evidence_scalar,
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
+from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -7079,6 +7080,30 @@ class FileJournalRetryService:
                     manual=True,
                 ),
             }
+            # The rest of the target row's write-time shape, on the same terms as
+            # ``failed_stage`` above and for the same reader: with the row gone from the
+            # candidate state the pin gate rebuilds the target from these keys and runs the
+            # resolved-row routing over the reconstruction, instead of guessing from id text.
+            # The key set and its closure invariant over the shared live-failure predicate live
+            # on ``MARKER_TARGET_ROW_DETAIL_FIELDS`` (the sanitizer whitelist and the gate read
+            # the same tuple, so the three surfaces cannot drift).  ``target_`` prefixes keep
+            # them clear of the three consumed key names: ``stage``/``job_type`` (the
+            # candidate-state record-stage reader) and ``model_id`` (the marker ATTRIBUTION
+            # reader -- the target row's model is a different semantic axis).  Absent values are
+            # not written, exactly as the sanitizer passes no empties; ``0`` and ``False`` are
+            # recorded values and ARE written.
+            #
+            # ``failed_job`` is a PERSISTED row, so two of the eight keys are structurally
+            # unreachable from here: ``repair_status``/``active_blocker`` are annotations the
+            # candidate-state projection applies to a row copy and ``_pipeline_job_row`` has no
+            # such fields, so ``target_repair_status``/``target_active_blocker`` are never
+            # emitted.  The gate honours them if a record ever carries them; recording the
+            # annotation at write time is issue #1482, and until it lands a target already
+            # annotated repaired is a disclosed pin (design D4).
+            for detail_key, row_field in MARKER_TARGET_ROW_DETAIL_FIELDS:
+                target_value = failed_job.get(row_field)
+                if target_value not in (None, ""):
+                    details[detail_key] = target_value
             if requested_by not in (None, ""):
                 details["requested_by"] = requested_by
             if request_id not in (None, ""):

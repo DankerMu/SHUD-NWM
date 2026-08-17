@@ -13,7 +13,10 @@ from services.orchestrator.scheduler_state_failure import (
     _state_has_failure_signal,
     _state_has_only_repaired_pipeline_failure_signal,
 )
-from services.orchestrator.scheduler_state_manual_retry import _event_is_manual_retry_marker
+from services.orchestrator.scheduler_state_manual_retry import (
+    MARKER_TARGET_ROW_DETAIL_KEYS,
+    _event_is_manual_retry_marker,
+)
 from services.orchestrator.scheduler_state_rows import (
     _bounded_task_result_rows,
     _is_source_cycle_download_stage,
@@ -494,6 +497,13 @@ def _candidate_state_decision_event(
                 # deletion is what creates that shape, so stripping this key would strip the
                 # evidence on exactly the path it serves.
                 "failed_stage",
+                # The rest of that target's write-time record, on the same reasoning: the gate
+                # rebuilds the deleted row from these keys and runs the resolved-row routing
+                # over the reconstruction (#1308).  Read from the consumer's own tuple rather
+                # than restated, so the writer, this whitelist and the gate cannot drift.  The
+                # ``value not in (None, "")`` filter below passes ``0`` and ``False`` through --
+                # they are recorded values, and the writer omits absences for the same reason.
+                *MARKER_TARGET_ROW_DETAIL_KEYS,
                 "retry_count",
                 "new_attempt",
                 "previous_job_id",

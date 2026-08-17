@@ -35,9 +35,50 @@ from services.orchestrator.scheduler_state_types import (
 # Mirrors ``file_orchestration_journal._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE``: cycle-scope
 # (cohort master) job ids are persisted as ``job_cycle_<source>_<stamp>_<suffix>``.
 _CYCLE_SCOPE_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
-# The candidate's own run id: ``fcst_<source>_<stamp>_<model_id>``.  Both patterns capture
-# ``(source, stamp)``, so a marker entity id's cycle can be compared with the candidate's own.
-_CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_")
+# The candidate's own run id: ``fcst_<source>_<stamp>_<model_id>``.  The first two groups are the
+# ``(source, stamp)`` pair the cycle pattern above captures too, so a marker entity id's cycle can
+# be compared with the candidate's own.  The third group is the model id and takes the WHOLE tail:
+# production model ids carry underscores of their own (``model_a``), so ``[^_]+`` would truncate
+# them into a comparison that silently never matches.  The tail is allowed to be empty so the
+# ``(source, stamp)`` half keeps matching exactly the run ids it matched before the group existed;
+# an empty tail names no model and fails the model comparison closed.
+_CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.*)")
+#: The marker's OWN write-time record of the row it repairs: ``details`` key -> target row field.
+#: Written by ``file_orchestration_journal.record_manual_repair``, passed through by the identity
+#: filter's retry-event carve-out, and read back here to rebuild the target when its row is gone
+#: from the decision state.  One tuple rather than three mirrored literals, so the writer, the
+#: sanitizer whitelist and this consumer cannot drift apart (#1308).
+#:
+#: CLOSURE INVARIANT: this key set must close over EVERY row field read by the transitive closure
+#: of ``_job_row_is_live_failure`` — its own status chain, plus
+#: ``_pipeline_job_is_repaired_stage_evidence`` (``repair_status``/``active_blocker``), plus
+#: ``_job_is_unsubmitted_auto_retry_placeholder`` (``status``, ``manual_retry_marker``,
+#: ``slurm_job_id``, ``array_task_id``, ``retry_count``, ``job_id``) — plus the ``model_id`` the
+#: router needs to route.  ``job_id`` is the marker's own ``entity_id`` and is not recorded twice.
+#: A predicate that starts reading a new row field MUST gain a key here, or the reconstruction
+#: stops being the row it claims to be (anchored by the residue matrix's anti-drift assertions).
+#:
+#: Two of the eight are GATE CONTRACT keys the current writer cannot fill:
+#: ``repair_status``/``active_blocker`` are projection-time annotations applied to a row COPY
+#: (``chain_repository_state._annotate_repaired_pipeline_jobs``), and the journal's closed row
+#: constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields, so the
+#: persisted row ``record_manual_repair`` reads never carries them.  They stay in the tuple
+#: because the closure invariant is what makes the reconstruction a faithful row and because a
+#: record that DOES carry them must be honoured; a target already annotated repaired at write
+#: time therefore still pins here where the row-present twin refuses — a disclosed permanent
+#: limitation, with the write-face fix routed to #1482.
+MARKER_TARGET_ROW_DETAIL_FIELDS = (
+    ("target_status", "status"),
+    # Gate-contract keys: see the note above — the current write face never emits these two.
+    ("target_repair_status", "repair_status"),
+    ("target_active_blocker", "active_blocker"),
+    ("target_model_id", "model_id"),
+    ("target_slurm_job_id", "slurm_job_id"),
+    ("target_retry_count", "retry_count"),
+    ("target_manual_retry_marker", "manual_retry_marker"),
+    ("target_array_task_id", "array_task_id"),
+)
+MARKER_TARGET_ROW_DETAIL_KEYS = tuple(detail_key for detail_key, _row_field in MARKER_TARGET_ROW_DETAIL_FIELDS)
 # A hydro run is the candidate's SHUD forecast leg, not a job row, so it has no ``stage`` field to
 # read.  Its stage family is the canonical normalization of the module's native-SHUD aliases
 # (``scheduler_state_types.NATIVE_SHUD_STAGE_ALIASES``) through ``_canonical_downstream_stage``
@@ -241,6 +282,43 @@ def _unresolvable_marker_stage_is_repair_target(
         return str(recorded_stage) == str(failed_stage)
     return _loop_stripped_retry_identity(str(entity_id)).endswith(f"_{failed_stage}")
 
+def _marker_record_target_row(event: Mapping[str, Any], entity_id: Any) -> dict[str, Any] | None:
+    """Rebuild the marker's target row from the marker's own write-time record, or ``None``.
+
+    The reconstruction is complete only when the record is: ``target_status`` AND ``failed_stage``
+    must both be present, because those are the two fields the resolved-row routing cannot answer
+    without (the live-failure test and the repair-target stage test).  A HALF record — the shape
+    the current writer still produces when the target row carries no stage, since an empty value is
+    neither written nor passed through by the sanitizer — is not decided on here at all: it falls
+    back to the legacy arm, id-token backstop included, so nothing about that arm degrades.
+
+    Every other ``target_*`` key is optional in exactly the way the row field it mirrors is: the
+    writer omits ``None``/``""`` and the sanitizer strips them, so a missing key means the row
+    carried no value there, which is what the predicates' own defaults already mean.  ``0`` and
+    ``False`` are recorded VALUES, not absences, on both sides of that rule.
+
+    ``job_id`` is the marker's ``entity_id`` — the id the placeholder predicate reads for its
+    ``_retry_<n>`` test — and ``stage`` is the recorded ``failed_stage``.  ``stage`` as a dict key
+    exists only in this in-memory row; the RECORD deliberately never uses that key name (the
+    candidate-state record-stage reader consumes ``details.stage``).  No ``run_id`` is
+    reconstructed: ``_job_is_cycle_scope_row`` decides cycle scope from ``run_id`` + empty
+    ``model_id``, but this row got here through the ``_CYCLE_SCOPE_JOB_ID_RE`` entity-id grammar,
+    which IS the cycle-scope proof, and the caller reads model-ness off ``target_model_id``
+    directly — so the two predicates map onto each other without a synthesized run id.
+    """
+
+    details = event.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    if details.get("target_status") in (None, "") or details.get("failed_stage") in (None, ""):
+        return None
+    row: dict[str, Any] = {"job_id": entity_id, "stage": details.get("failed_stage")}
+    for detail_key, row_field in MARKER_TARGET_ROW_DETAIL_FIELDS:
+        value = details.get(detail_key)
+        if value not in (None, ""):
+            row[row_field] = value
+    return row
+
 def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
     """Pin gate for markers whose entity resolves to no job row.
 
@@ -251,68 +329,100 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
     itself, and the MARKER has to carry the evidence instead — its own record first, its id
     text only as the legacy backstop.
 
-    Delivered semantics, in the twin's own order (``_cycle_scope_marker_pins_attempt``):
+    Two guards run first, for every marker alike:
 
     * a non-cycle-grammar id keeps the historical fail-open (synthetic and compacted states
       depend on it, and the SQL retry service's ``{run_id}_retry_active`` shape lands here);
-    * a cycle-grammar id whose ``(source, stamp)`` is not the candidate's own never pins;
-    * staleness first, through the two row-absent surfaces of it: the pin is refused when the
-      state's ``repaired_stage_evidence`` names this marker's target as its
-      ``original_failed_job_id`` (the target was already repaired), and when the state's
-      ``completed_stage_evidence`` names it as its ``job_id`` (the target already SUCCEEDED, so
-      it is not a repair target at all — that mapping exists only for stages with a
-      ``_stage_after`` successor in the forecast stage order, so it can never name
-      download/state_save_qc/publish targets);
-    * then the stage evidence — ``details.failed_stage`` primary, loop-stripped id token
-      backstop — pins when it names the state's ``failed_stage``;
-    * anything else (stage mismatch, or a state carrying no ``failed_stage`` at all) falls
-      through to ``not _state_has_candidate_scope_failed_job(state)``, the same predicate
-      object and therefore the same live-failure domain the twin's arm 2 uses.
+    * a cycle-grammar id whose ``(source, stamp)`` is not the candidate's own never pins.
 
-    Equivalence with the twin is claimed for MODEL-LESS (cycle-scope) FAILED-STATUS targets that
-    are neither unsubmitted auto-retry placeholders nor repaired-flagged: on those the two arms
-    ask the same question of the same objects and answer identically.  (``cancelled`` targets are
-    outside that TRANSCRIPTION, not outside the behaviour: this arm reads no row status at all,
-    and since #1294 the twin's row-present test is the shared ``_job_row_is_live_failure``
-    predicate, which counts ``cancelled``; the delivered claim domain is left as delivered.)
-    Model-bearing ``job_cycle_*`` targets are
-    outside the claim: with the row present the router short-circuits to a pin, with the row
-    absent this arm applies cycle-scope logic, so the two verdicts can diverge (design.md
-    Residue 2, issue #1308).
+    After them the gate splits on WHAT THE MARKER RECORDED (#1308).
 
-    The twin also refuses on evidence that lives on the ROW alone, and only ONE of those shapes
-    has a state-level surface that outlives the row: a non-failed target is covered here when
-    ``completed_stage_evidence`` names it, by the conjunct above.  The rest still pin here where
-    the twin refuses, and that residue is disclosed, not fixed, by this rule (design.md
-    Residue 1):
+    RECORD-BORNE LEG — ``target_status`` and ``failed_stage`` both present.  The target is
+    rebuilt from the record (``_marker_record_target_row``) and decided by the SAME routing
+    ``_marker_event_pins_attempt`` runs on a resolved row, so on everything the record captures
+    the two arms are one rule by construction:
 
-    * an unsubmitted auto-retry placeholder (``pending``/``submission_failed``, ``_retry_<n>``
-      id, no slurm id) — a submission-time row shape with no state-level projection at all;
-    * a repaired-flagged row (``repair_status``/``active_blocker``) the state's
-      ``repaired_stage_evidence`` does NOT name;
-    * a non-failed target the completed-stage evidence does NOT name — a later stage's success
-      outranked it (``_best_completed_stage_success_evidence`` keeps one winner), the projection
-      took the repaired-copy branch (that payload has no ``job_id``), or the state carries no
-      such mapping at all.
+    * a model-BEARING record short-circuits to an unconditional pin exactly as the router does
+      for a non-cycle-scope row (:608-609) — cross-stage and same-stage alike, and ahead of the
+      two staleness mappings, because that is what the router does.  The comparison is
+      fail-CLOSED and its source is deliberate: the candidate's own model comes off the TAIL of
+      the state's ``run_id`` (``fcst_<source>_<stamp>_<model_id>``), never from the surviving job
+      rows — ``_candidate_model_ids`` derives from rows, and the row-window truncation that
+      creates this very code path can leave that set EMPTY, which would turn the conjunction
+      permanently false and resurrect the under-pin this leg exists to close.  A record naming
+      any other model, and a state whose run id yields no model at all, do not pin;
+    * a model-LESS record runs ``_cycle_scope_marker_pins_attempt`` over the reconstruction —
+      the twin itself, so the shared ``_job_row_is_live_failure`` predicate answers on the
+      recorded shape: a placeholder record, a repaired-flagged record and a record whose status
+      is outside the live-failure domain refuse the pin exactly as the row-present twin refuses
+      the same row.  The middle one of those three is a contract on the record rather than a
+      shape the current writer emits (the repaired flags are projection-time annotations, absent
+      from the persisted rows the writer reads — see ``MARKER_TARGET_ROW_DETAIL_FIELDS``), as is
+      a success status (the writer only ever targets a failure).  The two state-level staleness
+      mappings stay in front of it, because they answer a question the record cannot: the
+      target's fate AFTER the marker was written.
 
-    The opposite direction is disclosed as well: on model-bearing ``job_cycle_*`` targets this arm
-    UNDER-pins where the row-present router pins unconditionally — cross-stage (the archived F5′
-    cell) and same-stage when a staleness mapping names the target (design.md Residue 2, #1308).
+    BACKSTOP LEG — no record, or a half record (the writer's own shape when the target row
+    carries no stage: the empty value is not written and the sanitizer passes no empties).
+    Legacy markers, every marker the SQL retry service writes, and synthesized states keep the
+    previously delivered behaviour bit for bit: the two staleness mappings, then the stage
+    evidence (``details.failed_stage`` primary, loop-stripped id token backstop), then
+    ``not _state_has_candidate_scope_failed_job(state)`` — the same predicate object, and
+    therefore the same live-failure domain, the twin's arm 2 uses.
 
-    The id-token backstop's stage inference on stage-less legacy markers is disclosed with it:
-    it reads the loop-stripped id text, not a recorded field.
+    Equivalence claim (delivered domain): for a marker carrying the record, this arm's verdict
+    equals the resolved-row routing's verdict on a row of exactly the recorded shape.  What the
+    record does not capture stays outside the claim, and that is a PERMANENT LIMITATION,
+    disclosed rather than delivered (spec: "Unresolvable cycle-grammar marker pins with
+    marker-record evidence").  The record is a write-time snapshot, so most of it is the
+    target's POST-WRITE fate — the part the two state mappings do not cover — and it is exactly:
+
+    * the target succeeded after the write but the completed-stage evidence does not name it —
+      a later-stage winner evicted it (``_best_completed_stage_success_evidence`` keeps one),
+      the projection took the repaired-copy branch (that payload carries no ``job_id``), or its
+      stage has no ``_stage_after`` successor at all (``download``/``state_save_qc``/``publish``
+      queue targets, whose producer can never name them); widening that producer is refused
+      because the same mapping drives restart routing (``chain_repository_state.py:884-886``);
+    * the target was repaired after the write without ``repaired_stage_evidence`` naming it
+      (that mapping keeps one winner too);
+    * the target was re-activated after the write — resubmitted out of a non-terminal failure
+      status back into the ACTIVE domain.  ``update_pipeline_job_status``'s terminal guard does
+      not cover ``submission_failed``, so on legacy-contract rows and on the auto-retry reuse
+      path (``_file_auto_retry_job_can_be_reused``) that transition is producible; on a
+      current-contract cohort MASTER row it is not (the typed API freezes ``status`` on ordinary
+      upsert, the runtime transition needs an accepted submit outcome, and reclaim needs
+      ``reservation_lost``).  Producible or not, it belongs to this same clause.
+
+    One member of the clause is not about post-write fate at all: the target was ALREADY
+    annotated repaired when the marker was written.  The annotation exists only on the
+    projection's row copy, so the writer cannot see it and the record cannot carry it (#1482) —
+    the record reads "live failure" for the same reason as the shapes above, and this arm pins
+    the same way.
+
+    In every one of those shapes the record still reads "live failure" and this arm pins where
+    the row-present twin, reading the row as it is NOW, would refuse.
+
+    The id-token backstop's stage inference is disclosed with the backstop leg it belongs to: it
+    reads the loop-stripped id TEXT, not recorded evidence, and its ceiling is the legacy marker
+    set plus the half records the current writer still produces — the token's stage may not be
+    the stage the target row actually carried.
     """
     entity_id = event.get("entity_id")
     match = _CYCLE_SCOPE_JOB_ID_RE.fullmatch(str(entity_id)) if entity_id not in (None, "") else None
     if match is None:
         return True
     run_match = _CANDIDATE_RUN_ID_RE.match(str(state.get("run_id") or ""))
-    if run_match is None or run_match.groups() != match.groups():
+    if run_match is None or run_match.group(1, 2) != match.groups():
         return False
+    target_row = _marker_record_target_row(event, entity_id)
+    if target_row is not None and str(target_row.get("model_id") or ""):
+        return str(target_row["model_id"]) == run_match.group(3)
     if _state_repaired_stage_evidence_names_job(state, entity_id):
         return False
     if _state_completed_stage_evidence_names_job(state, entity_id):
         return False
+    if target_row is not None:
+        return _cycle_scope_marker_pins_attempt(state, target_row)
     failed_stage = state.get("failed_stage")
     if failed_stage not in (None, "") and _unresolvable_marker_stage_is_repair_target(
         event, entity_id, failed_stage
@@ -476,9 +586,12 @@ def _cycle_scope_marker_pins_attempt(state: Mapping[str, Any], job: Mapping[str,
     asymmetry #1287 left, where this arm still tested the bare ``FAILED_PIPELINE_STATUSES``
     set and read a ``cancelled`` cohort master row as a stale target).  A ``cancelled`` target
     is therefore a valid repair target here exactly as it is a live failure there.  The
-    row-ABSENT arm (``_unresolvable_marker_entity_pins_attempt``) is the exception: reading no row
-    status at all, it decides on state-level staleness evidence, whose narrower surface makes it
-    pin on shapes this row-present test refuses -- residue disclosed there, tracked by #1308.
+    row-ABSENT arm (``_unresolvable_marker_entity_pins_attempt``) reuses this function rather than
+    paraphrasing it: when its marker carries the target's write-time record it rebuilds the row
+    from that record and calls THIS predicate with it, so the shapes below are refused on both
+    arms by the same code (#1308).  What the record cannot answer is the target's fate AFTER the
+    marker was written; beyond the two state-level staleness mappings that arm consults, that
+    remainder stays a disclosed divergence, enumerated there and in the spec.
     """
     if not _job_row_is_live_failure(job):
         return False
