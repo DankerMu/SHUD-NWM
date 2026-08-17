@@ -59,7 +59,8 @@ Issue #1407（#1307/PR #1404 design D5 的显式 scope-out 路由）：前沿豁
   - ops-contract/receipt: **selected** —— 两面 receipt 可读出前沿状态
     （面 A frontier/blocker 块；面 B anchor 披露块）。
   - state-machine/attempt-accounting、security/auth、performance:
-    not selected —— 无编排状态/权限/热路径面（helper 为单文件读取）。
+    not selected —— 无编排状态/权限/热路径面（helper 为单目录扫描 +
+    单文件大小上限，目录总量由 evidence retention 兜底，非热路径）。
 
 ## Non-Goals
 

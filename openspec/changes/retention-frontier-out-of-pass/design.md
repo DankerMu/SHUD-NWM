@@ -35,10 +35,15 @@ def read_latest_pass_frontier(evidence_dir: Path, *, now: datetime,
   不保证字典序可比；mtime 可被拷贝扰动）；**`started_at` 并列时取文件名
   字典序最大者**。选取阶段跳过不可解析/缺 `started_at` 的文件；单文件
   读取上限沿用 `MAX_EVIDENCE_BYTES` 口径（防超大文件拖垮 CLI）。
-- **新鲜度**：`now - receipt.started_at > max_age` ⇒ `unavailable/
-  receipt_stale`。max_age 来自 env
+- **新鲜度（双边）**：`abs(now - receipt.started_at) > max_age` ⇒
+  `unavailable/receipt_stale`——**未来侧同样判 stale**（review round-1 B：
+  时钟前跳/手拷 receipt 的 started_at 在未来时会永久赢得选取且单边判据下
+  永不过期，其 null bound 会伪装成健康镜像静默真删；判 stale 而非选取时
+  跳过——跳过会静默回落到更老 receipt、掩盖时钟故障）。max_age 来自 env
   `NHMS_RETENTION_FRONTIER_MAX_AGE_HOURS`（默认 **24**——生产 scheduler
-  为分钟级循环，24h 无 receipt 即流水线停摆，删除本就该缓）。
+  为分钟级循环，24h 无 receipt 即流水线停摆，删除本就该缓）；env 解析
+  total：空/0/负/非数字/**溢出**（timedelta 上限外，review round-1 A）
+  一律回落默认，`max_age_from_env` 永不 raise。
 - **unavailable 唯一枚举**（fail-closed 判定表，测试逐格；本列表为权威，
   fixture review P2-1）：
   - `evidence_dir_unresolved`——evidence_dir 派生本身失败（D2）。
