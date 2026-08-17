@@ -62,14 +62,35 @@ instead of the structured stage line rc=69.
 2. **Budget value and alignment**: `SESSION_BUDGET_SEC = 45.0` module
    constant; env override `NHMS_SMTP_SESSION_BUDGET_SEC` (validated
    like NHMS_SMTP_PORT: positive float, usage-error otherwise).
-   Alignment is guarded by a TEST importing both modules:
-   `SESSION_BUDGET_SEC < stall_alert.SENDMAIL_TIMEOUT_SEC` with margin
-   (assert 45 <= 60 - 10 or equivalent) — either constant drifting
-   alone goes red. Comment at the constant names the lane constant.
+   Round-1 INT-1 (CONFIRMED): positivity alone lets an operator set 90
+   and silently restore the pre-change rc=124 geometry, invisible to
+   the constants-only guard test — so the override is ALSO bounded by
+   a shim-local `SESSION_BUDGET_CEILING_SEC = 60.0` (comment names the
+   lane constant; do NOT import the lane — the shim is exec'd by
+   absolute path with no package context, and the dependency direction
+   is lane→shim): `_budget_seconds` rejects values >= ceiling as
+   _UsageError → rc=64, keeping the spec's "strictly below the lane's
+   sendmail wall" enforced, not inferred. Alignment is guarded by a
+   TEST importing both modules: `SESSION_BUDGET_SEC < 
+   stall_alert.SENDMAIL_TIMEOUT_SEC` with margin (assert 45 <= 60 - 10
+   or equivalent) AND `SESSION_BUDGET_CEILING_SEC <=
+   stall_alert.SENDMAIL_TIMEOUT_SEC` — either file drifting alone goes
+   red. `infra/env/node27-frontier-alert.example` SMTP block carries a
+   commented `NHMS_SMTP_SESSION_BUDGET_SEC` entry stating the ceiling.
 3. **Signal lifecycle**: install handler + `setitimer` AFTER config/
    parse (usage errors need no alarm), immediately before the factory
    call; in a `finally`, disarm with the race-safe sequence
-   `setitimer(0)` → set SIG_IGN → restore previous handler
+   `setitimer(0)` → set SIG_IGN → restore previous handler.
+   Round-1 CORR-1 (CONFIRMED): the disarm call itself runs with the
+   alarm still deliberately armed, and `_run`'s outer budget arm does
+   not cover its own `finally` — an expiry landing inside disarm
+   escaped to `main`'s backstop, printing a failure line + rc=69 AFTER
+   an SMTP-ACCEPTED had been printed (unsaying a 250). Disarm must
+   therefore be exception-safe end to end: `_SessionBudgetExceeded`
+   raised anywhere inside disarm is contained (not propagated to the
+   caller), and the handler restore is unconditional (runs even when
+   the expiry lands in the disarm prologue), so after disarm returns
+   the timer is inert and SIGALRM is restored on every path
    (fixture-review probe: restoring SIG_DFL while the timer expires
    concurrently kills the process with exit 142 and ZERO stderr —
    total evidence loss; the SIG_IGN interposition closes it). pytest

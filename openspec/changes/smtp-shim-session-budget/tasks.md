@@ -73,6 +73,43 @@
       default budget ≥ SMTP_TIMEOUT_SEC and no global env leak of
       NHMS_SMTP_SESSION_BUDGET_SEC (tests use the _env() dict helper).
 
+## R1. Round-1 verified findings (fix pass @ 8490b8a4)
+
+- [ ] R1.1 CORR-1 (P2): disarm exception-safe end to end —
+      `_SessionBudgetExceeded` from anywhere inside `disarm()` never
+      propagates to the caller; handler restore unconditional (covers
+      the prologue sub-window); after disarm the timer is inert and
+      SIGALRM restored on every path. New test via widened-window seam
+      (setitimer proxy): ACCEPTED printed + expiry in disarm → rc=0,
+      single evidence line, handler restored.
+- [ ] R1.2 INT-1 (P2): `SESSION_BUDGET_CEILING_SEC = 60.0` shim-local;
+      `_budget_seconds` rejects env values >= ceiling → rc=64;
+      alignment test extended: ceiling <= lane SENDMAIL_TIMEOUT_SEC;
+      validation tests (90 → rc=64 with SMTP-CONFIG-ERROR, sub-ceiling
+      accepted); `.example` SMTP block commented entry; runbook
+      :2122-2124 states the ceiling and the guard now truthfully
+      covers the override.
+- [ ] R1.3 INT-2 (P2): runbook rc=124 read-out clause — the
+      may-already-be-delivered final-dot window applies to ANY
+      `stage=send` expiry/timeout line (session-budget AND
+      error=timeout), not only stage-less rc=124.
+- [ ] R1.4 CORR-3 (Note): factory timeout clamped
+      `max(0.001, min(SMTP_TIMEOUT_SEC, remaining))` so a
+      negative/zero remaining can never surface as ValueError rc=70;
+      pin: remaining forced negative → factory receives 0.001.
+- [ ] R1.5 TEV-1 (P2): SIG_IGN interposition pinned —
+      `shim.signal.signal` recorder, assert SIG_IGN among installed
+      handlers during disarm.
+- [ ] R1.6 TEV-2 (Note): min() cap pinned in its live regime —
+      success path with env budget 0.30, assert factory timeout
+      <= 0.30 (existing :553 default pin untouched).
+- [ ] R1.7 TEV-3 (Note): `elapsed=` substring asserted in an existing
+      budget-expiry test.
+- CORR-2 verdict: CONFIRMED but DISCARD (lane consumes `accepted[-1]`;
+  receipt provably undamaged). Optional zero-cost reorder
+  (mark reported before printing) only if the region is touched
+  anyway; skipping needs no reason.
+
 ## 5. Spec delta
 
 - [x] 5.1 MODIFIED requirement in `specs/frontier-stall-alerting/spec.md`
