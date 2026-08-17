@@ -7,7 +7,8 @@
       回退非 strict `os.path.realpath(path)`；注释对齐范式源
       `scheduler_runtime_roots.py:576-590` 的裁定要点（分类归 storage
       preflight、非 strict 全版本不抛且复刻旧产物、errno 分流裁弃）。
-      db-free 臂 `:931-934` 逐字不动；调用方签名/返回类型不变。
+      db-free 臂逐字不动（改前 `:931-934`，实现后位于 `:947-950`）；调用方
+      签名/返回类型不变。
 
 ## 2. 测试（tests/test_production_scheduler.py，靠近既有 symlink 环族
 `:14318-14790`（复用 `_symlink_loop_dir`@:14318）；先红后绿）
@@ -45,7 +46,7 @@
 - [ ] 3.5 node-27 oracle（3.11.15，≤3.12 臂真实运行面）：新增测试于
       node-27 `uv run pytest -q tests/test_production_scheduler.py -k
       <新测试选择器>` 全绿（merge 后亦可，按 #1419 3.5 先例记录 receipt）。
-- [ ] 3.6 PR body 裁定记录（issue 验收第 2 条 + fixture review P1-1/P2-4，
+- [x] 3.6 PR body 裁定记录（issue 验收第 2 条 + fixture review P1-1/P2-4，
       Note-9）：记录（a）「二选一」选了 storage preflight 承接及其证据；
       （b）issue 验收第 1 条点名 `WORKSPACE_ROOT` 超出单点判据可达范围
       （containment-base 残余归 residual issue）；（c）
