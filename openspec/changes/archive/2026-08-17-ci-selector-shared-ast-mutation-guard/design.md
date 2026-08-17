@@ -108,10 +108,13 @@ fixtures.
 
 ## Test plan (maps to acceptance)
 
-1. Guard green on the real module (123 → 124 passed).
-2. Constructed reds: one per idiom class (4), each naming line +
-   construct; constructed clean source stays green (setattr +
-   subscript-assign no-false-positive pin).
+1. Guard green on the real module (123 → 145 node ids; final-review
+   Note-2 corrected this section's stale round-0 numbers at
+   post-merge archive time).
+2. Constructed reds: 20 per-member params across the six rule
+   classes, each naming line + construct; constructed clean source
+   stays green (setattr + subscript-assign + append
+   no-false-positive pins).
 3. `uv run pytest -q tests/test_select_ci_tests.py` green; ruff
    tracked clean; openspec validate strict.
 
