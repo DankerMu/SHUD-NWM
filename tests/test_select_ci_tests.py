@@ -27,6 +27,7 @@ from scripts.select_ci_tests import (
     PATH_TEST_RULES,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
+    SUPPORT_MODULE_TEST_RULES,
     PathTestRule,
     is_test_suite_path,
     main,
@@ -1087,22 +1088,58 @@ def _tracked_tests_support_modules() -> list[str]:
     return sorted(path for path in _tracked_python_files("tests") if not is_test_suite_path(path))
 
 
-def test_every_tracked_tests_support_module_selects_only_the_meta_guard_suite() -> None:
+# Support modules #1487 deliberately leaves on the collapse route even though
+# they DO derive non-gated importer suites. Issue #1487 excludes both by name, so
+# this is an inherited scope boundary, not a coverage claim. The factual
+# predicate it cites: ci.yml's `database` paths-filter lists both paths and
+# starts `real-db-integration`, which runs `pytest -q -m integration` — measured
+# coverage of their importers' tests is 75 of 245 (integration_helpers) and 0 of
+# 19 (conftest), because the non-gated derivation and `-m integration` select
+# near-disjoint sets by construction. PARTIAL, not full compensation. The
+# closure guard pins each path inside that filter block, so if the filter drops
+# one the carve-out reds and has to be re-decided rather than rotting into a
+# silent hole. Full routing for these two is a candidate follow-up.
+ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES = frozenset(
+    {
+        "tests/integration_helpers.py",
+        "tests/conftest.py",
+    }
+)
+
+
+def test_unrouted_tests_support_modules_select_only_the_meta_guard_suite() -> None:
     # Derived from the tracked tree, never frozen: the class is not just
     # conftest.py/integration_helpers.py/__init__.py but every non-suite module
     # under tests/ (fixture builders, fakes, template helpers), and a support
     # module added tomorrow is covered the moment it lands. Each must map to a
     # COLLECTIBLE target, or ci.yml's check=True red carries no assertion
     # information at all.
+    #
+    # RESCOPED by #1487, which is why the name is no longer "every tracked": a
+    # support module with a SUPPORT_MODULE_TEST_RULES entry now selects its
+    # derived importer suites plus the meta-guard, so asserting the collapse for
+    # it would assert the inverse of the routing. What stays here is the collapse
+    # route itself — today exactly the recorded carve-outs plus the modules that
+    # derive no importer suites. The scoping reads the rule table rather than
+    # re-deriving importers so the two guards cannot contradict each other: an
+    # importer-bearing module with NO rule stays in this domain (it still
+    # collapses, correctly asserted here) and is red over in the closure guard,
+    # which is the single authority on whether a rule was owed.
     support_modules = _tracked_tests_support_modules()
     assert support_modules, "expected tracked tests/ modules that are not test_*.py suites"
+    routed = {rule.pattern for rule in SUPPORT_MODULE_TEST_RULES}
+    collapsing = [path for path in support_modules if path not in routed]
+    assert collapsing, "expected tracked tests/ support modules outside the routing table"
+    # Anti-vacuity for the carve-outs specifically: routing one of them would
+    # otherwise shrink this domain in silence instead of forcing the decision.
+    assert ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES <= set(collapsing)
 
     offenders = [
         f"{path}: selected {selected}"
-        for path in support_modules
+        for path in collapsing
         if (selected := select_tests([path], repo_root=Path("."))) != [SELECTOR_META_GUARD_TEST]
     ]
-    assert not offenders, "tests/ support modules must map to the meta-guard suite: " + "; ".join(offenders)
+    assert not offenders, "unrouted tests/ support modules must map to the meta-guard suite: " + "; ".join(offenders)
     # The class boundary the derivation depends on: a nested suite is not a
     # support module. Zero tracked instances today, which is exactly why the
     # boundary needs asserting rather than observing.
@@ -1400,11 +1437,15 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
 # empty-selection-fails) decision. Flipping any of them must change a visible
 # assertion here.
 # Note the classes that are NOT here any more: a PR deleting a `tests/test_*.py`
-# and a PR touching only a `tests/` support module both leave a one-element
+# and a PR touching only an UNROUTED `tests/` support module (the recorded
+# carve-outs, or one deriving no importer suites) both leave a one-element
 # selection (the meta-guard suite), so they never reached this empty-selection
 # branch and lost the full-tree collect-only smoke they used to get. #1454's
 # `meta_guard_only` output field is what runs the smoke for them, in addition to
-# the targeted run — this branch's own semantics are untouched.
+# the targeted run — this branch's own semantics are untouched. A support module
+# WITH a SUPPORT_MODULE_TEST_RULES entry (#1487) is in neither class: it selects
+# real importer suites, so `meta_guard_only` is false and the targeted lane runs
+# assertions.
 @pytest.mark.parametrize(
     "changed_path",
     [
@@ -1637,7 +1678,7 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
     file_targets = sorted(
         {
             target
-            for rule in (*PATH_TEST_RULES, *CHANGED_TEST_FILE_RULES)
+            for rule in (*PATH_TEST_RULES, *CHANGED_TEST_FILE_RULES, *SUPPORT_MODULE_TEST_RULES)
             for target in rule.tests
             if "::" not in target
         }
@@ -2234,3 +2275,297 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
         assert broad_only_target not in selected, (
             f"{module_path} now reaches the broad services/orchestrator/** rule: a stop rule stopped stopping"
         )
+
+
+# --------------------------------------------------------------------------
+# tests/ support-module importer routing closure (#1487)
+#
+# Before #1487 a PR touching only a `tests/` support module ran the meta-guard
+# suite plus ci.yml's full-tree collect-only smoke: import/syntax only, zero
+# assertions on the suites that actually consume the fixture. That is the
+# #1191 -> #1247 -> #1283 -> #1447 rot shape one more time, so the routing exists
+# and this guard keeps it complete FROM THE TREE — the required sets are derived
+# here, never frozen, so a new importer suite reds naming the module and the
+# suite instead of quietly falling out of the PR lane.
+#
+# DOMAIN SPLIT, three guards, no overlap claimed:
+#   * this one            -> tracked non-suite modules under `tests/`
+#   * the #1455 guard      -> the nine audited production directories
+#     (test_directory_rule_importer_gaps_are_dispositioned), direct importers
+#     only, dispositioned through INTENTIONAL_RULE_GAP_EXCLUSIONS
+#   * the #1486 guard      -> GUARDED_MODULE_CLOSURES, direct UNION one hop
+# Each keeps its own derivation and its own exemption vocabulary on purpose.
+# --------------------------------------------------------------------------
+
+# One known member of each routed module's derived importer set. The anti-vacuity
+# floor per module (the GUARDED_MODULE_CLOSURES pattern): an aggregate count can
+# stay plausible while a half-blanked derivation empties one module's set, and
+# then the rule for it is unfalsifiable.
+SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
+    (
+        "tests/fixtures/mapping_builder/in_memory_grid_snapshot.py",
+        "tests/test_mapping_builder_algorithm.py",
+    ),
+    ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
+    ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
+    ("tests/__init__.py", "tests/test_integration_gate.py"),
+)
+
+# At least this many support modules must derive a non-empty importer set (6 of 8
+# today). A pure "universe non-empty" floor survives a derivation that collapses
+# to a single lucky module.
+MIN_SUPPORT_MODULES_WITH_IMPORTERS = 3
+
+CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
+# The `database:` key inside ci.yml's `filters: |` block literal. Filter keys sit
+# at 12 spaces and their entries at 14, which is what makes the block sliceable.
+_DATABASE_FILTER_KEY = "\n            database:\n"
+_NEXT_FILTER_KEY_LINE = re.compile(r"^ {12}\S", re.MULTILINE)
+
+
+def _derived_support_module_importers(modules: Sequence[str]) -> dict[str, set[str]]:
+    """``module path -> derived non-gated top-level importer suites``.
+
+    Semantic authority is `_non_gated_top_level_importer_tests` — same predicate,
+    same file-level marker filter, same package-`__init__`-to-package aliasing
+    (which is why `tests/__init__.py` derives the three suites that spell
+    `from tests import ...`). It is EXECUTED through the inverted index because
+    the per-module helper re-parses every test file on each call: 8 calls
+    measured 8.35 s against 0.99 s for one index pass, for an identical result.
+    """
+    index = _non_gated_top_level_importer_index()
+    return {module: index.get(_dotted_module_name(module), set()) for module in modules}
+
+
+def _support_module_closure_offenders(
+    *,
+    modules: Sequence[str],
+    derived: dict[str, set[str]],
+    select: Callable[[str], set[str]] | None = None,
+    carveouts: frozenset[str] = ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES,
+) -> list[str]:
+    """Support modules whose selection does not match their derived importers.
+
+    Every input is a parameter so each failure mode below is provable on
+    constructed data — a derived map carrying a suite no rule routes, a selection
+    callable that adds a target to a 0-importer module, an empty carve-out set —
+    without mutating a tracked file or a module global.
+    """
+    resolve = _selection_for_module if select is None else select
+    offenders: list[str] = []
+    for module in modules:
+        if module in carveouts:
+            continue
+        importers = derived.get(module, set())
+        selection = resolve(module)
+        if importers:
+            offenders.extend(
+                f"{module} -> {suite}: derived non-gated importer suite is not selected"
+                for suite in sorted(importers - selection)
+            )
+        elif selection != {SELECTOR_META_GUARD_TEST}:
+            offenders.append(
+                f"{module}: derives no importer suites but selects {sorted(selection)} "
+                f"instead of only {SELECTOR_META_GUARD_TEST}"
+            )
+    return offenders
+
+
+def _database_filter_block(workflow: str) -> str:
+    """ci.yml's `database:` paths-filter block, from its key to the next key.
+
+    Block-scoped rather than a whole-file grep: `tests/conftest.py` appearing
+    under some other filter says nothing about whether `real-db-integration`
+    starts for it, and that job IS the factual predicate the carve-out cites.
+    ``workflow`` is TEXT so the red path can feed a constructed workflow.
+    """
+    start = workflow.find(_DATABASE_FILTER_KEY)
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `database:` paths-filter block"
+    body_start = start + len(_DATABASE_FILTER_KEY)
+    following = _NEXT_FILTER_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+def _carveout_filter_pin_offenders(
+    *,
+    workflow: str,
+    carveouts: frozenset[str] = ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES,
+) -> list[str]:
+    block = _database_filter_block(workflow)
+    return [
+        f"{path}: carve-out is not listed in the ci.yml `database:` filter block"
+        for path in sorted(carveouts)
+        if f"- '{path}'" not in block
+    ]
+
+
+def test_tests_support_module_rules_cover_their_non_gated_importer_closure() -> None:
+    # THE guard. A support module either routes to its derived importer suites,
+    # or derives none and keeps the meta-guard collapse, or is a recorded
+    # carve-out. Derived from the tracked tree on every run, so the rule table
+    # cannot go stale in silence.
+    modules = _tracked_tests_support_modules()
+    assert modules, "expected tracked tests/ modules that are not test_*.py suites"
+
+    derived = _derived_support_module_importers(modules)
+
+    # Anti-vacuity, on the PRE-carve-out universe: the guard's whole content is
+    # the importer relation, and a derivation that breaks into silence (bad
+    # pathspec, AST regression, a marker filter gone wide) would otherwise pass
+    # with every module looking like a 0-importer collapse.
+    with_importers = sorted(module for module, importers in derived.items() if importers)
+    assert with_importers, "derived no non-gated importer suites for any tests/ support module"
+    assert len(with_importers) >= MIN_SUPPORT_MODULES_WITH_IMPORTERS, (
+        f"expected at least {MIN_SUPPORT_MODULES_WITH_IMPORTERS} support modules with derived importers, "
+        f"got {with_importers}"
+    )
+    assert {module for module, _ in SUPPORT_MODULE_ROUTING_ANCHORS} == {
+        rule.pattern for rule in SUPPORT_MODULE_TEST_RULES
+    }, "SUPPORT_MODULE_ROUTING_ANCHORS drifted from the routing table"
+    for module, anchor in SUPPORT_MODULE_ROUTING_ANCHORS:
+        assert anchor in derived.get(module, set()), (
+            f"{module}: expected {anchor} among derived importers, got {sorted(derived.get(module, set()))}"
+        )
+
+    offenders = _support_module_closure_offenders(modules=modules, derived=derived)
+    assert not offenders, "tests/ support-module importer closure incomplete:\n  " + "\n  ".join(offenders)
+
+
+def test_support_module_closure_guard_reds_on_a_missing_importer_suite() -> None:
+    # The rot this exists to catch: a new suite starts importing a routed fixture
+    # at file level and nobody extends the rule. Modelled on a constructed derived
+    # map — the tracked tree is untouched — and the failure must NAME both ends,
+    # because "closure incomplete" alone tells the next reader nothing.
+    module, _ = SUPPORT_MODULE_ROUTING_ANCHORS[0]
+    newcomer = "tests/test_mapping_builder_probe.py"
+
+    offenders = _support_module_closure_offenders(modules=[module], derived={module: {newcomer}})
+
+    assert offenders == [f"{module} -> {newcomer}: derived non-gated importer suite is not selected"]
+
+
+def test_support_module_closure_guard_reds_on_a_gratuitous_zero_importer_selection() -> None:
+    # The other direction, and the reason branch (c) is an EQUALITY: a module
+    # nothing imports must keep the one-element collapse that arms ci.yml's
+    # full-tree collect-only smoke (#1454). Widening it to unrelated suites
+    # trades that smoke for whatever the rule happened to name.
+    module = "tests/mock_shud_omp.py"
+    unrelated = "tests/test_gateway.py"
+
+    def selects_something_extra(module_path: str) -> set[str]:
+        return _selection_for_module(module_path) | {unrelated}
+
+    offenders = _support_module_closure_offenders(
+        modules=[module],
+        derived={module: set()},
+        select=selects_something_extra,
+    )
+
+    assert offenders == [
+        f"{module}: derives no importer suites but selects {sorted([SELECTOR_META_GUARD_TEST, unrelated])} "
+        f"instead of only {SELECTOR_META_GUARD_TEST}"
+    ]
+
+
+def test_support_module_carveout_is_load_bearing_not_decorative() -> None:
+    # Honest labelling of the carve-out: with the allowlist emptied, both entries
+    # red immediately — they have real derived importers that nothing selects.
+    # The exemption is a recorded scope decision with PARTIAL external coverage
+    # (see the allowlist comment), not a statement that the gap is closed.
+    modules = sorted(ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES)
+    derived = _derived_support_module_importers(modules)
+
+    assert not _support_module_closure_offenders(modules=modules, derived=derived)
+
+    without_the_allowlist = _support_module_closure_offenders(
+        modules=modules,
+        derived=derived,
+        carveouts=frozenset(),
+    )
+    assert {offender.split(" -> ", 1)[0] for offender in without_the_allowlist} == set(modules)
+
+
+def test_carved_out_support_modules_are_pinned_in_the_ci_database_filter_block() -> None:
+    # The carve-out cites one checkable fact — ci.yml's `database` filter lists
+    # these paths, so `real-db-integration` starts for them. Pin it, or the
+    # scope decision keeps reading fine long after its premise is gone.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert not _carveout_filter_pin_offenders(workflow=workflow)
+
+
+def test_carveout_filter_pin_reds_when_a_path_leaves_the_database_block() -> None:
+    # Constructed workflow text, so the tracked ci.yml is untouched. Two shapes:
+    # the entry deleted outright, and the entry moved under ANOTHER filter — the
+    # second is why the pin slices the block instead of grepping the file, since
+    # `tests/conftest.py` under `backend:` starts no database job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    entry = "              - 'tests/conftest.py'\n"
+    assert entry in _database_filter_block(workflow)
+
+    deleted = workflow.replace(entry, "")
+    assert _carveout_filter_pin_offenders(workflow=deleted) == [
+        "tests/conftest.py: carve-out is not listed in the ci.yml `database:` filter block"
+    ]
+
+    moved_to_backend = deleted.replace("            backend:\n", "            backend:\n" + entry)
+    assert entry in moved_to_backend
+    assert _carveout_filter_pin_offenders(workflow=moved_to_backend) == [
+        "tests/conftest.py: carve-out is not listed in the ci.yml `database:` filter block"
+    ]
+
+
+def test_support_module_rule_patterns_are_distinct_exact_paths() -> None:
+    # The routing table carries no `stop_on_match`, which is only safe while its
+    # patterns cannot both match one path. Exact paths (no glob metacharacters)
+    # plus uniqueness is that premise, asserted rather than assumed.
+    patterns = [rule.pattern for rule in SUPPORT_MODULE_TEST_RULES]
+
+    assert sorted(patterns) == sorted(set(patterns))
+    assert not [pattern for pattern in patterns if set(pattern) & set("*?[")]
+    assert all(not rule.stop_on_match and not rule.only_when_any_changed for rule in SUPPORT_MODULE_TEST_RULES)
+
+
+@pytest.mark.parametrize(
+    ("module_path", "required"),
+    [(rule.pattern, rule.tests) for rule in SUPPORT_MODULE_TEST_RULES],
+    ids=[rule.pattern for rule in SUPPORT_MODULE_TEST_RULES],
+)
+def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
+    module_path: str,
+    required: tuple[str, ...],
+) -> None:
+    assert Path(module_path).is_file(), f"routing table names a module that is not in the tree: {module_path}"
+    for suite in required:
+        assert Path(suite).is_file(), f"routing table names a suite that is not in the tree: {suite}"
+        # A file-level gated target would skip in the PR lane, buying constant
+        # skips and zero assertions — the #1447 ruling, applied at authoring time
+        # here and re-derived by the closure guard on every run.
+        assert not _file_level_gating_markers(_parse_tracked(suite)), (
+            f"routing table names a file-level gated suite (it would skip in the PR lane): {suite}"
+        )
+
+    selected = set(select_tests([module_path], repo_root=Path(".")))
+
+    missing = sorted(set(required) - selected)
+    assert not missing, f"{module_path}: routed importer suites not selected {missing}"
+    # Decision 2: the meta-guards must run on the PR class that can invalidate
+    # them, and a routed support-module PR is one — it can add the very importer
+    # the closure guard above derives.
+    assert SELECTOR_META_GUARD_TEST in selected
+    assert selected != {SELECTOR_META_GUARD_TEST}
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    ["tests/mock_shud_omp.py", "tests/fixtures/mapping_builder/keliya/build.py"],
+)
+def test_zero_importer_support_modules_keep_the_meta_guard_collapse(module_path: str) -> None:
+    # Issue #1487's acceptance names an example set for this route; the fixture
+    # review corrected it, because `tests/__init__.py` derives three importer
+    # suites under the repo's package-aliasing authority and is ROUTED. These two
+    # are the tree's actual 0-importer support modules.
+    assert Path(module_path).is_file()
+    assert module_path not in {rule.pattern for rule in SUPPORT_MODULE_TEST_RULES}
+
+    assert select_tests([module_path], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]

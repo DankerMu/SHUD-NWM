@@ -219,6 +219,61 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
 )
 
 
+# Support modules under `tests/` (fixtures, helpers, fakes) are not collectible,
+# so they map to the meta-guard suite plus ci.yml's full-tree collect-only smoke
+# — import/syntax only, zero assertions (#1453/#1454). For a support module that
+# real suites import at file level, that lane is blind to exactly the breakage a
+# fixture edit causes, so #1487 routes such a module to its non-gated top-level
+# importer suites instead. Exact paths, no globs: four entries, and
+# tests/test_select_ci_tests.py DERIVES the required sets from the tracked tree
+# (never freezes them), so a new importer suite reddens the closure guard naming
+# the module and the missing suite. `tests/integration_helpers.py` and
+# `tests/conftest.py` are deliberately absent — an issue-#1487 scope carve-out
+# recorded with its measured partial coverage in that suite's allowlist.
+SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        "tests/fixtures/mapping_builder/in_memory_grid_snapshot.py",
+        (
+            "tests/test_mapping_builder_algorithm.py",
+            "tests/test_mapping_builder_binding.py",
+            "tests/test_mapping_builder_cli.py",
+            "tests/test_mapping_builder_evidence.py",
+            "tests/test_mapping_builder_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "tests/slurm_template_helpers.py",
+        (
+            "tests/test_production_slurm_validation.py",
+            "tests/test_slurm_array_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "tests/river_identity_backfill_fakes.py",
+        (
+            "tests/test_node27_river_identity_backfill.py",
+            "tests/test_node27_river_identity_backfill_receipt.py",
+        ),
+    ),
+    PathTestRule(
+        # A 0-byte package file with a rule looks wrong until you follow the
+        # import: `from tests import X` contributes the base name `tests`, and
+        # the repo's derivation authority deliberately aliases a package
+        # `__init__.py` to the package itself (tests/test_select_ci_tests.py,
+        # _dotted_module_name + test_dotted_module_name_maps_a_package_init_to_the_package).
+        # These three suites therefore ARE its derived importers, and a PR that
+        # turns this file into a real package surface would otherwise run none of
+        # them. Measured 454 passed in 40.18 s locally — inside the lane budget.
+        "tests/__init__.py",
+        (
+            "tests/test_integration_gate.py",
+            "tests/test_node27_timeseries_compression_capture.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+        ),
+    ),
+)
+
+
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
@@ -730,17 +785,37 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                     if rule.stop_on_match:
                         break
             if not matched_changed_test:
-                # A `tests/` Python file that `is_test_suite_path` does not call
-                # a suite (conftest.py, integration_helpers.py, a fixtures/
-                # builder) is not collectible: `pytest -q <it>` returns
-                # NO_TESTS_COLLECTED (exit 5), which ci.yml's `check=True`
-                # renders as a misleading red carrying zero assertion
-                # information (#1453). Such a path maps to the meta-guard suite
-                # instead, so every emitted target is a collectible test file;
-                # the meta-guard-only collapse then arms ci.yml's full-tree
-                # collect-only smoke (#1454) over the import surface such a
-                # support module can break.
-                selected.add(path if is_test_suite else SELECTOR_META_GUARD_TEST)
+                matched_support_module = False
+                # Support-module routing (#1487) is reachable only here: after
+                # the CHANGED_TEST_FILE_RULES loop found nothing, and only for a
+                # non-suite path. The two domains are disjoint today — every
+                # CHANGED_TEST_FILE_RULES pattern is a `test_*.py` basename, so
+                # a path that reaches this branch never matched one anyway — but
+                # the ordering is what keeps the redirect contract above the
+                # authority if that ever stops being true.
+                if not is_test_suite:
+                    for rule in SUPPORT_MODULE_TEST_RULES:
+                        if fnmatch.fnmatch(path, rule.pattern):
+                            selected.update(rule.tests)
+                            # The meta-guard rider is not cargo: a routed
+                            # support-module PR can invalidate the tree-derived
+                            # meta-guards (including the closure guard that
+                            # governs this very rule), and that suite exists to
+                            # run on exactly the PR class that can.
+                            selected.add(SELECTOR_META_GUARD_TEST)
+                            matched_support_module = True
+                if not matched_support_module:
+                    # A `tests/` Python file that `is_test_suite_path` does not
+                    # call a suite (conftest.py, integration_helpers.py, a
+                    # fixtures/ builder) is not collectible: `pytest -q <it>`
+                    # returns NO_TESTS_COLLECTED (exit 5), which ci.yml's
+                    # `check=True` renders as a misleading red carrying zero
+                    # assertion information (#1453). Such a path maps to the
+                    # meta-guard suite instead, so every emitted target is a
+                    # collectible test file; the meta-guard-only collapse then
+                    # arms ci.yml's full-tree collect-only smoke (#1454) over the
+                    # import surface such a support module can break.
+                    selected.add(path if is_test_suite else SELECTOR_META_GUARD_TEST)
             # Unconditional, redirect or not: a redirect fires exactly when a
             # changed test file is swapped for focused nodes, which is also when
             # the meta-guards most need to run.
