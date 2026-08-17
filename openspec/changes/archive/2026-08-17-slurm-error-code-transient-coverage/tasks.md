@@ -84,7 +84,7 @@
 - [x] 3.3 `uv run ruff check .` 通过。
 - [x] 3.4 `openspec validate slurm-error-code-transient-coverage --strict
       --no-interactive` 通过。
-- [ ] 3.5 node-27 oracle（merge 后标准循环）：`ssh -p 32099
+- [x] 3.5 node-27 oracle（merge 后标准循环）：`ssh -p 32099
       nwm@210.77.77.27 'cd /home/nwm/NWM && git pull --ff-only && uv run
       pytest -q tests/test_real_slurm_gateway.py
       tests/test_production_scheduler.py'` 通过，结果记入 issue/PR；若失败
