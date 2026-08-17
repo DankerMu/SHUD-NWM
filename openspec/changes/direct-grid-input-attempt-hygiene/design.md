@@ -131,7 +131,7 @@ requirement 主段落同步补一句 staging 前卫生义务；非 direct-grid �
 | # | 面 | 不变式 | 锚 |
 |---|---|---|---|
 | I1 | direct-grid staging | 写入前 `shud/` 中未声明 accepted index 成员被删除；删除集合 ⊆ `SHUD_FORCING_INDEX_MEMBERS` | tasks 2.1/2.6 |
-| I2 | 失败编码 | 残留删除失败 → `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`，无静默继续；该码不在 TRANSIENT/NON_TRANSIENT 集合 | tasks 2.3 |
+| I2 | 失败编码 | 残留删除失败 → `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`，无静默继续；该码不在 `TRANSIENT_ERROR_CODES`（只 pin 这一侧；`NON_TRANSIENT` 登记留待后续，见 D3） | tasks 2.3 |
 | I3 | manifest 门 | manifest 声明多 index 成员 → `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS` 不被卫生掩盖 | tasks 2.2 |
 | I4 | 纵深防御 | 卫生后文件系统仍并存 → 歧义门照抛（消息为带外写入假说） | tasks 2.5 |
 | I5 | 车道隔离 | 非 direct-grid staging 不删除任何残留成员，manifest 锚定解析原样 | tasks 2.4 |
