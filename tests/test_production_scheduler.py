@@ -22794,6 +22794,369 @@ def test_recorded_permanent_code_with_top_level_retryable_is_refused_by_both_sur
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
+# --- #1420: the domain split reads the CURRENT failure's own code, not the state's
+
+_PUBLISH_FAILED_JOB_ID = "job_cycle_gfs_2026052106_publish_model_a"
+#: A recovered stage that kept its ``error_code``: retried, succeeded, code never
+#: cleared.  Geometry A of #1420.
+_STALE_RECOVERED_CONVERT_JOB = {
+    "job_id": "job_cycle_gfs_2026052106_convert_model_a",
+    "status": "succeeded",
+    "stage": "convert",
+    "error_code": "CONVERT_CANONICAL_FAILED",
+}
+
+
+def _auto_retry_event(*, previous_error: str) -> dict[str, Any]:
+    """An auto-retry event shaped exactly like ``retry.py:448`` writes it.
+
+    ``entity_id`` binds to the failed publish row that is present in the state:
+    an id bound to no row at all is dropped by the identity filter, and a state
+    carrying a pending retry row instead lands on ``active_duplicate_pipeline``
+    -- either way the candidate would never reach the resume channel, which
+    would make the pre-wiring red of this geometry meaningless.
+    """
+
+    return {
+        "event_id": 91,
+        "pipeline_event_id": "event_retry_auto_publish",
+        "entity_type": "pipeline_job",
+        "entity_id": _PUBLISH_FAILED_JOB_ID,
+        "event_type": "retry",
+        "status_from": "failed",
+        "status_to": "pending",
+        "details": {
+            "trigger": "auto",
+            "retry_count": 1,
+            "previous_error": previous_error,
+            "backoff_seconds": 60,
+            "previous_job_id": _PUBLISH_FAILED_JOB_ID,
+            "slurm_job_id": "8801",
+            "failure": retry_module.classify_failure(previous_error, attempt=1, retry_limit=3),
+            "reused_existing_retry_job": False,
+        },
+    }
+
+
+def _durable_publish_failure_state(
+    candidate: Any,
+    *,
+    extra_jobs: Sequence[Mapping[str, Any]] = (),
+    events: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """SHUD finished durably; publish failed recording NO code of its own.
+
+    This is the geometry the placeholder domain exists for -- the reader has to
+    fabricate ``PUBLISH_FAILED`` because the failing stage recorded nothing --
+    and the base every #1420 geometry adds its stale historical code to.
+    """
+
+    identity = _production_identity_fixture()
+    state: dict[str, Any] = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "succeeded",
+        "durable_shud_output_exists": True,
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "pipeline_status": "failed",
+        "failed_stage": "publish",
+        "retry_count": 1,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            },
+            *({**identity, **job} for job in extra_jobs),
+            {
+                **identity,
+                "job_id": _PUBLISH_FAILED_JOB_ID,
+                "status": "failed",
+                "stage": "publish",
+                "retry_count": 1,
+            },
+        ],
+    }
+    if events:
+        state["pipeline_events"] = [{**identity, **event} for event in events]
+    return state
+
+
+def _run_once_for_state(tmp_path: Path, state: Mapping[str, Any]) -> Any:
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(dict(state)),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    return scheduler.run_once()
+
+
+def _recorded_code_state(**overrides: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {"failed_stage": "publish"}
+    state.update(overrides)
+    return state
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        # Top level: the candidate/cycle row's own failure field.
+        (_recorded_code_state(error_code="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        (_recorded_code_state(reason_code="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        (_recorded_code_state(failure_reason="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        # Retry-history keys are about the PREVIOUS attempt, never this failure.
+        (_recorded_code_state(previous_error="SLURM_JOB_FAILED", last_error="NODE_FAILURE"), None),
+        # hydro_run, in a status the journal does NOT clear the code for.
+        (
+            _recorded_code_state(hydro_run={"status": "failed", "error_code": "OUTPUT_INCOMPLETE"}),
+            "OUTPUT_INCOMPLETE",
+        ),
+        # hydro_run in a cleared status: the SQL backend never clears on a
+        # successful transition, so this code is residue from an older attempt.
+        (
+            _recorded_code_state(hydro_run={"status": "succeeded", "error_code": "OUTPUT_INCOMPLETE"}),
+            None,
+        ),
+        (
+            _recorded_code_state(hydro_run={"status": "published", "error_code": "OUTPUT_INCOMPLETE"}),
+            None,
+        ),
+        # No status to judge by: trust the code (conservative -- keeps the #1313
+        # permanence gate in force rather than opening a resume).
+        (_recorded_code_state(hydro_run={"error_code": "OUTPUT_INCOMPLETE"}), "OUTPUT_INCOMPLETE"),
+        # The failed stage's own job row.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish", "error_code": "PUBLISH_FAILED"}
+                ]
+            ),
+            "PUBLISH_FAILED",
+        ),
+        # Geometry A at unit level: a recovered stage's leftover code.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    dict(_STALE_RECOVERED_CONVERT_JOB),
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # The other half of the "repair markers are not always written" problem:
+        # another stage's FAILED row carries a code, this stage's does not.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_convert",
+                        "status": "failed",
+                        "stage": "convert",
+                        "error_code": "CONVERT_CANONICAL_FAILED",
+                    },
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # Stop at the FIRST matching failed row: an older same-stage attempt's
+        # code is not this attempt's record.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_publish_retry_0",
+                        "status": "failed",
+                        "stage": "publish",
+                        "error_code": "PUBLISH_FAILED",
+                    },
+                    {"job_id": "job_publish_retry_1", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # Repaired-stage evidence rows stay excluded (as in ``_state_error_code``).
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_publish",
+                        "status": "failed",
+                        "stage": "publish",
+                        "error_code": "PUBLISH_FAILED",
+                        "repair_status": "repaired",
+                    }
+                ]
+            ),
+            None,
+        ),
+        # Production stages are aliases: both sides must normalize, or a real
+        # ``parse_output_array`` row would be missed by a bare string compare.
+        (
+            _recorded_code_state(
+                failed_stage="parse",
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_parse",
+                        "status": "failed",
+                        "stage": "parse_output_array",
+                        "error_code": "PARSE_TASK_FAILED",
+                    }
+                ],
+            ),
+            "PARSE_TASK_FAILED",
+        ),
+        # No top-level ``failed_stage``: the stage is inferred from the jobs.
+        (
+            {
+                "pipeline_jobs": [
+                    {"job_id": "job_forecast", "status": "succeeded", "stage": "forecast"},
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish", "error_code": "PUBLISH_FAILED"},
+                ]
+            },
+            "PUBLISH_FAILED",
+        ),
+        # Geometry B at unit level: an auto-retry event's ``previous_error``.
+        (_recorded_code_state(pipeline_events=[_auto_retry_event(previous_error="SLURM_JOB_FAILED")]), None),
+        # The event-derived PRODUCTION shape: a failed_task event never leaves its
+        # code in the event alone -- ``candidate_state_from_rows`` projects it to
+        # the top-level ``error_code`` (with a ``NODE_FAILURE`` fallback), which
+        # this scoping reads.
+        (
+            _recorded_code_state(
+                error_code="NODE_FAILURE",
+                pipeline_events=[
+                    {
+                        "event_id": 77,
+                        "event_type": "status_change",
+                        "status_to": "failed",
+                        "details": {"failed_task": {"task_id": "7", "stage": "publish"}},
+                    }
+                ],
+            ),
+            "NODE_FAILURE",
+        ),
+        # Never raises, whatever the state is missing.
+        ({}, None),
+    ],
+)
+def test_downstream_recorded_error_code_scoping_grid(state: dict[str, Any], expected: str | None) -> None:
+    # #1420 D2: the decision table for "did THIS failure record a code".
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) == expected
+
+
+def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+    # #1420 geometry A: SHUD is done, publish failed with no code of its own, and
+    # a convert row that was retried into success still carries
+    # ``CONVERT_CANONICAL_FAILED``.  Before the scoping this stale code routed the
+    # candidate into the recorded domain and refused a resume master would run.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate, extra_jobs=[_STALE_RECOVERED_CONVERT_JOB])
+
+    assert scheduler_state_failure_module._state_error_code(state) == "CONVERT_CANONICAL_FAILED"
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence["restart_stage"] == "publish"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+
+
+def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+    # #1420 geometry B, the common shape: every candidate that was ever
+    # auto-retried carries a ``previous_error``, so the broad scan turned "SHUD
+    # computed, publish failed silently" into manual-intervention work.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(
+        candidate,
+        events=[_auto_retry_event(previous_error="SLURM_JOB_FAILED")],
+    )
+
+    # The event really is retained by the identity filter -- otherwise this
+    # geometry's pre-wiring red would come from the candidate being skipped.
+    assert scheduler_state_failure_module._state_error_code(state) == "SLURM_JOB_FAILED"
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence["restart_stage"] == "publish"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+
+
+def test_downstream_resume_control_group_without_any_historical_code(tmp_path: Path) -> None:
+    # #1420 control: the same base with no stale code anywhere resumes before and
+    # after the scoping, which is what makes geometries A/B attributable to the
+    # stale code alone.  (``test_downstream_resume_keeps_synthesized_placeholder
+    # _domain`` pins the same domain at decision level for the parse stage.)
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate)
+
+    assert scheduler_state_failure_module._state_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_stale_code_still_reaches_the_reason_code_text_surface() -> None:
+    # #1420 I6: only the DOMAIN SPLIT is scoped.  ``_failure_policy_payload``
+    # keeps its broad scan, so the operator still sees the most relevant code the
+    # state carries -- the resume channel just no longer treats it as this
+    # failure's own record.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate, extra_jobs=[_STALE_RECOVERED_CONVERT_JOB])
+
+    failure = scheduler_state_failure_module._failure_policy_payload(state)
+    assert failure["reason_code"] == "CONVERT_CANONICAL_FAILED"
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.evidence["failure"]["reason_code"] == "CONVERT_CANONICAL_FAILED"
+    assert decision.evidence["failure"]["classifier"] == "unknown_failure"
+
+
+def test_stale_code_classifying_into_a_refused_classifier_still_refuses(tmp_path: Path) -> None:
+    # #1420 I7 boundary: the placeholder domain has always refused its three
+    # classifiers, and the stale code still reaches the classifier through the
+    # text surface above.  So a recovered stage's ``OUT_OF_MEMORY`` residue lands
+    # on ``resource_configuration`` and is refused -- pre-existing #1313
+    # semantics, unchanged by this scoping.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(
+        candidate,
+        extra_jobs=[{**_STALE_RECOVERED_CONVERT_JOB, "error_code": "OUT_OF_MEMORY"}],
+    )
+
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
 # --- seam 10: channels this change must NOT move
 
 

@@ -233,6 +233,77 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
                 return str(value)
     return None
 
+#: The three keys that carry a failure's OWN recorded code.  ``last_error`` /
+#: ``previous_error`` are deliberately absent: every real writer of those two is
+#: a retry-history event detail (retry.py:448/:485/:582,
+#: file_orchestration_journal.py:6917/:6963/:6995/:7061/:7190), and
+#: ``previous_error`` means, by definition, the error of the PREVIOUS attempt.
+_RECORDED_FAILURE_CODE_KEYS = ("error_code", "reason_code", "failure_reason")
+#: The ``hydro_run`` statuses whose journal write CLEARS the row's error code
+#: (file_orchestration_journal.py:1507-1513 is the source of this set -- it is
+#: NOT the durable-output success set, which answers a different question).  The
+#: SQL backend's ``update_hydro_run_status`` only assigns when the incoming value
+#: is not None, so a successful transition there leaves an older code in place:
+#: a code sitting on a run row in one of these statuses is stale residue rather
+#: than the current failure's own record.
+_HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
+
+
+def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
+    """The error code the CURRENT downstream failure recorded for itself (#1420).
+
+    The downstream-resume domain split asks whether THIS failure has a genuinely
+    recorded code -- the placeholder domain exists precisely because the failing
+    stage recorded none.  ``_state_error_code``'s broad scan answers a different
+    question ("is there any code anywhere in the state"), which routes a
+    code-less failure into the recorded domain whenever the state still carries a
+    stale one: a recovered stage's leftover ``error_code``, or an auto-retry
+    event's ``previous_error`` (which every once-retried candidate has).
+
+    Carriers, in order: the candidate/cycle row's own failure fields, the
+    ``hydro_run`` row when its status is not one the journal clears codes for,
+    then the failed stage's own failed job row.  Events never participate: an
+    event-only code has no production shape, because ``candidate_state_from_rows``
+    projects a ``failed_task`` event to the top-level ``error_code``
+    (chain_repository_state.py:846-848) with a ``NODE_FAILURE`` fallback
+    (chain_source_cycle.py:685,693), so a failed_task always leaves a non-empty
+    top-level code for the first carrier above to find.
+
+    Never raises; the broad-scan ``_state_error_code`` contract is unchanged and
+    still serves the reason-code text surface.
+    """
+
+    for key in _RECORDED_FAILURE_CODE_KEYS:
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    hydro_run = state.get("hydro_run")
+    if isinstance(hydro_run, Mapping):
+        status = hydro_run.get("status")
+        # A missing status is trusted: with nothing to judge staleness by, keeping
+        # the code in the recorded domain leaves the #1313 permanence gate in
+        # force rather than opening a resume on a guess.
+        if status in (None, "") or str(status) not in _HYDRO_RUN_CODE_CLEARING_STATUSES:
+            for key in _RECORDED_FAILURE_CODE_KEYS:
+                value = hydro_run.get(key)
+                if value not in (None, ""):
+                    return str(value)
+    failed_stage = _canonical_downstream_stage(_failed_stage(state))
+    if failed_stage is None:
+        return None
+    for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
+        if str(job.get("status") or "") not in FAILED_PIPELINE_STATUSES:
+            continue
+        if _canonical_downstream_stage(str(job.get("stage") or job.get("job_type") or "")) != failed_stage:
+            continue
+        # The newest failed row of the failed stage IS the current failure: if it
+        # recorded no code there is none, and an older attempt's code is not it.
+        value = job.get("error_code") or job.get("reason_code")
+        return str(value) if value not in (None, "") else None
+    return None
+
 def _state_error_message(state: Mapping[str, Any]) -> str | None:
     for key in ("error_message", "message"):
         value = state.get(key)
@@ -332,11 +403,14 @@ def _downstream_retry_evidence(
     if _force_native_shud_rerun(state):
         return None
     # #1313 D4: the ``{STAGE}_FAILED`` default below is READER-SYNTHESIZED -- it is
-    # fabricated here when the state records no error code at all, and is therefore
+    # fabricated here when the failing stage records no error code, and is therefore
     # not evidence under the spec's unknown-code clause.  Whether the code the
     # classification rests on was genuinely recorded decides which domain the
-    # downstream-resume judgement applies.
-    recorded_error_code = _state_error_code(state)
+    # downstream-resume judgement applies.  #1420 scopes "recorded" to the CURRENT
+    # failure's own carriers: a stale code left elsewhere in the state (a recovered
+    # stage's row, a retry-history key) describes a different failure and is not
+    # evidence for this split -- it still reaches the reason-code text below.
+    recorded_error_code = _downstream_recorded_error_code(state)
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
     if _cold_start_quarantined_failure(failure):
         return None
