@@ -48,7 +48,9 @@
       selection counts as a gap); every gap pair selected XOR
       excluded; stale exclusion (selected or vanished) reds; invalid
       token reds; `edge-consumer` entries machine-checked as selected
-      by some other rule; anti-vacuity anchored on the
+      by a rule whose pattern does not match the module; `redirect`
+      entries machine-checked as reached via `::` node ids in the
+      module's own selection; anti-vacuity anchored on the
       pre-subtraction gap universe (nonzero pairs before exclusion
       subtraction + all 9 directories contribute modules).
 - [x] 3.2 Guard red evidence via injectable selection/exclusion

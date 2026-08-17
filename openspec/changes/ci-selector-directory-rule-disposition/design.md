@@ -105,13 +105,20 @@ changed-test PR via the meta-guard).
    BLOCK records the rationale; `runtime-budget` entries name the
    measured number. Guard checks: token validity; pair still derives
    as a gap (staleness both ways); `edge-consumer` entries
-   additionally MACHINE-CHECKED (F2): the excluded suite must be
-   selected by at least one other rule in `PATH_TEST_RULES` — an
-   unselected edge-consumer is an orphan and reds. The guard does
+   additionally MACHINE-CHECKED (F2, sharpened round 1): the
+   excluded suite must be selected by at least one rule whose
+   pattern does NOT match the excluded module — membership in any
+   rule is too weak, since the module's own shadowed directory rule
+   would satisfy it and greenlight a genuine orphan; `redirect`
+   entries MACHINE-CHECKED (round 1): the module's own selection
+   must still reach the suite via `::`-qualified node ids — redirect
+   is the only token whose truth claim would otherwise have no
+   anchor, and deleting the node ids from a shared tuple must red
+   the entry, not silently zero the coverage. The guard does
    NOT re-run pytest (speed); fn-gated/runtime-budget truthfulness
    is review-time evidence anchored by the PR body's measurement
    table (spec scenario promises only what the guard checks: valid
-   token + live pair — Note B).
+   token + live pair + the two structural conditions — Note B).
 3. **Routing rules honored, not overridden** (the #1452 audit's
    standing calls): (a) orchestrator whole-suite redirect targets —
    suites the `stop_on_match` redirect design deliberately swaps for
@@ -143,8 +150,15 @@ changed-test PR via the meta-guard).
    recorded in the PR body); every added target verified non-gated
    at file level and existing. Package-`__init__.py` rows (34 of the
    211 pairs, Note D) are re-export shims closable cleanly with
-   narrow per-`__init__` rules — prefer ADD for them; none of the
-   four tokens describes them as exclusions.
+   narrow per-`__init__` rules — prefer ADD for them. Exception
+   (recorded round 1, delivered as deviation 6): where the
+   `__init__` row is the re-export sibling of a non-`__init__` pair
+   already excluded as `edge-consumer` for the same cross-surface
+   suite, decision 3(b) governs and the `__init__` row takes the
+   same `edge-consumer` exclusion (8 of the 34; the other 26 are
+   ADDs) — copying a gateway-contract or compose-topology suite
+   into five directory rules to satisfy Note D would couple
+   unrelated PR classes.
 4b. **Positive-selection floor** (F2 — the guard alone is
    satisfiable by 211 exclusions and zero additions, which would
    re-create the rotted-audit failure this change ends): explicit
@@ -208,8 +222,13 @@ changed-test PR via the meta-guard).
 
 ## Must preserve
 
-- All 75 existing selector-suite tests green UNMODIFIED (comment-only
-  edits allowed where a rule block gains entries next to them).
+- All 75 existing selector-suite tests green. Exception (recorded
+  round 1, disclosed as deviation 1): five tests assert selection
+  EXACT EQUALITY for modules whose rules this change grows — their
+  literal expectations are updated, every negative assertion and the
+  original members retained, and the broad-orchestrator fallback
+  test re-freezes the grown target list as an independent literal
+  (never an expectation read back from the rule table it checks).
 - Selection for every input class outside the 9 directories
   byte-identical (whole-tree old-vs-new diff is the oracle; expected
   delta = exactly the modules whose rules grew).

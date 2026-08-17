@@ -66,7 +66,7 @@ normative disposition rule for their direct-importer gaps.
 
 ### Requirement: Directory-rule importer gaps MUST be dispositioned as selections or reasoned exclusions
 
-For every tracked module under the nine audited directory paths (`workers/output_parser`, `workers/data_adapters`, `workers/forcing_producer`, `workers/shud_runtime`, `workers/model_registry`, `services/orchestrator`, `services/slurm_gateway`, `services/tile_publisher`, `services/production_closure` — including modules owned by earlier stop-rules rather than the directory rules themselves), a mechanized selector-suite guard SHALL derive the non-gated top-level importer suites the selector does not select for that module (node-id-only selection counts as a gap) and fail unless each such gap pair is either closed by a rule or present in an explicit exclusion table whose entries carry a reason token from {`fn-gated`, `redirect`, `edge-consumer`, `runtime-budget`} — where `fn-gated` denotes gating invisible to the file-level marker filter (function-level markers or environment opt-ins), established at disposition time by a recorded measurement in which the suite executed zero assertions, and `edge-consumer` entries are guard-checked to be selected by some other rule — and a stale exclusion (a pair that no longer derives as a gap) SHALL also fail the guard, so the audit that previously lived in a PR body can never rot silently again.
+For every tracked module under the nine audited directory paths (`workers/output_parser`, `workers/data_adapters`, `workers/forcing_producer`, `workers/shud_runtime`, `workers/model_registry`, `services/orchestrator`, `services/slurm_gateway`, `services/tile_publisher`, `services/production_closure` — including modules owned by earlier stop-rules rather than the directory rules themselves), a mechanized selector-suite guard SHALL derive the non-gated top-level importer suites the selector does not select for that module (node-id-only selection counts as a gap) and fail unless each such gap pair is either closed by a rule or present in an explicit exclusion table whose entries carry a reason token from {`fn-gated`, `redirect`, `edge-consumer`, `runtime-budget`} — where `fn-gated` denotes gating invisible to the file-level marker filter (function-level markers or environment opt-ins), established at disposition time by a recorded measurement in which the suite executed zero assertions, `edge-consumer` entries are guard-checked to be selected by at least one rule whose pattern does not match the excluded module, and `redirect` entries are guard-checked to still reach the suite via node-qualified ids in the module's own selection — and a stale exclusion (a pair that no longer derives as a gap) SHALL also fail the guard, so the audit that previously lived in a PR body can never rot silently again.
 
 #### Scenario: an undispositioned gap reds the suite
 
@@ -85,8 +85,12 @@ For every tracked module under the nine audited directory paths (`workers/output
 
 - **WHEN** a gap pair is present in the exclusion table with a valid
   reason token and the pair still derives as a gap (for
-  `edge-consumer`: and the suite is selected by some other rule)
+  `edge-consumer`: and a rule not matching the module selects the
+  suite; for `redirect`: and the module's selection reaches the suite
+  via node-qualified ids)
 - **THEN** the guard passes for that pair — the guard checks token
-  validity and pair liveness only; `fn-gated`/`runtime-budget`
-  truthfulness is anchored by the recorded measurement table in the
-  delivering PR, not re-executed by the guard
+  validity, pair liveness, and the structural
+  `edge-consumer`/`redirect` conditions only; `fn-gated`/
+  `runtime-budget` truthfulness is anchored by the recorded
+  measurement table in the delivering PR, not re-executed by the
+  guard
