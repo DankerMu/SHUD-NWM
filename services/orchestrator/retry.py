@@ -27,6 +27,7 @@ LOGGER = logging.getLogger(__name__)
 TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
+    "SLURM_DEADLINE",
     "NODE_FAILURE",
     "PREEMPTED",
     "STORAGE_WRITE_FAILED",
@@ -206,6 +207,7 @@ def failure_classifier(error_code: str | None) -> str:
     if code in {
         "SLURM_TIMEOUT",
         "SLURM_JOB_TIMEOUT",
+        "SLURM_DEADLINE",
         "NODE_FAILURE",
         "PREEMPTED",
         "SLURM_UNAVAILABLE",
@@ -224,6 +226,14 @@ def failure_classifier(error_code: str | None) -> str:
         return "malformed_input"
     if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:
         return "policy_blocked"
+    if code == "SLURM_JOB_FAILED":
+        # The gateway's catch-all for terminal Slurm states with no specific
+        # mapping.  It is deliberately registered on no classification surface, so
+        # it defaults to non-transient and downstream resume refuses it until an
+        # operator adjudicates.  Spelled out rather than left to fall through, so a
+        # later branch cannot adopt it by accident (openspec change
+        # slurm-error-code-transient-coverage).
+        return "unknown_failure"
     return "unknown_failure"
 
 

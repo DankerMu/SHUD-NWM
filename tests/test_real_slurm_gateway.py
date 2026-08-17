@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -15,6 +16,7 @@ from jinja2.exceptions import SecurityError
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
+from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -30,7 +32,7 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
-from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway
+from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway, map_slurm_error_code
 
 
 def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
@@ -964,7 +966,8 @@ def test_sacct_state_parsing(monkeypatch, tmp_path, slurm_state, expected):
         ("NODE_FAIL", "NODE_FAILURE"),
         ("PREEMPTED", "NODE_FAILURE"),
         ("OUT_OF_MEMORY", "OUT_OF_MEMORY"),
-        ("BOOT_FAIL", "SLURM_JOB_FAILED"),
+        ("BOOT_FAIL", "NODE_FAILURE"),
+        ("DEADLINE", "SLURM_DEADLINE"),
     ],
 )
 def test_failed_sacct_states_produce_stable_error_codes(
@@ -1006,7 +1009,9 @@ def test_out_of_memory_produces_out_of_memory_error_code(monkeypatch, tmp_path) 
 
 
 def test_unknown_terminal_produces_slurm_job_failed_error_code(monkeypatch, tmp_path) -> None:
-    _assert_slurm_state_error_code(monkeypatch, tmp_path, "BOOT_FAIL", "SLURM_JOB_FAILED")
+    # REVOKED is federation-only and deliberately unmapped, so it witnesses the
+    # generic unknown code now that BOOT_FAIL maps to NODE_FAILURE.
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "REVOKED", "SLURM_JOB_FAILED")
 
 
 def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> None:
@@ -1029,10 +1034,48 @@ def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> N
 def test_slurm_error_codes_align_with_retry_sets() -> None:
     assert "SLURM_TIMEOUT" in TRANSIENT_ERROR_CODES
     assert "NODE_FAILURE" in TRANSIENT_ERROR_CODES
+    assert "SLURM_DEADLINE" in TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
+    # Transient membership has two surfaces; a code carried by only one is a
+    # half-transient code (resume allowed, but an exhausted budget then reports
+    # permanent_failure_guard instead of retry_limit_exhausted).
+    assert TRANSIENT_ERROR_CODES == TRANSIENT_RETRY_REASON_CODES
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_RETRY_REASON_CODES
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected_error_code"),
+    [
+        ("TIMEOUT", "SLURM_TIMEOUT"),
+        ("NODE_FAIL", "NODE_FAILURE"),
+        ("PREEMPTED", "NODE_FAILURE"),
+        ("BOOT_FAIL", "NODE_FAILURE"),
+        ("OUT_OF_MEMORY", "OUT_OF_MEMORY"),
+        ("DEADLINE", "SLURM_DEADLINE"),
+        # Deliberately unmapped terminal forms: REVOKED is federation-only and
+        # SPECIAL_EXIT is unobserved on this control plane, so both fall through to
+        # the generic unknown code that waits for operator adjudication.
+        ("REVOKED", "SLURM_JOB_FAILED"),
+        ("SPECIAL_EXIT", "SLURM_JOB_FAILED"),
+        ("FAILED", "SLURM_JOB_FAILED"),
+        ("!! not a state", "SLURM_JOB_FAILED"),
+    ],
+)
+def test_map_slurm_error_code_maps_every_terminal_state(raw_state: str, expected_error_code: str) -> None:
+    assert map_slurm_error_code(raw_state) == expected_error_code
+
+
+def test_boot_fail_maps_to_failed_without_unmapped_warning(tmp_path, caplog) -> None:
+    gateway = _gateway(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="services.slurm_gateway.real_backend"):
+        status = gateway._map_slurm_state("BOOT_FAIL")
+
+    assert status == SlurmJobStatus.FAILED
+    assert [record for record in caplog.records if "Unmapped Slurm state" in record.getMessage()] == []
 
 
 def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):

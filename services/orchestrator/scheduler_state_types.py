@@ -57,6 +57,7 @@ NATIVE_SHUD_STAGE_ALIASES = {"forecast", "run_shud_forecast", "forecast_run", "a
 TRANSIENT_RETRY_REASON_CODES = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
+    "SLURM_DEADLINE",
     "NODE_FAILURE",
     "PREEMPTED",
     "STORAGE_WRITE_FAILED",

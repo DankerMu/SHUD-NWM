@@ -2,18 +2,18 @@
 
 ## 1. 实现
 
-- [ ] 1.1 `services/slurm_gateway/real_backend.py`（design D1）：
+- [x] 1.1 `services/slurm_gateway/real_backend.py`（design D1）：
       `map_slurm_error_code` 增 `DEADLINE` → `SLURM_DEADLINE`、`BOOT_FAIL`
       并入 `NODE_FAILURE` 分支；`SLURM_STATE_MAP` 增 `BOOT_FAIL` →
       `SlurmJobStatus.FAILED`（具名承担 reconcile.py:1224 cohort 投影行为
       正确化，D1/P1-2）；`REVOKED`/`SPECIAL_EXIT` 具名不映（注释记裁决）；
       :1422-1423 raw state 入 manifest 行为不动。
-- [ ] 1.2 分类三面（design D2/P1-1）：`SLURM_DEADLINE` 入
+- [x] 1.2 分类三面（design D2/P1-1）：`SLURM_DEADLINE` 入
       `retry.TRANSIENT_ERROR_CODES` + classifier `transient_slurm_runtime`
       集合 + `scheduler_state_types.TRANSIENT_RETRY_REASON_CODES`；
       `failure_classifier` 增 `SLURM_JOB_FAILED` 显式分支（尾部默认之前，
       行为等价，注释点名裁决与 resume 后果）；各集合既有成员不删不移。
-- [ ] 1.3 双 spec delta（design D3）：`real-slurm-gateway-contract`
+- [x] 1.3 双 spec delta（design D3）：`real-slurm-gateway-contract`
       MODIFIED「Retryable Slurm errors are stable」（保留 RealSlurmGateway
       主语；新增 DEADLINE 场景；node-failure WHEN 扩 BOOT_FAIL；未知终态
       场景补显式契约、resume 本体引用 job-retry-mechanism；TIMEOUT/OOM/
@@ -23,7 +23,7 @@
 
 ## 2. 测试（先红后绿；红证锚定 2.3 的 resume 放行方向）
 
-- [ ] 2.1 `tests/test_real_slurm_gateway.py`：`map_slurm_error_code` 逐格
+- [x] 2.1 `tests/test_real_slurm_gateway.py`：`map_slurm_error_code` 逐格
       （DEADLINE/BOOT_FAIL/REVOKED/SPECIAL_EXIT/裸 FAILED/垃圾串）——纯函数
       直测与既有 sacct-fake 端到端并存不替换（N3）；
       `_record_from_sacct_fields` DEADLINE 终态端到端（error_code=
@@ -37,7 +37,7 @@
       :999，raw_state 换 BOOT_FAIL）⇒ outcome=failed +
       error_code=NODE_FAILURE（**今天必红**：outcome=unverified、
       action=task_accounting_incomplete——I7 天然红-绿锚）。
-- [ ] 2.2 `tests/test_retry.py` + 扩充既有
+- [x] 2.2 `tests/test_retry.py` + 扩充既有
       `test_slurm_error_codes_align_with_retry_sets`
       （test_real_slurm_gateway.py:1029-1035）：
       `is_retryable_failure("SLURM_DEADLINE")` True + classifier
@@ -49,7 +49,7 @@
       `unknown_error_code_defaulted_non_transient`；
       `TRANSIENT_ERROR_CODES ∩ NON_TRANSIENT_ERROR_CODES == ∅` +
       **`TRANSIENT_ERROR_CODES == TRANSIENT_RETRY_REASON_CODES` 相等钉测**。
-- [ ] 2.3 resume 两方向主锚（红-绿，seam 具名）：
+- [x] 2.3 resume 两方向主锚（红-绿，seam 具名）：
       `test_downstream_resume_keeps_recorded_transient_codes`
       （test_production_scheduler.py:22633）参数化**加格
       `SLURM_DEADLINE`**（**接线前红**：未知码 → permanent →
@@ -63,26 +63,26 @@
       （:22796 参数化）加格 `SLURM_DEADLINE`；反方向
       `test_downstream_resume_refuses_recorded_non_transient_codes`
       （:22600-22628，已含 SLURM_JOB_FAILED）保绿。
-- [ ] 2.4 既有映射回归：TIMEOUT/NODE_FAIL/PREEMPTED/OOM 四路既有格与
+- [x] 2.4 既有映射回归：TIMEOUT/NODE_FAIL/PREEMPTED/OOM 四路既有格与
       CANCELLED 非 FAILED 态不发码，原断言保绿（BOOT_FAIL 一格按 2.1
       更新，为本 change 唯一既有断言改动）。
-- [ ] 2.5 anchor 保全：`test_repaired_raw_manifest_allows_stale_downstream_
+- [x] 2.5 anchor 保全：`test_repaired_raw_manifest_allows_stale_downstream_
       failure_retry`（tests/test_production_scheduler.py:22135）**零改动**
       且绿；`uv run pytest -q tests/test_production_scheduler.py -k
       "downstream or resume or raw_manifest"` 全绿。
 
 ## 3. 验证（Evidence Floor，per issue Verification）
 
-- [ ] 3.1 `uv run pytest -q tests/test_real_slurm_gateway.py
+- [x] 3.1 `uv run pytest -q tests/test_real_slurm_gateway.py
       tests/test_retry.py tests/test_reconcile_sacct_parse.py
       tests/test_gateway_reconcile.py tests/test_production_slurm_validation.py`
       通过（issue Verification 写的 `tests/test_reconcile.py` 不存在，以两
       个 reconcile 既有文件为准；补 slurm_validation——:1135 是
       map_slurm_error_code 调用点；偏离已记录）。
-- [ ] 3.2 `uv run pytest -q tests/test_production_scheduler.py -k
+- [x] 3.2 `uv run pytest -q tests/test_production_scheduler.py -k
       "downstream or resume or raw_manifest"` 通过。
-- [ ] 3.3 `uv run ruff check .` 通过。
-- [ ] 3.4 `openspec validate slurm-error-code-transient-coverage --strict
+- [x] 3.3 `uv run ruff check .` 通过。
+- [x] 3.4 `openspec validate slurm-error-code-transient-coverage --strict
       --no-interactive` 通过。
 - [ ] 3.5 node-27 oracle（merge 后标准循环）：`ssh -p 32099
       nwm@210.77.77.27 'cd /home/nwm/NWM && git pull --ff-only && uv run
