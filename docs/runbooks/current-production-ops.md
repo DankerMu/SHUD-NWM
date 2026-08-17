@@ -593,9 +593,11 @@ declaration -> 提交 declaration 到 mode-0600 路径 ->
    **不要用 `--dry-run` 取这个值**：dry_run 走 id-only 分类（prospective 行只有
    id、没有 checksum），既不评估 removal，其 `generation` 也不是真实 publish 会
    绑定的那个值——receipt 里该键为 `null`。
+
    ```bash
    jq -r '.registry_classification.generation' <receipt>
    ```
+
 3. 写 declaration，entry 形：`model_id` = 要退役的行、`old_checksum` = **previous
    canonical 那一行**的 `package_checksum`（与上一步 generation 同源——都从这张
    被拒 receipt 拷，`old_checksum` 取 `registry_classification.refused` 里那条

@@ -87,6 +87,6 @@
       example 就地扩展后被同名配对校验）：本地等价
       `check-jsonschema --check-metaschema <schema>` +
       `check-jsonschema --schemafile <schema> <example>` 两条过。
-- [ ] 3.5 PR body 记录：1.2 常量消费点核查结论、receipt schema 四处改动
+- [x] 3.5 PR body 记录：1.2 常量消费点核查结论、receipt schema 四处改动
       清单、D8 已知残余（退役行的 state snapshot 孤儿 + orchestrator 缺行
       行为）、issue 验收逐条映射。
