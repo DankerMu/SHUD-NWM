@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -465,8 +466,38 @@ def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
     return ".".join(parts) or None
 
 
+# One suite run re-parses the same ~500 files ~10^4 times (every guard rederives
+# its own view of the tree). Memoizing collapses that to one parse per file.
+# Released by tests/conftest.py's pytest_unconfigure: carrying the trees into
+# interpreter shutdown costs seconds of CPython finalization (see the hook).
+_PARSE_CACHE: dict[tuple[str, int, int], ast.Module] = {}
+
+
 def _parse_tracked(path: str) -> ast.Module:
-    return ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
+    """Parse ``path``, reusing an earlier parse of the same file identity.
+
+    The key is the RESOLVED absolute path plus stat identity, never the
+    caller-supplied spelling: tests chdir into ``tmp_path`` and parse
+    repo-shaped relative paths, so a relative key would alias a fixture onto
+    the repository file of the same name. ``mtime_ns`` + ``size`` make a
+    rewrite a different key, so a file rewritten mid-run is re-parsed.
+
+    Two boundaries this key deliberately does not discriminate: a rewrite
+    keeping the resolved path, ``mtime_ns`` AND size identical (unreachable
+    here — tracked files are never mutated mid-run and mtimes are
+    nanosecond-grained), and the ``filename`` spelling of the first parse,
+    which only shapes parse-time ``SyntaxError`` messages and leaves no trace
+    on the returned tree.
+
+    Cache hits hand back the same ``ast.Module``; every consumer only reads.
+    """
+    stat = os.stat(path)
+    key = (str(Path(path).resolve()), stat.st_mtime_ns, stat.st_size)
+    tree = _PARSE_CACHE.get(key)
+    if tree is None:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=path)
+        _PARSE_CACHE[key] = tree
+    return tree
 
 
 def _module_names_from_nodes(path: str, nodes: Iterable[ast.AST]) -> set[str]:
@@ -1036,6 +1067,58 @@ def test_file_level_gating_marker_detection_is_ast_shaped(tmp_path: Path) -> Non
         path.write_text("import pytest\n" + body, encoding="utf-8")
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
         assert _file_level_gating_markers(tree) == expected, name
+
+
+def _assigned_names(tree: ast.Module) -> list[str]:
+    """Module-level assignment target names — the two cache guards' content probe."""
+    return [
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    ]
+
+
+def test_parse_cache_keeps_a_chdir_fixture_off_the_repository_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _parse_tracked is memoized, and two guards above parse repo-shaped
+    # relative spellings from inside tmp_path (the relative-import walk and the
+    # one-hop recursion guard). Keying the cache on the caller's spelling
+    # instead of the resolved path would hand those fixtures the repository
+    # file of the same name the day one reuses a tracked name — a false green.
+    rel = "scripts/select_ci_tests.py"
+    repo_tree = _parse_tracked(rel)
+    assert "select_tests" in {node.name for node in repo_tree.body if isinstance(node, ast.FunctionDef)}
+
+    fixture = tmp_path / rel
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("PARSE_CACHE_FIXTURE_MARKER = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert _assigned_names(_parse_tracked(rel)) == ["PARSE_CACHE_FIXTURE_MARKER"], (
+        "the cache aliased a tmp_path fixture onto the repository parse"
+    )
+
+
+def test_parse_cache_observes_a_rewrite_of_an_already_parsed_file(tmp_path: Path) -> None:
+    # Stat identity, not just the path, is what makes a rewritten file a new
+    # cache key. The rewrite below keeps the byte count identical so the guard
+    # bites on the mtime_ns half of the key too, and bumps mtime explicitly
+    # rather than leaning on filesystem timestamp granularity.
+    probe = tmp_path / "probe_module.py"
+    probe.write_text("ALPHA = 1\n", encoding="utf-8")
+    assert _assigned_names(_parse_tracked(str(probe))) == ["ALPHA"]
+
+    probe.write_text("OMEGA = 2\n", encoding="utf-8")
+    before = os.stat(probe)
+    os.utime(probe, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+
+    assert _assigned_names(_parse_tracked(str(probe))) == ["OMEGA"], (
+        "the cache served a stale parse of a rewritten file"
+    )
 
 
 def test_changed_test_file_also_selects_the_selector_meta_guards() -> None:
