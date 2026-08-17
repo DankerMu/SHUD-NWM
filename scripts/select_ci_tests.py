@@ -93,6 +93,21 @@ DIRECT_GRID_CONTRACT_TESTS: tuple[str, ...] = (
 
 DIRECT_GRID_SURFACE_TESTS: tuple[str, ...] = DIRECT_GRID_E2E_TESTS + DIRECT_GRID_CONTRACT_TESTS
 
+# Non-gated top-level importers of workers/forcing_producer/direct_grid_contract.py
+# that the focused DIRECT_GRID_SURFACE_TESTS node ids never reach (#1455). The
+# contract module is owned by a stop_on_match rule, so the
+# `workers/forcing_producer/**` rule below is unreachable for it and these have
+# to ride the stop rule itself. Kept as a separate tuple appended at the rule
+# site so DIRECT_GRID_SURFACE_TESTS keeps meaning "the compact e2e fixture" for
+# every other reader.
+DIRECT_GRID_CONTRACT_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_direct_grid_variant_registration.py",
+    "tests/test_legacy_reactivation_guard.py",
+    "tests/test_mapping_builder_binding.py",
+    "tests/test_mapping_builder_cli.py",
+    "tests/test_mapping_builder_integration.py",
+)
+
 DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "workers/forcing_producer/direct_grid_contract.py",
     "openspec/changes/direct-grid-forcing/**",
@@ -118,6 +133,52 @@ FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
     "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
     "tests/test_source_cycle_raw_manifest.py",
+)
+
+# #1455 at-site extensions for the four orchestrator modules whose stop rules
+# make the `services/orchestrator/**` rule unreachable. Each tuple is appended
+# to ONE rule below with `(*SHARED_TESTS, *THIS)`; the shared constants
+# themselves stay untouched, because they also serve patterns outside the nine
+# audited directories (FILE_JOURNAL_READ_STATE_TESTS is used by
+# packages/common/safe_fs.py) where selection must not move.
+#
+# chain.py is the widest importer surface in the audit. Everything here is a
+# non-gated top-level importer whose subject IS the chain (~193s measured all
+# together); the chain's cross-surface importers — production-closure,
+# slurm-gateway, model-registry and forcing-producer suites — stay with the
+# rules that own them and are recorded as `edge-consumer` in
+# tests/test_select_ci_tests.py.
+CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_analysis_pipeline.py",
+    "tests/test_chain_repository_nfs_raw_manifest.py",
+    "tests/test_e2e.py",
+    "tests/test_e2e_ifs.py",
+    "tests/test_e2e_m3.py",
+    "tests/test_file_orchestration_journal.py",
+    "tests/test_ifs_forecast_integration.py",
+    "tests/test_orchestrator.py",
+    "tests/test_partial_success.py",
+    "tests/test_pipeline_logs_artifacts.py",
+    "tests/test_warm_start.py",
+    "tests/test_warm_start_chaining.py",
+)
+
+SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_cli_publish_qdown.py",
+    "tests/test_scheduler_backfill.py",
+    "tests/test_scheduler_backfill_predecessor.py",
+    "tests/test_scheduler_timing.py",
+    "tests/test_source_scoped_dispatch.py",
+)
+
+ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_cli_publish_qdown.py",
+    "tests/test_scheduler_backfill.py",
+)
+
+FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_file_orchestration_journal_read_cache.py",
+    "tests/test_scheduler_backfill.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -171,16 +232,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[2],
-        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, *CHAIN_IMPORTER_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
+        # scheduler.py is the allowlisted duplicate pattern: this non-stop entry
+        # plus the stop-on-match FILE_JOURNAL entry below. #1455's additions
+        # extend THIS existing entry rather than adding a third — the duplicate
+        # allowlist records a two-entry layering, and a third would split the
+        # module's ownership again.
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[3],
-        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, *SCHEDULER_IMPORTER_TESTS),
     ),
     PathTestRule(
         DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
-        DIRECT_GRID_SURFACE_TESTS,
+        # Extended AT THE RULE SITE, not by editing DIRECT_GRID_SURFACE_TESTS:
+        # the shared constant also serves the openspec-change pattern below,
+        # whose selection must not move (#1455 scopes to the nine directories).
+        (*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -200,7 +269,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[2],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -210,7 +279,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, *ORCHESTRATOR_CLI_IMPORTER_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -229,6 +298,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # The three object-store-root additions (#1455) are non-gated top-level
+        # importer suites of the adapters that this rule already owns:
+        # test_object_store_roots.py builds ERA5/GFS/IFS adapters directly, and
+        # the bbox pair consumes workers/data_adapters/region.py. They are cheap
+        # (0.8-2.4s) and every adapter shares the object-store root convention,
+        # so they ride the directory list rather than three narrow rules.
         "workers/data_adapters/**",
         (
             "tests/test_gfs_adapter.py",
@@ -236,13 +311,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_era5_adapter.py",
             "tests/test_data_adapter_resolution.py",
             "tests/test_production_scheduler.py",
+            "tests/test_object_store_roots.py",
+            "tests/test_grid_registry_bbox.py",
+            "tests/test_producer_bbox_preflight.py",
+            "tests/test_e2e.py",
+            "tests/test_e2e_ifs.py",
         ),
     ),
     PathTestRule(
+        # base.py's remaining non-gated importers are orchestration-layer suites
+        # borrowing its cycle-identity helpers (cycle_id_for / format_cycle_time
+        # / CycleDiscovery); those stay with the rules that own them (#1455
+        # `edge-consumer` routings). test_state_clone_cutover_hook.py is the one
+        # with no owning rule anywhere, so a base.py change would otherwise never
+        # run it. Narrow on purpose — only a base.py PR pays for it.
+        "workers/data_adapters/base.py",
+        ("tests/test_state_clone_cutover_hook.py",),
+    ),
+    PathTestRule(
+        # #1455: the producer/cli/store/package surface has same-subject suites
+        # that no rule reached. All are seconds-scale; the heavier e2e-named
+        # importers are dispositioned in tests/test_select_ci_tests.py instead.
         "workers/forcing_producer/**",
         (
             "tests/test_forcing_producer.py",
             "tests/test_production_met_validation.py",
+            "tests/test_forcing_producer_cli.py",
+            "tests/test_grid_signature.py",
+            "tests/test_grid_snapshot_registration.py",
+            "tests/test_source_identity.py",
+            "tests/test_timescale_write_guard_wired.py",
+            "tests/test_direct_grid_variant_registration.py",
+            "tests/test_producer_bbox_preflight.py",
+            "tests/test_object_store_roots.py",
+            "tests/test_direct_grid_e2e.py",
+            "tests/test_e2e.py",
+            "tests/test_e2e_ifs.py",
+            "tests/test_ifs_forecast_integration.py",
         ),
     ),
     PathTestRule(
@@ -254,18 +359,72 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #1455: the warm-start pair top-level-imports runtime.py and nothing
+        # selected it. Narrow rather than on the directory list — neither
+        # `__init__.py` nor `cli.py` imports warm-start behavior.
+        "workers/shud_runtime/runtime.py",
+        (
+            "tests/test_warm_start.py",
+            "tests/test_warm_start_chaining.py",
+            "tests/test_direct_grid_e2e.py",
+            "tests/test_e2e.py",
+        ),
+    ),
+    PathTestRule(
+        # #1455: nine cheap (0.6-4.6s) basin/registry suites top-level-import
+        # modules of this small directory and none were selected. They ride the
+        # directory list because the precision loss is nil — every one of them
+        # is a basin-registry suite, and the whole added set runs in ~20s.
         "workers/model_registry/**",
         (
             "tests/test_model_registration.py",
             "tests/test_model_registry_basin_versions.py",
             "tests/test_model_registry_list_basins.py",
+            "tests/test_basins_discovery.py",
+            "tests/test_basins_package_publication.py",
+            "tests/test_basins_registry_import.py",
+            "tests/test_basins_reingest.py",
+            "tests/test_direct_grid_variant_registration.py",
+            "tests/test_hhe_mvt_binding.py",
+            "tests/test_publish_scheduler_file_registry.py",
+            "tests/test_qhh_production_bootstrap.py",
+            "tests/test_qhh_scripts_static.py",
         ),
     ),
     PathTestRule(
+        # #1455: `tests/test_output_parser.py` was the only target, so the cli
+        # and dual-write suites — the ones that actually exercise the parser
+        # package's entry points — never ran on an output_parser PR. Both are
+        # sub-second and every module in this three-file directory is reachable
+        # through them.
         "workers/output_parser/**",
-        ("tests/test_output_parser.py",),
+        (
+            "tests/test_output_parser.py",
+            "tests/test_output_parser_cli.py",
+            "tests/test_output_parser_dual_write.py",
+            "tests/test_e2e.py",
+        ),
     ),
     PathTestRule(
+        # #1455: parser.py alone carries these two importers (46s + 3s), so they
+        # stay off the directory list and are paid only by a parser.py PR.
+        "workers/output_parser/parser.py",
+        (
+            "tests/test_analysis_pipeline.py",
+            "tests/test_timescale_write_guard_wired.py",
+        ),
+    ),
+    PathTestRule(
+        # #1455 closed 23 importer gaps here at once. Each addition is a
+        # non-gated top-level importer of at least one module this rule owns,
+        # and the whole added set measured ~55s locally — next to
+        # test_orchestration_chain.py, which this rule already carried, that is
+        # noise. They ride the directory list rather than 23 narrow per-module
+        # rules because the alternative triples the rule table for suites nobody
+        # would object to running on an orchestrator change; the modules with
+        # genuinely distinct or expensive gaps (chain.py, scheduler.py, cli.py,
+        # file_orchestration_journal.py) are owned by stop rules above and are
+        # extended at THEIR sites instead.
         "services/orchestrator/**",
         (
             "tests/test_orchestrator.py",
@@ -273,6 +432,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
+            "tests/test_cli_publish_qdown.py",
+            "tests/test_file_orchestration_journal.py",
+            "tests/test_file_orchestration_journal_read_cache.py",
+            "tests/test_file_orchestration_migration.py",
+            "tests/test_live_monitoring.py",
+            "tests/test_monitoring_api.py",
+            "tests/test_pipeline_persistence.py",
+            "tests/test_publish_scheduler_file_registry.py",
+            "tests/test_reconcile_sacct_parse.py",
+            "tests/test_replay_lineage.py",
+            "tests/test_retention.py",
+            "tests/test_retry.py",
+            "tests/test_retry_cancel_consistency.py",
+            "tests/test_run_tree_copyback.py",
+            "tests/test_scheduler_backfill_predecessor.py",
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_scheduler_generation.py",
+            "tests/test_scheduler_timing.py",
+            "tests/test_source_cycle_raw_manifest.py",
+            "tests/test_source_scoped_dispatch.py",
+            "tests/test_state_clone.py",
+            "tests/test_variant_activation_cutover.py",
+            "tests/test_e2e_m3.py",
         ),
     ),
     PathTestRule(
@@ -285,6 +467,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_real_slurm_gateway.py",
             "tests/test_slurm_array_contract.py",
             "tests/test_job_array.py",
+        ),
+    ),
+    # #1455: three narrow rules rather than four more entries on the directory
+    # list above. Only app.py, config.py and gateway.py have these importer
+    # gaps, and putting them on the directory rule would also change what a
+    # `services/slurm_gateway/real_backend.py` PR selects — the exact output
+    # issue #1455's own Verification command pins, and a surface PR #1486 just
+    # closed. Narrow keeps that output byte-identical.
+    PathTestRule(
+        "services/slurm_gateway/app.py",
+        (
+            "tests/test_role_boundary_static.py",
+            "tests/test_monitoring_api.py",
+        ),
+    ),
+    PathTestRule(
+        "services/slurm_gateway/config.py",
+        (
+            "tests/test_role_boundary_static.py",
+            "tests/test_m24_gateway_proof.py",
+        ),
+    ),
+    PathTestRule(
+        "services/slurm_gateway/gateway.py",
+        (
+            "tests/test_monitoring_api.py",
+            "tests/test_retry_cancel_consistency.py",
         ),
     ),
     PathTestRule(
@@ -314,11 +523,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #1455: test_cli_publish_qdown.py top-level-imports the package and
+        # publisher.py — the directory's only two importer gaps, both closed by
+        # one 1.5s target, so the directory list is the right home.
         "services/tile_publisher/**",
         (
             "tests/test_tile_publisher.py",
             "tests/test_forcing_copyback_backfill.py",
             "tests/test_static_serving.py",
+            "tests/test_cli_publish_qdown.py",
         ),
     ),
     PathTestRule(
@@ -331,6 +544,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #1455: the directory's 25 importer gaps collapse onto four suites, all
+        # of which are production-closure suites that other rules happened to own
+        # (real_backend.py, forcing_producer, the readonly-db script). The
+        # `two_node_e2e_*` lane family in particular ALL points at
+        # tests/test_two_node_e2e_evidence.py — one target closes thirteen
+        # modules' gaps. Measured in the PR lane, not assumed from the name:
+        # test_two_node_e2e_evidence.py runs 844 real assertions in ~2.5 min.
         "services/production_closure/**",
         (
             "tests/test_production_readiness_validation.py",
@@ -338,6 +558,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_object_store_validation.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_production_scale_validation.py",
+            "tests/test_production_e2e_validation.py",
+            "tests/test_production_met_validation.py",
+            "tests/test_readonly_db_validation.py",
+            "tests/test_two_node_e2e_evidence.py",
         ),
     ),
     PathTestRule(

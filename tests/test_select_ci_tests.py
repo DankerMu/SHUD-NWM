@@ -6,21 +6,26 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from scripts.select_ci_tests import (
+    CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
     CORE_SMOKE_TESTS,
+    DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
+    FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+    ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     PathTestRule,
     is_test_suite_path,
@@ -50,19 +55,32 @@ def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:
 
 
 def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
+    # The three contract suites are the original pin. The four additions are
+    # #1455's narrow `workers/shud_runtime/runtime.py` rule: every one is a
+    # non-gated top-level importer of runtime.py that no rule reached before.
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
     assert selected == [
+        "tests/test_direct_grid_e2e.py",
+        "tests/test_e2e.py",
         "tests/test_runtime_ic_header.py",
         "tests/test_runtime_mode.py",
         "tests/test_shud_runtime.py",
+        "tests/test_warm_start.py",
+        "tests/test_warm_start_chaining.py",
     ]
 
 
 def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture() -> None:
     selected = select_tests(["workers/forcing_producer/direct_grid_contract.py"], repo_root=Path("."))
 
-    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
+    # The compact fixture is still the core of the selection; #1455 appended the
+    # module's five other non-gated top-level importer suites AT THIS RULE SITE
+    # (the stop rule makes `workers/forcing_producer/**` unreachable here, and
+    # DIRECT_GRID_SURFACE_TESTS itself must not move — the openspec-change rule
+    # below shares it). The redirect intent is unchanged: the whole
+    # tests/test_forcing_producer.py never comes back.
+    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS})
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
     assert all(
         target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
@@ -91,8 +109,10 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
         repo_root=Path("."),
     )
 
-    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS)
+    # Still bounded, just by a bigger constant: the compact e2e fixture plus the
+    # five #1455 importer suites (all seconds-scale), and no core-smoke blowout.
+    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS})
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS)
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -137,8 +157,18 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     )
 
     # The changed test file adds the selector meta-guards (#1254); the redirect
-    # itself is untouched — no whole legacy suite comes back.
-    assert selected == sorted({*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_select_ci_tests.py"})
+    # itself is untouched — no whole legacy suite comes back. The two extra
+    # file-level targets are #1455's at-site extension of the
+    # file_orchestration_journal.py rule (its own read-cache suite and the
+    # backfill suite that drives it), which is additive to the redirect rather
+    # than a widening of it.
+    assert selected == sorted(
+        {
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+            "tests/test_select_ci_tests.py",
+        }
+    )
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_production_scheduler.py" not in selected
 
@@ -165,15 +195,55 @@ def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() 
 
 
 def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
+    # What this pins is the ROUTING: an orchestrator module no narrow or stop
+    # rule owns falls through to the broad `services/orchestrator/**` rule and
+    # gets exactly that rule's targets — nothing more, and no core-smoke
+    # fallback. The list grew from 5 to 28 in #1455 and stays FROZEN here as a
+    # literal: reading it back from the rule under test would make the size
+    # dimension self-referential, and size is exactly what matters on the widest
+    # PR class in the tree. Growing the rule means consciously editing this list
+    # and recording the new lane wall-clock (design risk 1: the 35-min Unit
+    # Tests cap). The five original members are asserted separately so a silent
+    # removal reds even if someone re-freezes carelessly.
     selected = select_tests(["services/orchestrator/retry.py"], repo_root=Path("."))
 
     assert selected == [
+        "tests/test_cli_publish_qdown.py",
+        "tests/test_e2e_m3.py",
+        "tests/test_file_orchestration_journal.py",
+        "tests/test_file_orchestration_journal_read_cache.py",
+        "tests/test_file_orchestration_migration.py",
+        "tests/test_live_monitoring.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_orchestration_chain.py",
+        "tests/test_orchestrator.py",
+        "tests/test_pipeline_persistence.py",
+        "tests/test_production_scheduler.py",
+        "tests/test_publish_scheduler_file_registry.py",
+        "tests/test_reconcile_sacct_parse.py",
+        "tests/test_replay_lineage.py",
+        "tests/test_retention.py",
+        "tests/test_retry.py",
+        "tests/test_retry_cancel_consistency.py",
+        "tests/test_run_tree_copyback.py",
+        "tests/test_scheduler_backfill.py",
+        "tests/test_scheduler_backfill_predecessor.py",
+        "tests/test_scheduler_file_provider_refresh.py",
+        "tests/test_scheduler_generation.py",
+        "tests/test_scheduler_timing.py",
+        "tests/test_source_cycle_raw_manifest.py",
+        "tests/test_source_scoped_dispatch.py",
+        "tests/test_state_clone.py",
+        "tests/test_variant_activation_cutover.py",
+        "tests/test_warm_start_chaining.py",
+    ]
+    assert {
         "tests/test_orchestration_chain.py",
         "tests/test_orchestrator.py",
         "tests/test_production_scheduler.py",
         "tests/test_scheduler_backfill.py",
         "tests/test_warm_start_chaining.py",
-    ]
+    } <= set(selected)
 
 
 def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
@@ -701,7 +771,26 @@ REAL_BACKEND_ONE_HOP_MEMBER = "tests/test_reconcile_sacct_parse.py"
 
 
 def _tracked_top_level_test_files() -> list[str]:
-    return [path for path in _tracked_python_files("tests") if fnmatch.fnmatch(path, "tests/test_*.py")]
+    """Tracked files directly under `tests/` that pytest collects by name.
+
+    Classification goes through `is_test_suite_path` — the selector's own
+    predicate, both `python_files` patterns, matched on the basename — rather
+    than a hand-rolled `tests/test_*.py` fnmatch. That path-shaped spelling was
+    wrong twice (PR #1486): fnmatch's `*` crosses `/`, so it reads
+    `tests/test_pkg/helper.py` as a suite, and its single pattern reads
+    `tests/x_test.py` as a support module. Every derivation below — the
+    importer index, the guarded-module closure, the disposition guard — inherits
+    that classification, so it has to equal pytest's.
+
+    "Top level" is enforced by the parent check, not by the pattern: `git
+    ls-files` glob magic also crosses `/`, and the derivations here are about
+    collectible top-level suites.
+    """
+    return [
+        path
+        for path in _tracked_python_files("tests")
+        if PurePosixPath(path).parent == PurePosixPath("tests") and is_test_suite_path(path)
+    ]
 
 
 def _file_level_gating_markers(tree: ast.Module) -> set[str]:
@@ -1557,3 +1646,591 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
     assert file_targets, "expected file-level test targets in the selector rule set"
     stale_files = [target for target in file_targets if not Path(target).is_file()]
     assert not stale_files, f"selector rules point at test files that no longer exist: {stale_files}"
+
+
+# --------------------------------------------------------------------------
+# Directory-rule importer gap disposition (#1455 item (2))
+#
+# The nine directory rules were audited in PR #1452 and the audit's verdicts
+# lived only in that PR's body, where nothing could re-check them. This section
+# turns the audit into data the tree carries: every gap pair the derivation
+# finds is either closed by a rule or named in INTENTIONAL_RULE_GAP_EXCLUSIONS
+# with a reason token.
+#
+# DOMAIN SPLIT vs test_guarded_module_rules_cover_their_non_gated_importer_closure
+# above: that guard owns the two GUARDED_MODULE_CLOSURES modules and derives
+# direct importers UNION a ONE-HOP module extension. This guard owns every
+# tracked module under the nine audited directory paths and derives DIRECT
+# importers only — those directories hold ~150 modules, so one-hop here would
+# grow the PR lane without a bound anyone chose. The two domains overlap on
+# services/slurm_gateway and neither subsumes the other; each keeps its own
+# derivation deliberately.
+# --------------------------------------------------------------------------
+
+DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
+    "workers/output_parser",
+    "workers/data_adapters",
+    "workers/forcing_producer",
+    "workers/shud_runtime",
+    "workers/model_registry",
+    "services/orchestrator",
+    "services/slurm_gateway",
+    "services/tile_publisher",
+    "services/production_closure",
+)
+
+# fn-gated:       gating the file-level marker filter cannot see (function-level
+#                 markers, env opt-ins). Admitted only against a recorded
+#                 measurement in which the suite executed ZERO assertions
+#                 (passed == failed == errors == 0 and skipped == collected).
+# redirect:       the owning rule deliberately swaps the whole suite for focused
+#                 `::` node ids; the suite IS reached, just not whole-file.
+#                 Machine-checked below: the module's own selection must still
+#                 carry at least one `<suite>::` node id. Deleting the node ids
+#                 from a shared tuple zeroes the coverage, and without this the
+#                 claim would have no anchor at all.
+# edge-consumer:  the suite belongs to ANOTHER surface's rules, which is where it
+#                 is selected from; copying it into this rule would couple
+#                 unrelated PR classes. Machine-checked below against exactly
+#                 that claim: some rule whose pattern does NOT match the excluded
+#                 module must select the suite whole. Membership in any rule is
+#                 too weak — the module's own (possibly shadowed) directory rule
+#                 would satisfy it and wave a genuine orphan through.
+# runtime-budget: the suite executes real assertions but its measured wall clock
+#                 does not fit the PR lane. Every entry names its number.
+RULE_GAP_REASON_TOKENS: frozenset[str] = frozenset({"fn-gated", "redirect", "edge-consumer", "runtime-budget"})
+
+# The #1452 audit's verdicts, made checkable. 211 pairs derived at d02b4edb;
+# 156 of them are now closed by rules and these 55 are the reasoned remainder
+# (44 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated).
+# Keys are per-pair on purpose — a wildcard would blunt exactly the staleness
+# check this table exists for, and the churn a new module causes here is the
+# point. Every wall-clock number below was measured once with
+# `uv run pytest -q <suite>` in PR-lane conditions (no opt-in env vars) on a
+# local macOS box; the hosted runner is slower, so the numbers are a floor.
+INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
+    # -- redirect ----------------------------------------------------------
+    # These six modules are owned by `stop_on_match` rules that deliberately
+    # swap the two slow orchestrator suites for focused `::` node ids
+    # (ORCHESTRATOR_MANIFEST_SURFACE_TESTS / FILE_JOURNAL_READ_STATE_TESTS),
+    # and direct_grid_contract.py for DIRECT_GRID_CONTRACT_TESTS. The suite is
+    # reached, just not whole-file — which is why the derivation still calls it
+    # a gap rather than normalizing the `::` away and losing the distinction.
+    ("services/orchestrator/chain.py", "tests/test_orchestration_chain.py"): "redirect",
+    ("services/orchestrator/chain.py", "tests/test_production_scheduler.py"): "redirect",
+    ("services/orchestrator/chain_repository_state.py", "tests/test_production_scheduler.py"): "redirect",
+    ("services/orchestrator/cli.py", "tests/test_production_scheduler.py"): "redirect",
+    ("services/orchestrator/file_orchestration_journal.py", "tests/test_production_scheduler.py"): "redirect",
+    ("services/orchestrator/scheduler.py", "tests/test_production_scheduler.py"): "redirect",
+    ("workers/forcing_producer/direct_grid_contract.py", "tests/test_forcing_producer.py"): "redirect",
+    # -- edge-consumer: slurm array-job entry points ------------------------
+    # tests/test_slurm_array_contract.py contracts the sbatch array entry
+    # points, so it top-level-imports the `cli` module (and package) of five
+    # directories at once. It belongs to `services/slurm_gateway/**`, which
+    # selects it. Copying it into five directory rules would make every adapter,
+    # producer, parser and runtime PR pay for a gateway contract.
+    ("services/orchestrator/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("services/orchestrator/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/data_adapters/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/data_adapters/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/forcing_producer/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/forcing_producer/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/output_parser/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/output_parser/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/shud_runtime/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/shud_runtime/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    # -- edge-consumer: two-node docker runtime -----------------------------
+    # tests/test_two_node_docker_runtime.py validates compose files and the
+    # deployment topology; it is owned by the `infra/compose.*.yml`,
+    # `infra/env/**` and `scripts/validate_two_node_docker_runtime.py` rules.
+    # Its imports of these modules are fixture material for that validation.
+    ("services/orchestrator/__init__.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
+    ("services/orchestrator/source_cycle_raw_manifest.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
+    ("services/production_closure/__init__.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
+    (
+        "services/production_closure/two_node_e2e_docker_security.py",
+        "tests/test_two_node_docker_runtime.py",
+    ): "edge-consumer",
+    ("services/production_closure/two_node_e2e_evidence.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
+    # -- edge-consumer: data_adapters/base.py cycle-identity helpers --------
+    # base.py exports `cycle_id_for`, `format_cycle_time` and `CycleDiscovery`;
+    # fourteen orchestration-, API- and journal-layer suites import one of those
+    # three names and nothing else from the adapters. Each is selected by the
+    # rule that owns its own surface, which is where a regression in it would be
+    # investigated. Pulling all fourteen into `workers/data_adapters/**` would
+    # put the orchestrator's journal and scheduler suites on every GFS/IFS/ERA5
+    # adapter PR. The one importer with NO owning rule anywhere,
+    # tests/test_state_clone_cutover_hook.py, is not here: it gets a narrow
+    # `workers/data_adapters/base.py` rule instead.
+    ("workers/data_adapters/base.py", "tests/test_api_contract.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_e2e_m3.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal_read_cache.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_file_orchestration_migration.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_ifs_forecast_integration.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_monitoring_api.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_pipeline_logs_artifacts.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_scheduler_backfill.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_scheduler_backfill_predecessor.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
+    ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
+    # -- runtime-budget ----------------------------------------------------
+    # Two of the 74 suites do not fit the lane. tests/test_orchestration_chain.py
+    # is the extreme one: the capped PR-lane run was killed at 596s having
+    # completed 47% of its 306 items (~21 min extrapolated), against a ~5 min
+    # per-module line. `services/orchestrator/**` already carries it for the
+    # orchestrator's own modules; putting it on an adapter or gateway PR as
+    # well is what would actually threaten the 35-min Unit Tests cap. Both
+    # importers here take it as a fixture dependency — base.py for
+    # `cycle_id_for`, config.py for the gateway settings object.
+    ("services/slurm_gateway/config.py", "tests/test_orchestration_chain.py"): "runtime-budget",
+    ("workers/data_adapters/base.py", "tests/test_orchestration_chain.py"): "runtime-budget",
+    # tests/test_gateway_reconcile.py is the audit's second-heaviest suite:
+    # 246.5s for 487 assertions. Its primary subject IS
+    # services/orchestrator/reconcile.py (persistence.py supplies the rows it
+    # reconciles), so `edge-consumer` would be a lie — the suite does not belong
+    # to another surface; `services/slurm_gateway/**` picks it up on a filename
+    # coincidence. What actually keeps it off a reconcile.py PR is the 246.5s,
+    # against a ~5 min per-module line the orchestrator rule's own targets
+    # already spend most of.
+    ("services/orchestrator/persistence.py", "tests/test_gateway_reconcile.py"): "runtime-budget",
+    ("services/orchestrator/reconcile.py", "tests/test_gateway_reconcile.py"): "runtime-budget",
+    # -- edge-consumer: orchestrator modules whose importers live elsewhere --
+    # Each of these suites is selected by the rule for the surface it actually
+    # tests: production-closure validation, model-registry bootstrap, the slurm
+    # gateway, the forcing producer, apps/api.
+    ("services/orchestrator/chain.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
+    ("services/orchestrator/chain_types.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
+    ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
+    ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
+    ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
+    ("services/orchestrator/production_contract.py", "tests/test_api_contract.py"): "edge-consumer",
+    ("services/orchestrator/retry.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
+    ("services/orchestrator/scheduler.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
+    ("services/orchestrator/scheduler.py", "tests/test_qhh_production_bootstrap.py"): "edge-consumer",
+    # -- edge-consumer: slurm_gateway/config.py -----------------------------
+    # config.py is a settings module every orchestration suite constructs a
+    # gateway client from. These three importers are orchestrator-surface suites
+    # selected by `services/orchestrator/**` (test_analysis_pipeline.py also by
+    # the chain.py and output_parser/parser.py rules); its fourth,
+    # tests/test_orchestration_chain.py, is routed by runtime below.
+    ("services/slurm_gateway/config.py", "tests/test_analysis_pipeline.py"): "edge-consumer",
+    ("services/slurm_gateway/config.py", "tests/test_orchestrator.py"): "edge-consumer",
+    ("services/slurm_gateway/config.py", "tests/test_production_scheduler.py"): "edge-consumer",
+    # -- edge-consumer: remaining single routings ---------------------------
+    # tests/test_production_scheduler.py is a scheduler suite (owned by
+    # `services/orchestrator/**`) that imports the SHUD runtime to drive it;
+    # tests/test_source_scoped_dispatch.py likewise imports the producer only to
+    # assert the scheduler's missing-source dispatch; and
+    # tests/test_production_object_store_validation.py is a production-closure
+    # suite reading basin geometry.
+    ("workers/shud_runtime/__init__.py", "tests/test_production_scheduler.py"): "edge-consumer",
+    ("workers/shud_runtime/runtime.py", "tests/test_production_scheduler.py"): "edge-consumer",
+    ("workers/forcing_producer/producer.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
+    ("workers/model_registry/basins_geometry.py", "tests/test_production_object_store_validation.py"): "edge-consumer",
+}
+
+
+def _non_gated_top_level_importer_index() -> dict[str, set[str]]:
+    """Inverted index: dotted module name -> non-gated top-level importer suites.
+
+    The inversion is what makes the guard affordable. Asking
+    ``_non_gated_top_level_importer_tests`` per module re-parses all ~190 test
+    files each call and measured over two minutes for this domain; parsing each
+    test file once and inverting measures ~1 s. Same predicate, same marker
+    filter — only the loop order differs.
+    """
+    index: dict[str, set[str]] = {}
+    for test_path in _tracked_top_level_test_files():
+        tree = _parse_tracked(test_path)
+        if _file_level_gating_markers(tree):
+            continue
+        for name in _top_level_imported_module_names(test_path, tree):
+            index.setdefault(name, set()).add(test_path)
+    return index
+
+
+def _directory_rule_audit_modules() -> list[str]:
+    """Every tracked module under the nine audited directory paths.
+
+    Includes modules the directory rules never actually reach because an earlier
+    `stop_on_match` rule owns them (chain.py, scheduler.py, cli.py,
+    direct_grid_contract.py...). Their gaps are gaps all the same — the
+    disposition question is about the module, not about which rule answers it.
+    """
+    modules: set[str] = set()
+    for directory in DIRECTORY_RULE_AUDIT_PATHS:
+        modules.update(_tracked_python_files(f"{directory}/*.py"))
+    return sorted(modules)
+
+
+def _selection_for_module(module_path: str) -> set[str]:
+    return set(select_tests([module_path], repo_root=Path(".")))
+
+
+def _directory_rule_importer_map(
+    *,
+    select: Callable[[str], set[str]] | None = None,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """``(universe, gaps)`` for the audited directories.
+
+    ``universe`` maps each audited module with at least one non-gated top-level
+    importer suite to that PRE-subtraction importer set; ``gaps`` maps it to the
+    importer suites a PR touching only that module does not select.
+
+    "Selected" is judged at FILE level on purpose: a suite the selector reaches
+    only through `::`-qualified node ids is partially covered, not covered, and
+    normalizing the `::` away would silently shrink this map. Those pairs are
+    real gaps that the exclusion table dispositions as `redirect`.
+
+    ``select`` is the seam: `select_tests` reads the module-global rule table, so
+    red evidence for "this exclusion went stale because a rule now selects it"
+    needs a constructed selection callable rather than a mutated tree.
+    """
+    resolve = _selection_for_module if select is None else select
+    index = _non_gated_top_level_importer_index()
+    universe: dict[str, set[str]] = {}
+    gaps: dict[str, set[str]] = {}
+    for module_path in _directory_rule_audit_modules():
+        importers = index.get(_dotted_module_name(module_path), set())
+        if not importers:
+            continue
+        universe[module_path] = importers
+        missing = importers - resolve(module_path)
+        if missing:
+            gaps[module_path] = missing
+    return universe, gaps
+
+
+def _rule_selected_test_files(rules: Sequence[PathTestRule], *, not_matching: str) -> set[str]:
+    """Test FILES some rule selects whole, excluding rules matching ``not_matching``.
+
+    Node ids do not count (a `::`-qualified target is partial coverage, the same
+    convention the gap derivation uses). ``not_matching`` is a module path whose
+    OWN rules are dropped from the union: `edge-consumer` claims the suite is
+    selected from ANOTHER surface, and a rule matching the module is that
+    module's own surface, not another one. `fnmatch` is the selector's own rule
+    matcher (`select_tests` uses it verbatim), so a pattern counts as the
+    module's own here exactly when it counts as a match there.
+    """
+    return {
+        target
+        for rule in rules
+        if not fnmatch.fnmatch(not_matching, rule.pattern)
+        for target in rule.tests
+        if "::" not in target
+    }
+
+
+def _disposition_offenders(
+    *,
+    exclusions: dict[tuple[str, str], str],
+    gaps: dict[str, set[str]],
+    rules: Sequence[PathTestRule] = PATH_TEST_RULES,
+    select: Callable[[str], set[str]] | None = None,
+) -> list[str]:
+    """Everything wrong with ``exclusions`` against the derived gap map.
+
+    All four inputs are parameters so the failure modes below can be shown on
+    constructed data — a gap map derived through a selection callable that
+    selects more, an entry with a bad token, a missing entry, a rule list where
+    only the module's own rule carries the suite, a selection with the redirect
+    node ids removed — without touching a tracked file or a module global. The
+    caller passes the gap map in rather than having this derive it, so the guard
+    below pays for one derivation instead of two.
+    """
+    resolve = _selection_for_module if select is None else select
+    derived = {(module, suite) for module, suites in gaps.items() for suite in suites}
+    offenders: list[str] = []
+
+    for pair, token in sorted(exclusions.items()):
+        if token not in RULE_GAP_REASON_TOKENS:
+            offenders.append(f"{pair[0]} -> {pair[1]}: invalid reason token {token!r}")
+    offenders.extend(
+        f"{module} -> {suite}: gap is neither selected by a rule nor excluded"
+        for module, suite in sorted(derived - set(exclusions))
+    )
+    offenders.extend(
+        f"{module} -> {suite}: stale exclusion — the pair no longer derives as a gap"
+        for module, suite in sorted(set(exclusions) - derived)
+    )
+    offenders.extend(
+        f"{module} -> {suite}: orphan edge-consumer — no rule outside the module's own selects that suite"
+        for (module, suite), token in sorted(exclusions.items())
+        if token == "edge-consumer" and suite not in _rule_selected_test_files(rules, not_matching=module)
+    )
+    offenders.extend(
+        f"{module} -> {suite}: dead redirect — the module's selection no longer reaches the suite via node ids"
+        for (module, suite), token in sorted(exclusions.items())
+        if token == "redirect" and not any(target.startswith(f"{suite}::") for target in resolve(module))
+    )
+    return offenders
+
+
+def test_directory_rule_importer_gaps_are_dispositioned() -> None:
+    # The #1452 audit of these nine directory rules lived in a PR body, where a
+    # new importer suite silently invalidated it. Here every gap pair must be
+    # answered: closed by a rule, or named in the exclusion table with a token.
+    # An exclusion that stops deriving as a gap is just as loud as an
+    # undispositioned one — that is the anti-rot half.
+    universe, gaps = _directory_rule_importer_map()
+
+    # Anti-vacuity anchored on the PRE-subtraction universe, never on the
+    # residual gap set: the good outcome shrinks the gaps toward zero, so a gap
+    # count is exactly the wrong floor. What must stay nonzero is the importer
+    # relation the derivation reads — and every audited directory must still
+    # contribute a module to it, so a broken pathspec or AST regression that
+    # blanks one directory reds instead of passing quietly.
+    assert universe, "derived no non-gated importer suites for any audited module"
+    silent = [
+        directory
+        for directory in DIRECTORY_RULE_AUDIT_PATHS
+        if not any(module.startswith(f"{directory}/") for module in universe)
+    ]
+    assert not silent, f"audited directories contributing no importer pairs: {silent}"
+
+    offenders = _disposition_offenders(exclusions=INTENTIONAL_RULE_GAP_EXCLUSIONS, gaps=gaps)
+    assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
+
+
+def test_disposition_guard_reds_on_an_undispositioned_gap() -> None:
+    # Constructed input, not a tracked mutation: drop one live entry and the
+    # guard must name that exact pair. Without this the guard could be reporting
+    # "no offenders" because it derives nothing.
+    pair = next(iter(sorted(INTENTIONAL_RULE_GAP_EXCLUSIONS)))
+    without_entry = {key: value for key, value in INTENTIONAL_RULE_GAP_EXCLUSIONS.items() if key != pair}
+
+    offenders = _disposition_offenders(exclusions=without_entry, gaps=_directory_rule_importer_map()[1])
+
+    assert offenders == [f"{pair[0]} -> {pair[1]}: gap is neither selected by a rule nor excluded"]
+
+
+def test_disposition_guard_reds_on_a_stale_exclusion() -> None:
+    # Two ways an entry goes stale, both shown through the injectable selection
+    # seam so the live rule table stays untouched: the pair vanishes from the
+    # tree, and a rule grows to select it.
+    pair = next(iter(sorted(INTENTIONAL_RULE_GAP_EXCLUSIONS)))
+    vanished = ("services/orchestrator/module_that_left_the_tree.py", "tests/test_gone.py")
+
+    offenders = _disposition_offenders(
+        exclusions={**INTENTIONAL_RULE_GAP_EXCLUSIONS, vanished: "redirect"},
+        gaps=_directory_rule_importer_map()[1],
+    )
+    assert f"{vanished[0]} -> {vanished[1]}: stale exclusion — the pair no longer derives as a gap" in offenders
+
+    def now_selects_the_pair(module_path: str) -> set[str]:
+        selection = _selection_for_module(module_path)
+        return selection | {pair[1]} if module_path == pair[0] else selection
+
+    offenders = _disposition_offenders(
+        exclusions=INTENTIONAL_RULE_GAP_EXCLUSIONS,
+        gaps=_directory_rule_importer_map(select=now_selects_the_pair)[1],
+    )
+    assert offenders == [f"{pair[0]} -> {pair[1]}: stale exclusion — the pair no longer derives as a gap"]
+
+
+def test_disposition_guard_reds_on_an_invalid_reason_token() -> None:
+    # The token vocabulary is the whole disposition contract; a free-text reason
+    # would let any pair be waved through under a word nobody reviewed.
+    pair = next(iter(sorted(INTENTIONAL_RULE_GAP_EXCLUSIONS)))
+    mistyped = {**INTENTIONAL_RULE_GAP_EXCLUSIONS, pair: "slow"}
+
+    offenders = _disposition_offenders(exclusions=mistyped, gaps=_directory_rule_importer_map()[1])
+
+    assert offenders == [f"{pair[0]} -> {pair[1]}: invalid reason token 'slow'"]
+
+
+def test_disposition_guard_reds_on_an_orphan_edge_consumer() -> None:
+    # `edge-consumer` claims another rule owns the suite. When no rule selects
+    # it, the claim is false and the pair is simply uncovered — the routing must
+    # not be able to launder that. Shown on a constructed rule list so the live
+    # table is not touched.
+    orphan_candidates = sorted(
+        pair for pair, token in INTENTIONAL_RULE_GAP_EXCLUSIONS.items() if token == "edge-consumer"
+    )
+    assert orphan_candidates, "expected at least one edge-consumer routing to exercise the orphan check"
+    pair = orphan_candidates[0]
+    rules_without_that_suite = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if target != pair[1]),
+            stop_on_match=rule.stop_on_match,
+            only_when_any_changed=rule.only_when_any_changed,
+        )
+        for rule in PATH_TEST_RULES
+    )
+
+    offenders = _disposition_offenders(
+        exclusions=INTENTIONAL_RULE_GAP_EXCLUSIONS,
+        gaps=_directory_rule_importer_map()[1],
+        rules=rules_without_that_suite,
+    )
+
+    assert (
+        f"{pair[0]} -> {pair[1]}: orphan edge-consumer — no rule outside the module's own selects that suite"
+        in offenders
+    )
+
+
+def test_disposition_guard_reds_when_only_the_modules_own_rule_carries_the_suite() -> None:
+    # The sharper half of the orphan check, and the reason it is not "any rule
+    # in the table": a suite carried ONLY by a rule that matches the excluded
+    # module is not another surface's — it is the module's own, and if that rule
+    # is shadowed by an earlier stop rule the coverage is zero while the routing
+    # reads fine. Fully constructed inputs (module, suite, rules, gap map), so
+    # nothing here depends on the live table.
+    module = "services/orchestrator/persistence.py"
+    suite = "tests/test_probe_edge_consumer.py"
+    own_rule_only = (PathTestRule("services/orchestrator/**", (suite,)),)
+
+    offenders = _disposition_offenders(
+        exclusions={(module, suite): "edge-consumer"},
+        gaps={module: {suite}},
+        rules=own_rule_only,
+    )
+
+    assert offenders == [
+        f"{module} -> {suite}: orphan edge-consumer — no rule outside the module's own selects that suite"
+    ]
+
+    # Same table, same gap, one rule for a surface that is genuinely elsewhere:
+    # now the routing claim is true and the guard passes.
+    with_another_surface = (*own_rule_only, PathTestRule("services/slurm_gateway/**", (suite,)))
+    assert not _disposition_offenders(
+        exclusions={(module, suite): "edge-consumer"},
+        gaps={module: {suite}},
+        rules=with_another_surface,
+    )
+
+
+def test_disposition_guard_reds_when_a_redirect_no_longer_reaches_the_suite() -> None:
+    # `redirect` claims the module still reaches the suite through `::` node
+    # ids. Deleting those node ids from a shared tuple (or renaming the tests
+    # behind them) zeroes the coverage while the entry keeps reading like a
+    # deliberate routing — the one token whose claim had no anchor before. The
+    # deletion is modelled through the injectable selection seam, so the live
+    # ORCHESTRATOR_MANIFEST_SURFACE_TESTS tuple stays untouched.
+    module, suite = "services/orchestrator/chain.py", "tests/test_orchestration_chain.py"
+    assert INTENTIONAL_RULE_GAP_EXCLUSIONS[(module, suite)] == "redirect"
+    assert any(target.startswith(f"{suite}::") for target in _selection_for_module(module))
+
+    def selection_without_the_node_ids(module_path: str) -> set[str]:
+        return {target for target in _selection_for_module(module_path) if not target.startswith(f"{suite}::")}
+
+    offenders = _disposition_offenders(
+        exclusions={(module, suite): "redirect"},
+        gaps={module: {suite}},
+        select=selection_without_the_node_ids,
+    )
+
+    assert offenders == [
+        f"{module} -> {suite}: dead redirect — the module's selection no longer reaches the suite via node ids"
+    ]
+
+
+# The positive-selection FLOOR. The disposition guard above is, on its own,
+# satisfiable by 211 exclusions and zero rule growth — which would re-create
+# exactly the rotted-audit failure #1455 exists to end. These pins name the
+# audit's confirmed same-subject gaps and demand SELECTION, so an
+# all-exclusions delivery reds here even while the guard stays green. A floor,
+# not a ceiling: the guard still governs everything not listed.
+#
+# Two entries deviate from the #1455 fixture's wording, which named a
+# "same-name suite" for every orchestrator module: `tests/test_persistence.py`
+# and `tests/test_reconcile.py` do not exist in the tree. The nearest real
+# same-subject suites are pinned instead (test_pipeline_persistence.py for
+# persistence.py; test_reconcile_sacct_parse.py for reconcile.py, which is the
+# suite the #1486 one-hop closure already ties to reconcile.py).
+POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("services/tile_publisher/publisher.py", ("tests/test_cli_publish_qdown.py",)),
+    (
+        "workers/output_parser/cli.py",
+        ("tests/test_output_parser_cli.py", "tests/test_output_parser_dual_write.py"),
+    ),
+    (
+        "workers/output_parser/parser.py",
+        ("tests/test_output_parser_cli.py", "tests/test_output_parser_dual_write.py"),
+    ),
+    (
+        "workers/shud_runtime/runtime.py",
+        ("tests/test_warm_start.py", "tests/test_warm_start_chaining.py"),
+    ),
+    (
+        "services/slurm_gateway/app.py",
+        ("tests/test_role_boundary_static.py", "tests/test_monitoring_api.py"),
+    ),
+    ("services/slurm_gateway/gateway.py", ("tests/test_retry_cancel_consistency.py",)),
+    ("services/orchestrator/persistence.py", ("tests/test_pipeline_persistence.py",)),
+    ("services/orchestrator/retry.py", ("tests/test_retry.py",)),
+    ("services/orchestrator/reconcile.py", ("tests/test_reconcile_sacct_parse.py",)),
+    ("services/orchestrator/scheduler_generation.py", ("tests/test_scheduler_generation.py",)),
+    ("services/orchestrator/scheduler_timing.py", ("tests/test_scheduler_timing.py",)),
+    ("services/orchestrator/replay_lineage.py", ("tests/test_replay_lineage.py",)),
+    ("services/orchestrator/retention.py", ("tests/test_retention.py",)),
+    ("services/orchestrator/run_tree_copyback.py", ("tests/test_run_tree_copyback.py",)),
+)
+
+
+@pytest.mark.parametrize(
+    ("module_path", "required"),
+    POSITIVE_SELECTION_FLOOR,
+    ids=[module_path for module_path, _ in POSITIVE_SELECTION_FLOOR],
+)
+def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, required: tuple[str, ...]) -> None:
+    assert Path(module_path).is_file(), f"floor pin names a module that is not in the tree: {module_path}"
+    for suite in required:
+        assert Path(suite).is_file(), f"floor pin names a suite that is not in the tree: {suite}"
+        assert not _file_level_gating_markers(_parse_tracked(suite)), (
+            f"floor pin names a file-level gated suite (it would skip in the PR lane): {suite}"
+        )
+
+    selected = set(select_tests([module_path], repo_root=Path(".")))
+
+    missing = sorted(set(required) - selected)
+    assert not missing, f"{module_path}: rules stopped selecting audit-floor suites {missing}"
+
+
+# Modules whose additions had to be placed with `stop_on_match` in mind: an
+# earlier stop rule owns each of these paths, so a narrow rule appended at the
+# end of PATH_TEST_RULES would never fire for them. Each addition therefore
+# extends its OWNING rule at that rule's site, and this pin proves the targets
+# really arrive rather than being amputated by the stop.
+STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("services/orchestrator/chain.py", CHAIN_IMPORTER_TESTS),
+    ("services/orchestrator/scheduler.py", SCHEDULER_IMPORTER_TESTS),
+    ("services/orchestrator/cli.py", ORCHESTRATOR_CLI_IMPORTER_TESTS),
+    ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
+    ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
+)
+
+
+@pytest.mark.parametrize(
+    ("module_path", "added"),
+    STOP_RULE_AT_SITE_EXTENSIONS,
+    ids=[module_path for module_path, _ in STOP_RULE_AT_SITE_EXTENSIONS],
+)
+def test_at_site_rule_extensions_survive_stop_on_match_ordering(module_path: str, added: tuple[str, ...]) -> None:
+    selected = set(select_tests([module_path], repo_root=Path(".")))
+
+    missing = sorted(set(added) - selected)
+    assert not missing, f"{module_path}: at-site additions never reached the selection (stop rule ordering?): {missing}"
+
+
+def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
+    # The other half of the ordering contract: the stop rules must still STOP.
+    # If an at-site extension had been written as a new rule placed later, or a
+    # stop flag had been dropped, these paths would start collecting the broad
+    # directory rule's targets — which is the runtime blowup #1455's design
+    # calls the primary risk. `test_state_clone.py` is a target only the broad
+    # `services/orchestrator/**` rule carries, so it is the tell.
+    broad_only_target = "tests/test_state_clone.py"
+    assert broad_only_target in select_tests(["services/orchestrator/persistence.py"], repo_root=Path("."))
+
+    for module_path, _ in STOP_RULE_AT_SITE_EXTENSIONS:
+        if not module_path.startswith("services/orchestrator/"):
+            continue
+        selected = select_tests([module_path], repo_root=Path("."))
+        assert broad_only_target not in selected, (
+            f"{module_path} now reaches the broad services/orchestrator/** rule: a stop rule stopped stopping"
+        )
