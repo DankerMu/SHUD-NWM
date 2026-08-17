@@ -49,12 +49,12 @@ for member in SHUD_FORCING_INDEX_MEMBERS:
 
 - `unlink_no_follow` + `containment_root=destination`（= model_input_dir，与
   staging 写入 `_write_staged_bytes(..., root=destination)` 同一约束根）；
-  symlink 形残留：`unlink_no_follow` **拒绝**（safe_fs.py:394 "Refusing to
-  unlink symlink"），与目录形（:396）同样落
+  symlink 形残留：`unlink_no_follow` **拒绝**（safe_fs.py:395 "Refusing to
+  unlink symlink"），与目录形（:397）同样落
   `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` fail-loud。**非文件形的
   修前/修后对照（round-1 复审 C1 改判，如实记账）**：symlink 形修前**已经**
   永久致命——`_regular_file_exists` 经 `stat_no_follow` 对 symlink 直接抛
-  `SafeFilesystemError`、重编为 `WORKSPACE_PATH_UNSAFE`（runtime.py:2595-2596
+  `SafeFilesystemError`、重编为 `WORKSPACE_PATH_UNSAFE`（runtime.py:2596-2597
   / safe_fs.py:257-258），从不返回 False——修后只是换成本 change 的 typed
   码，无新增自锁死；目录形修前**良性**（`_regular_file_exists` 返回 False、
   不计入 `staged_members`、staging 照常），修后**有意**转为不可重试

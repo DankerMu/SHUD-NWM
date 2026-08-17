@@ -78,7 +78,8 @@ direct-grid 失败必须 fail closed：binding 缺失、source 不在 `applicabl
   staging 写入前先删除本次 checksum 校验后的 package manifest **未声明**的可接受索引成员——跨 #1176 身份迁移
   重跑时，上一 attempt 残留的另一身份就此自愈，不再让文件系统层的并存把该 run_id 永久卡死。删除失败以
   **不自动重试**的 `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` 终止本次 attempt（目录形/软链形残留由
-  `unlink_no_follow` 直接拒绝，落同一码），绝不在残留之上继续 staging；卫生之后仍并存的照旧两层 fail-closed。
+  `unlink_no_follow` 直接拒绝，落同一码），绝不在残留之上继续 staging；卫生之后文件系统仍并存的
+  （成因只能是白名单 staging 之外的带外写入）照旧 fail-closed，manifest 声明两成员则更早在 manifest 门 fail-closed。
   删除集恒为 `{canonical, legacy}` 减去 manifest 声明的部分，不触碰工作区其余任何文件。
 - **非 direct-grid staging 的残余成员**：该路径是全前缀递归拷贝且 producer 从不清理，原地在
   pre-migration 前缀上再生产会留下孤儿 legacy 成员——属合法稳态，不 fail-closed。多成员时按声明源
