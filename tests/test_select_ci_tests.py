@@ -747,7 +747,17 @@ def _non_gated_top_level_importer_tests(module: str) -> set[str]:
 
 
 def _dotted_module_name(path: str) -> str:
-    return str(PurePosixPath(path).with_suffix("")).replace("/", ".")
+    """Dotted name a tracked `.py` path is imported under.
+
+    A package's `__init__.py` is imported as the package itself, so the trailing
+    component is stripped. Without that, a re-exporting package would be looked
+    up under a name nothing ever imports and would silently contribute an empty
+    importer set to the one-hop derivation — a guard that goes quiet rather than
+    red. No tracked `__init__.py` re-exports a guarded module today; this closes
+    the channel before one does.
+    """
+    dotted = str(PurePosixPath(path).with_suffix("")).replace("/", ".")
+    return dotted.removesuffix(".__init__")
 
 
 def _tracked_non_test_modules() -> list[str]:
@@ -789,6 +799,14 @@ def _one_hop_importer_tests(module: str, *, domain: Sequence[str] | None = None)
     for hop_path in _one_hop_importer_modules(module, domain=domain):
         contributed |= _non_gated_top_level_importer_tests(_dotted_module_name(hop_path))
     return contributed
+
+
+def test_dotted_module_name_maps_a_package_init_to_the_package() -> None:
+    # `services/slurm_gateway/__init__.py` is imported as
+    # `services.slurm_gateway`; a `.__init__` name is what nothing imports, so
+    # deriving importers for it returns the empty set — a guard failing quiet.
+    assert _dotted_module_name("services/slurm_gateway/__init__.py") == "services.slurm_gateway"
+    assert _dotted_module_name("services/slurm_gateway/real_backend.py") == "services.slurm_gateway.real_backend"
 
 
 def test_one_hop_importer_derivation_does_not_recurse(
@@ -960,8 +978,20 @@ def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str)
 
 
 def _tracked_tests_support_modules() -> list[str]:
-    """Tracked `tests/**.py` that pytest cannot collect as a suite."""
-    return sorted(set(_tracked_python_files("tests")) - set(_tracked_top_level_test_files()))
+    """Tracked `tests/**.py` that pytest cannot collect as a suite.
+
+    BASENAME-shaped, and deliberately NOT `_tracked_top_level_test_files()`:
+    that helper matches the repo-relative path against `tests/test_*.py` for the
+    importer-closure domain, which would count a nested `tests/pkg/test_x.py` as
+    a support module here and cement the misclassification this test is supposed
+    to catch. Derived independently of the selector's own predicate, so a bug in
+    that predicate reddens this test instead of moving its expectation.
+    """
+    return sorted(
+        path
+        for path in _tracked_python_files("tests")
+        if not fnmatch.fnmatch(PurePosixPath(path).name, "test_*.py")
+    )
 
 
 def test_every_tracked_tests_support_module_selects_only_the_meta_guard_suite() -> None:
@@ -980,6 +1010,28 @@ def test_every_tracked_tests_support_module_selects_only_the_meta_guard_suite() 
         if (selected := select_tests([path], repo_root=Path("."))) != [SELECTOR_META_GUARD_TEST]
     ]
     assert not offenders, "tests/ support modules must map to the meta-guard suite: " + "; ".join(offenders)
+    # The class boundary the derivation depends on: a nested suite is not a
+    # support module. Zero tracked instances today, which is exactly why the
+    # boundary needs asserting rather than observing.
+    assert not [path for path in support_modules if PurePosixPath(path).name.startswith("test_")]
+
+
+def test_nested_test_suite_self_selects_and_drags_the_meta_guards(tmp_path: Path) -> None:
+    # `tests/pkg/test_x.py` is a collectible suite: pytest runs it, and a PR
+    # changing it can invalidate the tree-derived meta-guards exactly like a
+    # top-level suite can. A path-shaped `tests/test_*.py` predicate calls it a
+    # support module, which loses BOTH — self-selection is replaced by the
+    # meta-guard mapping (#1453 misfiring on a real suite) and the #1254
+    # accumulation never fires. One basename predicate decides both, so this
+    # pins them together.
+    nested = tmp_path / "tests" / "pkg" / "test_nested_probe.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("def test_nested_probe(): pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+    selected = select_tests(["tests/pkg/test_nested_probe.py"], repo_root=tmp_path)
+
+    assert selected == ["tests/pkg/test_nested_probe.py", SELECTOR_META_GUARD_TEST]
 
 
 def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
@@ -1076,16 +1128,53 @@ def test_duplicate_pattern_guard_flags_an_unmerged_sibling_collision() -> None:
     assert sorted(duplicates - INTENTIONAL_DUPLICATE_PATTERNS) == [collision_pattern]
 
 
+def _unconditional_duplicate_rules(rules: Sequence[PathTestRule]) -> list[str]:
+    """Duplicated patterns whose entries are not all `only_when_any_changed`."""
+    duplicates = _duplicated_rule_patterns(rules)
+    return sorted(
+        {
+            rule.pattern
+            for rule in rules
+            if rule.pattern in duplicates and not rule.only_when_any_changed
+        }
+    )
+
+
 def test_changed_test_rule_duplicates_stay_out_of_the_guard_domain() -> None:
     # CHANGED_TEST_FILE_RULES duplicates its patterns by design (#1254): the
     # same changed test file gets different focused targets depending on which
     # surface files moved with it, expressed through only_when_any_changed. The
     # guard is deliberately scoped to PATH_TEST_RULES, so record the exemption
     # as a fact about the table rather than as silence.
+    #
+    # Scoped to the DUPLICATED patterns on purpose: an unconditional rule that
+    # appears once splits no ownership and is a legitimate table entry (open PR
+    # #1443 adds one), so demanding only_when_any_changed of every rule would
+    # red on it with a message about duplicates it does not create. What the
+    # exemption actually rests on is that each duplicate's entries discriminate
+    # by only_when_any_changed — without that they would be two unconditional
+    # entries for one pattern, i.e. exactly the split the PATH_TEST_RULES guard
+    # forbids.
     duplicates = _duplicated_rule_patterns(CHANGED_TEST_FILE_RULES)
 
     assert duplicates == {"tests/test_orchestration_chain.py", "tests/test_production_scheduler.py"}
-    assert all(rule.only_when_any_changed for rule in CHANGED_TEST_FILE_RULES)
+    assert not _unconditional_duplicate_rules(CHANGED_TEST_FILE_RULES)
+
+
+def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> None:
+    # The hazard the narrowed assert still has to catch, simulated on a
+    # constructed list: a second entry for an already-duplicated pattern with no
+    # only_when_any_changed fires on every PR touching that suite, silently
+    # widening the redirect the #1254 design deliberately keeps conditional.
+    hazard = (
+        *CHANGED_TEST_FILE_RULES,
+        PathTestRule("tests/test_orchestration_chain.py", ORCHESTRATOR_MANIFEST_SURFACE_TESTS),
+    )
+
+    assert _unconditional_duplicate_rules(hazard) == ["tests/test_orchestration_chain.py"]
+    # ...and a single unconditional non-duplicate entry (the #1443 shape) does not.
+    benign = (*CHANGED_TEST_FILE_RULES, PathTestRule("tests/test_display_coverage_refresh.py", CORE_SMOKE_TESTS))
+    assert not _unconditional_duplicate_rules(benign)
 
 
 # The first six inputs below sit inside ci.yml's `backend` paths-filter (so the
@@ -1248,6 +1337,11 @@ def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path,
         ("tests/test_orchestration_chain.py", "2"),
         # Empty selection: route C, whose own collect-only branch is unchanged.
         ("docs/runbooks/current-production-ops.md", "0"),
+        # The discrimination boundary. A single-target selection that is NOT the
+        # meta-guard suite must stay false — 15 rules in today's table select
+        # exactly one file, so a flag that merely counted targets would arm the
+        # extra collection pass on all of them and nothing here would notice.
+        ("db/schema.sql", "1"),
     ],
 )
 def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
@@ -1261,20 +1355,48 @@ def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
     assert fields["meta_guard_only"] == "false"
 
 
-def test_ci_workflow_consumes_the_meta_guard_only_output(tmp_path: Path) -> None:
-    # String coupling across a boundary no test can execute: the field is
-    # written by Python and read by a shell condition in a workflow file. Either
-    # side can be renamed alone and nothing else notices — the smoke would just
-    # stop running, silently, which is the exact failure mode #1454 exists to
-    # end. Anchored to the targeted job's block so a mention in an unrelated
-    # job cannot satisfy it.
+COLLAPSE_BRANCH_MARKER = 'if [ "${{ steps.targeted.outputs.meta_guard_only }}"'
+
+
+def _targeted_job_collapse_block() -> str:
+    """ci.yml's meta-guard-collapse branch, from its `if` to its matching `fi`.
+
+    Slicing to the block instead of scanning the whole job is what makes the
+    coupling pin killable: a job that merely MENTIONS the field, or that runs
+    the smoke somewhere else entirely, no longer satisfies it. The matching
+    `fi` is the next one at the branch's own 12-space indent — the inner
+    `if pytest … --collect-only` closes at 14 spaces and cannot truncate here.
+    """
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     start = workflow.index("\n  unit-test-targeted:")
     end = workflow.index("\n  frontend-build:", start)
     targeted_job = workflow[start:end]
 
-    assert "steps.targeted.outputs.meta_guard_only" in targeted_job
-    assert "--collect-only" in targeted_job
+    branch_start = targeted_job.find(COLLAPSE_BRANCH_MARKER)
+    assert branch_start != -1, (
+        "ci.yml's unit-test-targeted job no longer contains the meta-guard collapse branch "
+        f"(looked for {COLLAPSE_BRANCH_MARKER!r}); the #1454 collect-only smoke would be silently dead"
+    )
+    branch_end = targeted_job.find("\n            fi\n", branch_start)
+    assert branch_end != -1, "meta-guard collapse branch in ci.yml has no matching 12-space `fi`"
+    return targeted_job[branch_start:branch_end]
+
+
+def test_ci_workflow_consumes_the_meta_guard_only_output(tmp_path: Path) -> None:
+    # String coupling across a boundary no test can execute: the field is
+    # written by Python and read by a shell condition in a workflow file. Either
+    # side can be renamed alone and nothing else notices — the smoke would just
+    # stop running, silently, which is the exact failure mode #1454 exists to
+    # end.
+    collapse_block = _targeted_job_collapse_block()
+
+    # The condition runs the smoke ON collapse, not on its negation.
+    assert collapse_block.startswith(f'{COLLAPSE_BRANCH_MARKER} = "true" ]; then')
+    # ...and the smoke it guards is the full-tree collect-only, INSIDE the block.
+    assert "pytest tests/ -q --collect-only" in collapse_block
+    # The spec's wording constraint (this branch DID execute assertions) gets a
+    # pin, not just prose: a copy-paste from the count == 0 branch would lie.
+    assert "0 assertions" not in collapse_block
     # ...and the producing side emits that exact key, read from behavior rather
     # than from the selector's source text.
     assert "meta_guard_only" in _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))

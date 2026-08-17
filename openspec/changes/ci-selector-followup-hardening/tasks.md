@@ -84,7 +84,7 @@
 
 ## R1. Round-1 verified findings (fix pass @ c9152264)
 
-- [ ] R1.1 (P2, three lenses) Nested `tests/<dir>/test_*.py`
+- [x] R1.1 (P2, three lenses) Nested `tests/<dir>/test_*.py`
       misclassified as support module and the new invariant test
       cements the loss: classification at :477 AND the support-module
       derivation (:964) switch to a BASENAME predicate
@@ -94,30 +94,30 @@
       `_tracked_top_level_test_files` (:700 — it feeds the
       importer-closure domain, a different surface). Verified: zero
       classification delta on all 196 tracked `tests/**.py` today.
-- [ ] R1.2 (Note) `_dotted_module_name` strips a trailing
+- [x] R1.2 (Note) `_dotted_module_name` strips a trailing
       `.__init__` so re-exporting packages contribute their real
       dotted name to one-hop derivation (zero delta today, closes a
       silent-∅ channel).
-- [ ] R1.3 (P2) `meta_guard_only` discrimination boundary pinned:
+- [x] R1.3 (P2) `meta_guard_only` discrimination boundary pinned:
       add `("db/schema.sql", "1")` to the suppression parametrize
       (kills the `len(tests)==1` mutant; 15 single-target rules in
       today's table).
-- [ ] R1.4 (P2) ci.yml coupling pin de-hollowed: slice the collapse
+- [x] R1.4 (P2) ci.yml coupling pin de-hollowed: slice the collapse
       block (`if [ "…meta_guard_only }}"` → matching top-level
       `fi`), assert comparator is `= "true"` and
       `pytest tests/ -q --collect-only` sits INSIDE the block, with
       a readable "collapse branch not found" message on the marker
       locate (kills condition-flip, dead-reference, and neutered-
       smoke mutants; wording refactors stay green).
-- [ ] R1.5 (Note) `assert "0 assertions" not in collapse_block` —
+- [x] R1.5 (Note) `assert "0 assertions" not in collapse_block` —
       the spec's MUST-NOT wording constraint gets its pin.
-- [ ] R1.6 (P2) `all(rule.only_when_any_changed …)` at :1088
+- [x] R1.6 (P2) `all(rule.only_when_any_changed …)` at :1088
       narrowed to DUPLICATED patterns only (open PR #1443 adds a
       legitimate unconditional non-duplicate rule and would false-red
       with a duplicates-pointing message); add the real-hazard red
       case (injected duplicate WITHOUT `only_when_any_changed` →
       False) to keep the narrowed assert killable.
-- [ ] R1.7 (P2) Operator-contract docs: the Unit Tests third mode
+- [x] R1.7 (P2) Operator-contract docs: the Unit Tests third mode
       (meta-guard collapse → targeted + smoke, no 0-assertion claim)
       added to `instructions/agents/shared.md` CI section and applied
       VERBATIM-identically to CLAUDE.md and AGENTS.md (three files,
@@ -125,7 +125,7 @@
       2026-08-10-ci-empty-selection-signal-legibility task 1.3);
       MUST ride in the same commit as the code fixes (CI cost
       discipline — no trailing docs commit).
-- [ ] R1.8 (ride-along) "five uncompensated support files" corrected
+- [x] R1.8 (ride-along) "five uncompensated support files" corrected
       to SIX in proposal.md + design.md (8 files − 2 database-filter
       compensated).
 - DEFER (recorded): helper→importer gate-strength challenge

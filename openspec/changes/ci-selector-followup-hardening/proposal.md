@@ -50,7 +50,7 @@ second PR lands.
   red (zero assertion information) becomes a green that runs the
   meta-guard suite plus the #1454 collect-only smoke; for
   `conftest.py`/`integration_helpers.py` the `database` filter's
-  `real-db-integration` job still compensates, the other five have no
+  `real-db-integration` job still compensates, the other six have no
   compensating job — accepted because the red they lose carried no
   evidence either. The pin
   `test_meta_guard_accumulation_is_scoped_to_test_file_names` is

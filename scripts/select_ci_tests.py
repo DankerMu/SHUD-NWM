@@ -13,10 +13,15 @@ from pathlib import Path, PurePosixPath
 # The selector's own suite carries tracked-tree-derived meta-guards (same-name
 # script pairs, container-contract closure, guarded-module importer closure). A
 # PR that adds or moves a test file can invalidate any of them, so every changed
-# `tests/test_*.py` drags this suite along (~6s) instead of letting the guards
-# go unrun on exactly the change class they exist for.
+# test suite under `tests/` drags this suite along (~6s) instead of letting the
+# guards go unrun on exactly the change class they exist for.
 SELECTOR_META_GUARD_TEST = "tests/test_select_ci_tests.py"
-CHANGED_TEST_META_GUARD_PATTERN = "tests/test_*.py"
+# Matched against the BASENAME, not the repo-relative path: `tests/pkg/test_x.py`
+# is every bit as collectible as `tests/test_x.py`, and a `tests/test_*.py` path
+# match would classify it as a support module — losing its self-selection AND
+# skipping the meta-guard accumulation on a PR that changes a test file. One
+# predicate decides both, so the two can never drift apart.
+CHANGED_TEST_SUITE_BASENAME_PATTERN = "test_*.py"
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_api.py",
@@ -474,7 +479,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
-            is_test_file_name = fnmatch.fnmatch(path, CHANGED_TEST_META_GUARD_PATTERN)
+            is_test_suite = fnmatch.fnmatch(PurePosixPath(path).name, CHANGED_TEST_SUITE_BASENAME_PATTERN)
             matched_changed_test = False
             for rule in CHANGED_TEST_FILE_RULES:
                 if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
@@ -494,11 +499,11 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                 # is a collectible test file; the meta-guard-only collapse then
                 # arms ci.yml's full-tree collect-only smoke (#1454) over the
                 # import surface such a support module can break.
-                selected.add(path if is_test_file_name else SELECTOR_META_GUARD_TEST)
+                selected.add(path if is_test_suite else SELECTOR_META_GUARD_TEST)
             # Unconditional, redirect or not: a redirect fires exactly when a
             # changed test file is swapped for focused nodes, which is also when
             # the meta-guards most need to run.
-            if is_test_file_name:
+            if is_test_suite:
                 selected.add(SELECTOR_META_GUARD_TEST)
             continue
         matched = False

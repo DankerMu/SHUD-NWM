@@ -109,7 +109,7 @@ exploding toward the 64-suite fixed point).
    evidence is the meta-guard suite + the #1454 collect-only smoke.
    `conftest.py`/`integration_helpers.py` keep `real-db-integration`
    compensation via the `database` filter (ci.yml :57-58, non-draft);
-   the other five support files have no compensating job — accepted:
+   the other six support files have no compensating job — accepted:
    the red they lose carried zero assertions too, and the smoke at
    least guards the import surface. The issue's optional
    helper→importer mapping is REJECTED for now (static per-helper
@@ -224,7 +224,15 @@ exploding toward the 64-suite fixed point).
    invisibility (zero tracked instances; touching
    `CHANGED_TEST_META_GUARD_PATTERN` and `_tracked_top_level_test_files`
    together is a cross-surface widening with no present-day payoff) —
-   stays out, noted here per #1455's "可选" framing. Route-A/B
+   stays out, noted here per #1455's "可选" framing.
+   SUPERSEDED by round-1 finding R1.1: #1453's mapping turned that
+   invisibility from a missed-widening into an active
+   misclassification (a nested suite would be treated as a support
+   module, losing self-selection AND the meta-guard accumulation), so
+   the selector's predicate became basename-shaped
+   (`CHANGED_TEST_SUITE_BASENAME_PATTERN`) — a one-surface change;
+   `_tracked_top_level_test_files` is untouched, it feeds the
+   importer-closure domain. Route-A/B
    empty-selection policy stays #1182-family property (#1454's smoke
    revival does not change the `count == 0` branch's gate strength).
 
