@@ -86,10 +86,13 @@ exploding toward the 64-suite fixed point).
 
 1. **#1453 fix lives in the selector, not ci.yml** (issue's
    recommended route): in the changed-test branch, a `tests/` Python
-   path whose BASENAME does not match `test_*.py` (round-1 R1.1
-   corrected the predicate from path-shaped to basename-shaped —
-   mirroring pytest's own collection rule) skips self-selection and
-   instead `selected.add(SELECTOR_META_GUARD_TEST)`. Rationale: the
+   path whose BASENAME matches neither `test_*.py` nor `*_test.py`
+   (round-1 R1.1 corrected the predicate from path-shaped to
+   basename-shaped; the retro's invariant-closure pass completed it
+   to BOTH of pytest's default `python_files` patterns and anchored
+   it against pytest itself — see the anchor test) skips
+   self-selection and instead
+   `selected.add(SELECTOR_META_GUARD_TEST)`. Rationale: the
    selector's output contract becomes "every emitted file-level target
    is a collectible test file", which ci.yml's `check=True` relies on;
    tolerating exit 5 in ci.yml (alt A) would demote fail-closed to
@@ -300,7 +303,7 @@ git.
 
 ## Risks to watch
 
-- Fail-closed → green conversion for the 5 uncompensated support
+- Fail-closed → green conversion for the 6 uncompensated support
   files (decision 1) is a deliberate gate-strength trade recorded
   above — reviewers should challenge it if they find a helper whose
   regression the collect-only smoke cannot catch AND whose importers

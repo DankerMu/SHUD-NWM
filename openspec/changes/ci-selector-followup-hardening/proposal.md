@@ -37,9 +37,12 @@ would dominate and destabilize this PR; #1455 stays open until that
 second PR lands.
 
 - **#1453**: in the changed-test branch of
-  `scripts/select_ci_tests.py`, a `tests/**.py` path NOT matching
-  `tests/test_*.py` no longer self-selects; it maps to the selector
-  meta-guard suite (`tests/test_select_ci_tests.py`), so the selection
+  `scripts/select_ci_tests.py`, a `tests/` Python file that is not a
+  pytest-collectible suite by BASENAME (final round-1/Phase-7 shape:
+  basename matches neither `test_*.py` nor `*_test.py`, at any depth —
+  mirroring pytest's default `python_files`) no longer self-selects;
+  it maps to the selector meta-guard suite
+  (`tests/test_select_ci_tests.py`), so the selection
   is always collectible. The affected class is 8 tracked files (not
   the issue's 3): `conftest.py`, `integration_helpers.py`,
   `__init__.py`, `mock_shud_omp.py`, `river_identity_backfill_fakes.py`,
@@ -93,18 +96,21 @@ second PR lands.
   `only_when_any_changed` design).
 - **#1455 (4)**: `GATING_MARKER_NAMES` is anchored: the auto-skip
   marker set is AST-derived from `tests/conftest.py`
-  `pytest_collection_modifyitems`, the frozen set must be a subset of
-  it, `grib`'s deliberate absence is a visible assertion, and
-  `real_disk`/`timescaledb_210` are asserted NOT auto-skipped (adding
-  them would wrongly exclude suites that really run).
+  `pytest_collection_modifyitems`, the binding assertion is the
+  EQUALITY `derived == GATING_MARKER_NAMES | {"grib"}` (design
+  decision 7 — subset/difference framings pass silently when conftest
+  stops skipping a marker), `grib`'s deliberate absence is a visible
+  assertion, and `real_disk`/`timescaledb_210` are asserted NOT
+  auto-skipped (adding them would wrongly exclude suites that really
+  run).
 
 Non-goals: no change to any production module logic or to the content
 of any newly-selected test suite; no route-A/B empty-selection policy
 change (the collect-only branch's semantics stay; #1454 only adds a
 second trigger for the smoke); no `scripts/**/*.sh` gating (#1138); no
 `CHANGED_TEST_FILE_RULES` early-continue semantics change (#1254
-settled); nested `tests/<pkg>/test_*.py` support stays out (zero
-tracked instances today; recorded as a deliberate deferral in design);
+settled); [SUPERSEDED by round-1 R1.1 — nested suites are now
+correctly classified as suites, see design decision 8's note];
 no support-helper → importer-suite mapping (#1453's "按需追加"
 option): the selector is static-pattern-based, a per-helper rule
 snapshot invites exactly the rot this guard family exists against,

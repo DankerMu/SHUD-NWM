@@ -148,17 +148,19 @@ test suite (`tests/test_select_ci_tests.py`) whenever any
 tracked-tree-derived meta-guards run on exactly the PR class that can
 invalidate them, while preserving changed-test self-selection and the
 existing redirect-rule semantics.
-A changed `tests/` Python file whose BASENAME does not match
-`test_*.py` (a support module such as `conftest.py`,
+A changed `tests/` Python file whose BASENAME matches neither
+`test_*.py` nor `*_test.py` (a support module such as `conftest.py`,
 `integration_helpers.py`, or `__init__.py`) SHALL NOT self-select —
 pytest returns `NO_TESTS_COLLECTED` (exit 5) for such a target, which
 ci.yml's `check=True` renders as a misleading failure — and SHALL
 instead map to the selector meta-guard suite, so the emitted selection
 always consists of collectible test files. The suite-vs-support
-classification is basename-shaped at any depth, mirroring pytest's own
-collection rule (`testpaths = ["tests"]`, default `python_files`): a
-nested `tests/<pkg>/test_*.py` suite self-selects and drags the
-meta-guards exactly like a top-level one.
+classification is basename-shaped at any depth and MUST equal pytest's
+own collection rule (`testpaths = ["tests"]`, default `python_files` =
+`test_*.py` and `*_test.py`), anchored by a test that derives the rule
+from pytest itself rather than restating it: a nested
+`tests/<pkg>/test_*.py` or `*_test.py` suite self-selects and drags
+the meta-guards exactly like a top-level one.
 
 #### Scenario: standalone changed test file selects the meta-guards
 
