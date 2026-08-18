@@ -212,14 +212,25 @@ self-releases.
 - Pass evidence: `restart_reconcile.reserved_unbound.outcomes[]` entries with
   `action=query_unavailable`, `reconciliation_decision=accounting_unavailable` and
   `reconciliation_reason_class=comment_accounting_unproven`. Take `job_id` and
-  `idempotency_key` from the entry.
+  `idempotency_key` from the entry. On a pass that hit the evidence byte limit the
+  bounded compaction keeps only `job_id` / `action` / `status` /
+  `reconciliation_reason_class` (plus streak/quarantine fields) — the
+  `reconciliation_decision` and `idempotency_key` keys may be absent; filter by the
+  reason-class token alone and recover the `idempotency_key` from the journal master
+  row below.
 - Journal: the same `reconciliation_reason_class` is persisted on the cohort master row,
   whose `status` is still `reserved` and whose `slurm_job_id` is still null.
 - Scheduler log, once per pass, tells the two unproven causes apart: `comment storage probe
   could not execute: …` means `scontrol` failed or was unreachable (a deployment fault —
-  fix that first, the cluster may well store comments), while `accounting does not store
-  job comments: AccountingStoreFlags lacks job_comment` means the cluster is provably
-  comment-less.
+  fix that first, the cluster may well store comments; while the fault persists, each
+  pass's `accounting_unavailable` write also resets any accumulated
+  `identity_blocked_streak`, so the § `identity_mismatch_released` ladder cannot fire
+  either). `accounting does not store job comments: AccountingStoreFlags lacks
+  job_comment` normally means the cluster is provably comment-less — but the same message
+  also fires when the config output has no `AccountingStoreFlags` line at all (for
+  example a pre-20.11 Slurm using the legacy `AccountingStoreJobComment` key, which the
+  probe deliberately does not read); when in doubt, run `scontrol show config | grep -i
+  AccountingStore` by hand before concluding the capability is absent.
 
 ### Deciding whether the job is actually in flight
 

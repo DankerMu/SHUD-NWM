@@ -111,9 +111,12 @@ PIPELINE_ALREADY_ACTIVE 直至人工处置）写入 runbook。
 - `ReconcileQueryUnavailable` 既有语义：transient-deny、不递增 absence 结论、
   行保持 reserved；`ReconcileQuerySaturated` 是其子类（:140），探针内 catch 父类
   即覆盖饱和档。
-- identity-mismatch streak（#1173 ladder）不受影响：pre-query 的 identity_blocked
-  分支（:1408-1420）在门之前 continue；accounting_unavailable 写不重置 streak 的
-  既有行为保持。
+- identity-mismatch streak（#1173 ladder）：门不递增该计数（transient-deny 分支
+  不触碰计数）。注意 accounting_unavailable 写**清零** streak 是既有设计
+  （spec :246「resets on any other transition」，tests/test_gateway_reconcile.py
+  :11753 钉死为意图），本单为该清零新增了一个触发源——存 comment 集群上 scontrol
+  持续故障（而 sacct 正常）时每 pass 清零会冻结 #1173 释放阶梯；方向 fail-safe
+  （只误停不误弃），窄触发面，已在 runbook 记载。
 - 探针失败不得抛出到 querier 之外（吞为 False + 可区分 WARNING）。
 - `tests/test_gateway_reconcile.py` 全绿（493+ 条）。
 

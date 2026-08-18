@@ -21,7 +21,8 @@ conclusion is recorded. This outcome class deliberately does not
 converge on its own: it does not increment the identity-mismatch streak
 counter (whose convergence requirement covers only the
 `identity_mismatch_blocked` outcome family), adds no automatic release
-exit, and leaves disposition to the documented runbook procedure — on
+exit, and leaves disposition to the documented runbook procedure (which
+today may terminate in escalation rather than repair) — on
 such clusters no reliable automatic absence proof exists, so any
 automatic exit would trade duplicate submission against abandoning a
 live job. On clusters where the probe proves the capability, sacct query
