@@ -577,11 +577,11 @@ def _select_backfill_source_cycles(
     available_gaps = [discovery for discovery in gaps if discovery.available]
     unavailable_gaps = [discovery for discovery in gaps if not discovery.available]
     # §8.7 quarantine breaker (#1157): a cycle whose ONLY reason for being a
-    # gap is a stale journal lineage that two completed submissions already
-    # re-recorded can never converge by rerunning, so it must stop holding the
-    # source's single oldest-first execution slot.  Walk from the oldest gap
-    # and release consecutive breaker-engaged cycles to the next one; the walk
-    # stops at the first cycle with real work, which keeps the slot.
+    # gap is a stale journal lineage that a provenance-stamped quarantine
+    # rerun already re-recorded can never converge by rerunning, so it must
+    # stop holding the source's single oldest-first execution slot.  Walk from
+    # the oldest gap and release consecutive breaker-engaged cycles to the next
+    # one; the walk stops at the first cycle with real work, which keeps the slot.
     breaker_released: list[tuple[CycleDiscovery, list[dict[str, Any]]]] = []
     remaining_gaps = list(available_gaps)
     while remaining_gaps:

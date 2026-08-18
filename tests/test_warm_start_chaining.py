@@ -2800,6 +2800,102 @@ def test_cohort_reservation_records_each_models_warm_start_identity(tmp_path: Pa
     ]
 
 
+def test_cohort_reservation_stamps_quarantine_rerun_provenance(tmp_path: Path) -> None:
+    """E11 (#1157): the master row books WHICH models this submission reruns under §8.7.
+
+    The stamp is written at reservation — the only point that still sees each
+    basin's scheduler decision — and read back by the breaker accessor, so the
+    write and read sides are pinned as one round trip here rather than as two
+    fixtures that could drift apart.  Without this leg both halves of the write
+    side (the canonical list builder and the closed constructor's member) are
+    mutable without a single unit test noticing.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    cycle = "2026050100"
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _basins(3)
+    quarantined_model_id = "model_1"
+    for index, basin in enumerate(basins):
+        state_evidence: dict[str, Any] = {"restart_stage": "forecast"}
+        if f"model_{index}" == quarantined_model_id:
+            state_evidence["decision"] = "retry_journal_predecessor_identity_mismatch"
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": state_evidence,
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026050100/state.cfg.ic",
+                "init_state_checksum": f"sha256:state-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "complete"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = next(
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+    # Only the quarantined basin's model is stamped: an unrelated resubmit of
+    # the two others must never look like a failed convergence attempt.
+    assert master["journal_predecessor_quarantine_rerun_model_ids"] == [quarantined_model_id]
+
+    # The stamp is capture-once, like the identity map beside it: a divergent
+    # value must be REJECTED, never merged away, or the breaker could be armed
+    # retroactively on a submission that was never a quarantine rerun.
+    durable = repository.get_pipeline_job(str(master["job_id"]))
+    # Public reads hand back placeholder object URIs (top level and nested in
+    # the identity map); replaying those into a write would trip the frozen
+    # check on those fields first, so omit every field that carries one — an
+    # absent field keeps its persisted value.
+    replayed = {
+        key: value
+        for key, value in durable.items()
+        if "[object-uri]" not in json.dumps(value) and "[uri]" not in json.dumps(value)
+    }
+    with pytest.raises(FileOrchestrationJournalError) as forged_error:
+        repository.upsert_pipeline_job(
+            {**replayed, "journal_predecessor_quarantine_rerun_model_ids": ["model_0"]}
+        )
+    assert forged_error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert forged_error.value.field == "journal_predecessor_quarantine_rerun_model_ids"
+    assert repository.get_pipeline_job(str(master["job_id"])) == durable
+
+    # write -> read round trip: the breaker accessor counts THIS submission for
+    # the stamped model only.
+    def _occurrences(model_id: str, init_state_id: str) -> int:
+        return reopened.completed_pipeline_init_state_id_occurrences(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id=model_id,
+            init_state_id=init_state_id,
+        )
+
+    quarantined_token = f"state_gfs_{quarantined_model_id}_2026050100_gfs_2026043012_f012"
+    assert _occurrences(quarantined_model_id, quarantined_token) == 1
+    assert _occurrences("model_0", "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
+    # Stamped model, but the row's identity map books a DIFFERENT token for it:
+    # the model and the token must BOTH match, or a stale-token count could be
+    # satisfied by any other lineage the same submission recorded.
+    assert _occurrences(quarantined_model_id, "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
+
+
 def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:
     """Cold-seeded basins resolve no warm start, so nothing is booked for them.
 

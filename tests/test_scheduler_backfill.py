@@ -1698,7 +1698,7 @@ def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
 
 # ---------------------------------------------------------------------------
 # §8.7 quarantine breaker (#1157 D4): a cycle whose ONLY reason for being a gap
-# is a quarantine that two completed submissions already re-recorded stops
+# is a quarantine that a provenance-stamped rerun already re-recorded stops
 # holding the source's single oldest-first execution slot — while still being
 # reported as a gap, never as complete.
 # ---------------------------------------------------------------------------

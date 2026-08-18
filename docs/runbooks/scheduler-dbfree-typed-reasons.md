@@ -373,10 +373,11 @@ cohort **master** 行中，`journal_predecessor_quarantine_rerun_model_ids`（�
 1. **确认是断路器而不是普通 quarantine**。候选侧读 `blocked_candidates[].reason`：
    是本 reason 才是断路器；仍是 `journal_predecessor_identity_mismatch`
    （decision `retry_journal_predecessor_identity_mismatch`）说明还在重跑收敛
-   窗口内，**不要**人工干预，等下一个自然 pass。计数读不出来（repository 无
-   accessor、行不可读）时口径是 fail toward liveness——断路器保持断开、decision
-   保持 retry，所以看到 retry 也可能是"数不出来"，判据以 evidence 里的
-   `journal_predecessor_identity.occurrences` 是否存在为准。
+   窗口内，**不要**人工干预，等下一个自然 pass。retry 只表示"还没数到任何一次
+   带戳的失败收敛重跑"——它把"计数为 0"和"计数读不出来"（repository 无 accessor、
+   行不可读，口径为 fail toward liveness）合在一起，阈值为 1 时两者对处置**没有
+   区别**：都只能等重跑。retry evidence 里不带 `occurrences`（只有 blocked 那份
+   带），所以别指望靠该字段区分这两种情形。
    该 cycle **整个不在** `blocked_candidates[]` 里（连 candidate 都没有）时**不是**
    "断路器没生效"，而是 discovery 侧已经在本 pass 释放了执行槽：去
    `predecessor_backfill` / source-cycle 选择证据里读那条
