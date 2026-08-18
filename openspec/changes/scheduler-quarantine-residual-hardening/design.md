@@ -46,7 +46,7 @@ accessor 相应过滤：只数"terminal-success master 且 token 匹配 且 mode
 - （R1）拒绝"只读改判收敛可行性"（expected entry absent/unusable 才 engage、不看 provenance）：Class A 已实证 usable entry 也会被下游拒绝，该近似在乐观方向出错时恢复无限重跑循环——即 #1157 主项本身；provenance 戳无近似。
 - （R1）拒绝维持"数任意 2 条 master"：Slurm 节点故障/OOM/超时后的 `retry_missing_forecast_output` recompute 是常规事件，预充值频率是 material 的，不是理论角落。
 
-**（R3 已确认的 known limit，defer 路由）**：breaker 仅在带戳 quarantine rerun 的 cohort master 达到 `succeeded`/`complete`/`published` 时武装；`partially_failed` master（任一同伴 array task 失败）对本 model 计 0——即使本 model 自己的 task 成功并重录了 stale token——fail-stop 与槽位释放被推迟到第一个全成功 cohort 的 rerun。多 basin cohort 的不健康 cycle 下这是常见形状（1 个 quarantine model + 任 1 个失败 basin 即触发；白名单不要求全员 quarantine）。修复形状已勘明（master `candidate_projections` 的 per-model 成功门 OR 现有聚合门；两陷阱：保留既有 succeeded 臂——无 projections 的干净 master 仍须计 1；本 model 自己 task 失败绝不计——overcount 方向禁止）。触发类整体在生产 cadence `0,12` 下不可达（本 change 的既定前提），故按 P2-only 规则 defer；跟进 issue 与 #1555 同为改 cadence 前置债。
+**（R3 已确认的 known limit，defer 路由）**：breaker 仅在带戳 quarantine rerun 的 cohort master 达到 `succeeded`/`complete`/`published` 时武装；`partially_failed` master（任一同伴 array task 失败）对本 model 计 0——即使本 model 自己的 task 成功并重录了 stale token——fail-stop 与槽位释放被推迟到第一个全成功 cohort 的 rerun。多 basin cohort 的不健康 cycle 下这是常见形状（1 个 quarantine model + 任 1 个失败 basin 即触发；白名单不要求全员 quarantine）。修复形状已勘明（master `candidate_projections` 的 per-model 成功门 OR 现有聚合门；两陷阱：保留既有 succeeded 臂——无 projections 的干净 master 仍须计 1；本 model 自己 task 失败绝不计——overcount 方向禁止）。触发类整体在生产 cadence `0,12` 下不可达（本 change 的既定前提），故按 P2-only 规则 defer；跟进 issue **#1562**，与 #1555 同为改 cadence 前置债。
 
 ### D4 — 槽位释放：discovery 槽位选择把 breaker-engaged gap 当 evidence-only，cycle 仍报 gap
 
