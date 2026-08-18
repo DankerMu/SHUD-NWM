@@ -18,16 +18,25 @@ terminal-skip 短路在 `not env_enabled and already_complete` 时成立。
   错误」，且崩溃前该候选已被静默按「toggle=off」短路——语义上把「检查无法
   完成」折叠成了「检查结果为否」，违反 `first-cycle-package-ic-consumption`
   确立的 UNREADABLE→fail-closed 分类不变量。
-- **backfill 面真正静默**：`scheduler_backfill_predecessor.py:476-486` 把
-  strict 路径异常吞成 `predecessor_gate_failed`，坏 env 在该面完全不可见。
+- **backfill 面的静默档**：`scheduler_backfill_predecessor.py:476-486` 把
+  strict 路径异常吞成 `predecessor_gate_failed`（`:481-484` 已把
+  `type(error).__name__` 记入 emission evidence——错误**类型**可见但变量名
+  不可归因）；真正完全静默的是 **journal-complete 的 predecessor 被折叠
+  False 短路后无声放行**这一档。
 - 直调 seam（测试/未来消费者）同样拿到假 `False`。
 
 ## What Changes
 
-三值化 + **「不可读 → 响亮失败」为期望终态**（与其余 6 处 `from_env()` 调用
-点的传播语义一致；不发明「strict 未知」平行模式——strict 路径自身在
-scheduler_generation_gate.py:430/:679 经 `_db_free_strict_warm_start_required_for`
-（scheduler_core.py:668-678）再读 env，必然抛出同一异常，本单不掩盖它）：
+三值化 + **「不可读 → 不静默」为期望终态**（与其余 6 处 `from_env()` 调用
+点的传播语义一致；不发明「strict 未知」平行模式）。strict 路径的再读 env
+仅发生在两个落点——legacy 落点 gate:430 与 warm_continue /
+block_predecessor_pending 落尾 gate:679（经
+`_db_free_strict_warm_start_required_for`，scheduler_core.py:671-678）——
+落到这两处时抛出同一解析异常（响亮失败）；五条提前 return 的 decision 分支
+（PACKAGED_IC_BOOTSTRAP :556-561、:582、COLD_NEW_MODEL :601-602、
+COLD_DECLARED_CUTOVER :615-616、`_DECLARATION_LEVEL_BLOCKS` :634-638）不再
+读 env，返回证据且仅留 WARNING。**两种形状都不是静默短路**，本单不掩盖任何
+一种：
 
 - `forecast_warm_start_env_enabled` 返回 `bool | None`：`from_env()` 成功 →
   `bool(require_forecast_warm_start)`（unset→默认 False=显式关闭，
@@ -52,11 +61,12 @@ scheduler_generation_gate.py:430/:679 经 `_db_free_strict_warm_start_required_f
 ## Non-Goals
 
 - `OrchestratorConfig.from_env()` 解析语义与 `_env_flag` 白名单不动。
-- **不**为「不可读」构造能产出证据的降级路径（strict 路径的 :430/:679 再读
-  env 必抛；掩盖它需要「strict 未知」平行模式，超出本单且违背与其余调用点
-  一致的传播原则）。坏 env 下的正确终态是：不静默短路 + WARNING 归因 +
-  响亮失败；修 env 后证据自然回来。
-- `candidate_pipeline_already_complete`（fail-closed，:120-123 区）不动。
+- **不**为「不可读」构造降级平行模式（落到 :430/:679 的分支抛出、五条提前
+  return 分支返回证据——两者都不静默；掩盖抛出档违背与其余调用点一致的传播
+  原则）。坏 env 下的正确终态是：不静默短路 + WARNING 归因 +（视分支）响亮
+  失败或带证据返回；修 env 后完整行为自然回来。
+- `candidate_pipeline_already_complete`（fail-closed，窄 except 在
+  gate:148-159）不动。
 - 下游各 `from_env()` 消费者的异常传播行为不动。
 - §8.6/§8.7 债（#1152/#1157）与 #1164 主线。
 

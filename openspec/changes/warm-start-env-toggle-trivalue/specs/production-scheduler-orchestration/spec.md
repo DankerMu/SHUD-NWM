@@ -16,11 +16,14 @@ variable failed, and on the predecessor-backfill path the error is
 swallowed entirely. An unreadable toggle first logs one
 `SCHEDULER_WARM_START_ENV_UNREADABLE` warning per scheduler instance
 carrying the parse error (the root-cause env is readable straight from
-the log), then takes the strict warm-start path, whose own env reads
-re-raise the same parse failure — the deliberate end state for a broken
-env is a loud, attributable failure, consistent with how every other
-`OrchestratorConfig.from_env()` call site propagates, never a silent
-skip; no degraded evidence-producing mode is invented for it. On the
+the log), then takes the strict warm-start path. On the strict-path
+branches that read the env again (the legacy landing and the
+warm-continue / blocked-predecessor tail) the same parse failure
+re-raises — a loud, attributable failure consistent with how every other
+`OrchestratorConfig.from_env()` call site propagates; the early-return
+decision branches that never read the env return their evidence with
+only the warning. Either shape is acceptable and neither is a silent
+skip; no degraded parallel mode is invented for the unreadable state. On the
 backfill path the same change turns the swallowed error into a
 `predecessor_gate_failed` skip with the warning already logged —
 fail-closed instead of silently admitting. Explicit values preserve
@@ -34,9 +37,11 @@ WHEN the orchestrator env config fails to parse (for example an unrelated
 `FORECAST_HORIZON_HOURS=abc`) while a candidate's pipeline is
 journal-complete on the db-free path
 THEN the terminal-skip shortcut is not taken, the strict warm-start path
-is entered and the parse failure surfaces as a raised error, and one
-warning naming the parse failure was logged before the failure — the
-operator can read the broken variable from the log instead of guessing
+is entered and — on a branch that reads the env again — the parse
+failure surfaces as a raised error (an early-return branch instead
+returns its evidence), and one warning naming the parse failure was
+logged first — the operator can read the broken variable from the log
+instead of guessing
 
 #### Scenario: the backfill path fails closed instead of silently admitting
 

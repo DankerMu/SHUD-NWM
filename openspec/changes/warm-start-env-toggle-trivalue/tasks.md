@@ -20,17 +20,21 @@
       提前 return 短路不参与；用 `_set_db_free_scheduler_env` + file journal
       已完成 pipeline）：坏无关 env 下断言三件——(a)
       `strict_warm_start_evidence` 被进入（spy；不得用 evidence 非 None 判据
-      ——strict 自身可返回 None，gate:447）；(b) 失败响亮（strict 内
-      :430/:679 再读 env 抛 ValueError，按调用层真实收口形状断言）；(c)
-      WARNING 已先落。**改动前红**：无异常、静默短路返回 None、无 WARNING
+      ——strict 自身可返回 None，gate:447）；(b) 非静默终态：state-index 构造
+      **须落在到达 gate:679（或 legacy :430）的分支**上并断言 ValueError 按
+      调用层真实收口形状抛出；若构造落入五条提前 return 分支，断言改为
+      「返回证据（非短路 None）」——两种形状皆非静默短路；(c) WARNING 已
+      先落。**改动前红**：无异常、静默短路返回 None、无 WARNING
 - [ ] 2.3 WARNING 可观测性：caplog（logger
       `services.orchestrator.scheduler_generation_gate`）断言 token + `repr(exc)`
       可追根因；同实例第二次调用不重复；env 可读时零该 token
 - [ ] 2.4 回归锁：显式 false + 已完成 → 仍 terminal-skip（None，D8.9）；
       显式 true → strict 行为逐字不变
-- [ ] 2.5 backfill 面钉住（有意行为变更）：坏 env 下
-      `scheduler_backfill_predecessor.py:476-486` 的吞点从「放行」变
-      「`predecessor_gate_failed` 跳过」且 WARNING 已归因——显式回归测试
+- [ ] 2.5 backfill 面钉住（有意行为变更；**须构造 journal-complete 的
+      predecessor**——否则改动前后同为 predecessor_gate_failed，锁空转）：
+      坏 env + journal-complete predecessor 下从「折叠 False 短路 → gate=None
+      → 放行」变「strict 抛出 → `predecessor_gate_failed` 跳过」且 WARNING
+      已归因；**改动前该用例红（形状=放行）**
 
 ## 3. Verification
 
