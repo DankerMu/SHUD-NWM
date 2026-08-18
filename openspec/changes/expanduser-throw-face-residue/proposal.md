@@ -58,9 +58,11 @@
 - `services/orchestrator/` 其余约 40 处 `.expanduser()` 站点与 `LocalObjectStore` 其余
   构造站点（`scheduler_file_providers.py`、`tile_publisher/`、`workers/**` 等）：两 issue
   均声明未逐一审计，本 change 只治五处已复核站点，不做全仓扫（扩面需另立单）。
-- 第六副本 `packages/common/safe_fs.py:23`（`_expand_path` 的裸 `Path(path).expanduser()`，
-  约 10 个 safe_fs 入口的共享前奏）：fixture review 发现，两 issue 均未跟踪；本修复后
-  `LocalObjectStore` 交给 safe_fs 的已是绝对路径，无前导 tilde 可达——另行立单承接。
+- 第六副本 `packages/common/safe_fs.py:721-723`（`_expand_path` 的裸
+  `Path(path).expanduser()`，safe_fs 全部 16 个公共入口的共享前奏）：fixture review
+  发现，两 issue 均未跟踪；本修复后 `LocalObjectStore` 交给 safe_fs 的已是绝对路径，
+  无前导 tilde 可达——已立单 #1547 承接（含 scripts 面 live 逃逸证据与
+  `chain_runtime_utils._absolute_configured_path` 孪生登记）。
 - S3 适配面与 object-key 校验语义不变。
 
 ## Risk triage
