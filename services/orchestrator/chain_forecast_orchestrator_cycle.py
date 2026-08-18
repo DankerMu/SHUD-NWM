@@ -24,6 +24,13 @@ _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_strict_warm_start_terminal_run_manifest_missing",
     "retry_strict_warm_start_retry_run_manifest_mismatch",
     "retry_terminal_run_manifest_missing",
+    # §8.7 quarantine rerun (#1157): the cycle's forecast job already
+    # SUCCEEDED with a stale predecessor lineage, so an idle resume would
+    # re-adopt that very run.  The rerun only means anything as a real
+    # replacement submission.  Its breaker fail-stop decision
+    # (``blocked_journal_predecessor_identity_quarantine``) is deliberately
+    # NOT a member — nothing may revive it.
+    "retry_journal_predecessor_identity_mismatch",
 }
 _STAGE_ORDER = {
     "convert": 0,

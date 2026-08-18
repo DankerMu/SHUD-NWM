@@ -243,10 +243,36 @@ def apply_cohort_warm_start(
             model_package_version=basin.get("model_package_uri"),
             model_package_checksum=basin.get("model_package_checksum"),
             max_lead_hours=_basin_max_lead_hours(basin),
+            quarantine_required_lead_hours=_basin_quarantine_required_lead_hours(basin),
         )
         _apply_initial_state_selection_to_basin(basin, selection)
         if selection.rejection_code is not None:
             basin["init_state_rejection_code"] = selection.rejection_code
+
+
+def _basin_quarantine_required_lead_hours(basin: Mapping[str, Any]) -> int | None:
+    """Lead hours of the predecessor a §8.7 quarantine rerun expects (#1157 D2).
+
+    Read from the quarantine retry evidence the scheduler attached to the
+    candidate (``scheduler_candidates._journal_predecessor_identity_retry_
+    evidence`` -> candidate ``state_evidence`` -> manifest -> basin).  ``None``
+    for every basin that is not a quarantine rerun, which keeps the selection
+    call byte-identical to before this change.
+    """
+    state_evidence = basin.get("state_evidence")
+    if not isinstance(state_evidence, Mapping):
+        return None
+    identity = state_evidence.get("journal_predecessor_identity")
+    if not isinstance(identity, Mapping):
+        return None
+    raw_lead_hours = identity.get("required_lead_hours")
+    if raw_lead_hours in (None, "") or isinstance(raw_lead_hours, bool):
+        return None
+    try:
+        lead_hours = int(raw_lead_hours)
+    except (TypeError, ValueError):
+        return None
+    return lead_hours if lead_hours > 0 else None
 
 
 def mark_packaged_ic_bootstrap_basins(basins: Sequence[dict[str, Any]]) -> None:

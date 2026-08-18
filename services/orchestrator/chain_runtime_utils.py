@@ -174,6 +174,11 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
         "retry_strict_warm_start_terminal_run_manifest_missing",
         "retry_strict_warm_start_retry_run_manifest_mismatch",
         "retry_terminal_run_manifest_missing",
+        # Sibling copy of ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``
+        # (``chain_forecast_orchestrator_cycle.py``) minus
+        # ``retry_repair_missing_forcing``; the §8.7 quarantine rerun (#1157)
+        # must be a real replacement submission on both copies.
+        "retry_journal_predecessor_identity_mismatch",
     }
     if basins and all(
         isinstance(basin.get("state_evidence"), Mapping)

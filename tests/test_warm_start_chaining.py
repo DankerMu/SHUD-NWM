@@ -2142,6 +2142,8 @@ def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whiteli
         "retry_strict_warm_start_terminal_run_manifest_missing",
         "retry_strict_warm_start_retry_run_manifest_mismatch",
         "retry_terminal_run_manifest_missing",
+        # #1157: the §8.7 quarantine rerun joined both whitelists.
+        "retry_journal_predecessor_identity_mismatch",
     }
 
     def basin(decision: str) -> dict[str, Any]:
@@ -2183,6 +2185,384 @@ def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whiteli
         )
         is False
     )
+
+
+def _quarantine_whitelist_basin(decision: str) -> dict[str, Any]:
+    return {
+        "model_id": "demo_model",
+        "basin_id": "demo_basin",
+        "candidate_id": "GFS:2026-05-01T12:00:00Z:demo_model:forecast_gfs_deterministic",
+        "orchestration_run_id": "cycle_gfs_2026050112",
+        "state_evidence": {
+            "decision": decision,
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+        },
+    }
+
+
+def test_quarantine_rerun_decision_forces_resubmission_on_both_whitelists() -> None:
+    """E5 (#1157): the quarantine rerun is a real replacement, its block is not.
+
+    Both whitelists match ``state_evidence["decision"]`` literally.  Without
+    membership the second quarantine of a cycle whose forecast job already
+    SUCCEEDED degrades to an idle resume that re-adopts the very run carrying
+    the stale lineage.  The breaker's blocked decision must stay outside both,
+    or the fail-stop would be revived into a submission on the next pass.
+    """
+    from types import SimpleNamespace
+
+    from services.orchestrator import chain_runtime_utils
+    from services.orchestrator.chain_forecast_orchestrator_cycle import (
+        _FORCE_TERMINAL_RESUBMIT_DECISIONS,
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    retry_decision = "retry_journal_predecessor_identity_mismatch"
+    blocked_decision = "blocked_journal_predecessor_identity_quarantine"
+    terminal_job = {
+        "job_id": "job_cycle_gfs_2026050112_forecast",
+        "status": "succeeded",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+    }
+
+    def needs_forced_resubmit(decision: str) -> bool:
+        return _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(
+                active_basins=[_quarantine_whitelist_basin(decision)],
+                restart_stage="forecast",
+            ),
+            terminal_job,
+        )
+
+    assert retry_decision in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert blocked_decision not in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert needs_forced_resubmit(retry_decision) is True
+    assert needs_forced_resubmit(blocked_decision) is False
+
+    # Sibling copy (``chain_runtime_utils.force_replacement_decisions``) is
+    # function-local, so it is pinned through its seam.
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin(retry_decision)]
+        )
+        is True
+    )
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin(blocked_decision)]
+        )
+        is False
+    )
+    # "Must preserve": the two copies keep their existing difference —
+    # ``retry_repair_missing_forcing`` belongs to the first one only.
+    assert "retry_repair_missing_forcing" in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin("retry_repair_missing_forcing")]
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("quarantined", [True, False])
+def test_second_quarantine_submits_a_replacement_instead_of_resuming(
+    tmp_path: Path,
+    quarantined: bool,
+) -> None:
+    """E5 integration: the succeeded forecast job is replaced, not re-adopted.
+
+    The journal already holds a SUCCEEDED forecast job for this cycle — the
+    first quarantine rerun's own run, which re-recorded the stale lineage.
+    Under the quarantine decision the orchestrator must submit a replacement
+    with a NEW run identity; under a non-whitelisted decision the same fixture
+    resumes that succeeded job and submits nothing (the pre-change behaviour
+    the whitelist membership fixes).
+    """
+    from tests.test_orchestration_chain import (
+        FakeCycleRepository,
+        FakeCycleSlurmClient,
+        _basins,
+        _orchestrator,
+    )
+
+    run_id = "cycle_gfs_2026050100_forecast_model_0"
+    base_job_id = f"job_{run_id}_forecast"
+    repository = FakeCycleRepository()
+    repository.jobs[base_job_id] = {
+        "job_id": base_job_id,
+        "run_id": run_id,
+        "cycle_id": "gfs_2026050100",
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_0",
+        "stage": "forecast",
+        "status": "succeeded",
+        "slurm_job_id": "7001",
+        "idempotency_key": f"{run_id}:forecast",
+        "retry_count": 0,
+        "submitted_at": "2026-05-01T00:00:00Z",
+        "finished_at": "2026-05-01T00:30:00Z",
+        # Already advertised, so the resume leg does not re-publish logs for a
+        # Slurm job this fake client never ran.
+        "log_uri": f"s3://nhms/runs/{run_id}/logs/forecast.log",
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+    basins[0]["restart_stage"] = "forecast"
+    basins[0]["state_evidence"] = {
+        "decision": (
+            "retry_journal_predecessor_identity_mismatch" if quarantined else "skip_terminal"
+        ),
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+    }
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    forecast_submissions = [
+        submission for submission in client.submissions if submission.get("stage") == "forecast"
+    ]
+    replacement_job_id = f"{base_job_id}_retry_1"
+    if quarantined:
+        assert len(forecast_submissions) == 1
+        assert replacement_job_id in repository.jobs
+        assert repository.jobs[replacement_job_id]["idempotency_key"] == (
+            f"{run_id}:forecast:retry_1"
+        )
+        # The replacement is a NEW run identity; the stale row is left intact.
+        assert repository.jobs[base_job_id]["status"] == "succeeded"
+        assert repository.jobs[base_job_id]["slurm_job_id"] == "7001"
+    else:
+        # No whitelist match: the succeeded row is resumed in place (and then
+        # judged on its own durable output) instead of being replaced.
+        assert forecast_submissions == []
+        assert replacement_job_id not in repository.jobs
+
+
+# ---------------------------------------------------------------------------
+# §8.7 quarantine rerun convergence (#1157 D2): the env=false exact lookup
+# PREFERS the expected predecessor lineage, and falls back byte-identically
+# when that preference yields no usable snapshot.
+#
+# Cadence `0,6,12` for cycle T=2026-05-21T12:00Z: the expected predecessor is
+# T-6h, so the expected token ends `_gfs_2026052106_f006` while the stale one
+# ends `_gfs_2026052100_f012`.  The stale id sorts STRICTLY BEFORE the expected
+# one under plain string ordering, so the file index's `min(state_id)` tie-break
+# picks the WRONG entry — an unimplemented preference cannot pass by luck.
+# ---------------------------------------------------------------------------
+
+_QUARANTINE_CYCLE_TIME = "2026-05-21T12:00:00Z"
+_QUARANTINE_MODEL_ID = "demo_model"
+_QUARANTINE_PACKAGE_URI = "s3://nhms/models/demo_model/package/"
+_QUARANTINE_REQUIRED_LEAD_HOURS = 6
+
+
+def _quarantine_state_id(*, lead_hours: int) -> str:
+    """Compose the token the write side would produce for this lineage."""
+    from packages.common.state_manager import state_snapshot_id
+    from workers.data_adapters.base import cycle_id_for
+
+    valid_time = _dt(_QUARANTINE_CYCLE_TIME)
+    return state_snapshot_id(
+        _QUARANTINE_MODEL_ID,
+        valid_time,
+        source_id="gfs",
+        cycle_id=cycle_id_for("gfs", valid_time - timedelta(hours=lead_hours)),
+        lead_hours=lead_hours,
+    )
+
+
+def _quarantine_state_index_orchestrator(
+    tmp_path: Path,
+    *,
+    entries: list[tuple[int, bool]],
+) -> ForecastOrchestrator:
+    """Orchestrator over a REAL file state index holding one entry per lineage.
+
+    ``entries`` is ``(lead_hours, usable_flag)`` per index row, all at valid
+    time T.  The real repository is what makes the ``min(state_id)`` tie-break
+    (and the absent earlier-valid-time fallback) genuine rather than mocked.
+    """
+    from packages.common.state_manager import (
+        FileStateSnapshotIndexRepository,
+        StateManager,
+        StateSnapshot,
+    )
+    from workers.data_adapters.base import cycle_id_for
+
+    valid_time = _dt(_QUARANTINE_CYCLE_TIME)
+    state_object_root = tmp_path / "state-object-store"
+    store = LocalObjectStore(state_object_root, "s3://nhms-state")
+    repository = FileStateSnapshotIndexRepository(
+        str(tmp_path / "state-index.json"),
+        object_store_root=state_object_root,
+        object_store_prefix="s3://nhms-state",
+        published_artifact_root=state_object_root,
+        create_missing=True,
+    )
+    for lead_hours, usable_flag in entries:
+        producer_cycle_time = valid_time - timedelta(hours=lead_hours)
+        content = f"state-f{lead_hours:03d}\n".encode()
+        state_uri = store.write_bytes_atomic(
+            f"states/gfs/{_QUARANTINE_MODEL_ID}/f{lead_hours:03d}/state.cfg.ic",
+            content,
+        )
+        repository.upsert_state_snapshot(
+            StateSnapshot(
+                state_id=_quarantine_state_id(lead_hours=lead_hours),
+                model_id=_QUARANTINE_MODEL_ID,
+                run_id=f"fcst_gfs_{lead_hours:03d}_{_QUARANTINE_MODEL_ID}",
+                valid_time=valid_time,
+                state_uri=state_uri,
+                checksum=f"sha256:{sha256_bytes(content)}",
+                usable_flag=usable_flag,
+                source_id="gfs",
+                cycle_id=cycle_id_for("gfs", producer_cycle_time),
+                lead_hours=lead_hours,
+                model_package_version=_QUARANTINE_PACKAGE_URI,
+            )
+        )
+
+    object_root = tmp_path / "object-store"
+    return ForecastOrchestrator(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            poll_interval_seconds=0,
+            job_timeout_seconds=5,
+            require_forecast_warm_start=False,
+        ),
+        repository=FakeOrchestratorRepository(),
+        state_manager=StateManager(
+            repository=repository,
+            object_store=LocalObjectStore(state_object_root, "s3://nhms-state"),
+        ),
+        slurm_client=FakeSlurmClient(),
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+
+
+def _quarantine_basin(*, quarantined: bool) -> dict[str, Any]:
+    basin: dict[str, Any] = {
+        "model_id": _QUARANTINE_MODEL_ID,
+        "basin_id": _QUARANTINE_MODEL_ID,
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": _QUARANTINE_PACKAGE_URI,
+        "source_id": "gfs",
+    }
+    if quarantined:
+        basin["state_evidence"] = {
+            "decision": "retry_journal_predecessor_identity_mismatch",
+            "reason": "journal_predecessor_identity_mismatch",
+            "restart_stage": "forecast",
+            "journal_predecessor_identity": {
+                "recorded_init_state_id": _quarantine_state_id(lead_hours=12),
+                "expected_init_state_id": _quarantine_state_id(
+                    lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS
+                ),
+                "required_lead_hours": _QUARANTINE_REQUIRED_LEAD_HOURS,
+                "quarantined_skip_reason": "terminal_hydro_success",
+            },
+        }
+    return basin
+
+
+def _quarantine_selected_state_id(
+    orchestrator: ForecastOrchestrator,
+    *,
+    quarantined: bool,
+) -> str | None:
+    cycle_time = _dt(_QUARANTINE_CYCLE_TIME)
+    basins = orchestrator._normalize_cycle_basins(
+        [_quarantine_basin(quarantined=quarantined)], "gfs", cycle_time
+    )
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+    return basins[0].get("init_state_id")
+
+
+def test_quarantine_rerun_converges_on_the_expected_lineage_entry(tmp_path: Path) -> None:
+    """E1: one rerun converges when the expected-lineage entry exists.
+
+    The stale entry sorts first, so the unfiltered lookup that today's code
+    performs still picks it — the control leg below pins exactly that.  Only
+    the lineage preference reaches the expected entry, and the token it selects
+    is the one the §8.7 filter computes as expected, so the next scoring pass
+    makes no quarantine judgement.
+    """
+    from services.orchestrator import scheduler_generation as generation
+
+    stale_state_id = _quarantine_state_id(lead_hours=12)
+    expected_state_id = _quarantine_state_id(lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS)
+    # Adversarial pin: `min(state_id)` alone would answer with the STALE entry.
+    assert stale_state_id < expected_state_id
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+    )
+
+    assert _quarantine_selected_state_id(orchestrator, quarantined=True) == expected_state_id
+    # Next scoring pass: the recorded token now matches, so no judgement.
+    assert (
+        generation.journal_init_state_lineage_matches_expected(
+            expected_state_id,
+            source_id="gfs",
+            model_id=_QUARANTINE_MODEL_ID,
+            candidate_valid_time=_dt(_QUARANTINE_CYCLE_TIME),
+            required_lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS,
+        )
+        is True
+    )
+
+
+def test_non_quarantine_selection_ignores_the_expected_lineage(tmp_path: Path) -> None:
+    """E1 control: a basin without quarantine evidence selects exactly as before.
+
+    Same two-entry index; with no evidence no lineage arguments are passed and
+    the file index's `min(state_id)` tie-break still answers with the stale
+    entry — the byte-identical pre-change selection.
+    """
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+    )
+
+    assert _quarantine_selected_state_id(orchestrator, quarantined=False) == (
+        _quarantine_state_id(lead_hours=12)
+    )
+
+
+@pytest.mark.parametrize("leg", ["expected_entry_absent", "expected_entry_unusable"])
+def test_quarantine_rerun_falls_back_instead_of_cold_starting(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """E2: the lineage is a PREFERENCE, not a filter.
+
+    When the preferred lookup yields no USABLE snapshot — the entry is missing,
+    or present with ``usable_flag`` false — the rerun must repeat today's
+    unfiltered selection and pick the same stale-lineage entry.  Hard-filtering
+    would hand the rerun a zeroed cold start (the file index offers no
+    earlier-valid-time fallback), which is physically worse than the wrong
+    warm start; that non-convergent shape belongs to the breaker instead.
+    """
+    entries = (
+        [(12, True)]
+        if leg == "expected_entry_absent"
+        else [(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, False)]
+    )
+    orchestrator = _quarantine_state_index_orchestrator(tmp_path, entries=entries)
+
+    selected_state_id = _quarantine_selected_state_id(orchestrator, quarantined=True)
+
+    assert selected_state_id == _quarantine_state_id(lead_hours=12)
+    # Same answer as a non-quarantine basin: the fallback is byte-identical.
+    assert selected_state_id == _quarantine_selected_state_id(orchestrator, quarantined=False)
 
 
 def _released_identity_blocked_master(
