@@ -9759,11 +9759,17 @@ def _journal_tree_bytes(root: Path) -> dict[str, bytes]:
     Following symlinks during the walk is load-bearing: the tampered scenes
     replace ``journal/<source>`` with a symlink, and a write that leaked
     through it lands in the decoy.  A non-following walk stops at the symlink
-    and reports the leaked bytes as "nothing changed".  The symlinks
-    themselves are dropped from the result — only the bytes behind them count.
+    and reports the leaked bytes as "nothing changed".  Symlinked directories
+    are traversed, so the bytes behind them count; a symlinked FILE is dropped
+    outright and its target bytes are invisible here — no fixture plants one
+    inside ``root`` today, and a zero-write assertion in a scene that does
+    would need a different helper.
     Precondition: the tamper fixtures keep their decoys OUTSIDE ``root``, so
-    the tree has no symlink cycle; ``followlinks=True`` would loop forever on
-    one and no cycle detection is added here on purpose.
+    the tree has no symlink cycle; a cycle would not hang the walk — the
+    kernel's symlink limit ends the descent and ``os.walk``'s default
+    ``onerror`` swallows it — but the snapshot would silently gain duplicated
+    keys from the repeated descent; no cycle detection is added here on
+    purpose.
     """
 
     return {
