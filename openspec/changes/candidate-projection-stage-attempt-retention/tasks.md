@@ -66,12 +66,25 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - E-v2-S4 flat 载体几何回归钉: retry_count=4 载体行在窗内 → `state["retry_count"] == 4`。
 - E-v2-sel 新键形状: 投影 state 恒含 `stage_retry_attempt_floors` dict（可空）；非投影
   state（无该键）读取行为不变。
+- E13 identity 收窄（round-2 R2-A）: (a) **真实 journal 端到端腿**——model-less 带后缀
+  cohort 行（retry_count=N）+ 候选自己首次失败行，无截断：filtered decision 为
+  ('retry','retry_failed_candidate')、payload attempt==0（floors 被收窄；红证据 = 当前
+  head 读出 N/permanent）；(b) shared-cycle-aggregate 臂（identity_filter:221-241）同断言；
+  (c) E1/E5 wedge 行（裸 cycle run id）floor 存活——收窄不误伤；(d) strip 列表含 floors 键。
+- E14 payload 决策面钉（round-2 R2-B）: 逆序几何 + 候选自己窗内 transient 失败行 →
+  `_failure_policy_payload` {attempt: N, retryable: False, permanent: True} +
+  `_permanent_failure_evidence` 非 None（去 floor 并入变异必须红）。
+- E15 nameable mint 钉（round-2 R2-D）: 窗内候选权威 failed `_retry_2` 行 + 窗外
+  `_retry_87` → mint `previous_attempt==87` / `new_attempt==88`（改前铸 `_retry_3`；去
+  floor 并入变异必须红）。
 - E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat or retention or floor"`；
   `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py
   tests/test_gateway_reconcile.py`；`uv run ruff check .`；
   `openspec validate candidate-projection-stage-attempt-retention --strict --no-interactive`。
-- E9 receipt: PR body 引用 #1173 归档 receipt（archive/2026-07-27-…/tasks.md:39-40）；
-  归档文件不编辑。
+- E9 receipt: PR body 引用 #1173 归档 receipt（archive/2026-07-27-…/tasks.md:39-40；归档
+  文件不编辑）+ **issue AC-6 行数**（node-22 只读实测，2026-08-18）：cycle 2026072000
+  pipeline-jobs 行数 gfs=94（其中 87 条 `_forecast_retry_*`）/ ifs=124——ifs 超过默认
+  job_limit=100，逆序截断几何在生产真实存在。
 
 ## Review focus (v2)
 
@@ -84,6 +97,10 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 5. E6c 必须驱动真实 reclaim 链（:1835-1839 前置条件形状），:1911 变异必须咬红。
 6. D0 v2 澄清——DB 路径 floors 数值面顺向变化已落字；选集在两路径都不变。
 7. Python 3.11 兼容（#1566 教训）。
+8. （round-2 增补）D1.6 identity 收窄——E13 四子腿是守门；修法必须是收窄式（贡献行元数据
+   + 同谓词判定），**禁止**从过滤后行集重算 floors（会打死 E1/E5，verifier (e) 裁定）。
+9. （round-2 增补）D3 两个有意决策级变化（E14 payload / E15 nameable mint）必须有腿且
+   design 声明到位；flat 分量边界（D1.7）措辞收窄落 spec/design/docstring/runbook 四处。
 
 ## Tasks
 
@@ -94,5 +111,8 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - [x] 2.2 E6a/b/c + 不变量注释四处（含 :2807 按 D4 修正措辞）
 - [x] 2.3 消费面核对 E7（PR body 落结论）
 - [x] 2.4 runbook 机制描述更新（failed-basin-retry.md）
-- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt + follow-up issue 编号（geometry-B manual mint）
-      写入 PR body；DB 缺口 issue：**#1572**
+- [x] 1.3 (round-2) D1.6 identity 收窄实现（贡献行元数据 + 三处 filter 收窄 + strip 键）
+- [x] 2.5 (round-2) E13/E14/E15 腿 + D1.7 措辞收窄（rows.py 两处 docstring + runbook 句）
+      + rows.py:36-39 "always present" 注释限定
+- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + flat 串味
+      follow-up issue 编号写入 PR body

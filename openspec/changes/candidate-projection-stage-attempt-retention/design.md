@@ -18,7 +18,10 @@ Project profile: NHMS
 - `services/orchestrator/chain_repository_state.py` `candidate_state_from_rows` 截断块——
   选集回退为纯新鲜度 `[:job_limit]`；截断前构建 floors 并落 state 新键
 - `services/orchestrator/scheduler_state_rows.py` `_state_job_retry_attempt`——stage-scoped
-  推导并入 floor（stage-less flat-first 逐字节不变）
+  推导并入 floor（stage-less flat-first 逐字节不变）；floors builder 同时产出贡献行
+  identity 元数据
+- `services/orchestrator/scheduler_state_identity_filter.py`——floors 随候选域过滤收窄
+  （D1.6）+ strip 列表加两个键
 - `tests/test_production_scheduler.py`：逆序几何回归腿 + 三个已证伪几何的回归钉 +
   既有友好序用例 `test_strict_warm_start_budget_binds_on_the_truncated_production_geometry`
   (:42219) 保持
@@ -76,6 +79,39 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
    state（无 floors 键）行为不变。
 5. **DB 路径**：同一 builder 在 `job_limit+1` 窗口上跑（D0 澄清条），无门控——门控会让
    两条路径分叉，代价高于收益（round-1 C3 verifier 口径）。
+6. **identity 收窄（round-2 R2-A，P1）**：floors 必须随候选域过滤收窄。floors 条目携带
+   贡献行 identity 元数据（平行键 `stage_retry_attempt_floor_sources`：stage → 贡献行
+   whitelist 投影列表，字段覆盖 `_legacy_identity_values` 别名 + job-id 引用键 +
+   source-cycle blocker 谓词读的 status/stage 字段；同 stage 取到 max 的全部行都算贡献
+   行）。`scheduler_state_identity_filter` 在重写行群体的同时，**仅当某 stage 的全部贡献
+   行被同一 authority/scope 谓词判出局时**删除该 stage 的 floor 条目。三处谓词：
+   - authority（evidence 路径 :67-77 的语义）——**落在公共尾 `_candidate_state_filtered_
+     decision_state`，不是 :67-77 行循环内**：行删除按 `legacy_sources` 的**下标**走，
+     而贡献行没有下标（它可能在任何 filter 看到之前就被截断出行集），所以只能重跑
+     `_candidate_state_identity_validation` 判定所依据的谓词
+     `_state_row_has_authoritative_candidate_proof`（+ source-cycle blocker 逃生门）；
+     放公共尾还顺带堵住"legacy_sources 为空即整函数早退"的漏洞——那条路径上窗外外来
+     贡献行本来一次也不会被判。
+   - `_inconclusive_source_cycle_decision_state`（:105-110）：`_state_row_references_job_ids`。
+   - `_candidate_scoped_shared_cycle_aggregate_state`（:221-241）：
+     `_shared_cycle_row_is_candidate_scoped`（+ blocker 逃生门）。该臂两条可达分支都先
+     调 `_strip_top_level_pipeline_decision_fields`，所以实际由 strip 半边兜住；收窄调用
+     是 top-level blocker 成立时的那半边。
+   `STAGE_RETRY_ATTEMPT_FLOORS_KEY`（连同 sources 键）同时加入
+   `_strip_top_level_pipeline_decision_fields`（:579-618）——它与 `retry_attempt`/
+   `attempt`/`retry_count` 同列；在 shared-cycle-aggregate 臂上这半边是**承重**的
+   （E13b 走的就是它）。**陷阱（verifier (e) 裁定）**：
+   不得"从过滤后幸存的 pipeline_jobs 重算 floors"——E1/E5 的贡献行在 filter 之前就已被
+   截断出行集，重算会把 floor 归零打死整个 change；E1/E5 的 wedge 行（裸 cycle run id、
+   model-less）在 `_state_row_has_authoritative_candidate_proof` 下为 True，收窄式修法
+   保留其 floor。反向锚：tests/test_file_orchestration_journal.py:1493-1505（非候选行
+   retry_count 不得成为本候选 attempt）。
+7. **flat 分量边界（round-2 R2-C，双镜头证实）**：floors 只保证 **stage 行扫描分量**的
+   截断不变；候选级 flat `retry_count` 聚合（chain_repository_state.py:826/:863，本 change
+   未动）仍随窗口塌陷，其跨 stage 串味（convert 行 retry_count 经 flat 通道进 forecast
+   预算）是既有行为，显式排除在保证外（follow-up issue **#1579**）。spec、
+   本节与 `_state_retry_attempt`/`_state_job_retry_attempt` docstring 的措辞一律按此收窄，
+   不得写绝对的"截断不变等式"。
 
 ## D2: 必须保持（v2 后大幅收缩——选集不变使可见性面按构造关闭）
 
@@ -99,16 +135,22 @@ stage-scoped 调用点逐一核对并在 PR 记录结论：
 - `scheduler_candidates.py:2225`（auto L2 预算，stage 是常量 `"forecast"`）：floors 直接
   命中——逆序几何下 `("blocked", "strict_warm_start_retry_budget_exhausted")`（E5）。
   **这是 issue #1179 的目标面，不依赖 `_failed_stage` 行可见性。**
-- `scheduler_state_failure.py:188/:1444/:1900`：stage 可解析时（failed 行在窗内——生产
-  常态）读出真值；数值记账面变真。
-- **`:1917` manual-retry mint 的边界（v2 与初版的差异）**：`:1917` 是
-  `_state_retry_attempt(state, stage=_failed_stage(state))`。failed 行在窗内时 mint 今天
-  就正确（行扫描直接读到）。geometry B（failed 行在窗外 + terminal-completion filler 使
-  三键全空）下 `_failed_stage` 恒为 None（v2 选集不变，行不可见）→ stage-less flat-first
-  读 0 → mint `_retry_1` 撞既有键静默 no-op——**维持现状，不在本 change 修**。初版靠行
-  可见性顺带修它，但那正是被 S1/S2 证伪的机制。边界钉住（E11-v2 硬断言 + E12-v2 现状钉），
-  缺口路由 follow-up issue（编号见 tasks 3.1/PR body）：manual mint 需要 stage 解析不依赖
-  行可见性（如 marker 自带 stage 或读 floors 键集）。
+- **`scheduler_state_failure.py:188/:1444/:1900` 是决策级变化，不只是记账（round-2 R2-B
+  修订）**：stage 可命名时 `_failure_policy_payload` 的 attempt 读出真值，`classify_failure`
+  在真值 ≥ retry_limit 时把 transient 失败判成 `permanent=True / limit_exhausted=True`，
+  remedy 通道被 permanent 门（failure.py:418/:473/:1481/:1557/:1641/:1689/:1723）关闭、
+  `_permanent_failure_evidence` 由 None 变 ("permanent_failure","retry_limit_exhausted")。
+  **这是本 issue 预算绑定语义的有意后果，必须有腿钉住**（E14）。注意这些消费点吃的是
+  identity-filtered `decision_state` 而非 raw state——floors 的 identity 收窄（D1.6）是
+  该面正确性的前提。
+- **`:1917` manual-retry mint 分两支（round-2 R2-D 修订）**：`:1917` 是
+  `_state_retry_attempt(state, stage=_failed_stage(state))`。**stage 可命名支**（候选权威的
+  failed/cancelled 行在窗内——"failed 行在窗内"不等于"最大 attempt 行在窗内"，两者可分离）：
+  最大 attempt 行在窗外时 mint 由窗口局部值（如 `_retry_3`）变为真值 `_retry_{N+1}`——
+  持久化身份变化，本 change 的有意行为，必须有腿钉住（E15）。geometry B 支（三键全空 +
+  行在窗外）：`_failed_stage` 恒 None → stage-less flat-first 读 0 → mint `_retry_1` 撞键
+  静默 no-op——**维持现状，不在本 change 修**（E11-v2 硬断言 + E12-v2 现状钉，#1577 路由：
+  manual mint 需要 stage 解析不依赖行可见性）。
 - `manual_retry:982`（family floors）：`_fallback_previous_attempt:978-983` 早退语义不变
   （选集不变）。
 - 无 stage 调用点走 flat-first，**floors 不得改变其行为**（E12''-v2 变异钉）。

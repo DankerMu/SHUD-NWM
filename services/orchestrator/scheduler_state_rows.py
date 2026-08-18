@@ -33,10 +33,53 @@ from services.orchestrator.scheduler_state_types import (
 )
 from workers.data_adapters.base import format_cycle_time
 
-# State key carrying the per-stage attempt maxima across the job-limit
-# truncation (#1179); always present on a projected candidate state, possibly
-# empty.  See ``stage_retry_attempt_floors``.
+# State keys carrying the per-stage attempt maxima across the job-limit
+# truncation (#1179), and the candidate-identity metadata of the rows those
+# maxima came from.  Both are present, possibly empty, on a state produced by
+# ``candidate_state_from_rows``; the journal's read-blocked stub
+# (``file_orchestration_journal._file_journal_blocked_candidate_state``) does
+# not go through that projection and carries neither.  Every reader goes
+# through ``.get``.  See ``stage_retry_attempt_floors``.
 STAGE_RETRY_ATTEMPT_FLOORS_KEY = "stage_retry_attempt_floors"
+STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY = "stage_retry_attempt_floor_sources"
+
+#: Fields copied out of a contributing row into its floor-source record.  The
+#: set is the union of what the identity/scope predicates that filter ROWS read
+#: (``_legacy_identity_values`` aliases, ``_state_row_references_job_ids`` job
+#: id keys, and the source-cycle download-blocker predicate's status/stage
+#: fields), so re-running any of them over the record answers as it does over
+#: the row it came from.
+STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS = (
+    "job_id",
+    "pipeline_job_id",
+    "pipeline_event_id",
+    "entity_id",
+    "previous_job_id",
+    "failed_job_id",
+    "run_id",
+    "model_id",
+    "basin_id",
+    "source",
+    "source_id",
+    "cycle_time",
+    "cycle_time_utc",
+    "cycle_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "canonical_product_id",
+    "forcing_version_id",
+    "hydro_run_id",
+    "published_manifest_id",
+    "stage",
+    "job_type",
+    "status",
+    "pipeline_status",
+    "job_status",
+    "error_code",
+    "retry_count",
+    "repair_status",
+    "active_blocker",
+)
 
 
 def _bounded_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -443,9 +486,14 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     (``..._convert_model_0_forecast_retry_1_retry_2``).
 
     A stage-scoped read also honours the projection's
-    ``stage_retry_attempt_floors`` (#1179), so the answer does not depend on
-    which rows survived the ``job_limit`` truncation: for every canonical stage
-    the value equals what the untruncated job list would have derived.
+    ``stage_retry_attempt_floors`` (#1179).  What that makes
+    truncation-invariant is the STAGE-MATCHING ROW SCAN component: for every
+    canonical stage it returns what the untruncated job list would have derived.
+    The candidate-level flat ``retry_count`` this maxes against is aggregated
+    AFTER truncation and stays window-sensitive exactly as it was before #1179 —
+    a cross-stage row's persisted count reaching this answer through the flat
+    channel is pre-existing behaviour, tracked in #1579, not something the floors
+    fix or promise.
 
     Without ``stage`` the flat-first order and the cross-job recorded-count max
     are preserved byte-for-byte for the evidence-owner / manual-retry consumers,
@@ -477,9 +525,11 @@ def _state_job_retry_attempt(state: Mapping[str, Any], canonical_stage: str | No
     The row scan alone is only as complete as the ``job_limit`` window: the row
     holding a stage's maximum attempt may have been truncated away.  For a
     stage-scoped read the projection's ``stage_retry_attempt_floors`` restores
-    that number (#1179) — the floors are built over the untruncated rows, so the
-    result is truncation-invariant.  A state that no projection produced carries
-    no floors key and reads exactly as before.
+    that number (#1179) — the floors are built over the untruncated rows, so THIS
+    component is truncation-invariant (the caller's flat aggregate is not; see
+    ``_state_retry_attempt``).  A state that no projection produced carries no
+    floors key and reads exactly as before, and a state whose identity filtering
+    dropped a stage's every contributing row carries no floor for it either.
     """
 
     jobs = _state_jobs(state)
@@ -514,8 +564,10 @@ def _job_stage_name(job: Mapping[str, Any]) -> str | None:
             return str(value)
     return None
 
-def stage_retry_attempt_floors(jobs: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """Per-canonical-stage maximum effective attempt over ``jobs`` (#1179).
+def stage_retry_attempt_floors(
+    jobs: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
+    """Per-canonical-stage maximum effective attempt over ``jobs``, and its sources (#1179).
 
     The candidate-state projection truncates ``pipeline_jobs`` to ``job_limit``
     by pure freshness, so in the reverse geometry — the ``*_forecast_retry_N``
@@ -534,18 +586,52 @@ def stage_retry_attempt_floors(jobs: Iterable[Mapping[str, Any]]) -> dict[str, i
     ``retry_count=N`` — just as durably as in a ``_retry_<n>`` suffix.  A stage
     whose maximum is 0 is omitted: every row of it derives 0 anyway, so a zero
     floor would say nothing.
+
+    The second return value records, per stage, the identity of EVERY row that
+    reached that stage's maximum.  ``pipeline_jobs`` is the unfiltered cycle-wide
+    list, so a floor may well come from a row that is not this candidate's; the
+    identity filter re-runs its own row predicates over these records to narrow
+    the floors with the row population (``scheduler_state_identity_filter``).
+    Recording all the tied rows rather than the first is what makes that
+    narrowing conservative: the floor survives while ANY contributor does.
     """
 
     floors: dict[str, int] = {}
+    sources: dict[str, list[dict[str, Any]]] = {}
     for job in jobs:
         stage = _canonical_downstream_stage(_job_stage_name(job))
         if stage is None:
             continue
         attempt = effective_retry_attempt(job.get("job_id"), job.get("retry_count"))
-        # ``> 0`` falls out of the comparison: an all-zero stage never enters.
-        if attempt > floors.get(stage, 0):
+        current = floors.get(stage, 0)
+        # An equal attempt is a TIE and joins the contributor list; a zero one
+        # never enters, so an all-zero stage stays out of the mapping.
+        if attempt < current or attempt <= 0:
+            continue
+        if attempt > current:
             floors[stage] = attempt
-    return floors
+            sources[stage] = []
+        sources[stage].append(_stage_retry_attempt_floor_source(job))
+    return floors, sources
+
+def _stage_retry_attempt_floor_source(job: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a contributing row onto the fields the row filters read.
+
+    A whitelist rather than the whole row: these records ride along in every
+    candidate state, and the cohort rows that most often carry a floor are the
+    same ones the journal already compacts for the evidence-size guard
+    (``file_orchestration_journal._compact_cycle_scope_job``).  The nested
+    ``identity`` payload is kept because ``_legacy_identity_values`` reads its
+    fields as aliases of the row-level ones.
+    """
+
+    record = {key: job[key] for key in STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS if key in job}
+    identity = job.get("identity")
+    if isinstance(identity, Mapping):
+        nested = {key: identity[key] for key in STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS if key in identity}
+        if nested:
+            record["identity"] = nested
+    return record
 
 def _state_retry_limit(state: Mapping[str, Any]) -> int | None:
     for key in ("retry_limit", "max_retries"):

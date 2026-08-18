@@ -36,8 +36,10 @@ auto-retry"钉成契约（真实 reserve→release 与 reserve→permit→reclai
 - 消费面核对（不改码，除非核对发现同构缺陷）：`scheduler_state_failure.py:188/:1444/:1900/:1917`、
   `scheduler_state_manual_retry.py:982`、`scheduler_candidates.py:2225`
 - 钉住测试：release 行 shape + `should_auto_retry` 判定（不改行为；不变量注释落
-  reservation 写点 `file_orchestration_journal.py:1778/:1903`——`error_code: None` 的真实
-  载体——与释放写点 `:2804/:2954` 共四处）
+  reservation/reclaim 写点 `file_orchestration_journal.py:1778/:1907`——`error_code: None`
+  的真实载体——加 `permit_pipeline_job_retry`（:2807，产出 `absence_retry_permitted` 的
+  reclaim door，注释为事实陈述非 isolation 契约主语）与 `release_identity_blocked_reservation`
+  （:2960）共四处）
 - 文档：`docs/runbooks/failed-basin-retry.md` 补一行（预算在逆序几何下现在真实绑定）
 
 Fixture level: expanded（强制触发词：`retry`、persisted/shared state transitions、`scheduler`）。
