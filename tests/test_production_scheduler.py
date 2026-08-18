@@ -42637,10 +42637,14 @@ def test_repeated_blocked_candidate_reason_opens_no_progress_circuit(
             "last_pass_id": results[2].evidence["pass_id"],
         }
     ]
+    # The durable artifact, not just the in-memory result, carries the block.
+    persisted = json.loads(Path(results[2].artifact_path or "").read_text(encoding="utf-8"))
+    assert persisted["no_progress_circuit"] == blocks[2]
     warnings = [
         record for record in caplog.records if "SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN" in record.getMessage()
     ]
     assert len(warnings) == 1
+    assert f"last={results[2].evidence['pass_id']}" in warnings[0].getMessage()
 
 
 def _reserved_unbound_wedge_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
@@ -43345,3 +43349,94 @@ def test_stale_tracker_tmp_sibling_does_not_block_the_overwrite(tmp_path: Path) 
     assert not stale_tmp.exists()
     tracker = evidence_dir / scheduler_no_progress_module.STATE_FILENAME
     assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["subject_id"] == "cand_a"
+
+
+@pytest.mark.parametrize("plant", ["dangling_symlink", "directory"])
+def test_tracker_write_failure_is_surfaced_and_self_heals(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    plant: str,
+) -> None:
+    """A tracker write that cannot land must never be silent (issue #1118 C1)."""
+
+    caplog.set_level(logging.WARNING)
+    first = _no_progress_blocked_pass(tmp_path)
+    tracker = _no_progress_tracker_path(tmp_path)
+    stale_tmp = tracker.with_name(scheduler_no_progress_module.STATE_TMP_FILENAME)
+    if plant == "dangling_symlink":
+        stale_tmp.symlink_to(tracker.with_name("no-such-target.json"))
+    else:
+        stale_tmp.mkdir()
+
+    blocked = _no_progress_blocked_pass(tmp_path)
+
+    assert first.evidence["no_progress_circuit"]["tracked"] == 1
+    assert blocked.evidence["no_progress_circuit"]["state_write_failed"] is True
+    write_failures = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_STATE_WRITE_FAILED_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(write_failures) == 1
+    # The count could not advance on disk, and the unusable temp path is gone.
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+    assert not stale_tmp.exists() and not stale_tmp.is_symlink()
+
+    recovered = _no_progress_blocked_pass(tmp_path)
+
+    # Counting resumes from the last durable value (1), not from the frozen pass.
+    assert "state_write_failed" not in recovered.evidence["no_progress_circuit"]
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 2
+
+
+def test_near_limit_pass_is_not_degraded_by_the_circuit_block(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The size gate itself must not see the marker's bytes (issue #1118 C3)."""
+
+    disabled = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    disabled_artifact = Path(disabled.artifact_path or "").read_bytes()
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", len(disabled_artifact) + 40)
+
+    enabled = _no_progress_blocked_pass(tmp_path)
+    enabled_artifact = json.loads(Path(enabled.artifact_path or "").read_text(encoding="utf-8"))
+
+    # Per-pass identity only: pass id, lease token, clocks, artifact path.
+    volatile = ("pass_id", "artifact_path", "timing", "started_at", "finished_at", "retention", "lock")
+    assert enabled.status == "planned"
+    assert "limit" not in enabled.evidence
+    assert "no_progress_circuit" not in enabled_artifact
+    assert {key: value for key, value in enabled_artifact.items() if key not in volatile} == {
+        key: value
+        for key, value in json.loads(disabled_artifact.decode("utf-8")).items()
+        if key not in volatile
+    }
+
+
+def test_unexpected_observation_error_fails_open_without_failing_the_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("adapter shape drifted")
+
+    monkeypatch.setattr(scheduler_no_progress_module, "observe_adapters", _boom)
+
+    result = _no_progress_blocked_pass(tmp_path)
+
+    assert result.status == "planned"
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_canonical_leads"
+    assert "no_progress_circuit" not in result.evidence
+    assert "no_progress_circuit" not in json.loads(
+        Path(result.artifact_path or "").read_text(encoding="utf-8")
+    )
+    failures = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_FAILED_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(failures) == 1

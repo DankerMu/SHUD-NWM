@@ -101,6 +101,21 @@ def _serialized_evidence_within_limit(
     if serialized is not None:
         return payload, serialized
 
+    # #1118: the size verdict itself must not be decided by the observe-only
+    # marker. A pass that fits without it fits, full stop — otherwise the
+    # marker alone would flip a healthy near-limit pass to
+    # ``resource_limit_blocked`` and summarize its candidate lists, i.e. an
+    # evidence-only feature would rewrite the pass's terminal status.
+    if "no_progress_circuit" in payload:
+        without_circuit = {key: value for key, value in payload.items() if key != "no_progress_circuit"}
+        serialized = _serialize_evidence_json_if_within_limit(
+            without_circuit,
+            max_evidence_bytes=context.max_evidence_bytes,
+        )
+        if serialized is not None:
+            return without_circuit, serialized
+        payload = without_circuit
+
     bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
     bounded_payload = _fit_bounded_evidence_payload(
         bounded_payload,

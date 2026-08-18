@@ -80,12 +80,25 @@ mismatch，`WARM_START_TIME_MISMATCH` 不在 `TRANSIENT_ERROR_CODES`
 - **压缩层**：`bounded_evidence_payload`（scheduler_evidence_payload.py:
   920-993）是字面量白名单重建——加 `no_progress_circuit` 键 + 照 :983-992
   模式的「源 payload 缺席即弹出」守卫（否则禁用态走压缩路径会凭空得到
-  `null` 键，违反禁用逐字等旧）。**字节压力下先舍本块**：首次 fit 失败后、
-  任何既有字段被摘要/丢弃之前整块弹出 `no_progress_circuit`——装得下照常
-  保留；装不下时后续各降级档看到的 payload 与本单存在之前逐字相同（否则新键
-  把既有 proof 块顶出 2400 字节级预算，既有保真测试真红）。超预算 pass 的
+  `null` 键，违反禁用逐字等旧）。**字节压力下先舍本块（两道门都要）**：
+  第一道 5MB 判定若带 block 超限，弹块后**重试一次**再定超限与否（round-1
+  C3：否则近限健康 pass 被 marker 单独顶过闸 → 全量降级
+  `resource_limit_blocked`，终态被 observe-only 功能改写且 readiness 面读作
+  blocked）；bounded 重建路径同样在任何既有字段被摘要/丢弃之前整块弹出
+  （否则新键把既有 proof 块顶出 2400 字节级预算，既有保真测试真红）。两道
+  之后：尺寸裁决、各压缩档与终态与本功能不存在时逐字相同。超预算 pass 的
   产物没有该块，但聚合 WARNING 与状态文件计数不受影响（D4：journalctl 才是
   真通道），runbook 写明「没这个块 ≠ 没开闸」。
+- **落盘失败必须可见**（round-1 C1）：`write_state` 返回 False → block 置
+  `state_write_failed: true` + 独立 WARNING token
+  `SCHEDULER_NO_PROGRESS_CIRCUIT_STATE_WRITE_FAILED`；`os.open` 失败路径同样
+  清理 `.tmp`（与其余三条失败路径对齐，unlink 失败再试 rmdir）：**可删**
+  残留（悬空 symlink/空目录）下一 pass 自愈；**不可删**残留（非空目录/异主
+  不可删文件）不自愈但每 pass 持续报警——计数绝不静默冻结（原缺陷突破
+  design D1「丢失最多推迟开闸 N pass」的代价上界）。
+- **WARNING 行携带 `last=<last_pass_id>`** + runbook 注明 adapter 级 gap
+  （源缺席期条目保留、last_pass_id 冻结即陈旧信号）——round-1 C2 的可辨识性
+  随行；preservation 语义本身是本 delta 明令，不改。
 - **观察路径整体 fail-open**：`observe_pass` 外层 catch-all → WARNING token
   `SCHEDULER_NO_PROGRESS_CIRCUIT_OBSERVE_FAILED` + 返回 None（observe-only
   不得拖垮生产 pass，同 reconcile recovery 惯例）；测试断言键存在，吞异常

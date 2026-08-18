@@ -45,6 +45,9 @@ EVIDENCE_KEY = "no_progress_circuit"
 #: actually consumes today).
 CIRCUIT_OPEN_LOG_TOKEN = "SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN"
 CIRCUIT_FAILED_LOG_TOKEN = "SCHEDULER_NO_PROGRESS_CIRCUIT_OBSERVE_FAILED"
+#: A tracker write that did not land freezes the counts, so it is surfaced in
+#: the block and on its own log line instead of passing for a healthy pass.
+CIRCUIT_STATE_WRITE_FAILED_LOG_TOKEN = "SCHEDULER_NO_PROGRESS_CIRCUIT_STATE_WRITE_FAILED"
 #: Deliberately NOT prefixed ``scheduler_``: the retention script only deletes
 #: ``scheduler_*.json`` pass artifacts and skips everything else as
 #: ``unrecognised`` (scripts/node22_scheduler_evidence_retention.py:212-215).
@@ -308,10 +311,13 @@ def circuit_block(
     opened: Sequence[TrackerEntry],
     truncated: int,
     state_reset: str | None,
+    state_write_failed: bool = False,
 ) -> dict[str, Any]:
     block: dict[str, Any] = {"threshold": threshold, "tracked": len(entries)}
     if state_reset is not None:
         block["state_reset"] = state_reset
+    if state_write_failed:
+        block["state_write_failed"] = True
     block["open"] = [entry.to_open_entry() for entry in opened]
     block["truncated"] = truncated
     return block
@@ -403,6 +409,11 @@ def write_state(dir_fd: int, entries: Sequence[TrackerEntry]) -> bool:
     try:
         fd = os.open(STATE_TMP_FILENAME, flags, 0o644, dir_fd=dir_fd)
     except OSError:
+        # A leftover that is not a plain file (symlink, directory) makes this
+        # open fail on every future pass too, which would freeze the counts for
+        # good. Clear it here — same cleanup the three failure paths below do —
+        # so the next pass writes normally.
+        _unlink_quietly(STATE_TMP_FILENAME, dir_fd)
         return False
     try:
         handle = os.fdopen(fd, "w", encoding="utf-8")
@@ -429,6 +440,15 @@ def write_state(dir_fd: int, entries: Sequence[TrackerEntry]) -> bool:
 def _unlink_quietly(name: str, dir_fd: int) -> None:
     try:
         os.unlink(name, dir_fd=dir_fd)
+        return
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+    # ``unlink`` refuses a directory; an empty one is still ours to clear. A
+    # non-empty directory stays, and every pass keeps reporting the failure.
+    try:
+        os.rmdir(name, dir_fd=dir_fd)
     except OSError:
         pass
 
@@ -441,9 +461,12 @@ def _open_state_directory(evidence_dir: Path, workspace_root: Path) -> int | Non
 
 
 def _log_circuit_open(block: Mapping[str, Any]) -> None:
+    # ``last`` is the pass that last OBSERVED the subject, which an adapter-absent
+    # stretch freezes while the entry is preserved; a value older than the pass
+    # writing this line is the staleness signal.
     subjects = "; ".join(
         f"{entry['subject_kind']}={entry['subject_id']} reason={entry['reason']} "
-        f"passes={entry['consecutive_passes']}"
+        f"passes={entry['consecutive_passes']} last={entry['last_pass_id']}"
         for entry in block["open"]
     )
     log.warning(
@@ -501,11 +524,12 @@ def _observe_pass(
         # fail too. Count from empty rather than fail the pass.
         entries, state_reset = (), "missing"
         merged = merge_entries(entries, adapters, pass_id=pass_id)
+        state_written = False
     else:
         try:
             entries, state_reset = load_state(dir_fd)
             merged = merge_entries(entries, adapters, pass_id=pass_id)
-            write_state(dir_fd, merged)
+            state_written = write_state(dir_fd, merged)
         finally:
             os.close(dir_fd)
     opened, truncated = open_entries(merged, threshold=threshold)
@@ -515,7 +539,18 @@ def _observe_pass(
         opened=opened,
         truncated=truncated,
         state_reset=state_reset,
+        state_write_failed=not state_written,
     )
+    if not state_written:
+        # This pass's counts died with the process: the next pass resumes from
+        # the last value that actually landed. Never silent — a frozen counter
+        # that still reads healthy is how a wedge stays invisible for days.
+        log.warning(
+            "%s pass_id=%s tracked=%s",
+            CIRCUIT_STATE_WRITE_FAILED_LOG_TOKEN,
+            pass_id,
+            len(merged),
+        )
     if opened:
         _log_circuit_open(block)
     return block
@@ -523,7 +558,9 @@ def _observe_pass(
 
 __all__ = [
     "CANDIDATE_ADAPTER",
+    "CIRCUIT_FAILED_LOG_TOKEN",
     "CIRCUIT_OPEN_LOG_TOKEN",
+    "CIRCUIT_STATE_WRITE_FAILED_LOG_TOKEN",
     "EVIDENCE_KEY",
     "KNOWN_ADAPTERS",
     "MAX_OPEN_ENTRIES",

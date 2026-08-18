@@ -1396,9 +1396,16 @@ pass evidence 顶层 `no_progress_circuit` 块：
   （`"corrupt"`）时出现，两者都只是从零重算，**不会让 pass 失败**。健康期
   每个完整 pass 都会重写状态文件，所以稳态下这个键不该再出现。
 - `operator_action_required` 只在该候选行自己带 #1152 三态判据时随行出现。
-- **超出 evidence 字节预算的 pass 上该块会被整块丢弃**（它是压缩期第一个被舍的
-  项，以保证既有键的裁剪口径逐字不变）。此时 journalctl 的聚合 WARNING 与状态
-  文件里的计数都不受影响——按下面的 grep 走，别以为"没这个块=没开闸"。
+- `state_write_failed: true` = **本 pass 的计数没落盘**（tracker 写盘失败），
+  下一 pass 会从最后一次成功落盘的值接着数，本 pass 白数一轮。出现即查
+  evidence_root 权限/挂载，以及是否有残留的 `no-progress-tracker.json.tmp`
+  （非常规残留——符号链接、空目录——会被下一 pass 自动清掉；非空目录或异主
+  文件要人工清）。同时会有一条
+  `SCHEDULER_NO_PROGRESS_CIRCUIT_STATE_WRITE_FAILED` 日志。
+- **超出 evidence 字节预算的 pass 上该块会被整块丢弃**（它是两道字节门里第一个
+  被舍的项，以保证尺寸裁决、既有键裁剪与 pass 终态都与本功能不存在时逐字相同）。
+  此时 journalctl 的聚合 WARNING 与状态文件里的计数都不受影响——按下面的 grep
+  走，别以为"没这个块=没开闸"。
 
 告警（journalctl 是当前唯一被实际消费的通道，每个开闸的完整 pass 一条聚合行）：
 
@@ -1412,6 +1419,13 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
 阻塞、lock 争用、资源中止的 pass 既不计数也不清零（它们的候选列表本就是空的，
 在那里观察等于把计数误清零）。所以墙钟跨度可能明显大于同数 tick——不要拿
 `first_pass_id`/`last_pass_id` 的时间差除以 tick 间隔来反推。
+
+同样的 gap 还有 **adapter 级**的一层：某个 pass 里适配器的源整个缺席（reconcile
+段报错只写 `reserved_unbound_error`、dry-run），该适配器名下的条目**原样保留**
+（不计数也不清除），`last_pass_id` 就此冻结。所以读条目时对一下产物自己的
+`pass_id`：**`open` 条目的 `last_pass_id` 落后于本 pass 的 `pass_id`，说明这条
+是陈旧观测**（当前 pass 根本没看到该主体，只是没被清除），别当成"这一轮又卡了
+一次"。WARNING 行里的 `last=` 字段就是给这个对账用的。
 
 `reason` 的三类来源与下游处置：
 

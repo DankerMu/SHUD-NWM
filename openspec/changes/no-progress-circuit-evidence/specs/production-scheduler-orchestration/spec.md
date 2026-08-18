@@ -38,15 +38,24 @@ is present is cleared. A pair reaching N appears in the pass evidence
 under a top-level `no_progress_circuit` block (open entries capped at 50
 with a truncation count) and in one aggregated
 `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN` warning per fully-observed pass.
-Under evidence byte pressure the block is the first thing shed: when the
-bounded payload does not fit, the whole `no_progress_circuit` block is
-dropped before any pre-existing field is summarized or dropped, so every
-existing compaction stage sees a payload byte-for-byte identical to one
-from before this feature existed — the warning and the persisted counts
-are unaffected, and the absence of the block in an over-budget pass does
-not mean no circuit is open. The observation path as a whole fails open:
-an unexpected observation error logs its own warning and skips the block
-for that pass instead of failing the pass. The circuit is evidence only:
+Under evidence byte pressure the block is the first thing shed, at every
+layer: an initial serialization that exceeds the byte budget only because
+of the block is retried once with the block dropped before the size
+verdict stands, and the bounded-compaction rebuild likewise drops the
+block before any pre-existing field is summarized or dropped — so the
+size gate, every compaction stage, and the pass's terminal status are
+byte-for-byte what they would be had this feature never existed; the
+warning and the persisted counts are unaffected, and the absence of the
+block in an over-budget pass does not mean no circuit is open. A tracker
+state-file write that fails to land is surfaced, never silent: the pass's
+block carries `state_write_failed: true`, a distinct
+`SCHEDULER_NO_PROGRESS_CIRCUIT_STATE_WRITE_FAILED` warning is logged, and
+a removable non-regular leftover temp file (a dangling symlink, an empty
+directory) is deleted so the next pass self-heals; an unremovable
+leftover cannot self-heal but keeps the failure surfaced on every pass —
+counting is never frozen silently. The observation path as a whole
+fails open: an unexpected observation error logs its own warning and
+skips the block for that pass instead of failing the pass. The circuit is evidence only:
 it never alters scheduling decisions, retries, terminal statuses, or the
 closed reconciliation vocabularies.
 
