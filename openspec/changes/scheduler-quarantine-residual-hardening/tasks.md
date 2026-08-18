@@ -69,6 +69,8 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 - [x] 8.2 doc-drift 全面扫除（invariant-closure 式，不只修点名行）：`scheduler_discovery.py:579-581` 注释、runbook :376-379 判别句（删句——threshold=1 下 unavailable ≡ 0，区分 vacuous）；全库 grep 旧 "N=2 / 两条 master / two submissions" 口径残留一并对齐（fixture 文本由 orchestrator 已修）
 - [x] 8.3 （可选加固，R2 test-evidence Note 2）写→读往返腿里补一条 `_master_row_records_init_state_id` model 匹配断言（戳含 model 但 identity map 用另一 model 的 token → 计 0）
 
+R3 措辞钉：E8 的 master-kind 门今日不判别（reconcile 复制行本就无戳、被 provenance 门先挡）——它是对"未来 reconcile 开始复制该字段"的 defense-in-depth；E8 的判别来源是 provenance 门（R3 两位 reviewer 独立实证）。
+
 ## Required evidence（每行 = 测试或命令；输入 → 期望）
 
 - [x] E1 `0,6,12` cadence + wrong-suffix 首轮 fixture（**wrong-lineage entry 的 state_id 按字符串序严格排在 expected-lineage entry 之前**，堵"未实现也因 `min(state_id)` 碰巧选对"的假绿）→ 首轮 quarantine 产出 `retry_journal_predecessor_identity_mismatch`；重跑（basin 带 quarantine evidence）选中 expected-lineage entry → 记录 expected token → 下轮无 quarantine。
@@ -85,6 +87,7 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
   `test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined` 的 docstring
   说明 breaker 未触发的前提（断言不变）。
 - [x] E10 `uv run ruff check .` clean；`openspec validate scheduler-quarantine-residual-hardening --strict --no-interactive` valid；若任务 3.6 触发 runbook 增补，增补行须过 markdownlint 并保持该 runbook 既有分诊表结构（此为 3.6 的 evidence 归属）。
+- [x] E11（R2 写侧往返腿，task 8.1 交付）`test_cohort_reservation_stamps_quarantine_rerun_provenance`：quarantine-decision basin 过真实 `orchestrate_cycle` → master 行戳 == [该 model] 且他 model 不入列；分歧 re-upsert → `file_journal_evidence_invariant_invalid` 且 field 即该字段；同一 journal 喂 occurrences 完成 write→read 往返（戳中 1 / 未戳 0 / model-token 错配 0）。R2/R3 变异证：M1/M2 及 4 个加压变异均被此腿唯一击杀。
 
 ## Evidence Floor（对应 issue 验收标准）
 
