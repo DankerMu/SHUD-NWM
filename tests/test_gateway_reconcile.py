@@ -1216,6 +1216,67 @@ def test_file_cohort_boot_fail_task_projects_failed_with_node_failure(tmp_path: 
     assert failed["error_code"] == "NODE_FAILURE"
 
 
+@pytest.mark.parametrize("raw_state", ["REVOKED", "SPECIAL_EXIT"])
+def test_file_cohort_unmapped_terminal_task_projects_failed(tmp_path: Any, raw_state: str) -> None:
+    # Same shape as the BOOT_FAIL case above: both states are enumerated by
+    # slurm_validation TERMINAL_SLURM_STATES, so a cohort carrying one of them must
+    # project a terminal task rather than stalling the whole cohort on
+    # task_accounting_incomplete.  The error code stays the generic unknown one --
+    # SLURM_STATE_MAP registration is orthogonal to map_slurm_error_code.
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    for index in range(2):
+        repository.append_historical_hydro_run(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "run_type": "forecast",
+                "scenario_id": "operational",
+                "model_id": f"model_{index}",
+                "basin_version_id": f"basin_v{index}",
+                "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "init_state_id": f"state_{index}",
+                "source_id": "gfs",
+                "cycle_time": "2026-07-12T00:00:00Z",
+                "start_time": "2026-07-12T00:00:00Z",
+                "end_time": "2026-07-12T18:00:00Z",
+                "status": "failed",
+                "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
+                "output_uri": f"s3://nhms/runs/model_{index}/output",
+                "log_uri": f"s3://nhms/runs/model_{index}/logs",
+                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+                "error_message": "transport timeout",
+                "created_at": "2026-07-12T00:00:00Z",
+                "updated_at": "2026-07-12T00:01:00Z",
+            }
+        )
+    task_records = (
+        SacctRecord("17667_0", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=0),
+        SacctRecord("17667_1", raw_state, "nhms_forecast", exit_code="1:0", array_task_id=1),
+    )
+    master = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="COMPLETED",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=("17667_0", "17667_1"),
+        array_task_records=task_records,
+    )
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
+
+    assert outcomes[0].action == "terminal"
+    assert outcomes[0].status == "partially_failed"
+    assert outcomes[0].status != RECONCILE_UNVERIFIED_STATUS
+    cohort = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    projections = cohort["candidate_projections"]
+    assert projections[0]["array_task_outcome"] == "succeeded"
+    assert projections[1]["array_task_outcome"] == "failed"
+    failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "SLURM_JOB_FAILED"
+
+
 @pytest.mark.parametrize(
     ("task_outcomes", "raw_master_status", "expected_status"),
     [

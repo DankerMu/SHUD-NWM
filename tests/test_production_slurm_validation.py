@@ -1974,6 +1974,20 @@ def test_sacct_evidence_parser_records_stable_fields_and_error_codes() -> None:
     assert records[3]["error_code"] == "OUT_OF_MEMORY"
 
 
+@pytest.mark.parametrize("state", ["", "   "])
+def test_normalize_slurm_state_treats_empty_state_as_unknown(state: str) -> None:
+    assert slurm_validation._normalize_slurm_state(state) == "UNKNOWN"
+
+
+def test_sacct_evidence_parser_converges_empty_state_to_unknown() -> None:
+    # sacct row passes the six-field count check but carries no State: it must fall
+    # to the UNKNOWN vocabulary rather than raising IndexError out of the parser.
+    records = slurm_validation.parse_sacct_evidence("123_0||1:0|00:01:00|cn04|CPU\n")
+
+    assert records[0]["state"] == "UNKNOWN"
+    assert records[0]["error_code"] == "SLURM_JOB_FAILED"
+
+
 def shutil_proxy():
     return slurm_validation.shutil
 
