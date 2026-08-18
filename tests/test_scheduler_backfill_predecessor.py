@@ -742,3 +742,215 @@ def test_emit_predecessor_skips_when_present_in_existing_blocked_keys(
     assert "predecessor_already_present" in reasons
     statuses = [record.get("status") for record in evidence]
     assert statuses == ["skipped"]
+
+
+# ---------------------------------------------------------------------------
+# #1152 task 2.1: env-wired REAL §8 gate integration.
+#
+# Every other test in this module stubs ``strict_warm_start_for_candidate``.
+# This one drives the real gate through ``ProductionScheduler._build_candidates``
+# so the no-earlier-history geometry is pinned end-to-end: the emitted
+# predecessor is itself blocked with the same typed reason and carries the
+# #1152 operator signal, proving the §8.6 gap cannot self-heal.
+# ---------------------------------------------------------------------------
+
+
+def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    """#1152: real §8 gate + ``NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true``.
+
+    Fixture base = ``tests/test_scheduler_generation.py::
+    test_env_override_blocks_predecessor_pending_without_earlier_history``
+    (one current-generation state entry strictly LATER than the candidate
+    cycle → generation-scoped signal sees history, the gate's strictly-earlier
+    probe does not).  The successor at 12Z blocks with
+    ``block_predecessor_pending``; §8.6 emits the 00Z predecessor, whose OWN
+    §8 gate reproduces the identical geometry — so the emitted predecessor is
+    blocked, not admitted, and the gap does not close without an operator
+    backfilling the missing state.
+
+    Silent-skip traps this test must avoid (tasks.md 2.1): the predecessor
+    cycle is deliberately NOT injected into ``cycles`` (that would make the
+    main loop block it first and the emitter dedup via
+    ``predecessor_already_present``), and its raw manifest IS staged under
+    the wired ``NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`` (otherwise
+    ``_predecessor_raw_manifest_ready`` returns
+    ``predecessor_raw_manifest_not_ready`` and the §8 gate never runs).  The
+    ``status == "blocked"`` pin on the emission-evidence record is what
+    forecloses every silent-skip variant.
+    """
+    import json
+    from pathlib import Path
+
+    from services.orchestrator import scheduler_generation as generation
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+        _write_missing_forcing_repair_raw_manifest,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, Path(tmp_path) / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    predecessor_cycle_time = _pdt("2026-05-21T00:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = fixture["package_checksum"]
+    if len(candidate_checksum) != 64 or any(
+        ch not in "0123456789abcdef" for ch in candidate_checksum
+    ):
+        candidate_checksum = "b" * 64
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_later_history",
+                valid_time="2026-05-22T00:00:00Z",
+                cycle_id="gfs_2026052112",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = Path(tmp_path) / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(generation.CUTOVER_DECLARATION_ENV, str(declaration_path))
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    # #1152 task 2.1 precondition: wire the raw-manifest gate ON and stage the
+    # predecessor's manifest under the object-store root the readiness probe
+    # reads (``NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`` == object_store_root).
+    # The successor's manifest is staged too so env=true cannot flip the
+    # successor off the ``block_predecessor_pending`` path under test.
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=predecessor_cycle_time
+    )
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=cycle_time
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    # Nothing is admitted: neither the successor nor the emitted predecessor.
+    assert candidates == []
+    # The successor's blocked entry carries the §8.6 emission summary.
+    successor_blocked = [
+        entry for entry in blocked if entry.cycle_time_utc == cycle_time
+    ]
+    assert len(successor_blocked) == 1
+    summary = (
+        successor_blocked[0]
+        .state_evidence.get("predecessor_backfill", {})
+        .get("summary", {})
+    )
+    records = summary.get("records") or []
+    # The emission-evidence pin (tasks.md 2.1): the predecessor record MUST be
+    # ``blocked`` — every silent-skip variant would report ``skipped`` here.
+    predecessor_records = [
+        record
+        for record in records
+        if record.get("predecessor_cycle_time")
+        == predecessor_cycle_time.isoformat()
+    ]
+    assert len(predecessor_records) == 1, records
+    assert predecessor_records[0]["status"] == "blocked", records
+    assert (
+        predecessor_records[0]["reason"]
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+
+    # The emitted predecessor itself landed on ``blocked`` with the identical
+    # typed reason — the gap does not self-heal.
+    predecessor_blocked = [
+        entry for entry in blocked if entry.cycle_time_utc == predecessor_cycle_time
+    ]
+    assert len(predecessor_blocked) == 1
+    predecessor_evidence = predecessor_blocked[0].state_evidence
+    assert (
+        predecessor_blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert predecessor_evidence["state_history"]["history_exists"] is False
+    # #1152: the operator signal fires — this population cannot self-heal.
+    assert predecessor_evidence["operator_action_required"] is True
+    assert predecessor_evidence["self_heal_expected"] is False
+    assert predecessor_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        predecessor_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    # Non-goal guard: the gate decision / failure block are unchanged.
+    assert predecessor_evidence["failure"]["retryable"] is True
+    assert predecessor_evidence["failure"]["permanent"] is False

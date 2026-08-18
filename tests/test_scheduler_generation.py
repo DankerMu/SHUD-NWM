@@ -1373,15 +1373,25 @@ def test_env_override_does_not_admit_missing_predecessor(
         blocked[0].reason
         == "state_snapshot_index_prior_checkpoint_missing_after_history"
     )
+    state_evidence = blocked[0].state_evidence
     transition_decision = (
-        blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
-            "decision"
-        )
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
     )
     assert (
         transition_decision
         == generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING
     )
+    # #1152: this is the self-healing population — strictly-earlier usable
+    # history exists, so the gap closes on its own once the predecessor cycle
+    # lands.  No operator action is named and no runbook pointer is attached.
+    assert state_evidence["state_history"]["history_exists"] is True
+    assert state_evidence["self_heal_expected"] is True
+    assert state_evidence["operator_action_required"] is False
+    assert "operator_action" not in state_evidence
+    assert "runbook" not in state_evidence
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
 
 
 def test_env_override_blocks_predecessor_pending_without_earlier_history(
@@ -1541,6 +1551,19 @@ def test_env_override_blocks_predecessor_pending_without_earlier_history(
     # Pin the split predicate itself: the block fires even though the gate's
     # strictly-earlier history probe found nothing.
     assert state_evidence.get("state_history", {}).get("history_exists") is False
+    # #1152: this is the NON-self-healing population — with no strictly-earlier
+    # usable history the emitted predecessor reproduces the same block forever,
+    # so the evidence names the operator action and the runbook literal.
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
 
 
 def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_history(

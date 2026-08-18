@@ -716,6 +716,21 @@ def strict_warm_start_evidence(
     producer_cycle_time = _scheduler._ensure_utc(candidate.cycle_time_utc) - _scheduler.timedelta(
         hours=required_lead_hours
     )
+    # Issue #1152: split the two operator populations that reach this single
+    # typed reason.  With strictly-earlier usable history the gap self-heals
+    # once the predecessor cycle lands; without it, the §8.6 predecessor
+    # emission re-evaluates to this very shape every pass and the successor
+    # defers forever — only an operator publishing the missing predecessor
+    # state can close it.  Additive fields only: the gate decision and the
+    # ``failure`` block below are unchanged.
+    history_exists = bool(history.get("history_exists"))
+    operator_signal: dict[str, Any] = {
+        "self_heal_expected": history_exists,
+        "operator_action_required": not history_exists,
+    }
+    if not history_exists:
+        operator_signal["operator_action"] = "backfill_predecessor_state"
+        operator_signal["runbook"] = "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     return _scheduler._evidence_safe(
         {
             **dict(evidence),
@@ -734,6 +749,7 @@ def strict_warm_start_evidence(
                 "history_required_exact_successor": True,
             },
             "state_history": history,
+            **operator_signal,
             "failure": {
                 "classifier": "file_state_snapshot_index_unavailable",
                 "reason_code": "STATE_SNAPSHOT_INDEX_PRIOR_CHECKPOINT_MISSING_AFTER_HISTORY",
