@@ -66,7 +66,9 @@
 - [x] 3.2 uv run pytest -q tests/test_production_scheduler.py（全量）
 - [x] 3.3 uv run ruff check services tests scripts
 - [x] 3.4 openspec validate no-progress-circuit-evidence --strict --no-interactive
-- [ ] 3.5 merge 后：node-27 oracle receipt（3.2 套件 + 定向选择器）记入
-      #1118；node-22 实机观察一个真实完整 pass 的 evidence block 形状
-      （enabled 默认下 open 空或如实反映当前 wedge——#1116 的 reserved 行若
-      仍在扣即为首个真实开闸样本）一并记入
+- [x] 3.5 merge 后：node-27 oracle receipt 已记入 #1118（定向 circuit 28
+      passed；全量 72 红全量分类为 #1513 umask 环境类
+      `provider_lock_parent_unsafe`，与本 diff 无关，已追评 #1513 扩影响面）；
+      node-22 实机 pass 观察**如实递延**——调度器当前未运营（无 timer/容器/
+      cron，evidence root 空），义务转记 #1118 receipt 评论（下次运营首个完整
+      pass 采 block 形状 + 产物字节数）
