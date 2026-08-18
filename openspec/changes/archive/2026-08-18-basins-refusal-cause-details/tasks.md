@@ -36,4 +36,4 @@
       tests/test_basins_registry_import.py tests/test_basins_reingest.py
 - [x] 3.3 uv run ruff check .（issue AC 原形；本地已知 untracked 投影 E501 例外按会话惯例记录）
 - [x] 3.4 openspec validate basins-refusal-cause-details --strict --no-interactive
-- [ ] 3.5 merge 后 node-27 oracle receipt：3.2 套件，记入 #1432
+- [x] 3.5 merge 后 node-27 oracle receipt：3.2 套件，记入 #1432
