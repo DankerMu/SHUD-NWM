@@ -118,6 +118,8 @@ __all__ = (
     "evaluate_transition_decision",
     "expected_journal_init_state_tokens",
     "generation_evidence",
+    "journal_identity_quarantine_breaker_engaged",
+    "journal_identity_quarantine_occurrence_count",
     "journal_init_state_lineage_matches_expected",
     "load_cutover_declaration",
     "match_declaration_entry",
@@ -1460,3 +1462,62 @@ def journal_init_state_lineage_matches_expected(
     if recorded.startswith(f"{expected_base}_"):
         return False
     return None
+
+
+#: How many DISTINCT completed forecast submissions must have recorded the SAME
+#: stale token before the §8.7 quarantine stops retrying it (#1157).  Two is the
+#: smallest count that proves the rerun re-selected the same wrong lineage: the
+#: first recording is the original defect, the second is the failed convergence.
+#: Deliberately a constant, not a configuration knob (YAGNI).
+_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 2
+
+
+def journal_identity_quarantine_occurrence_count(
+    repository: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    recorded_init_state_id: str,
+) -> int:
+    """Read how many completed submissions already recorded this stale token.
+
+    Accessor injection follows the repository ``getattr`` convention (cf.
+    ``scheduler_discovery._journal_predecessor_identity_is_stale``), so a
+    repository without ``completed_pipeline_init_state_id_occurrences`` — a DB
+    repository, or any test double — simply yields ``0``.
+
+    TOTAL: every unavailable shape (no repository, no accessor, an accessor
+    that raises, a non-integer answer) returns ``0``, which leaves the breaker
+    disengaged and the quarantine retry in force.  That direction is the safe
+    one: an undercount costs one more rerun, an overcount would fail-stop a
+    cycle that was still converging.
+    """
+    accessor = (
+        getattr(repository, "completed_pipeline_init_state_id_occurrences", None)
+        if repository is not None
+        else None
+    )
+    if not callable(accessor):
+        return 0
+    try:
+        count = int(
+            accessor(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                init_state_id=recorded_init_state_id,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a foreign accessor must not break the pass
+        return 0
+    return count if count > 0 else 0
+
+
+def journal_identity_quarantine_breaker_engaged(occurrences: Any) -> bool:
+    """Whether ``occurrences`` reaches the §8.7 quarantine breaker threshold."""
+
+    try:
+        return int(occurrences) >= _JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
+    except (TypeError, ValueError):
+        return False

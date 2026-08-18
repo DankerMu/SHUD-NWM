@@ -6998,6 +6998,227 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
     )
 
 
+# ---------------------------------------------------------------------------
+# §8.7 breaker (#1157): how many DISTINCT completed submissions recorded one
+# token.  The distinctness key is the forecast cohort MASTER row — reconcile
+# COPIES the identity onto each per-model terminal row under a different
+# ``job_id``, so counting rows instead of masters would double every
+# submission.
+# ---------------------------------------------------------------------------
+
+_BREAKER_TOKEN = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+_BREAKER_OTHER_TOKEN = "state_gfs_model_a_2026062800_gfs_2026062800_f000"
+
+
+def _breaker_identity_entry(
+    *, model_id: str = "model_a", init_state_id: str = _BREAKER_TOKEN, array_task_id: int = 0
+) -> dict[str, Any]:
+    return {
+        "array_task_id": array_task_id,
+        "model_id": model_id,
+        "init_state_id": init_state_id,
+    }
+
+
+def _cohort_master_job(
+    cycle_time: datetime,
+    *,
+    job_suffix: str = "",
+    status: str = "succeeded",
+    identities: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """One forecast cohort MASTER row: model-less, cycle-scoped, identity-bearing."""
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    return {
+        "job_id": f"job_{run_id}_forecast{job_suffix}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": run_id,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": status,
+        "model_id": None,
+        "init_state_identities": identities
+        if identities is not None
+        else [_breaker_identity_entry()],
+    }
+
+
+def _reconciled_terminal_job(
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+    array_task_id: int = 0,
+    identities: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The per-model terminal row reconcile copies the master's entry onto."""
+    run_id = f"fcst_gfs_{format_cycle_time(cycle_time)}_{model_id}"
+    return {
+        "job_id": f"job_{run_id}_forecast_reconciled_17667_{array_task_id}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": (
+            f"gfs:{cycle_time.isoformat()}:{model_id}:forecast_gfs_deterministic"
+        ),
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "succeeded",
+        "model_id": model_id,
+        "array_task_id": array_task_id,
+        "slurm_job_id": f"17667_{array_task_id}",
+        "init_state_identities": identities
+        if identities is not None
+        else [_breaker_identity_entry(array_task_id=array_task_id)],
+    }
+
+
+def _breaker_journal(
+    tmp_path: Path,
+    cycle_time: datetime,
+    jobs: list[dict[str, Any]],
+    *,
+    hydro_status: str | None = "complete",
+) -> FileOrchestrationJournalRepository:
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status=hydro_status, jobs=jobs)
+    if hydro_status is not None:
+        latest["hydro_run"]["init_state_id"] = _BREAKER_TOKEN
+    _write_json(
+        journal_root / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json",
+        latest,
+    )
+    return FileOrchestrationJournalRepository(journal_root)
+
+
+def _breaker_occurrences(
+    repository: FileOrchestrationJournalRepository,
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+    init_state_id: str = _BREAKER_TOKEN,
+) -> int:
+    return repository.completed_pipeline_init_state_id_occurrences(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=model_id,
+        init_state_id=init_state_id,
+    )
+
+
+def test_init_state_occurrences_counts_distinct_masters_per_token(tmp_path: Path) -> None:
+    """Two submissions of the same cycle+model that recorded the SAME token = 2.
+
+    The second master is the quarantine rerun that re-selected the same wrong
+    lineage — exactly the non-convergent shape the breaker exists to stop.
+    A master carrying a DIFFERENT token contributes to that token's count only.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_2",
+                identities=[_breaker_identity_entry(init_state_id=_BREAKER_OTHER_TOKEN)],
+            ),
+        ],
+    )
+
+    assert _breaker_occurrences(repository, cycle_time) == 2
+    assert _breaker_occurrences(repository, cycle_time, init_state_id=_BREAKER_OTHER_TOKEN) == 1
+    # Another model's entry on the same masters is not this candidate's lineage.
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
+def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> None:
+    """The distinctness pin: master + its reconcile-copied terminal row = 1.
+
+    ``tests/test_file_orchestration_journal.py`` already pins that reconcile
+    copies each task's entry onto a per-model terminal row with its own
+    ``job_id``; counting rows would read one submission as two and fail-stop a
+    cycle on its FIRST recording.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [_cohort_master_job(cycle_time), _reconciled_terminal_job(cycle_time)],
+    )
+
+    assert _breaker_occurrences(repository, cycle_time) == 1
+
+
+@pytest.mark.parametrize(
+    "leg",
+    ["no_journal", "blank_token", "terminal_row_only", "unsucceeded_master", "unreadable_identities"],
+)
+def test_init_state_occurrences_returns_zero_for_uncountable_shapes(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """Never raises; every uncountable shape is 0 (breaker stays disengaged)."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    jobs: list[dict[str, Any]] = []
+    if leg == "terminal_row_only":
+        # A reconcile copy with no surviving master: not a submission record.
+        jobs = [_reconciled_terminal_job(cycle_time)]
+    elif leg == "unsucceeded_master":
+        jobs = [_cohort_master_job(cycle_time, status="running")]
+    elif leg == "unreadable_identities":
+        # Corrupt map shapes: a scalar instead of a list, and a non-mapping entry.
+        jobs = [
+            _cohort_master_job(cycle_time, identities=[]),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1", identities=[]),
+        ]
+        jobs[0]["init_state_identities"] = _BREAKER_TOKEN
+        jobs[1]["init_state_identities"] = ["not-a-mapping"]
+
+    repository = (
+        FileOrchestrationJournalRepository(tmp_path / "journal")
+        if leg == "no_journal"
+        else _breaker_journal(tmp_path, cycle_time, jobs)
+    )
+
+    token = "" if leg == "blank_token" else _BREAKER_TOKEN
+    assert _breaker_occurrences(repository, cycle_time, init_state_id=token) == 0
+
+
+def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
+    tmp_path: Path,
+) -> None:
+    """Truncation pin (#1157 D3): the count reads the journal, not the payload.
+
+    ``candidate_state`` bounds its job list, so counting from that payload
+    would silently undercount a busy cycle and never engage the breaker.  Here
+    the bounded payload is provably truncated while the accessor still sees
+    both masters.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    filler = [
+        _reconciled_terminal_job(cycle_time, array_task_id=index, identities=[])
+        for index in range(1, 8)
+    ]
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+            *filler,
+        ],
+    )
+
+    bounded = _candidate_state(repository, cycle_time=cycle_time, job_limit=2, event_limit=2)
+    assert bounded is not None
+    assert bounded["state_truncated"] is True
+    assert len(bounded["pipeline_jobs"]) == 2
+
+    assert _breaker_occurrences(repository, cycle_time) == 2
+
+
 def test_next_current_master_retry_identity_is_stable_after_helper_consolidation() -> None:
     from services.orchestrator.file_orchestration_journal import _next_current_master_retry_identity
 

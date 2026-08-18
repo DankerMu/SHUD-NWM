@@ -628,6 +628,80 @@ class FileOrchestrationJournalRepository:
             return None
         return str(recorded).strip() or None
 
+    def completed_pipeline_init_state_id_occurrences(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        init_state_id: str,
+    ) -> int:
+        """Count completed forecast submissions that recorded ``init_state_id``.
+
+        The §8.7 quarantine breaker (#1157) asks "how many DISTINCT completed
+        submissions of this cycle+model have already recorded this exact
+        token?".  One submission writes exactly ONE forecast cohort MASTER row,
+        whose ``init_state_identities`` map is captured at reservation time and
+        never rewritten afterwards (#1183), so the master row IS the
+        distinctness key:
+
+        - only terminal-success MASTER rows are counted
+          (``accepted_submit_row_kind`` == ``"master"``); the per-model
+          terminal rows that reconcile COPIES the identity onto carry distinct
+          ``job_id`` values and would double-count one submission, so they are
+          excluded — a submission's master row plus its per-model terminal row
+          count as 1,
+        - the token must appear on that master's map under an entry naming
+          THIS ``model_id``; a cohort master carries one entry per member and
+          another model's entry is not this candidate's lineage.
+
+        Read from the memoized ``_cycle_rows`` view (``pipeline_jobs`` is keyed
+        by ``job_id`` and collapse-free), never from the bounded
+        ``candidate_state`` payload, so ``candidate_state_job_limit``
+        truncation cannot undercount.
+
+        Returns ``0`` — never raises — when the count cannot be read (no
+        journal rows, unreadable rows, empty/blank token), the same fail shape
+        as :meth:`completed_pipeline_init_state_id`.  Callers treat ``0`` as
+        "breaker disengaged" (fail toward liveness: one more rerun beats a
+        wrong fail-stop).
+
+        No journal mutation and no run-manifest reads: this reports what the
+        JOURNAL recorded.  Scheduler wiring consumes it via
+        ``getattr(repo, ..., None)`` (repo convention, cf.
+        ``scheduler_backfill_predecessor.py:226``), so it is intentionally
+        absent from the ``ActiveCandidateRepository`` Protocol.
+        """
+        token = str(init_state_id or "").strip()
+        if not token:
+            return 0
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+        except FileOrchestrationJournalError:
+            return 0
+        occurrences = 0
+        for job in _current_terminal_jobs(rows.pipeline_jobs.values()):
+            try:
+                if not _job_is_terminal_success(job):
+                    continue
+                if not _job_matches_candidate(
+                    job,
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                ):
+                    continue
+                if accepted_submit_row_kind(job) != "master":
+                    continue
+                if _master_row_records_init_state_id(job, model_id=model_id, init_state_id=token):
+                    occurrences += 1
+            except (AttributeError, TypeError, ValueError):
+                # One unreadable row must not blank the whole count; skipping it
+                # can only undercount, which leaves the breaker disengaged.
+                continue
+        return occurrences
+
     def active_slurm_jobs(
         self,
         *,
@@ -8751,6 +8825,24 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+def _master_row_records_init_state_id(
+    job: Mapping[str, Any], *, model_id: str, init_state_id: str
+) -> bool:
+    """Whether a cohort master's identity map names this model with this token."""
+
+    identities = job.get(INIT_STATE_IDENTITY_FIELD)
+    if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
+        return False
+    for entry in identities:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("model_id") or "") != model_id:
+            continue
+        if str(entry.get("init_state_id") or "").strip() == init_state_id:
+            return True
+    return False
 
 
 def _job_is_current_terminal_completion(job: Mapping[str, Any]) -> bool:

@@ -2963,6 +2963,11 @@ def _terminal_state_save_qc_job(cycle_time: datetime) -> dict[str, Any]:
     }
 
 
+#: ``_run_wiring_a_build_candidates`` default: the run manifest mirrors whatever
+#: the journal recorded.  Pass an explicit value to drive them apart (E6).
+_MANIFEST_MIRRORS_JOURNAL = object()
+
+
 def _run_wiring_a_build_candidates(
     monkeypatch: Any,
     tmp_path: Path,
@@ -2970,6 +2975,9 @@ def _run_wiring_a_build_candidates(
     recorded_init_state_id: str | None,
     hydro_status: str | None = "complete",
     jobs: Sequence[Mapping[str, Any]] | None = None,
+    journal_identity_field: str = "init_state_id",
+    manifest_init_state_id: Any = _MANIFEST_MIRRORS_JOURNAL,
+    repository_factory: Any | None = None,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive ``_build_candidates`` over one journal-recognised completed cycle T.
 
@@ -3054,14 +3062,19 @@ def _run_wiring_a_build_candidates(
         jobs=[dict(job) for job in (jobs or [])],
     )
     if hydro_status is not None and recorded_init_state_id is not None:
-        latest["hydro_run"]["init_state_id"] = recorded_init_state_id
+        latest["hydro_run"][journal_identity_field] = recorded_init_state_id
     _write_json(journal_root / "latest" / "gfs" / cycle_segment / "model_a.json", latest)
     # The run manifest keeps the pre-existing ``terminal_run_manifest_missing``
     # leg from firing first, so the else-leg under test is reached.
+    manifest_state_id = (
+        recorded_init_state_id
+        if manifest_init_state_id is _MANIFEST_MIRRORS_JOURNAL
+        else manifest_init_state_id
+    )
     run_manifest = Path(roots["object_store_root"]) / "runs" / run_id / "input" / "manifest.json"
     run_manifest.parent.mkdir(parents=True, exist_ok=True)
     run_manifest.write_text(
-        json.dumps({"initial_state": {"quality": "fresh", "state_id": recorded_init_state_id}}),
+        json.dumps({"initial_state": {"quality": "fresh", "state_id": manifest_state_id}}),
         encoding="utf-8",
     )
 
@@ -3069,7 +3082,11 @@ def _run_wiring_a_build_candidates(
         ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
         registry=FakeRegistry([model]),
         adapters={},
-        active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
+        active_repository=(
+            repository_factory(journal_root)
+            if repository_factory is not None
+            else scheduler_module.FileOrchestrationJournalRepository(journal_root)
+        ),
         orchestrator_factory=lambda _source_id: pytest.fail(
             "this seam must not build an orchestrator"
         ),
@@ -3209,6 +3226,322 @@ def test_build_candidates_declines_judgement_on_superseded_hydro_placeholder(
     assert blocked == []
     assert len(skipped) == 1
     assert skipped[0]["reason"] == "terminal_pipeline_success"
+
+
+def _wiring_a_journal_identity(cycle_time: datetime, *, model_id: str = "model_a") -> str | None:
+    """Wiring B's verdict on the journal ``_run_wiring_a_build_candidates`` just wrote."""
+    import os
+
+    from services.orchestrator import scheduler as scheduler_module
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        Path(os.environ["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    )
+    return repository.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id=model_id
+    )
+
+
+def test_build_candidates_declines_judgement_on_run_manifest_backfilled_identity(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E6 (#1157 D1): journal has no id, the run manifest has a stale one.
+
+    ``chain_repository_state`` backfills the manifest's ``state_id`` onto the
+    candidate-state ``hydro_run`` row, so reading that row made Wiring A judge
+    an identity the JOURNAL never recorded — while the discovery-side accessor
+    declined.  Both wirings must now agree on no judgement.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=None,
+        manifest_init_state_id=_wrong_suffix_init_state_id(),
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "terminal_hydro_success"
+    # Wiring B agrees: the journal recorded nothing to judge.
+    assert _wiring_a_journal_identity(_pdt("2026-05-21T12:00:00Z")) is None
+
+
+def test_build_candidates_declines_judgement_on_bare_state_id_alias(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E6 (#1157 D1): a wrong-suffix id recorded ONLY under the bare ``state_id``.
+
+    The shared alias table ``_INIT_STATE_FIELD_ALIASES`` still resolves that
+    key for strict warm-start comparison (unchanged by this issue), but the
+    journal accessor's alias set is ``init_state_id``/``initial_state_id``
+    only — so switching Wiring A onto the accessor makes both wirings decline.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=_wrong_suffix_init_state_id(),
+        journal_identity_field="state_id",
+        manifest_init_state_id=None,
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "terminal_hydro_success"
+    assert _wiring_a_journal_identity(_pdt("2026-05-21T12:00:00Z")) is None
+
+
+def test_shared_init_state_alias_table_is_unchanged() -> None:
+    """"Must preserve": alias convergence came from swapping the ACCESSOR.
+
+    Narrowing the shared table instead would silently change strict warm-start
+    matching for legacy bare-``state_id`` rows, which is out of scope here.
+    """
+    from services.orchestrator.scheduler_init_state_match import _INIT_STATE_FIELD_ALIASES
+
+    assert _INIT_STATE_FIELD_ALIASES["state_id"] == (
+        "init_state_id",
+        "initial_state_id",
+        "state_id",
+    )
+
+
+# ---------------------------------------------------------------------------
+# §8.7 breaker (#1157): the candidate-side demotion from retry to blocked.
+# ---------------------------------------------------------------------------
+
+
+def _cohort_master_recording(
+    cycle_time: datetime,
+    init_state_id: str,
+    *,
+    job_suffix: str = "",
+) -> dict[str, Any]:
+    """A terminal-success forecast cohort master that recorded ``init_state_id``."""
+    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    return {
+        "job_id": f"job_{run_id}_forecast{job_suffix}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": run_id,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "succeeded",
+        "model_id": None,
+        "init_state_identities": [
+            {"array_task_id": 0, "model_id": "model_a", "init_state_id": init_state_id}
+        ],
+    }
+
+
+@pytest.mark.parametrize("master_count", [1, 2])
+def test_build_candidates_breaker_demotes_quarantine_at_two_recordings(
+    monkeypatch: Any,
+    tmp_path: Path,
+    master_count: int,
+) -> None:
+    """E3 N-boundary: one recording still retries, two fail-stop.
+
+    The demoted decision must land the candidate in ``blocked`` — not in the
+    submission set — carrying both tokens, the occurrence count and a
+    manual-retry-required policy, so an operator can see why the loop stopped.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+    masters = [
+        _cohort_master_recording(
+            cycle_time,
+            recorded_init_state_id,
+            job_suffix="" if index == 0 else f"_retry_{index}",
+        )
+        for index in range(master_count)
+    ]
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=masters,
+    )
+
+    assert skipped == []
+    if master_count == 1:
+        assert blocked == []
+        assert len(candidates) == 1
+        assert candidates[0].state_evidence["decision"] == (
+            "retry_journal_predecessor_identity_mismatch"
+        )
+        return
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert blocked[0].reason == "journal_predecessor_identity_quarantine_breaker_engaged"
+    evidence = blocked[0].state_evidence
+    assert evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert evidence["reason"] == "journal_predecessor_identity_quarantine_breaker_engaged"
+    identity = evidence["journal_predecessor_identity"]
+    assert identity["recorded_init_state_id"] == recorded_init_state_id
+    assert identity["expected_init_state_id"] == _expected_init_state_id()
+    assert identity["required_lead_hours"] == 6
+    assert identity["quarantined_skip_reason"] == "terminal_hydro_success"
+    assert identity["occurrences"] == 2
+    assert evidence["retry_policy"] == {
+        "automatic_retry_allowed": False,
+        "manual_retry_required": True,
+        "occurrences": 2,
+        "occurrence_threshold": 2,
+    }
+
+
+def test_build_candidates_keeps_quarantine_retry_without_occurrence_accessor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E3 fail-toward-liveness: no occurrence accessor -> breaker disengaged.
+
+    A repository that cannot answer "how many times" must never be read as
+    "zero times is fine to fail-stop on".  One more rerun costs a cycle; a
+    wrong fail-stop costs operator time on a cycle that was still converging.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+
+    class NoOccurrenceAccessorRepository(scheduler_module.FileOrchestrationJournalRepository):
+        completed_pipeline_init_state_id_occurrences = None
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=[
+            _cohort_master_recording(cycle_time, recorded_init_state_id),
+            _cohort_master_recording(cycle_time, recorded_init_state_id, job_suffix="_retry_1"),
+        ],
+        repository_factory=NoOccurrenceAccessorRepository,
+    )
+
+    assert skipped == []
+    assert blocked == []
+    assert len(candidates) == 1
+    assert candidates[0].state_evidence["decision"] == (
+        "retry_journal_predecessor_identity_mismatch"
+    )
+
+
+def test_build_candidates_quarantines_terminal_completed_cycle_skip(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E7: the ``terminal_completed_cycle`` skip reason reaches the filter.
+
+    It is the only completed-type skip reachable under
+    ``NHMS_REQUIRE_FORECAST_WARM_START=true`` that never had an identity gate,
+    so its shape is exercised directly at the decision seam: same evidence
+    contract as the ``terminal_hydro_success`` shape, only the quarantined
+    reason differs.
+    """
+    from types import SimpleNamespace
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from services.orchestrator.scheduler_state import CandidateStateDecision
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+    candidate = SimpleNamespace(
+        source_id="gfs",
+        model_id="model_a",
+        cycle_time_utc=cycle_time,
+    )
+    repository = SimpleNamespace(
+        completed_pipeline_init_state_id=(
+            lambda *, source_id, cycle_time, model_id: recorded_init_state_id
+        ),
+        completed_pipeline_init_state_id_occurrences=(
+            lambda *, source_id, cycle_time, model_id, init_state_id: 1
+        ),
+    )
+    context = SimpleNamespace(
+        active_repository=repository,
+        required_lead_hours_for_candidate=lambda _candidate, _cycle: 6,
+    )
+
+    decision = scheduler_candidates_module._journal_predecessor_identity_quarantine(
+        context,
+        candidate,
+        SimpleNamespace(),
+        CandidateStateDecision(
+            "skip",
+            "terminal_completed_cycle",
+            {"decision": "skip_terminal", "terminal_source": "forecast_cycle"},
+        ),
+    )
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "journal_predecessor_identity_mismatch"
+    assert decision.evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    identity = decision.evidence["journal_predecessor_identity"]
+    assert identity["recorded_init_state_id"] == recorded_init_state_id
+    assert identity["expected_init_state_id"] == _expected_init_state_id()
+    assert identity["required_lead_hours"] == 6
+    assert identity["quarantined_skip_reason"] == "terminal_completed_cycle"
+
+
+def test_journal_identity_quarantine_breaker_helper_is_total() -> None:
+    """The injected-accessor breaker predicate never raises and never over-counts."""
+    from types import SimpleNamespace
+
+    from tests.test_production_scheduler import _dt as _pdt
+
+    count = generation.journal_identity_quarantine_occurrence_count
+    engaged = generation.journal_identity_quarantine_breaker_engaged
+    kwargs = {
+        "source_id": "gfs",
+        "cycle_time": _pdt("2026-05-21T12:00:00Z"),
+        "model_id": "model_a",
+        "recorded_init_state_id": _wrong_suffix_init_state_id(),
+    }
+
+    def repository_returning(value: Any) -> Any:
+        return SimpleNamespace(
+            completed_pipeline_init_state_id_occurrences=(
+                lambda *, source_id, cycle_time, model_id, init_state_id: value
+            )
+        )
+
+    def raising(*, source_id: str, cycle_time: Any, model_id: str, init_state_id: str) -> int:
+        raise RuntimeError("journal read exploded")
+
+    assert count(None, **kwargs) == 0
+    assert count(SimpleNamespace(), **kwargs) == 0
+    assert count(
+        SimpleNamespace(completed_pipeline_init_state_id_occurrences=raising), **kwargs
+    ) == 0
+    assert count(repository_returning("not-a-number"), **kwargs) == 0
+    assert count(repository_returning(-3), **kwargs) == 0
+    assert count(repository_returning(2), **kwargs) == 2
+
+    assert engaged(0) is False
+    assert engaged(1) is False
+    assert engaged(2) is True
+    assert engaged(7) is True
+    assert engaged(None) is False
+    assert engaged("two") is False
 
 
 # ---------------------------------------------------------------------------
