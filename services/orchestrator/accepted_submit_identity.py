@@ -44,6 +44,9 @@ ACCEPTED_RECONCILIATION_REASON_CLASSES = frozenset(
         "accounting_authority_unproven",
         "bounded_output_bytes_saturated",
         "bounded_output_rows_saturated",
+        # The cluster's accounting does not store the sbatch comment, so no comment
+        # query can ever prove absence (#1116).
+        "comment_accounting_unproven",
         "coverage_incomplete",
         "process_unavailable",
     }

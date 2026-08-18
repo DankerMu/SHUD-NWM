@@ -38,7 +38,11 @@ reconcile.py:214-234 + querier 内 :373-377 的 `accounting_authority_unproven` 
 - **决策层零改动**：`reconcile.py:1443-1476` 的 `except ReconcileQueryUnavailable`
   块已把该异常统一收成 transient-deny（`:1477-1501` 是 coverage_incomplete 分支）
   → 行保持 reserved、不判 `reservation_lost`、不产生 absence 结论；reason_class
-  沿既有管道进 pass evidence。
+  沿既有管道进 pass evidence。管道自带词汇校验：
+  `services/orchestrator/accepted_submit_identity.py:46-48` 的
+  `ACCEPTED_RECONCILIATION_REASON_CLASSES` frozenset 需加
+  `"comment_accounting_unproven"` token（纯放宽加项；缺它 accepted-submit 路径的
+  `_record_file_reconciliation` 抛 `ValueError`——由 2.3 e2e 转绿实测暴露）。
 - 既有 15 处实构 querier 的测试用例（tests/test_gateway_reconcile.py:4621,4648,
   4669,4898,5038,5084,9876,9894,10217,10280,10327,10396,10420,10462,10494）全部
   注入 `comment_storage_probe=lambda: True`（照抄 `global_visibility_probe` 注入

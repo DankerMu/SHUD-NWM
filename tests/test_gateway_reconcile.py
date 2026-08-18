@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import time
 from dataclasses import replace
@@ -4620,6 +4621,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         grace=timedelta(0),
@@ -4647,6 +4649,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         covered_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         grace=timedelta(0),
@@ -4668,6 +4671,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         matched_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         now=lambda: query_end,
@@ -4897,6 +4901,7 @@ def test_versioned_accounting_saturation_is_public_bounded_unavailable_evidence(
         repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         now=lambda: query_end,
@@ -5035,7 +5040,10 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
         )
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
+    )
     assert query("key-a")[0].slurm_job_id == "17667"
     assert query("key-b")[0].slurm_job_id == "17668"
     assert scans == (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
@@ -5081,7 +5089,10 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
     monkeypatch.setattr(reconcile_module.subprocess, "Popen", popen)
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128)
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("secret-key")
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        )("secret-key")
     assert len(processes) == 1
     assert processes[0].reaped is True
 
@@ -9873,7 +9884,10 @@ def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(
         "_bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=lambda: True,
+    )
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="visibility is unproven"):
         query("key", accepted_submit_contract_version="nhms.accepted_submit.v1")
@@ -9891,7 +9905,10 @@ def test_comment_sacct_legacy_global_query_does_not_require_visibility_probe(
         "_bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=lambda: True,
+    )
 
     assert tuple(query("legacy-key")) == ()
     assert calls
@@ -10085,6 +10102,284 @@ def test_global_accounting_visibility_probe_fails_closed_but_checks_both_when_on
     assert commands == [["scontrol", "show", "config"], ["sacctmgr", "show", "config"]]
 
 
+_RECONCILE_MODULE_LOGGER = "services.orchestrator.reconcile"
+
+
+def _reconcile_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _RECONCILE_MODULE_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flags_line", "expected"),
+    [
+        # node-22 renders the production value with padded spaces around "=".
+        ("AccountingStoreFlags    = (null)", False),
+        ("AccountingStoreFlags    = job_comment", True),
+        ("AccountingStoreFlags    = job_comment,job_extra", True),
+        ("AccountingStoreFlags    = job_extra", False),
+        ("AccountingStoreFlags    = ", False),
+        (None, False),
+    ],
+)
+def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    flags_line: str | None,
+    expected: bool,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any) -> str:
+        commands.append(list(command))
+        config = "PrivateData = none\nClusterName = qhh\n"
+        return config if flags_line is None else f"{config}{flags_line}\n"
+
+    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
+        assert reconcile_module.default_comment_storage_probe("/opt/slurm/bin")() is expected
+    assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
+    warnings = _reconcile_warnings(caplog)
+    if expected:
+        assert warnings == []
+    else:
+        assert any("accounting does not store job comments" in message for message in warnings)
+        assert not any("could not execute" in message for message in warnings)
+
+
+def test_comment_storage_probe_swallows_an_unrunnable_probe_with_a_distinct_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any) -> str:
+        commands.append(list(command))
+        raise reconcile_module.ReconcileQueryUnavailable("controller config unavailable")
+
+    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
+        assert reconcile_module.default_comment_storage_probe()() is False
+    assert commands == [["scontrol", "show", "config"]]
+    warnings = _reconcile_warnings(caplog)
+    assert any("comment storage probe could not execute" in message for message in warnings)
+    assert not any("accounting does not store job comments" in message for message in warnings)
+
+
+@pytest.mark.parametrize(
+    "query_kwargs",
+    [
+        {},
+        {"accepted_submit_contract_version": "nhms.accepted_submit.v1"},
+        {
+            "expected_user": "scheduler",
+            "expected_account": "account",
+            "accepted_submit_contract_version": "nhms.accepted_submit.v1",
+        },
+    ],
+    ids=["legacy", "global", "owner"],
+)
+def test_comment_sacct_refuses_every_scope_when_comment_storage_is_unproven(
+    monkeypatch: pytest.MonkeyPatch,
+    query_kwargs: dict[str, Any],
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: False,
+    )
+
+    with pytest.raises(
+        reconcile_module.ReconcileQueryUnavailable,
+        match="accounting does not store job comments",
+    ) as error:
+        query("key", **query_kwargs)
+    assert error.value.reason_class == "comment_accounting_unproven"
+    assert calls == []
+
+
+@pytest.mark.parametrize("proven", [True, False])
+def test_comment_storage_probe_runs_once_per_querier_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    proven: bool,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    probes = 0
+
+    def storage_probe() -> bool:
+        nonlocal probes
+        probes += 1
+        return proven
+
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=storage_probe,
+    )
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+
+    for key in ("key-a", "key-b"):
+        if proven:
+            assert tuple(query(key)) == ()
+        else:
+            with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
+                query(key)
+    assert probes == 1
+    assert len(calls) == (page_count if proven else 0)
+
+
+def test_comment_storage_gate_outranks_visibility_but_not_the_contract_version_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    probes = 0
+
+    def storage_probe() -> bool:
+        nonlocal probes
+        probes += 1
+        return False
+
+    both_unproven = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=storage_probe,
+    )
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable) as error:
+        both_unproven("key", accepted_submit_contract_version="nhms.accepted_submit.v1")
+    assert error.value.reason_class == "comment_accounting_unproven"
+
+    unsupported = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=storage_probe,
+    )
+    with pytest.raises(
+        reconcile_module.ReconcileQueryUnavailable,
+        match="contract version is unsupported",
+    ):
+        unsupported("key", accepted_submit_contract_version="nhms.accepted_submit.v0")
+    assert probes == 1
+
+
+def test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    query_end = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    # The genuinely in-flight cohort job, as a comment-less cluster reports it:
+    # accounting stores the row but drops the sbatch --comment, so the comment
+    # index can never see it.
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: "72001|nhms_forecast|RUNNING|0:0||scheduler|account\n",
+    )
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_visibility_stdout",
+        lambda _command: "PrivateData = none\nAccountingStoreFlags    = (null)\n",
+    )
+
+    outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    persisted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+    assert outcome.action == "query_unavailable"
+    assert outcome.status == "reserved"
+    assert outcome.reconciliation_decision == "accounting_unavailable"
+    assert outcome.reconciliation_reason_class == "comment_accounting_unproven"
+    assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+
+
+def test_comment_storing_cluster_still_binds_and_still_demotes_past_grace(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    query_end = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    matched_repository = _file_cohort_repository(
+        tmp_path / "matched",
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    comment = str(matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_comment"])
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: f"72001|nhms_forecast|RUNNING|0:0|{comment}|||\n",
+    )
+    bound = reconcile_module.reconcile_reserved_unbound_jobs(
+        matched_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        now=lambda: query_end,
+    )[0]
+    assert bound.action == "bound"
+    assert matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "72001"
+
+    absent_repository = _file_cohort_repository(
+        tmp_path / "absent",
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    absent = reconcile_module.reconcile_reserved_unbound_jobs(
+        absent_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+    assert absent.action == "absence_retry_permitted"
+    assert absent_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["status"] == "reservation_lost"
+
+
 @pytest.mark.parametrize("stream_fd", [1, 2])
 def test_global_accounting_visibility_process_bounds_stdout_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
@@ -10216,6 +10511,7 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     query = reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
         now=lambda: datetime(2026, 7, 22, 12, tzinfo=UTC),
     )
 
@@ -10279,6 +10575,7 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
     with _pinned_local_timezone("Asia/Shanghai"):
         query = reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=advancing_now,
         )
 
@@ -10326,6 +10623,7 @@ def _rendered_page_bounds(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], i
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
         now=lambda: _PINNED_COMMENT_SCAN_NOW,
     )("gfs:tz:forecast")
 
@@ -10393,7 +10691,10 @@ def test_comment_sacct_global_collision_is_detected_across_separate_pages(
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        ),
         target,
         expected_user="scheduler",
         expected_account="account",
@@ -10417,7 +10718,10 @@ def test_comment_sacct_rejects_any_single_page_over_its_bound(
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
 
     with pytest.raises(reconcile_module.ReconcileQuerySaturated, match="bounded output") as error:
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("key")
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        )("key")
     expected = "rows" if boundary == "row" else "bytes"
     assert error.value.boundary == expected
     assert error.value.reason_class == f"bounded_output_{expected}_saturated"
@@ -10459,7 +10763,10 @@ def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        ),
         "key",
         expected_user="scheduler",
         expected_account="account",
@@ -10491,7 +10798,10 @@ def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
         reconcile_module._query_comment_accounting_proof(
-            reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+            reconcile_module.default_comment_sacct_querier(
+                global_visibility_probe=lambda: True,
+                comment_storage_probe=lambda: True,
+            ),
             "key",
             expected_user="scheduler",
             expected_account="account",
