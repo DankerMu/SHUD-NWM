@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -4793,3 +4794,115 @@ def test_first_cycle_qualified_package_admits_candidate_carrying_the_ic_digest(
     assert evidence["ready"] is True
     assert evidence["packaged_ic_checksum"] == PACKAGE_IC_SHA256
     assert evidence["cold_start_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1196: the NHMS_REQUIRE_FORECAST_WARM_START compat toggle is three-valued.
+#
+# ``forecast_warm_start_env_enabled`` used to fold every
+# ``OrchestratorConfig.from_env()`` failure into ``False`` with zero logging,
+# which is the value that ENABLES the D8.9 terminal-skip shortcut at
+# ``scheduler_core._strict_warm_start_for_candidate``.  "The check could not
+# be completed" must stay distinguishable from "the check answered no".
+# ---------------------------------------------------------------------------
+
+#: Logger the gate warns on — asserted by name so a module move cannot leave
+#: the operator-facing warning silently unrouted.
+_GATE_LOGGER = "services.orchestrator.scheduler_generation_gate"
+
+#: Token the unreadable-env warning carries.
+_UNREADABLE_TOKEN = "SCHEDULER_WARM_START_ENV_UNREADABLE"
+
+
+def test_warm_start_env_toggle_is_three_valued(monkeypatch: Any) -> None:
+    """#1196 verdict 1: true -> True, false -> False, unset -> False,
+    unreadable -> None.  The unreadable state has its own value; it never
+    borrows the "explicitly disabled" one."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is True
+
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is False
+
+    # Unset parses to the ``_env_flag(..., default=False)`` documented default
+    # (chain_config.py:154 + :168-171).  ``delenv`` keeps an inherited process
+    # env out of the verdict.
+    monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is False
+
+    # An UNRELATED broken variable makes the whole orchestrator config
+    # unreadable (``int("abc")`` at chain_config.py:150).
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is None
+
+
+@pytest.mark.parametrize(
+    ("broken_env", "broken_value", "expected_cause_text"),
+    [
+        # Unrelated variable: ``int()`` names the offending VALUE.
+        (
+            "FORECAST_HORIZON_HOURS",
+            "abc",
+            "invalid literal for int() with base 10: 'abc'",
+        ),
+        # The toggle itself: ``_env_flag`` names the offending VARIABLE
+        # (chain_config.py:176).
+        (
+            "NHMS_REQUIRE_FORECAST_WARM_START",
+            "maybe",
+            "NHMS_REQUIRE_FORECAST_WARM_START must be a boolean value.",
+        ),
+    ],
+)
+def test_unreadable_warm_start_env_warns_once_per_scheduler_with_root_cause(
+    monkeypatch: Any,
+    caplog: Any,
+    broken_env: str,
+    broken_value: str,
+    expected_cause_text: str,
+) -> None:
+    """#1196 verdict 3: the unreadable verdict carries an attributable
+    WARNING — token + ``repr(exc)`` — and repeats at most once per scheduler
+    instance so a ``run_continuous`` pass cannot spam identical lines."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+    monkeypatch.setenv(broken_env, broken_value)
+    scheduler = SimpleNamespace()
+
+    with caplog.at_level(logging.WARNING, logger=_GATE_LOGGER):
+        assert gate.forecast_warm_start_env_enabled(scheduler) is None
+        assert gate.forecast_warm_start_env_enabled(scheduler) is None
+        # A DIFFERENT scheduler instance gets its own warning budget.
+        other = SimpleNamespace()
+        assert gate.forecast_warm_start_env_enabled(other) is None
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == _GATE_LOGGER and _UNREADABLE_TOKEN in record.getMessage()
+    ]
+    assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
+    for record in records:
+        # ``repr(exc)`` — the operator reads the root cause straight from the log.
+        assert expected_cause_text in record.getMessage()
+
+
+def test_readable_warm_start_env_logs_no_unreadable_warning(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """#1196 must-preserve: a readable env emits zero new logging."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    scheduler = SimpleNamespace()
+
+    with caplog.at_level(logging.WARNING, logger=_GATE_LOGGER):
+        for value, expected in (("true", True), ("false", False)):
+            monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", value)
+            assert gate.forecast_warm_start_env_enabled(scheduler) is expected
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _UNREADABLE_TOKEN in record.getMessage()
+    ] == []

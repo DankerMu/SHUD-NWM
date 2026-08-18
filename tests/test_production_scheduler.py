@@ -30,6 +30,7 @@ from services.orchestrator import cli
 from services.orchestrator import file_orchestration_journal as file_orchestration_journal_module
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_backfill_predecessor as scheduler_backfill_predecessor_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_config as scheduler_config_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
@@ -38,6 +39,7 @@ from services.orchestrator import scheduler_evidence_payload as scheduler_eviden
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_generation as scheduler_generation_module
+from services.orchestrator import scheduler_generation_gate as scheduler_generation_gate_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_no_progress as scheduler_no_progress_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
@@ -43440,3 +43442,383 @@ def test_unexpected_observation_error_fails_open_without_failing_the_pass(
         if scheduler_no_progress_module.CIRCUIT_FAILED_LOG_TOKEN in record.getMessage()
     ]
     assert len(failures) == 1
+
+
+# ---------------------------------------------------------------------------
+# #1196: an unreadable warm-start env toggle never enables the terminal-skip
+# shortcut.
+#
+# The seam is the real DB-free ``_strict_warm_start_for_candidate``: a non
+# db-free scheduler returns at scheduler_core.py:742 before the shortcut is
+# reached, so only the db-free shape exercises it.
+# ---------------------------------------------------------------------------
+
+#: Logger the gate warns on when the orchestrator env cannot be parsed.
+_WARM_START_GATE_LOGGER = "services.orchestrator.scheduler_generation_gate"
+_WARM_START_UNREADABLE_TOKEN = "SCHEDULER_WARM_START_ENV_UNREADABLE"
+#: Cadence of ``allowed_cycle_hours_utc=(0, 12)`` -> 12h lead for every cycle.
+_WARM_START_TOGGLE_LEAD_HOURS = 12
+_WARM_START_TOGGLE_CANDIDATE_CYCLE = "2026-05-21T12:00:00Z"
+_WARM_START_TOGGLE_PREDECESSOR_CYCLE = "2026-05-21T00:00:00Z"
+_WARM_START_TOGGLE_NOW = "2026-05-21T18:00:00Z"
+
+
+def _seed_completed_journal_cycle_latest_view(
+    journal_root: Path, *, cycle_time: datetime, model_id: str = "model_a"
+) -> Path:
+    """Write a completed latest-view row so ``has_completed_pipeline`` is True.
+
+    Reuses the journal test module's own latest-view composer so the fixture
+    stays pinned to the shape the reader validates.  Imported inside the
+    function because ``tests.test_file_orchestration_journal`` imports THIS
+    module at load time.
+    """
+    from tests.test_file_orchestration_journal import _latest_view, _write_json
+
+    latest = _latest_view(cycle_time=cycle_time, model_id=model_id, hydro_status="complete")
+    path = journal_root / "latest" / "gfs" / format_cycle_time(cycle_time) / f"{model_id}.json"
+    _write_json(path, latest)
+    return path
+
+
+def _warm_start_toggle_state_entries(roots: Mapping[str, Path], checksum: str) -> list[dict[str, Any]]:
+    """Three consecutive current-generation checkpoints, one per 12h cycle.
+
+    Each entry sits exactly at its own cycle's expected warm-start identity
+    (``valid_time`` = cycle, ``cycle_id`` = cycle - 12h, ``lead_hours`` = 12),
+    so both the 12Z candidate and its 00Z predecessor see current-generation
+    history and land on the §8 warm-continue tail — the branch that reads the
+    orchestrator env a second time (scheduler_generation_gate.py:679).
+    """
+    entries = []
+    for valid_time, producer_cycle_id in (
+        (_WARM_START_TOGGLE_CANDIDATE_CYCLE, "gfs_2026052100"),
+        (_WARM_START_TOGGLE_PREDECESSOR_CYCLE, "gfs_2026052012"),
+        ("2026-05-20T12:00:00Z", "gfs_2026052000"),
+    ):
+        entries.append(
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=checksum,
+                state_id=f"state_gfs_model_a_{format_cycle_time(_dt(valid_time))}_current_gen",
+                valid_time=valid_time,
+                cycle_id=producer_cycle_id,
+                lead_hours=_WARM_START_TOGGLE_LEAD_HOURS,
+            )
+        )
+    return entries
+
+
+@dataclass
+class _WarmStartToggleFixture:
+    scheduler: Any
+    model: dict[str, Any]
+    registered_model: Any
+    journal_root: Path
+
+    def cycle(self, cycle_time: str) -> Any:
+        parsed = _dt(cycle_time)
+        return scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id=cycle_id_for("gfs", parsed),
+                source_id="gfs",
+                cycle_time=parsed,
+                cycle_hour=parsed.hour,
+                available=True,
+                status="discovered",
+            ),
+            horizon={},
+        )
+
+    def candidate(self, cycle_time: str) -> scheduler_module.SchedulerCandidate:
+        cycle = self.cycle(cycle_time)
+        return scheduler_module._candidate_for(
+            discovery=cycle.discovery, model=self.registered_model, horizon={}
+        )
+
+
+def _warm_start_toggle_fixture(monkeypatch: Any, tmp_path: Path) -> _WarmStartToggleFixture:
+    """DB-free scheduler whose §8 gate reaches the env-rereading tail."""
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    candidate_cycle = _dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    generated_at = _dt(_WARM_START_TOGGLE_NOW)
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=candidate_cycle,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    package_checksum = str(fixture["package_checksum"])
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=candidate_cycle,
+        package_checksum=package_checksum,
+        generated_at=generated_at,
+        entries=_warm_start_toggle_state_entries(roots, package_checksum),
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": package_checksum,
+        },
+    }
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "the §8 gate probe must not build an orchestrator"
+        ),
+    )
+    return _WarmStartToggleFixture(
+        scheduler=scheduler,
+        model=model,
+        registered_model=scheduler_module._coerce_registered_model(model),
+        journal_root=journal_root,
+    )
+
+
+def _spy_on_strict_warm_start_evidence(
+    monkeypatch: Any, caplog: Any
+) -> list[dict[str, Any]]:
+    """Wrap the REAL ``strict_warm_start_evidence`` and record entry.
+
+    Records the log messages already emitted at entry so a test can prove the
+    unreadable-env warning landed BEFORE the strict path was taken.  Entry —
+    not a non-``None`` return — is the positive signal that the terminal-skip
+    shortcut was not taken: the strict path can legitimately return ``None``
+    itself (scheduler_generation_gate.py:447).
+    """
+    calls: list[dict[str, Any]] = []
+    real = scheduler_generation_gate_module.strict_warm_start_evidence
+
+    def _spy(scheduler: Any, candidate: Any, cycle: Any) -> Any:
+        calls.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "cycle_time_utc": candidate.cycle_time_utc,
+                "logs_at_entry": [record.getMessage() for record in caplog.records],
+            }
+        )
+        return real(scheduler, candidate, cycle)
+
+    monkeypatch.setattr(
+        scheduler_generation_gate_module, "strict_warm_start_evidence", _spy
+    )
+    return calls
+
+
+def test_unreadable_warm_start_env_takes_strict_path_and_fails_loudly(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 verdict 2: an unrelated env typo must not silently skip §8.
+
+    Before the fix the gate folded the parse failure into ``False``, the D8.9
+    terminal-skip fired on the journal-complete cycle and
+    ``_strict_warm_start_for_candidate`` returned ``None`` with no exception
+    and no log line.  Now: warning first, strict path entered, and the parse
+    failure re-raised from the warm-continue tail.
+    """
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    # Fixture guard: the D8.9 preflight really does see a completed pipeline,
+    # so the shortcut is genuinely reachable and this test cannot pass vacuously.
+    assert fixture.scheduler._candidate_pipeline_already_complete(candidate) is True
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        calls = _spy_on_strict_warm_start_evidence(monkeypatch, caplog)
+        with pytest.raises(ValueError) as raised:
+            fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle)
+
+    # (a) the strict path was entered — the shortcut did not fire.
+    assert [call["candidate_id"] for call in calls] == [candidate.candidate_id]
+    # (b) the terminal state is loud: the same parse failure re-raises from
+    # the env re-read on the warm-continue tail.
+    assert "invalid literal for int() with base 10: 'abc'" in str(raised.value)
+    # (c) the attributable warning had already landed when strict was entered.
+    assert any(
+        _WARM_START_UNREADABLE_TOKEN in message for message in calls[0]["logs_at_entry"]
+    )
+    assert [
+        record.name
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == [_WARM_START_GATE_LOGGER]
+
+
+def test_explicitly_disabled_warm_start_env_still_terminal_skips(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 must-preserve (D8.9): explicit false + journal-complete pipeline
+    keeps the pre-§8 terminal-skip, and unset behaves the same way."""
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        calls = _spy_on_strict_warm_start_evidence(monkeypatch, caplog)
+        monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+        assert fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+        monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+        assert fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+
+    assert calls == []
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == []
+
+
+def test_explicitly_enabled_warm_start_env_keeps_section8_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 must-preserve: explicit true still bypasses the compat shortcut
+    and emits §8 evidence for the journal-complete cycle, with no new logging."""
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        evidence = fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle)
+
+    assert evidence is not None
+    assert evidence["ready"] is True
+    assert (
+        evidence["registry_cutover_transition"]["decision"]
+        == scheduler_generation_module.TransitionDecision.WARM_CONTINUE
+    )
+    # The strict-required tail returns the raw index evidence before the
+    # compat ``mode`` relabelling — the byte shape env=true always had.
+    assert "mode" not in evidence
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == []
+
+
+def _predecessor_pending_successor(
+    fixture: _WarmStartToggleFixture,
+) -> scheduler_module.SchedulerCandidate:
+    """A blocked successor pointing §8.6 at the 00Z predecessor cycle."""
+    successor = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    predecessor_time = _dt(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+    return replace(
+        successor,
+        status="blocked",
+        reason="state_snapshot_index_prior_checkpoint_missing_after_history",
+        state_evidence={
+            "registry_cutover_transition": {
+                "decision": (
+                    scheduler_generation_module.TransitionDecision.BLOCK_PREDECESSOR_PENDING
+                ),
+                "generation": "gen-fixture",
+                "selected_predecessor": {
+                    "source_id": "gfs",
+                    "valid_time": _format_iso_z(predecessor_time),
+                    "lead_hours": _WARM_START_TOGGLE_LEAD_HOURS,
+                    "generation": "gen-fixture",
+                    "cycle_id": cycle_id_for("gfs", predecessor_time),
+                },
+            }
+        },
+    )
+
+
+def _emit_predecessor_backfill(
+    fixture: _WarmStartToggleFixture,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """Drive §8.6 predecessor emission through the REAL §8 gate."""
+
+    def _blocked_candidate_factory(
+        candidate: Any, reason: str, *, state_evidence: dict[str, Any] | None = None
+    ) -> Any:
+        return replace(
+            candidate, status="blocked", reason=reason, state_evidence=state_evidence or {}
+        )
+
+    candidates: list[Any] = []
+    blocked: list[Any] = [_predecessor_pending_successor(fixture)]
+    evidence = scheduler_backfill_predecessor_module.emit_predecessor_candidates(
+        models=[fixture.registered_model],
+        cycles=[fixture.cycle(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=scheduler_module._candidate_for,
+        strict_warm_start_for_candidate=fixture.scheduler._strict_warm_start_for_candidate,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        active_repository=fixture.scheduler.active_repository,
+    )
+    return candidates, blocked, evidence
+
+
+def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 verdict 4 (intended behavior change): on the §8.6 backfill path
+    an unreadable env stops ADMITTING the predecessor.
+
+    Before the fix the folded ``False`` plus the predecessor's own
+    journal-complete pipeline short-circuited the gate to ``None``, and
+    ``emit_predecessor_candidates`` admitted the predecessor with no error and
+    no log line.  Now the strict path raises, the emitter records
+    ``predecessor_gate_failed`` and the root cause is already in the log.
+    """
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    predecessor_time = _dt(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=predecessor_time
+    )
+    # Fixture guard: without a journal-complete PREDECESSOR the pre-fix gate
+    # would already fail closed and this lock would spin on nothing.
+    assert (
+        fixture.scheduler._candidate_pipeline_already_complete(
+            fixture.candidate(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+        )
+        is True
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        candidates, blocked, evidence = _emit_predecessor_backfill(fixture)
+
+    assert candidates == []
+    assert [record["reason"] for record in evidence] == ["predecessor_gate_failed"]
+    assert evidence[0]["error"] == "ValueError"
+    assert len(blocked) == 1
+    assert [
+        record.name
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == [_WARM_START_GATE_LOGGER]

@@ -728,7 +728,7 @@ class ProductionScheduler:
             package_checksum=package_checksum,
         )
 
-    def _forecast_warm_start_env_enabled(self) -> bool:
+    def _forecast_warm_start_env_enabled(self) -> bool | None:
         return _generation_gate.forecast_warm_start_env_enabled(self)
 
     def _candidate_pipeline_already_complete(
@@ -748,8 +748,11 @@ class ProductionScheduler:
         # gating still fires for admittable new work (env=true) and cannot
         # ADMIT a declaration-less cutover / missing predecessor /
         # wrong-generation checkpoint — see ``scheduler_generation_gate``.
+        # ``is False`` — not falsy: an UNREADABLE toggle (``None``) must take
+        # the strict path so the parse failure surfaces instead of skipping
+        # §8 on this cycle (#1196).
         if (
-            not _generation_gate.forecast_warm_start_env_enabled(self)
+            _generation_gate.forecast_warm_start_env_enabled(self) is False
             and _generation_gate.candidate_pipeline_already_complete(self, candidate)
         ):
             return None
