@@ -9,6 +9,7 @@ import pytest
 
 from packages.common import safe_fs
 from services.production_closure import slurm_validation
+from services.slurm_gateway.real_backend import SLURM_STATE_MAP
 from tests.slurm_template_helpers import _join_line_continuations
 
 
@@ -1972,6 +1973,14 @@ def test_sacct_evidence_parser_records_stable_fields_and_error_codes() -> None:
     assert records[2]["state"] == "CANCELLED"
     assert records[2]["error_code"] is None
     assert records[3]["error_code"] == "OUT_OF_MEMORY"
+
+
+def test_terminal_slurm_states_are_all_present_in_slurm_state_map() -> None:
+    # The file-cohort task projection reads SLURM_STATE_MAP without a default, so a
+    # terminal state this module knows about but the map does not strands the cohort
+    # on task_accounting_incomplete.  Pin the containment so the vocabularies cannot
+    # drift apart a third time (BOOT_FAIL, then REVOKED/SPECIAL_EXIT).
+    assert slurm_validation.TERMINAL_SLURM_STATES <= set(SLURM_STATE_MAP)
 
 
 @pytest.mark.parametrize("state", ["", "   "])

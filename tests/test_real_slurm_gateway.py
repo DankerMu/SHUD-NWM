@@ -16,7 +16,6 @@ from jinja2.exceptions import SecurityError
 
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
-from services.production_closure.slurm_validation import TERMINAL_SLURM_STATES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -34,7 +33,6 @@ from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import (
     LOG_TRUNCATION_MARKER,
-    SLURM_STATE_MAP,
     RealSlurmGateway,
     _normalize_slurm_state,
     map_slurm_error_code,
@@ -1080,15 +1078,6 @@ def test_map_slurm_error_code_maps_every_terminal_state(raw_state: str, expected
 @pytest.mark.parametrize("raw_state", ["", "   "])
 def test_normalize_slurm_state_treats_empty_state_as_unknown(raw_state: str) -> None:
     assert _normalize_slurm_state(raw_state) == "UNKNOWN"
-
-
-def test_terminal_slurm_states_are_all_present_in_slurm_state_map() -> None:
-    # The file-cohort task projection reads SLURM_STATE_MAP without a default, so a
-    # terminal state the validation module knows about but the map does not strands
-    # the cohort on task_accounting_incomplete.  Pin the containment so the
-    # vocabularies cannot drift apart a third time (BOOT_FAIL, then
-    # REVOKED/SPECIAL_EXIT).
-    assert TERMINAL_SLURM_STATES <= set(SLURM_STATE_MAP)
 
 
 def test_parse_sacct_status_empty_state_converges_to_unknown(tmp_path) -> None:
