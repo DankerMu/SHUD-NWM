@@ -78,7 +78,7 @@ Domain packs (NHMS profile): 全部 not selected — 无地理/时序/数值/Slu
 - [x] 1.2 `_journal_segment_exists` / `_sequence_regular_file_exists` / `_sequence_directory_exists`
       切换到共享探测（D2 kind 判定各自保持）
 - [x] 1.3 D6 三 choke frame 转换（目标统一 `FileOrchestrationJournalError(file_journal_unreadable)`；
-      只捕载体，不捕基类；frames 2/3 为防御纵深）
+      只捕载体，不捕基类；frame 3 为防御纵深——frames 1/2 为公共契约，round-1 B1 修正）
 - [x] 2.1 回归测试 E1-E7e（symlink 现场用 `tmp_path` 真实 symlink 构造，不 mock safe_fs）
 - [x] 3.1 E8 命令全绿；偏离/行为变化记录（D2 第三处纳入、D3 有意收敛、D6 choke 转换、
-      D7 四行为表、残余风险两条）写入 PR body
+      D7 六行为表、残余风险）写入 PR body

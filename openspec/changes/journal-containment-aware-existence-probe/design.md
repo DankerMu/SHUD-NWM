@@ -39,11 +39,13 @@ missing（末端或任一父组件）→ `FileNotFoundError`。共享 helper 的
 
 探测错误的载体是一个**不继承 `FileOrchestrationJournalError` 的内部异常**
 （`_JournalProbeContainmentError(Exception)`，携带 redacted 相对路径 + error_type）。
-不继承是 round-2 review P1-2 的裁决依据：本文件已有 31 处
-`except FileOrchestrationJournalError` broad handler，子类会被其中位于探测 lane 上的
-handler（:6615 / :6251 / :2762）**在转换前**吞掉，把 containment fault 变回静默空——
-恰是本 issue 要消灭的失效模式。载体在 D6 的三个 choke frame 被转换为公共类型；
-**载体绝不允许逃出任何公共方法**（D6 覆盖论证）。
+不继承是 round-2 fixture review P1-2 的裁决依据——当时测得的现场是 choke frame 尚未
+包住探测叶子的形状：探测在叶子直接抛公共子类，broad handler（:6615 / :6251 / :2762）
+在转换前吞掉它。**终版代码形状下该危害不再活跃**（PR round-2 实测：继承变异在 329 测试
+下零行为可观察差——每个探测消费点都直接被 choke frame 的 try 包住，最近的 broad handler
+在 frame 之外）；不继承保留为**前瞻性护栏**：一旦转换点外移、或将来有 broad handler 被
+引入探测与 frame 之间，子类就会被提前吞掉。载体在 D6 的三个 choke frame 被转换为公共
+类型；**载体绝不允许逃出任何公共方法**（D6 覆盖论证）。
 测试只钉 reason token 与公共异常类型，绝不钉 message 文本（跨平台分支差异，Note）。
 
 不改 safe_fs 公共 API（issue 边界）；helper 落 `file_orchestration_journal.py`。
@@ -94,8 +96,11 @@ handler（:6615 / :6251 / :2762）**在转换前**吞掉，把 containment fault
 `_cycle_segment_paths`(:6729)、`_next_sequence_unlocked` 内的直接 sequence 探测(:6319)、
 `_latest_replay_sequences_unlocked`(:6345, 目录探测)。而 `_cycle_segment_paths` 的全部
 调用方是 :6317/:6473/:6796，`_latest_replay_sequences_unlocked` 的**唯一**调用方是
-`_next_sequence_unlocked`(:6324)，公共 wrapper `_next_sequence`(:6304) 全仓（含 tests）
-**零调用方**。因此载体的转换点恰好是三个 frame，且完备：
+`_next_sequence_unlocked`(:6324)，公共 wrapper `_next_sequence`(:6304) **生产代码零调用方**
+（本 change 的测试新增 5 处直接调用作 floor 直钉——E3/E4/E5 腿；wrapper 只取锁后委托给
+frame 2，不构成第四个转换点）。因此载体的转换点恰好是三个 frame，且完备
+（本节行号为 base 922733db 口径；D6 第 2 条内 `insert_pipeline_event`(:3597) 与
+`_next_event_id_unlocked`(:6423) 为 head 口径，base 对应 :3572/:6389）：
 
 三个 frame 的转换目标**统一**为
 `FileOrchestrationJournalError("file_journal_unreadable", field=redacted 相对路径,
