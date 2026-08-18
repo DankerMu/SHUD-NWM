@@ -70,10 +70,10 @@ Domain packs (NHMS profile): Slurm production lifecycle **selected**（L2 预算
 
 ## Tasks
 
-- [ ] 1.1 `candidate_state_from_rows` 截断块 stage-aware 保留（D1 五条规则，过滤式 fill）
-- [ ] 2.1 回归测试 E1-E5、E10、E11（tests/test_production_scheduler.py；E11/E12 共享几何）
-- [ ] 2.2 E12 两腿 + E6 真实序列钉 + 四处不变量注释
-- [ ] 2.3 消费面核对 E7（PR body 落结论）
-- [ ] 2.4 runbook 一行（failed-basin-retry.md）
-- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt 引用写入 PR body；DB 缺口 issue：**#1572**（已路由，
+- [x] 1.1 `candidate_state_from_rows` 截断块 stage-aware 保留（D1 五条规则，过滤式 fill）
+- [x] 2.1 回归测试 E1-E5、E10、E11（tests/test_production_scheduler.py；E11/E12 共享几何）
+- [x] 2.2 E12 两腿 + E6 真实序列钉 + 四处不变量注释
+- [x] 2.3 消费面核对 E7（PR body 落结论）
+- [x] 2.4 runbook 一行（failed-basin-retry.md）
+- [x] 3.1 E8 全绿；偏离记录 + E9 receipt 引用写入 PR body；DB 缺口 issue：**#1572**（已路由，
       depends on 本 change 的不变量定稿）

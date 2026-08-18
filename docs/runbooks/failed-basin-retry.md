@@ -100,6 +100,11 @@ Manual re-entry, in order:
    rows whose authoritative `stage` matches contribute their `*_retry_<N>` suffix, so a
    `reserved` master with `retry_count=0` still reports the real attempt count as long as
    a `*_forecast_retry_<N>` row survives the candidate-state job-limit truncation.
+   Since #1179 the file-journal projection retains each canonical stage's maximum-attempt
+   row before truncating, so the budget also binds in the reverse geometry where that
+   `*_forecast_retry_<N>` row is OLDER than `job_limit` fresher rows of other stages
+   (it used to be dropped and the attempt silently read `0`); the DB-backed read path
+   truncates in SQL upstream of the projection and is not covered (#1572).
 2. Decide whether re-running is actually correct. If the init-state identity mismatch is a
    data defect, fix the data first — the budget is protecting you from re-submitting the
    same mismatch forever.
