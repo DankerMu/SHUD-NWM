@@ -1,53 +1,64 @@
 ## 1. Implementation
 
 - [ ] 1.1 新模块 `services/orchestrator/scheduler_no_progress.py`：纯函数核
-      （载入/校验状态、三适配器抽取观察、严格连续 merge（同对累加/换 reason
-      重置/缺席清除）、open 判定与 50 条截断、block 组装）+ 状态文件原子写
-      （tmp+rename）；文件缺失/损坏 → 空态 + block 标 `state_reset: true`，
-      **不抛**
+      （状态载入/校验、A1/A3 适配器抽取（含源在场判据与 subject 去重取首行）、
+      严格连续 merge（同对累加/换 reason 重置/源在场缺席清除/源不在场保留）、
+      open 判定与 50 条截断、block 组装（`state_reset` 三态：缺省/"missing"/
+      "corrupt"、open 条目带 operator_action_required 标注））+ 状态文件覆盖
+      写原语：目录 fd 相对建 `.tmp`（O_NOFOLLOW，0o644）→ 写 + fsync →
+      dir_fd 相对 `os.replace`；读侧 O_NOFOLLOW；缺失/损坏 → 空态 + 对应
+      `state_reset` 值，不抛；enabled 完整 pass **恒写**状态文件（零条目也写）
 - [ ] 1.2 `ProductionSchedulerConfig` 加 `no_progress_circuit_passes`（env
       `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`，默认 3，≤0 禁用，照
       scheduler_config.py:221 邻位 `_env_int` 惯例与范围校验入队）
-- [ ] 1.3 `run_once` 集成（scheduler_runtime.py，payload 组装后、
-      `write_evidence`（scheduler_evidence.py:367）前单点）：enabled 时
-      observe→注入顶层 `no_progress_circuit` block→存在 open 条目则记聚合
-      WARNING（token `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN`）；disabled 时零
-      接触（不读不写不注入不日志）
-- [ ] 1.4 bounded 压缩层（scheduler_evidence_payload.py）：顶层
-      `no_progress_circuit` block 在压缩 payload 中保留（block 自身有界，
-      无需内部裁剪；既有键行为逐字不变）
-- [ ] 1.5 `scripts/node22_scheduler_evidence_retention.py`：核查删除谓词对
-      `no-progress-tracker.json` 的命中情况；若命中则白名单豁免（tracker 非
-      evidence，不受 168h 裁剪）；不命中则以测试钉住现状
+- [ ] 1.3 集成：**仅** `scheduler_runtime.py:1417` 完整 pass 写盘点前
+      observe→注入顶层 `no_progress_circuit`→有 open 则聚合 WARNING（token
+      `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN`）。**不得**挂
+      `scheduler_core.py:914` 共享 `_write_evidence` 方法；早退（:711/:765/
+      :805/:839/:897/:985）、异常（:1430-1458）、prelock（:596/:641/:681）、
+      `lock_contended`（:711）一律不观察、不读写状态文件；disabled 零接触
+- [ ] 1.4 压缩层（scheduler_evidence_payload.py:920-993 字面量白名单重建）：
+      加 `no_progress_circuit` 键 + 照 :983-992 模式的「源 payload 缺席即
+      弹出」守卫；既有键行为逐字不变
+- [ ] 1.5 retention 兼容：以谓词层测试钉住 `no-progress-tracker.json` 归
+      `unrecognised` 跳过删除（scripts/node22_scheduler_evidence_retention.py
+      :212-215/:268-277 现状），脚本零改动
 - [ ] 1.6 `docs/runbooks/current-production-ops.md` 新小节：block 形状、
-      WARNING token grep 姿势、三适配器对应的下游 runbook 交叉指引
+      WARNING grep、`consecutive_passes`=完整观察 pass 数（墙钟可能大于同数
+      tick，早退/中止不计不清）、reason 三类对应下游 runbook 交叉指引
       （#1152 predecessor-pending / #1173 identity ladder / #1116
-      comment_accounting_unproven 处置小节）
+      comment_accounting_unproven）
 
-## 2. Tests（tests/test_production_scheduler.py 为主；纯函数层可同文件就近组织）
+## 2. Tests（tests/test_production_scheduler.py 为主）
 
-- [ ] 2.1 适配器契约：对**真实形状**的 payload 片段（candidate summary /
-      state evidence operator_action_required / reserved_unbound outcome）各
-      产生正确 (subject, reason) 观察；成功/推进候选（status 属推进类或
-      reason 空）零观察
+- [ ] 2.1 适配器契约（真实形状 payload 片段）：A1 blocked 行（含
+      `state_evidence.operator_action_required=true` 标注随行）产生正确观察；
+      `skipped_candidates`（status 仍 selected，如 terminal_hydro_success）
+      零观察；selected 正常行零观察；A3 outcome 行（含 reason_class None 档）
+      产生正确观察；同 subject 同 pass 多行取首行
 - [ ] 2.2 红证（A1 主线）：同 (candidate, reason) 连续 3 个独立 scheduler
-      实例逐 pass 驱动（共享 evidence_root，oneshot 忠实——不共享内存对象）：
-      第 3 pass 的 evidence 出现 `no_progress_circuit.open` 条目
-      （consecutive_passes=3、first/last pass id 正确）+ 聚合 WARNING；
+      实例逐 pass 驱动（共享 evidence_root tmp_path，oneshot 忠实，构造先例
+      tests/test_production_scheduler.py:31013-31024/:419-457）：第 3 pass
+      evidence 出现 `no_progress_circuit.open` 条目（consecutive_passes=3、
+      first/last_pass_id 与 `evidence["pass_id"]` 对账）+ 聚合 WARNING；
       **改动前该测试必须红**（payload 无此键）
-- [ ] 2.3 连续语义：第 2 pass 换 reason → 重置（第 4 pass 才开闸）；subject
-      缺席一 pass → 条目清除；健康 pass（全成功）→ block 注入但 open 空、
-      无 WARNING
-- [ ] 2.4 A2 / A3 各一条开闸场景（A3 用 comment_accounting_unproven 形状的
-      outcome——#1116 wedge 的直接可见性验收）
-- [ ] 2.5 disabled（0 与负值）：payload 无新键、evidence_root 无 tracker 文件、
-      无日志——与今日逐字相同；默认值=3 经 env 与直接构造两路生效
-- [ ] 2.6 持久化：损坏 JSON / 半写文件 → 空态 + `state_reset: true` 且 pass
-      不失败；原子写后文件可被下一实例读回（round-trip）
-- [ ] 2.7 有界性：51+ 个开闸主体 → open 列表截断至 50 + truncated 计数；
-      bounded 压缩路径保留 block 且既有键裁剪行为逐字不变
-- [ ] 2.8 retention：谓词层测试钉住 tracker 文件不被删除（依 1.5 的实际
-      结论写：白名单豁免生效 或 glob 天然不命中）
+- [ ] 2.3 连续/防误清语义：换 reason → 重置（第 4 pass 才开闸）；源在场且
+      subject 缺席 → 清除；健康 pass → block 注入 open 空、无 WARNING；
+      **A3 源不在场**（`reserved_unbound_error` 形状 / dry-run skipped）→
+      A3 条目原样保留、计数不断；**早退/中止 pass**（lock_contended 或
+      SchedulerResourceLimitError 分支）→ 不读写 tracker、其 evidence 形状
+      逐字如旧、既有计数不受影响
+- [ ] 2.4 A3 开闸场景：comment_accounting_unproven 形状 outcome 连续 3 完整
+      pass → open（#1116 wedge 可见性验收）
+- [ ] 2.5 disabled（0 与负值）：payload 无新键（**含超预算走压缩路径的
+      pass**）、evidence_root 无 tracker 文件、零日志——逐字等旧；默认值 3
+      经 env 与直接构造两路生效
+- [ ] 2.6 持久化：损坏 JSON/半写文件 → `state_reset:"corrupt"`；文件缺失 →
+      `"missing"`；两者 pass 不失败；原子写 round-trip（下一实例读回）；
+      enabled 健康 pass 后文件存在（恒写）→ 下一 pass 无 state_reset
+- [ ] 2.7 有界性：51+ 开闸主体 → open 截断 50 + truncated 计数；bounded
+      压缩保留 block、禁用态压缩不出 null 键、既有键裁剪逐字不变
+- [ ] 2.8 retention 谓词：tracker 文件名归 unrecognised 不删（现状钉住）
 
 ## 3. Verification
 
@@ -56,6 +67,6 @@
 - [ ] 3.3 uv run ruff check services tests scripts
 - [ ] 3.4 openspec validate no-progress-circuit-evidence --strict --no-interactive
 - [ ] 3.5 merge 后：node-27 oracle receipt（3.2 套件 + 定向选择器）记入
-      #1118；node-22 实机观察一个真实 pass 的 evidence block 形状（enabled
-      默认下 open 空或如实反映当前 wedge——#1116 的 reserved 行若仍在扣即为
-      首个真实开闸样本）一并记入
+      #1118；node-22 实机观察一个真实完整 pass 的 evidence block 形状
+      （enabled 默认下 open 空或如实反映当前 wedge——#1116 的 reserved 行若
+      仍在扣即为首个真实开闸样本）一并记入

@@ -7,57 +7,78 @@
 infra/compose.compute.yml:121-139 同形）。`run_continuous` 存在但非生产路径。
 因此跨 pass 计数**必须**落盘；仓内唯一跨 pass 计数先例 `identity_blocked_streak`
 走 journal 原子替换（file_orchestration_journal.py:2868/:5993）。本单不用
-journal（它是 per-job 行存储，而 circuit 主体含 candidate 级观察且属 evidence
-域而非账本域），改用 evidence_root 下独立 JSON 状态文件 + 原子写（tmp+rename，
-与 evidence 写盘同纪律）。代价：状态文件不进 journal 的事务边界——可接受，
-observe-only，丢失最多推迟开闸 N pass。
+journal（per-job 行存储，而 circuit 主体含 candidate 级观察且属 evidence 域），
+改用 evidence_root 下独立 JSON 状态文件。写原语**不可照搬**
+`write_new_regular_file`（O_EXCL 创建即独占，scheduler_evidence.py:888-919）——
+tracker 需覆盖写：目录 fd 相对创建 `.tmp`（O_NOFOLLOW，0o644）→ 写 + fsync →
+dir_fd 相对 `os.replace`；读取侧同样 O_NOFOLLOW。`.tmp` 兄弟文件对 retention
+无害（`_has_inflight_sibling` 谓词，脚本 :205-209）。代价：状态文件不进
+journal 事务边界——可接受，observe-only，丢失最多推迟开闸 N pass。
 
 ## D2 观察源与「不发明判据」
 
-#1152/#1173 明文把「跨 pass 聚合」划给 #1118 并要求消费其事实字段。三个适配器
-全部读**已组装的 evidence payload**（bounded 幸存键），不读内部对象：
+两个适配器读**完整 pass 的未压缩 payload**（不读内部对象、不读 bounded 键表
+——scheduler_evidence_payload.py:26-35 是压缩期 hoisting 映射，观察期真实路径
+是 `row["state_evidence"]["operator_action_required"]`）：
 
-| 适配器 | 源字段 | subject | reason | 覆盖事故 |
+| 适配器 | 源（未压缩路径） | subject | reason | 覆盖 |
 |---|---|---|---|---|
-| A1 | candidate summaries（status/reason） | candidate | `{status}:{reason}` | (a) warm-state mismatch 六天类 |
-| A2 | state evidence `operator_action_required` | candidate | `operator_action_required:{decision}` | #1152 predecessor-pending 类 |
-| A3 | reserved_unbound outcomes | job | `{action}:{reason_class}` | #1116 wedge、#1173 尾迹 |
+| A1 | `candidates`+`blocked_candidates` 中 status=="blocked" 且 reason 非空的行（`skipped_candidates` 排除：status 仍 selected，含成功跳过） | candidate | `blocked:{reason}` | (a) permanent_failure_guard 类、#1152 predecessor-pending 类 |
+| A3 | `restart_reconcile.reserved_unbound.outcomes[]`（仅当 status=="completed" 且键在场） | job | `{action}:{reason_class}` | #1116 wedge、#1173 尾迹 |
 
-读 payload 而非内部对象的理由：(1) 字段契约已被 bounded 白名单钉死、有测试；
-(2) 集成点天然单一（write_evidence 前）；(3) observe-only 与决策层解耦在
-类型层面即成立。风险：payload 键形状变化会静默饿死适配器——用契约测试钉住
-（每适配器一条「真实形状 payload → 观察产生」的测试，形状漂移即红）。
+#1152 的 `operator_action_required` 不设独立适配器：该类行本身就是 A1 的
+blocked 行（1:1 同现，`decision` 顶层字段不存在——唯一生产者
+scheduler_generation_gate.py:749-789 只发 `continuity_policy.decision`），
+独立适配器会与 A1 撞同一 subject 导致两 reason 互相重置、永不开闸。降级为
+A1 观察条目上的布尔标注，消费义务闭合且状态模型保持 subject 键。
 
-## D3 连续语义与内存安全
+契约风险（payload 键形状漂移静默饿死适配器）用契约测试钉住：每适配器一条
+「真实形状 payload → 观察产生」，形状漂移即红。
 
-严格连续（镜像 #1173）：`(subject, reason)` 逐 pass 相同才累加；换 reason 重置
-为 1；缺席即清除。推论：状态文件条目数 ≤ 当 pass 观察数（每 pass 全量重建交集），
-无历史累积、无泄漏。open 列表与 WARNING 截断至 50 条（count 降序 + truncated
-计数）。**不做** grace/间歇容忍（缺席一 pass 即断）——宁可漏报间歇性问题也不
-把「偶发恢复」误报为持续卡死；间歇聚合是显式 non-goal。
+## D3 连续语义、误清防护与内存安全
+
+严格连续（subject 键，镜像 #1173）：同 (subject, reason) 连续**完整观察 pass**
+累加；换 reason 重置为 1；**源在场**且 subject 缺席才清除。两层防误清：
+
+1. **pass 级**：只在 `scheduler_runtime.py:1417` 的完整 pass 写盘点前观察。
+   其余 11 个写盘点（早退 :711/:765/:805/:839/:897/:985、异常 :1458、prelock
+   :596/:641/:681、callback scheduler_core.py:2006）payload 候选列表为空/无
+   restart_reconcile——在那里观察等于每次早退清空全部计数；`lock_contended`
+   （:711）还在未持租约下运行，共享写有并发风险。实现上**不得**挂
+   `scheduler_core.py:914` 的共享 `_write_evidence` 方法（8 站点全走它，是最
+   自然也最错的落点）。
+2. **适配器级**：源在场判据（A1 候选列表键在场；A3 status=="completed" 且
+   `reserved_unbound` 在场——sacct 抖动走 :1561-1563 只写
+   `reserved_unbound_error`，dry-run/store 不可用返回 None/skipped）。源不在场
+   → 该适配器名下条目原样保留。否则一次 sacct 抖动就把 #1116 wedge 计数清零。
+
+推论：状态文件条目数 ≤ 当 pass 观察数（源在场的适配器域内全量重建交集），
+无历史累积。open 列表与 WARNING 截断 50 条。**不做**间歇容忍（缺席一完整
+pass 即断）——宁漏报间歇不把偶发恢复误报为持续卡死。运维口径：
+`consecutive_passes` 数的是完整观察 pass，墙钟跨度可能大于同数 timer tick
+（中间的早退/中止 pass 不计数也不清零），runbook 写明。
 
 ## D4 告警通道现实
 
-evidence JSON 当前零消费端（无 ops API 路由、retention 脚本只删不读）。issue
-的「让 monitor 看到」在当前架构里唯一真实通道是 journalctl——所以 WARNING 是
-一等出口而非附属：聚合单条、含 subject/reason/计数、token
-`SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN` 可 grep。evidence block 是给未来消费端与
-人工取证的结构化对账面。消费端建设（API/推送）显式另立。
+evidence JSON 当前零消费端（无 ops API 路由、retention 只删不读）。当前架构
+唯一真实通道是 journalctl——WARNING 是一等出口：聚合单条、token
+`SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN` 可 grep、含 subject/reason/计数（截断
+50）。subject 键模型下同一 wedge 只产一条 open 条目，无聚合去重问题。
+evidence block 是给未来消费端与人工取证的结构化对账面；消费端建设显式另立。
 
 ## D5 与近邻机制的互斥边界
 
-- `_SchedulerProgressGuard`：intra-pass 阶段熔断（每 run_once 新建，抛
-  SchedulerResourceLimitError 改变行为）。本单 cross-pass、observe-only、永不抛。
-  两者共存无交互。
-- #1431 warm-start ladder：cycle 内阶梯 + escalate，不落 mark、下一 cycle 重走。
-  本单在其外层数「连续 cycle 都 escalate/失败」的次数——A1 观察到的是每 pass
-  candidate summary 的失败残影，无需触碰 runtime worker。
-- #1173 streak：per-row、驱动**行为**（释放终态）。本单 per-(subject,reason)、
-  纯证据。A3 观察到 streak 尾迹属预期重叠（circuit 开闸早于/伴随释放，释放后
-  subject 离场自动清除）。
+- `_SchedulerProgressGuard`（scheduler_runtime.py:31-70）：intra-pass 阶段
+  熔断，抛 `SchedulerResourceLimitError` **改变行为**；其异常分支（:1430-1458）
+  正是本单「不观察」的中止 pass 类——两机制无交互由集成点选择直接成立。
+- #1431 warm-start ladder：cycle 内阶梯，不落 mark、下一 cycle 重走。本单在
+  其外层数「连续完整 pass 都 blocked」——A1 观察的是候选失败残影
+  （permanent_failure_guard），无需触碰 runtime worker。
+- #1173 streak：per-row、驱动行为（释放终态）。本单 per-(subject,reason)、
+  纯证据。A3 观察 streak 尾迹属预期重叠（释放后 subject 离场自动清除）。
 
 ## D6 禁用与默认
 
-默认 3（与 #1173 一致；两起事故分别是 ~数十 pass 与 ~数天，3 足够早且
-observe-only 无误伤面）。≤0 禁用 = 完全旁路（不读不写不注入不日志），保证
-回退路径是纯配置动作。
+默认 3（与 #1173 一致；observe-only 无误伤面）。≤0 禁用 = 完全旁路（不读不写
+不注入不日志，**含压缩路径**——bounded 层的键守卫保证禁用态超预算 pass 不
+凭空出现 null 键），回退是纯配置动作。
