@@ -136,6 +136,88 @@ def write_test_netcdf4(
     return content
 
 
+def write_test_netcdf4_bundle(
+    path: str | Path,
+    variables: Sequence[str],
+    forecast_hour: int,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Write a minimal multi-variable NetCDF4 bundle for testing (#1412).
+
+    Mirrors the per-forecast-hour bundle layout of the GFS cloud-era manifest:
+    one dataset carrying every bundle variable as its own data_var keyed by
+    cfgrib short name, so per-variable canonical reads find their record.
+    """
+    import xarray as xr
+
+    if not variables:
+        raise ValueError("variables must be non-empty for a bundle payload")
+    longitude_values = list(longitudes) if longitudes is not None else [0.0]
+    latitude_values = list(latitudes) if latitudes is not None else [0.0]
+    if len(longitude_values) != len(latitude_values):
+        raise ValueError("Longitude and latitude coordinate counts must match.")
+    point_count = len(longitude_values)
+
+    data_vars: dict[str, tuple[list[str], list[float]]] = {}
+    per_var_attrs: dict[str, str] = {}
+    for variable in variables:
+        short_name = CFGRIB_SHORT_NAMES.get(variable, variable)
+        if source == "ERA5":
+            value = default_era5_value(variable, forecast_hour)
+        else:
+            value = default_gfs_value(variable, forecast_hour)
+        data_vars[short_name] = (["point"], [value] * point_count)
+        per_var_attrs[short_name] = short_name
+
+    ds = xr.Dataset(
+        data_vars,
+        coords={
+            "point": list(range(point_count)),
+            "latitude": ("point", latitude_values),
+            "longitude": ("point", longitude_values),
+        },
+        attrs={
+            "source": source,
+            "forecast_hour": forecast_hour,
+            "bundle_variables": ",".join(variables),
+        },
+    )
+    if cycle_time is not None:
+        ds.attrs["cycle_time"] = cycle_time.isoformat()
+    for short_name in per_var_attrs:
+        ds[short_name].attrs["GRIB_shortName"] = short_name
+        ds[short_name].attrs["shortName"] = short_name
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(target, engine="netcdf4")
+    content = target.read_bytes()
+    ds.close()
+    return content
+
+
+def encode_test_netcdf4_bundle(
+    variables: Sequence[str],
+    forecast_hour: int,
+    cycle_time: datetime | None = None,
+    source: str = "gfs",
+    longitudes: Sequence[float] | None = None,
+    latitudes: Sequence[float] | None = None,
+) -> bytes:
+    """Encode a multi-variable NetCDF4 bundle in memory (#1412)."""
+    import tempfile
+    from pathlib import Path as P
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = P(tmp) / "bundle.nc"
+        return write_test_netcdf4_bundle(
+            path, variables, forecast_hour, cycle_time, source, longitudes, latitudes
+        )
+
+
 def encode_test_netcdf4(
     variable: str,
     forecast_hour: int,
