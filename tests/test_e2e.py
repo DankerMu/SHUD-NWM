@@ -767,6 +767,13 @@ def _run_gfs_adapter(
             # this fixture cannot honestly serve — and the default also reads
             # ambient GFS_SOURCE_BACKENDS, so pin the chain hermetically.
             source_backends=(GFS_NOMADS_BACKEND,),
+            # With NOMADS the only backend, _throttle_nomads and the circuit
+            # breaker become load-bearing: pin their state root to tmp (the
+            # config default reads ambient OBJECT_STORE_ROOT — on node-27,
+            # the e2e oracle, that is a real production state path) and
+            # disable the inter-request sleep window.
+            object_store_root=object_root,
+            nomads_min_interval_seconds=0,
         ),
         repository=repository,
         object_store=store,
