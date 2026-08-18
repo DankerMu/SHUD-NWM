@@ -25,6 +25,14 @@ start time
 THEN the rendered `--starttime` equals the local wall-clock form of UTC
 now minus the configured lookback (the window is not narrowed)
 
+#### Scenario: a positive-offset host stops silently widening the window
+
+WHEN the host timezone is east of UTC (the production node-22 case) and
+list_jobs runs with no explicit start time
+THEN the rendered `--starttime` equals the local wall-clock form of UTC
+now minus the configured lookback — the effective window narrows from
+the accidental lookback-plus-offset width to the declared lookback width
+
 #### Scenario: a UTC host renders the same value as before
 
 WHEN the host timezone is UTC
