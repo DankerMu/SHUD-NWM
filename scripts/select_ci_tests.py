@@ -768,6 +768,75 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/node27_autopipe_cron.sh",
         ("tests/test_node27_autopipeline_preflight.py",),
     ),
+    # Shell wrappers with committed guard suites (#1138). Like the autopipe
+    # cron rule above, none of these are backend python paths, so without an
+    # explicit mapping a wrapper-only PR would select nothing; targets were
+    # derived from `grep -rln '<script>.sh' tests/` and must track real
+    # references. Wrappers with no guard suite intentionally have no rule here
+    # and arm the core-smoke fallback via _is_backend_shell_path.
+    PathTestRule(
+        "scripts/scheduler_file_provider_refresh_once.sh",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
+    PathTestRule(
+        "scripts/install_node22_scheduler_file_provider_refresh.sh",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_download_once.sh",
+        ("tests/test_node27_download_cycles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_once.sh",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_retention_once.sh",
+        (
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_raw_retention_once.sh",
+        ("tests/test_node27_wrapper_pythonpath.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_frontier_stall_alert_once.sh",
+        ("tests/test_node27_frontier_stall_alert.py",),
+    ),
+    PathTestRule(
+        "scripts/run_qhh_backend_smoke.sh",
+        ("tests/test_qhh_scripts_static.py",),
+    ),
+    PathTestRule(
+        "scripts/run_qhh_cycle.sh",
+        (
+            "tests/test_run_qhh_continuous.py",
+            "tests/test_role_boundary_static.py",
+            "tests/test_qhh_scripts_static.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/local_pg.sh",
+        ("tests/test_qhh_scripts_static.py",),
+    ),
+    PathTestRule(
+        "scripts/ops/node22-run-cycle-once.sh",
+        ("tests/test_production_scheduler.py",),
+    ),
+    PathTestRule(
+        "scripts/ops/start-display-api.sh",
+        (
+            "tests/test_two_node_docker_runtime.py",
+            "tests/test_entropy_audit_script.py",
+        ),
+    ),
     PathTestRule(
         "scripts/governance/audit_repo_entropy.py",
         ("tests/test_entropy_audit_script.py",),
@@ -794,7 +863,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
     selected: set[str] = set()
     changed = [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
-    unknown_backend_python = False
+    unknown_backend_path = False
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
@@ -859,10 +928,10 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             selected.add(same_name_test)
             matched = True
 
-        if _is_backend_python_path(path) and not matched:
-            unknown_backend_python = True
+        if (_is_backend_python_path(path) or _is_backend_shell_path(path)) and not matched:
+            unknown_backend_path = True
 
-    if unknown_backend_python:
+    if unknown_backend_path:
         selected.update(CORE_SMOKE_TESTS)
 
     selected_paths = sorted(selected)
@@ -907,6 +976,15 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
 
 def _is_backend_python_path(path: str) -> bool:
     return path.endswith(".py") and path.startswith(("apps/api/", "packages/", "services/", "workers/", "scripts/"))
+
+
+def _is_backend_shell_path(path: str) -> bool:
+    # scripts/**/*.sh is backend surface since #1138: the ci.yml `backend`
+    # paths-filter matches it, so an unmapped wrapper must arm the core-smoke
+    # fallback here instead of yielding an empty (collect-only) selection.
+    # Deliberately scoped to scripts/: other .sh surfaces (infra/, frontend)
+    # keep their own filters and have no pytest guard convention.
+    return path.endswith(".sh") and path.startswith("scripts/")
 
 
 def _same_name_script_test(path: str) -> str | None:
