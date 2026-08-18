@@ -188,6 +188,114 @@ On this cluster accounting does not store job comments (#1116), so that query no
 returns nothing; fall back to `sacct -a --name nhms_forecast` narrowed to the reservation's
 `submission_attempt_started_at` window and match by user/account and submit time.
 
+## Reserved rows held by `comment_accounting_unproven` (#1116)
+
+Since #1116 the comment querier probes `scontrol show config` once per reconcile pass and
+refuses every comment query — owner-scoped, global and legacy — unless
+`AccountingStoreFlags` contains the `job_comment` flag. **This cluster does not store it**
+(`AccountingStoreFlags = (null)`, Slurm 23.11.4, measured on node-22 2026-08-18), so each
+reserved-unbound cohort master is recorded `accounting_unavailable` /
+`comment_accounting_unproven` and **stays `reserved`** instead of being demoted.
+
+The refusal is deliberate: a comment search on a cluster that never stored the comment can
+only ever answer "not found", so reading that answer as a confirmed absence demotes a live
+reservation to `reservation_lost`, and the reclaim path then re-`sbatch`es the same cohort
+— a silent double submission. The price of refusing is real and must be paid by hand: a
+`reserved` row is not terminal, so **every later pass of that cycle keeps failing with
+`PIPELINE_ALREADY_ACTIVE`** and records `submission_failed` with zero Slurm submissions
+until the row is disposed of. This outcome class has no automatic exit — it does not feed
+`identity_blocked_streak` (that counter only counts `identity_mismatch_blocked`) and never
+self-releases.
+
+### Finding the held rows
+
+- Pass evidence: `restart_reconcile.reserved_unbound.outcomes[]` entries with
+  `action=query_unavailable`, `reconciliation_decision=accounting_unavailable` and
+  `reconciliation_reason_class=comment_accounting_unproven`. Take `job_id` and
+  `idempotency_key` from the entry. On a pass that hit the evidence byte limit the
+  bounded compaction keeps only `job_id` / `action` / `status` /
+  `reconciliation_reason_class` (plus streak/quarantine fields) — the
+  `reconciliation_decision` and `idempotency_key` keys may be absent; filter by the
+  reason-class token alone and recover the `idempotency_key` from the journal master
+  row below.
+- Journal: the same `reconciliation_reason_class` is persisted on the cohort master row,
+  whose `status` is still `reserved` and whose `slurm_job_id` is still null.
+- Scheduler log, once per pass, tells the two unproven causes apart: `comment storage probe
+  could not execute: …` means `scontrol` failed or was unreachable (a deployment fault —
+  fix that first, the cluster may well store comments; while the fault persists, each
+  pass's `accounting_unavailable` write also resets any accumulated
+  `identity_blocked_streak`, so the § `identity_mismatch_released` ladder cannot fire
+  either). `accounting does not store job comments: AccountingStoreFlags lacks
+  job_comment` normally means the cluster is provably comment-less — but the same message
+  also fires when the config output has no `AccountingStoreFlags` line at all (for
+  example a pre-20.11 Slurm using the legacy `AccountingStoreJobComment` key, which the
+  probe deliberately does not read); when in doubt, run `scontrol show config | grep -i
+  AccountingStore` by hand before concluding the capability is absent.
+
+### Deciding whether the job is actually in flight
+
+`sacct -a --comment "nhms_idem:<idempotency_key>"` is useless here by construction. Use the
+same name-scoped fallback as the identity-blocked triage above (§ `identity_mismatch_released`,
+"To triage an abandoned-but-alive suspicion"):
+
+```bash
+sacct -a --name nhms_forecast \
+  --starttime <submission_attempt_started_at> --endtime now \
+  --format=JobID,JobName,State,User,Account,Submit
+squeue -a --name nhms_forecast
+```
+
+Match by submit time inside the reservation's attempt window and by user/account (the row's
+`expected_slurm_user` / `expected_slurm_account`, when `slurm_ownership_required` is set).
+`squeue` covers the still-queued/running half without the accounting propagation lag.
+
+### Disposition — what exists today
+
+1. **Fix the cluster — but only after every held row has been through the in-flight
+   check above and confirmed dead.** Set `AccountingStoreFlags=job_comment` in
+   `slurm.conf` and `scontrol reconfigure` (a cluster-admin action, not a repo command).
+   **Warning — ordering matters:** the moment the probe turns True the gate opens for
+   **all** held rows, not just future attempts. Jobs submitted while the flag was off
+   carry an empty accounting `Comment` forever (the flag applies at submission time and
+   is not retroactive), so the comment search still cannot see them: a held row whose
+   job is **still running** on a just-fixed cluster is immediately judged a confirmed
+   absence past grace, demoted to `reservation_lost` with `absence_retry_permitted`,
+   and the next pass reclaims and re-`sbatch`es the cohort — the exact double
+   submission this gate exists to prevent. With every held row confirmed dead first,
+   reconfiguring is safe and doubles as the demotion mechanism: the next pass demotes
+   each dead row through the normal absence path and the retry is minted legitimately.
+2. **In flight:** do not touch the row. Let the job reach its terminal state — but be aware
+   reconcile still cannot bind it, because binding needs the comment match that this cluster
+   cannot serve. The row remains held, so it still ends up in case 3.
+3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window): if the
+   cluster can be reconfigured **and every other held row is also confirmed dead**, case 1
+   is the demotion mechanism — reconfigure and let the next pass demote through the normal
+   absence path. When reconfiguring is not an option (or any other held row may still be
+   alive, making the cluster-wide gate flip unsafe), **there is no safe row-scoped operator
+   mechanism to demote the row today.** Verified against the code:
+   - The manual-retry surface (`POST /api/v1/runs/{run_id}/retry`, `RetryService` /
+     the file journal's `record_manual_repair`) only accepts a latest job whose status is
+     `failed` / `submission_failed` / `partially_failed` / `permanently_failed` /
+     `cancelled` (`retry.py:73-74`); `reserved` is neither that nor an active status, so the
+     call raises `RetryNotFoundError` and writes nothing.
+   - `reclaim_pipeline_job_reservation` requires `status=reservation_lost` with
+     `reconciliation_decision=absence_retry_permitted`
+     (`file_orchestration_journal.py:1711-1720`); it returns `None` for a `reserved` row.
+   - The `nhms-pipeline` CLI has no reservation/status subcommand (`cli.py:742-800`).
+
+   The only physical option left is hand-editing the journal, which is unsupported here and
+   is exactly the write this gate exists to prevent. Escalate instead: the missing
+   operator-facing demotion tool is tracked as the #1116 follow-up, and until it lands the
+   affected cycle stays wedged on `PIPELINE_ALREADY_ACTIVE`. A new cycle (new candidate
+   identity) is unaffected and keeps running.
+
+Verified by:
+
+- `tests/test_gateway_reconcile.py::test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments`
+  — a genuinely in-flight job with an empty `Comment` no longer demotes the reservation.
+- `tests/test_gateway_reconcile.py::test_comment_storage_probe_requires_job_comment_in_accounting_store_flags`
+  — the `(null)` / `job_comment` / missing-line parse vectors and the two distinct warnings.
+
 ## Missing accounting vs wrong accounting (缺账 vs 错账)
 
 A cycle whose whole cohort ran to `succeeded` can still be judged `gap` forever. When the
