@@ -554,34 +554,72 @@ def test_multiple_matched_sp_mesh_files_are_rejected_as_ambiguous(tmp_path: Path
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("failing_call", ["stat", "sha256"])
+def test_checksum_walk_marks_a_required_file_unreadable_when_stat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stat failure is injected INSIDE the walk, never around discovery.
+
+    ``Path.stat`` cannot be patched across a whole ``discover_basins_inventory``
+    run: on 3.11 ``Path.is_file()`` goes through ``self.stat()`` and does not
+    swallow EACCES, so the fake escapes at ``_glob_non_sidecar_files`` and aborts
+    discovery, while on 3.14 ``is_file()`` reaches ``os.path.isfile`` and misses
+    the patch entirely -- green locally, red on CI, pinning nothing either way.
+    Driving the walk directly keeps the injection to the one ``path.stat()`` the
+    size check makes. The discovery-level consequences (partial, quirk, payload
+    key) are pinned by the ``_sha256`` injection below, which needs no patching
+    of pathlib at all.
+    """
+
+    root = tmp_path / "basins"
+    input_dir = root / "basin-a" / "input" / "alias-a"
+    input_dir.mkdir(parents=True)
+    unreadable_name = "alias-a.tsd.lai"
+    (input_dir / unreadable_name).write_text("tsd.lai\n", encoding="utf-8")
+    readable = input_dir / "alias-a.tsd.mf"
+    readable.write_text("tsd.mf\n", encoding="utf-8")
+    expected_checksum = hashlib.sha256(readable.read_bytes()).hexdigest()
+    resolved_root = root.resolve()
+    warnings: list[basins_discovery.DiscoveryWarning] = []
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.name == unreadable_name:
+            raise PermissionError(errno.EACCES, "simulated stat failure")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", fake_stat)
+        checksums, unreadable = basins_discovery._checksums_for_required_files(
+            input_dir,
+            {"tsd_lai": [unreadable_name], "tsd_mf": [readable.name]},
+            resolved_root,
+            warnings,
+        )
+
+    assert [reason.split(":")[0] for reason in unreadable] == [unreadable_name]
+    assert [(warning.code, warning.path) for warning in warnings] == [
+        ("BASINS_REQUIRED_FILE_UNREADABLE", str(input_dir / unreadable_name))
+    ]
+    # The rest of the walk is unaffected: only the unreadable file lost its checksum.
+    assert checksums == {readable.name: expected_checksum}
+
+
 def test_unreadable_required_file_degrades_status_to_partial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failing_call: str,
 ) -> None:
     root = tmp_path / "basins"
     make_valid_model(root / "basin-a", "alias-a")
     unreadable_name = "alias-a.tsd.lai"
+    real_sha256 = basins_discovery._sha256
 
-    if failing_call == "stat":
-        real_stat = Path.stat
+    def fake_sha256(path: Path) -> str:
+        if path.name == unreadable_name:
+            raise OSError(errno.EIO, "simulated hash failure")
+        return real_sha256(path)
 
-        def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
-            if self.name == unreadable_name:
-                raise OSError(errno.EACCES, "simulated stat failure")
-            return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(Path, "stat", fake_stat)
-    else:
-        real_sha256 = basins_discovery._sha256
-
-        def fake_sha256(path: Path) -> str:
-            if path.name == unreadable_name:
-                raise OSError(errno.EIO, "simulated hash failure")
-            return real_sha256(path)
-
-        monkeypatch.setattr(basins_discovery, "_sha256", fake_sha256)
+    monkeypatch.setattr(basins_discovery, "_sha256", fake_sha256)
 
     inventory = discover_basins_inventory(root)
     model = one_model(inventory)
