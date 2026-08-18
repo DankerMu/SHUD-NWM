@@ -1285,7 +1285,10 @@ CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Seq
 class ReservationReconcileOutcome:
     job_id: str
     idempotency_key: str
-    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed".
+    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed"
+    # | "journal_quarantined".
+    # "journal_quarantined": the FileOrchestrationJournalError branch; the only
+    # producer of quarantine_reason / quarantine_field (see those fields below).
     # "absence_unconfirmed": accounting answered absent (query succeeded, no
     # matching comment row) but the reservation is younger than
     # RESERVATION_ABSENCE_GRACE, so the absence may merely be slurmdbd
