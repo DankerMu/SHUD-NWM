@@ -28,23 +28,31 @@ orchestrator 侧不掌握 scheduler cadence；全局改 exact 选取会碰非 qu
 
 **lineage miss（含"entry 存在但 `usable_flag=false`"——usability 门在 provider 调用之后，`chain_forecast_state.py:662-666`）时回退到不带 lineage 的今日查找（偏好语义），不是硬过滤**：miss 判定 = 带 lineage 的查找**未产出 usable snapshot**。db-free file 模式下 `get_latest_usable_state` 无条件 raise（`state_manager.py:1116-1118`），`_exact_or_latest_usable_state` 捕获后返回 None → `cold_start_no_state`（`chain_forecast_state.py:196-199`）——若把 lineage 当过滤，expected entry 缺失的重跑会变成**归零 cold start**（#1164 缺陷类，物理上远差于 wrong-lineage warm start，且是否能过 §8 gate 亦未决）。因此 miss 时重跑保持今日的 wrong-lineage 选取（逐字节同前），该不收敛类由 D3 breaker 在 N=2 处 fail-stop——这正是"收敛层 + 兜底层"的分工。首轮（无 evidence）行为不变。
 
+**（R1 修订，Class A CONFIRMED）偏好还必须覆盖"preferred snapshot usable 但被 caller 循环下游拒绝"**：`_validate_state_lineage`（package version/checksum/max-lead）或 QC 钩子拒绝后，caller 把 cursor 推过 T（`chain_forecast_state.py:246-248`），exact 分支从此不可达 → cold start（verifier 双腿复现；legacy 无 package 记录的 fallback entry 因 `_validate_state_lineage` 的 None-skip 系统性比全填充 preferred entry 更宽松，普通 registry 升级即触发）。修复 = **one-shot 偏好重置**：当被拒绝的 state 来自 lineage-preferred 查找时，禁用偏好、cursor 保持 cycle_time，下一迭代做今日不带 lineage 的 exact 查找（重置仅一次，防循环）；此后行为逐字节同前。
+
 - 实现 seam：selection 调用链（`chain_forecast_cycle.py:239` → `_select_forecast_initial_state` → `_exact_or_latest_usable_state`）需把 basin 的 quarantine lineage 透传下去（新增可选参数，默认 None = 现行为）。implementer 须实测 basin dict 在该调用点可见 `state_evidence`；不可见时通过与 `_basin_max_lead_hours` 同层的既有 basin 通道传递，并在偏离记录中报告实际采用的通道。
 
 ### D3 — breaker 载体：journal 历史只读计数（新 accessor），不用 retry-attempt 计数、不加 sidecar 状态文件
 
-判定："当前 stale token 已被 ≥N=2 个**不同 completed forecast submission** 记录"。**distinctness 键 = cohort master 行**：一次 submission 恰好写一条 cohort master 行（reservation 时把 `init_state_identities` 落在 master 上且此后不再改写，`chain_forecast_orchestrator_cycle.py:592-601` + `accepted_submit_identity.py:148-151` #1183 注释——该字段属于 `ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS`，**不在** `ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS`，勿以为要补进 immutable 表），reconcile 会把各 model 的条目**复制**到 per-model terminal 行（`tests/test_file_orchestration_journal.py:7981-7998` 钉住，job_id 不同）——因此计数**只数 terminal-success 的 cohort master 行**（master kind 判定走 `accepted_submit_row_kind` 等既有 helper），per-model terminal 行一律排除；同一 submission 的 master+terminal 两行 = 1（E8 钉）。数据源 = journal `_cycle_rows.pipeline_jobs`（按 job_id 保留、collapse-free，`file_orchestration_journal.py:3774-3776`），新增 FileOrchestrationJournal 只读 accessor（形如 `completed_pipeline_init_state_id_occurrences(source_id, cycle_time, model_id, init_state_id) -> int`，复用 memoized `_cycle_rows`，never-raises 返回 0 语义与 `completed_pipeline_init_state_id` 一致）。
+**（R1 修订，Class B CONFIRMED——原"数任意 2 条 master"无 §8.7 provenance，会被 `retry_terminal_run_manifest_missing` / `retry_missing_forecast_output` 等无关白名单 resubmit 预充值，首次 quarantine 判定即误 fail-stop）** 判定改为 provenance 精确形式："当前 stale token 已被**至少一条带 §8.7 quarantine-rerun provenance 的 terminal-success cohort master 行**重复记录"（原始缺陷 run 由当前 positive mismatch 本身见证，无需计数；带戳 master = 一次已失败的收敛尝试——恰是 threshold 注释"second = failed convergence"的字面语义）。**provenance 戳由 reservation 写侧落**：cohort reservation（`chain_forecast_orchestrator_cycle.py:589-608`）读 `context.active_basins` 的 `state_evidence`，当 basin decision 为 `retry_journal_predecessor_identity_mismatch` 时在 master 行记 `journal_predecessor_quarantine_rerun_model_ids`（该 cohort 中被 quarantine 重跑的 model_id 列表）；字段入 `ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS` **并且必须同时加入 reservation 写入的 closed constructor**（`file_orchestration_journal.py:5875-5880` 警告：缺席即被静默丢弃、后续 frozen 校验假报）；**不入** immutable 表。这不是 §8.7 filter 写 journal——reservation 本就是写路径，§8.7 评分/过滤侧仍纯只读。旧 journal 无该字段 → 计 0 → breaker 不触发（fail toward liveness，部署即安全）。
+
+accessor 相应过滤：只数"terminal-success master 且 token 匹配 且 model_id ∈ 该行 provenance 列表"。distinctness 键仍 = cohort master 行：一次 submission 恰好写一条 cohort master 行（reservation 时把 `init_state_identities` 落在 master 上且此后不再改写，`chain_forecast_orchestrator_cycle.py:592-601` + `accepted_submit_identity.py:148-151` #1183 注释——该字段属于 `ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS`，**不在** `ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS`，勿以为要补进 immutable 表），reconcile 会把各 model 的条目**复制**到 per-model terminal 行（`tests/test_file_orchestration_journal.py:7981-7998` 钉住，job_id 不同）——因此计数**只数 terminal-success 的 cohort master 行**（master kind 判定走 `accepted_submit_row_kind` 等既有 helper），per-model terminal 行一律排除；同一 submission 的 master+terminal 两行 = 1（E8 钉）。数据源 = journal `_cycle_rows.pipeline_jobs`（按 job_id 保留、collapse-free，`file_orchestration_journal.py:3774-3776`），新增 FileOrchestrationJournal 只读 accessor（形如 `completed_pipeline_init_state_id_occurrences(source_id, cycle_time, model_id, init_state_id) -> int`，复用 memoized `_cycle_rows`，never-raises 返回 0 语义与 `completed_pipeline_init_state_id` 一致）。
 
 - 拒绝 `_state_retry_attempt`：replacement cohort 拿全新 run_id、无 `_retry_` 后缀 → 系统性 undercount。
 - 拒绝 scheduler sidecar 状态文件：新增持久面，违反 KISS 与 §8.7 只读精神。
 - 拒绝从 bounded `raw_candidate_state` 计数：`candidate_state_job_limit` 截断会 undercount；accessor 直读 journal 不受 candidate payload 截断影响（E8 有截断腿钉此点）。
 - 拒绝"数 journal 历史段里的 distinct completed hydro_run 行"作 fallback：`_CycleRows` 只有单一 last-wins 的 `hydro_run` 槽（`file_orchestration_journal.py:390-397, 4177-4181`），历史 hydro_run 行经 `_cycle_rows` 不可数——那需要新开 raw 段读取面，超出本 change。master-row 计数即唯一口径，无 fallback。
 - 计数失败/无 accessor/行不可读 → 0 → breaker 不触发且 decision 保持 quarantine retry（fail toward liveness：宁可多重跑一轮，不可误 fail-stop；E3 有 accessor 缺失腿钉此点）。
+- （R1）拒绝"只读改判收敛可行性"（expected entry absent/unusable 才 engage、不看 provenance）：Class A 已实证 usable entry 也会被下游拒绝，该近似在乐观方向出错时恢复无限重跑循环——即 #1157 主项本身；provenance 戳无近似。
+- （R1）拒绝维持"数任意 2 条 master"：Slurm 节点故障/OOM/超时后的 `retry_missing_forecast_output` recompute 是常规事件，预充值频率是 material 的，不是理论角落。
 
 ### D4 — 槽位释放：discovery 槽位选择把 breaker-engaged gap 当 evidence-only，cycle 仍报 gap
 
 `cycle_completion_status` 的 §8.7 choke point 不变（stale → gap，**绝不 ADMIT**）。`_select_backfill_source_cycles` 在 available_gaps 中排除 breaker-engaged 的 cycle（判定复用 D3 accessor + `_journal_predecessor_identity_is_stale` 同口径），比照 unavailable gap 的处理：产出 evidence 条目（`selection_status="not_selected"`、reason=breaker、含 recorded/expected token）且不占 `available_gaps[:1]` 执行槽。后续 cycle 有该 T 处 completed run 的 state 可作合法 fallback warm start，不会因跳过而断链。
 
-**per-cycle 聚合规则**（breaker 按 cycle+model，槽位按 source-cycle）：仅当"该 cycle 若无 §8.7 stale 判定即为 complete，且所有把它钉成 gap 的 model 均 breaker-engaged"时才排除出执行槽——即 gap 的**唯一**成因是 breaker-engaged 的 quarantine。混合 cycle（某 model breaker-engaged、另一 model 真实未完成）**仍占槽正常执行**：排除它会饿死其余 model 的真实工作，违背 fail-toward-liveness（E4 有混合腿钉此点）。
+**per-cycle 聚合规则**（breaker 按 cycle+model，槽位按 source-cycle）：仅当"该 cycle 若无 §8.7 stale 判定即为 complete，且所有把它钉成 gap 的 model 均 breaker-engaged"时才排除出执行槽——即 gap 的**唯一**成因是 breaker-engaged 的 quarantine。混合 cycle（某 model breaker-engaged、另一 model 真实未完成）**仍占槽正常执行**：排除它会饿死其余 model 的真实工作，违背 fail-toward-liveness（E4 有混合腿钉此点；R1 Class C1 增补 **partial-engagement 腿**——第二 model 自有 positive mismatch 但 provenance 计数未达阈 → 仍占槽，per-model 合取项需判别性覆盖）。per-model engaged 判定与候选侧共用 D3 的 provenance 计数口径。
+
+（R1 措辞钉）`0,12` 下 discovery 侧新代码**会执行但结果 provably 相同**（accessor 存在性门恒真，对最老 available gap 多一次 `_cycle_completion_verdict` 重评分，`_cycle_rows` memo 吸收读放大）——"逐字节不变"指行为/决策/evidence 语义，不指指令路径。
 
 - 拒绝"breaker 时 `_journal_predecessor_identity_is_stale` 返回 False（cycle 转 complete）"：那是 ADMIT，违反 §8.7 不变量，且 token 证据无处落地（cycle complete 后不再产出任何 evidence）。
 - 候选侧 blocked demotion（`_strict_warm_start_terminal_mismatch_decision` :2135-2167 先例形状）覆盖非 backfill 入口（当前 cycle 路径）的同一回路；blocked decision 字符串刻意不进两处白名单（先例同款防复活语义）。
@@ -72,8 +80,11 @@ orchestrator 侧不掌握 scheduler cadence；全局改 exact 选取会碰非 qu
 - Regression rows:
   - `0,12` cadence 全量既有 §8.7 测试 → 全绿无新 quarantine（逐字节不变）。
   - `0,6,12` fixture、wrong-suffix 首轮、expected-lineage entry **存在**（且 wrong-lineage 的 state_id 按字符串序严格排在 expected 之前，堵 `min(state_id)` 假绿）→ 一次 quarantine → 重跑（带 evidence）选中 expected lineage → 不再产出 `retry_journal_predecessor_identity_mismatch`。
-  - expected-lineage entry **不存在** → 重跑回退今日选取（同一 wrong-lineage state，逐字节同前）→ 再 quarantine → 第 2 条 terminal-success master 同 token 后候选侧 blocked + discovery 槽位放行下一 gap；cycle 仍报 gap。
-  - 混合 cycle（一 model breaker-engaged、另一 model 真实未完成）→ 该 cycle 仍占执行槽正常执行。
+  - expected-lineage entry **不存在** → 重跑回退今日选取（同一 wrong-lineage state，逐字节同前）→ 再 quarantine → 带 provenance 戳的 rerun master 同 token 落账后候选侧 blocked + discovery 槽位放行下一 gap；cycle 仍报 gap。
+  - （R1）preferred entry usable 但被下游 lineage/QC 拒绝 → one-shot 偏好重置 → 今日不带 lineage 选取（非 cold start）。
+  - （R1）无关白名单 resubmit（manifest-missing / missing-output recompute）铸出的第 2 条无戳 master → 首次 quarantine 判定仍为 retry（不被预充值）。
+  - （R1）旧 journal（无 provenance 字段）→ 计 0 → breaker 不触发。
+  - 混合 cycle（一 model breaker-engaged、另一 model 真实未完成）→ 该 cycle 仍占执行槽正常执行；partial-engagement（第二 model 自有 mismatch 但未达阈）同样占槽。
   - accessor 缺失 / 行不可读 → 计数不可得 → decision 保持 quarantine retry（breaker 不触发）。
   - "journal 无 id + manifest 有 id" 行 → A/B 两侧一致弃判（skip 保持）。
   - 裸 `state_id` alias 行 → 两侧一致弃判。

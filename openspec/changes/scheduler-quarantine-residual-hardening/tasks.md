@@ -55,16 +55,24 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 - [x] 3.6 若 blocked decision 构成新 typed reason 面，`docs/runbooks/scheduler-dbfree-typed-reasons.md` 增补一行分诊条目（沿用该 runbook 既有两步核对结构）
 - [x] 6.x 测试（见 Required evidence 全部行，均须先红后绿：新断言在未改实现上失败的红证输出入 PR evidence）
 
+### R1 修复任务（Round 1 verdict：7 CONFIRMED / 0 REFUTED；Class A/B major）
+
+- [ ] 7.1 Class A：one-shot 偏好重置——`_select_forecast_initial_state` 中当被下游 lineage/QC 拒绝的 state 来自 lineage-preferred 查找时，禁用偏好、cursor 保持 cycle_time 重做不带 lineage 的 exact 查找（仅重置一次）；design D2 R1 修订段为准
+- [ ] 7.2 Class B（写侧）：reservation 落 provenance 戳 `journal_predecessor_quarantine_rerun_model_ids`（basin decision 为 quarantine retry 的 model 列表；入 ORDINARY_UPSERT_FIELDS **且**入 reservation closed constructor，勿入 immutable 表）；design D3 R1 修订段为准
+- [ ] 7.3 Class B（读侧）：accessor 改为只计带 provenance 且 model 匹配的 terminal-success master；breaker 判定阈值改"带戳计数 ≥1"；discovery per-model engaged 判定同口径
+- [ ] 7.4 Class D：runbook 该节修正——处置 step 4 改 fail-stop 真相 + out-of-band 新提交身份说明（manual_retry marker 对 completed 行无效及原因：`scheduler_state_decision.py:220-269` 评估顺序）；两步核对 step 1 加"不在 blocked_candidates[] → 读 backfill not_selected 条目"第三分支
+- [ ] 7.5 E 行更新后的红绿证据（E2 下游拒绝腿、E3 provenance 三腿、E4 partial-engagement 腿、E7 路由腿、E8 provenance 计数）
+
 ## Required evidence（每行 = 测试或命令；输入 → 期望）
 
 - [x] E1 `0,6,12` cadence + wrong-suffix 首轮 fixture（**wrong-lineage entry 的 state_id 按字符串序严格排在 expected-lineage entry 之前**，堵"未实现也因 `min(state_id)` 碰巧选对"的假绿）→ 首轮 quarantine 产出 `retry_journal_predecessor_identity_mismatch`；重跑（basin 带 quarantine evidence）选中 expected-lineage entry → 记录 expected token → 下轮无 quarantine。
-- [x] E2 同 fixture 但 expected-lineage entry 不存在 → 重跑回退**今日的不带 lineage 查找**，选中同一 wrong-lineage entry（断言选中 state_id 与改动前一致，非 cold start）→ 再次 quarantine → 收敛由 E3 breaker 腿接管；**usable_flag 腿**：expected-lineage entry 存在但 `usable_flag=false` → 同样回退不带 lineage 查找并选中 wrong-lineage usable entry（非 cold start）。
-- [x] E3 不收敛构造（2 条 terminal-success cohort **master** 行记录同一 stale token）→ 候选侧 decision 为 blocked（断言 decision/reason 字面、recorded/expected token、occurrences=2、manual_retry_required=True）；仅 1 条 master 时仍为 retry（N 边界双腿）；repository **无 accessor** / 行不可读 → decision 保持 `retry_journal_predecessor_identity_mismatch`（fail-toward-liveness 腿）。
-- [x] E4 discovery：全部 gap 成因均为 breaker-engaged 的 cycle 不占 `available_gaps[:1]`（下一 gap 被选中执行），evidence 含 not_selected 条目与两 token；该 cycle 完成度仍为 gap（非 complete）；**混合腿**：同 cycle 一 model breaker-engaged、另一 model 真实未完成 → cycle 仍占槽正常执行。
+- [ ] E2 同 fixture 但 expected-lineage entry 不存在 → 重跑回退**今日的不带 lineage 查找**，选中同一 wrong-lineage entry（断言选中 state_id 与改动前一致，非 cold start）→ 再次 quarantine → 收敛由 E3 breaker 腿接管；**usable_flag 腿**：expected-lineage entry 存在但 `usable_flag=false` → 同样回退不带 lineage 查找并选中 wrong-lineage usable entry（非 cold start）；**（R1）下游拒绝腿**：preferred entry usable 但被 `_validate_state_lineage` 拒绝（package-version 漂移构造）→ one-shot 偏好重置 → 选中今日的 wrong-lineage entry（断言与 control 腿同 state_id，quality 非 cold_start_no_state）。
+- [ ] E3（R1 改 provenance 语义）不收敛构造：**带 provenance 戳**（`journal_predecessor_quarantine_rerun_model_ids` 含该 model）的 terminal-success master 重录同一 stale token → 候选侧 decision 为 blocked（断言 decision/reason 字面、recorded/expected token、provenance 计数、manual_retry_required=True）；**预充值腿**：2+ 条**无戳** master 同 token（manifest-missing/missing-output replacement 形状）→ 首次判定仍为 retry；**旧 journal 腿**：行无 provenance 字段 → retry；repository **无 accessor** / 行不可读 → retry（fail-toward-liveness）。
+- [x] E4 discovery：全部 gap 成因均为 breaker-engaged 的 cycle 不占 `available_gaps[:1]`（下一 gap 被选中执行），evidence 含 not_selected 条目与两 token；该 cycle 完成度仍为 gap（非 complete）；**混合腿**：同 cycle 一 model breaker-engaged、另一 model 真实未完成 → cycle 仍占槽正常执行；**（R1）partial-engagement 腿**：第二 model 自有 wrong-suffix token 但 provenance 计数未达阈（如 1 条无戳 master）→ cycle 仍占槽且无 breaker release 条目（判别性覆盖 per-model 合取项——C1 verifier 已构造该输入：committed 保槽 / 变异释放）。
 - [x] E5 白名单：`retry_journal_predecessor_identity_mismatch` 下 `_terminal_stage_needs_forced_resubmit` 与 `_replacement_retry_scoped_cycle_execution` 均为 True；集成腿：第二次同 cycle+model quarantine 产生 replacement forecast submission（新 run 身份，非 idle resume 复用 succeeded job）。breaker blocked decision 字面不在两白名单（成员钉测试）。
 - [x] E6 A/B parity："journal 无 id + manifest 有 id" 行 → A 弃判（skip 保持）且 B 返回 None；裸 `state_id` alias 行 → 两侧一致弃判。
-- [x] E7 `terminal_completed_cycle` skip reason + durable hydro success + wrong-suffix id → quarantine retry 触发。
-- [x] E8 accessor 单测：多 master 同/异 token 计数；**同一 submission 的 master 行 + reconcile 复制出的 per-model terminal 行 → 计数恰为 1**（distinctness 键钉）；无行/不可读/占位行 → 0、never-raises；**截断腿**：cycle job 数超过 `candidate_state_job_limit` → accessor 计数不受影响（不从 bounded payload 计数）。
+- [ ] E7 `terminal_completed_cycle` skip reason + durable hydro success + wrong-suffix id → quarantine retry 触发；**（R1）路由腿**：`test_production_scheduler.py:10047` 形状的带-accessor 变体（`completed_pipeline_init_state_id` 返回 wrong-suffix id）走真实 `build_candidates` → `skipped_candidates == []` 且 decision 为 `retry_journal_predecessor_identity_mismatch`（钉住 terminal_completed_cycle 经真实路径到达 §8.7，堵 routing-only 变异假绿）。
+- [ ] E8 accessor 单测（R1 改 provenance 过滤）：带戳/无戳 master 混布时只计带戳且 model 匹配者；**同一 submission 的 master 行 + reconcile 复制出的 per-model terminal 行 → 计数恰为 1**（distinctness 键钉）；戳含其它 model 但不含本 model → 不计；无行/不可读/占位行/无字段 → 0、never-raises；**截断腿**：cycle job 数超过 `candidate_state_job_limit` → accessor 计数不受影响（不从 bounded payload 计数）。
 - [x] E9 `0,12` 回归：`uv run pytest -q tests/test_scheduler_generation.py tests/test_file_orchestration_journal.py tests/test_warm_start_chaining.py tests/test_state_manager.py tests/test_production_scheduler.py` 全绿（外加 §8.7 discovery 既有归属套件 `tests/test_scheduler_backfill.py`）；
   既有 §8.7 测试零改动，例外两处且均为本 change 要求的口径更新：白名单成员集
   补入新成员（`test_warm_start_chaining.py`）、

@@ -97,7 +97,7 @@ The `retry_journal_predecessor_identity_mismatch` decision SHALL be a member of 
 
 ### Requirement: Quarantine reruns SHALL prefer the expected predecessor lineage when selecting the exact warm-start state
 
-When `NHMS_REQUIRE_FORECAST_WARM_START` is not true and a basin carries quarantine evidence (`journal_predecessor_identity`), the exact warm-start lookup at `before_time == cycle_time` SHALL first query the state-snapshot provider with the expected predecessor lineage — `cycle_id` derived from the candidate cycle time minus the evidence's `required_lead_hours`, and `lead_hours` equal to that value — and select the lineage-matching entry when a usable one exists; the lineage SHALL be a preference, not a filter: whenever the lineage-preferred lookup does not yield a USABLE snapshot (no lineage-matching entry, or a matching entry whose `usable_flag` is false) the lookup SHALL repeat today's unfiltered exact selection byte-identically (never degrading the rerun to a zeroed cold start, since the file-index state manager offers no earlier-valid-time fallback), leaving that non-convergent shape to the quarantine breaker. Selection paths without quarantine evidence SHALL pass no lineage arguments and behave byte-identically to before this change, and the PostgreSQL provider SHALL keep ignoring the lineage arguments (the §8.7 quarantine loop exists only in file-journal mode).
+When `NHMS_REQUIRE_FORECAST_WARM_START` is not true and a basin carries quarantine evidence (`journal_predecessor_identity`), the exact warm-start lookup at `before_time == cycle_time` SHALL first query the state-snapshot provider with the expected predecessor lineage — `cycle_id` derived from the candidate cycle time minus the evidence's `required_lead_hours`, and `lead_hours` equal to that value — and select the lineage-matching entry when a usable one exists; the lineage SHALL be a preference, not a filter: whenever the lineage-preferred lookup does not yield a USABLE snapshot (no lineage-matching entry, or a matching entry whose `usable_flag` is false), and equally whenever the lineage-preferred snapshot is subsequently rejected by downstream lineage validation or QC, the selection SHALL retry today's unfiltered exact lookup at the cycle time exactly once (a one-shot preference reset that does not advance the selection cursor past the cycle time) so the rerun lands on today's selection byte-identically (never degrading to a zeroed cold start, since the file-index state manager offers no earlier-valid-time fallback), leaving non-convergent shapes to the quarantine breaker. Selection paths without quarantine evidence SHALL pass no lineage arguments and behave byte-identically to before this change, and the PostgreSQL provider SHALL keep ignoring the lineage arguments (the §8.7 quarantine loop exists only in file-journal mode).
 
 #### Scenario: One rerun converges when the expected-lineage entry exists
 
@@ -118,6 +118,17 @@ When `NHMS_REQUIRE_FORECAST_WARM_START` is not true and a basin carries quaranti
   re-records the stale token, and the non-convergent shape is terminated by
   the quarantine breaker requirement
 
+#### Scenario: Downstream rejection of the preferred entry resets to today's selection
+
+- **WHEN** the lineage-preferred snapshot at valid time T is usable but is
+  then rejected by downstream lineage validation (for example a
+  model-package version mismatch after a registry upgrade) or by the QC
+  hook
+- **THEN** the selection performs the one-shot preference reset, repeats
+  the unfiltered exact lookup at the cycle time, and selects the same
+  wrong-lineage usable entry as before this change — never a zeroed cold
+  start
+
 #### Scenario: Non-quarantine selection is unchanged
 
 - **WHEN** a basin without quarantine evidence selects its warm-start state
@@ -125,18 +136,35 @@ When `NHMS_REQUIRE_FORECAST_WARM_START` is not true and a basin carries quaranti
 - **THEN** the provider receives no lineage arguments and the selection is
   byte-identical to before this change
 
-### Requirement: A non-convergent quarantine SHALL be broken after two identical recorded identities
+### Requirement: A non-convergent quarantine SHALL be broken once a quarantine rerun re-records the stale identity
 
-When the same stale recorded `init_state_id` for one cycle and model has been recorded by at least two distinct completed forecast submissions — counted read-only from the journal as terminal-success cohort MASTER rows carrying that token (per-model terminal rows that reconcile copies the identity onto are excluded, so one submission's master row plus its per-model terminal row count as one), never from the bounded candidate-state payload — the scheduler SHALL stop producing the quarantine retry: the candidate-side filter SHALL demote the decision to a blocked decision carrying a typed reason, the recorded and expected identity tokens, the occurrence count, and a manual-retry-required retry policy; the discovery-side backfill selection SHALL exclude a cycle from the single oldest-first execution slot only when every model keeping that cycle a gap is breaker-engaged (a cycle with any genuinely incomplete model SHALL keep taking the slot), while still reporting the excluded cycle as a gap (never as complete) and emitting a not-selected evidence entry that carries both identity tokens; no journal row SHALL be written or deleted, and an unavailable or failed occurrence count SHALL leave the breaker disengaged and the quarantine retry decision unchanged (fail toward liveness).
+A forecast cohort reservation whose basin carries the `retry_journal_predecessor_identity_mismatch` decision SHALL stamp quarantine-rerun provenance onto the cohort MASTER row (the affected model ids, written by the reservation writer — the §8.7 scoring and filtering surfaces themselves remain strictly read-only). When the stale recorded `init_state_id` for one cycle and model has been re-recorded by at least one terminal-success cohort MASTER row carrying that provenance for that model — counted read-only from the journal (per-model terminal rows that reconcile copies the identity onto are excluded, so one submission's master row plus its per-model terminal row count as one), never from the bounded candidate-state payload; masters minted by non-quarantine replacements (for example a missing-run-manifest or missing-forecast-output resubmission) carry no such provenance and SHALL NOT arm the breaker; journals written before this change carry no provenance field and SHALL leave the breaker disengaged — the scheduler SHALL stop producing the quarantine retry: the candidate-side filter SHALL demote the decision to a blocked decision carrying a typed reason, the recorded and expected identity tokens, the occurrence count, and a manual-retry-required retry policy; the discovery-side backfill selection SHALL exclude a cycle from the single oldest-first execution slot only when every model keeping that cycle a gap is breaker-engaged (a cycle with any genuinely incomplete model SHALL keep taking the slot), while still reporting the excluded cycle as a gap (never as complete) and emitting a not-selected evidence entry that carries both identity tokens; no journal row SHALL be written or deleted, and an unavailable or failed occurrence count SHALL leave the breaker disengaged and the quarantine retry decision unchanged (fail toward liveness).
 
-#### Scenario: Breaker demotes the quarantine to blocked after the second identical recording
+#### Scenario: Breaker demotes the quarantine to blocked after a provenance-stamped rerun re-records the token
 
-- **WHEN** two distinct completed forecast submissions for cycle T and one
-  model have recorded the same stale `init_state_id`
+- **WHEN** a completed quarantine rerun (its master row stamped with
+  quarantine-rerun provenance for the model) has re-recorded the same stale
+  `init_state_id` that the current positive mismatch observes
 - **THEN** the candidate-side decision is the blocked decision with the
-  recorded token, the expected token, an occurrence count of 2, and
-  `manual_retry_required` true — and the first completed recording alone
-  still yields the quarantine retry
+  recorded token, the expected token, the provenance-stamped occurrence
+  count, and `manual_retry_required` true — while before any stamped rerun
+  completes the decision stays the quarantine retry
+
+#### Scenario: Non-quarantine replacements do not pre-arm the breaker
+
+- **WHEN** the journal holds two or more terminal-success masters recording
+  the same stale token but none carries quarantine-rerun provenance for the
+  model (for example the second master came from a missing-run-manifest or
+  missing-forecast-output replacement)
+- **THEN** the first quarantine judgement is the ordinary quarantine retry,
+  and the convergence layer gets its rerun before any fail-stop
+
+#### Scenario: Pre-change journals leave the breaker disengaged
+
+- **WHEN** the cycle's journal rows were written before this change and
+  carry no provenance field
+- **THEN** the breaker stays disengaged and the quarantine retry behavior
+  is unchanged
 
 #### Scenario: Breaker-engaged gap releases the backfill execution slot
 
@@ -157,9 +185,11 @@ When the same stale recorded `init_state_id` for one cycle and model has been re
 #### Scenario: Mixed cycle with a genuinely incomplete model keeps the slot
 
 - **WHEN** one model of cycle T is breaker-engaged while another model of
-  the same cycle is genuinely incomplete (no completed pipeline at all)
+  the same cycle still has work the scheduler could progress — whether it
+  has no completed pipeline at all, or has its own positive identity
+  mismatch whose provenance-stamped count has not engaged the breaker
 - **THEN** cycle T still takes the backfill execution slot and executes
-  normally for the incomplete model
+  normally for the model that is not breaker-engaged
 
 #### Scenario: Unavailable occurrence count leaves the breaker disengaged
 
