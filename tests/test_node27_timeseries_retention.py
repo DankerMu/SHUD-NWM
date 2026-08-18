@@ -59,7 +59,54 @@ from scripts import node27_timeseries_retention as retention
 _ROOT = Path(__file__).resolve().parents[1]
 _RECEIPT_SCHEMA_PATH = _ROOT / "schemas/timeseries_retention_receipt.schema.json"
 _RUNBOOK_PATH = _ROOT / "docs/runbooks/tier-node27-timeseries-storage.md"
-_DESIGN_PATH = _ROOT / "openspec/changes/tier-node27-timeseries-storage/design.md"
+# #1384: the design doc lives in a PENDING openspec change today, and moves to
+# openspec/changes/archive/<YYYY-MM-DD>-<slug>/design.md when #855 archives.
+# Dual-location resolution is intentional, not redundancy: it decouples the
+# H4/H6 byte-identity tests below from the archive PR (which a pure
+# openspec/** diff would merge without ever running this file in CI).
+_DESIGN_SLUG = "tier-node27-timeseries-storage"
+
+
+def _resolve_design_path(root: Path = _ROOT) -> Path:
+    pending = root / f"openspec/changes/{_DESIGN_SLUG}/design.md"
+    if pending.is_file():
+        return pending
+    archived = sorted(root.glob(f"openspec/changes/archive/*-{_DESIGN_SLUG}/design.md"))
+    if archived:
+        return archived[-1]
+    pytest.fail(
+        f"design.md for change '{_DESIGN_SLUG}' not found in either the pending"
+        f" location ({pending}) or the archive glob"
+        f" (openspec/changes/archive/*-{_DESIGN_SLUG}/design.md); if the change"
+        " was renamed, update _DESIGN_SLUG in this file"
+    )
+
+
+def test_resolve_design_path_prefers_pending_location(tmp_path: Path) -> None:
+    pending = tmp_path / f"openspec/changes/{_DESIGN_SLUG}/design.md"
+    pending.parent.mkdir(parents=True)
+    pending.write_text("pending", encoding="utf-8")
+    archived = tmp_path / f"openspec/changes/archive/2026-08-20-{_DESIGN_SLUG}/design.md"
+    archived.parent.mkdir(parents=True)
+    archived.write_text("archived", encoding="utf-8")
+
+    assert _resolve_design_path(tmp_path) == pending
+
+
+def test_resolve_design_path_falls_back_to_latest_archive(tmp_path: Path) -> None:
+    older = tmp_path / f"openspec/changes/archive/2026-08-20-{_DESIGN_SLUG}/design.md"
+    older.parent.mkdir(parents=True)
+    older.write_text("older", encoding="utf-8")
+    newer = tmp_path / f"openspec/changes/archive/2026-09-01-{_DESIGN_SLUG}/design.md"
+    newer.parent.mkdir(parents=True)
+    newer.write_text("newer", encoding="utf-8")
+
+    assert _resolve_design_path(tmp_path) == newer
+
+
+def test_resolve_design_path_fails_loudly_when_both_locations_missing(tmp_path: Path) -> None:
+    with pytest.raises(pytest.fail.Exception, match="pending"):
+        _resolve_design_path(tmp_path)
 _WRAPPER_PATH = _ROOT / "scripts/node27_timeseries_retention_once.sh"
 _SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-retention.service"
 _TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-retention.timer"
@@ -237,7 +284,7 @@ def test_wire_codes_contain_no_archive_family_member() -> None:
 def test_wire_codes_byte_identical_across_code_runbook_design() -> None:
     """H6 cross-file: every WIRE_CODES member appears in runbook §8.2 + design #855."""
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
-    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    design_text = _resolve_design_path().read_text(encoding="utf-8")
     for code in retention.WIRE_CODES:
         assert code in runbook_text, f"{code!r} missing from runbook §8.2"
         assert code in design_text, f"{code!r} missing from design.md #855 block"
@@ -291,7 +338,7 @@ def test_wire_codes_documented_tokens_all_reference_wire_codes_frozenset() -> No
     orphan code that has no source-of-truth in ``WIRE_CODES``.
     """
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
-    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    design_text = _resolve_design_path().read_text(encoding="utf-8")
     documented_tokens = (
         _extract_wire_code_candidates(runbook_text)
         | _extract_wire_code_candidates(design_text)
@@ -1843,7 +1890,7 @@ def test_measure_sql_prefix_byte_identical_with_docs() -> None:
     """
     assert _EXPECTED_MEASURE_SQL.startswith(_DOC_MEASURE_SQL_PREFIX)
     readme_text = _RECEIPTS_README_PATH.read_text(encoding="utf-8")
-    design_text = _DESIGN_PATH.read_text(encoding="utf-8")
+    design_text = _resolve_design_path().read_text(encoding="utf-8")
     assert _DOC_MEASURE_SQL_PREFIX in readme_text, (
         "receipts README resolution note must name the measurement statement"
     )
