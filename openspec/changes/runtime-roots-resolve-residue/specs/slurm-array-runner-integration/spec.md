@@ -18,8 +18,9 @@ is tracked separately as issue #1544 — it is outside this requirement.
 
 WHEN WORKSPACE_ROOT is a symlink loop's final segment
 THEN configuration construction raises the existing structured safe-directory
-ValueError ("production scheduler evidence_dir must be a safe directory")
-identically on CPython 3.11/3.12 and 3.13+
+ValueError identically on CPython 3.11/3.12 and 3.13+ (the current message
+attributes the evidence_dir field; that attribution is a known defect tracked
+as issue #1545, and this scenario locks the refusal class, not the string)
 
 #### Scenario: NHMS_SCHEDULER_LOCK_ROOT final-segment loop converges to the structured containment refusal
 
@@ -30,10 +31,14 @@ ValueError (carrying the field name) identically on CPython 3.11/3.12 and
 
 #### Scenario: parent-segment loop no longer aborts construction on 3.11/3.12
 
-WHEN any env-driven root's parent segment contains a symlink loop
+WHEN any env-driven root's parent segment contains a symlink loop under the
+db-backed configuration arm
 THEN configuration construction on CPython 3.11/3.12 produces the same
 canonical form and the same subsequent verdict as 3.13+ instead of raising an
-errno-less RuntimeError
+errno-less RuntimeError. The db-free preserve-final arm
+(`_safe_preserve_final_component`) is outside this requirement: on 3.11/3.12
+it still swallows the loop and returns the raw path — that residue belongs to
+issue #1400
 
 #### Scenario: ENOENT and non-loop containment semantics are unchanged
 

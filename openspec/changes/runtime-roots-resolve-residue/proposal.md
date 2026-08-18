@@ -47,6 +47,7 @@ Issue #1520（#1332→…→#1423 家族，Depends on #1423 已落地）：同�
 - ENOENT（尚不存在的合法路径）与「配置期不做存在性校验」语义不回归。
 - `_confined_path` containment 语义（must be under workspace_root）对非环输入逐字不变。
 - 非 strict realpath 产物与旧非 strict resolve 逐字一致（#1423 D2 论证复用）。
-- db-free 臂（`_safe_preserve_final_component` / `_confined_path_for_mode` db-free 臂）：
-  3.13+ 产物逐字不变；≤3.12 父段环几何的产物从旧的未规范化原始路径收敛到 3.13+ 规范形
-  （家族「跨版本同一判定」的收敛目标，非回归；实测无消费者依赖旧形态）。
+- db-free 臂：3.13+ 产物逐字不变。`_confined_path_for_mode` db-free 臂在 ≤3.12 父段环几何
+  的产物收敛到 3.13+ 规范形（家族收敛目标，非回归；实测无消费者依赖旧形态）。
+  `_safe_preserve_final_component`（db-free preserve-final 臂，喂八个 *_preflight_path 字段）
+  零改动：≤3.12 仍吞 RuntimeError 返回原始路径——该残余属 #1400，不在本 change 收敛范围。
