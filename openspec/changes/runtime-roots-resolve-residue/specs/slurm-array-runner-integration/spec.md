@@ -4,17 +4,29 @@
 
 Scheduler configuration construction SHALL apply the established
 strict-realpath-then-non-strict paradigm to the containment-base confinement
-helper and to both preserve-final parent-segment helpers, so that a symlink
-loop in a containment base's final segment or in any configured path's parent
-segment produces the same exception type and the same subsequent verdict on
-every supported CPython version, and never aborts construction with an
-errno-less RuntimeError on any version.
+helper, to both preserve-final parent-segment helpers, and to the
+safe-directory final-component guard's parent-segment resolution, so that a
+symlink loop in WORKSPACE_ROOT's or NHMS_SCHEDULER_LOCK_ROOT's final segment,
+or in any configured path's parent segment, produces the same exception type
+and the same subsequent verdict on CPython 3.11/3.12 as on 3.13+, and never
+aborts construction with an errno-less RuntimeError in those geometries. The
+safe-directory guard's own final-segment resolve (a loop as the evidence
+directory's final segment inside the workspace) remains version-divergent and
+is tracked separately as issue #1544 — it is outside this requirement.
 
-#### Scenario: containment-base final-segment loop converges to the structured containment refusal
+#### Scenario: WORKSPACE_ROOT final-segment loop converges to the structured safe-directory refusal
 
-WHEN WORKSPACE_ROOT or NHMS_SCHEDULER_LOCK_ROOT is a symlink loop's final segment
+WHEN WORKSPACE_ROOT is a symlink loop's final segment
+THEN configuration construction raises the existing structured safe-directory
+ValueError ("production scheduler evidence_dir must be a safe directory")
+identically on CPython 3.11/3.12 and 3.13+
+
+#### Scenario: NHMS_SCHEDULER_LOCK_ROOT final-segment loop converges to the structured containment refusal
+
+WHEN NHMS_SCHEDULER_LOCK_ROOT is a symlink loop's final segment
 THEN configuration construction raises the existing structured containment
-ValueError (carrying a field name) identically on CPython 3.11/3.12 and 3.13+
+ValueError (carrying the field name) identically on CPython 3.11/3.12 and
+3.13+
 
 #### Scenario: parent-segment loop no longer aborts construction on 3.11/3.12
 

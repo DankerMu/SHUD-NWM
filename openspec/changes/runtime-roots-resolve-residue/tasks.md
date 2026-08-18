@@ -29,7 +29,13 @@
       本地 3.14 上同用例改动前后的行为差异如实记录（3.13+ 无崩溃臂，判别力声明写进 PR body）
       —— 3.11 改动前 5 failed / 4 passed（全部 errno-less RuntimeError @ pathlib.py:990）；
       3.14 改动前后均 9 passed（无判别力，作跨版本等价锁）。
-- [x] 3.2 issue Verification 步骤 4 两段脚本在 3.11 隔离环境修复后不再抛 RuntimeError（矩阵重测记录）
+- [x] 3.2 issue Verification 步骤 4 两段脚本在 3.11 隔离环境修复后不再抛 RuntimeError
+      —— 两张 post-fix 矩阵（证据 1 末段环 / 证据 2 父段环，3.11.14 vs 3.14.2 各 8 字段）
+      内联于 PR #1541 body「AC6 证据矩阵」节，16 行双臂逐行一致。
 - [x] 3.3 uv run pytest -q tests/test_production_scheduler.py —— 1504 passed（3.14 与 3.11 双臂）
 - [x] 3.4 uv run ruff check services tests —— All checks passed
 - [x] 3.5 openspec validate runtime-roots-resolve-residue --strict --no-interactive —— valid
+- [ ] 3.6 merge 后 node-27（3.11.15）oracle receipt：`uv run pytest -q
+      tests/test_production_scheduler.py -k "resolve_residue"` 应 9 passed，
+      receipt 记入 issue #1520（沿 #1423 tasks 3.5 先例；CI 3.11 + node-27 3.11.15
+      共同构成 ≤3.12 崩溃臂的回归护栏）

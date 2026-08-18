@@ -725,9 +725,12 @@ def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) 
 
 
 def _require_safe_directory_final_component(path: Path, workspace_root: Path, field_name: str) -> None:
-    # Same parent-segment paradigm as _confined_path: a loop above the final
-    # component must reach the lstat() verdict below on every CPython instead of
-    # aborting here on <=3.12 (#1520).
+    # Parent-segment arm only, same paradigm as _confined_path: a loop ABOVE the
+    # final component must reach the lstat() verdict below on every CPython
+    # instead of aborting here on <=3.12 (#1520).  The final component is not
+    # covered -- the bare path.resolve() in the symlink branch further down
+    # still splits the versions on a loop there (errno-less RuntimeError on
+    # <=3.12, silently accepted on 3.13+) and is tracked by #1544.
     _scheduler._require_under_workspace(_canonical_parent(path), workspace_root, field_name)
     try:
         path_stat = path.lstat()
