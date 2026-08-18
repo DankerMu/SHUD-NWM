@@ -25,7 +25,7 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 ## Risk packs considered（core）
 
 - Public API / CLI / script entry: not selected — 无 API/CLI 面。
-- Config / project setup: not selected — 不加配置项（N=2 常量，YAGNI）。
+- Config / project setup: not selected — 不加配置项（threshold=1 带戳常量，YAGNI）。
 - File IO / path safety / overwrite: not selected — 新 accessor 只读既有 journal 文件，无写入面。
 - Schema / columns / units / field names: selected — evidence 新字段（breaker block、not_selected reason）与 decision/reason 字面是下游按键消费的契约，测试钉字面。
 - Auth / permissions / secrets: not selected — 无。
@@ -45,7 +45,7 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 ## Implementation tasks
 
 - [x] 1.1 journal accessor：`completed_pipeline_init_state_id_occurrences(source_id, cycle_time, model_id, init_state_id) -> int`（只读、never-raises→0、复用 `_cycle_rows.pipeline_jobs`；**只数 terminal-success cohort master 行**，per-model terminal 复制行不计，口径见 design D3；含 docstring 契约）
-- [x] 1.2 breaker 判定 helper（`scheduler_generation.py` §8.7 区段或 `scheduler_candidates.py` 内部，纯函数 + accessor 注入；`N=2` 常量）
+- [x] 1.2 breaker 判定 helper（`scheduler_generation.py` §8.7 区段或 `scheduler_candidates.py` 内部，纯函数 + accessor 注入；常量语义后由 7.3 修订为"带戳计数 ≥1"）
 - [x] 2.1 候选侧：`_journal_predecessor_identity_quarantine` identity 来源切换为 accessor（D1：getattr 约定、无 accessor→弃判、alias 收敛）
 - [x] 2.2 候选侧：positive mismatch 且 breaker engaged → `blocked` decision（typed decision/reason、recorded/expected token、occurrences、`retry_policy.manual_retry_required`、经 `_evidence_safe`）
 - [x] 3.1 白名单：`retry_journal_predecessor_identity_mismatch` 加入 `_FORCE_TERMINAL_RESUBMIT_DECISIONS` 与 `force_replacement_decisions` 两处
@@ -62,6 +62,12 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 - [x] 7.3 Class B（读侧）：accessor 改为只计带 provenance 且 model 匹配的 terminal-success master；breaker 判定阈值改"带戳计数 ≥1"；discovery per-model engaged 判定同口径
 - [x] 7.4 Class D：runbook 该节修正——处置 step 4 改 fail-stop 真相 + out-of-band 新提交身份说明（manual_retry marker 对 completed 行无效及原因：`scheduler_state_decision.py:220-269` 评估顺序）；两步核对 step 1 加"不在 blocked_candidates[] → 读 backfill not_selected 条目"第三分支
 - [x] 7.5 E 行更新后的红绿证据（E2 下游拒绝腿、E3 provenance 三腿、E4 partial-engagement 腿、E7 路由腿、E8 provenance 计数）
+
+### R2 修复任务（Round 2 verdict：6 CONFIRMED / 0 REFUTED；写侧覆盖 major + doc-drift 类重复）
+
+- [ ] 8.1 写侧 E11 腿（Class E，R2 唯一代码面缺口）：照 #1183 同形先例（`test_warm_start_chaining.py:2740`）加 reservation 端到端测试——一个 basin 带 `state_evidence.decision = "retry_journal_predecessor_identity_mismatch"`、其余 basin 不带，跑真实 `orchestrate_cycle` → 重开 journal 断言 master 行 `journal_predecessor_quarantine_rerun_model_ids == [该 model]` 且其余 model 不入列；外加分歧值 re-upsert → `file_journal_evidence_invariant_invalid` 腿；再把同一 journal 喂 `completed_pipeline_init_state_id_occurrences` 完成 write→read 往返（verifier 已实证该形状 passes HEAD / kills 两个存活变异）
+- [ ] 8.2 doc-drift 全面扫除（invariant-closure 式，不只修点名行）：`scheduler_discovery.py:579-581` 注释、runbook :376-379 判别句（删句——threshold=1 下 unavailable ≡ 0，区分 vacuous）；全库 grep 旧 "N=2 / 两条 master / two submissions" 口径残留一并对齐（fixture 文本由 orchestrator 已修）
+- [ ] 8.3 （可选加固，R2 test-evidence Note 2）写→读往返腿里补一条 `_master_row_records_init_state_id` model 匹配断言（戳含 model 但 identity map 用另一 model 的 token → 计 0）
 
 ## Required evidence（每行 = 测试或命令；输入 → 期望）
 

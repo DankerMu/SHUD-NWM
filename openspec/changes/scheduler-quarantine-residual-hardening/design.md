@@ -26,7 +26,7 @@ Wiring A（候选侧 quarantine）不再读 `raw_candidate_state["hydro_run"]`�
 
 orchestrator 侧不掌握 scheduler cadence；全局改 exact 选取会碰非 quarantine 热路径。quarantine retry evidence（`journal_predecessor_identity`）已随 basin `state_evidence` 到达 orchestrator（`scheduler_candidates.py:2085-2098` → `scheduler_candidate_manifest.py:228-230` → `chain_forecast_cycle.py:239` 处 basin 可见），其中 `required_lead_hours` 足以推出 expected lineage：`cycle_id = cycle_id_for(source_id, cycle_time - required_lead_hours)`、`lead_hours = required_lead_hours`。仅当 basin 携带该 evidence 且 env=false 且 `before_time == cycle_time`（exact 分支）时先做**带 lineage 的查找**；命中 → 选中 expected-lineage entry，一次重跑收敛（验收 1）。
 
-**lineage miss（含"entry 存在但 `usable_flag=false`"——usability 门在 provider 调用之后，`chain_forecast_state.py:662-666`）时回退到不带 lineage 的今日查找（偏好语义），不是硬过滤**：miss 判定 = 带 lineage 的查找**未产出 usable snapshot**。db-free file 模式下 `get_latest_usable_state` 无条件 raise（`state_manager.py:1116-1118`），`_exact_or_latest_usable_state` 捕获后返回 None → `cold_start_no_state`（`chain_forecast_state.py:196-199`）——若把 lineage 当过滤，expected entry 缺失的重跑会变成**归零 cold start**（#1164 缺陷类，物理上远差于 wrong-lineage warm start，且是否能过 §8 gate 亦未决）。因此 miss 时重跑保持今日的 wrong-lineage 选取（逐字节同前），该不收敛类由 D3 breaker 在 N=2 处 fail-stop——这正是"收敛层 + 兜底层"的分工。首轮（无 evidence）行为不变。
+**lineage miss（含"entry 存在但 `usable_flag=false`"——usability 门在 provider 调用之后，`chain_forecast_state.py:662-666`）时回退到不带 lineage 的今日查找（偏好语义），不是硬过滤**：miss 判定 = 带 lineage 的查找**未产出 usable snapshot**。db-free file 模式下 `get_latest_usable_state` 无条件 raise（`state_manager.py:1116-1118`），`_exact_or_latest_usable_state` 捕获后返回 None → `cold_start_no_state`（`chain_forecast_state.py:196-199`）——若把 lineage 当过滤，expected entry 缺失的重跑会变成**归零 cold start**（#1164 缺陷类，物理上远差于 wrong-lineage warm start，且是否能过 §8 gate 亦未决）。因此 miss 时重跑保持今日的 wrong-lineage 选取（逐字节同前），该不收敛类由 D3 breaker（provenance 语义：1 条带戳失败收敛 rerun 即 fail-stop）接管——这正是"收敛层 + 兜底层"的分工。首轮（无 evidence）行为不变。
 
 **（R1 修订，Class A CONFIRMED）偏好还必须覆盖"preferred snapshot usable 但被 caller 循环下游拒绝"**：`_validate_state_lineage`（package version/checksum/max-lead）或 QC 钩子拒绝后，caller 把 cursor 推过 T（`chain_forecast_state.py:246-248`），exact 分支从此不可达 → cold start（verifier 双腿复现；legacy 无 package 记录的 fallback entry 因 `_validate_state_lineage` 的 None-skip 系统性比全填充 preferred entry 更宽松，普通 registry 升级即触发）。修复 = **one-shot 偏好重置**：当被拒绝的 state 来自 lineage-preferred 查找时，禁用偏好、cursor 保持 cycle_time，下一迭代做今日不带 lineage 的 exact 查找（重置仅一次，防循环）；此后行为逐字节同前。
 
@@ -54,6 +54,8 @@ accessor 相应过滤：只数"terminal-success master 且 token 匹配 且 mode
 
 （R1 措辞钉）`0,12` 下 discovery 侧新代码**会执行但结果 provably 相同**（accessor 存在性门恒真，对最老 available gap 多一次 `_cycle_completion_verdict` 重评分，`_cycle_rows` memo 吸收读放大）——"逐字节不变"指行为/决策/evidence 语义，不指指令路径。
 
+（R2 措辞钉，写侧）`0,12` 下每条新写入的 cohort master 行**持久携带新键** `journal_predecessor_quarantine_rerun_model_ids: []`（reservation 无条件写；additive——不在 immutable 表、不进 cohort digest、旧行 normalize 为 `[]` 与新行相等，无消费者破坏；rollback 到 pre-#1157 代码读新行未穷尽验证，风险方向为忽略未知键）。"行为逐字节不变"不含此持久键新增。
+
 - 拒绝"breaker 时 `_journal_predecessor_identity_is_stale` 返回 False（cycle 转 complete）"：那是 ADMIT，违反 §8.7 不变量，且 token 证据无处落地（cycle complete 后不再产出任何 evidence）。
 - 候选侧 blocked demotion（`_strict_warm_start_terminal_mismatch_decision` :2135-2167 先例形状）覆盖非 backfill 入口（当前 cycle 路径）的同一回路；blocked decision 字符串刻意不进两处白名单（先例同款防复活语义）。
 
@@ -63,7 +65,7 @@ accessor 相应过滤：只数"terminal-success master 且 token 匹配 且 mode
 
 ### 常量
 
-- `N=2` 硬编码为模块常量（如 `_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 2`），不加配置项（YAGNI）。
+- 阈值硬编码为模块常量 `_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 1`（R1 provenance 语义：只数带戳 rerun master，1 条即"原始缺陷 + 1 次失败收敛"；**勿改回 2 或恢复数无戳 master**——那会重新引入 Class B 预充值缺陷），不加配置项（YAGNI）。
 - breaker blocked decision/reason 命名建议：decision `blocked_journal_predecessor_identity_quarantine`、reason `journal_predecessor_identity_quarantine_breaker_engaged`（与 `blocked_strict_warm_start_init_state_mismatch` 先例命名法一致；最终字面以实现为准并测试钉住）。
 
 ## Invariant Matrix

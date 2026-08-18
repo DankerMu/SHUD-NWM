@@ -176,11 +176,14 @@ A forecast cohort reservation whose basin carries the `retry_journal_predecessor
 
 #### Scenario: One submission's master and terminal rows count as one
 
-- **WHEN** a single completed forecast submission has written the stale
-  token onto its cohort master row and reconcile has copied the identity
-  onto the model's per-model terminal row
-- **THEN** the occurrence count for that token is exactly 1 and the
-  quarantine decision remains the retry, not the blocked demotion
+- **WHEN** a single completed provenance-stamped quarantine rerun has
+  written the stale token onto its cohort master row and reconcile has
+  copied the identity onto the model's per-model terminal row
+- **THEN** the provenance-stamped occurrence count for that token is
+  exactly 1 — the reconcile copy is never double-counted — and, that count
+  witnessing one failed convergence attempt, the breaker engages; the same
+  two rows without the provenance stamp count 0 and leave the quarantine
+  retry unchanged
 
 #### Scenario: Mixed cycle with a genuinely incomplete model keeps the slot
 
