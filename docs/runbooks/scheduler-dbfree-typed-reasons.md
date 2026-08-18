@@ -90,8 +90,8 @@ backfill 才能闭合缺口：
 |  | 探测 `ready=true` | 探测 `ready=false` |
 |---|---|---|
 | 几何 | `valid_time == T − lead_hours` 上有当代、`usable_flag=true`、lineage 相符、对象在位且 checksum 正确的 checkpoint——那正是被发出的 predecessor cycle 自己的 warm-start 入参，它跑完就会产出 T 需要的那一格 | 缺口 ≥2 格（最新可用 state 早于 T − lead_hours，此时 `history_exists` 仍是 `true`）、完全没有严格早于 T 的可用 checkpoint（`history_exists=false`）、该格上坐着**旧 generation** 条目、或条目在但 state 对象丢失/读不出/checksum 不符 |
-| §8.6 backfill 结局 | 发出的 predecessor 自己的 warm start 已就绪，被它自己那道 §8 门放行并进入本 pass 的 `candidates[]`（`status=emitted`；真实门端到端已钉在 `tests/test_scheduler_backfill_predecessor.py::test_emitted_predecessor_admitted_when_self_heal_expected`），跑完落地后缺口闭合 | 发出的 predecessor 自身再次被 gate 拦下（typed reason 视失败面而定：缺口几何下是**同一个** reason，错代/对象丢失下是 `state_snapshot_index_*` 的对应 reason），逐级后退永不落地 |
-| 是否自愈 | 是——等 predecessor cycle 跑完即可，**前提是 §8.6 本 pass 真的把 predecessor 发出去了**（发射记录校验见表下） | 否——不做人工干预会永远 defer |
+| §8.6 backfill 结局 | 发出的 predecessor 自己的 warm start 已就绪，被它自己那道 §8 门放行并进入本 pass 的 `candidates[]`（`status=emitted`；真实门端到端已钉在 `tests/test_scheduler_backfill_predecessor.py::test_emitted_predecessor_admitted_when_self_heal_expected`），跑完落地后缺口闭合 | 发出的 predecessor 自身**通常**再次被 gate 拦下（typed reason 视失败面而定：缺口几何下是**同一个** reason，错代/对象丢失下是 `state_snapshot_index_*` 的对应 reason），逐级后退不落地；**例外见表下"declared-cutover 边界"**——该边界上 predecessor 反而被放行 |
+| 是否自愈 | 是——等 predecessor cycle 跑完即可，**前提是 §8.6 本 pass 真的把 predecessor 发出去了**（发射记录校验见表下） | 否——不做人工干预会永远 defer；**唯一例外**是 declared-cutover 边界（见表下），那里 predecessor 本 pass 已被发出，等它落地即可 |
 | evidence 信号 | `self_heal_expected=true`、`operator_action_required=false`、`self_heal_probe={"ready": true, "reason": null}`；不带 `operator_action` / `runbook` | `self_heal_expected=false`、`operator_action_required=true`、`operator_action="backfill_predecessor_state"`、`runbook` 指向本文、`self_heal_probe.reason` 给出被判死的具体原因 |
 
 分诊的第一跳是 `operator_action_required`，不必再自己解析 `state_history`；
@@ -100,6 +100,21 @@ backfill 才能闭合缺口：
 `self_heal_probe.reason` 只作解释用，不参与判定。任何验证短缺（条目缺失、
 错代、对象丢失、evidence 畸形）一律取 `false`，即倒向"需要人工介入"，
 绝不倒向"会自愈"。
+
+**declared-cutover 边界：`operator_action_required=true` 的已知假阳性（安全方向）**。
+当 `required_prior_cycle_time == declaration.effective_cycle_utc`——即 T 是
+cutover 之后的第一个 successor，被发出的 predecessor 正好坐在声明的生效
+cycle 上——probe 仍然读 `ready=false`（那一格上确实没有当代 checkpoint，也不
+该有：cutover 那一 cycle 本来就是冷启的），于是 successor 的
+`operator_action_required` 为 `true`；但该 predecessor 自己那道 §8 门走的是
+transition matrix 的 `cold_declared_cutover` 分支，**被放行**（其
+`state_evidence.predecessor_backfill_gate.mode = db_free_cold_declared_cutover`，
+successor 的发射记录为 `status=emitted`，且它进了本 pass 的 `candidates[]`）。
+这是设计上的保守取值——signal 只探 warm-start 那一格，不复算 transition
+matrix，倒向"需要人工介入"而不是"会自愈"。**运维影响**：这时按布尔手工调度
+`required_prior_cycle_id` 会重复触发同一个本 pass 已经发出去的 cycle。因此下面
+的两步分诊对 `true` 分支同样必须做完（真实门端到端已钉在
+`tests/test_scheduler_backfill_predecessor.py::test_cutover_boundary_predecessor_admitted_despite_operator_action_flag`）。
 
 **但只有这个布尔不足以停手**：它只回答"state 那一格齐不齐"，不回答"§8.6
 本 pass 到底有没有把 predecessor 发出去"——两者互相独立（raw manifest 未就
@@ -179,7 +194,10 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
   （注意两者由不同 formatter 序列化，写法可能是 `+00:00` 与 `Z` 之别，
   **按时间戳比对，不要按字符串比对**）。
 - successor 那条记录的 `operator_action_required` 连续多个 pass 恒为 `true`，
-  且 `self_heal_probe.reason` 不变——这是"再退一级也没用"的直接证据。
+  且 `self_heal_probe.reason` 不变——**并且**同 pass 的发射记录是
+  `status=blocked`：两者同时成立才是"再退一级也没用"的证据。发射记录为
+  `status=emitted` 时不是 stall（典型是上面的 declared-cutover 边界，
+  predecessor 已被放行、正在跑）。
   **不要**去读被发出的 predecessor 那条记录来判断链是否收敛：那组字段是单级
   语义（见上节），缺口 ≥2 格时它可能显示 `self_heal_expected=true`。
 - successor 的 `state_history.latest_usable_state.valid_time` 在多个 pass
@@ -212,7 +230,11 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
 
 1. **确认群体**（两步，缺一不可）。取**被发现的 successor** 候选的
    `state_evidence`：
-   - 一、读 `operator_action_required`。为 `true` 直接进第 2 步；为 `false`
+   - 一、读 `operator_action_required`。为 `true` **也不能直接动手**：先做
+     第二步核对发射记录——`status=emitted` 说明 §8.6 本 pass 已经把 predecessor
+     发出去且它被自己那道门放行了（典型是 declared-cutover 边界上的假阳性），
+     此时**不要**手工调度它，等它跑完落地即可；只有 `status=blocked`（或非
+     transient 的 skip）才继续进第 2 步定位缺格。为 `false`
      说明 gate 已用 predecessor 自己那道门的全量验证探测过
      （`self_heal_probe.ready=true`），被发出的 predecessor 的 warm start 已
      就绪——但先别停手。
@@ -258,7 +280,10 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
 4. **补齐 predecessor state**。让 `required_prior_cycle_id` 那个 cycle 真
    正跑一次并把产出的 state checkpoint 发布进 state snapshot index
    （正常途径是调度该 cycle 的完整 chain，而不是手写 index 条目）。这是
-   `operator_action="backfill_predecessor_state"` 指的动作。
+   `operator_action="backfill_predecessor_state"` 指的动作。**手工调度前再确认
+   一次**：`predecessor_backfill.summary.records[]` 里没有该 predecessor 的
+   `status=emitted` 记录（有就说明本 pass 已经调度过同一个 cycle，重复触发是
+   多余的）。
 5. **不要**用降低约束的方式"解决"它：
    - `NHMS_REQUIRE_FORECAST_WARM_START=false` **不会**放行——§8 gate 独立
      于该 env，env 只能弱化 warm-start 提示，不能承认缺失的 predecessor。

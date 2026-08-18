@@ -1152,3 +1152,191 @@ def test_emitted_predecessor_admitted_when_self_heal_expected(
     assert [
         entry for entry in blocked if entry.cycle_time_utc == predecessor_cycle_time
     ] == []
+
+
+def test_cutover_boundary_predecessor_admitted_despite_operator_action_flag(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    """#1152 phase-7: the CONSERVATIVE false positive at the declared-cutover
+    boundary, pinned end-to-end.
+
+    Geometry (same real-gate wiring as the two tests above; only the state
+    index and ``effective_cycle_utc`` move): the state index holds ONLY an
+    old-generation entry at 2026-05-20T12Z, and the declaration's
+    ``effective_cycle_utc`` is 2026-05-21T00Z — i.e. exactly
+    ``T − required_lead_hours`` for the 12Z successor, so the §8.6-emitted
+    predecessor sits ON the cutover boundary.
+
+    Consequence: the successor's self-heal probe (an exact warm-start lookup at
+    00Z with the candidate checksum) finds nothing and therefore reports
+    ``operator_action_required=True`` — but the emitted predecessor is NOT
+    blocked: its own §8 transition lands on ``COLD_DECLARED_CUTOVER`` and it is
+    ADMITTED (``mode="db_free_cold_declared_cutover"``,
+    ``status="emitted"``).  The boolean is a false positive in the SAFE
+    direction, and the runbook's two-step triage (boolean, then the emission
+    record) is what resolves it — an operator who stops at the boolean would
+    manually schedule a cycle this same pass already dispatched.
+    """
+    import json
+    from pathlib import Path
+
+    from services.orchestrator import scheduler_generation as generation
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+        _write_missing_forcing_repair_raw_manifest,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, Path(tmp_path) / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    predecessor_cycle_time = _pdt("2026-05-21T00:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = fixture["package_checksum"]
+    if len(candidate_checksum) != 64 or any(
+        ch not in "0123456789abcdef" for ch in candidate_checksum
+    ):
+        candidate_checksum = "b" * 64
+    # Old-generation-only history, strictly earlier than the predecessor slot:
+    # nothing current-generation exists anywhere in the index.
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum="a" * 64,
+                state_id="state_old_gen_pre_cutover_history",
+                valid_time="2026-05-20T12:00:00Z",
+                cycle_id="gfs_2026052000",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = Path(tmp_path) / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        # == T − required_lead_hours: the emitted predecessor
+                        # sits exactly ON the declared cutover boundary.
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(generation.CUTOVER_DECLARATION_ENV, str(declaration_path))
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=predecessor_cycle_time
+    )
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=cycle_time
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    # The successor blocks with the typed reason and reads operator-action.
+    successor_blocked = [
+        entry for entry in blocked if entry.cycle_time_utc == cycle_time
+    ]
+    assert len(successor_blocked) == 1
+    successor_evidence = successor_blocked[0].state_evidence
+    assert (
+        successor_blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert successor_evidence["operator_action_required"] is True
+    assert successor_evidence["self_heal_expected"] is False
+    assert successor_evidence["self_heal_probe"]["ready"] is False
+    assert (
+        successor_evidence["self_heal_probe"]["reason"]
+        == "state_snapshot_index_exact_checkpoint_missing"
+    )
+
+    # ...yet the emitted predecessor is ADMITTED via the declared cutover.
+    admitted = [
+        entry for entry in candidates if entry.cycle_time_utc == predecessor_cycle_time
+    ]
+    assert len(admitted) == 1, [entry.cycle_time_utc for entry in candidates]
+    assert [
+        entry for entry in blocked if entry.cycle_time_utc == predecessor_cycle_time
+    ] == []
+    predecessor_gate = dict(
+        admitted[0].state_evidence.get("predecessor_backfill_gate") or {}
+    )
+    assert predecessor_gate["mode"] == "db_free_cold_declared_cutover", predecessor_gate
+    assert predecessor_gate["ready"] is True
+
+    # The emission record says ``emitted`` — the second triage step that keeps
+    # an operator from manually scheduling a cycle this pass already dispatched.
+    summary = successor_evidence.get("predecessor_backfill", {}).get("summary", {})
+    records = summary.get("records") or []
+    assert len(records) == 1, records
+    assert records[0]["status"] == "emitted", records
+    assert (
+        records[0]["predecessor_cycle_time"] == predecessor_cycle_time.isoformat()
+    ), records

@@ -17,6 +17,25 @@ criteria documented in the runbook (field absence is not a self-heal guarantee).
 `operator_action_required` SHALL survive the bounded-evidence summarization
 tier (retained in `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`) so the runbook's
 single-boolean triage remains executable on summarized passes.
+The signal is CONSERVATIVE at the declared-cutover boundary: when the
+predecessor slot coincides with a declaration's effective cycle
+(`T == effective_cycle + lead_hours`), the emitted predecessor is admitted by
+the transition matrix via `cold_declared_cutover` while the warm-start probe
+still reads not-ready — `operator_action_required=True` is then a false
+positive in the safe direction; operator triage SHALL confirm the emission
+record (`records[].status == "emitted"`) before manually scheduling the
+predecessor cycle.
+
+#### Scenario: declared-cutover boundary reads operator-action but the predecessor is already admitted
+
+- **GIVEN** an in-window declaration with `effective_cycle_utc == T − required_lead_hours`,
+  old-generation-only history, and `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true`
+- **WHEN** the successor at `T` blocks with the typed reason and
+  `emit_predecessor_candidates` runs against the real §8 gate
+- **THEN** the successor's evidence carries `operator_action_required=True`
+  (conservative false positive) while the emission record carries
+  `status="emitted"` — the two-step triage (boolean, then emission record)
+  resolves it without manual scheduling
 
 #### Scenario: no-earlier-history geometry flags operator action
 
