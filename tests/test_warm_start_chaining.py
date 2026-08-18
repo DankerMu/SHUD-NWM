@@ -2379,12 +2379,18 @@ def _quarantine_state_index_orchestrator(
     tmp_path: Path,
     *,
     entries: list[tuple[int, bool]],
+    drifted_package_lead_hours: int | None = None,
 ) -> ForecastOrchestrator:
     """Orchestrator over a REAL file state index holding one entry per lineage.
 
     ``entries`` is ``(lead_hours, usable_flag)`` per index row, all at valid
     time T.  The real repository is what makes the ``min(state_id)`` tie-break
     (and the absent earlier-valid-time fallback) genuine rather than mocked.
+
+    ``drifted_package_lead_hours`` records that entry under a DIFFERENT model
+    package version, which is what a registry upgrade leaves behind: the entry
+    is perfectly usable at the provider, and ``_validate_state_lineage`` in the
+    caller's loop then rejects it.
     """
     from packages.common.state_manager import (
         FileStateSnapshotIndexRepository,
@@ -2422,7 +2428,11 @@ def _quarantine_state_index_orchestrator(
                 source_id="gfs",
                 cycle_id=cycle_id_for("gfs", producer_cycle_time),
                 lead_hours=lead_hours,
-                model_package_version=_QUARANTINE_PACKAGE_URI,
+                model_package_version=(
+                    f"{_QUARANTINE_PACKAGE_URI}v-previous/"
+                    if lead_hours == drifted_package_lead_hours
+                    else _QUARANTINE_PACKAGE_URI
+                ),
             )
         )
 
@@ -2473,17 +2483,25 @@ def _quarantine_basin(*, quarantined: bool) -> dict[str, Any]:
     return basin
 
 
-def _quarantine_selected_state_id(
+def _quarantine_selected_basin(
     orchestrator: ForecastOrchestrator,
     *,
     quarantined: bool,
-) -> str | None:
+) -> dict[str, Any]:
     cycle_time = _dt(_QUARANTINE_CYCLE_TIME)
     basins = orchestrator._normalize_cycle_basins(
         [_quarantine_basin(quarantined=quarantined)], "gfs", cycle_time
     )
     orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
-    return basins[0].get("init_state_id")
+    return basins[0]
+
+
+def _quarantine_selected_state_id(
+    orchestrator: ForecastOrchestrator,
+    *,
+    quarantined: bool,
+) -> str | None:
+    return _quarantine_selected_basin(orchestrator, quarantined=quarantined).get("init_state_id")
 
 
 def test_quarantine_rerun_converges_on_the_expected_lineage_entry(tmp_path: Path) -> None:
@@ -2563,6 +2581,40 @@ def test_quarantine_rerun_falls_back_instead_of_cold_starting(
     assert selected_state_id == _quarantine_state_id(lead_hours=12)
     # Same answer as a non-quarantine basin: the fallback is byte-identical.
     assert selected_state_id == _quarantine_selected_state_id(orchestrator, quarantined=False)
+
+
+def test_quarantine_rerun_resets_the_preference_when_the_preferred_entry_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """E2 (R1 / Class A): a usable preferred entry rejected DOWNSTREAM must not cold-start.
+
+    The provider's usability gate is not the last word — the caller's loop
+    still runs ``_validate_state_lineage`` and the QC hook, and on rejection it
+    advances the cursor past T, which makes the exact branch unreachable for
+    the rest of the loop.  With no earlier-valid-time fallback in the file
+    index that is a zeroed cold start, i.e. the preference silently behaving as
+    a hard filter.  Here a registry upgrade left the expected-lineage entry on
+    the previous package version — an ordinary event, not a corner case.
+
+    The one-shot reset must therefore land on exactly what a non-quarantine
+    basin selects from the same index.
+    """
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+        drifted_package_lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS,
+    )
+
+    quarantined = _quarantine_selected_basin(orchestrator, quarantined=True)
+    control = _quarantine_selected_basin(orchestrator, quarantined=False)
+
+    assert quarantined["init_state_id"] == _quarantine_state_id(lead_hours=12)
+    assert quarantined["init_state_id"] == control["init_state_id"]
+    assert quarantined["init_state_quality"] == control["init_state_quality"]
+    assert quarantined["init_state_quality"] != "cold_start_no_state"
+    # The reset is one-shot, so it cannot loop: the rejected preferred entry is
+    # never re-offered and the selection terminates on the fallback.
+    assert quarantined.get("init_state_rejection_code") is None
 
 
 def _released_identity_blocked_master(

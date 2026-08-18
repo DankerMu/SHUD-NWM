@@ -1464,12 +1464,17 @@ def journal_init_state_lineage_matches_expected(
     return None
 
 
-#: How many DISTINCT completed forecast submissions must have recorded the SAME
-#: stale token before the §8.7 quarantine stops retrying it (#1157).  Two is the
-#: smallest count that proves the rerun re-selected the same wrong lineage: the
-#: first recording is the original defect, the second is the failed convergence.
-#: Deliberately a constant, not a configuration knob (YAGNI).
-_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 2
+#: How many FAILED quarantine-convergence attempts must the journal prove
+#: before the §8.7 quarantine stops retrying (#1157).  One is enough because
+#: the counted rows are provenance-stamped quarantine RERUNS: the original
+#: defect run needs no counting (the caller's own positive mismatch witnesses
+#: it), so a single stamped rerun that came back with the same stale token IS
+#: the failed convergence.  Counting bare same-token masters instead would let
+#: unrelated whitelisted replacements (missing run manifest, missing forecast
+#: output) pre-arm the breaker and fail-stop the FIRST quarantine judgement,
+#: before the convergence layer ever ran.  Deliberately a constant, not a
+#: configuration knob (YAGNI).
+_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 1
 
 
 def journal_identity_quarantine_occurrence_count(
@@ -1480,7 +1485,11 @@ def journal_identity_quarantine_occurrence_count(
     model_id: str,
     recorded_init_state_id: str,
 ) -> int:
-    """Read how many completed submissions already recorded this stale token.
+    """Read how many quarantine RERUNS already re-recorded this stale token.
+
+    The accessor counts only provenance-stamped quarantine reruns, so this is
+    a count of PROVEN failed convergence attempts — not of same-token masters,
+    which unrelated whitelisted replacements also mint.
 
     Accessor injection follows the repository ``getattr`` convention (cf.
     ``scheduler_discovery._journal_predecessor_identity_is_stale``), so a

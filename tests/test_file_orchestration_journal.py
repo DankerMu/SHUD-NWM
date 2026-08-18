@@ -6999,11 +6999,16 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
 
 
 # ---------------------------------------------------------------------------
-# §8.7 breaker (#1157): how many DISTINCT completed submissions recorded one
-# token.  The distinctness key is the forecast cohort MASTER row — reconcile
-# COPIES the identity onto each per-model terminal row under a different
-# ``job_id``, so counting rows instead of masters would double every
-# submission.
+# §8.7 breaker (#1157): how many PROVEN failed quarantine-convergence attempts
+# re-recorded one token.  Two filters compose:
+#   - the distinctness key is the forecast cohort MASTER row — reconcile COPIES
+#     the identity onto each per-model terminal row under a different
+#     ``job_id``, so counting rows instead of masters would double every
+#     submission;
+#   - the row must carry §8.7 quarantine-rerun provenance for THIS model.
+#     Unrelated whitelisted replacements (missing run manifest, missing
+#     forecast output) re-record the same token but carry no provenance, and
+#     must not pre-arm the breaker into fail-stopping the first quarantine.
 # ---------------------------------------------------------------------------
 
 _BREAKER_TOKEN = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
@@ -7026,10 +7031,16 @@ def _cohort_master_job(
     job_suffix: str = "",
     status: str = "succeeded",
     identities: list[dict[str, Any]] | None = None,
+    quarantine_rerun_model_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """One forecast cohort MASTER row: model-less, cycle-scoped, identity-bearing."""
+    """One forecast cohort MASTER row: model-less, cycle-scoped, identity-bearing.
+
+    ``quarantine_rerun_model_ids=None`` models a row written by something other
+    than a §8.7 quarantine rerun — including every journal written before
+    #1157, which has no such field at all.
+    """
     run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
-    return {
+    row = {
         "job_id": f"job_{run_id}_forecast{job_suffix}",
         "run_id": run_id,
         "cycle_id": cycle_id_for("gfs", cycle_time),
@@ -7042,6 +7053,9 @@ def _cohort_master_job(
         if identities is not None
         else [_breaker_identity_entry()],
     }
+    if quarantine_rerun_model_ids is not None:
+        row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
+    return row
 
 
 def _reconciled_terminal_job(
@@ -7078,15 +7092,22 @@ def _breaker_journal(
     jobs: list[dict[str, Any]],
     *,
     hydro_status: str | None = "complete",
+    model_ids: tuple[str, ...] = ("model_a",),
 ) -> FileOrchestrationJournalRepository:
     journal_root = tmp_path / "journal"
-    latest = _latest_view(cycle_time=cycle_time, hydro_status=hydro_status, jobs=jobs)
-    if hydro_status is not None:
-        latest["hydro_run"]["init_state_id"] = _BREAKER_TOKEN
-    _write_json(
-        journal_root / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json",
-        latest,
-    )
+    for model_id in model_ids:
+        latest = _latest_view(
+            cycle_time=cycle_time,
+            model_id=model_id,
+            hydro_status=hydro_status,
+            jobs=jobs,
+        )
+        if hydro_status is not None:
+            latest["hydro_run"]["init_state_id"] = _BREAKER_TOKEN
+        _write_json(
+            journal_root / "latest/gfs" / format_cycle_time(cycle_time) / f"{model_id}.json",
+            latest,
+        )
     return FileOrchestrationJournalRepository(journal_root)
 
 
@@ -7105,12 +7126,16 @@ def _breaker_occurrences(
     )
 
 
-def test_init_state_occurrences_counts_distinct_masters_per_token(tmp_path: Path) -> None:
-    """Two submissions of the same cycle+model that recorded the SAME token = 2.
+def test_init_state_occurrences_counts_only_provenance_stamped_masters(
+    tmp_path: Path,
+) -> None:
+    """R1 (#1157 Class B): only PROVEN quarantine reruns count.
 
-    The second master is the quarantine rerun that re-selected the same wrong
-    lineage — exactly the non-convergent shape the breaker exists to stop.
-    A master carrying a DIFFERENT token contributes to that token's count only.
+    Three same-token masters sit on this cycle: the original defect run (no
+    provenance), an unrelated whitelisted replacement (no provenance), and one
+    stamped quarantine rerun.  Only the stamped one is a failed convergence
+    attempt, so the count is 1 — counting all three would fail-stop a cycle
+    whose quarantine had not yet been retried even once.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = _breaker_journal(
@@ -7122,15 +7147,42 @@ def test_init_state_occurrences_counts_distinct_masters_per_token(tmp_path: Path
             _cohort_master_job(
                 cycle_time,
                 job_suffix="_retry_2",
-                identities=[_breaker_identity_entry(init_state_id=_BREAKER_OTHER_TOKEN)],
+                quarantine_rerun_model_ids=["model_a"],
             ),
         ],
     )
 
-    assert _breaker_occurrences(repository, cycle_time) == 2
-    assert _breaker_occurrences(repository, cycle_time, init_state_id=_BREAKER_OTHER_TOKEN) == 1
-    # Another model's entry on the same masters is not this candidate's lineage.
-    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+    assert _breaker_occurrences(repository, cycle_time) == 1
+    # A stamped rerun that recorded a DIFFERENT token does not count for this one.
+    assert _breaker_occurrences(repository, cycle_time, init_state_id=_BREAKER_OTHER_TOKEN) == 0
+
+
+def test_init_state_occurrences_ignores_another_models_provenance(tmp_path: Path) -> None:
+    """The stamp is per-model: a cohort rerunning model_b does not arm model_a.
+
+    A single cohort submission can carry a quarantine rerun for one member and
+    ordinary work for the others, so a bare "this cohort was a rerun" reading
+    would fail-stop innocent models of the same cycle.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(
+                cycle_time,
+                identities=[
+                    _breaker_identity_entry(),
+                    _breaker_identity_entry(model_id="model_b", array_task_id=1),
+                ],
+                quarantine_rerun_model_ids=["model_b"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 1
 
 
 def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> None:
@@ -7138,14 +7190,16 @@ def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> No
 
     ``tests/test_file_orchestration_journal.py`` already pins that reconcile
     copies each task's entry onto a per-model terminal row with its own
-    ``job_id``; counting rows would read one submission as two and fail-stop a
-    cycle on its FIRST recording.
+    ``job_id``; counting rows would read one stamped rerun as two.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     repository = _breaker_journal(
         tmp_path,
         cycle_time,
-        [_cohort_master_job(cycle_time), _reconciled_terminal_job(cycle_time)],
+        [
+            _cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+            _reconciled_terminal_job(cycle_time),
+        ],
     )
 
     assert _breaker_occurrences(repository, cycle_time) == 1
@@ -7153,7 +7207,15 @@ def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "leg",
-    ["no_journal", "blank_token", "terminal_row_only", "unsucceeded_master", "unreadable_identities"],
+    [
+        "no_journal",
+        "blank_token",
+        "terminal_row_only",
+        "unsucceeded_master",
+        "unreadable_identities",
+        "legacy_rows_without_provenance_field",
+        "unreadable_provenance",
+    ],
 )
 def test_init_state_occurrences_returns_zero_for_uncountable_shapes(
     tmp_path: Path,
@@ -7166,15 +7228,30 @@ def test_init_state_occurrences_returns_zero_for_uncountable_shapes(
         # A reconcile copy with no surviving master: not a submission record.
         jobs = [_reconciled_terminal_job(cycle_time)]
     elif leg == "unsucceeded_master":
-        jobs = [_cohort_master_job(cycle_time, status="running")]
+        jobs = [_cohort_master_job(cycle_time, status="running", quarantine_rerun_model_ids=["model_a"])]
     elif leg == "unreadable_identities":
         # Corrupt map shapes: a scalar instead of a list, and a non-mapping entry.
         jobs = [
-            _cohort_master_job(cycle_time, identities=[]),
-            _cohort_master_job(cycle_time, job_suffix="_retry_1", identities=[]),
+            _cohort_master_job(cycle_time, identities=[], quarantine_rerun_model_ids=["model_a"]),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_1",
+                identities=[],
+                quarantine_rerun_model_ids=["model_a"],
+            ),
         ]
         jobs[0]["init_state_identities"] = _BREAKER_TOKEN
         jobs[1]["init_state_identities"] = ["not-a-mapping"]
+    elif leg == "legacy_rows_without_provenance_field":
+        # Deploy safety: every journal written before #1157 looks like this.
+        # Two same-token masters used to arm the breaker; now they must not.
+        jobs = [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+        ]
+    elif leg == "unreadable_provenance":
+        jobs = [_cohort_master_job(cycle_time, quarantine_rerun_model_ids=[])]
+        jobs[0]["journal_predecessor_quarantine_rerun_model_ids"] = "model_a"
 
     repository = (
         FileOrchestrationJournalRepository(tmp_path / "journal")
@@ -7194,7 +7271,7 @@ def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
     ``candidate_state`` bounds its job list, so counting from that payload
     would silently undercount a busy cycle and never engage the breaker.  Here
     the bounded payload is provably truncated while the accessor still sees
-    both masters.
+    the stamped rerun master.
     """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     filler = [
@@ -7206,7 +7283,11 @@ def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
         cycle_time,
         [
             _cohort_master_job(cycle_time),
-            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_1",
+                quarantine_rerun_model_ids=["model_a"],
+            ),
             *filler,
         ],
     )
@@ -7216,7 +7297,7 @@ def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
     assert bounded["state_truncated"] is True
     assert len(bounded["pipeline_jobs"]) == 2
 
-    assert _breaker_occurrences(repository, cycle_time) == 2
+    assert _breaker_occurrences(repository, cycle_time) == 1
 
 
 def test_next_current_master_retry_identity_is_stable_after_helper_consolidation() -> None:

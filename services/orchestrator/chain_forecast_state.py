@@ -162,6 +162,29 @@ def _state_passes_qc(self, state: StateSnapshot) -> bool:
         return False
 
 
+def _state_matches_preferred_lineage(
+    state: StateSnapshot,
+    *,
+    lineage_cycle_id: str | None,
+    lineage_lead_hours: int | None,
+) -> bool:
+    """Whether ``state`` is the §8.7 lineage-preferred snapshot (#1157 D2 R1).
+
+    The preference is expressed to the provider as a ``cycle_id`` /
+    ``lead_hours`` filter, so a snapshot the preferred lookup produced matches
+    both by construction.  Comparing the answer instead of threading a "which
+    lookup won" flag back out keeps ``_exact_or_latest_usable_state``'s
+    signature intact, and is exact either way: a snapshot carrying the expected
+    lineage IS the preferred one, whichever call returned it.
+    """
+
+    if lineage_cycle_id in (None, "") and lineage_lead_hours is None:
+        return False
+    if lineage_cycle_id not in (None, "") and state.cycle_id != lineage_cycle_id:
+        return False
+    return lineage_lead_hours is None or state.lead_hours == lineage_lead_hours
+
+
 def _select_forecast_initial_state(
     self,
     *,
@@ -201,6 +224,7 @@ def _select_forecast_initial_state(
             lineage_cycle_id = None
             lineage_lead_hours = None
 
+    lineage_preference_spent = False
     cursor = cycle_time
     last_rejection_code: str | None = None
     # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
@@ -245,6 +269,23 @@ def _select_forecast_initial_state(
         if rejection_code is not None:
             # Record the rejection on the candidate and advance to an older one.
             last_rejection_code = rejection_code
+            if not lineage_preference_spent and _state_matches_preferred_lineage(
+                state, lineage_cycle_id=lineage_cycle_id, lineage_lead_hours=lineage_lead_hours
+            ):
+                # ONE-SHOT PREFERENCE RESET (#1157 D2 R1).  The lineage is a
+                # preference, and a preferred entry that is usable but rejected
+                # downstream (package-version drift after a registry upgrade,
+                # max-lead, QC) must not turn it into a filter.  Advancing the
+                # cursor past T here would make the exact branch unreachable
+                # for the rest of the loop, and the file index has no
+                # earlier-valid-time fallback, so the rerun would land on a
+                # zeroed cold start — strictly worse than the wrong-lineage
+                # warm start today's code picks.  Drop the preference, keep the
+                # cursor at T, and redo the unfiltered exact lookup once.
+                lineage_preference_spent = True
+                lineage_cycle_id = None
+                lineage_lead_hours = None
+                continue
             cursor = state.valid_time - timedelta(microseconds=1)
             continue
 
@@ -684,7 +725,11 @@ def _exact_or_latest_usable_state(
     not a filter: the lineage-scoped lookup runs first, and whenever it does
     not yield a USABLE snapshot — no lineage-matching entry, or one whose
     ``usable_flag`` is false — the unfiltered lookup below repeats today's
-    selection byte-identically.  Hard-filtering instead would turn a rerun
+    selection byte-identically.  (The third miss shape, a preferred snapshot
+    that is usable here but rejected by the caller's downstream lineage/QC
+    validation, is handled by ``_select_forecast_initial_state``'s one-shot
+    preference reset, which re-enters this function with no lineage at all.)
+    Hard-filtering instead would turn a rerun
     whose expected entry never existed into a zeroed cold start (the file
     state index has no earlier-valid-time fallback), which is physically far
     worse than the wrong-lineage warm start; that non-convergent shape is

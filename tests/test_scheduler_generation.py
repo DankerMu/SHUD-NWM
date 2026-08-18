@@ -3323,12 +3323,18 @@ def _cohort_master_recording(
     init_state_id: str,
     *,
     job_suffix: str = "",
+    quarantine_rerun_model_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """A terminal-success forecast cohort master that recorded ``init_state_id``."""
+    """A terminal-success forecast cohort master that recorded ``init_state_id``.
+
+    ``quarantine_rerun_model_ids=None`` omits the provenance field entirely —
+    the shape of an unrelated whitelisted replacement, and of every journal
+    written before #1157.
+    """
     from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
     run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
-    return {
+    row = {
         "job_id": f"job_{run_id}_forecast{job_suffix}",
         "run_id": run_id,
         "cycle_id": cycle_id_for("gfs", cycle_time),
@@ -3341,15 +3347,16 @@ def _cohort_master_recording(
             {"array_task_id": 0, "model_id": "model_a", "init_state_id": init_state_id}
         ],
     }
+    if quarantine_rerun_model_ids is not None:
+        row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
+    return row
 
 
-@pytest.mark.parametrize("master_count", [1, 2])
-def test_build_candidates_breaker_demotes_quarantine_at_two_recordings(
+def test_build_candidates_breaker_demotes_quarantine_after_a_stamped_rerun(
     monkeypatch: Any,
     tmp_path: Path,
-    master_count: int,
 ) -> None:
-    """E3 N-boundary: one recording still retries, two fail-stop.
+    """E3 (R1): a provenance-stamped rerun that re-recorded the token fail-stops.
 
     The demoted decision must land the candidate in ``blocked`` — not in the
     submission set — carrying both tokens, the occurrence count and a
@@ -3359,31 +3366,26 @@ def test_build_candidates_breaker_demotes_quarantine_at_two_recordings(
 
     cycle_time = _pdt("2026-05-21T12:00:00Z")
     recorded_init_state_id = _wrong_suffix_init_state_id()
-    masters = [
-        _cohort_master_recording(
-            cycle_time,
-            recorded_init_state_id,
-            job_suffix="" if index == 0 else f"_retry_{index}",
-        )
-        for index in range(master_count)
-    ]
 
     candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
         monkeypatch,
         tmp_path,
         recorded_init_state_id=recorded_init_state_id,
-        jobs=masters,
+        jobs=[
+            # The original defect run: no provenance, and none needed — the
+            # current positive mismatch is its witness.
+            _cohort_master_recording(cycle_time, recorded_init_state_id),
+            # The quarantine rerun that came back with the same stale lineage.
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                job_suffix="_retry_1",
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ],
     )
 
     assert skipped == []
-    if master_count == 1:
-        assert blocked == []
-        assert len(candidates) == 1
-        assert candidates[0].state_evidence["decision"] == (
-            "retry_journal_predecessor_identity_mismatch"
-        )
-        return
-
     assert candidates == []
     assert len(blocked) == 1
     assert blocked[0].reason == "journal_predecessor_identity_quarantine_breaker_engaged"
@@ -3395,13 +3397,69 @@ def test_build_candidates_breaker_demotes_quarantine_at_two_recordings(
     assert identity["expected_init_state_id"] == _expected_init_state_id()
     assert identity["required_lead_hours"] == 6
     assert identity["quarantined_skip_reason"] == "terminal_hydro_success"
-    assert identity["occurrences"] == 2
+    assert identity["occurrences"] == 1
     assert evidence["retry_policy"] == {
         "automatic_retry_allowed": False,
         "manual_retry_required": True,
-        "occurrences": 2,
-        "occurrence_threshold": 2,
+        "occurrences": 1,
+        "occurrence_threshold": 1,
     }
+
+
+@pytest.mark.parametrize(
+    "leg",
+    ["no_masters", "unstamped_replacements", "legacy_rows", "other_models_stamp"],
+)
+def test_build_candidates_keeps_quarantine_retry_without_stamped_rerun(
+    monkeypatch: Any,
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """E3 (R1) pre-arming pins: only a PROVEN failed rerun may fail-stop.
+
+    ``unstamped_replacements`` is the Class-B defect itself: an unrelated
+    whitelisted resubmit (missing run manifest, or a missing-forecast-output
+    recompute after a Slurm failure) mints a second same-token master.  Under
+    a bare "two masters" count that pre-armed the breaker, so the very FIRST
+    quarantine judgement fail-stopped and the convergence layer never ran.
+    ``legacy_rows`` is the same shape as every journal written before #1157.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+    if leg == "no_masters":
+        jobs: list[dict[str, Any]] = []
+    elif leg == "other_models_stamp":
+        jobs = [
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                quarantine_rerun_model_ids=["model_b"],
+            )
+        ]
+    else:
+        # Two same-token masters, neither stamped for this model.
+        jobs = [
+            _cohort_master_recording(cycle_time, recorded_init_state_id),
+            _cohort_master_recording(
+                cycle_time, recorded_init_state_id, job_suffix="_retry_1"
+            ),
+        ]
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=jobs,
+    )
+
+    assert skipped == []
+    assert blocked == []
+    assert len(candidates) == 1
+    assert candidates[0].state_evidence["decision"] == (
+        "retry_journal_predecessor_identity_mismatch"
+    )
 
 
 def test_build_candidates_keeps_quarantine_retry_without_occurrence_accessor(
@@ -3428,8 +3486,11 @@ def test_build_candidates_keeps_quarantine_retry_without_occurrence_accessor(
         tmp_path,
         recorded_init_state_id=recorded_init_state_id,
         jobs=[
-            _cohort_master_recording(cycle_time, recorded_init_state_id),
-            _cohort_master_recording(cycle_time, recorded_init_state_id, job_suffix="_retry_1"),
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                quarantine_rerun_model_ids=["model_a"],
+            )
         ],
         repository_factory=NoOccurrenceAccessorRepository,
     )
@@ -3471,8 +3532,10 @@ def test_build_candidates_quarantines_terminal_completed_cycle_skip(
         completed_pipeline_init_state_id=(
             lambda *, source_id, cycle_time, model_id: recorded_init_state_id
         ),
+        # No stamped quarantine rerun has completed yet, so the breaker is
+        # disengaged and this shape must still produce the retry.
         completed_pipeline_init_state_id_occurrences=(
-            lambda *, source_id, cycle_time, model_id, init_state_id: 1
+            lambda *, source_id, cycle_time, model_id, init_state_id: 0
         ),
     )
     context = SimpleNamespace(
@@ -3536,9 +3599,10 @@ def test_journal_identity_quarantine_breaker_helper_is_total() -> None:
     assert count(repository_returning(-3), **kwargs) == 0
     assert count(repository_returning(2), **kwargs) == 2
 
+    # R1: the counted rows are provenance-stamped reruns, so ONE proven failed
+    # convergence attempt is the fail-stop trigger.
     assert engaged(0) is False
-    assert engaged(1) is False
-    assert engaged(2) is True
+    assert engaged(1) is True
     assert engaged(7) is True
     assert engaged(None) is False
     assert engaged("two") is False

@@ -343,11 +343,17 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
 §8.7 journal predecessor identity quarantine（#1107）会把"journal 记录的
 `init_state_id` 与 T 的期望 predecessor token 同 base key、异 lineage 后缀"的
 completed-skip 降级为 `retry_journal_predecessor_identity_mismatch` 重跑。这个
-reason 表示该重跑已被证明**不收敛**：同一 cycle+model 的**同一个** stale token
-已被 **≥2 个不同的 completed forecast submission** 记录（计数口径 = journal 里
-带该 token 的 terminal-success cohort **master** 行；reconcile 复制到 per-model
-terminal 行的那份不计，所以一次 submission 的 master+terminal 算 1）。断路器随即
-接管（#1157）：
+reason 表示该重跑已被证明**不收敛**：同一 cycle+model 上**已有一次 quarantine
+重跑**回来仍记录同一个 stale token。计数口径 = journal 里 terminal-success
+cohort **master** 行中，`journal_predecessor_quarantine_rerun_model_ids`（提交
+预留时按 basin decision 落下的 provenance 戳）含本 model **且**记录了该 token
+的那些；reconcile 复制到 per-model terminal 行的那份不计，所以一次 submission
+的 master+terminal 算 1。首犯那一次不进计数——调用方自己那次 positive mismatch
+就是它的证据——所以阈值是"带戳计数 ≥1"。**不带戳的 master 一律不计**：
+`retry_terminal_run_manifest_missing` / `retry_missing_forecast_output` 这类与
+§8.7 无关的白名单重提交也会重录同一个 token，把它们计进来会在第一次 quarantine
+判定前就预充断路器、直接 fail-stop 掉本该重跑的那一轮。#1157 之前写的旧 journal
+行没有这个字段，一律计 0（断路器保持断开）。断路器随即接管（#1157）：
 
 - 候选侧 decision 从 retry 降为
   `blocked_journal_predecessor_identity_quarantine`（进 `blocked_candidates[]`），
@@ -371,6 +377,14 @@ terminal 行的那份不计，所以一次 submission 的 master+terminal 算 1�
    accessor、行不可读）时口径是 fail toward liveness——断路器保持断开、decision
    保持 retry，所以看到 retry 也可能是"数不出来"，判据以 evidence 里的
    `journal_predecessor_identity.occurrences` 是否存在为准。
+   该 cycle **整个不在** `blocked_candidates[]` 里（连 candidate 都没有）时**不是**
+   "断路器没生效"，而是 discovery 侧已经在本 pass 释放了执行槽：去
+   `predecessor_backfill` / source-cycle 选择证据里读那条
+   `selection_status=not_selected` +
+   `selection_reason=journal_predecessor_identity_quarantine_breaker_engaged` 的
+   条目，两个 token 在那里。两个面**每个 pass 互斥**：cycle 拿到槽才会构造候选
+   （于是出现在 `blocked_candidates[]`），槽被释放就不构造候选（于是只在
+   not_selected 条目里可见）。
 2. **核对两个 token 的差异面**。比 `recorded_init_state_id` 与
    `expected_init_state_id`：两者 base key（source / model / `valid_time=T`）必然
    相同，差的是 lineage 后缀（`_<predecessor_cycle_id>_f<lead>`）。后缀里
@@ -393,9 +407,23 @@ terminal 行的那份不计，所以一次 submission 的 master+terminal 算 1�
    forced-resubmit 白名单（`_FORCE_TERMINAL_RESUBMIT_DECISIONS` /
    `force_replacement_decisions`）来"放行"：那正是断路器要防的复活，会把
    fail-stop 变回无限重跑。
-4. **验证收敛**：补齐后的下一个自然 pass，该 cycle+model 的重跑应记录
-   `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete；断路器条目从
-   pass evidence 中消失。
+4. **恢复只能靠"新的提交身份"，补状态本身不会自己再入**。断路器是 fail-stop：
+   journal 里那条 completed 行既不改写也不删除，所以即使第 2 步把期望的
+   predecessor state 补齐了，下一个 pass 读到的仍是同一个 stale token、同一个
+   带戳计数——候选侧继续 blocked、discovery 侧继续释放执行槽，**不会**自动重跑。
+   要让该 cycle+model 重新进入调度，必须在 §8.7 之外产生一次**新的 forecast 提交
+   身份**（新的 run / cohort 身份，其 journal 行记录期望 token）；此后 §8.7 不再
+   判定，cycle 才可能转 complete。
+   **特别注意：给该行打 `manual_retry_marker` 是无效的**——
+   `manual_retry_requested` 要到 `scheduler_state_decision.py:269` 才被评估，而
+   terminal-success 系列 skip 在 `:220`（`terminal_hydro_success`）/
+   `:235`（`terminal_completed_cycle`）/ `:257`（`terminal_pipeline_success`）
+   就已返回，一条 completed 行永远走不到 manual retry 那一支；打了标记只会看到
+   同一个 blocked reason 原样再来一遍。
+5. **验证收敛**：新提交身份完成后的下一个自然 pass，该 cycle+model 的 journal 行
+   应记录 `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete；
+   `blocked_candidates[]` 条目与 backfill `not_selected` 条目同时从 pass evidence
+   中消失。
 
 ## 相关文档
 

@@ -35,6 +35,7 @@ from services.orchestrator.accepted_submit_identity import (
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
@@ -48,6 +49,7 @@ from services.orchestrator.accepted_submit_identity import (
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
+    normalize_quarantine_rerun_model_ids,
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
@@ -205,6 +207,11 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     # frozen check compare persisted-against-persisted — a silent drop instead
     # of the required ``file_journal_evidence_invariant_invalid``.
     INIT_STATE_IDENTITY_FIELD,
+    # Merged for the same reason (#1157): a divergent incoming provenance list
+    # must REACH the frozen check and be rejected, never silently keep the
+    # persisted one — retroactively arming the breaker is the failure this
+    # guards against.
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -636,24 +643,29 @@ class FileOrchestrationJournalRepository:
         model_id: str,
         init_state_id: str,
     ) -> int:
-        """Count completed forecast submissions that recorded ``init_state_id``.
+        """Count FAILED quarantine-convergence attempts that re-recorded ``init_state_id``.
 
-        The §8.7 quarantine breaker (#1157) asks "how many DISTINCT completed
-        submissions of this cycle+model have already recorded this exact
-        token?".  One submission writes exactly ONE forecast cohort MASTER row,
-        whose ``init_state_identities`` map is captured at reservation time and
-        never rewritten afterwards (#1183), so the master row IS the
-        distinctness key:
+        The §8.7 quarantine breaker (#1157) asks "has a quarantine rerun of
+        this cycle+model already completed and come back with the same stale
+        token?".  The original defect run needs no counting — the caller's own
+        positive mismatch witnesses it — so only reruns are counted, and only
+        those the journal can PROVE were quarantine reruns:
 
-        - only terminal-success MASTER rows are counted
+        - the row must be a terminal-success cohort MASTER row
           (``accepted_submit_row_kind`` == ``"master"``); the per-model
           terminal rows that reconcile COPIES the identity onto carry distinct
           ``job_id`` values and would double-count one submission, so they are
           excluded — a submission's master row plus its per-model terminal row
           count as 1,
-        - the token must appear on that master's map under an entry naming
-          THIS ``model_id``; a cohort master carries one entry per member and
-          another model's entry is not this candidate's lineage.
+        - its ``init_state_identities`` map must record the token under an
+          entry naming THIS ``model_id`` (a cohort master carries one entry per
+          member; another model's entry is not this candidate's lineage),
+        - and its ``journal_predecessor_quarantine_rerun_model_ids`` provenance
+          must list THIS ``model_id``.  Masters minted by unrelated
+          whitelisted replacements — ``retry_terminal_run_manifest_missing``,
+          ``retry_missing_forecast_output`` after a Slurm failure — re-record
+          the same token but carry no such provenance, and must not pre-arm
+          the breaker into fail-stopping the FIRST quarantine judgement.
 
         Read from the memoized ``_cycle_rows`` view (``pipeline_jobs`` is keyed
         by ``job_id`` and collapse-free), never from the bounded
@@ -661,10 +673,11 @@ class FileOrchestrationJournalRepository:
         truncation cannot undercount.
 
         Returns ``0`` — never raises — when the count cannot be read (no
-        journal rows, unreadable rows, empty/blank token), the same fail shape
-        as :meth:`completed_pipeline_init_state_id`.  Callers treat ``0`` as
-        "breaker disengaged" (fail toward liveness: one more rerun beats a
-        wrong fail-stop).
+        journal rows, unreadable rows, empty/blank token) and for every journal
+        written before #1157, whose rows carry no provenance field at all.
+        Callers treat ``0`` as "breaker disengaged" (fail toward liveness: one
+        more rerun beats a wrong fail-stop, and a pre-#1157 deployment simply
+        keeps today's behavior until its first stamped rerun lands).
 
         No journal mutation and no run-manifest reads: this reports what the
         JOURNAL recorded.  Scheduler wiring consumes it via
@@ -693,6 +706,10 @@ class FileOrchestrationJournalRepository:
                 ):
                     continue
                 if accepted_submit_row_kind(job) != "master":
+                    continue
+                if model_id not in normalize_quarantine_rerun_model_ids(
+                    job.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+                ):
                     continue
                 if _master_row_records_init_state_id(job, model_id=model_id, init_state_id=token):
                     occurrences += 1
@@ -5951,6 +5968,13 @@ class FileOrchestrationJournalRepository:
             # later frozen-value check would then raise on the phantom change.
             INIT_STATE_IDENTITY_FIELD: _bounded_init_state_identities(
                 record.get(INIT_STATE_IDENTITY_FIELD)
+            ),
+            # Explicit member of the closed constructor for the same reason
+            # (#1157): absent here the reservation's provenance stamp would be
+            # dropped on write and the later frozen-value check would raise on
+            # the phantom change.
+            QUARANTINE_RERUN_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
+                record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
             ),
             "restart_stage": record.get("restart_stage"),
             "submission_attempt": record.get("submission_attempt", 1),

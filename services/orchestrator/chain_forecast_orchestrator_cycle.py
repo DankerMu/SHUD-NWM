@@ -6,11 +6,13 @@ from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     INIT_STATE_IDENTITY_FIELD,
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     accepted_submit_contract_is_current,
     accepted_submit_pipeline_job_model_id,
     accepted_submit_row_kind,
     canonical_forecast_cohort_init_state_identities,
     canonical_forecast_cohort_members,
+    canonical_quarantine_rerun_model_ids,
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
@@ -599,6 +601,15 @@ class ForecastOrchestratorCycleMixin:
             init_state_identities = canonical_forecast_cohort_init_state_identities(
                 basins=context.active_basins,
             )
+            # #1157: same reservation-time capture, for the other half of the
+            # §8.7 story.  The scheduler's decision for each basin is visible
+            # only here; recording WHICH models this submission reruns under
+            # quarantine is what lets the breaker distinguish a failed
+            # convergence attempt from an unrelated whitelisted resubmit that
+            # merely re-recorded the same stale token.
+            quarantine_rerun_model_ids = canonical_quarantine_rerun_model_ids(
+                basins=context.active_basins,
+            )
             expected_user = self.config.reconcile_slurm_user
             expected_account = self.config.reconcile_slurm_account
             reservation_evidence = {
@@ -606,6 +617,7 @@ class ForecastOrchestratorCycleMixin:
                 "slurm_comment": _chain.slurm_comment_for(idempotency_key),
                 "cohort_members": list(members),
                 INIT_STATE_IDENTITY_FIELD: list(init_state_identities),
+                QUARANTINE_RERUN_PROVENANCE_FIELD: list(quarantine_rerun_model_ids),
                 "restart_stage": "forecast",
                 "submission_attempt": submission_attempt,
                 "submission_attempt_started_at": datetime.now(UTC),
