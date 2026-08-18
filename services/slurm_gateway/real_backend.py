@@ -463,7 +463,9 @@ class RealSlurmGateway(SlurmGateway):
             "--format=JobID,JobName,State,ExitCode,Start,End",
         ]
         if not start_time:
-            start_time = (self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+            # sacct reads bare timestamps in the host's local timezone.
+            lookback_start = (self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).astimezone()
+            start_time = lookback_start.strftime("%Y-%m-%dT%H:%M:%S")
         command.append(f"--starttime={start_time}")
         if end_time:
             command.append(f"--endtime={end_time}")

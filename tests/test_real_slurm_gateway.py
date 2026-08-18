@@ -3448,6 +3448,73 @@ def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):
     assert any(arg.startswith("--starttime=") for arg in calls[0])
 
 
+# sacct reads bare timestamps in the host's local timezone, so the pinned instant below
+# is rendered differently per host TZ; expectations are literal, never recomputed.
+_PINNED_LIST_JOBS_NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
+
+
+def _rendered_starttime(gateway, monkeypatch, *, pinned_now=None, **list_jobs_kwargs) -> str:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    if pinned_now is not None:
+        monkeypatch.setattr(gateway, "_now", lambda: pinned_now)
+
+    gateway.list_jobs(limit=100, offset=0, **list_jobs_kwargs)
+
+    return next(arg for arg in calls[0] if arg.startswith("--starttime="))
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_is_local_wall_clock_east_of_utc(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("Asia/Shanghai"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T12:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_is_local_wall_clock_west_of_utc(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("America/New_York"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T00:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_on_utc_host_is_unchanged(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("UTC"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T04:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_explicit_start_time_is_passed_through_unconverted(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("America/New_York"):
+        rendered = _rendered_starttime(
+            gateway,
+            monkeypatch,
+            pinned_now=_PINNED_LIST_JOBS_NOW,
+            start_time="2026-07-01T09:30:00",
+        )
+
+    assert rendered == "--starttime=2026-07-01T09:30:00"
+
+
 def test_slurm_command_failure_details_are_bounded_and_redacted(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     secret_stdout = "token=supersecret " + ("x" * 300_000)
