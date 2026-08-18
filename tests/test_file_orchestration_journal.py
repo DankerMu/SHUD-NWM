@@ -9722,3 +9722,473 @@ def test_stale_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "running"
     assert _permanently_failed_events(repository, record) == []
     assert _auto_retry_skipped_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# #1167: containment-aware existence probes over the journal tree.
+# ---------------------------------------------------------------------------
+
+
+_PROBE_CYCLE = _dt("2026-06-28T00:00:00Z")
+_PROBE_CYCLE_SEGMENT = format_cycle_time(_PROBE_CYCLE)
+_COHORT_CYCLE = _dt("2026-07-20T00:00:00Z")
+_COHORT_CYCLE_SEGMENT = format_cycle_time(_COHORT_CYCLE)
+
+
+def _symlink_over_directory(path: Path, *, stash: Path) -> None:
+    """Swap one real journal directory for a symlink to a real, empty directory.
+
+    The decoy and the displaced original both live outside the journal root so
+    the scene isolates the parent-component probe: every path component up to
+    the symlink is a real directory, and the symlink's target simply does not
+    contain the entry being probed.
+    """
+
+    stash.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.exists():
+        path.rename(stash / f"stashed-{path.name}")
+    decoy = stash / f"decoy-{path.name}"
+    decoy.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(decoy, target_is_directory=True)
+
+
+def _journal_tree_bytes(root: Path) -> dict[str, bytes]:
+    """Durable journal content only; the empty flock files are not records.
+
+    Following symlinks during the walk is load-bearing: the tampered scenes
+    replace ``journal/<source>`` with a symlink, and a write that leaked
+    through it lands in the decoy.  A non-following walk stops at the symlink
+    and reports the leaked bytes as "nothing changed".  Symlinked directories
+    are traversed, so the bytes behind them count; a symlinked FILE is dropped
+    outright and its target bytes are invisible here — no fixture plants one
+    inside ``root`` today, and a zero-write assertion in a scene that does
+    would need a different helper.
+    Precondition: the tamper fixtures keep their decoys OUTSIDE ``root``, so
+    the tree has no symlink cycle; a cycle would not hang the walk — the
+    kernel's symlink limit ends the descent and ``os.walk``'s default
+    ``onerror`` swallows it — but the snapshot would silently gain duplicated
+    keys from the repeated descent; no cycle detection is added here on
+    purpose.
+    """
+
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(
+            Path(dirpath) / name
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=True)
+            for name in filenames
+        )
+        if not path.is_symlink() and path.is_file() and ".locks" not in path.parts
+    }
+
+
+def test_probe_fails_loud_when_the_journal_source_parent_is_a_symlink(tmp_path: Path) -> None:
+    """E1 — a symlinked parent component is no longer reported as 'absent'.
+
+    ``os.stat(follow_symlinks=False)`` does not follow the FINAL component but
+    happily follows a symlinked parent, so the segment probe used to look into
+    the decoy, find no cycle file and let the read return ``[]`` — a tampered
+    or misconfigured tree downgraded to "this cycle has no records".
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+
+    repository = FileOrchestrationJournalRepository(root)
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert caught.value.reason == "file_journal_unreadable"
+
+    # The public read surfaces it the way it surfaces a corrupt journal file:
+    # a blocked row carrying the reason, not a silently empty status list.
+    blocked = FileOrchestrationJournalRepository(root).list_stage_statuses(
+        source_id="gfs",
+        cycle_time=_PROBE_CYCLE,
+    )
+    assert [row["file_journal"]["reason"] for row in blocked] == ["file_journal_unreadable"]
+
+
+def test_symlinked_journal_source_parent_fails_a_sequence_write_loud(tmp_path: Path) -> None:
+    """E2 — the sequence-floor sibling of the same probe idiom, on a write.
+
+    A silently skipped slot would underestimate the floor and let a replay
+    sequence be reused, which is unrecoverable state corruption.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+    before = _journal_tree_bytes(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=cycle_id_for("gfs", _PROBE_CYCLE),
+            event_type="cycle_note",
+            status_from=None,
+            status_to=None,
+        )
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(root) == before
+
+
+def test_symlink_occupying_a_segment_slot_fails_loud_on_read_and_on_the_floor(
+    tmp_path: Path,
+) -> None:
+    """E3 — an end symlink in a probed slot is loud on both consumers.
+
+    The read side already reached the hardened reader with this token, so only
+    the origin of the error moves.  The floor probe is the real change: it used
+    to ``lstat`` the slot, see "not a regular file" and skip it, so a tampered
+    tree silently reset the floor to 1 while a segment carrying sequence 7 sat
+    right there.
+    """
+
+    root = tmp_path / "journal"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write_jsonl(
+        outside / "planted.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_planted", sequence=7)],
+    )
+    (root / "journal" / "gfs").mkdir(parents=True)
+    (root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl").symlink_to(outside / "planted.jsonl")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as read_caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert read_caught.value.reason == "file_journal_unreadable"
+
+    with pytest.raises(FileOrchestrationJournalError) as floor_caught:
+        FileOrchestrationJournalRepository(root)._next_sequence(
+            source_id="gfs",
+            cycle_time=_PROBE_CYCLE,
+        )
+    assert floor_caught.value.reason == "file_journal_unreadable"
+
+
+def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: Path) -> None:
+    """E4 — the third copy of the idiom, the ``latest/`` directory probe.
+
+    The latest view holds the highest replay sentinel of the cycle, so a
+    symlinked ``latest/<source>`` that made the cycle directory look absent
+    dropped the floor from 10 back to 2 and handed the next write a sequence
+    the cycle had already used.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    latest_view = _latest_view(cycle_time=_PROBE_CYCLE, jobs=[_active_job(_PROBE_CYCLE)])
+    latest_view["replay"]["latest_sequence"] = 9
+    _write_json(root / "latest" / "gfs" / _PROBE_CYCLE_SEGMENT / "model_a.json", latest_view)
+    assert (
+        FileOrchestrationJournalRepository(root)._next_sequence(
+            source_id="gfs",
+            cycle_time=_PROBE_CYCLE,
+        )
+        == 10
+    )
+
+    _symlink_over_directory(root / "latest" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+    before = _journal_tree_bytes(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as floor_caught:
+        repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert floor_caught.value.reason == "file_journal_unreadable"
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=cycle_id_for("gfs", _PROBE_CYCLE),
+            event_type="cycle_note",
+            status_from=None,
+            status_to=None,
+        )
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(root) == before
+
+
+def test_genuine_absence_under_real_directories_stays_a_legal_empty_read(tmp_path: Path) -> None:
+    """E5 — the guard-rail: ``FileNotFoundError`` is absence, never a fault.
+
+    ``stat_no_follow`` raises the same ``FileNotFoundError`` for a missing
+    entry and for a missing PARENT component, so mapping either one to loud
+    would kill every cold-start read of a brand new source.
+    """
+
+    root = tmp_path / "journal"
+    (root / "journal" / "gfs").mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+    assert repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert repository.list_stage_statuses(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+
+    cold = FileOrchestrationJournalRepository(tmp_path / "never-initialized")
+    assert cold._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+    assert cold._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+
+
+def test_directory_occupying_a_segment_slot_still_reaches_the_hardened_reader(
+    tmp_path: Path,
+) -> None:
+    """E6 — a safe but non-regular occupant stays the reader's call, not the probe's."""
+
+    root = tmp_path / "journal"
+    (root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl").mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+
+    assert repository._journal_segment_exists(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl"
+    )
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert caught.value.reason == "file_journal_unreadable"
+
+
+def test_sequence_floor_probe_is_containment_aware_at_its_own_seam(tmp_path: Path) -> None:
+    """E3 sibling — the floor probe pinned directly, not through its caller.
+
+    ``_cycle_segment_paths`` pre-filters every path this probe receives today,
+    so no end-to-end lane can distinguish it from a bare ``os.stat``.  The pin
+    lives at the seam so a #1165-family change to that pre-filtering cannot
+    silently hand the probe an uncontained path.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with pytest.raises(journal_module._JournalProbeContainmentError):
+        repository._sequence_regular_file_exists(root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl")
+
+    # The other half of the seam's contract: under a chain of real directories
+    # a missing entry is still plain absence, never a fault.
+    honest = FileOrchestrationJournalRepository(tmp_path / "honest")
+    (tmp_path / "honest" / "journal" / "gfs").mkdir(parents=True)
+    assert (
+        honest._sequence_regular_file_exists(
+            tmp_path / "honest" / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl"
+        )
+        is False
+    )
+
+
+def _reserved_cohort_master_on_disk(base: Path) -> tuple[Any, dict[str, Any]]:
+    repository, record = _reserved_cohort_master(base, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    return repository, record
+
+
+def _corrupt_cohort_cycle_log(repository: Any) -> None:
+    (repository.root / "journal" / "gfs" / f"{_COHORT_CYCLE_SEGMENT}.jsonl").write_text(
+        "{not json\n",
+        encoding="utf-8",
+    )
+
+
+def _d7_upsert(repository: Any, record: Mapping[str, Any]) -> Any:
+    # A member row, not the master: its direct file resolves the id without a
+    # global scan, so the lane reaches the segment probe.
+    return repository.upsert_pipeline_job(
+        {
+            "job_id": "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0",
+            "run_id": "fcst_gfs_2026072000_model_0",
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026072000",
+            "job_type": "run_shud_forecast",
+            "model_id": "model_0",
+            "stage": "forecast",
+            "status": "failed",
+            "error_code": "NODE_FAILURE",
+            "created_at": _COHORT_CYCLE,
+            "updated_at": _COHORT_CYCLE,
+        }
+    )
+
+
+def _d7_reject(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.reject_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=1,
+        finished_at=_dt("2026-07-20T01:00:00Z"),
+        error_code="SBATCH_REJECTED",
+        error_message="scheduler rejected the forecast array",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+    )
+
+
+def _d7_mark_permanently_failed(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.mark_pipeline_job_permanently_failed(str(record["job_id"]))
+
+
+def _d7_permit_retry(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.permit_pipeline_job_retry(
+        str(record["job_id"]),
+        accepted_submit_contract_version=None,
+        expected_submission_attempt=1,
+    )
+
+
+def _d7_insert_event(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.insert_pipeline_event(
+        entity_type="forecast_cycle",
+        entity_id=cycle_id_for("gfs", _COHORT_CYCLE),
+        event_type="cycle_note",
+        status_from=None,
+        status_to=None,
+    )
+
+
+def _d7_update_status(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.update_pipeline_job_status(str(record["job_id"]), "failed")
+
+
+def _d7_project(repository: Any, record: Mapping[str, Any]) -> Any:
+    return _project_cohort_failure(repository, record, error_code="NODE_FAILURE")
+
+
+_D7_WRITE_LANES: dict[str, tuple[Any, Any]] = {
+    "upsert_pipeline_job": (_terminally_failed_cohort_master, _d7_upsert),
+    "reject_pipeline_job_submit_attempt": (_reserved_cohort_master_on_disk, _d7_reject),
+    "mark_pipeline_job_permanently_failed": (_reserved_cohort_master_on_disk, _d7_mark_permanently_failed),
+    "permit_pipeline_job_retry": (_reserved_cohort_master_on_disk, _d7_permit_retry),
+    "insert_pipeline_event": (_reserved_cohort_master_on_disk, _d7_insert_event),
+    "update_pipeline_job_status": (_reserved_cohort_master_on_disk, _d7_update_status),
+    "project_forecast_cohort_tasks": (_terminally_failed_cohort_master, _d7_project),
+}
+
+
+@pytest.mark.parametrize("lane", sorted(_D7_WRITE_LANES))
+def test_symlinked_parent_fails_every_public_write_lane_in_reader_fault_parity(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    """E7a/E7b/E7d and design D7 — one parity-table row per public write lane.
+
+    The contract is the pair, not either half: a containment fault reaches the
+    caller as the SAME exception type a corrupt journal file already reaches it
+    with, so no lane gains a new exception type and none goes quiet.  Only the
+    reason token and the type are pinned — the message text differs by platform
+    (Linux ELOOP vs macOS ENOTDIR) and the originating frame is not contractual.
+
+    Before this change these lanes surfaced, respectively, ``OrchestratorError``
+    from the eventual safe_fs write, ``file_journal_authority_transition_requires
+    _typed_api`` derived from the empty read, or a silent no-op.
+    """
+
+    build, action = _D7_WRITE_LANES[lane]
+
+    tampered_root = tmp_path / "symlinked"
+    tampered_root.mkdir()
+    tampered, tampered_record = build(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+    before = _journal_tree_bytes(tampered.root)
+    with pytest.raises(FileOrchestrationJournalError) as tampered_caught:
+        action(tampered, tampered_record)
+    assert tampered_caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(tampered.root) == before
+
+    corrupt_root = tmp_path / "corrupt"
+    corrupt_root.mkdir()
+    corrupt, corrupt_record = build(corrupt_root)
+    _corrupt_cohort_cycle_log(corrupt)
+    with pytest.raises(FileOrchestrationJournalError) as corrupt_caught:
+        action(corrupt, corrupt_record)
+    assert corrupt_caught.value.reason == "file_journal_malformed_json"
+
+
+def test_a_write_that_silently_no_opped_under_a_symlinked_parent_now_fails_loud(
+    tmp_path: Path,
+) -> None:
+    """E7c / D7 row 3 — the one success-to-failure flip, and the point of #1167.
+
+    A reserved master is not permanently-failable, so ``stale`` is the honest
+    answer on an intact tree.  Under a symlinked parent the journal read came
+    back empty and the method returned that same ``stale`` — the caller could
+    not distinguish a tampered tree from an honest refusal.
+    """
+
+    honest_root = tmp_path / "honest"
+    honest_root.mkdir()
+    honest, honest_record = _reserved_cohort_master_on_disk(honest_root)
+    assert honest.mark_pipeline_job_permanently_failed(str(honest_record["job_id"])).outcome == "stale"
+
+    tampered_root = tmp_path / "tampered"
+    tampered_root.mkdir()
+    tampered, tampered_record = _reserved_cohort_master_on_disk(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+    before = _journal_tree_bytes(tampered.root)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        tampered.mark_pipeline_job_permanently_failed(str(tampered_record["job_id"]))
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(tampered.root) == before
+
+
+def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
+    tmp_path: Path,
+) -> None:
+    """E7e — parity on the lanes that already absorb journal faults.
+
+    The carrier must not inherit the public journal error.  At head every
+    probe consumption sits directly inside a choke frame's ``try``, so no
+    broad handler on this lane can reach a carrier before conversion; the
+    ``issubclass`` line is a forward-looking guard against FUTURE shapes —
+    conversion moved outward, or a broad handler introduced between a probe
+    and its choke frame — where a subclass would be swallowed into the
+    silent-empty failure mode this change exists to remove.  (The
+    fixture-review-era measurement of that hazard was taken against the
+    pre-choke-frame code shape.)  The observables below pin the other half —
+    the fault stays absorbed to the SAME answer a corrupt journal file
+    already yields, so no lane gains loudness here.  They are pinned
+    absolutely rather than against each other because a common-mode drift
+    (both lanes degrading to ``[]``) would satisfy an equality.
+    """
+
+    assert not issubclass(journal_module._JournalProbeContainmentError, FileOrchestrationJournalError)
+
+    tampered_root = tmp_path / "symlinked"
+    tampered_root.mkdir()
+    tampered, _ = _terminally_failed_cohort_master(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+
+    corrupt_root = tmp_path / "corrupt"
+    corrupt_root.mkdir()
+    corrupt, _ = _terminally_failed_cohort_master(corrupt_root)
+    _corrupt_cohort_cycle_log(corrupt)
+
+    for repository in (tampered, corrupt):
+        assert repository._cycle_materialization_model_ids_unlocked(
+            source_id="gfs",
+            cycle_time=_COHORT_CYCLE,
+        ) == ["model_0", "model_1"]
+        assert (
+            repository.has_completed_pipeline(
+                source_id="gfs",
+                cycle_time=_COHORT_CYCLE,
+                model_id="model_0",
+            )
+            is False
+        )
