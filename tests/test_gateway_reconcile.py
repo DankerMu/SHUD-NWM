@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,6 +26,7 @@ from services.orchestrator.reconcile import (
     SacctRecord,
     reconcile_inflight_jobs,
 )
+from tests.test_real_slurm_gateway import _pinned_local_timezone
 
 
 def _authoritative_absence_query(
@@ -10242,6 +10244,7 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
     assert all(any(item.startswith("--endtime=") for item in command) for command in commands)
 
 
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
 def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_scopes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10273,33 +10276,100 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
         return ""
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    query = reconcile_module.default_comment_sacct_querier(
-        global_visibility_probe=lambda: True,
-        now=advancing_now,
-    )
+    with _pinned_local_timezone("Asia/Shanghai"):
+        query = reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=advancing_now,
+        )
 
-    late_proof = reconcile_module._query_comment_accounting_proof(
-        query,
-        late_key,
-        expected_user="scheduler",
-        expected_account="account",
-    )
-    assert late_proof.kind == "owned_match"
-    assert [record.slurm_job_id for record in late_proof.records] == ["17667"]
-    assert len(commands) == page_count * 2
-    assert scope_pages == {"owner": page_count, "global": page_count}
+        late_proof = reconcile_module._query_comment_accounting_proof(
+            query,
+            late_key,
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        assert late_proof.kind == "owned_match"
+        assert [record.slurm_job_id for record in late_proof.records] == ["17667"]
+        assert len(commands) == page_count * 2
+        assert scope_pages == {"owner": page_count, "global": page_count}
 
-    early_proof = reconcile_module._query_comment_accounting_proof(
-        query,
-        early_key,
-        expected_user="scheduler",
-        expected_account="account",
-    )
+        early_proof = reconcile_module._query_comment_accounting_proof(
+            query,
+            early_key,
+            expected_user="scheduler",
+            expected_account="account",
+        )
     assert early_proof.kind == "owned_match"
     assert [record.slurm_job_id for record in early_proof.records] == ["17668"]
     assert len(commands) == page_count * 2
     assert now_calls == [base_now]
-    assert "--endtime=2026-07-22T12:00:00" in commands[0]
+    # base_now is 2026-07-22T12:00Z; UTC+8 renders it as the host's local wall clock.
+    assert "--endtime=2026-07-22T20:00:00" in commands[0]
+
+
+# sacct reads bare timestamps in the host's local timezone, so the pinned instant below
+# is rendered differently per host TZ; expectations are literal, never recomputed.
+_PINNED_COMMENT_SCAN_NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
+
+
+def _rendered_page_bounds(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], int]:
+    """Return every sacct page command of one global-scope scan, newest page first."""
+    from services.orchestrator import reconcile as reconcile_module
+
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    commands: list[list[str]] = []
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        return ""
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        now=lambda: _PINNED_COMMENT_SCAN_NOW,
+    )("gfs:tz:forecast")
+
+    assert len(commands) == page_count
+    return commands, page_count
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_are_local_wall_clock_east_of_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("Asia/Shanghai"):
+        commands, _ = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T12:00:00" in commands[0]
+    assert "--starttime=2026-07-05T12:00:00" in commands[-1]
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_are_local_wall_clock_west_of_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("America/New_York"):
+        commands, _ = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T00:00:00" in commands[0]
+    assert "--starttime=2026-07-05T00:00:00" in commands[-1]
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_on_utc_host_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("UTC"):
+        commands, page_count = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T04:00:00" in commands[0]
+    assert "--starttime=2026-07-05T04:00:00" in commands[-1]
+    # Page identity is the rendered pair, so a UTC host must still see one command per page.
+    rendered_bounds = {
+        tuple(item for item in command if item.startswith(("--starttime=", "--endtime=")))
+        for command in commands
+    }
+    assert len(rendered_bounds) == page_count
 
 
 def test_comment_sacct_global_collision_is_detected_across_separate_pages(

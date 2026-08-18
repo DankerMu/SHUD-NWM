@@ -379,8 +379,9 @@ def default_comment_sacct_querier(
         matches: list[SacctRecord] = []
         seen_ids: set[str] = set()
         for page_start, page_end in pages:
-            start_time = page_start.strftime("%Y-%m-%dT%H:%M:%S")
-            end_time = page_end.strftime("%Y-%m-%dT%H:%M:%S")
+            # sacct reads bare timestamps in the host's local timezone.
+            start_time = page_start.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+            end_time = page_end.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
             page_key = (*owner_scope, start_time, end_time)
             if page_key not in indexed_matches_by_page:
                 command = [
