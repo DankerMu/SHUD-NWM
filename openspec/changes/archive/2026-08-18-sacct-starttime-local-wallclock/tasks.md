@@ -28,5 +28,5 @@
 - [x] 3.2 uv run pytest -q tests/test_real_slurm_gateway.py
 - [x] 3.3 uv run ruff check .（本地 untracked 投影 E501 既知例外照会话惯例记录）
 - [x] 3.4 openspec validate sacct-starttime-local-wallclock --strict --no-interactive
-- [ ] 3.5 merge 后 node-27（UTC+8 宿主，正好是判别档）oracle receipt：3.2 套件 +
+- [x] 3.5 merge 后 node-27（UTC+8 宿主，正好是判别档）oracle receipt：3.2 套件 +
       TZ 三档选择器，记入 #1282
