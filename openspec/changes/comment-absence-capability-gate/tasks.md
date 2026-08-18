@@ -9,7 +9,8 @@
       原因可区分（「探针无法执行」vs「flags 不含 job_comment」）
 - [ ] 1.2 `default_comment_sacct_querier` 加 `comment_storage_probe` 可注入参数
       （默认 `default_comment_storage_probe(slurm_bin_path)`）；插入点钉死：
-      contract-version 检查（:371-372）之后、visibility 门（:373-377）之前；
+      contract-version 检查（:368-369）之后、visibility 门整块（:370-377）之前
+      ——插在第 370 行之前、不得落入 `if not any(owner_scope) …` 块内部；
       nonlocal 一次性缓存；未证明抛
       `ReconcileQueryUnavailable("accounting does not store job comments",
       reason_class="comment_accounting_unproven")`；owner/global/legacy 三类

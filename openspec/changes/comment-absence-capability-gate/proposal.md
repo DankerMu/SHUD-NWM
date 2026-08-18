@@ -27,9 +27,11 @@ reconcile.py:214-234 + querier 内 :373-377 的 `accounting_authority_unproven` 
   （scontrol 失败/不可达——可能是配置错误）vs「flags 不含 job_comment」（集群
   确证不存 comment）。
 - `default_comment_sacct_querier` 新增可注入参数 `comment_storage_probe`（默认由
-  bin_path 构造）；插入点**钉死**：contract-version 检查（:371-372）**之后**、
-  visibility 门（:373-377）**之前**（必须早于 visibility 门以覆盖 owner scope；
-  必须晚于 contract-version 使 unsupported-version 抛点归属不变）。nonlocal 缓存
+  bin_path 构造）；插入点**钉死**：contract-version 检查（:368-369）**之后**、
+  visibility 门**整块**（:370-377，:370 是 `if not any(owner_scope) …` 守卫）
+  **之前**——即插在第 370 行之前、**不得落入该 if 块内部**（必须早于 visibility
+  门以覆盖 owner/legacy scope；必须晚于 contract-version 使 unsupported-version
+  抛点归属不变）。nonlocal 缓存
   每 querier 实例探测一次（镜像 `visibility_proven`）；未证明抛
   `ReconcileQueryUnavailable("accounting does not store job comments",
   reason_class="comment_accounting_unproven")`。
@@ -95,8 +97,8 @@ PIPELINE_ALREADY_ACTIVE 直至人工处置）写入 runbook。
 - 存 comment 集群（probe True）：sacct 查询行为不变（owned_match 绑定、
   global_absence 过 grace 判 reservation_lost、coverage/分页/page_key 全部现状，
   #1559 刚修）；每 querier 实例仅多一次 scontrol 探测子进程。
-- 抛点优先级归属不变：unsupported contract version 仍抛原消息（:371-372）；
-  visibility 门（:373-377）在 comment 门之后仍按原条件生效
+- 抛点优先级归属不变：unsupported contract version 仍抛原消息（:368-369）；
+  visibility 门（:370-377）在 comment 门之后仍按原条件生效
   （tests/test_gateway_reconcile.py:9876/:9894 期望不变，靠注入 probe=True 保持）。
 - **任何单测不得触达真实 scontrol**（15 处实构 querier 用例全部注入
   `comment_storage_probe=lambda: True`）。
