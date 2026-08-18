@@ -27,18 +27,28 @@ checksum fail-open——已 glob 匹配的必需文件 stat/sha256 抛 OSError �
 
 ## What Changes
 
-- **A**：`_normalized_checkpoint_ic_file` 消费 minute_index **之前**用
-  `state_qc.cfg_ic_header_shape` 判形状；不合法 → 抛 `StateManagerError`，消息带
-  机器可 grep 的 reason token（对齐 `state_cli.py:68-70` #1325 publish-side
-  admission reason 约定），**拒绝发布**、不产出 `.normalized` 文件。
-- **B**：`_checkpoint_header_minute` 同判据；不合法 → 返回 `None`，
-  `_checkpoint_with_header_time` 自然退回 manifest 声明的 `valid_time`（不 rekey），
-  留一条可观测记录（logger warning，token 可 grep）。
-- **checksum 面**：`except OSError` 臂改为记 quirk（`unreadable_required_file` 类）
-  + warning，`status` 落 `"partial"`；`missing_required_files` 语义不变（匹配到的
-  文件不塞进去）。同臂顺带给超过 `CHECKSUM_LIMIT_BYTES` 的静默无-checksum 分支
-  是否加可观测标记留给实测裁定：若零成本顺手则加同族 quirk，否则报告不改
-  （issue 定性为「设计上的界、缺可观测标记」，非本单硬验收）。
+- **A**：`_normalized_checkpoint_ic_file` 在**minute_index 非 None 时**（即真的要
+  消费该位置时）用 `state_qc.cfg_ic_header_shape` 判形状；不合法 → 抛
+  `StateManagerError`，消息带机器可 grep 的 reason token（对齐 `state_cli.py:68-70`
+  #1325 publish-side admission reason 约定），**拒绝该 checkpoint 的发布**、不产出
+  `.normalized` 文件（`:202` 循环非事务性，混合 manifest 下更早的合法 checkpoint
+  已上传——pre-existing 循环形态，与 `:255` residual rejection 同款，非本单引入）。
+  **minute_index 为 None 的头部类**（空/单 token/非数字尾）保持今日 `:263-266`
+  容忍分支逐字不变——门不得把「从未被消费的值」扩进拒绝集（fixture review P1-2）。
+- **B**：`_checkpoint_header_minute` 同判据同位置；不合法 → 返回 `None`，
+  `_checkpoint_with_header_time` 自然退回 manifest 声明的 `valid_time`（`:291`
+  实证：`observed_minute is None → return checkpoint`），留 stdlib logging warning
+  （token 可 grep）。可观测通道：`state_cli.py` 现无 logger，按包内既有惯例加
+  module-level `logging.getLogger`（`manifest_index.py:13` 同款）；db-free 计算节点
+  上未配置 logging 时 WARNING 经 lastResort 落 stderr——够用，不发明新通道。
+- **checksum 面**：`except OSError` 臂三态化——机制显式（fixture review P1-1，
+  quirk 不驱动 status）：checksum walk 吐出独立的 `unreadable_required_files`
+  集合，镜像既有 `invalid_required_files` 机制（`:227` 调用/`:253` quirk/`:280`
+  payload key 三件套），status 表达式（`:256`）直接消费该集合落 `"partial"`，
+  payload 带同名独立 key；另记 quirk + warning。`missing_required_files` 语义
+  不变；**不与** `_safe_resolve_under_root` 返回 None 的 unsafe-symlink 臂
+  （`:431-436`，已有 warning）合并。超过 `CHECKSUM_LIMIT_BYTES` 的静默分支留给
+  实测裁量：零成本顺手则加同族 quirk，否则报告不改（issue 定性为设计界，非硬验收）。
 - 形状判据**只**来自 `state_qc.cfg_ic_header_shape` 单一 helper，`state_cli.py`
   不新增第二份 token 计数规则（#1429 单一判据原则）。
 
@@ -63,6 +73,9 @@ checksum fail-open——已 glob 匹配的必需文件 stat/sha256 抛 OSError �
 - 3-token native（`<mesh> <cols> <minute>`）与 4-token（`<mesh> <river> <lake>
   <minute>`）头部在 A/B 两面行为**零变化**（现有 rekey/归一化用例全绿；issue
   对照 C 的 no-op 语义保持）。
+- **minute_index 为 None 的头部类**（空/单 token/非数字尾）在 A/B 两面保持今日
+  容忍无消费分支逐字不变（拒绝集只含「有 minute_index 但形状不合法」：2-token
+  与 ≥5 数字 token）。
 - `_checkpoint_with_header_time` 对「header minute 与 manifest 一致」的既有
   no-op 语义不变。
 - `missing_required_files` 判定语义不变；checksum 成功路径的条目形状不变。
