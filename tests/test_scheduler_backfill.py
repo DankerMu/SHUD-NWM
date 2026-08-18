@@ -1659,10 +1659,12 @@ def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
 ) -> None:
     """3.5(b) a re-run that re-selects the same wrong-suffix state stays
     quarantined and keeps occupying the source's single oldest-first backfill
-    slot -- as long as no completed submission has RECORDED that token twice.
-    This fixture writes no forecast cohort master at all, so the #1157 breaker
-    counts zero occurrences and stays disengaged; the slot-release behaviour
-    once two masters carry the token is pinned separately below.
+    slot -- as long as no provenance-stamped quarantine rerun master has
+    recorded that token even once.  This fixture writes no forecast cohort
+    master at all, so the #1157 breaker counts zero occurrences and stays
+    disengaged; the slot-release behaviour once a STAMPED master carries the
+    token is pinned separately below, next to its mirror leg pinning that
+    unstamped same-token masters keep the slot however many there are.
 
     This is the deterministic env=false base-key re-selection class
     (``chain_forecast_state.py`` exact lookup with no cycle_id/lead_hours ->

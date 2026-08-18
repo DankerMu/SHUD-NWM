@@ -396,11 +396,18 @@ cohort **master** 行中，`journal_predecessor_quarantine_rerun_model_ids`（�
 
 1. **看 state index 有没有期望那一格**。用 `expected_init_state_id` 的后缀去
    `NHMS_SCHEDULER_STATE_INDEX` 里找 `cycle_id` + `lead_hours` 相符、
-   `usable_flag=true` 的条目。**有**：说明 quarantine 重跑本该收敛（重跑会优先
-   按期望 lineage 查找），却仍记录了 stale token ⇒ 问题在写侧（run manifest /
-   state 记录链路），按该链路排查。**没有**：这就是断路器存在的那一类——
-   期望的 predecessor state 根本不存在，重跑只能反复选中同一个 wrong-lineage
-   state。
+   `usable_flag=true` 的条目。**有**：**先别急着断定是写侧**，还有第二种成因：
+   该条目存在且 usable，却在下游被 `_validate_state_lineage`（registry 升级后的
+   model package 版本 / checksum 漂移、超 max lead）或 QC 钩子拒绝——此时
+   §8.7 的一次性偏好重置按设计回退到不带 lineage 的查找，于是**合法地**又记录了
+   stale token；重跑晚于该条目发布（条目是重跑跑完之后才进 index 的）表现完全
+   相同。这条路径**不留任何 operator 可见痕迹**：回退成功即 `init_state_rejection_code`
+   为 `null`（钉在 `tests/test_warm_start_chaining.py:2617`）。所以这一支要核的
+   不只是"存在 + usable_flag"，还要核该条目与当代 generation 的**兼容性**
+   （`model_package_checksum` / lineage 约束）以及它的发布时间是否晚于重跑；
+   都对得上再回到写侧（run manifest / state 记录链路）排查。**没有**：这就是
+   断路器存在的那一类——期望的 predecessor state 根本不存在，重跑只能反复选中
+   同一个 wrong-lineage state。
 2. **补齐期望的 predecessor state**：让 `expected_init_state_id` 后缀指向的那个
    predecessor cycle 真正跑一次并把 checkpoint 发布进 state snapshot index
    （与上一节第 4 步同法——正常调度整条 chain，不要手写 index 条目）。
