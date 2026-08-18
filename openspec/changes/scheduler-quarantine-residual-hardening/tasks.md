@@ -44,29 +44,33 @@ Repair intensity: high（production state machine + retry/resume；Invariant Mat
 
 ## Implementation tasks
 
-- [ ] 1.1 journal accessor：`completed_pipeline_init_state_id_occurrences(source_id, cycle_time, model_id, init_state_id) -> int`（只读、never-raises→0、复用 `_cycle_rows.pipeline_jobs`；**只数 terminal-success cohort master 行**，per-model terminal 复制行不计，口径见 design D3；含 docstring 契约）
-- [ ] 1.2 breaker 判定 helper（`scheduler_generation.py` §8.7 区段或 `scheduler_candidates.py` 内部，纯函数 + accessor 注入；`N=2` 常量）
-- [ ] 2.1 候选侧：`_journal_predecessor_identity_quarantine` identity 来源切换为 accessor（D1：getattr 约定、无 accessor→弃判、alias 收敛）
-- [ ] 2.2 候选侧：positive mismatch 且 breaker engaged → `blocked` decision（typed decision/reason、recorded/expected token、occurrences、`retry_policy.manual_retry_required`、经 `_evidence_safe`）
-- [ ] 3.1 白名单：`retry_journal_predecessor_identity_mismatch` 加入 `_FORCE_TERMINAL_RESUBMIT_DECISIONS` 与 `force_replacement_decisions` 两处
-- [ ] 3.2 discovery：`_select_backfill_source_cycles` 仅在"gap 成因全部为 breaker-engaged model"时排除该 cycle（evidence-only、含 token 的 not_selected 条目、不占执行槽；cycle 完成度仍为 gap；混合 cycle 仍占槽——聚合规则见 design D4）
-- [ ] 4.1 收敛层：quarantine-rerun lineage **偏好**透传（D2：basin evidence → `_select_forecast_initial_state` → `_exact_or_latest_usable_state` → 先带 `cycle_id`/`lead_hours` 查，miss 回退今日不带 lineage 查找；默认 None 不变）
-- [ ] 5.1 PG provider `del` 行注释落字（D5，不改行为）
-- [ ] 3.6 若 blocked decision 构成新 typed reason 面，`docs/runbooks/scheduler-dbfree-typed-reasons.md` 增补一行分诊条目（沿用该 runbook 既有两步核对结构）
-- [ ] 6.x 测试（见 Required evidence 全部行，均须先红后绿：新断言在未改实现上失败的红证输出入 PR evidence）
+- [x] 1.1 journal accessor：`completed_pipeline_init_state_id_occurrences(source_id, cycle_time, model_id, init_state_id) -> int`（只读、never-raises→0、复用 `_cycle_rows.pipeline_jobs`；**只数 terminal-success cohort master 行**，per-model terminal 复制行不计，口径见 design D3；含 docstring 契约）
+- [x] 1.2 breaker 判定 helper（`scheduler_generation.py` §8.7 区段或 `scheduler_candidates.py` 内部，纯函数 + accessor 注入；`N=2` 常量）
+- [x] 2.1 候选侧：`_journal_predecessor_identity_quarantine` identity 来源切换为 accessor（D1：getattr 约定、无 accessor→弃判、alias 收敛）
+- [x] 2.2 候选侧：positive mismatch 且 breaker engaged → `blocked` decision（typed decision/reason、recorded/expected token、occurrences、`retry_policy.manual_retry_required`、经 `_evidence_safe`）
+- [x] 3.1 白名单：`retry_journal_predecessor_identity_mismatch` 加入 `_FORCE_TERMINAL_RESUBMIT_DECISIONS` 与 `force_replacement_decisions` 两处
+- [x] 3.2 discovery：`_select_backfill_source_cycles` 仅在"gap 成因全部为 breaker-engaged model"时排除该 cycle（evidence-only、含 token 的 not_selected 条目、不占执行槽；cycle 完成度仍为 gap；混合 cycle 仍占槽——聚合规则见 design D4）
+- [x] 4.1 收敛层：quarantine-rerun lineage **偏好**透传（D2：basin evidence → `_select_forecast_initial_state` → `_exact_or_latest_usable_state` → 先带 `cycle_id`/`lead_hours` 查，miss 回退今日不带 lineage 查找；默认 None 不变）
+- [x] 5.1 PG provider `del` 行注释落字（D5，不改行为）
+- [x] 3.6 若 blocked decision 构成新 typed reason 面，`docs/runbooks/scheduler-dbfree-typed-reasons.md` 增补一行分诊条目（沿用该 runbook 既有两步核对结构）
+- [x] 6.x 测试（见 Required evidence 全部行，均须先红后绿：新断言在未改实现上失败的红证输出入 PR evidence）
 
 ## Required evidence（每行 = 测试或命令；输入 → 期望）
 
-- [ ] E1 `0,6,12` cadence + wrong-suffix 首轮 fixture（**wrong-lineage entry 的 state_id 按字符串序严格排在 expected-lineage entry 之前**，堵"未实现也因 `min(state_id)` 碰巧选对"的假绿）→ 首轮 quarantine 产出 `retry_journal_predecessor_identity_mismatch`；重跑（basin 带 quarantine evidence）选中 expected-lineage entry → 记录 expected token → 下轮无 quarantine。
-- [ ] E2 同 fixture 但 expected-lineage entry 不存在 → 重跑回退**今日的不带 lineage 查找**，选中同一 wrong-lineage entry（断言选中 state_id 与改动前一致，非 cold start）→ 再次 quarantine → 收敛由 E3 breaker 腿接管；**usable_flag 腿**：expected-lineage entry 存在但 `usable_flag=false` → 同样回退不带 lineage 查找并选中 wrong-lineage usable entry（非 cold start）。
-- [ ] E3 不收敛构造（2 条 terminal-success cohort **master** 行记录同一 stale token）→ 候选侧 decision 为 blocked（断言 decision/reason 字面、recorded/expected token、occurrences=2、manual_retry_required=True）；仅 1 条 master 时仍为 retry（N 边界双腿）；repository **无 accessor** / 行不可读 → decision 保持 `retry_journal_predecessor_identity_mismatch`（fail-toward-liveness 腿）。
-- [ ] E4 discovery：全部 gap 成因均为 breaker-engaged 的 cycle 不占 `available_gaps[:1]`（下一 gap 被选中执行），evidence 含 not_selected 条目与两 token；该 cycle 完成度仍为 gap（非 complete）；**混合腿**：同 cycle 一 model breaker-engaged、另一 model 真实未完成 → cycle 仍占槽正常执行。
-- [ ] E5 白名单：`retry_journal_predecessor_identity_mismatch` 下 `_terminal_stage_needs_forced_resubmit` 与 `_replacement_retry_scoped_cycle_execution` 均为 True；集成腿：第二次同 cycle+model quarantine 产生 replacement forecast submission（新 run 身份，非 idle resume 复用 succeeded job）。breaker blocked decision 字面不在两白名单（成员钉测试）。
-- [ ] E6 A/B parity："journal 无 id + manifest 有 id" 行 → A 弃判（skip 保持）且 B 返回 None；裸 `state_id` alias 行 → 两侧一致弃判。
-- [ ] E7 `terminal_completed_cycle` skip reason + durable hydro success + wrong-suffix id → quarantine retry 触发。
-- [ ] E8 accessor 单测：多 master 同/异 token 计数；**同一 submission 的 master 行 + reconcile 复制出的 per-model terminal 行 → 计数恰为 1**（distinctness 键钉）；无行/不可读/占位行 → 0、never-raises；**截断腿**：cycle job 数超过 `candidate_state_job_limit` → accessor 计数不受影响（不从 bounded payload 计数）。
-- [ ] E9 `0,12` 回归：`uv run pytest -q tests/test_scheduler_generation.py tests/test_file_orchestration_journal.py tests/test_warm_start_chaining.py tests/test_state_manager.py tests/test_production_scheduler.py` 全绿；既有 §8.7 测试零改动（除非新增断言）。
-- [ ] E10 `uv run ruff check .` clean；`openspec validate scheduler-quarantine-residual-hardening --strict --no-interactive` valid；若任务 3.6 触发 runbook 增补，增补行须过 markdownlint 并保持该 runbook 既有分诊表结构（此为 3.6 的 evidence 归属）。
+- [x] E1 `0,6,12` cadence + wrong-suffix 首轮 fixture（**wrong-lineage entry 的 state_id 按字符串序严格排在 expected-lineage entry 之前**，堵"未实现也因 `min(state_id)` 碰巧选对"的假绿）→ 首轮 quarantine 产出 `retry_journal_predecessor_identity_mismatch`；重跑（basin 带 quarantine evidence）选中 expected-lineage entry → 记录 expected token → 下轮无 quarantine。
+- [x] E2 同 fixture 但 expected-lineage entry 不存在 → 重跑回退**今日的不带 lineage 查找**，选中同一 wrong-lineage entry（断言选中 state_id 与改动前一致，非 cold start）→ 再次 quarantine → 收敛由 E3 breaker 腿接管；**usable_flag 腿**：expected-lineage entry 存在但 `usable_flag=false` → 同样回退不带 lineage 查找并选中 wrong-lineage usable entry（非 cold start）。
+- [x] E3 不收敛构造（2 条 terminal-success cohort **master** 行记录同一 stale token）→ 候选侧 decision 为 blocked（断言 decision/reason 字面、recorded/expected token、occurrences=2、manual_retry_required=True）；仅 1 条 master 时仍为 retry（N 边界双腿）；repository **无 accessor** / 行不可读 → decision 保持 `retry_journal_predecessor_identity_mismatch`（fail-toward-liveness 腿）。
+- [x] E4 discovery：全部 gap 成因均为 breaker-engaged 的 cycle 不占 `available_gaps[:1]`（下一 gap 被选中执行），evidence 含 not_selected 条目与两 token；该 cycle 完成度仍为 gap（非 complete）；**混合腿**：同 cycle 一 model breaker-engaged、另一 model 真实未完成 → cycle 仍占槽正常执行。
+- [x] E5 白名单：`retry_journal_predecessor_identity_mismatch` 下 `_terminal_stage_needs_forced_resubmit` 与 `_replacement_retry_scoped_cycle_execution` 均为 True；集成腿：第二次同 cycle+model quarantine 产生 replacement forecast submission（新 run 身份，非 idle resume 复用 succeeded job）。breaker blocked decision 字面不在两白名单（成员钉测试）。
+- [x] E6 A/B parity："journal 无 id + manifest 有 id" 行 → A 弃判（skip 保持）且 B 返回 None；裸 `state_id` alias 行 → 两侧一致弃判。
+- [x] E7 `terminal_completed_cycle` skip reason + durable hydro success + wrong-suffix id → quarantine retry 触发。
+- [x] E8 accessor 单测：多 master 同/异 token 计数；**同一 submission 的 master 行 + reconcile 复制出的 per-model terminal 行 → 计数恰为 1**（distinctness 键钉）；无行/不可读/占位行 → 0、never-raises；**截断腿**：cycle job 数超过 `candidate_state_job_limit` → accessor 计数不受影响（不从 bounded payload 计数）。
+- [x] E9 `0,12` 回归：`uv run pytest -q tests/test_scheduler_generation.py tests/test_file_orchestration_journal.py tests/test_warm_start_chaining.py tests/test_state_manager.py tests/test_production_scheduler.py` 全绿（外加 §8.7 discovery 既有归属套件 `tests/test_scheduler_backfill.py`）；
+  既有 §8.7 测试零改动，例外两处且均为本 change 要求的口径更新：白名单成员集
+  补入新成员（`test_warm_start_chaining.py`）、
+  `test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined` 的 docstring
+  说明 breaker 未触发的前提（断言不变）。
+- [x] E10 `uv run ruff check .` clean；`openspec validate scheduler-quarantine-residual-hardening --strict --no-interactive` valid；若任务 3.6 触发 runbook 增补，增补行须过 markdownlint 并保持该 runbook 既有分诊表结构（此为 3.6 的 evidence 归属）。
 
 ## Evidence Floor（对应 issue 验收标准）
 

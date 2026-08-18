@@ -336,6 +336,67 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
   并升级告警）尚未落地；在它落地之前，上面的 stall 识别特征需要人工
   按 pass evidence 判读。
 
+## `journal_predecessor_identity_quarantine_breaker_engaged`
+
+### 含义
+
+§8.7 journal predecessor identity quarantine（#1107）会把"journal 记录的
+`init_state_id` 与 T 的期望 predecessor token 同 base key、异 lineage 后缀"的
+completed-skip 降级为 `retry_journal_predecessor_identity_mismatch` 重跑。这个
+reason 表示该重跑已被证明**不收敛**：同一 cycle+model 的**同一个** stale token
+已被 **≥2 个不同的 completed forecast submission** 记录（计数口径 = journal 里
+带该 token 的 terminal-success cohort **master** 行；reconcile 复制到 per-model
+terminal 行的那份不计，所以一次 submission 的 master+terminal 算 1）。断路器随即
+接管（#1157）：
+
+- 候选侧 decision 从 retry 降为
+  `blocked_journal_predecessor_identity_quarantine`（进 `blocked_candidates[]`），
+  evidence 带 `journal_predecessor_identity.{recorded_init_state_id,
+  expected_init_state_id, occurrences}` 与
+  `retry_policy.manual_retry_required=true`；
+- discovery 侧该 cycle **不再占用** source 唯一的 oldest-first backfill 执行槽
+  （pass evidence 里是一条 `selection_status=not_selected` +
+  `selection_reason=journal_predecessor_identity_quarantine_breaker_engaged` 的
+  source-cycle 条目，带两个 token）。
+
+该 cycle 的完成度**仍然是 gap**，绝不会因断路器变成 complete；journal 不被写入
+也不被删除。
+
+### 两步核对
+
+1. **确认是断路器而不是普通 quarantine**。候选侧读 `blocked_candidates[].reason`：
+   是本 reason 才是断路器；仍是 `journal_predecessor_identity_mismatch`
+   （decision `retry_journal_predecessor_identity_mismatch`）说明还在重跑收敛
+   窗口内，**不要**人工干预，等下一个自然 pass。计数读不出来（repository 无
+   accessor、行不可读）时口径是 fail toward liveness——断路器保持断开、decision
+   保持 retry，所以看到 retry 也可能是"数不出来"，判据以 evidence 里的
+   `journal_predecessor_identity.occurrences` 是否存在为准。
+2. **核对两个 token 的差异面**。比 `recorded_init_state_id` 与
+   `expected_init_state_id`：两者 base key（source / model / `valid_time=T`）必然
+   相同，差的是 lineage 后缀（`_<predecessor_cycle_id>_f<lead>`）。后缀里
+   predecessor cycle 与 lead 哪一项对不上，决定了下一步查的是 cadence 配置还是
+   state index 的那一格。
+
+### 处置
+
+1. **看 state index 有没有期望那一格**。用 `expected_init_state_id` 的后缀去
+   `NHMS_SCHEDULER_STATE_INDEX` 里找 `cycle_id` + `lead_hours` 相符、
+   `usable_flag=true` 的条目。**有**：说明 quarantine 重跑本该收敛（重跑会优先
+   按期望 lineage 查找），却仍记录了 stale token ⇒ 问题在写侧（run manifest /
+   state 记录链路），按该链路排查。**没有**：这就是断路器存在的那一类——
+   期望的 predecessor state 根本不存在，重跑只能反复选中同一个 wrong-lineage
+   state。
+2. **补齐期望的 predecessor state**：让 `expected_init_state_id` 后缀指向的那个
+   predecessor cycle 真正跑一次并把 checkpoint 发布进 state snapshot index
+   （与上一节第 4 步同法——正常调度整条 chain，不要手写 index 条目）。
+3. **不要**把 `blocked_journal_predecessor_identity_quarantine` 加进两处
+   forced-resubmit 白名单（`_FORCE_TERMINAL_RESUBMIT_DECISIONS` /
+   `force_replacement_decisions`）来"放行"：那正是断路器要防的复活，会把
+   fail-stop 变回无限重跑。
+4. **验证收敛**：补齐后的下一个自然 pass，该 cycle+model 的重跑应记录
+   `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete；断路器条目从
+   pass evidence 中消失。
+
 ## 相关文档
 
 - [`current-production-ops.md`](current-production-ops.md) — 当前生产值守手册。
