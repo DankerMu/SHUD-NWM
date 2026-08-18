@@ -6,8 +6,9 @@ The registry import refusal SHALL carry the refused model's health causes
 in its structured payload: when a model is refused as not importable, the
 error payload includes the model's status and its missing, invalid, and
 unreadable required-file collections, copied from the inventory model
-record under the same key names the scheduler registry publish channel
-and the discovery payload use. The refusal predicate, error code, and
+record (empty when a caller-supplied inventory predates a key) — the
+first three key names match the scheduler registry publish channel, the
+fourth matches the discovery payload. The refusal predicate, error code, and
 message text stay byte-for-byte unchanged, pre-existing payload keys keep
 their values, and the reingest passthrough (which already forwards
 upstream details verbatim) surfaces the same cause keys in its own

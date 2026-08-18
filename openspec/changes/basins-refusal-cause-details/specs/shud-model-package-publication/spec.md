@@ -6,8 +6,10 @@ The package publication refusal SHALL carry the refused model's health
 causes in its structured payload: when a model is refused as not
 publishable, the error payload includes the model's status and its
 missing, invalid, and unreadable required-file collections, copied from
-the inventory model record under the same key names the scheduler
-registry publish channel and the discovery payload use — no new aliases.
+the inventory model record (empty when a caller-supplied inventory
+predates a key) — the first three key names match the scheduler registry
+publish channel, the fourth matches the discovery payload; no new
+aliases.
 The refusal predicate, error code, and message text stay byte-for-byte
 unchanged, and every pre-existing payload key keeps its value, so receipt
 consumers remain backward compatible; error instances raised without
