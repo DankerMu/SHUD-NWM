@@ -160,7 +160,8 @@ this collapse path.
 - **WHEN** the diff consists only of files in the known unmapped classes
   (`schemas/**`, unmapped `infra/**`, `.py` outside the five backend
   prefixes, non-`.py` under backend prefixes, non-`.py` under `tests/`,
-  `scripts/**/*.sh`)
+  `.sh` files outside `scripts/`; `scripts/**/*.sh` left this list when it
+  joined the backend gate — an unmapped one now arms the core-smoke fallback)
 - **THEN** the selector returns an empty selection and the selector test
   suite pins each class explicitly as the route-C contract, so any future
   route-A/B policy change must flip a visible assertion
@@ -530,4 +531,37 @@ evade it, a recorded tripwire limit.)
   on an attribute receiver
 - **THEN** the shared-AST mutation guard fails, naming the offending
   construct and line
+
+### Requirement: Shell wrapper changes MUST gate their guard suites
+
+The CI change-detection gate SHALL treat tracked `scripts/**/*.sh` files as
+backend surface: the `backend` paths-filter matches them, and the targeted
+test selector maps each shell wrapper that has committed guard tests to those
+guard test files. A `scripts/**/*.sh` path with no explicit mapping falls back
+to the core smoke selection instead of an empty selection.
+
+#### Scenario: sh-only change selects the wrapper's guard suite
+
+WHEN a pull request changes only `scripts/scheduler_file_provider_refresh_once.sh`
+THEN the `backend` filter reports true
+AND the targeted selector output includes `tests/test_scheduler_file_provider_refresh.py`
+
+#### Scenario: unmapped shell script falls back loudly, not empty
+
+WHEN a pull request changes only a new `scripts/**/*.sh` file that has no
+selector mapping
+THEN the targeted selector returns at least the core smoke test set
+AND does not return an empty selection
+
+#### Scenario: sh plus py change selects the union of guards
+
+WHEN a pull request changes both a mapped shell wrapper and a mapped backend
+python module
+THEN the targeted selector output contains both surfaces' guard suites
+
+#### Scenario: a mapped shell wrapper does not pull core smoke
+
+WHEN a pull request changes only a shell wrapper that has an explicit guard
+mapping
+THEN the selection contains its guard suite and no core-smoke fallback entries
 

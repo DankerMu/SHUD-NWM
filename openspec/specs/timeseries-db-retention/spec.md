@@ -267,3 +267,47 @@ modify. Historical receipts remain byte-unchanged.
   prefixed `COMPLETENESS_` or `DRILL_`, and the receipt schema `1.1`
   SHALL be byte-unchanged by this change
 
+### Requirement: Resource-governance receipts MUST pin archive_root absence at artifact level
+
+The node-27 resource-governance audit receipt SHALL NOT carry a top-level
+`archive_root` block (ADR 0002 revision: the audit must not claim observation
+of a volume no lane uses), and this absence SHALL be pinned by a regression
+test that constructs the receipt artifact itself, not merely by asserting the
+absence of retired collector functions or config attributes.
+
+#### Scenario: constructed receipt carries no archive_root key
+
+WHEN the governance receipt is built via `build_receipt()` with its
+filesystem/postgres/systemd collectors stubbed
+THEN the resulting receipt dict has no top-level `archive_root` key
+
+#### Scenario: reintroduction by another path fails the pin
+
+WHEN any change reintroduces a top-level `archive_root` block through a
+renamed or generic collector path
+THEN the artifact-level pin test fails even though the retired-attribute
+assertions still pass
+
+### Requirement: Byte-identity guard tests MUST survive openspec change archival
+
+The H4/H6 byte-identity tests that read the tiering change's design.md SHALL
+resolve the document from the pending change location first and fall back to
+the archived change location, failing with an explicit dual-location message
+when neither exists, so that archiving the change cannot turn the guards red.
+
+#### Scenario: pending location preferred
+
+WHEN the design.md exists in both the pending and archived locations
+THEN the tests read the pending copy
+
+#### Scenario: archived change still resolvable
+
+WHEN the change has been archived and only
+`openspec/changes/archive/<date>-tier-node27-timeseries-storage/design.md` exists
+THEN the tests resolve the latest archived copy and keep running their assertions
+
+#### Scenario: both locations missing fails loudly
+
+WHEN neither location exists
+THEN the tests fail with a message naming both searched locations instead of a bare FileNotFoundError
+
