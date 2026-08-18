@@ -2804,9 +2804,14 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
-            # The transition swaps accounting and status only: the reservation's null
-            # ``error_code`` rides through untouched, which is the auto-retry isolation
-            # contract (spec: candidate-projection-stage-attempt-retention).
+            # This write produces ``absence_retry_permitted``, one of the reclaim doors
+            # the auto-retry isolation contract explicitly EXCLUDES: the row is meant to
+            # be retried (``_verified_accepted_submit_forecast_retry`` and
+            # ``reclaim_pipeline_job_reservation``'s precondition both key off this
+            # shape).  The null ``error_code`` here is only the fact that the transition
+            # introduces no new code; the isolation contract's subject is the
+            # ``identity_mismatch_released`` sub-shape below (spec:
+            # candidate-projection-stage-attempt-retention).
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(

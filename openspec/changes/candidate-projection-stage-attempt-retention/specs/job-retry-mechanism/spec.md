@@ -4,7 +4,7 @@
 
 ### Requirement: Strict-warm-start terminal mismatch retries SHALL respect a stage-scoped budget
 
-When the candidate ladder would emit `retry_strict_warm_start_terminal_init_state_mismatch` for a terminal-success candidate whose recorded init-state identity mismatches the strict warm-start resolution, the scheduler SHALL first evaluate the stage-scoped retry attempt against the configured retry limit. When the attempt has reached the limit, the scheduler SHALL emit the stable blocked decision `blocked_strict_warm_start_init_state_mismatch` carrying a retry-policy block (automatic retry not allowed, manual retry required, attempt, retry limit) instead of the retry decision, and the blocked decision SHALL NOT participate in forced terminal resubmission or replacement-retry scoping. When the attempt is below the limit, the retry decision and its evidence SHALL remain unchanged. The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — **including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages**: on the file-journal candidate-state projection (the production path, which reads the cycle's rows unlimited before projecting), the `job_limit` truncation SHALL retain, for every canonical downstream stage whose maximum effective retry attempt in the projection input is non-zero, the pipeline-job row carrying that maximum (derived through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use — never job-id substring parsing and never a locally forked stage-alias table), subject to the `job_limit` hard cap below, so that stage-scoped attempt derivation over the truncated projection returns the true upper bound for every retained stage. The `job_limit` hard cap SHALL never be exceeded (when retained upper-bound rows alone would exceed it, the freshest by truth timestamp win), and geometries where the retained rows already fall inside the freshness window SHALL produce an element-for-element identical projection to the pure-freshness selection. The DB-backed candidate-state read path, which truncates in SQL upstream of the projection, is explicitly outside this guarantee.
+When the candidate ladder would emit `retry_strict_warm_start_terminal_init_state_mismatch` for a terminal-success candidate whose recorded init-state identity mismatches the strict warm-start resolution, the scheduler SHALL first evaluate the stage-scoped retry attempt against the configured retry limit. When the attempt has reached the limit, the scheduler SHALL emit the stable blocked decision `blocked_strict_warm_start_init_state_mismatch` carrying a retry-policy block (automatic retry not allowed, manual retry required, attempt, retry limit) instead of the retry decision, and the blocked decision SHALL NOT participate in forced terminal resubmission or replacement-retry scoping. When the attempt is below the limit, the retry decision and its evidence SHALL remain unchanged. The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — **including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages**: on the file-journal candidate-state projection (the production path, which reads the cycle's rows unlimited before projecting), the projection SHALL derive, from the untruncated projection input, each canonical downstream stage's maximum effective retry attempt — through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use (including the `job_type` fallback for stage-less rows and the persisted-`retry_count` half for rows without a `_retry_<n>` suffix), never job-id substring parsing and never a locally forked stage-alias table — and carry these upper bounds across truncation so that stage-scoped attempt derivation over the truncated projection returns the true upper bound for every canonical downstream stage. The truncated row selection itself SHALL remain the pure-freshness top-`job_limit` selection, element for element identical to the pre-change projection in every geometry — the carried upper bounds SHALL add no rows, evict no rows, and change no state key derived from the row population — and the stage-less flat-first attempt derivation SHALL remain byte-identical. The DB-backed candidate-state read path, which truncates in SQL upstream of the projection, is explicitly outside this guarantee (the shared projection computes the carried upper bounds over that path's `job_limit+1` window — a value-level improvement only; its row selection is likewise unchanged).
 
 #### Scenario: Budget exhaustion demotes the retry to a stable blocked decision
 
@@ -31,41 +31,46 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 - **WHEN** the `*_forecast_retry_N` row carrying the stage's maximum attempt is older than `job_limit` fresher rows of other stages and `N` has reached the retry limit
 - **THEN** the truncated file-journal projection still yields stage-scoped attempt `N` and the demotion to `blocked_strict_warm_start_init_state_mismatch` triggers instead of an unbudgeted retry
 
-#### Scenario: Friendly geometry projection is unchanged
+#### Scenario: Projection row selection is unchanged in every geometry
 
-- **WHEN** the maximum-attempt rows already sit inside the freshness window
-- **THEN** the truncated projection equals the freshness-ordered top-`job_limit` selection element for element, in the same order
+- **WHEN** any input geometry is projected — including the reverse geometry, a geometry whose only completed-stage success row sits at the old end of the freshness window, a geometry with a stale active-status row outside the window, and a geometry whose flat `retry_count` carrier sits inside the window
+- **THEN** `pipeline_jobs` equals the freshness-ordered top-`job_limit` selection element for element, and every state key derived from the row population (`pipeline_status`, `failed_stage`, `restart_stage`, completed-stage evidence, active-job scanning, the flat `retry_count` aggregate, `latest_job` derivation) is identical to the pre-change projection
 
-#### Scenario: Hard cap survives degenerate retention
-
-- **WHEN** the per-stage upper-bound rows alone would exceed `job_limit`
-- **THEN** the projection still contains exactly `job_limit` rows, chosen among the upper-bound rows by freshest truth timestamp
-
-#### Scenario: Zero-attempt stages claim no retention slot
+#### Scenario: Zero-attempt stages carry no upper bound
 
 - **WHEN** a canonical stage's maximum effective attempt in the input is zero
-- **THEN** no row of that stage is retained beyond what the freshness window admits, and the stage-scoped derivation still returns zero
+- **THEN** the carried upper bounds contain no entry for that stage and stage-scoped derivation still returns zero
 
-#### Scenario: Copyback is retained and download is not a retention stage
+#### Scenario: Upper bounds derive through the consumer chain on degenerate row shapes
 
-- **WHEN** the input carries an out-of-window maximum-attempt `copyback` row and out-of-window `download` rows
-- **THEN** the `copyback` upper-bound row is retained (it is a canonical downstream stage) while `download` rows claim no retention slot (not a canonical downstream stage), matching the consumer-side canonical-stage table rather than any locally forked alias table
+- **WHEN** the input carries an out-of-window maximum-attempt `copyback` row, out-of-window `download` rows, a row whose attempt lives only in its persisted `retry_count` (no `_retry_<n>` suffix), and a row whose stage lives only in `job_type`
+- **THEN** the `copyback`, persisted-`retry_count`, and `job_type`-only upper bounds are all carried (canonical stages via the consumer chain) while `download` rows contribute no upper bound (not a canonical downstream stage), matching the consumer-side canonical-stage table rather than any locally forked alias table or job-id substring parsing
+
+#### Scenario: Stage-less flat-first derivation is unaffected
+
+- **WHEN** the stage-less attempt derivation runs against a projected state carrying non-empty stage upper bounds
+- **THEN** it returns the flat-first value exactly as before — the carried upper bounds never leak into stage-less reads
 
 ## ADDED Requirements
 
 ### Requirement: Released identity-blocked reservation rows SHALL remain outside automatic retry classification
 
-A pipeline-job row produced by identity-blocked reservation release (`status="reservation_lost"`, `identity_mismatch_released` sub-shape) SHALL carry no `error_code` — the reservation writes that seed the row SHALL keep setting `error_code` to null, and the release transition SHALL NOT introduce one — and `should_auto_retry`/`classify_failure` SHALL therefore evaluate it as non-retriable. Tests SHALL pin both the written row shape (driving the real reserve-then-release sequence, not a hand-built row) and the `should_auto_retry` verdict, so that any future edit stamping a transient error code onto the reservation or release writes fails the pin instead of silently opening a duplicate-submission route. This requirement governs only the automatic-retry classification decision: the reservation reclaim predicate and the reconcile-verified retry shortcut (the two reclaim doors that the existing "Lost reservations are not mark sources" requirement keeps open) are explicitly unaffected.
+A pipeline-job row produced by identity-blocked reservation release (`status="reservation_lost"`, `identity_mismatch_released` sub-shape) SHALL carry no `error_code` — the reservation writes that seed the row, including the reclaim re-seed of a lost reservation, SHALL keep setting `error_code` to null, and the release transition SHALL NOT introduce one — and `should_auto_retry`/`classify_failure` SHALL therefore evaluate it as non-retriable. Tests SHALL pin both the written row shape (driving the real reserve-then-release sequence — and the real reserve-permit-reclaim-release sequence — not a hand-built row) and the `should_auto_retry` verdict, so that any future edit stamping a transient error code onto the reservation, reclaim, or release writes fails the pin instead of silently opening a duplicate-submission route. This requirement governs only the automatic-retry classification decision: the reservation reclaim predicate and the reconcile-verified retry shortcut (the two reclaim doors that the existing "Lost reservations are not mark sources" requirement keeps open) are explicitly unaffected.
 
 #### Scenario: Release row shape carries no error code
 
 - **WHEN** an identity-blocked reservation is reserved and then released through the real transition sequence
 - **THEN** the resulting accounting row has `status == "reservation_lost"` and a null `error_code`
 
+#### Scenario: Release after reclaim carries no error code
+
+- **WHEN** a reservation is reserved, permitted for retry after an ambiguous submit (`absence_retry_permitted`), reclaimed back to reserved through the real reclaim transition, and then released as identity-blocked
+- **THEN** the released row still has a null `error_code` and `should_auto_retry` is false — the reclaim re-seed did not introduce a transient code
+
 #### Scenario: Released row is not auto-retriable
 
 - **WHEN** automatic retry classification evaluates the released reservation row
-- **THEN** `should_auto_retry` is false, and the pin fails the moment any transient error code is introduced on the reservation or release writes
+- **THEN** `should_auto_retry` is false, and the pin fails the moment any transient error code is introduced on the reservation, reclaim, or release writes
 
 #### Scenario: Reclaim doors stay open
 

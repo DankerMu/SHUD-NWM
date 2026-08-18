@@ -100,11 +100,21 @@ Manual re-entry, in order:
    rows whose authoritative `stage` matches contribute their `*_retry_<N>` suffix, so a
    `reserved` master with `retry_count=0` still reports the real attempt count as long as
    a `*_forecast_retry_<N>` row survives the candidate-state job-limit truncation.
-   Since #1179 the file-journal projection retains each canonical stage's maximum-attempt
-   row before truncating, so the budget also binds in the reverse geometry where that
-   `*_forecast_retry_<N>` row is OLDER than `job_limit` fresher rows of other stages
-   (it used to be dropped and the attempt silently read `0`); the DB-backed read path
-   truncates in SQL upstream of the projection and is not covered (#1572).
+   Since #1179 that last clause no longer applies to the number: before truncating, the
+   file-journal projection records each canonical stage's maximum attempt in the state key
+   `stage_retry_attempt_floors`, and a stage-scoped read maxes the row scan against that
+   floor. So the budget also binds in the reverse geometry where the `*_forecast_retry_<N>`
+   row is OLDER than `job_limit` fresher rows of other stages (it used to be dropped and
+   the attempt silently read `0`). The row selection itself is untouched — still pure
+   freshness — so `pipeline_status`, `failed_stage`, `restart_stage`, the active-job scan
+   and the flat `retry_count` all read exactly what they read before. Two consequences to
+   know about: a stage-LESS attempt read (no `stage` argument) still answers with the flat
+   candidate-scoped count and never sees the floors; and under the geometry where the
+   failed row is outside the window AND a succeeded terminal-stage row empties the stage
+   keys, `_failed_stage` is `None`, so the manual-retry mint still re-derives `_retry_1`
+   and no-ops on the existing key (an accepted boundary, tracked in #1577). The DB-backed
+   read path truncates in SQL upstream of the projection, so an attempt outside that
+   window never reaches the floors either (#1572).
 2. Decide whether re-running is actually correct. If the init-state identity mismatch is a
    data defect, fix the data first — the budget is protecting you from re-submitting the
    same mismatch forever.

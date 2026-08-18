@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
-from services.orchestrator.retry_identity import effective_retry_attempt
-from services.orchestrator.scheduler_state_rows import _canonical_downstream_stage, _job_stage_name
+from services.orchestrator.scheduler_state_rows import (
+    STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    stage_retry_attempt_floors,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
@@ -635,67 +637,6 @@ def candidate_state(
     )
 
 
-def _stage_attempt_upper_bound_positions(freshness_ordered_jobs: list[dict[str, Any]]) -> set[int]:
-    """Positions of the per-stage retry-attempt upper bounds (#1179).
-
-    ``freshness_ordered_jobs`` is the freshness-DESCENDING list, so the first
-    row reaching a stage's maximum is also the freshest one carrying it — the
-    ``>`` comparison is what makes an attempt tie resolve to the newest row.
-
-    Stage identity and attempt derivation deliberately come from the SAME chain
-    the budget consumers read with (``_canonical_downstream_stage`` +
-    ``_job_stage_name`` + ``effective_retry_attempt``, ``scheduler_state_rows``
-    :417-479): this module's ``_STAGE_ALIASES`` is a different domain — it
-    admits ``download`` and omits ``copyback`` — so retaining by it would keep
-    rows no consumer scopes to and drop ones they do.  A stage whose maximum is
-    0 claims no slot: every row of it derives 0 anyway, so retention would only
-    evict a fresher row for no gain.
-    """
-
-    upper_bounds: dict[str, tuple[int, int]] = {}
-    for position, job in enumerate(freshness_ordered_jobs):
-        stage = _canonical_downstream_stage(_job_stage_name(job))
-        if stage is None:
-            continue
-        attempt = effective_retry_attempt(job.get("job_id"), job.get("retry_count"))
-        if attempt <= 0:
-            continue
-        current = upper_bounds.get(stage)
-        if current is None or attempt > current[0]:
-            upper_bounds[stage] = (attempt, position)
-    return {position for _, position in upper_bounds.values()}
-
-
-def _stage_attempt_retaining_selection(
-    freshness_ordered_jobs: list[dict[str, Any]],
-    job_limit: int,
-) -> list[dict[str, Any]]:
-    """Truncate to ``job_limit`` while keeping every stage's attempt upper bound.
-
-    The stage-scoped budget (#1173) is only real if the row carrying a stage's
-    maximum attempt survives truncation; in the reverse geometry — the
-    ``*_forecast_retry_N`` row older than ``job_limit`` fresher rows of other
-    stages — pure freshness dropped it and the derived attempt silently read 0
-    (#1179).
-
-    The remaining slots are filled by FILTERING the freshness-ordered list, not
-    by re-sorting: the order the caller re-sorts is unchanged, and a geometry
-    whose upper-bound rows already sit inside the window selects exactly the
-    freshness top-``job_limit``, element for element.  ``job_limit`` is a hard
-    cap: when the upper-bound rows alone exceed it the freshest of them win.
-    """
-
-    retained = _stage_attempt_upper_bound_positions(freshness_ordered_jobs)
-    if len(retained) > job_limit:
-        retained = set(sorted(retained)[:job_limit])
-    selected = set(retained)
-    for position in range(len(freshness_ordered_jobs)):
-        if len(selected) >= job_limit:
-            break
-        selected.add(position)
-    return [freshness_ordered_jobs[position] for position in sorted(selected)]
-
-
 def candidate_state_from_rows(
     *,
     source_id: str,
@@ -740,8 +681,15 @@ def candidate_state_from_rows(
             reverse=True,
         )
     ]
+    # Built BEFORE the truncation, over every row that passed the terminal
+    # filter: the row carrying a stage's maximum attempt may be older than
+    # ``job_limit`` fresher rows of other stages, and dropping it used to make
+    # the stage-scoped derivation read 0 (#1179).  The floors travel; the row
+    # selection below stays pure freshness, so no key derived from the row
+    # population moves.
+    retry_attempt_floors = stage_retry_attempt_floors(jobs)
     jobs = sorted(
-        _stage_attempt_retaining_selection(jobs, job_limit),
+        jobs[:job_limit],
         key=lambda job: (
             _pipeline_job_truth_sort_key(job),
             _datetime_sort_key(job.get("created_at")),
@@ -895,6 +843,7 @@ def candidate_state_from_rows(
         "forecast_cycle": forecast_cycle,
         "nfs_raw_manifest": dict(nfs_raw_manifest) if isinstance(nfs_raw_manifest, Mapping) else None,
         "pipeline_jobs": jobs,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY: retry_attempt_floors,
         "pipeline_events": events,
         "pipeline_status": pipeline_status,
         "stage": (

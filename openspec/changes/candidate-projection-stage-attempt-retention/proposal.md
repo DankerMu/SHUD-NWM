@@ -12,16 +12,21 @@ download/convert/forcing/parse/… 与 36 流域 cohort 行，超 100 行不难�
 
 ## What Changes
 
-**file-journal 投影路径**（生产实际路径）的截断阶段做 stage-aware 保留：切 `[:job_limit]`
-之前，先保留每个"最大 effective attempt 非零"的 canonical downstream stage 上 attempt
-最大的那一行（把预算真值锁进投影；受 `job_limit` hard cap 约束），剩余名额按现有时间序
-过滤式填充。不变量："被截断的投影必须保留每个 canonical stage
-的 attempt 上界"（保护数值上界，非行群体）。**DB 读路径在 SQL 里就截断
-（`chain_repository_state.py:519-535`，`ORDER BY … LIMIT job_limit+1`），投影层保留救不了它
-——显式排除并路由独立 issue（D0 裁决）**。补逆序几何回归测试；核对全部 stage-scoped attempt
-消费点（其中 failure 侧 mint 路径是真实行为变化，两腿钉住——E12）；把
-"`identity_mismatch_released` 行不得进入 auto-retry"钉成契约（真实 reserve→release 序列
-shape 钉 + 判定钉 + 四处不变量注释，不改行为）；PR body 引用 #1173 归档 receipt。
+（v2，round-1 cross-review 后机制修订——初版"行保留"被评审差分探针证伪可见性安全性，
+详见 design.md 头注）**file-journal 投影路径**（生产实际路径）改为 **attempt-floor 载带**：
+`pipeline_jobs` 选集维持纯新鲜度 `[:job_limit]` **逐字节不变**（可见性零变化）；截断前对
+全量投影输入按消费链（`_canonical_downstream_stage` + `_job_stage_name` +
+`effective_retry_attempt`）提取每个 canonical downstream stage 的最大 effective attempt，
+落 state 新键 `stage_retry_attempt_floors`；`_state_job_retry_attempt` stage-scoped 读取时
+并入 floor。不变量："截断不得改变 stage-scoped attempt 推导的结果"（保护数值上界，非行
+群体——proposal 原措辞即此，v2 使实现忠于它）。stage-less flat-first 语义逐字节不变。
+**DB 读路径在 SQL 里就截断（`chain_repository_state.py:519-535`），guarantee 显式排除并
+路由 #1572（D0 裁决）；共享投影函数使 DB 路径的 floors 在 `job_limit+1` 窗口上计算——
+纯数值面顺向改良，选集同样不变（D0 v2 澄清）**。补逆序几何回归测试 + round-1 四个证伪
+几何的回归钉；核对全部 stage-scoped attempt 消费点（geometry-B 下 manual mint 维持现状
+撞键 no-op——显式边界，follow-up issue 路由）；把"`identity_mismatch_released` 行不得进入
+auto-retry"钉成契约（真实 reserve→release 与 reserve→permit→reclaim→release 两条链 shape
+钉 + 判定钉 + 四处不变量注释，不改行为）；PR body 引用 #1173 归档 receipt。
 
 ## Impact
 

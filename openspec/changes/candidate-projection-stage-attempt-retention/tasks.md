@@ -3,77 +3,96 @@
 Fixture level: expanded
 Upstream suggested level: absent (issue 早于 0.16.0 契约；`retry`/persisted-state/`scheduler` 强制触发词定 expanded)
 
+> v2（round-1 cross-review 后机制修订）：行保留 → attempt-floor 载带；选集逐字节回到现状。
+> 初版 E 腿中依赖行可见性的（旧 E3/E11/E12a 行为变化）已按 v2 重定义；round-1 verified
+> findings S1-S4 / C1-C4 全部映射到 v2 腿或文档修正。
+
 ## Risk packs considered (core)
 
-- Public API / CLI / script entry: not selected — 私有投影函数签名不变。
+- Public API / CLI / script entry: not selected — 私有投影函数签名不变（state 增新键，Mapping 惰性）。
 - Config / project setup: not selected — `job_limit` 默认与语义不变。
 - File IO / path safety / overwrite: not selected — 无文件面（纯内存投影）。
-- Schema / columns / units / field names: not selected — 投影键集不变（`state_truncated`/`pipeline_jobs_total` 语义 D2 钉住）。
+- Schema / columns / units / field names: **selected** — state 新键 `stage_retry_attempt_floors`
+  的形状与惰性（D1.3）；证据 E-v2-sel。
 - Auth / permissions / secrets: not selected — 无认证面。
-- Concurrency / shared state / ordering: **selected** — 截断选集与回排顺序契约、过滤式 fill 的窗口边界稳定性（D1.2）、保留并列规则（D1.1）；证据 E1/E2/E3。
-- Resource limits / large input / discovery: **selected** — hard cap 不得突破（D1.4）+ 可见性两半面的诚实分析（D2）；证据 E4/E11。
-- Legacy compatibility / examples: **selected** — 友好序逐元素一致 + :42219 不放宽（证据 E2）；DB 路径显式排除为 D0 裁决，无腿（by design）。
-- Error handling / rollback / partial outputs: **selected** — 预算 blocked（E5）+ mint 行为变化两腿（E12）+ released 行钉住（E6）。
+- Concurrency / shared state / ordering: **selected** — 选集逐字节不变是承重墙（D2）；证据
+  E2'/E-v2-sel。
+- Resource limits / large input / discovery: **selected** — floors 不加行不删行、hard cap 归
+  于现状截断；证据 E4'。
+- Legacy compatibility / examples: **selected** — 三个证伪几何回归钉（S1/S2/S3/S4）+ :42219
+  不放宽 + stage-less flat-first 不变（E12''）。
+- Error handling / rollback / partial outputs: **selected** — 预算 blocked（E5）+ geometry-B
+  边界现状钉（E11-v2/E12-v2）+ released 行钉（E6a/b/c）。
 - Release / packaging / dependency compatibility: not selected — 无依赖变化；3.11 兼容自查（D6）。
-- Documentation / migration notes: **selected** — `docs/runbooks/failed-basin-retry.md` 补一行（预算在逆序几何下现在真实绑定）。
+- Documentation / migration notes: **selected** — runbook 机制描述更新 + D0 共享函数事实澄清
+  + :2807 注释归属修正（C4）。
 
-Domain packs (NHMS profile): Slurm production lifecycle **selected**（L2 预算绑定 + E12a 恢复
-一次真实提交路径影响生产自旋收敛；oracle 仍为本地 pytest，不改 sbatch/调度行为本身）。
-其余 not selected——无地理/时序/数值/DB 面（DB 读路径显式排除，D0）。
+Domain packs (NHMS profile): Slurm production lifecycle **selected**（L2 预算绑定影响生产自旋
+收敛；oracle 仍为本地 pytest）。其余 not selected——无地理/时序/数值/DB 面（DB 读路径
+guarantee 排除，D0；共享函数数值面已澄清）。
 
-## Required evidence
+## Required evidence (v2)
 
-- E1 逆序几何主缺陷: `*_forecast_retry_N` 旧端 + `>= job_limit` 条更新其它 stage 行 →
-  `_state_retry_attempt(state, stage="forecast") == N`（当前实测 0；issue 探针同形，
-  `job_limit=5`, `N=87`）。
-- E2 友好序不回归: :42219 原样通过；另加显式期望腿——保留行在窗内时最终选集 == 新鲜度序
-  top-`job_limit` 的**显式 id 列表**（不与"pre-change 代码"比，与写死的期望列表比）。
-- E3 保留确定性: 同 stage 同 attempt 并列 → truth timestamp 最新者保留；fill 为过滤式
-  （D1.2），窗口边界完全并列时行为与现状一致。
-- E4 退化边界: 保留集 > `job_limit` → 总数仍 == `job_limit`（truth timestamp 最新胜）；
-  attempt==0 stage 不占名额。
+- E1 逆序几何主缺陷: `*_forecast_retry_N` 旧端 + `>= job_limit` 条其它 stage 更新行 →
+  `_state_retry_attempt(state, stage="forecast") == N`（floors 载带；红证据 = 去掉 floors
+  并入）。
+- E2' 选集逐字节不变: 逆序几何下 `pipeline_jobs` == 纯新鲜度 top-`job_limit` 的**显式 id
+  列表**（写死期望）；既有 :42219 原样通过。
+- E4' floors 不动行群体: 输入 > `job_limit` 时投影恰 `job_limit` 行（最新序）；floors 非空
+  不改变行数与成员。
 - E5 预算绑定: 逆序 + `N >= retry_limit` → `("blocked", "strict_warm_start_retry_budget_exhausted")`。
-- E6 released 行钉住: (a) **真实 reserve→release 序列**产出行 `status=="reservation_lost"`
-  且 `error_code` 为空；(b) 该行 `should_auto_retry` 为假；不变量注释落 :1778/:1903/:2804/:2954
-  四处。
-- E7 消费面核对: `scheduler_state_failure.py` 四处 + `manual_retry:982` 逐一核对结论入
-  PR body（:1917 除外——它有专属 E12 腿）。
-- E10 alias 表钉: 窗外最大 attempt `copyback` 行被保留（canonical）；窗外 `download` 行
-  不占保留名额（非 canonical）——防 `_STAGE_ALIASES` 误用（D1.1）。
-- E11 挤出面交互: 用 **geometry B**（D3 配方：succeeded publish filler → 三键全空）使
-  `_failed_stage` 行扫描可达，**硬断言前提** `assert _failed_stage(today_state) is None`
-  （非注释——geometry A 下会 vacuous 绿），钉逆序几何下解析结果 `None → 'forecast'`。
-- E12 manual-retry mint 行为变化（D3 修订引用链）: (a) 逆序 + adopted marker 不带显式
-  attempt + `N < retry_limit` → `manual_retry.new_attempt == N+1`、mint `_retry_{N+1}`
-  （今天静默 no-op 撞键）；(b) 逆序 + `N >= retry_limit` → manual 路径照常
-  `allowed: True` / `new_attempt == N+1`——预算不门 manual retry（`manual=True` 解除
-  permanent），钉既有语义在真值下的形状。
-- E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat"`；
+- E6 released 行钉: (a) 真实 reserve→release 行 `status=="reservation_lost"` 且 `error_code`
+  空; (b) `should_auto_retry` 为假; **(c) reserve→permit(absence_retry_permitted)→reclaim→
+  release 全链后同断言**（:1911 塞瞬时 code 变异必须咬红）。不变量注释四处 + :2807 措辞按
+  D4 修正。
+- E7 消费面核对: D3 v2 清单逐一核对结论入 PR body。
+- E10' floor 推导链同构: 窗外最大 attempt `copyback` 行入 floor；`download` 行不入；
+  **attempt 只在持久化 `retry_count`（无 `_retry_` 后缀，如 `_retry_active`）的行入 floor**；
+  **stage 空只有 `job_type` 的行入 floor**——C1 两个变异（丢 job_type 回退 / 纯后缀解析）
+  必须各自咬红。
+- E11-v2 geometry-B 边界钉: succeeded publish filler + 窗外 failed retry 行 →
+  **硬断言** `_failed_stage(state) is None`（选集不变，行不可见）；同 state 上
+  `_state_retry_attempt(state, stage="forecast") == N`（floors 与行可见性解耦的直接证明）。
+- E12-v2 manual mint 现状边界钉: geometry B + adopted marker 无显式 attempt →
+  `new_attempt == 1`（现状撞键 no-op 维持，follow-up issue 编号入注释与 PR body）。
+- E12'' stage-less flat-first 不变: floors 非空的投影 state 上 `_state_retry_attempt(state)`
+  （无 stage）仍 flat-first 返回顶层 `retry_count`（floors 渗入 stage-less 的变异必须红）。
+- E-v2-S1 再入几何回归钉: candidate-scoped retry 行 + 更新 run 成功行全窗外 + cycle-scope
+  filler → `pipeline_status`/`failed_stage` 与改前全同（None/None），且 stage-scoped attempt
+  读出真值。
+- E-v2-S2 completed-stage 几何回归钉: 窗外 wedge + 窗内 convert succeeded + forcing failed →
+  `restart_stage == 'forcing'`、completed-stage 证据保持。
+- E-v2-S3 ACTIVE 几何回归钉: 窗外 running + slurm_job_id 行 → `_state_active_jobs` 为空。
+- E-v2-S4 flat 载体几何回归钉: retry_count=4 载体行在窗内 → `state["retry_count"] == 4`。
+- E-v2-sel 新键形状: 投影 state 恒含 `stage_retry_attempt_floors` dict（可空）；非投影
+  state（无该键）读取行为不变。
+- E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat or retention or floor"`；
   `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py
   tests/test_gateway_reconcile.py`；`uv run ruff check .`；
   `openspec validate candidate-projection-stage-attempt-retention --strict --no-interactive`。
-- E9 receipt: PR body 引用 #1173 归档 receipt（archive/2026-07-27-…/tasks.md:39-40，
-  已佐证 D4）；fresh node-22 只读计数可选，不可达不阻塞；归档文件不编辑。
+- E9 receipt: PR body 引用 #1173 归档 receipt（archive/2026-07-27-…/tasks.md:39-40）；
+  归档文件不编辑。
 
-## Review focus
+## Review focus (v2)
 
-1. D1.1 推导链同构 + **禁用本文件 `_STAGE_ALIASES`**（含 download 漏 copyback）——E10 是守门腿。
-2. D1.2 过滤式 fill——窗口边界完全并列的稳定排序行为不得漂移。
-3. D2 可见性变化两个半面——加入面在生产行形下被全部扫描者过滤（无腿，诚实收窄）；挤出面（条件可达，E11
-   须自建可达性前提）；`latest_job` 已证安全无需腿。
-4. D3/E12 是 **manual-retry 路径**的有意行为变化——`manual=True` 设计上解除 limit 门
-   （retry.py:199），预算不门 manual retry；两腿钉住（可达性前提与 E11 共享几何），
-   不得只写 prose，引用链按 D3 修订版。
-5. E6a 必须驱动真实 reserve→release 序列——手搓行钉不住真实回归向量（:1778/:1903 的未来编辑）。
-6. D0 范围裁决——spec 措辞显式排除 DB 路径；DB 缺口 issue 已路由（PR body 记编号）。
+1. 选集逐字节不变是承重墙——四个证伪几何回归钉（E-v2-S1..S4）+ E2' 显式 id 列表；任何
+   选集差异都是 P1。
+2. floors 推导链同构（builder 与消费者同模块同函数）——E10' 的 C1 两变异是守门腿。
+3. stage-less flat-first 语义不得被 floors 污染（E12''）。
+4. geometry-B 边界是**显式接受的现状**（E11-v2/E12-v2 + follow-up issue），不是回归——
+   review 不得再以行不可见为由要求恢复行保留。
+5. E6c 必须驱动真实 reclaim 链（:1835-1839 前置条件形状），:1911 变异必须咬红。
+6. D0 v2 澄清——DB 路径 floors 数值面顺向变化已落字；选集在两路径都不变。
 7. Python 3.11 兼容（#1566 教训）。
 
 ## Tasks
 
-- [x] 1.1 `candidate_state_from_rows` 截断块 stage-aware 保留（D1 五条规则，过滤式 fill）
-- [x] 2.1 回归测试 E1-E5、E10、E11（tests/test_production_scheduler.py；E11/E12 共享几何）
-- [x] 2.2 E12 两腿 + E6 真实序列钉 + 四处不变量注释
+- [x] 1.1 (v1) `candidate_state_from_rows` 截断块 stage-aware 保留 —— **v2 中回退**
+- [x] 1.2 v2 机制：选集回退纯新鲜度 + floors builder（scheduler_state_rows）+ state 新键 +
+      `_state_job_retry_attempt` 并入 floor
+- [x] 2.1 v2 测试：E1/E2'/E4'/E5/E10'/E11-v2/E12-v2/E12''/E-v2-S1..S4/E-v2-sel
+- [x] 2.2 E6a/b/c + 不变量注释四处（含 :2807 按 D4 修正措辞）
 - [x] 2.3 消费面核对 E7（PR body 落结论）
-- [x] 2.4 runbook 一行（failed-basin-retry.md）
-- [x] 3.1 E8 全绿；偏离记录 + E9 receipt 引用写入 PR body；DB 缺口 issue：**#1572**（已路由，
-      depends on 本 change 的不变量定稿）
+- [x] 2.4 runbook 机制描述更新（failed-basin-retry.md）
+- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt + follow-up issue 编号（geometry-B manual mint）
+      写入 PR body；DB 缺口 issue：**#1572**

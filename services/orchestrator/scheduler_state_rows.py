@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,6 +32,11 @@ from services.orchestrator.scheduler_state_types import (
     STATE_M23_COMPARISON_FIELDS,
 )
 from workers.data_adapters.base import format_cycle_time
+
+# State key carrying the per-stage attempt maxima across the job-limit
+# truncation (#1179); always present on a projected candidate state, possibly
+# empty.  See ``stage_retry_attempt_floors``.
+STAGE_RETRY_ATTEMPT_FLOORS_KEY = "stage_retry_attempt_floors"
 
 
 def _bounded_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -437,11 +442,18 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     because production ids embed several stage tokens
     (``..._convert_model_0_forecast_retry_1_retry_2``).
 
+    A stage-scoped read also honours the projection's
+    ``stage_retry_attempt_floors`` (#1179), so the answer does not depend on
+    which rows survived the ``job_limit`` truncation: for every canonical stage
+    the value equals what the untruncated job list would have derived.
+
     Without ``stage`` the flat-first order and the cross-job recorded-count max
-    are preserved byte-for-byte for the evidence-owner / manual-retry consumers.
-    The flat value never short-circuits the stage-scoped derivation: a real
-    projected state ALWAYS carries a top-level ``retry_count`` (0 whenever the
-    journal's clean-reservation invariant reset the forecast master row).
+    are preserved byte-for-byte for the evidence-owner / manual-retry consumers,
+    and the floors never leak in: they are per-stage maxima over the UNFILTERED
+    cycle-wide rows, exactly the cross-scope charge the stage argument exists to
+    prevent.  The flat value never short-circuits the stage-scoped derivation: a
+    real projected state ALWAYS carries a top-level ``retry_count`` (0 whenever
+    the journal's clean-reservation invariant reset the forecast master row).
     """
 
     flat = _state_flat_retry_attempt(state)
@@ -460,10 +472,27 @@ def _state_flat_retry_attempt(state: Mapping[str, Any]) -> int | None:
     return None
 
 def _state_job_retry_attempt(state: Mapping[str, Any], canonical_stage: str | None) -> int:
+    """Maximum attempt the state's rows carry, floored by the projection's carry-over.
+
+    The row scan alone is only as complete as the ``job_limit`` window: the row
+    holding a stage's maximum attempt may have been truncated away.  For a
+    stage-scoped read the projection's ``stage_retry_attempt_floors`` restores
+    that number (#1179) — the floors are built over the untruncated rows, so the
+    result is truncation-invariant.  A state that no projection produced carries
+    no floors key and reads exactly as before.
+    """
+
     jobs = _state_jobs(state)
-    if not jobs:
+    scanned = max((_job_retry_attempt(job, canonical_stage) for job in jobs), default=0)
+    if canonical_stage is None:
+        return scanned
+    return max(scanned, _state_stage_retry_attempt_floor(state, canonical_stage))
+
+def _state_stage_retry_attempt_floor(state: Mapping[str, Any], canonical_stage: str) -> int:
+    floors = state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) or {}
+    if not isinstance(floors, Mapping):
         return 0
-    return max(_job_retry_attempt(job, canonical_stage) for job in jobs)
+    return _coerce_int(floors.get(canonical_stage), default=0)
 
 def _job_retry_attempt(job: Mapping[str, Any], canonical_stage: str | None) -> int:
     recorded = _coerce_int(job.get("retry_count"), default=0)
@@ -484,6 +513,39 @@ def _job_stage_name(job: Mapping[str, Any]) -> str | None:
         if value not in (None, ""):
             return str(value)
     return None
+
+def stage_retry_attempt_floors(jobs: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Per-canonical-stage maximum effective attempt over ``jobs`` (#1179).
+
+    The candidate-state projection truncates ``pipeline_jobs`` to ``job_limit``
+    by pure freshness, so in the reverse geometry — the ``*_forecast_retry_N``
+    row OLDER than ``job_limit`` fresher rows of other stages — the only durable
+    record of attempt N was dropped and the stage-scoped derivation silently read
+    0, leaving #1173's L2 budget unbound.  The projection carries these floors
+    across the truncation rather than retaining rows, so the row population, and
+    every state key derived from it, stays exactly what pure freshness selects.
+
+    Derivation must stay identical to the consumer side above
+    (``_canonical_downstream_stage`` + ``_job_stage_name`` +
+    ``effective_retry_attempt``), which is why this lives here and not in the
+    projection module: that module's ``_STAGE_ALIASES`` is a different domain
+    (it admits ``download`` and omits ``copyback``), and an attempt lives in a
+    persisted ``retry_count`` — ``retry.py`` mints ``*_retry_active`` ids with
+    ``retry_count=N`` — just as durably as in a ``_retry_<n>`` suffix.  A stage
+    whose maximum is 0 is omitted: every row of it derives 0 anyway, so a zero
+    floor would say nothing.
+    """
+
+    floors: dict[str, int] = {}
+    for job in jobs:
+        stage = _canonical_downstream_stage(_job_stage_name(job))
+        if stage is None:
+            continue
+        attempt = effective_retry_attempt(job.get("job_id"), job.get("retry_count"))
+        # ``> 0`` falls out of the comparison: an all-zero stage never enters.
+        if attempt > floors.get(stage, 0):
+            floors[stage] = attempt
+    return floors
 
 def _state_retry_limit(state: Mapping[str, Any]) -> int | None:
     for key in ("retry_limit", "max_retries"):

@@ -42309,7 +42309,7 @@ def test_strict_warm_start_budget_binds_on_the_truncated_production_geometry() -
     assert decision.evidence["retry_policy"]["retry_limit"] == 3
 
 
-# --- #1179: stage-aware retention in the candidate-state projection ---------
+# --- #1179: attempt-floor carry across the candidate-state truncation --------
 
 _RETENTION_CYCLE_ID = "gfs_2026072000"
 _RETENTION_CYCLE_RUN_ID = "cycle_gfs_2026072000"
@@ -42321,13 +42321,15 @@ _RETENTION_BASE = "2026-07-20T01:00:00Z"
 def _retention_job(
     job_id: str,
     *,
-    stage: str,
+    stage: str | None,
     job_type: str,
     status: str,
     minutes: int,
     retry_count: int = 0,
+    run_id: str = _RETENTION_CYCLE_RUN_ID,
+    model_id: str | None = None,
 ) -> dict[str, Any]:
-    """One cycle-scope pipeline-job row of the #1179 truncation geometries.
+    """One pipeline-job row of the #1179 truncation geometries.
 
     Cycle scope (model-less, ``cycle_`` run id) is the production row shape the
     issue reproduced on; ``finished_at`` is what ``_pipeline_job_truth_sort_key``
@@ -42336,8 +42338,9 @@ def _retention_job(
 
     return {
         "job_id": job_id,
-        "run_id": _RETENTION_CYCLE_RUN_ID,
+        "run_id": run_id,
         "cycle_id": _RETENTION_CYCLE_ID,
+        "model_id": model_id,
         "job_type": job_type,
         "stage": stage,
         "status": status,
@@ -42347,14 +42350,14 @@ def _retention_job(
     }
 
 
-def _retention_forecast_retry_job(attempt: int, *, minutes: int) -> dict[str, Any]:
+def _retention_forecast_retry_job(attempt: int, *, minutes: int, status: str = "failed") -> dict[str, Any]:
     """The wedge row: attempt N recorded ONLY in the ``_retry_N`` id suffix."""
 
     return _retention_job(
         f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_{attempt}",
         stage="forecast",
         job_type="run_shud_forecast_array",
-        status="failed",
+        status=status,
         minutes=minutes,
     )
 
@@ -42411,12 +42414,21 @@ def _retention_job_ids(state: Mapping[str, Any]) -> list[str]:
     return [str(job["job_id"]) for job in state["pipeline_jobs"]]
 
 
-def test_stage_aware_truncation_retains_the_out_of_window_forecast_attempt() -> None:
+def _retention_floors(state: Mapping[str, Any]) -> dict[str, int]:
+    from services.orchestrator.scheduler_state_rows import STAGE_RETRY_ATTEMPT_FLOORS_KEY
+
+    floors = state[STAGE_RETRY_ATTEMPT_FLOORS_KEY]
+    assert isinstance(floors, dict)
+    return floors
+
+
+def test_attempt_floor_carries_the_out_of_window_forecast_attempt() -> None:
     """E1 (#1179) -- the reverse geometry: the wedge row is the OLDEST row.
 
-    Pure-freshness truncation drops ``*_forecast_retry_87`` and the stage-scoped
-    attempt silently reads 0, so #1173's L2 budget never binds. The retention
-    rule keeps the per-stage upper bound instead.
+    Pure-freshness truncation drops ``*_forecast_retry_87``, so the row scan
+    alone reads 0 and #1173's L2 budget never binds. The projection carries the
+    attempt across the truncation as a floor instead -- the dropped row stays
+    dropped, only the NUMBER survives.
     """
 
     from services.orchestrator.scheduler_state_rows import _state_retry_attempt
@@ -42431,7 +42443,9 @@ def test_stage_aware_truncation_retains_the_out_of_window_forecast_attempt() -> 
     assert state["pipeline_jobs_total"] == len(jobs)
     assert state["state_truncated"] is True
     assert len(state["pipeline_jobs"]) == job_limit
-    assert retry_row["job_id"] in _retention_job_ids(state)
+    # The row itself is NOT rescued: the selection stays pure freshness.
+    assert retry_row["job_id"] not in _retention_job_ids(state)
+    assert _retention_floors(state) == {"forecast": 87}
     assert state["retry_count"] == 0
     assert _state_retry_attempt(state, stage="forecast") == 87
 
@@ -42458,91 +42472,49 @@ def test_strict_warm_start_budget_binds_on_the_reverse_truncation_geometry() -> 
     assert decision.evidence["retry_policy"]["attempt"] == 87
 
 
-def test_friendly_geometry_truncation_selection_is_unchanged() -> None:
-    """E2 (#1179) -- retention inside the window changes nothing, element for element.
+def test_truncation_selection_stays_pure_freshness_in_both_geometries() -> None:
+    """E2' (#1179) -- the row selection is the load-bearing invariant.
 
-    The expected list is written out, not compared against a pre-change run: the
-    freshness-ordered top-5 of this input, in ascending projection order.
+    Both expected lists are written out rather than compared against a
+    pre-change run: the freshness-ordered top-5 of each input, in ascending
+    projection order. The reverse geometry is the one v1's row retention moved;
+    it must select exactly what pure freshness selects.
     """
 
     from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
     job_limit = 5
-    retry_row = _retention_forecast_retry_job(87, minutes=40)
-    filler = _retention_publish_filler(job_limit + 1, first_minute=1)
-    state = _retention_state([*filler, retry_row], job_limit=job_limit)
 
-    assert _retention_job_ids(state) == [
+    reverse = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+    )
+    assert _retention_job_ids(reverse) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}" for index in range(1, 6)
+    ]
+
+    friendly = _retention_state(
+        [*_retention_publish_filler(job_limit + 1, first_minute=1), _retention_forecast_retry_job(87, minutes=40)],
+        job_limit=job_limit,
+    )
+    assert _retention_job_ids(friendly) == [
         f"job_{_RETENTION_CYCLE_RUN_ID}_publish_2",
         f"job_{_RETENTION_CYCLE_RUN_ID}_publish_3",
         f"job_{_RETENTION_CYCLE_RUN_ID}_publish_4",
         f"job_{_RETENTION_CYCLE_RUN_ID}_publish_5",
         f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
     ]
-    assert _state_retry_attempt(state, stage="forecast") == 87
+    assert _state_retry_attempt(reverse, stage="forecast") == 87
+    assert _state_retry_attempt(friendly, stage="forecast") == 87
 
 
-def test_stage_retention_keeps_the_freshest_row_of_a_tied_attempt() -> None:
-    """E3a (#1179) -- same stage, same attempt: truth timestamp decides."""
+def test_attempt_floors_do_not_widen_the_job_limit() -> None:
+    """E4' (#1179) -- four out-of-window stages, still exactly ``job_limit`` rows.
 
-    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
-
-    job_limit = 3
-    older_tie = _retention_job(
-        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_a_retry_12",
-        stage="forecast",
-        job_type="run_shud_forecast_array",
-        status="failed",
-        minutes=1,
-    )
-    fresher_tie = _retention_job(
-        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_b_retry_12",
-        stage="forecast",
-        job_type="run_shud_forecast_array",
-        status="failed",
-        minutes=2,
-    )
-    state = _retention_state(
-        [older_tie, fresher_tie, *_retention_publish_filler(job_limit + 1)],
-        job_limit=job_limit,
-    )
-
-    ids = _retention_job_ids(state)
-    assert fresher_tie["job_id"] in ids
-    assert older_tie["job_id"] not in ids
-    assert len(ids) == job_limit
-    assert _state_retry_attempt(state, stage="forecast") == 12
-
-
-def test_fully_tied_window_boundary_keeps_the_stable_selection() -> None:
-    """E3b (#1179) -- zero-attempt rows tied on every truth field: no drift.
-
-    Nothing is retained here (attempt 0 everywhere), so the selection is decided
-    exactly as it is today -- by the sort key's job-id tiebreak on a fully tied
-    window boundary.
+    Floors are a number per stage, not a slot: however many stages carry an
+    attempt, the projected row set is the freshness top-``job_limit``, and every
+    one of those attempts is still readable.
     """
-
-    job_limit = 5
-    jobs = [
-        _retention_job(
-            f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index:02d}",
-            stage="publish",
-            job_type="publish_tiles",
-            status="succeeded",
-            minutes=10,
-        )
-        for index in range(7)
-    ]
-
-    state = _retention_state(jobs, job_limit=job_limit)
-
-    assert _retention_job_ids(state) == [
-        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index:02d}" for index in range(2, 7)
-    ]
-
-
-def test_stage_retention_never_exceeds_the_job_limit() -> None:
-    """E4a (#1179) -- more upper-bound stages than slots: the hard cap wins."""
 
     from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
@@ -42576,96 +42548,149 @@ def test_stage_retention_never_exceeds_the_job_limit() -> None:
     state = _retention_state(jobs, job_limit=job_limit)
 
     assert _retention_job_ids(state) == [
-        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_5",
-        f"job_{_RETENTION_CYCLE_RUN_ID}_parse_retry_6",
-    ]
-    assert _state_retry_attempt(state, stage="parse") == 6
-    assert _state_retry_attempt(state, stage="forecast") == 5
-    # The two evicted upper bounds are genuinely gone -- the cap is not widened.
-    assert _state_retry_attempt(state, stage="convert") == 0
-    assert _state_retry_attempt(state, stage="forcing") == 0
-
-
-def test_zero_attempt_stage_claims_no_retention_slot() -> None:
-    """E4b (#1179) -- an attempt-0 stage never displaces a freshness-window row."""
-
-    job_limit = 3
-    zero_attempt_row = _retention_job(
-        f"job_{_RETENTION_CYCLE_RUN_ID}_state_save_qc",
-        stage="state_save_qc",
-        job_type="save_state_snapshot_array",
-        status="failed",
-        minutes=2,
-    )
-    jobs = [
-        _retention_forecast_retry_job(9, minutes=1),
-        zero_attempt_row,
-        *_retention_publish_filler(3, first_minute=20),
-    ]
-
-    state = _retention_state(jobs, job_limit=job_limit)
-
-    ids = _retention_job_ids(state)
-    assert zero_attempt_row["job_id"] not in ids
-    assert ids == [
-        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_9",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_0",
         f"job_{_RETENTION_CYCLE_RUN_ID}_publish_1",
-        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_2",
     ]
+    assert _retention_floors(state) == {"convert": 3, "forcing": 4, "forecast": 5, "parse": 6}
+    assert _state_retry_attempt(state, stage="convert") == 3
+    assert _state_retry_attempt(state, stage="forcing") == 4
+    assert _state_retry_attempt(state, stage="forecast") == 5
+    assert _state_retry_attempt(state, stage="parse") == 6
 
 
-def test_stage_retention_follows_the_consumer_canonical_stage_table() -> None:
-    """E10 (#1179) -- ``copyback`` is canonical, ``download`` is not.
+def test_stage_attempt_floors_follow_the_consumer_derivation_chain() -> None:
+    """E10' (#1179) -- the floor dict is built with the consumer's own chain.
 
-    The projection module's own ``_STAGE_ALIASES`` table would answer the other
-    way round on both rows; retention must use the consumer-side canonical table
-    (``DOWNSTREAM_RESTART_STAGES``) instead.
+    Four row shapes, one per way the derivation can diverge:
+
+    * ``copyback`` is canonical to the consumers but absent from the projection
+      module's ``_STAGE_ALIASES``;
+    * ``download`` is the mirror image -- in ``_STAGE_ALIASES``, not canonical;
+    * an attempt can live in a persisted ``retry_count`` with no numeric id
+      suffix at all (``retry.py`` mints ``*_retry_active`` with ``retry_count=N``),
+      so a pure job-id parse loses it;
+    * a row's ``stage`` column is nullable, so the stage has to fall back to
+      ``job_type`` the way ``_job_stage_name`` does.
+
+    A canonical stage whose rows are all attempt 0 (``publish`` here) stays out
+    of the dict: a zero floor would say nothing.
     """
 
     from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
-    job_limit = 4
-    copyback_row = _retention_job(
-        f"job_{_RETENTION_CYCLE_RUN_ID}_copyback_retry_7",
-        stage="copyback",
-        job_type="run_tree_copyback",
-        status="failed",
-        minutes=1,
+    job_limit = 3
+    jobs = [
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_copyback_retry_7",
+            stage="copyback",
+            job_type="run_tree_copyback",
+            status="failed",
+            minutes=1,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_download_retry_9",
+            stage="download",
+            job_type="download_gfs",
+            status="failed",
+            minutes=2,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_retry_active",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=3,
+            retry_count=6,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
+            stage=None,
+            job_type="run_shud_forecast_array",
+            status="failed",
+            minutes=4,
+        ),
+        *_retention_publish_filler(job_limit + 1, first_minute=20),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert _retention_floors(state) == {"copyback": 7, "forcing": 6, "forecast": 87}
+    assert _state_retry_attempt(state, stage="copyback") == 7
+    assert _state_retry_attempt(state, stage="forcing") == 6
+    assert _state_retry_attempt(state, stage="forecast") == 87
+    assert _state_retry_attempt(state, stage="download") == 0
+    assert _state_retry_attempt(state, stage="publish") == 0
+
+
+def test_projected_state_always_carries_a_stage_attempt_floor_mapping() -> None:
+    """E-v2-sel (#1179) -- the new state key's shape, and its absence elsewhere."""
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
     )
-    download_row = _retention_job(
-        f"job_{_RETENTION_CYCLE_RUN_ID}_download_retry_9",
-        stage="download",
-        job_type="download_gfs",
-        status="failed",
-        minutes=2,
+
+    job_limit = 3
+    empty = _retention_state(_retention_publish_filler(job_limit + 1), job_limit=job_limit)
+    assert empty[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+
+    carrying = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
     )
+    assert carrying[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+
+    # A state no projection produced carries no floors key and reads exactly as
+    # it did before: the row scan and nothing else.
+    foreign = {
+        "retry_count": 0,
+        "pipeline_jobs": [_retention_forecast_retry_job(4, minutes=1)],
+    }
+    assert STAGE_RETRY_ATTEMPT_FLOORS_KEY not in foreign
+    assert _state_retry_attempt(foreign, stage="forecast") == 4
+    assert _state_retry_attempt(foreign, stage="convert") == 0
+
+
+def test_stage_less_retry_attempt_reading_ignores_the_floors() -> None:
+    """E12'' (#1179) -- floors are stage-scoped; the flat-first read is untouched.
+
+    The floors are per-stage maxima over the UNFILTERED cycle-wide rows, which is
+    exactly the cross-scope charge the stage argument exists to prevent. A
+    stage-less read must still answer with the candidate-scoped flat count.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
     state = _retention_state(
-        [copyback_row, download_row, *_retention_publish_filler(5, first_minute=20)],
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
         job_limit=job_limit,
     )
 
-    ids = _retention_job_ids(state)
-    assert copyback_row["job_id"] in ids
-    assert download_row["job_id"] not in ids
-    assert len(ids) == job_limit
-    assert _state_retry_attempt(state, stage="copyback") == 7
+    assert _retention_floors(state) == {"forecast": 87}
+    assert state["retry_count"] == 0
+    assert _state_retry_attempt(state) == 0
+    assert _state_retry_attempt(state, stage=None) == 0
+    assert _state_retry_attempt(state, stage="publish") == 0
 
 
-def test_stage_retention_makes_the_failed_stage_row_scan_resolve_forecast() -> None:
-    """E11 (#1179) -- the eviction half-face, on the one reachable consumer.
+def test_geometry_b_keeps_the_failed_stage_invisible_while_the_floor_carries() -> None:
+    """E11-v2 (#1179) -- the floor and row visibility are decoupled, on purpose.
 
     ``_failed_stage`` only walks job rows when ``failed_stage``/``stage``/
     ``restart_stage`` are ALL empty, which the succeeded-``publish`` filler
-    (geometry B) is chosen to produce. The baseline assertion is a hard
-    precondition: with a convert filler the state would carry
-    ``restart_stage='forcing'`` and this leg would be vacuously green.
+    (geometry B) is chosen to produce. v1 rescued the failed row into the window
+    and flipped this to ``"forecast"``; v2 leaves the row where truncation put it
+    -- and still reads the true attempt. The ``is None`` here is a hard
+    assertion, not a baseline: it is the S1/S2 class of visibility flip staying
+    shut.
     """
 
     from services.orchestrator.scheduler_state_failure import _failed_stage
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
     job_limit = 5
     filler = _retention_publish_filler(job_limit + 1)
-    # Exactly the rows today's pure-freshness truncation keeps.
     baseline_state = _retention_state(filler, job_limit=job_limit)
     assert all(baseline_state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
     assert _failed_stage(baseline_state) is None
@@ -42673,15 +42698,15 @@ def test_stage_retention_makes_the_failed_stage_row_scan_resolve_forecast() -> N
     state = _retention_state([_retention_forecast_retry_job(87, minutes=1), *filler], job_limit=job_limit)
 
     assert all(state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
-    assert _failed_stage(state) == "forecast"
+    assert _failed_stage(state) is None
+    assert _state_retry_attempt(state, stage="forecast") == 87
 
 
 def _retention_adopted_manual_marker_event() -> dict[str, Any]:
     """An adopted manual-retry marker carrying NO operator attempt claim.
 
     Without a pinned ``retry_count`` the mint falls back to
-    ``previous_attempt + 1``, which is exactly the value the truncation used to
-    destroy.
+    ``previous_attempt + 1``, read through ``_failed_stage``.
     """
 
     return {
@@ -42698,18 +42723,25 @@ def _retention_adopted_manual_marker_event() -> dict[str, Any]:
     }
 
 
-def test_manual_retry_mints_the_true_next_attempt_in_the_reverse_geometry() -> None:
-    """E12a (#1179) -- the operator path recovers a submission it used to skip.
+def test_manual_retry_mint_keeps_todays_geometry_b_behaviour() -> None:
+    """E12-v2 (#1179) -- the mint gap under geometry B is an accepted boundary.
 
-    Today the destroyed attempt makes the mint re-derive ``_retry_1``, an
-    idempotency key the journal already holds, and the submission is silently
-    dropped. With the true attempt visible the mint moves to ``_retry_88``.
+    ``_manual_retry_state_evidence`` scopes the attempt by ``_failed_stage``,
+    which geometry B leaves ``None`` (the failed row is outside the window and
+    the terminal filler empties the three stage keys). The stage-less read then
+    answers with the flat count, so the mint re-derives ``_retry_1`` -- an
+    idempotency key the journal already holds, i.e. a silent no-op.
+
+    This is unchanged from before #1179 and is NOT fixed here: making the mint
+    stage-aware without row visibility needs its own change (#1577). Pinned so
+    that fix has a red leg to flip.
     """
 
     from types import SimpleNamespace
 
     from services.orchestrator.chain_runtime_utils import _pipeline_retry_job_id, _retry_attempt_from_basins
     from services.orchestrator.scheduler_state_failure import _failed_stage, _manual_retry_state_evidence
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
     job_limit = 5
     jobs = [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)]
@@ -42719,7 +42751,9 @@ def test_manual_retry_mints_the_true_next_attempt_in_the_reverse_geometry() -> N
         retry_limit=100,
         events=[_retention_adopted_manual_marker_event()],
     )
-    assert _failed_stage(state) == "forecast"
+    assert _failed_stage(state) is None
+    # The number IS reachable -- just not through the stage the mint asks for.
+    assert _state_retry_attempt(state, stage="forecast") == 87
 
     candidate = SimpleNamespace(
         candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
@@ -42729,42 +42763,181 @@ def test_manual_retry_mints_the_true_next_attempt_in_the_reverse_geometry() -> N
 
     assert evidence["decision"] == "manual_retry"
     assert evidence["manual_retry"]["allowed"] is True
-    assert evidence["manual_retry"]["previous_attempt"] == 87
-    assert evidence["manual_retry"]["new_attempt"] == 88
+    assert evidence["manual_retry"]["previous_attempt"] == 0
+    assert evidence["manual_retry"]["new_attempt"] == 1
 
     minted_attempt = _retry_attempt_from_basins([{"state_evidence": evidence}])
-    assert minted_attempt == 88
+    assert minted_attempt == 1
     base_job_id = f"job_{_RETENTION_CYCLE_RUN_ID}_forecast"
-    assert _pipeline_retry_job_id(base_job_id, minted_attempt) == f"{base_job_id}_retry_88"
+    assert _pipeline_retry_job_id(base_job_id, minted_attempt) == f"{base_job_id}_retry_1"
 
 
-def test_manual_retry_stays_allowed_above_the_budget_in_the_reverse_geometry() -> None:
-    """E12b (#1179) -- ``manual=True`` lifts the limit gate; that stays true."""
+def test_reentrant_candidate_geometry_projects_exactly_as_before() -> None:
+    """E-v2-S1 (#1179) -- the candidate-scope visibility flip stays shut.
 
-    from types import SimpleNamespace
+    A candidate-scoped ``*_forecast_retry_5`` failure, its own newer succeeded
+    forecast and publish rows, and enough fresher cycle-scope publish rows to
+    push all three out of the window. Pulling the failed row back in (what v1
+    did) makes ``candidate_jobs`` non-empty and reports the candidate as failed
+    -- contradicting the untruncated truth, where the retry SUCCEEDED. The
+    floors carry attempt 5 without touching any of that.
+    """
 
-    from services.orchestrator.scheduler_state_failure import _manual_retry_state_evidence
+    from services.orchestrator.scheduler_state_failure import _failed_stage
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
 
     job_limit = 5
-    jobs = [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)]
-    state = _retention_state(
-        jobs,
-        job_limit=job_limit,
-        retry_limit=3,
-        events=[_retention_adopted_manual_marker_event()],
-    )
+    candidate_rows = [
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_forecast_retry_5",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="failed",
+            minutes=1,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_forecast_run2",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="succeeded",
+            minutes=2,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_publish_run2",
+            stage="publish",
+            job_type="publish_tiles",
+            status="succeeded",
+            minutes=3,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+    ]
+    filler = _retention_publish_filler(job_limit + 1)
 
-    candidate = SimpleNamespace(
-        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+    state = _retention_state([*candidate_rows, *filler], job_limit=job_limit)
+
+    assert _retention_job_ids(state) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}" for index in range(1, 6)
+    ]
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert _failed_stage(state) is None
+    assert _retention_floors(state) == {"forecast": 5}
+    assert _state_retry_attempt(state, stage="forecast") == 5
+
+
+def test_completed_stage_evidence_survives_an_out_of_window_wedge() -> None:
+    """E-v2-S2 (#1179) -- the resume-after-completed-stage evidence keeps its row.
+
+    The window is exactly full: the ``convert`` success is its OLDEST member, so
+    rescuing the out-of-window ``*_forecast_retry_9`` row (what v1 did) evicts
+    the one row ``restart_stage`` is derived from and the cycle stalls every
+    pass. The floor carries attempt 9 with the window untouched.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    jobs = [
+        _retention_forecast_retry_job(9, minutes=1),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_convert",
+            stage="convert",
+            job_type="convert_canonical",
+            status="succeeded",
+            minutes=2,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_a",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=3,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_b",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=4,
+        ),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert _retention_job_ids(state) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_convert",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_a",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_b",
+    ]
+    assert state["restart_stage"] == "forcing"
+    assert state["completed_stage_evidence"]["stage"] == "convert"
+    assert _state_retry_attempt(state, stage="forecast") == 9
+
+
+def test_out_of_window_active_row_is_not_resurrected_by_the_floors() -> None:
+    """E-v2-S3 (#1179) -- a stale ``running`` row stays out of the active set.
+
+    v1 rescued it because it carried the stage's maximum attempt, re-arming
+    ``_state_active_jobs`` (and with it the duplicate-pipeline skip) off a row
+    truncation had already aged out. Carrying only the number leaves the active
+    scan reading exactly the rows pure freshness selected.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_active_jobs, _state_retry_attempt
+
+    job_limit = 3
+    stale_active = _retention_forecast_retry_job(9, minutes=1, status="running")
+    stale_active.pop("finished_at")
+    stale_active["started_at"] = _dt(_RETENTION_BASE) + timedelta(minutes=1)
+    stale_active["slurm_job_id"] = "991177"
+    jobs = [stale_active, *_retention_publish_filler(job_limit)]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert stale_active["job_id"] not in _retention_job_ids(state)
+    assert _state_active_jobs(state) == []
+    assert _state_retry_attempt(state, stage="forecast") == 9
+
+
+def test_flat_retry_count_carrier_row_keeps_its_window_slot() -> None:
+    """E-v2-S4 (#1179) -- the top-level ``retry_count`` is not squeezed out.
+
+    ``state["retry_count"]`` aggregates the candidate-scoped rows that survived
+    truncation. The carrier here is the window's oldest row and is NOT its
+    stage's attempt maximum, so v1's retention evicted it and the flat count
+    collapsed to 0 for the evidence-owner / manual-retry consumers that read it.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    carrier = _retention_job(
+        f"job_{_RETENTION_RUN_ID}_forecast",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="reserved",
+        minutes=2,
+        retry_count=4,
         run_id=_RETENTION_RUN_ID,
+        model_id="model_a",
     )
-    evidence = _manual_retry_state_evidence(candidate, state, {})
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        carrier,
+        *_retention_publish_filler(2, first_minute=3),
+    ]
 
-    assert evidence["decision"] == "manual_retry"
-    assert evidence["manual_retry"]["allowed"] is True
-    assert evidence["manual_retry"]["new_attempt"] == 88
-    assert evidence["failure"]["limit_exhausted"] is True
-    assert evidence["failure"]["permanent"] is False
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert carrier["job_id"] in _retention_job_ids(state)
+    assert state["retry_count"] == 4
+    assert _state_retry_attempt(state) == 4
+    assert _state_retry_attempt(state, stage="forecast") == 87
 
 
 def test_released_identity_blocked_reservation_is_not_auto_retriable(tmp_path: Path) -> None:
@@ -42792,6 +42965,91 @@ def test_released_identity_blocked_reservation_is_not_auto_retriable(tmp_path: P
         accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
         expected_submission_attempt=int(reserved["submission_attempt"]),
         expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    )
+    assert written == 1
+
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+    assert released.get("error_code") in (None, "")
+
+    job = PipelineJob(
+        job_id=job_id,
+        run_id=released.get("run_id"),
+        cycle_id=released.get("cycle_id"),
+        job_type=str(released.get("job_type") or "run_shud_forecast_array"),
+        model_id=released.get("model_id"),
+        status=str(released["status"]),
+        stage=released.get("stage"),
+    )
+    job.retry_count = effective_retry_attempt(job.job_id, released.get("retry_count"))
+    job.error_code = released.get("error_code")
+
+    assert _DbFreeRetryGateService(max_retries=3).should_auto_retry(job) is False
+
+
+def test_reclaimed_reservation_release_is_not_auto_retriable_either(tmp_path: Path) -> None:
+    """E6c (#1179) -- the SECOND reservation write point, driven through reclaim.
+
+    ``reclaim_pipeline_job_reservation`` re-seeds a reservation from scratch, and
+    that seed is where the reclaimed row's ``error_code`` comes from -- the first
+    write point never touches this row again. So the full production door has to
+    be walked: reserve, permit (``absence_retry_permitted`` is the ONLY shape
+    reclaim accepts), reclaim, then release. Stamping a transient code at the
+    reclaim seed (``SLURM_RESERVATION_LOST`` is in ``TRANSIENT_ERROR_CODES``)
+    would make every release of a reclaimed reservation an automatic duplicate
+    submission -- and fail this test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.persistence import PipelineJob
+    from services.orchestrator.retry_identity import effective_retry_attempt
+    from tests.test_orchestration_chain import _DbFreeRetryGateService
+
+    record = dict(vars(_accepted_submit_reserved_cohort_row()))
+    job_id = str(record["job_id"])
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = repository.get_pipeline_job(job_id)
+    assert permitted["status"] == "reservation_lost"
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+
+    assert (
+        repository.reclaim_pipeline_job_reservation(
+            {
+                **permitted,
+                "expected_submission_attempt": permitted["submission_attempt"],
+                "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+                "status": "reserved",
+                "submission_attempt": int(permitted["submission_attempt"]) + 1,
+                "submit_outcome": None,
+                "reconciliation_source": None,
+                "reconciliation_decision": None,
+                "matched_slurm_job_id": None,
+            }
+        )
+        is not None
+    )
+    reclaimed = repository.get_pipeline_job(job_id)
+    assert reclaimed["status"] == "reserved"
+
+    written = repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(reclaimed["submission_attempt"]),
+        expected_submission_attempt_started_at=reclaimed["submission_attempt_started_at"],
         identity_blocked_streak=3,
     )
     assert written == 1
