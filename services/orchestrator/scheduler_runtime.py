@@ -11,6 +11,7 @@ from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence_module
+from services.orchestrator import scheduler_no_progress as _scheduler_no_progress
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
@@ -1402,6 +1403,23 @@ def run_once(self) -> SchedulerPassResult:
                 active_lower_bound=retention_bound,
                 active_lower_bound_source=retention_bound_source,
             )
+            # Issue #1118: the ONLY no-progress-circuit observation point. This
+            # is the fully-observed pass — the one whose candidate lists and
+            # reconcile segment are actually assembled. Every other evidence
+            # write in this module (early exit, pre-lock, lock contention,
+            # resource-limit abort) carries empty lists, so observing there
+            # would clear the accumulated counts; none of them may touch the
+            # tracker, which is why this hook is here and not on the shared
+            # ``_write_evidence``.
+            no_progress_circuit = _scheduler_no_progress.observe_pass(
+                evidence,
+                pass_id=pass_id,
+                threshold=int(getattr(self.config, "no_progress_circuit_passes", 0) or 0),
+                evidence_dir=Path(self.config.evidence_dir),
+                workspace_root=Path(self.config.workspace_root),
+            )
+            if no_progress_circuit is not None:
+                evidence[_scheduler_no_progress.EVIDENCE_KEY] = no_progress_circuit
             # Populate timing.pass BEFORE the write so the on-disk artifact
             # carries the block (Phase 4.5 C6). Use ``pass_status`` (pre-write
             # planned status) here; the evidence-size-fallback path can

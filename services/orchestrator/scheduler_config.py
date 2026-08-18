@@ -221,6 +221,12 @@ class ProductionSchedulerConfig:
     identity_blocked_streak_limit: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT", 3)
     )
+    # Consecutive fully-observed passes reporting the same (subject, reason)
+    # before the observe-only no-progress circuit marks it open (#1118). ``<= 0``
+    # disables the marker completely: no tracker file, no evidence key, no log.
+    no_progress_circuit_passes: int = field(
+        default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", 3)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _scheduler._env_int(
             "NHMS_CANDIDATE_STATE_JOB_LIMIT",
@@ -510,6 +516,11 @@ class ProductionSchedulerConfig:
             self,
             "identity_blocked_streak_limit",
             int(self.identity_blocked_streak_limit),
+        )
+        object.__setattr__(
+            self,
+            "no_progress_circuit_passes",
+            int(self.no_progress_circuit_passes),
         )
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
