@@ -2218,6 +2218,14 @@ def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_histor
         state_evidence.get("registry_cutover_transition", {}).get("decision")
         == "block_predecessor_pending"
     )
+    # #1152 absence pin: the strict leg short-circuits BEFORE the operator-signal
+    # attachment site, so none of the signal fields may appear here.  The runbook
+    # documents the signal as an env=false (history-probe branch) artifact only;
+    # if strict mode ever grew them the runbook's routing advice would be wrong.
+    assert "operator_action_required" not in state_evidence
+    assert "self_heal_expected" not in state_evidence
+    assert "self_heal_probe" not in state_evidence
+    assert "operator_action" not in state_evidence
 
 
 def test_env_override_does_not_admit_stale_declaration(

@@ -11,7 +11,9 @@ action (`backfill_predecessor_state`) and the runbook path
 (`retryable=True`, `permanent=False`) and the gate decision itself SHALL remain
 unchanged. The legacy (pre-§8, checksum-less/no-declaration or untrusted-index)
 emission site is out of scope: it returns passthrough `None` for the
-no-earlier-history geometry and never emits a shape requiring the distinction.
+no-earlier-history geometry; on the `history_exists=True` geometry it emits the
+typed reason WITHOUT the signal fields, and operators fall back to the manual
+criteria documented in the runbook (field absence is not a self-heal guarantee).
 `operator_action_required` SHALL survive the bounded-evidence summarization
 tier (retained in `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`) so the runbook's
 single-boolean triage remains executable on summarized passes.

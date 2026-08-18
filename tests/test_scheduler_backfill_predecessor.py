@@ -953,7 +953,7 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
     )
     # Round-2 single-level semantics: the field on an EMITTED predecessor's own
     # record answers only "does MY own single-level backfill close MY gap".
-    # Here it reads True because the predecessor's own probe (at
+    # Here it reads False because the predecessor's own probe (at
     # predecessor_cycle_time − lead) finds nothing either; in a ≥2-gap chain
     # the same field can read self_heal_expected=True on this record while the
     # successor is still stalled, so chain convergence is read off the

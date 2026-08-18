@@ -16749,6 +16749,39 @@ def test_bounded_candidate_summary_retains_predecessor_pending_operator_signal()
     # Idempotent: a second pass over the already-summarized row keeps it.
     assert scheduler_evidence_payload_module._bounded_candidate_summary(summary) == summary
 
+    # The retention guard is `value is not None` (scheduler_evidence_payload.py:265),
+    # NOT truthiness — so the self-healing leg (`operator_action_required: False`,
+    # emitted whenever the predecessor's own probe reads ready) must survive too.
+    # A truthiness guard would silently erase the "no operator needed" half of the
+    # triage and leave operators unable to distinguish it from an absent field.
+    self_healing_row = {
+        **row,
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_b:forecast_gfs_deterministic",
+        "model_id": "model_b",
+        "state_evidence": {
+            **row["state_evidence"],
+            "self_heal_expected": True,
+            "operator_action_required": False,
+            "self_heal_probe": {"ready": True, "reason": None},
+        },
+    }
+    # No `operator_action` / `runbook`: the gate only attaches those on the
+    # not-self-healing leg (scheduler_generation_gate.py:760-762).
+    del self_healing_row["state_evidence"]["operator_action"]
+    del self_healing_row["state_evidence"]["runbook"]
+
+    self_healing_summary = scheduler_evidence_payload_module._bounded_candidate_summary(
+        self_healing_row
+    )
+
+    assert "operator_action_required" in self_healing_summary
+    assert self_healing_summary["operator_action_required"] is False
+    assert set(self_healing_summary) <= _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS
+    assert (
+        scheduler_evidence_payload_module._bounded_candidate_summary(self_healing_summary)
+        == self_healing_summary
+    )
+
 
 def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() -> None:
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_summary_idempotent")
