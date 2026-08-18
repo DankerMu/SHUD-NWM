@@ -1357,6 +1357,73 @@ proxy target and certificates. If local health fails, restart with
 `bash scripts/ops/start-display-api.sh` from `/home/nwm/NWM` and read
 `/tmp/display-api.log`.
 
+### 6.1 No-progress circuit（跨 pass 重复同一理由的证据标记，#1118）
+
+调度器每个**完整 pass** 会统计"同一主体连续报同一 no-progress 理由"的次数，
+达阈值即在证据里开闸。**纯观测**：不改调度决策、不停重试、不新增终态。
+
+阈值 `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`（默认 3；`<= 0` 完全禁用——
+不写状态文件、evidence 无该键、零日志）。跨 pass 计数落在
+`<evidence_root>/no-progress-tracker.json`（oneshot 每 tick 新进程，内存计数
+活不过一个 tick）；该文件不以 `scheduler_` 开头，retention 归 `unrecognised`
+永不删除。
+
+pass evidence 顶层 `no_progress_circuit` 块：
+
+```json
+{
+  "threshold": 3,
+  "tracked": 4,
+  "state_reset": "missing",
+  "open": [
+    {
+      "subject_kind": "job",
+      "subject_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+      "reason": "query_unavailable:comment_accounting_unproven",
+      "consecutive_passes": 3,
+      "first_pass_id": "scheduler_2026081812_...",
+      "last_pass_id": "scheduler_2026081814_...",
+      "operator_action_required": true
+    }
+  ],
+  "truncated": 0
+}
+```
+
+- `tracked` = 本 pass 在跟踪的 (主体, 理由) 条目数；`open` 只列到阈值的，按
+  次数降序**最多 50 条**，多出的计在 `truncated`。
+- `state_reset` 只在状态文件缺失（`"missing"`，首次启用即如此）或损坏
+  （`"corrupt"`）时出现，两者都只是从零重算，**不会让 pass 失败**。健康期
+  每个完整 pass 都会重写状态文件，所以稳态下这个键不该再出现。
+- `operator_action_required` 只在该候选行自己带 #1152 三态判据时随行出现。
+- **超出 evidence 字节预算的 pass 上该块会被整块丢弃**（它是压缩期第一个被舍的
+  项，以保证既有键的裁剪口径逐字不变）。此时 journalctl 的聚合 WARNING 与状态
+  文件里的计数都不受影响——按下面的 grep 走，别以为"没这个块=没开闸"。
+
+告警（journalctl 是当前唯一被实际消费的通道，每个开闸的完整 pass 一条聚合行）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'journalctl -u nhms-compute-scheduler.service --since "-24h" \
+     | grep SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN'
+```
+
+**`consecutive_passes` 数的是完整观察 pass，不是 timer tick**：早退、prelock
+阻塞、lock 争用、资源中止的 pass 既不计数也不清零（它们的候选列表本就是空的，
+在那里观察等于把计数误清零）。所以墙钟跨度可能明显大于同数 tick——不要拿
+`first_pass_id`/`last_pass_id` 的时间差除以 tick 间隔来反推。
+
+`reason` 的三类来源与下游处置：
+
+| reason 形状 | 来源 | 去哪儿处置 |
+|---|---|---|
+| `blocked:<candidate reason>`，且条目带 `operator_action_required: true` | #1152 predecessor-pending 三态判据 | [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)（`self_heal_expected` / `backfill_predecessor_state` 一节） |
+| `<action>:identity_mismatch_blocked` / 相关 identity 尾迹 | #1173 identity 阶梯（streak ≥ 3 自动放行为 `identity_mismatch_released`） | [`failed-basin-retry.md`](failed-basin-retry.md) § `identity_mismatch_released`；本文 §8.5 是同一条线的配置口径 |
+| `query_unavailable:comment_accounting_unproven` | #1116：本集群不存 job comment，reserved 行**设计性永久**扣着 | [`failed-basin-retry.md`](failed-basin-retry.md) §"Reserved rows held by `comment_accounting_unproven`"——**必须人工处置**，无自动出口 |
+
+开闸只说明"这个主体连续 N 个完整 pass 没动过"，不判定谁对谁错；先按上表定位
+到下游 runbook，再决定动不动手。
+
 ## 7. 当前运行口径
 
 This section is a live snapshot, not a permanent fact. Refresh it during handoff.

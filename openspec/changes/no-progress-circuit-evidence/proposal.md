@@ -80,7 +80,16 @@ mismatch，`WARM_START_TIME_MISMATCH` 不在 `TRANSIENT_ERROR_CODES`
 - **压缩层**：`bounded_evidence_payload`（scheduler_evidence_payload.py:
   920-993）是字面量白名单重建——加 `no_progress_circuit` 键 + 照 :983-992
   模式的「源 payload 缺席即弹出」守卫（否则禁用态走压缩路径会凭空得到
-  `null` 键，违反禁用逐字等旧）。
+  `null` 键，违反禁用逐字等旧）。**字节压力下先舍本块**：首次 fit 失败后、
+  任何既有字段被摘要/丢弃之前整块弹出 `no_progress_circuit`——装得下照常
+  保留；装不下时后续各降级档看到的 payload 与本单存在之前逐字相同（否则新键
+  把既有 proof 块顶出 2400 字节级预算，既有保真测试真红）。超预算 pass 的
+  产物没有该块，但聚合 WARNING 与状态文件计数不受影响（D4：journalctl 才是
+  真通道），runbook 写明「没这个块 ≠ 没开闸」。
+- **观察路径整体 fail-open**：`observe_pass` 外层 catch-all → WARNING token
+  `SCHEDULER_NO_PROGRESS_CIRCUIT_OBSERVE_FAILED` + 返回 None（observe-only
+  不得拖垮生产 pass，同 reconcile recovery 惯例）；测试断言键存在，吞异常
+  仍红，不掩盖缺陷。
 - **retention 兼容已核实为天然不命中**：`no-progress-tracker.json` 不以
   `scheduler_` 开头，归 `unrecognised` 跳过删除（scripts/
   node22_scheduler_evidence_retention.py:212-215/:268-277）；以测试钉住现状，

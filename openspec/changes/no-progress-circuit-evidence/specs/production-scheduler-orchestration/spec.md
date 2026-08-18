@@ -36,11 +36,19 @@ subject: the same (subject, reason) pair increments, a changed reason
 resets the count to one, and a subject absent while its adapter's source
 is present is cleared. A pair reaching N appears in the pass evidence
 under a top-level `no_progress_circuit` block (open entries capped at 50
-with a truncation count, so the block stays bounded under the evidence
-byte budget) and in one aggregated `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN`
-warning per fully-observed pass. The circuit is evidence only: it never
-alters scheduling decisions, retries, terminal statuses, or the closed
-reconciliation vocabularies.
+with a truncation count) and in one aggregated
+`SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN` warning per fully-observed pass.
+Under evidence byte pressure the block is the first thing shed: when the
+bounded payload does not fit, the whole `no_progress_circuit` block is
+dropped before any pre-existing field is summarized or dropped, so every
+existing compaction stage sees a payload byte-for-byte identical to one
+from before this feature existed — the warning and the persisted counts
+are unaffected, and the absence of the block in an over-budget pass does
+not mean no circuit is open. The observation path as a whole fails open:
+an unexpected observation error logs its own warning and skips the block
+for that pass instead of failing the pass. The circuit is evidence only:
+it never alters scheduling decisions, retries, terminal statuses, or the
+closed reconciliation vocabularies.
 
 #### Scenario: the same reason repeating across passes opens the circuit
 

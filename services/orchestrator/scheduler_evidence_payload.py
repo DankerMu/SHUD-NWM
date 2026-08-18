@@ -139,6 +139,19 @@ def _fit_bounded_evidence_payload(
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
 
+    # #1118: the no-progress circuit is an observe-only marker, so it is the
+    # first thing shed under byte pressure — before any existing field is
+    # summarized or dropped. Every later tier then sees exactly the payload it
+    # saw before the marker existed, so no existing key's trimming moves. The
+    # aggregated WARNING and the tracker state file are unaffected, so counting
+    # and the ops signal survive a pass whose artifact could not carry them.
+    if bounded_payload.pop("no_progress_circuit", None) is not None and _payload_fits(
+        bounded_payload,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=True,
+    ):
+        return bounded_payload
+
     _summarize_bounded_candidate_lists(bounded_payload)
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
@@ -977,6 +990,7 @@ def bounded_evidence_payload(
         "restart_reconcile_proof": payload.get("restart_reconcile_proof"),
         "restart_reconcile": _compact_bounded_restart_reconcile(payload.get("restart_reconcile")),
         "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
+        "no_progress_circuit": payload.get("no_progress_circuit"),
         "retention": payload.get("retention"),
         "timing": payload.get("timing"),
     }
@@ -988,6 +1002,11 @@ def bounded_evidence_payload(
         bounded_payload.pop("restart_reconcile_proof", None)
     if "restart_reconcile" not in payload:
         bounded_payload.pop("restart_reconcile", None)
+    # #1118: with the circuit disabled the source payload has no such key, and a
+    # literal ``None`` here would make the over-budget path differ from the
+    # plain one — disabled must stay byte-for-byte as before.
+    if "no_progress_circuit" not in payload:
+        bounded_payload.pop("no_progress_circuit", None)
     if "timing" not in payload:
         bounded_payload.pop("timing", None)
     return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)

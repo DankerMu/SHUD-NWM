@@ -5,6 +5,7 @@ import errno
 import hashlib
 import inspect
 import json
+import logging
 import os
 import pwd
 import re
@@ -38,6 +39,7 @@ from services.orchestrator import scheduler_execution as scheduler_execution_mod
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
 from services.orchestrator import scheduler_generation as scheduler_generation_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
+from services.orchestrator import scheduler_no_progress as scheduler_no_progress_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
@@ -42561,3 +42563,785 @@ def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_pat
     assert items["model_b"]["candidate_outcome"]["status"] == "active"
     assert items["model_b"]["candidate_outcome"].get("reason") is None
     assert items["model_b"]["error_code"] == "CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"
+
+
+def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:
+    """A fresh scheduler whose only candidate is blocked with a stable reason.
+
+    The scheduler is a systemd one-shot, so every cross-pass test builds a NEW
+    ``ProductionScheduler`` over the SAME workspace (hence the same evidence
+    root) instead of reusing one in-memory object.
+    """
+
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    readiness = FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=_canonical_rows(
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    variables=GFS_REQUIRED_STANDARD_VARIABLES,
+                    forecast_hours=(0, 3),
+                    policy_identity=policy,
+                    source_object_identity=source_object,
+                    omit_pairs={("shortwave_down", 3)},
+                ),
+                forecast_hours=(0, 3),
+                policy_identity=policy,
+                source_object_identity=source_object,
+                canonical_product_id=f"canon_gfs_{format_cycle_time(cycle_time)}",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+    return ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), **config_kwargs),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        canonical_readiness_provider=readiness,
+    )
+
+
+def _no_progress_blocked_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+    return _no_progress_blocked_scheduler(tmp_path, **config_kwargs).run_once()
+
+
+def test_repeated_blocked_candidate_reason_opens_no_progress_circuit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    results = [_no_progress_blocked_pass(tmp_path) for _ in range(3)]
+
+    blocks = [result.evidence["no_progress_circuit"] for result in results]
+    assert [block["open"] for block in blocks[:2]] == [[], []]
+    assert blocks[2]["open"] == [
+        {
+            "subject_kind": "candidate",
+            "subject_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "reason": "blocked:missing_canonical_leads",
+            "consecutive_passes": 3,
+            "first_pass_id": results[0].evidence["pass_id"],
+            "last_pass_id": results[2].evidence["pass_id"],
+        }
+    ]
+    warnings = [
+        record for record in caplog.records if "SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def _reserved_unbound_wedge_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+    """One fresh pass whose only work is a reserved-unbound row that cannot be proven.
+
+    Mirrors the #1116 wedge: the comment querier refuses (this cluster does not
+    store job comments), so the row stays ``reserved`` and reappears, identical,
+    on every later pass.
+    """
+
+    from services.orchestrator.reconcile import ReconcileQueryUnavailable
+
+    def _comment_query(_idempotency_key: str, **_kwargs: Any) -> tuple[Any, ...]:
+        raise ReconcileQueryUnavailable(
+            "accounting does not store job comments",
+            reason_class="comment_accounting_unproven",
+        )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path,
+            dry_run=False,
+            scheduler_journal_backend="file",
+            scheduler_journal_root=tmp_path / "journal",
+            database_url=None,
+            database_url_configured=False,
+            **config_kwargs,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=repository,
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=_noop_reconcile_sacct_query,
+    )
+    return scheduler.run_once()
+
+
+def _no_progress_candidate_row(
+    reason: str | None,
+    *,
+    candidate_id: str | None = None,
+    status: str = "blocked",
+    operator_action_required: bool = False,
+) -> dict[str, Any]:
+    """A real ``SchedulerCandidate.to_dict`` row — the adapter's actual contract."""
+
+    candidate = _scheduler_candidate_fixture()
+    state_evidence: dict[str, Any] = {"decision": "block" if status == "blocked" else "submit"}
+    if operator_action_required:
+        state_evidence["operator_action_required"] = True
+    if candidate_id is not None:
+        candidate = replace(candidate, candidate_id=candidate_id)
+    return replace(candidate, status=status, reason=reason, state_evidence=state_evidence).to_dict()
+
+
+def _no_progress_reconcile_outcome(
+    *,
+    job_id: str = "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+    action: str = "query_unavailable",
+    reason_class: str | None = "comment_accounting_unproven",
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "idempotency_key": "cycle_gfs_2026071200_forecast_fixture:forecast",
+        "action": action,
+        "status": "reserved",
+        "slurm_job_id": None,
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "accounting_unavailable",
+        "reconciliation_reason_class": reason_class,
+        "identity_blocked_streak": None,
+    }
+
+
+def _no_progress_observe(
+    payload: Mapping[str, Any],
+    *,
+    pass_id: str,
+    tmp_path: Path,
+    threshold: int = 3,
+) -> dict[str, Any] | None:
+    """Drive one observation over a shared evidence root (the persistence seam)."""
+
+    return scheduler_no_progress_module.observe_pass(
+        payload,
+        pass_id=pass_id,
+        threshold=threshold,
+        evidence_dir=tmp_path / "scheduler" / "evidence",
+        workspace_root=tmp_path,
+    )
+
+
+def _no_progress_tracker_path(tmp_path: Path) -> Path:
+    return tmp_path / "scheduler" / "evidence" / scheduler_no_progress_module.STATE_FILENAME
+
+
+def test_no_progress_candidate_adapter_reads_blocked_rows_only() -> None:
+    payload = {
+        "candidates": [
+            _no_progress_candidate_row(None, candidate_id="cand_selected", status="selected"),
+            _no_progress_candidate_row(
+                "permanent_failure_guard",
+                candidate_id="cand_permanent",
+                operator_action_required=True,
+            ),
+            _no_progress_candidate_row("", candidate_id="cand_blank_reason"),
+        ],
+        "blocked_candidates": [
+            _no_progress_candidate_row("block_predecessor_pending", candidate_id="cand_pending"),
+        ],
+        # status stays ``selected`` on a skip row, and a successful skip lives here.
+        "skipped_candidates": [
+            {
+                **_no_progress_candidate_row(None, candidate_id="cand_skipped", status="selected"),
+                "reason": "terminal_hydro_success",
+            }
+        ],
+    }
+
+    observations = scheduler_no_progress_module.candidate_observations(payload)
+
+    assert observations.source_present is True
+    assert [
+        (item.subject_kind, item.subject_id, item.reason, item.operator_action_required)
+        for item in observations.observations
+    ] == [
+        ("candidate", "cand_permanent", "blocked:permanent_failure_guard", True),
+        ("candidate", "cand_pending", "blocked:block_predecessor_pending", False),
+    ]
+
+
+def test_no_progress_candidate_adapter_keeps_the_first_row_of_a_duplicated_subject(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "candidates": [_no_progress_candidate_row("first_reason", candidate_id="cand_a")],
+        "blocked_candidates": [_no_progress_candidate_row("second_reason", candidate_id="cand_a")],
+    }
+
+    block = _no_progress_observe(payload, pass_id="pass_1", tmp_path=tmp_path, threshold=1)
+
+    assert block is not None
+    assert block["tracked"] == 1
+    assert [entry["reason"] for entry in block["open"]] == ["blocked:first_reason"]
+
+
+def test_no_progress_reconcile_adapter_reads_completed_reserved_unbound_outcomes() -> None:
+    payload = {
+        "restart_reconcile": {
+            "status": "completed",
+            "reserved_unbound": {
+                "count": 2,
+                "outcomes": [
+                    _no_progress_reconcile_outcome(),
+                    _no_progress_reconcile_outcome(job_id="job_b", action="bound", reason_class=None),
+                ],
+            },
+        }
+    }
+
+    observations = scheduler_no_progress_module.reconcile_observations(payload)
+
+    assert observations.source_present is True
+    assert [(item.subject_kind, item.subject_id, item.reason) for item in observations.observations] == [
+        (
+            "job",
+            "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            "query_unavailable:comment_accounting_unproven",
+        ),
+        ("job", "job_b", "bound"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reconcile",
+    [
+        None,
+        {"status": "error", "reserved_unbound_error": "sacct exited 1"},
+        {"status": "skipped", "reason": "reconcile_store_unavailable"},
+        {"status": "completed"},
+    ],
+)
+def test_no_progress_adapters_report_absent_sources(reconcile: Any) -> None:
+    payload: dict[str, Any] = {}
+    if reconcile is not None:
+        payload["restart_reconcile"] = reconcile
+
+    assert scheduler_no_progress_module.candidate_observations(payload).source_present is False
+    assert scheduler_no_progress_module.reconcile_observations(payload).source_present is False
+
+
+def test_changed_reason_resets_the_no_progress_streak(tmp_path: Path) -> None:
+    reasons = ["missing_canonical_leads", "permanent_failure_guard", "permanent_failure_guard"]
+    blocks = [
+        _no_progress_observe(
+            {
+                "candidates": [],
+                "blocked_candidates": [_no_progress_candidate_row(reason, candidate_id="cand_a")],
+            },
+            pass_id=f"pass_{index}",
+            tmp_path=tmp_path,
+        )
+        for index, reason in enumerate(reasons)
+    ]
+    fourth = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_3",
+        tmp_path=tmp_path,
+    )
+
+    assert fourth is not None
+    assert [block["open"] for block in blocks if block is not None] == [[], [], []]
+    assert fourth["open"] == [
+        {
+            "subject_kind": "candidate",
+            "subject_id": "cand_a",
+            "reason": "blocked:permanent_failure_guard",
+            "consecutive_passes": 3,
+            # The streak restarted on the pass that changed the reason.
+            "first_pass_id": "pass_1",
+            "last_pass_id": "pass_3",
+        }
+    ]
+
+
+def test_absent_subject_with_a_present_source_clears_the_entry(tmp_path: Path) -> None:
+    blocked_payload = {
+        "candidates": [],
+        "blocked_candidates": [_no_progress_candidate_row("missing_canonical_leads", candidate_id="cand_a")],
+    }
+
+    first = _no_progress_observe(blocked_payload, pass_id="pass_0", tmp_path=tmp_path)
+    cleared = _no_progress_observe(
+        {"candidates": [], "blocked_candidates": []},
+        pass_id="pass_1",
+        tmp_path=tmp_path,
+    )
+    restarted = _no_progress_observe(blocked_payload, pass_id="pass_2", tmp_path=tmp_path)
+
+    assert first is not None and cleared is not None and restarted is not None
+    assert first["tracked"] == 1
+    assert cleared["tracked"] == 0
+    assert restarted["tracked"] == 1
+    assert json.loads(_no_progress_tracker_path(tmp_path).read_text(encoding="utf-8"))["entries"] == [
+        {
+            "adapter": "candidate",
+            "subject_kind": "candidate",
+            "subject_id": "cand_a",
+            "reason": "blocked:missing_canonical_leads",
+            "consecutive_passes": 1,
+            "first_pass_id": "pass_2",
+            "last_pass_id": "pass_2",
+        }
+    ]
+
+
+def test_absent_reconcile_source_preserves_the_reserved_unbound_streak(tmp_path: Path) -> None:
+    completed = {
+        "candidates": [],
+        "blocked_candidates": [],
+        "restart_reconcile": {
+            "status": "completed",
+            "reserved_unbound": {"count": 1, "outcomes": [_no_progress_reconcile_outcome()]},
+        },
+    }
+    sacct_fault = {
+        "candidates": [],
+        "blocked_candidates": [],
+        "restart_reconcile": {"status": "error", "reserved_unbound_error": "sacct exited 1"},
+    }
+
+    first = _no_progress_observe(completed, pass_id="pass_0", tmp_path=tmp_path)
+    faulted = _no_progress_observe(sacct_fault, pass_id="pass_1", tmp_path=tmp_path)
+    second = _no_progress_observe(completed, pass_id="pass_2", tmp_path=tmp_path)
+    third = _no_progress_observe(completed, pass_id="pass_3", tmp_path=tmp_path)
+
+    assert first is not None and faulted is not None and second is not None and third is not None
+    assert [first["tracked"], faulted["tracked"], second["tracked"]] == [1, 1, 1]
+    assert [block["open"] for block in (first, faulted, second)] == [[], [], []]
+    # The sacct fault neither counted nor cleared: pass 0, 2 and 3 are the three
+    # fully-observed passes that opened it.
+    assert third["open"][0]["consecutive_passes"] == 3
+    assert third["open"][0]["first_pass_id"] == "pass_0"
+
+
+def test_healthy_pass_injects_an_empty_circuit_without_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["no_progress_circuit"] == {
+        "threshold": 3,
+        "tracked": 0,
+        "state_reset": "missing",
+        "open": [],
+        "truncated": 0,
+    }
+    assert [record for record in caplog.records if record.name.endswith("scheduler_no_progress")] == []
+
+
+def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
+    tmp_path: Path,
+) -> None:
+    first = _no_progress_blocked_pass(tmp_path)
+    second = _no_progress_blocked_pass(tmp_path)
+    assert second.evidence["no_progress_circuit"]["tracked"] == 1
+    tracker = _no_progress_tracker_path(tmp_path)
+    tracker_bytes = tracker.read_bytes()
+
+    # (a) lock contention: the pass never holds the lease, so it must not share
+    # the tracker file with the pass that does.
+    contended_scheduler = _no_progress_blocked_scheduler(tmp_path)
+    lock_path = Path(contended_scheduler.config.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "existing-token",
+                "pass_id": "existing",
+            }
+        ),
+        encoding="utf-8",
+    )
+    contended = contended_scheduler.run_once()
+    lock_path.unlink()
+
+    # (b) resource-limit abort via the intra-pass progress guard.
+    aborted = ProductionScheduler(
+        _config(
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            progress_guard_max_no_progress_steps=0,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    ).run_once()
+
+    assert contended.status == "lock_contended"
+    assert aborted.evidence["execution_boundary"] == "scheduler_progress_guard_blocked"
+    assert "no_progress_circuit" not in contended.evidence
+    assert "no_progress_circuit" not in aborted.evidence
+    assert tracker.read_bytes() == tracker_bytes
+
+    third = _no_progress_blocked_pass(tmp_path)
+
+    assert third.evidence["no_progress_circuit"]["open"][0]["consecutive_passes"] == 3
+    assert third.evidence["no_progress_circuit"]["open"][0]["first_pass_id"] == first.evidence["pass_id"]
+
+
+def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1116 visibility: a deliberately non-convergent reserved row becomes legible."""
+
+    from tests.test_gateway_reconcile import _file_cohort_repository
+
+    caplog.set_level(logging.WARNING)
+    _file_cohort_repository(tmp_path, member_count=1)
+
+    results = [_reserved_unbound_wedge_pass(tmp_path) for _ in range(3)]
+
+    outcomes = results[2].evidence["restart_reconcile"]["reserved_unbound"]["outcomes"]
+    assert outcomes[0]["reconciliation_reason_class"] == "comment_accounting_unproven"
+    assert [result.evidence["no_progress_circuit"]["open"] for result in results[:2]] == [[], []]
+    assert results[2].evidence["no_progress_circuit"]["open"] == [
+        {
+            "subject_kind": "job",
+            "subject_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            "reason": "query_unavailable:comment_accounting_unproven",
+            "consecutive_passes": 3,
+            "first_pass_id": results[0].evidence["pass_id"],
+            "last_pass_id": results[2].evidence["pass_id"],
+        }
+    ]
+    warnings = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_OPEN_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize("threshold", [0, -1])
+def test_disabled_no_progress_circuit_is_byte_for_byte_the_old_behaviour(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    threshold: int,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
+
+    results = [_no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=threshold) for _ in range(3)]
+
+    evidence_root = tmp_path / "scheduler" / "evidence"
+    for result in results:
+        assert "no_progress_circuit" not in result.evidence
+        persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+        assert "no_progress_circuit" not in persisted
+    assert not _no_progress_tracker_path(tmp_path).exists()
+    assert list(evidence_root.glob("*.tmp")) == []
+    assert [record for record in caplog.records if record.name.endswith("scheduler_no_progress")] == []
+
+
+def test_disabled_no_progress_circuit_stays_absent_on_the_compaction_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
+
+    result = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "resource_limit_blocked"
+    assert persisted["limit"]["reason"] == "evidence_size_limit_exceeded"
+    assert "no_progress_circuit" not in persisted
+    assert "no_progress_circuit" not in result.evidence
+
+
+def test_no_progress_circuit_threshold_comes_from_env_and_from_the_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assert _config(tmp_path).no_progress_circuit_passes == 3
+
+    monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "5")
+    assert _config(tmp_path).no_progress_circuit_passes == 5
+    assert _config(tmp_path, no_progress_circuit_passes=2).no_progress_circuit_passes == 2
+
+    monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "0")
+    result = _no_progress_blocked_pass(tmp_path)
+    assert "no_progress_circuit" not in result.evidence
+
+
+def test_corrupt_tracker_state_resets_with_a_marker_without_failing_the_pass(
+    tmp_path: Path,
+) -> None:
+    first = _no_progress_blocked_pass(tmp_path)
+    tracker = _no_progress_tracker_path(tmp_path)
+    tracker.write_text('{"schema_version": "nhms.scheduler.no_pro', encoding="utf-8")
+
+    second = _no_progress_blocked_pass(tmp_path)
+
+    assert first.evidence["no_progress_circuit"]["state_reset"] == "missing"
+    assert second.status == first.status
+    assert second.evidence["no_progress_circuit"] == {
+        "threshold": 3,
+        "tracked": 1,
+        "state_reset": "corrupt",
+        "open": [],
+        "truncated": 0,
+    }
+    # Counting restarted from the corrupt reset, and the file is valid again.
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+    third = _no_progress_blocked_pass(tmp_path)
+    assert "state_reset" not in third.evidence["no_progress_circuit"]
+    assert third.evidence["no_progress_circuit"]["tracked"] == 1
+
+
+def test_enabled_healthy_pass_always_rewrites_the_tracker_file(tmp_path: Path) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    )
+
+    first = scheduler.run_once()
+    tracker = _no_progress_tracker_path(tmp_path)
+    written = json.loads(tracker.read_text(encoding="utf-8"))
+    second = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    ).run_once()
+
+    assert first.evidence["no_progress_circuit"]["state_reset"] == "missing"
+    assert written == {
+        "schema_version": scheduler_no_progress_module.STATE_SCHEMA_VERSION,
+        "entries": [],
+    }
+    assert "state_reset" not in second.evidence["no_progress_circuit"]
+    assert list((tmp_path / "scheduler" / "evidence").glob("*.tmp")) == []
+
+
+def test_no_progress_open_entries_are_truncated_at_fifty(tmp_path: Path) -> None:
+    payload = {
+        "candidates": [],
+        "blocked_candidates": [
+            _no_progress_candidate_row("permanent_failure_guard", candidate_id=f"cand_{index:03d}")
+            for index in range(51)
+        ],
+    }
+
+    block = _no_progress_observe(payload, pass_id="pass_0", tmp_path=tmp_path, threshold=1)
+
+    assert block is not None
+    assert block["tracked"] == 51
+    assert len(block["open"]) == scheduler_no_progress_module.MAX_OPEN_ENTRIES
+    assert block["truncated"] == 1
+    assert [entry["subject_id"] for entry in block["open"][:2]] == ["cand_000", "cand_001"]
+    persisted = json.loads(_no_progress_tracker_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(persisted["entries"]) == 51
+
+
+def test_bounded_evidence_payload_keeps_the_circuit_block_and_pops_it_when_absent() -> None:
+    block = {
+        "threshold": 3,
+        "tracked": 1,
+        "open": [
+            {
+                "subject_kind": "candidate",
+                "subject_id": "cand_a",
+                "reason": "blocked:permanent_failure_guard",
+                "consecutive_passes": 3,
+                "first_pass_id": "pass_0",
+                "last_pass_id": "pass_2",
+            }
+        ],
+        "truncated": 0,
+    }
+
+    kept = scheduler_module._bounded_evidence_payload(
+        {"status": "planned", "no_progress_circuit": block},
+        reason="evidence_size_limit_exceeded",
+    )
+    absent = scheduler_module._bounded_evidence_payload(
+        {"status": "planned"},
+        reason="evidence_size_limit_exceeded",
+    )
+
+    assert kept["no_progress_circuit"] == block
+    assert "no_progress_circuit" not in absent
+
+
+def test_retention_skips_the_no_progress_tracker_as_unrecognised(tmp_path: Path) -> None:
+    """The tracker survives retention today because it is not ``scheduler_*``."""
+
+    from scripts import node22_scheduler_evidence_retention as retention_script
+
+    now = _dt("2026-07-05T12:00:00Z")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    tracker = evidence_root / scheduler_no_progress_module.STATE_FILENAME
+    tracker.write_text('{"schema_version": "v1", "entries": []}', encoding="utf-8")
+    stale = evidence_root / "scheduler_2026040100_deadbeefcafe.json"
+    stale.write_text("{}", encoding="utf-8")
+    old = (now - timedelta(days=100)).timestamp()
+    for path in (tracker, stale):
+        os.utime(path, (old, old))
+
+    assert retention_script._is_pass_evidence(tracker.name) is False
+    receipt = retention_script.run_retention(
+        retention_script.SchedulerEvidenceRetentionConfig(
+            evidence_root=evidence_root,
+            retention_days=30,
+            max_bytes=512 * 1024 * 1024,
+            receipt_retention_days=180,
+            whitelist_globs=(),
+            summary_path=None,
+        ),
+        now=now,
+    )
+
+    skipped = [item["path"] for item in receipt["skipped_paths_by_reason"]["unrecognised"]]
+    assert str(tracker) in skipped
+    assert tracker.exists()
+    assert not stale.exists()
+
+
+def test_bounded_fit_sheds_the_circuit_block_before_touching_existing_keys() -> None:
+    """Under byte pressure the marker goes first, so existing trimming is unmoved."""
+
+    block = {
+        "threshold": 3,
+        "tracked": 1,
+        "open": [
+            {
+                "subject_kind": "candidate",
+                "subject_id": "cand_a",
+                "reason": "blocked:permanent_failure_guard",
+                "consecutive_passes": 3,
+                "first_pass_id": "pass_0",
+                "last_pass_id": "pass_2",
+            }
+        ],
+        "truncated": 0,
+    }
+    payload = {
+        "status": "resource_limit_blocked",
+        "pass_id": "scheduler_2026052112_deadbeefcafe",
+        "candidates": [_no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")],
+        "blocked_candidates": [],
+        "source_cycles": [],
+    }
+    without_marker = dict(payload)
+    with_marker = {**payload, "no_progress_circuit": block}
+    budget = len(json.dumps(without_marker, separators=(",", ":"), sort_keys=True).encode("utf-8")) + 8
+
+    assert not scheduler_evidence_payload_module._payload_fits(
+        with_marker,
+        max_evidence_bytes=budget,
+        compact=True,
+    )
+    fitted = scheduler_evidence_payload_module._fit_bounded_evidence_payload(
+        with_marker,
+        max_evidence_bytes=budget,
+    )
+    baseline = scheduler_evidence_payload_module._fit_bounded_evidence_payload(
+        without_marker,
+        max_evidence_bytes=budget,
+    )
+
+    assert "no_progress_circuit" not in fitted
+    assert fitted == baseline
+
+
+def test_tracker_state_symlink_is_not_followed_on_read_or_write(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-tracker.json"
+    outside_payload = json.dumps(
+        {
+            "schema_version": scheduler_no_progress_module.STATE_SCHEMA_VERSION,
+            "entries": [
+                {
+                    "adapter": "candidate",
+                    "subject_kind": "candidate",
+                    "subject_id": "cand_a",
+                    "reason": "blocked:permanent_failure_guard",
+                    "consecutive_passes": 9,
+                    "first_pass_id": "pass_planted",
+                    "last_pass_id": "pass_planted",
+                }
+            ],
+        }
+    )
+    outside.write_text(outside_payload, encoding="utf-8")
+    tracker = evidence_dir / scheduler_no_progress_module.STATE_FILENAME
+    tracker.symlink_to(outside)
+
+    block = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_0",
+        tmp_path=tmp_path,
+    )
+
+    assert block is not None
+    assert block["state_reset"] == "corrupt"
+    # The planted count was never read, and the planted file was never written.
+    assert block["open"] == []
+    assert outside.read_text(encoding="utf-8") == outside_payload
+    assert tracker.is_symlink() is False
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+
+
+def test_stale_tracker_tmp_sibling_does_not_block_the_overwrite(tmp_path: Path) -> None:
+    """A crash between create and replace must not wedge the tracker forever."""
+
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    stale_tmp = evidence_dir / scheduler_no_progress_module.STATE_TMP_FILENAME
+    stale_tmp.write_text("half written", encoding="utf-8")
+
+    block = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_0",
+        tmp_path=tmp_path,
+    )
+
+    assert block is not None
+    assert block["tracked"] == 1
+    assert not stale_tmp.exists()
+    tracker = evidence_dir / scheduler_no_progress_module.STATE_FILENAME
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["subject_id"] == "cand_a"
