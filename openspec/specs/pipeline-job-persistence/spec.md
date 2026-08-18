@@ -291,3 +291,103 @@ The accepted-submit cohort forecast path SHALL persist the init-state identity (
 - **WHEN** an upsert presents an init-state identity payload with a malformed or partial field set
 - **THEN** accepted-submit normalization rejects the transition rather than persisting a partial record
 
+### Requirement: Reconcile sacct scan windows are rendered in the host's local wall clock
+
+The restart-reconciliation comment scan SHALL render its sacct page
+boundaries in the host's local wall-clock representation of the
+UTC-computed instants, because sacct interprets bare timestamps in the
+host's local timezone: page arithmetic stays on the monotonic UTC axis,
+and only the rendered `--starttime`/`--endtime` strings are converted, so
+the scanned interval equals the intended interval on every host timezone
+instead of being silently translated by the host offset (which on an
+east-of-UTC host shifted the whole window into the past and made every
+absence verdict for a job younger than the offset vacuous). The
+per-session page freeze and the page-cache identity keyed by the rendered
+strings keep their existing semantics, and on a UTC host the rendered
+strings are byte-for-byte what they were before. On DST-observing hosts
+the once-yearly fall-back hour renders an ambiguous local timestamp that
+sacct's timezone-less interface may resolve up to an hour off, so the
+coverage-complete gate can over-claim its scanned interval by at most one
+hour once a year (inherent to sacct, not to this conversion;
+spring-forward is safe because a UTC-to-local conversion never emits a
+skipped wall clock, and adjacent page boundaries sit twelve hours apart
+so rendered page keys can never collide).
+
+#### Scenario: an east-of-UTC host scans the intended window
+
+WHEN the reconcile comment scan runs on a host east of UTC
+THEN the rendered page boundaries are the local wall-clock forms of the
+UTC page instants, so a job submitted minutes ago falls inside the newest
+page instead of beyond it
+
+#### Scenario: a UTC host renders the same strings as before
+
+WHEN the host timezone is UTC
+THEN every rendered page boundary string is byte-for-byte identical to
+the pre-change output
+
+#### Scenario: page freeze and cache identity are unchanged
+
+WHEN a querier session renders its pages under any host timezone that
+stays stable for the session's duration
+THEN the page set is frozen once per session and the page-cache keys
+deduplicate exactly as before (a mid-session timezone change re-renders
+the same frozen UTC page to a different key, costing only a redundant
+sacct re-query — never a wrong verdict)
+
+### Requirement: Comment-based absence proof requires proven comment accounting capability
+
+The restart-reconciliation comment querier SHALL refuse to answer — raising
+its transient query-unavailable error with reason class
+`comment_accounting_unproven` before issuing any sacct command — unless a
+once-per-querier-instance probe of `scontrol show config` proves that
+`AccountingStoreFlags` includes the `job_comment` flag, because on a
+cluster whose accounting never stores the sbatch comment a comment search
+can never find a genuinely in-flight job, so treating its empty answer as
+a confirmed absence falsely demotes live reservations to
+`reservation_lost` and re-submits their cohorts. A probe that cannot run,
+a missing `AccountingStoreFlags` line, and a `(null)` or
+`job_comment`-less flag value all count as unproven (fail-closed toward
+refusing, never toward trusting the search), with a warning that
+distinguishes probe-execution failure from a cluster whose flags provably
+lack `job_comment`. Refusal keeps the existing transient-deny semantics:
+reserved rows stay reserved past the grace window and no absence
+conclusion is recorded. This outcome class deliberately does not
+converge on its own: it does not increment the identity-mismatch streak
+counter (whose convergence requirement covers only the
+`identity_mismatch_blocked` outcome family), adds no automatic release
+exit, and leaves disposition to the documented runbook procedure (which
+today may terminate in escalation rather than repair) — on
+such clusters no reliable automatic absence proof exists, so any
+automatic exit would trade duplicate submission against abandoning a
+live job. On clusters where the probe proves the capability, sacct query
+behavior is unchanged and the querier's raise-priority order is
+preserved: the accepted-submit contract-version check still raises first,
+and the global-visibility gate still applies to the queries it guarded
+before.
+
+#### Scenario: a cluster that does not store comments never confirms absence
+
+WHEN the probe reads `AccountingStoreFlags = (null)` (or the flag list
+lacks `job_comment`, or the line is absent, or scontrol fails)
+THEN every comment query — owner-scoped, global, and legacy — raises the
+transient query-unavailable error with reason class
+`comment_accounting_unproven` without invoking sacct, and a reserved row
+past its grace window stays reserved instead of being demoted to
+`reservation_lost`
+
+#### Scenario: a comment-storing cluster is unchanged
+
+WHEN the probe proves `AccountingStoreFlags` includes `job_comment`
+THEN owner-scope and global-scope comment queries page sacct exactly as
+before, owned matches still bind, and a coverage-complete confirmed
+absence older than the grace window still demotes to `reservation_lost`
+
+#### Scenario: the probe runs once per querier instance
+
+WHEN one querier instance serves multiple queries in a session
+THEN the capability probe executes at most once and its verdict is
+reused, and because the querier is rebuilt each reconcile pass a
+transient scontrol failure denies only that pass — the next pass probes
+again
+
