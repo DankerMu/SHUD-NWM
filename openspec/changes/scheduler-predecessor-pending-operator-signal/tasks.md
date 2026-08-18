@@ -79,6 +79,12 @@
       `NHMS_REQUIRE_FORECAST_WARM_START=false`（复用
       `tests/test_scheduler_generation.py::test_env_override_blocks_predecessor_pending_without_earlier_history`
       的 fixture 底座）。
+- [x] 2.2（round-3 retro 纠正）正向腿真实门端到端钉：
+      `tests/test_scheduler_backfill_predecessor.py::test_emitted_predecessor_admitted_when_self_heal_expected`
+      —— self-heal 几何下被发出的 predecessor 被真实 §8 门 admit（进
+      `candidates`、不进 `blocked`），successor 发射记录 `status=="emitted"`，
+      successor 字段 `self_heal_expected=True / self_heal_probe.ready=True`；
+      红演示 = 撤 predecessor manifest staging → `'skipped' == 'emitted'` 断言红。
 - [x] 3.1 新建 `docs/runbooks/scheduler-dbfree-typed-reasons.md`：该 typed
       reason 的含义、两类群体区分（判据 = predecessor 自己那道门的全量
       warm-start 验证 `ready`，**不是** `history_exists`，**也不是**
@@ -108,7 +114,7 @@
 
 ## Evidence mapping
 
-- selected pack `evidence contract` → tasks 1.2 / 2.1 / 3.2（五个几何 + 真实门
-  + bounded 摘要层）+ spec delta scenario。
+- selected pack `evidence contract` → tasks 1.2 / 2.1 / 2.2 / 3.2（五个几何 +
+  真实门双腿（blocked + emitted）+ bounded 摘要层）+ spec delta scenario。
 - 非目标（不改判定行为）→ 既有 `test_env_override_blocks_predecessor_pending_*`
   回归绿证明 reason/failure 块不变。

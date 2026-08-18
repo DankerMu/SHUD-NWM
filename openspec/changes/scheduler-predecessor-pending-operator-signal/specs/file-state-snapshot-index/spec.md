@@ -78,3 +78,15 @@ single-boolean triage remains executable on summarized passes.
 - **THEN** the emitted predecessor is itself blocked with the same typed
   reason and `operator_action_required=True`, demonstrating the gap does not
   self-heal without operator backfill
+
+#### Scenario: emitted predecessor is admitted under a real §8 gate in the self-heal geometry
+
+- **GIVEN** `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` and a successor
+  blocked with the same typed reason whose state index holds the emitted
+  predecessor's own verified warm-start state (`self_heal_expected=True`,
+  `self_heal_probe.ready=True`)
+- **WHEN** `emit_predecessor_candidates` runs against the real §8 gate
+- **THEN** the emitted predecessor is ADMITTED (present in the candidate
+  list, absent from blocked) and the successor's emission record carries
+  `status="emitted"` — the "stand down" half of the signal is backed by the
+  machinery, not only by field values

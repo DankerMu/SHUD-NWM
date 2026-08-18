@@ -107,6 +107,12 @@ backfill 才能闭合缺口：
 successor 记录**的 `state_evidence.predecessor_backfill.summary.records[]` 里
 找到该 predecessor 的发射记录（按 `predecessor_cycle_time` 时间戳比对），且其
 `status` ∈ {`emitted`, `blocked`}——即 §8 gate 真的对 predecessor 执行过。
+注意：`predecessor_model_not_available` /
+`predecessor_candidate_construction_failed` / `predecessor_gate_failed` 三类
+记录**不带** `predecessor_cycle_time`（后两类连 predecessor 身份都不带）——按
+时间戳比对会误读成"记录缺席"。每个 blocked successor 的 `records[]` 恒为单条，
+直接读那唯一一条的 `reason` 即可；判 cap 截断前必须先确认其他 successor 的
+`pass_totals.truncated` 存在。
 不满足时缺口**不会**自己闭合，且要修的东西也不是 state：
 
 - `status=skipped` 且 `reason` 为 `predecessor_raw_manifest_not_ready` /
@@ -118,9 +124,11 @@ successor 记录**的 `state_evidence.predecessor_backfill.summary.records[]` �
 - `status=skipped` 且 `reason` 为 `predecessor_candidate_construction_failed` /
   `predecessor_gate_failed` → 是构造/门执行本身出错，按 pass 日志排查，别当
   数据缺口处置。
-- **完全没有**该 predecessor 的记录 → 本 pass 的发射撞到 256 条上限被截断
-  （截断记录不挂在任何 successor 上，特征是其他 successor 的
-  `summary.pass_totals` 里出现 `truncated`），先降 pending 规模或分批。
+- `records[]` **完全为空** → 才考虑本 pass 的发射撞到 256 条上限被截断；且
+  只有在其他 successor 的 `summary.pass_totals` 里确实出现 `truncated` 之后
+  才能这么判（截断记录不挂在任何 successor 上），确认后先降 pending 规模或
+  分批。`records[]` 里有记录但按 `predecessor_cycle_time` 比对不上，**不是**
+  缺席——上面那三类无时间戳 reason 就长这样，直接读那条记录的 `reason`。
 - `status=skipped` 且 `reason=predecessor_already_present` → predecessor 已在
   本 pass 的列表里：落在 `candidates[]` 是良性的（它这轮就跑），落在
   `blocked_candidates[]` 则要对**它那条记录**再走一遍本节分诊。
@@ -213,9 +221,14 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
      记录：`status` ∈ {`emitted`, `blocked`} 才说明 §8.6 真的把它推给了 gate，
      这时才可以停手等下一个自然 pass（此时任何手工补 state 都是在制造错误
      lineage）。`status=skipped`（`predecessor_raw_manifest_not_ready` /
-     `predecessor_model_not_available` 等）或**记录缺席**（cap 截断）时，缺口
+     `predecessor_model_not_available` 等）或 `records[]` **为空**时，缺口
      不会自己闭合，但要修的是 raw manifest / 模型可用性 / 发射上限，**不是**
      补 state——按上一节"只有这个布尔不足以停手"的分支表处置，别进第 4 步。
+     空 `records[]` 只有在其他 successor 的 `summary.pass_totals` 里确认了
+     `truncated` 之后才可判为 cap 截断；而按 `predecessor_cycle_time` 比对不
+     上的记录是**在场但对不上**（`predecessor_model_not_available` /
+     `predecessor_candidate_construction_failed` / `predecessor_gate_failed`
+     不带时间戳），不是缺席——`records[]` 恒为单条，直接读它的 `reason`。
    - 若本 pass evidence 是 `limit.candidate_lists=summarized` / `dropped` 的
      摘要，records 已被丢掉，第二步做不了：先取未摘要的完整证据再判，不要只
      凭布尔停手。
@@ -279,10 +292,10 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
   `latest_usable_state.valid_time` 是不够的。
 - 判据不只看 `valid_time`：该格上坐着**错误 generation** 的 checkpoint 时，
   successor 自己的精确查找发生在 `valid_time == T`（不是该格），因此**并不会**
-  被改判成 wrong-generation 一类 reason——它照样落在本 reason 上（前提是 index
-  里另有当代 history 让 transition matrix 仍判 `block_predecessor_pending`；
-  若那条旧代条目是 index 里**唯一**的条目，matrix 会走 wrong-generation /
-  cold-start 分支，reason 就不是本条了）。真正兜住
+  被改判成 wrong-generation 一类 reason——它照样落在本 reason 上（只有当错代
+  条目坐在 `valid_time == T`——successor 自己那一格——matrix 才判
+  wrong-generation；坐在 `T − lead` 上的错代条目**永远不会**改道 successor 的
+  typed reason，无论 index 里有没有别的当代 history，本节都适用）。真正兜住
   这一类的是判据本身：probe 会跑完 generation/lineage 与对象校验，
   `self_heal_probe.reason` 会点名具体失败（如
   `state_snapshot_index_model_package_checksum_mismatch`、
