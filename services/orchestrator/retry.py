@@ -1626,7 +1626,11 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_uri", text)
             )
             continue
-        root = Path(text).expanduser()
+        # os.path.expanduser (not Path.expanduser), same reason as
+        # _local_runtime_root_safety above: an undeterminable home directory
+        # leaves the value verbatim so it falls closed through the non-absolute
+        # arm below instead of raising RuntimeError out of the adjudicator.
+        root = Path(os.path.expanduser(text))
         if not root.is_absolute():
             rejected.append(
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_relative", text)
@@ -1664,7 +1668,10 @@ def _db_free_selector_path_rejection(
         return _runtime_root_rejection(selector_field, source, "db_free_allowed_roots_missing", value)
     if _URI_STYLE_RE.match(value):
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_uri", value)
-    path = Path(value).expanduser()
+    # os.path.expanduser (not Path.expanduser): see _local_runtime_root_safety --
+    # an undeterminable home directory leaves the value verbatim and it falls
+    # closed through the non-absolute arm below.
+    path = Path(os.path.expanduser(value))
     if not path.is_absolute():
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_relative", value)
     try:

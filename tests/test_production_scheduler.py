@@ -15379,6 +15379,605 @@ def test_unknown_user_tilde_copyback_source_blocks_one_candidate_and_the_pass_su
     assert result.artifact_path.exists()
 
 
+# ---------------------------------------------------------------------------
+# #1436 + #1441: the same throw face's remaining five sites.  ``Path.expanduser()``
+# raises an errno-LESS ``RuntimeError`` ("Could not determine home directory.",
+# identical on every supported CPython) whenever no home directory can be derived,
+# and at these five sites the call sits outside every try or behind an ``except``
+# that cannot catch it:
+#
+#   * ``scheduler_preflight._preflight_allowed_roots`` / ``._storage_root_check``
+#     -- no try at all, so the escape aborts the whole ``_slurm_preflight`` and
+#     the ``SLURM_PREFLIGHT_*`` structured blockers are lost (#1436);
+#   * ``retry._db_free_selector_allowed_roots`` / ``._db_free_selector_path_rejection``
+#     -- same, so the ``db_free_*`` rejections are never generated (#1436);
+#   * ``LocalObjectStore.__post_init__`` -- the expansion sits OUTSIDE the
+#     ``SafeFilesystemError`` conversion try, so the unified artifact probe's
+#     ``except ObjectStoreError`` and the sidecar tier's
+#     ``except (ObjectStoreError, OSError, ValueError)`` both miss it (#1441).
+#
+# The four #1436 sites take the family primitive (``Path(os.path.expanduser(...))``,
+# #1424/PR #1435): the value stays verbatim and falls through the arms each
+# function already has.  The object-store root deliberately does NOT -- keeping
+# the literal there would anchor the store at the cwd and really create a
+# ``~nosuchuser_zz`` directory -- so it converts to the domain ``ObjectStoreError``
+# instead.  Terminal states below are the task-0 probe's measurements, not guesses.
+# ---------------------------------------------------------------------------
+
+#: The unexpandable value used by the residue tests, in root rather than uri shape.
+_TILDE_RESIDUE_ROOT = "~nosuchuser_zz/roots"
+
+#: Both trigger faces of the one throw type: an unknown ``~user``, and a plain
+#: ``~`` on a runtime with neither ``HOME`` nor a passwd entry.
+_TILDE_RESIDUE_FACES = ("unknown_user_tilde", "homeless_plain_tilde")
+
+
+def _tilde_residue_value(face: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Arm one trigger face and hand back a value this interpreter cannot expand.
+
+    Self-証: ``_assert_tilde_is_genuinely_unexpandable`` re-proves the trigger on
+    every run, so these tests go red rather than vacuously green if a platform
+    (or a future CPython) stops raising here.
+    """
+
+    if face == "homeless_plain_tilde":
+        _break_home_directory_resolution(monkeypatch)
+        value = "~/roots"
+    else:
+        value = _TILDE_RESIDUE_ROOT
+    _assert_tilde_is_genuinely_unexpandable(value)
+    return value
+
+
+@dataclass(frozen=True)
+class _PreflightRootsConfigStub:
+    """Exactly the three attributes ``_preflight_allowed_roots`` reads.
+
+    A real ``ProductionSchedulerConfig`` cannot carry an unexpandable tilde this
+    far: construction expands every root itself
+    (``scheduler_config._expanduser_for_mode``) and on db-backed runtimes
+    deliberately re-raises -- that arm is the already-fixed #1423/#1520 territory
+    and out of scope here.  This stub pins the preflight helper's own seam.
+    """
+
+    allowed_storage_roots: tuple[Path, ...]
+    workspace_root: Path
+    db_free_required: bool = False
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoent_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+    db_free_required: bool,
+) -> None:
+    # Task 0 probe, measured terminal state (both the db-backed and the db-free
+    # arm): the verbatim value is a RELATIVE path, so strict realpath fails with
+    # ENOENT and the walk's ENOENT tolerance arm -- whose docstring already states
+    # that a merely missing root never produces a blocker -- admits it anchored at
+    # the cwd.  That cwd-anchored phantom root is the ACCEPTED new state of this
+    # change (issue #1436 acceptance 2's "or tolerated by the existing arm"
+    # branch); its geometry is the separately tracked #1427 adjacency and is
+    # recorded here, not changed.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+    config = _PreflightRootsConfigStub(
+        allowed_storage_roots=(Path(value),),
+        workspace_root=tmp_path,
+        db_free_required=db_free_required,
+    )
+
+    resolved, blockers = scheduler_preflight_module._preflight_allowed_roots(config)
+
+    assert blockers == []
+    assert resolved == (Path(os.path.realpath(anchor / value)),)
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_storage_root_check_yields_out_of_root_when_the_cwd_is_outside_every_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state: the verbatim value continues into the
+    # existing contained -> visible ladder, and with the cwd outside every allowed
+    # root containment loses first, exactly as any other out-of-root value would.
+    allowed = tmp_path / "allowed-root"
+    allowed.mkdir()
+    anchor = tmp_path / "cwd-outside-every-root"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    check, blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root",
+        value,
+        (Path(os.path.realpath(allowed)),),
+    )
+
+    anchored = str(Path(os.path.realpath(anchor / value)))
+    assert check == {
+        "configured": True,
+        "path": anchored,
+        "contained": False,
+        "compute_node_visible": False,
+    }
+    assert blocker == {
+        "code": "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT",
+        "field": "workspace_root",
+        "path": anchored,
+        "message": "Slurm workspace_root must stay under configured project or production roots.",
+    }
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_storage_root_check_yields_not_visible_when_the_cwd_is_under_a_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # The ladder's other rung, for the same reason the artifact-guard lane pins
+    # both cwd geometries (#1424 D2): the verdict is a function of the process
+    # working directory, so "contained but not there" must be pinned too.
+    allowed = tmp_path / "allowed-root"
+    anchor = allowed / "runs"
+    anchor.mkdir(parents=True)
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    check, blocker = scheduler_preflight_module._storage_root_check(
+        "object_store_root",
+        value,
+        (Path(os.path.realpath(allowed)),),
+    )
+
+    anchored = str(Path(os.path.realpath(anchor / value)))
+    assert check == {
+        "configured": True,
+        "path": anchored,
+        "contained": True,
+        "compute_node_visible": False,
+    }
+    assert blocker == {
+        "code": "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_NOT_VISIBLE",
+        "field": "object_store_root",
+        "path": anchored,
+        "message": "Slurm object_store_root must exist as a compute-node visible directory.",
+    }
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_db_free_selector_allowed_roots_falls_closed_as_relative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state: py3.14.2 live evidence in #1424 had
+    # this one ESCAPING, so the db_free rejection was never generated at all.  The
+    # verbatim value is relative, which is precisely what the existing
+    # non-absolute arm already rejects.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("env:NHMS_SCHEDULER_ALLOWED_ROOTS", value)
+
+    assert roots == ()
+    assert rejected == [
+        {
+            "field": "scheduler_allowed_roots",
+            "source": "env:NHMS_SCHEDULER_ALLOWED_ROOTS",
+            "reason": "db_free_allowed_root_relative",
+            "value": value,
+        }
+    ]
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_db_free_selector_path_rejection_falls_closed_as_relative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state.  The neighbouring
+    # ``path.resolve(strict=False)`` line is #1400's territory and is deliberately
+    # untouched, so this value must fall closed BEFORE reaching it -- which the
+    # non-absolute arm does.
+    allowed = tmp_path / "allowed-root"
+    allowed.mkdir()
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_workspace_root",
+        "env:NHMS_SCHEDULER_WORKSPACE_ROOT",
+        value,
+        allowed_roots=(Path(os.path.realpath(allowed)),),
+    )
+
+    assert rejection == {
+        "field": "scheduler_workspace_root",
+        "source": "env:NHMS_SCHEDULER_WORKSPACE_ROOT",
+        "reason": "db_free_selector_path_relative",
+        "value": value,
+    }
+
+
+def test_tilde_residue_slurm_preflight_returns_structured_blockers_instead_of_aborting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1436 acceptance 1 at the escaping seam: ``scheduler_gateway._slurm_preflight``
+    # has no try, and neither does its caller
+    # (``scheduler_candidate_execution_evidence``), so the RuntimeError used to
+    # take the whole preflight -- and every ``SLURM_PREFLIGHT_*`` blocker it had
+    # already accumulated -- with it.
+    #
+    # The tilde values are injected onto the built config with
+    # ``object.__setattr__`` on purpose: config construction owns its own tilde
+    # handling (#1423/#1520, already fixed and out of scope), and what this test
+    # must pin is the preflight's behaviour once a tilde value reaches it.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    anchor = roots["workspace_root"] / "anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    _assert_tilde_is_genuinely_unexpandable(_TILDE_RESIDUE_ROOT)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    object.__setattr__(config, "object_store_root", Path("~nosuchuser_zz/store"))
+    object.__setattr__(
+        config,
+        "allowed_storage_roots",
+        (Path(_TILDE_RESIDUE_ROOT), Path(os.path.realpath(tmp_path))),
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    # The allowed-roots walk admitted the tilde root through its ENOENT arm, so it
+    # contributes no blocker but does appear as a cwd-anchored containment base.
+    assert [blocker for blocker in preflight["blockers"] if blocker["field"] == "allowed_storage_roots"] == []
+    assert preflight["checks"]["allowed_roots"] == [
+        str(Path(os.path.realpath(anchor / _TILDE_RESIDUE_ROOT))),
+        str(Path(os.path.realpath(tmp_path))),
+    ]
+    # ...and the tilde object-store root got a structured verdict, not an abort.
+    assert [
+        blocker["code"] for blocker in preflight["blockers"] if blocker["field"] == "object_store_root"
+    ] == ["SLURM_PREFLIGHT_OBJECT_STORE_ROOT_NOT_VISIBLE"]
+    assert preflight["checks"]["storage_roots"]["object_store_root"] == {
+        "configured": True,
+        "path": str(Path(os.path.realpath(anchor / "~nosuchuser_zz/store"))),
+        "contained": True,
+        "compute_node_visible": False,
+    }
+    # Non-vacuous: the checks the escape used to destroy are all present.
+    assert set(preflight["checks"]) >= {"database", "storage_roots", "allowed_roots", "templates", "gateway"}
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_raises_the_domain_error_and_creates_no_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 1-3.  ``ObjectStoreError`` (not the bare RuntimeError) is
+    # what every reviewed caller already catches, and the literal-directory
+    # assertion is the reason this site does NOT take the family primitive: with
+    # the value kept verbatim, ``Path.cwd() / root`` plus
+    # ``ensure_directory_no_follow`` would materialise a real ``~nosuchuser_zz``
+    # directory under the working directory.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    with pytest.raises(ObjectStoreError) as excinfo:
+        LocalObjectStore(value)
+
+    assert type(excinfo.value) is ObjectStoreError
+    assert value in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "home directory" in str(excinfo.value.__cause__)
+    assert list(anchor.iterdir()) == []
+
+    # The ``Path`` spelling of the same root takes the identical arm.
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(Path(value))
+    assert list(anchor.iterdir()) == []
+
+
+def test_tilde_residue_object_store_error_stays_separate_from_the_unsafe_root_conversion(
+    tmp_path: Path,
+) -> None:
+    # Task 1.3's explicit constraint: the new ``except RuntimeError`` must not be
+    # merged with the existing ``ensure_directory_no_follow`` boundary.
+    # ``ObjectStoreError`` IS a ``RuntimeError``, so a merged handler would relabel
+    # every "root is unsafe" failure as "root is not expandable".
+    not_a_directory = tmp_path / "regular-file"
+    not_a_directory.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ObjectStoreError) as excinfo:
+        LocalObjectStore(not_a_directory / "store")
+
+    assert "Local object store root is unsafe" in str(excinfo.value)
+    assert "not expandable" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_keeps_the_artifact_probe_error_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 4: the unified probe's object leg already contains
+    # ``ObjectStoreError`` into a distinguishable fail-closed reason, so converting
+    # the throw type restores that attribution with ZERO caller changes.  Before
+    # the fix the bare RuntimeError went straight through both except arms and
+    # aborted the pass with no evidence at all.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    candidate = _artifact_guard_candidate(monkeypatch)
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    value = _tilde_residue_value(face, monkeypatch)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", value)
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate, "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/manifest.json"
+    ) == (True, "artifact_probe_error")
+    assert list(anchor.iterdir()) == []
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_keeps_the_sidecar_unreadable_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 4, second reviewed caller: the sidecar tier's
+    # ``except (ObjectStoreError, OSError, ValueError)`` wraps the construction as
+    # well, so the same conversion restores ``sidecar_unreadable`` there.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    candidate = _artifact_guard_candidate(monkeypatch)
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    value = _tilde_residue_value(face, monkeypatch)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", value)
+
+    provenance = scheduler_state_failure_module._forcing_sidecar_provenance(candidate)
+
+    assert provenance.witness is False
+    assert provenance.status == "sidecar_unreadable"
+    assert list(anchor.iterdir()) == []
+
+
+#: The #1436 lane, grouped PER MODULE on purpose: the collector below keys nodes
+#: by bare function name, and ``_path_is_relative_to`` exists in ``retry`` as well
+#: as in ``scheduler_state_failure``, so one merged dict would silently collide.
+_TILDE_RESIDUE_EXPANDUSER_LANES: tuple[tuple[Any, tuple[str, ...]], ...] = (
+    (scheduler_preflight_module, ("_preflight_allowed_roots", "_storage_root_check")),
+    (retry_module, ("_db_free_selector_allowed_roots", "_db_free_selector_path_rejection")),
+)
+
+
+def _module_lane_function_nodes(module: Any, names: Sequence[str]) -> dict[str, ast.FunctionDef]:
+    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    return {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    }
+
+
+def test_tilde_residue_lane_expands_tilde_only_through_os_path_expanduser() -> None:
+    # The #1424 receiver discriminant, extended to the four #1436 sites: no
+    # function in this lane may reach the raising expansion form again.  This lane
+    # carries the expanduser pin ONLY -- it is deliberately NOT fed to
+    # ``_resolve_call_names``, because ``_db_free_selector_path_rejection`` keeps a
+    # ``path.resolve(strict=False)`` line that belongs to #1400 and is pinned as
+    # PRESENT just below.
+    for module, names in _TILDE_RESIDUE_EXPANDUSER_LANES:
+        lane = _module_lane_function_nodes(module, names)
+
+        assert sorted(lane) == sorted(names), f"{module.__name__} lane is incomplete"
+        for name, node in lane.items():
+            assert _expanduser_calls_with_foreign_receiver(node) == [], (
+                f"{module.__name__}.{name} still expands ~ off a Path receiver"
+            )
+            # Non-vacuous: each site really does still expand ``~``, so the pin
+            # cannot be satisfied by dropping tilde support altogether.
+            assert _os_path_expanduser_call_count(node) > 0, (
+                f"{module.__name__}.{name} no longer expands ~ at all"
+            )
+
+
+def test_tilde_residue_change_leaves_the_issue_1400_resolve_line_in_place() -> None:
+    # Scope pin in the other direction: #1400 owns
+    # ``_db_free_selector_path_rejection``'s ``path.resolve(strict=False)`` and its
+    # ``except OSError``.  This change must not have "helpfully" migrated it.
+    lane = _module_lane_function_nodes(retry_module, ("_db_free_selector_path_rejection",))
+
+    assert _resolve_call_names(lane["_db_free_selector_path_rejection"]) == ["resolve"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "~/roots",
+        "~",
+        "~/",
+        "~/a/../b",
+        "/abs/roots",
+        "relative/roots",
+    ],
+)
+def test_tilde_residue_primitive_is_byte_compatible_with_path_expanduser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    # Regression lock at the swapped expression itself: on every input the OLD
+    # primitive could handle, the new one yields the identical ``Path``.
+    #
+    # Input-domain carve-out, same as #1424: homes that rstrip to ``''`` (``HOME``
+    # of ``''``, ``/``, ``//``...) combined with a ``~//`` value are excluded --
+    # there the two primitives genuinely differ on the leading double slash, which
+    # the downstream realpath folds back.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    assert Path(os.path.expanduser(value)) == Path(value).expanduser()
+
+
+def test_tilde_residue_preflight_allowed_roots_keeps_every_expandable_arm_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for ``_preflight_allowed_roots``, arm by arm.  The
+    # independent oracle is the pre-expanded ABSOLUTE spelling of the same root:
+    # it never touches the changed line, so equal verdicts prove the expansion
+    # still happens and still feeds the same arms.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    existing = home / "existing"
+    existing.mkdir()
+    not_created_yet = home / "nfs-not-mounted-yet"
+    loop = _symlink_loop_dir(home, "allowed-loop")
+
+    def verdict(root: Path, *, db_free: bool) -> tuple[Any, Any]:
+        return scheduler_preflight_module._preflight_allowed_roots(
+            _PreflightRootsConfigStub(
+                allowed_storage_roots=(root,),
+                workspace_root=tmp_path,
+                db_free_required=db_free,
+            )
+        )
+
+    # Plain expandable root.
+    assert verdict(Path("~/existing"), db_free=False) == ((Path(os.path.realpath(existing)),), [])
+    assert verdict(Path("~/existing"), db_free=False) == verdict(existing, db_free=False)
+    # ENOENT arm: a not-yet-created root keeps its admitted, lexically normalized
+    # semantics.
+    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=False) == (
+        (Path(os.path.realpath(not_created_yet)),),
+        [],
+    )
+    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=False) == verdict(not_created_yet, db_free=False)
+    # db-free lexical fallback arm (PR #831 tolerance): an unresolvable root is
+    # legitimate configuration there, and the EXPANDED value is what gets kept.
+    assert verdict(Path("~/allowed-loop-a"), db_free=True) == ((home / "allowed-loop-a",), [])
+    assert verdict(Path("~/allowed-loop-a"), db_free=True) == verdict(loop, db_free=True)
+    # db-backed unsafe arm: same root, blocker carrying the expanded path.
+    assert verdict(Path("~/allowed-loop-a"), db_free=False) == (
+        (),
+        [
+            {
+                "code": "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH",
+                "field": "allowed_storage_roots",
+                "path": str(home / "allowed-loop-a"),
+                "message": "Slurm allowed storage root must be canonically resolvable.",
+            }
+        ],
+    )
+    assert verdict(Path("~/allowed-loop-a"), db_free=False) == verdict(loop, db_free=False)
+
+
+def test_tilde_residue_storage_root_check_keeps_expandable_and_absolute_verdicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for ``_storage_root_check``, against the same
+    # pre-expanded oracle.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = home / "workspace"
+    workspace.mkdir()
+    allowed = (Path(os.path.realpath(home)),)
+
+    tilde_check, tilde_blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root", "~/workspace", allowed
+    )
+
+    assert (tilde_check, tilde_blocker) == scheduler_preflight_module._storage_root_check(
+        "workspace_root", str(workspace), allowed
+    )
+    assert tilde_blocker is None
+    assert tilde_check == {
+        "configured": True,
+        "path": str(Path(os.path.realpath(workspace))),
+        "contained": True,
+        "compute_node_visible": True,
+    }
+    # And an absolute tilde-free root outside every allowed root still blocks.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _outside_check, outside_blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root", str(outside), allowed
+    )
+    assert outside_blocker is not None
+    assert outside_blocker["code"] == "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT"
+
+
+def test_tilde_residue_db_free_selector_lanes_keep_expandable_and_absolute_verdicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for both retry.py sites, against the same oracle.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    approved = home / "approved"
+    approved.mkdir()
+    inside = approved / "workspace"
+    inside.mkdir()
+    outside = home / "outside"
+    outside.mkdir()
+
+    tilde_roots, tilde_rejected = retry_module._db_free_selector_allowed_roots("env", "~/approved")
+
+    assert (tilde_roots, tilde_rejected) == retry_module._db_free_selector_allowed_roots("env", str(approved))
+    assert tilde_rejected == []
+    assert tilde_roots == (Path(os.path.realpath(approved)),)
+
+    def rejection(value: str) -> dict[str, str] | None:
+        return retry_module._db_free_selector_path_rejection(
+            "scheduler_workspace_root", "env", value, allowed_roots=tilde_roots
+        )
+
+    # Expandable and contained -> admitted (no rejection), same as the absolute
+    # spelling.
+    assert rejection("~/approved/workspace") is None
+    assert rejection("~/approved/workspace") == rejection(str(inside))
+    # Expandable but outside -> the existing containment rejection, byte for byte.
+    assert rejection("~/outside") == {
+        "field": "scheduler_workspace_root",
+        "source": "env",
+        "reason": "db_free_selector_path_outside_allowed_roots",
+        "value": "~/outside",
+    }
+    assert rejection(str(outside))["reason"] == "db_free_selector_path_outside_allowed_roots"
+
+
 def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()

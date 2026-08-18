@@ -531,7 +531,12 @@ def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[s
     resolved: list[Path] = []
     blockers: list[dict[str, Any]] = []
     for root in roots:
-        expanded = root.expanduser()
+        # os.path.expanduser (not Path.expanduser) so that a root whose home
+        # directory cannot be determined ("~nosuchuser/x", or "~/x" with no HOME
+        # and no passwd entry) is returned verbatim and flows on through the arms
+        # below instead of raising an errno-less RuntimeError out of the whole
+        # preflight (#1436, same primitive as #1424's artifact-guard lane).
+        expanded = Path(os.path.expanduser(root))
         try:
             candidate = Path(os.path.realpath(expanded, strict=True))
         except OSError as error:
@@ -584,7 +589,11 @@ def _storage_root_check(
                 "message": f"Slurm execution requires configured {field_name}.",
             },
         )
-    path = Path(value).expanduser()
+    # os.path.expanduser (not Path.expanduser): an undeterminable home directory
+    # leaves the value verbatim, so it continues into the contained -> visible
+    # ladder below as an ordinary relative path instead of raising out of the
+    # preflight (#1436).
+    path = Path(os.path.expanduser(value))
     # Strict resolution + errno split: a symlink loop no longer raises from
     # non-strict resolution on CPython 3.13+, so the unsafe verdict comes
     # from the kernel errno. ENOENT is NOT unsafe - a merely missing root
