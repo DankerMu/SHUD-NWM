@@ -551,11 +551,34 @@ def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[di
     return tuple(normalized), exclusions
 
 
+def _canonical_parent(path: Path) -> Path:
+    """Canonicalise a path's parent segment on every supported CPython.
+
+    Same paradigm as _optional_config_path below: strict os.path.realpath, one
+    non-strict os.path.realpath fallback for every strict failure, and no
+    verdict of its own -- the caller's containment check or the storage
+    preflight classifies what comes back.  Path.resolve() cannot be used here
+    because a symlink loop in the parent segment makes it raise an errno-less
+    RuntimeError up to 3.12 (strict=False does not help; GH-113838 lands in
+    3.13), aborting configuration construction on every production interpreter
+    while 3.13+ walks on to a structured verdict.  The non-strict fallback
+    reproduces the old Path.resolve() product verbatim -- POSIX order, symlinks
+    first and `..` afterwards -- so loop-free and ENOENT inputs are unchanged
+    (design D1/D2 of #1423).
+    """
+
+    parent = path.parent
+    try:
+        return Path(os.path.realpath(parent, strict=True))
+    except OSError:
+        return Path(os.path.realpath(parent))
+
+
 def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = workspace_root / path
-    resolved_parent = path.parent.resolve()
+    resolved_parent = _canonical_parent(path)
     candidate = resolved_parent / path.name
     _scheduler._require_under_workspace(resolved_parent, workspace_root, field_name)
     return candidate
@@ -594,14 +617,14 @@ def _config_path_preserve_final_component(value: Path | str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
-    return path.parent.resolve(strict=False) / path.name
+    return _canonical_parent(path) / path.name
 
 
 def _config_path_relative_to_preserve_final(value: Path | str, base: Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = base / path
-    return path.parent.resolve(strict=False) / path.name
+    return _canonical_parent(path) / path.name
 
 
 def _optional_config_path_relative_to_preserve_final(value: Path | str | None, base: Path) -> Path | None:
@@ -702,7 +725,10 @@ def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) 
 
 
 def _require_safe_directory_final_component(path: Path, workspace_root: Path, field_name: str) -> None:
-    _scheduler._require_under_workspace(path.parent.resolve(), workspace_root, field_name)
+    # Same parent-segment paradigm as _confined_path: a loop above the final
+    # component must reach the lstat() verdict below on every CPython instead of
+    # aborting here on <=3.12 (#1520).
+    _scheduler._require_under_workspace(_canonical_parent(path), workspace_root, field_name)
     try:
         path_stat = path.lstat()
     except FileNotFoundError:
