@@ -142,6 +142,13 @@ SLURM_STATE_MAP = {
     # reads this map without a default: before the entry existed a BOOT_FAIL array
     # task stalled on outcome "unverified" and left the cohort accounting incomplete.
     "BOOT_FAIL": SlurmJobStatus.FAILED,
+    # REVOKED and SPECIAL_EXIT are terminal for accounting purposes too -- the
+    # slurm_validation TERMINAL_SLURM_STATES vocabulary has always enumerated them --
+    # so they belong here for the same reason BOOT_FAIL does.  Registering them is
+    # orthogonal to map_slurm_error_code, which deliberately leaves both unmapped so
+    # they keep falling to the generic SLURM_JOB_FAILED code.
+    "REVOKED": SlurmJobStatus.FAILED,
+    "SPECIAL_EXIT": SlurmJobStatus.FAILED,
     "CANCELLED": SlurmJobStatus.CANCELLED,
 }
 
@@ -199,7 +206,10 @@ def _sacct_metric_fields(fields: Sequence[str]) -> dict[str, Any]:
 
 
 def _normalize_slurm_state(raw_state: str) -> str:
-    normalized = raw_state.strip().upper().split()[0].rstrip("+")
+    parts = raw_state.strip().upper().split()
+    if not parts:
+        return "UNKNOWN"
+    normalized = parts[0].rstrip("+")
     return normalized if re.fullmatch(r"[A-Z0-9_]+", normalized) else "UNKNOWN"
 
 

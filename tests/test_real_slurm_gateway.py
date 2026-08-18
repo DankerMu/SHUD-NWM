@@ -31,7 +31,12 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
-from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway, map_slurm_error_code
+from services.slurm_gateway.real_backend import (
+    LOG_TRUNCATION_MARKER,
+    RealSlurmGateway,
+    _normalize_slurm_state,
+    map_slurm_error_code,
+)
 
 
 def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
@@ -1059,10 +1064,56 @@ def test_slurm_error_codes_align_with_retry_sets() -> None:
         ("SPECIAL_EXIT", "SLURM_JOB_FAILED"),
         ("FAILED", "SLURM_JOB_FAILED"),
         ("!! not a state", "SLURM_JOB_FAILED"),
+        # An empty or whitespace-only State field is the same "unrecognisable state"
+        # class as illegal characters: it normalizes to UNKNOWN and takes the
+        # fallback code instead of raising out of the parse legs.
+        ("", "SLURM_JOB_FAILED"),
+        ("   ", "SLURM_JOB_FAILED"),
     ],
 )
 def test_map_slurm_error_code_maps_every_terminal_state(raw_state: str, expected_error_code: str) -> None:
     assert map_slurm_error_code(raw_state) == expected_error_code
+
+
+@pytest.mark.parametrize("raw_state", ["", "   "])
+def test_normalize_slurm_state_treats_empty_state_as_unknown(raw_state: str) -> None:
+    assert _normalize_slurm_state(raw_state) == "UNKNOWN"
+
+
+def test_parse_sacct_status_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    record = gateway._parse_sacct_status(
+        "12345||1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+        "12345",
+    )
+
+    assert record.manifest["slurm_raw_state"] == "UNKNOWN"
+    assert record.status == SlurmJobStatus.FAILED
+
+
+def test_parse_sacct_list_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    records = gateway._parse_sacct_list(
+        "12345|nhms_forecast|   |1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+    )
+
+    assert [record.manifest["slurm_raw_state"] for record in records] == ["UNKNOWN"]
+    assert records[0].status == SlurmJobStatus.FAILED
+
+
+def test_array_member_aggregation_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    record = gateway._parse_sacct_status(
+        "12345_0||1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        "12345_1|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:04:00\n",
+        "12345",
+    )
+
+    assert record.manifest["slurm_raw_state"] == "UNKNOWN"
+    assert record.status == SlurmJobStatus.FAILED
 
 
 def test_boot_fail_maps_to_failed_without_unmapped_warning(tmp_path, caplog) -> None:

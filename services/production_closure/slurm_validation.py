@@ -1478,7 +1478,10 @@ def _timeout_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _normalize_slurm_state(state: str) -> str:
-    return state.strip().upper().split(maxsplit=1)[0]
+    parts = state.strip().upper().split(maxsplit=1)
+    if not parts:
+        return "UNKNOWN"
+    return parts[0]
 
 
 def _is_controlled_failure_outcome(record: dict[str, Any]) -> bool:
