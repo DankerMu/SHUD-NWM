@@ -13,10 +13,14 @@ east-of-UTC host shifted the whole window into the past and made every
 absence verdict for a job younger than the offset vacuous). The
 per-session page freeze and the page-cache identity keyed by the rendered
 strings keep their existing semantics, and on a UTC host the rendered
-strings are byte-for-byte what they were before. The once-yearly
-ambiguous local hour on DST-observing hosts remains irreducibly ambiguous
-to sacct's timezone-less interface (inherent, as recorded for the gateway
-lookback requirement).
+strings are byte-for-byte what they were before. On DST-observing hosts
+the once-yearly fall-back hour renders an ambiguous local timestamp that
+sacct's timezone-less interface may resolve up to an hour off, so the
+coverage-complete gate can over-claim its scanned interval by at most one
+hour once a year (inherent to sacct, not to this conversion;
+spring-forward is safe because a UTC-to-local conversion never emits a
+skipped wall clock, and adjacent page boundaries sit twelve hours apart
+so rendered page keys can never collide).
 
 #### Scenario: an east-of-UTC host scans the intended window
 
