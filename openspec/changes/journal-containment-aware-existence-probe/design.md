@@ -82,6 +82,11 @@ handler（:6615 / :6251 / :2762）**在转换前**吞掉，把 containment fault
   与现状一致。
 - `_cycle_segment_signatures`(:6781) 的 `_stat_signature` 缓存指纹 idiom 不在本 change 范围
   （issue 明确 stat 用法普查 out of scope）；如实现中发现其与新探测产生一致性问题，报偏离不修。
+  **该一致性问题已实测坐实**（PR review round-1 B2）：`_stat_signature` 跟随 symlink 父组件，
+  空槽指纹在"真实空目录"与"symlink→空目录"下同为 all-None，长活实例（scheduler 每进程一个
+  repository，`scheduler_core.py:110`）的 warm `_cycle_rows` 缓存在 tamper 后继续静默返回
+  缓存的 `[]`（fresh 实例返回 blocked 行）。按本条预授权报偏离不修，路由 follow-up issue；
+  写路径不受影响（warm 缓存下 frame 2 照常 raise，实测）。
 
 ## D6: choke-frame 转换（round-1 P1-1/P2-2 + round-2 P1-1/P1-2 驱动，终版）
 
@@ -96,19 +101,24 @@ handler（:6615 / :6251 / :2762）**在转换前**吞掉，把 containment fault
 `FileOrchestrationJournalError("file_journal_unreadable", field=redacted 相对路径,
 evidence={error_type})`——读写不分叉（round-3 review 实测钉定；见 D7 契约论证）：
 
-1. **`_read_cycle_segments`(:6796)**：全部读 lane 经此路由（E1）。**公共契约实际由此 frame
-   定义**：每个公共写方法在触达 frame 2/3 之前都先经 `_cycle_rows`(:3828→:3880/:3888) 或
-   `_cycle_rows_by_model_unlocked`(:3910→:3953/:3959) 做 precondition read（round-3 实测：
-   全部公共写方法的可观察错误来自本 frame）。
-2. **`_next_sequence_unlocked`(:6308)**：防御纵深 frame——其全部直接调用方
+1. **`_read_cycle_segments`(:6796)**：全部读 lane 经此路由（E1）。七条 D7 lane 中六条的
+   公共可观察错误由此 frame 定义：这些写方法在触达 frame 2 之前先经
+   `_cycle_rows`(:3828→:3880/:3888) 或 `_cycle_rows_by_model_unlocked`(:3910→:3953/:3959)
+   做 precondition read。
+2. **`_next_sequence_unlocked`(:6308)**：**同为公共契约 frame**（PR review round-1 B1
+   实测修正——早先"防御纵深、公共 lane 零触发"的判断是错的）：
+   `insert_pipeline_event`(:3597) → `_next_event_id_unlocked`(:6423) →
+   `_next_sequence_unlocked` 在任何 precondition read **之前**先算 sequence floor，
+   该 lane（含 E2/E4 现场）的公共错误即由本 frame 转换；删除本 frame 会让裸载体从公共方法
+   逃逸（实测复现）。其余直接调用方
    （`_write_pipeline_job_unlocked`(:6032)、`reject_pipeline_job_submit_attempt`(:2504)、
    `mark_pipeline_job_permanently_failed`(:2609)、`permit_pipeline_job_retry`(:2826)、
    `project_forecast_cohort_tasks`(:3320)、`_append_validated_record_unlocked`(:6163)、
-   `_next_event_id_unlocked`(:6389)、`_next_accepted_submit_event_id_unlocked`(:6402)、
-   `_materialize_latest_unlocked`(:6561)、`_materialize_cycle_latest_unlocked`(:6598)）在
-   公共 lane 上均被 frame 1 的 precondition read 前置拦截；本 frame 保证任何缺 precondition
-   read 的（现在或将来的）路径上载体依然不逃逸。**不得**把本 frame 钉为公共契约。
-3. **`_append_journal_bytes_unlocked`(:6473)**：同 2，防御纵深（append lane 的 rollover 探测）。
+   `_next_accepted_submit_event_id_unlocked`(:6402)、`_materialize_latest_unlocked`(:6561)、
+   `_materialize_cycle_latest_unlocked`(:6598)）在公共 lane 上被 frame 1 前置拦截，对它们
+   本 frame 是防御纵深。E2/E4/E7d 的测试钉住本 frame 的可观察行为。
+3. **`_append_journal_bytes_unlocked`(:6473)**：防御纵深（append lane 的 rollover 探测；
+   公共 lane 实测零触发——触达 append 意味着更早的探测已成功）。
 
 约束与既有行为保持：
 
@@ -142,13 +152,18 @@ token 为 `file_journal_unreadable`。实测行为表：
 类型从 `OrchestratorError` 变 `FileOrchestrationJournalError` 的行（1/2/5）**不是新回归类**：
 这些 lane 的调用方今天就已暴露于 reader fault 的 `FileOrchestrationJournalError`（round-3
 损坏文件对照实测：同七个方法今天全部 surface `file_journal_malformed_json` 同类型）；只捕
-`OrchestratorError` 的 handler（`chain_array_accounting.py:256` 等）的暴露是 pre-existing
-类，已在 Non-goals 落字。全表进 PR body 偏离/行为变化节。
+`OrchestratorError` 的 handler（实际站点 `chain_forecast_submission.py:164`——round-1 B4
+修正：早先引用的 `chain_array_accounting.py:256` 包的是 sacct 解析，不在 journal lane 上）
+的暴露是 pre-existing 类，已在 Non-goals 落字。全表进 PR body 偏离/行为变化节。
 
 ## D5: 性能
 
-`stat_no_follow` 每次探测重走父链 open。探测点在 per-cycle 读与 sequence 分配路径上，
-频次为每 cycle 常数次（segment 槽位数 × surface 数），非热循环。性能优化 explicit non-goal。
+`stat_no_follow` 每次探测重走父链 open（从文件系统锚点逐组件，成本随 journal root 绝对深度
+线性增长）。实测量级（round-1 B3，macOS/APFS，depth-9 root）：单次探测 ~1µs → ~100-140µs
+（约两个数量级）；一次 `insert_pipeline_event` 发出 ~76-92 次探测（早先"槽位×surface≈8"的
+频次模型低估了一个数量级），端到端写 lane +40-80%（8.7ms → 15.8ms 级）。绝对成本（每写
+~毫秒级、每 cycle 数十写）不构成运维可观察的回归；Linux openat 更廉价、生产 root 更浅，
+实际数字更小。性能优化 explicit non-goal。
 
 ## Seams under test
 
@@ -170,8 +185,13 @@ token 为 `file_journal_unreadable`。实测行为表：
 
 ## 残余风险（PR body 落字项）
 
-- `self.root` 未 resolve（:502）：部署配置的 journal root 自身若经 symlink 到达，读侧从
-  静默 `[]` 翻成 loud。缓解：写侧 `_ensure_root_unlocked` 一直要求 symlink-free root，
+- warm `_cycle_rows` 指纹缓存在 tamper 后继续静默返回缓存 `[]`（D4 坐实项；pre-existing
+  cache idiom，报偏离不修，路由 follow-up issue；spec 措辞已按此收窄）。
+- probe 成本量级见 D5（披露项，非回归）。
+- `self.root` 未 resolve（:502）：部署配置的 journal root 自身若经 symlink 到达——round-1
+  correctness 实测该项**高估**：root 本身 symlink 时 base 与 head 行为一致（写
+  `FILE_JOURNAL_WRITE_FAILED`、读被 walker 的 `file_journal_unsafe_scanned_entry` 挡），
+  无静默→loud 翻转。保留缓解事实：写侧 `_ensure_root_unlocked` 一直要求 symlink-free root，
   任何写过 journal 的节点已满足约束。
 - `_open_parent_dir` 需父链读权限（`os.stat` 只需 search 权限）：`0711` 父目录会从 absent
   翻成 loud（D1 表 OSError 行的既定结果，非缺陷）。

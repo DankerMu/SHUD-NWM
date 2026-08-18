@@ -62,8 +62,9 @@ Domain packs (NHMS profile): 全部 not selected — 无地理/时序/数值/Slu
 4. 探测异常映射保持既有 evidence 形状（field=redacted 相对路径，evidence.error_type）。
 5. 转换只在 D6 三个 choke frame（`_read_cycle_segments` / `_next_sequence_unlocked` /
    `_append_journal_bytes_unlocked`），目标统一 `file_journal_unreadable`：只捕载体不捕
-   `FileOrchestrationJournalError`、零字节写入保证不变；frame 之外不触碰任何写逻辑；
-   frames 2/3 是防御纵深，**不得**钉为公共契约（公共 lane 实测全部由 frame 1 定义）。
+   `FileOrchestrationJournalError`、零字节写入保证不变；frame 之外不触碰任何写逻辑。
+   frames 1/2 都是公共契约（frame 2 承载 `insert_pipeline_event` lane——round-1 B1 修正）；
+   frame 3 是防御纵深。
 6. 载体 `_JournalProbeContainmentError` **不得**继承 `FileOrchestrationJournalError`
    （否则 31 处 broad handler 会在转换前吞掉它——round-2 P1-2），且不得逃出任何公共方法。
 7. D7 表六行行为逐一核对（含 `update_pipeline_job_status`）：类型换到 reader-fault 既有
