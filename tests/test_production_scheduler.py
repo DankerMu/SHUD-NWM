@@ -15719,6 +15719,32 @@ def test_tilde_residue_object_store_error_stays_separate_from_the_unsafe_root_co
     assert "not expandable" not in str(excinfo.value)
 
 
+def test_tilde_residue_expandable_object_store_root_keeps_constructing_and_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1441 acceptance 5, the POSITIVE half (PR #1548 round-1 Note-3): the new
+    # ``except RuntimeError`` must not have disturbed the ordinary expandable
+    # root.  The independent oracle is the same store addressed by its
+    # pre-expanded ABSOLUTE spelling -- it never enters the guarded expression.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    key = "runs/run_001/logs/job.log"
+
+    tilde_store = LocalObjectStore("~/store-sub")
+
+    assert tilde_store.root == home / "store-sub"
+    assert tilde_store.root.is_dir()
+
+    absolute_store = LocalObjectStore(str(home / "store-sub"))
+    assert absolute_store.root == tilde_store.root
+    # ...and the two really are the same store, not merely equal-looking roots.
+    assert tilde_store.write_bytes_atomic(key, b"log-content") == absolute_store.uri_for_key(key)
+    assert absolute_store.read_bytes(key) == b"log-content"
+    assert tilde_store.exists(key) is True
+
+
 @pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
 def test_tilde_residue_object_store_root_keeps_the_artifact_probe_error_attribution(
     monkeypatch: pytest.MonkeyPatch,
@@ -15817,6 +15843,14 @@ def test_tilde_residue_change_leaves_the_issue_1400_resolve_line_in_place() -> N
     assert _resolve_call_names(lane["_db_free_selector_path_rejection"]) == ["resolve"]
 
 
+#: The one in-domain input class where the two primitives genuinely disagree and
+#: the disagreement is ACCEPTED rather than repaired (PR #1548 round-1 N1).
+#: ``Path("./~/x")`` normalizes the ``.`` away at construction, so its first tail
+#: component becomes ``~`` and ``Path.expanduser()`` expands it; ``os.path.expanduser``
+#: works on the raw string, sees a leading ``.`` and returns it verbatim.
+_TILDE_RESIDUE_ACCEPTED_DIVERGENCES = ("./~/x", "./~/approved/ws")
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -15826,6 +15860,7 @@ def test_tilde_residue_change_leaves_the_issue_1400_resolve_line_in_place() -> N
         "~/a/../b",
         "/abs/roots",
         "relative/roots",
+        *_TILDE_RESIDUE_ACCEPTED_DIVERGENCES,
     ],
 )
 def test_tilde_residue_primitive_is_byte_compatible_with_path_expanduser(
@@ -15834,15 +15869,40 @@ def test_tilde_residue_primitive_is_byte_compatible_with_path_expanduser(
     value: str,
 ) -> None:
     # Regression lock at the swapped expression itself: on every input the OLD
-    # primitive could handle, the new one yields the identical ``Path``.
+    # primitive could handle, the new one yields the identical ``Path`` -- except
+    # for the two carve-outs below, both of which are recorded acceptances rather
+    # than silent gaps.
     #
-    # Input-domain carve-out, same as #1424: homes that rstrip to ``''`` (``HOME``
-    # of ``''``, ``/``, ``//``...) combined with a ``~//`` value are excluded --
-    # there the two primitives genuinely differ on the leading double slash, which
-    # the downstream realpath folds back.
+    # Carve-out 1 (inherited from #1424, not parametrized here): homes that rstrip
+    # to ``''`` (``HOME`` of ``''``, ``/``, ``//``...) combined with a ``~//``
+    # value.  There the two primitives differ on the leading double slash, which
+    # the downstream realpath folds back, so no verdict moves.
+    #
+    # Carve-out 2 (PR #1548 round-1 N1, parametrized and asserted below): the
+    # ``./~/...`` shape.  Here the verdict really does move, and only at the three
+    # sites that take a raw ``str`` -- ``_storage_root_check``,
+    # ``_db_free_selector_allowed_roots`` and ``_db_free_selector_path_rejection``.
+    # ``_preflight_allowed_roots`` receives ``Path`` roots, which have already
+    # dropped the ``.`` before the expansion is reached, so it does not diverge.
+    # Measured direction at those three: the value stops being absolute, so the
+    # two selectors reject it (``db_free_allowed_root_relative`` /
+    # ``db_free_selector_path_relative``) and the storage-root check anchors it at
+    # the cwd and returns ``*_OUT_OF_ROOT``, where the old code silently admitted
+    # an expanded home path.  That is fail-CLOSED, and ``./~/x`` is not a plausible
+    # operator spelling of a storage root, so review accepted it as-is.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+
+    if value in _TILDE_RESIDUE_ACCEPTED_DIVERGENCES:
+        assert os.path.expanduser(value) == value
+        assert Path(os.path.expanduser(value)) != Path(value).expanduser()
+        # The discriminating half of "fail-closed": the new value is relative, so
+        # every downstream arm treats it as one; the old value was an absolute
+        # path inside the home directory.
+        assert not Path(os.path.expanduser(value)).is_absolute()
+        assert Path(value).expanduser() == home / value.removeprefix("./~/")
+        return
 
     assert Path(os.path.expanduser(value)) == Path(value).expanduser()
 

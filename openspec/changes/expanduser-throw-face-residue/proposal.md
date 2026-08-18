@@ -22,15 +22,20 @@
 
 用户裁定两单并单交付（同一抛型家族、修复互补、文件不相交）。
 
-**可达性口径（task 0 实测修订，如实记录）**：preflight 两站点经今天的真
-`ProductionSchedulerConfig` **不可达**——db-backed 臂在 config 构造期
-`scheduler_config.py` `_expanduser_for_mode` 更早抛同型 RuntimeError（#1423/#1520
-已裁定的「故意 re-raise」口径），db-free 臂经 config 展开层后已 cwd 锚定、无前导
-tilde 到达 preflight；故 #1436 issue 正文「`_slurm_preflight` 整趟崩」对 db-backed
-臂不成立（崩在更早的 config 帧）。preflight 两处修复定性为**纵深防御 + 机械家族
-对齐**（钉测 lane 扩面仍必要）。另三站点是**真活口**：`retry.py` 两处直接吃
-env/manifest 原始字符串（#1424 py3.14 live 实测 ESCAPED），`object_store.py` root
-来自 `OBJECT_STORE_ROOT`/`resource_profile` 原始值，均不过 config 展开层。
+**可达性口径（task 0 实测 + round-1 评审归因矫正，如实记录）**：preflight 两站点
+经今天的真 `ProductionSchedulerConfig` **不可达**——db-backed 臂在 config 构造期
+更早抛同型 RuntimeError，按字段分两条机制：多数根字段（workspace/object-store/
+published-artifact/runtime/temp/lock/evidence 等）崩在 `scheduler_config.py`
+`_expanduser_for_mode`；而 `allowed_storage_roots`/`log_root` 走
+`_optional_config_path_for_mode` db-backed 臂**绕过** `_expanduser_for_mode`，
+崩在 `scheduler_runtime_roots.py` 的第七/第八家族副本（`_optional_config_path:572`
+/ `_config_path_relative_to_preserve_final:601`，**已立单 #1549**）。db-free 臂经
+config 展开层后已 cwd 锚定、无前导 tilde 到达 preflight。故 #1436 issue 正文
+「`_slurm_preflight` 整趟崩」对 db-backed 臂不成立（崩在更早的 config 帧）。
+preflight 两处修复定性为**纵深防御 + 机械家族对齐**（钉测 lane 扩面仍必要）。
+另三站点是**真活口**：`retry.py` 两处直接吃 env/manifest 原始字符串（#1424
+py3.14 live 实测 ESCAPED），`object_store.py` root 来自
+`OBJECT_STORE_ROOT`/`resource_profile` 原始值，均不过 config 展开层。
 
 ## What Changes
 
@@ -87,7 +92,10 @@ env/manifest 原始字符串（#1424 py3.14 live 实测 ESCAPED），`object_sto
 ## Must preserve
 
 - 不含 `~` 的绝对路径与可展开 `~/...` 在五处的判定结果逐字不变（含 ENOENT 臂、
-  db-free 词法回退臂、object-store 现有全部用例）。
+  db-free 词法回退臂、object-store 现有全部用例）。**记录在案的接受偏差**（round-1
+  path-safety 实测）：`./~/x` 形态（前导 `.` 且首个存续段为 `~`）在三个 str 输入
+  站点从「Path 归一化后展开收编」变为「原样拒绝」——方向 fail-closed、非合理运维
+  配置，显式入 byte-compat 钉测的 carve-out 分支，不算回归。
 - `_slurm_preflight` blocker 结构与 reason 码集合不变（只是不再崩，不新增 reason）。
 - **接受的新状态**：不可展开 tilde 的 allowed root 由 ENOENT 容忍臂以 cwd 锚定形态
   收编进 containment base（不产 blocker）——这是家族原语的既定语义（#1424 同款），
