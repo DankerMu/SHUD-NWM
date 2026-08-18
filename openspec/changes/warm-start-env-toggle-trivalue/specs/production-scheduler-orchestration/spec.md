@@ -30,8 +30,10 @@ skip; no degraded parallel mode is invented for the unreadable state. On the
 backfill path the same change applies when the predecessor's strict
 evaluation lands on an env-re-reading branch: the swallowed error becomes a
 `predecessor_gate_failed` skip with the warning already logged — fail-closed
-instead of silently admitting (a predecessor landing on an early-return
-decision branch keeps its pre-change evidence-based outcome). This backfill
+instead of silently admitting (a predecessor landing on a ready-class
+early-return branch keeps its pre-change admitted outcome; one landing on a
+block-class early-return branch tightens from admitted to blocked — also
+fail-closed). This backfill
 contract is pinned at the emitter seam: in a live pass the candidate loop's
 own unguarded env read fails the pass before the emitter runs, so the
 silent-admission shape is constructible only by driving the emitter

@@ -56,8 +56,9 @@ COLD_DECLARED_CUTOVER :615-616、`_DECLARATION_LEVEL_BLOCKS` :634-638）不再
   `scheduler_backfill_predecessor.py:477` 经 `_strict_warm_start_for_candidate`
   间接受影响——坏 env 从「折叠 False→gate=None→predecessor 放行」变为
   「strict 抛出→吞成 `predecessor_gate_failed` 跳过」，且 WARNING 已归因；
-  该新终态限于 predecessor 的 strict 评估落到再读 env 的分支（落五条提前
-  return 分支时保持改动前的按证据裁决，无回归）。显式回归测试钉住新行为。
+  该新终态限于 predecessor 的 strict 评估落到再读 env 的分支；落 ready 类
+  提前 return 分支时保持改动前的 admit 结果，落 block 类提前分支时由 admit
+  收紧为 blocked——同为 fail-closed 方向，无放松回归。显式回归测试钉住新行为。
   **可达性口径（seam 级钉住）**：真实 pass 中候选主循环自身的无保护
   `from_env()`（scheduler_core.py:785 附近）会先于 emitter 让 pass 响亮失败，
   且 `BLOCK_PREDECESSOR_PENDING` 只能由那条抛异常的落尾分支产出——坏 env 下
