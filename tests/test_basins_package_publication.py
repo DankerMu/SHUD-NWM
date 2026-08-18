@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import scripts.publish_scheduler_file_registry as scheduler_registry
+import workers.model_registry.basins_discovery as basins_discovery
 import workers.model_registry.basins_package as basins_package
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.cli import DEFAULT_BASINS_MIGRATION_SOURCE_URI, _argparse_main, _click_main
@@ -1060,6 +1062,133 @@ def test_publish_basins_rejects_partial_model_with_structured_error(
     assert error["model_id"] == model_id
     assert error["version"] == "vbasins-test"
     assert "tailanhe" in error["path"]
+
+
+def test_publish_basins_refusal_payload_carries_partial_model_causes(tmp_path: Path) -> None:
+    """Same missing-file geometry as the structured-error test above, asserted on
+    the refusal payload's cause keys (#1432) instead of the CLI JSON envelope."""
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "tailanhe", "tlh", include_tsd_rl=False, forcing_count=1, forcing_dir_name="focing")
+    inventory_path = tmp_path / "inventory.json"
+    inventory = discover_basins_inventory(root)
+    write_inventory(inventory, inventory_path)
+    model = inventory["models"][0]
+
+    with pytest.raises(basins_package.BasinsPackageError) as excinfo:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model["model_id"],
+            version="vbasins-test",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    payload = excinfo.value.to_payload()
+    assert payload["error_code"] == "BASINS_MODEL_NOT_PUBLISHABLE"
+    assert payload["message"] == "Basins model is not publishable from this inventory."
+    assert payload["model_id"] == model["model_id"]
+    assert payload["version"] == "vbasins-test"
+    assert payload["path"] == model["source_path"]
+    assert payload["status"] == "partial"
+    assert payload["missing_required_files"] == ["*.tsd.rl"]
+    assert payload["invalid_required_files"] == []
+    assert payload["unreadable_required_files"] == []
+
+
+def test_publish_basins_refusal_payload_names_malformed_ic_file(tmp_path: Path) -> None:
+    """The #1197 header shape gate marks the IC invalid at discovery; the refusal
+    payload has to name that ``*.cfg.ic`` instead of a generic message (#1432)."""
+
+    root = tmp_path / "basins"
+    input_dir = _make_valid_model(root / "tailanhe", "tlh", forcing_count=1)
+    (input_dir / "tlh.cfg.ic").write_text("23106\t6\n1\t0.1\n", encoding="utf-8")
+    inventory_path = tmp_path / "inventory.json"
+    inventory = discover_basins_inventory(root)
+    write_inventory(inventory, inventory_path)
+    model = inventory["models"][0]
+
+    with pytest.raises(basins_package.BasinsPackageError) as excinfo:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model["model_id"],
+            version="vbasins-test",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    payload = excinfo.value.to_payload()
+    assert payload["error_code"] == "BASINS_MODEL_NOT_PUBLISHABLE"
+    assert payload["status"] == "partial"
+    assert payload["missing_required_files"] == []
+    assert [reason.split(":")[0] for reason in payload["invalid_required_files"]] == ["tlh.cfg.ic"]
+    assert payload["unreadable_required_files"] == []
+
+
+def test_publish_basins_refusal_payload_names_unreadable_required_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable-required-file is discovery's third partial-status channel
+    (#1552); the refusal payload carries it as its own key (#1432)."""
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "tailanhe", "tlh", forcing_count=1)
+    unreadable_name = "tlh.tsd.lai"
+    real_sha256 = basins_discovery._sha256
+
+    def fake_sha256(path: Path) -> str:
+        if path.name == unreadable_name:
+            raise OSError(errno.EIO, "simulated hash failure")
+        return real_sha256(path)
+
+    monkeypatch.setattr(basins_discovery, "_sha256", fake_sha256)
+    inventory_path = tmp_path / "inventory.json"
+    inventory = discover_basins_inventory(root)
+    write_inventory(inventory, inventory_path)
+    model = inventory["models"][0]
+
+    with pytest.raises(basins_package.BasinsPackageError) as excinfo:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model["model_id"],
+            version="vbasins-test",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    payload = excinfo.value.to_payload()
+    assert payload["error_code"] == "BASINS_MODEL_NOT_PUBLISHABLE"
+    assert payload["status"] == "partial"
+    assert payload["missing_required_files"] == []
+    assert payload["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in payload["unreadable_required_files"]] == [unreadable_name]
+
+
+def test_publish_basins_refusal_without_causes_keeps_payload_byte_identical(tmp_path: Path) -> None:
+    """Backward-compat lock: the raise sites that pass no details keep exactly the
+    pre-#1432 payload — no cause keys, no empty-list placeholders."""
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "tailanhe", "tlh", forcing_count=1)
+    inventory_path = tmp_path / "inventory.json"
+    write_inventory(discover_basins_inventory(root), inventory_path)
+
+    with pytest.raises(basins_package.BasinsPackageError) as excinfo:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id="basins_absent_shud",
+            version="vbasins-test",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    payload = excinfo.value.to_payload()
+    assert json.dumps(payload, sort_keys=True) == json.dumps(
+        {
+            "error_code": "BASINS_MODEL_NOT_FOUND",
+            "message": "Basins model_id was not found in inventory.",
+            "model_id": "basins_absent_shud",
+            "version": "vbasins-test",
+        },
+        sort_keys=True,
+    )
 
 
 def test_publish_basins_rejects_invalid_utf8_inventory_with_structured_error(

@@ -63,6 +63,7 @@ class BasinsPackageError(RuntimeError):
         version: str | None = None,
         path: str | None = None,
         manifest_uri: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
@@ -70,6 +71,7 @@ class BasinsPackageError(RuntimeError):
         self.version = version
         self.path = path
         self.manifest_uri = manifest_uri
+        self.details = dict(details or {})
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error_code": self.error_code, "message": str(self)}
@@ -81,6 +83,7 @@ class BasinsPackageError(RuntimeError):
             payload["path"] = self.path
         if self.manifest_uri is not None:
             payload["manifest_uri"] = self.manifest_uri
+        payload.update(self.details)
         return payload
 
 
@@ -542,6 +545,12 @@ def _find_publishable_model(inventory: dict[str, Any], model_id: str, version: s
                 model_id=model_id,
                 version=version,
                 path=str(model.get("source_path") or ""),
+                details={
+                    "status": model.get("status"),
+                    "missing_required_files": model.get("missing_required_files") or [],
+                    "invalid_required_files": model.get("invalid_required_files") or [],
+                    "unreadable_required_files": model.get("unreadable_required_files") or [],
+                },
             )
         return model
     raise BasinsPackageError(
