@@ -48,6 +48,7 @@ jobs:
               - 'schemas/**'
               - 'db/**'
               - 'scripts/validate_*.py'
+              - 'scripts/**/*.sh'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'

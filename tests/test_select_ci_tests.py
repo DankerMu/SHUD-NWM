@@ -316,6 +316,72 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
+def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
+    # #1138: an sh-only change set must select the wrapper's guard suite (this
+    # used to return [] and CI degraded to --collect-only with zero assertions).
+    assert Path("scripts/scheduler_file_provider_refresh_once.sh").exists()
+
+    selected = select_tests(
+        ["scripts/scheduler_file_provider_refresh_once.sh"], repo_root=Path(".")
+    )
+
+    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_sh_plus_docs_change_does_not_dilute_guard_selection() -> None:
+    selected = select_tests(
+        [
+            "scripts/scheduler_file_provider_refresh_once.sh",
+            "docs/runbooks/current-production-ops.md",
+        ],
+        repo_root=Path("."),
+    )
+
+    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_sh_plus_py_change_selects_union_of_guards() -> None:
+    selected = select_tests(
+        [
+            "scripts/scheduler_file_provider_refresh_once.sh",
+            "scripts/node27_autopipeline.py",
+        ],
+        repo_root=Path("."),
+    )
+
+    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_node27_autopipeline_preflight.py" in selected
+
+
+def test_select_tests_unmapped_shell_wrapper_arms_core_smoke_fallback() -> None:
+    # A new scripts/**/*.sh with no explicit rule must not vanish into an empty
+    # selection now that the ci.yml backend filter matches it; it falls back to
+    # the core smoke set exactly like an unmapped backend python path.
+    selected = select_tests(["scripts/no_such_wrapper_xyz.sh"], repo_root=Path("."))
+
+    assert selected
+    for test_path in CORE_SMOKE_TESTS:
+        assert test_path in selected
+
+
+def test_every_tracked_scripts_shell_wrapper_selects_nonempty() -> None:
+    # Closure guard: every tracked scripts/**/*.sh either has an explicit
+    # guard-suite rule or arms the core-smoke fallback — never an empty
+    # selection. New wrappers are covered by construction.
+    tracked = subprocess.run(
+        ["git", "ls-files", "scripts/**/*.sh", "scripts/*.sh"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert tracked, "expected at least one tracked shell wrapper under scripts/"
+    for wrapper in tracked:
+        selected = select_tests([wrapper], repo_root=Path("."))
+        assert selected, f"{wrapper} selected an empty test set"
+
+
 def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback() -> None:
     selected = select_tests(
         [
@@ -1542,7 +1608,11 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
         pytest.param("apps/frontend/scripts/gen.py", id="py-under-apps-frontend"),
         pytest.param("packages/common/sql/x.sql", id="non-py-under-backend-prefix"),
         pytest.param("tests/fixtures/sample.json", id="non-py-under-tests"),
-        pytest.param("scripts/run_x.sh", id="shell-script"),
+        # scripts/**/*.sh left this list in #1138: the ci.yml backend filter
+        # now matches it, so an unmapped wrapper arms the core-smoke fallback
+        # (see test_select_tests_unmapped_shell_wrapper_arms_core_smoke_fallback)
+        # instead of pinning empty. Non-scripts shell stays empty:
+        pytest.param("infra/docker/some_hook.sh", id="shell-outside-scripts"),
     ],
 )
 def test_select_tests_pins_known_empty_selection_classes(changed_path: str) -> None:
