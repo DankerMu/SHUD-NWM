@@ -1382,6 +1382,14 @@ pass evidence 顶层 `no_progress_circuit` 块：
       "reason": "query_unavailable:comment_accounting_unproven",
       "consecutive_passes": 3,
       "first_pass_id": "scheduler_2026081812_...",
+      "last_pass_id": "scheduler_2026081814_..."
+    },
+    {
+      "subject_kind": "candidate",
+      "subject_id": "gfs:2026-07-12T00:00:00+00:00",
+      "reason": "blocked:state_snapshot_index_prior_checkpoint_missing_after_history",
+      "consecutive_passes": 3,
+      "first_pass_id": "scheduler_2026081812_...",
       "last_pass_id": "scheduler_2026081814_...",
       "operator_action_required": true
     }
