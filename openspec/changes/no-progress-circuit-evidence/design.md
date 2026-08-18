@@ -13,7 +13,9 @@ journal（per-job 行存储，而 circuit 主体含 candidate 级观察且属 ev
 tracker 需覆盖写：目录 fd 相对创建 `.tmp`（O_NOFOLLOW，0o644）→ 写 + fsync →
 dir_fd 相对 `os.replace`；读取侧同样 O_NOFOLLOW。`.tmp` 兄弟文件对 retention
 无害（`_has_inflight_sibling` 谓词，脚本 :205-209）。代价：状态文件不进
-journal 事务边界——可接受，observe-only，丢失最多推迟开闸 N pass。
+journal 事务边界——可接受，observe-only：正常丢失最多推迟开闸 N pass；落盘
+持续失败（不可删 `.tmp` 残留等）不再受该上界约束，改由 `state_write_failed`
++ 独立 WARNING 每 pass 兜底（round-1 C1 修复后的真实代价模型）。
 
 ## D2 观察源与「不发明判据」
 
