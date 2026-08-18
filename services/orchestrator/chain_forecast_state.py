@@ -162,6 +162,29 @@ def _state_passes_qc(self, state: StateSnapshot) -> bool:
         return False
 
 
+def _state_matches_preferred_lineage(
+    state: StateSnapshot,
+    *,
+    lineage_cycle_id: str | None,
+    lineage_lead_hours: int | None,
+) -> bool:
+    """Whether ``state`` is the §8.7 lineage-preferred snapshot (#1157 D2 R1).
+
+    The preference is expressed to the provider as a ``cycle_id`` /
+    ``lead_hours`` filter, so a snapshot the preferred lookup produced matches
+    both by construction.  Comparing the answer instead of threading a "which
+    lookup won" flag back out keeps ``_exact_or_latest_usable_state``'s
+    signature intact, and is exact either way: a snapshot carrying the expected
+    lineage IS the preferred one, whichever call returned it.
+    """
+
+    if lineage_cycle_id in (None, "") and lineage_lead_hours is None:
+        return False
+    if lineage_cycle_id not in (None, "") and state.cycle_id != lineage_cycle_id:
+        return False
+    return lineage_lead_hours is None or state.lead_hours == lineage_lead_hours
+
+
 def _select_forecast_initial_state(
     self,
     *,
@@ -171,6 +194,7 @@ def _select_forecast_initial_state(
     model_package_version: str | None = None,
     model_package_checksum: str | None = None,
     max_lead_hours: int | None = None,
+    quarantine_required_lead_hours: int | None = None,
 ) -> InitialStateSelection:
     if self.config.strict_forecast_warm_start_required_for(cycle_time):
         return self._select_strict_forecast_initial_state(
@@ -183,6 +207,24 @@ def _select_forecast_initial_state(
     if self.state_manager is None:
         return InitialStateSelection(None, None, None, None, "cold_start_no_state")
 
+    # §8.7 quarantine rerun (#1157 D2): the basin's quarantine evidence names
+    # the lead hours of the predecessor the journal SHOULD have recorded, which
+    # is enough to name that predecessor's cycle.  Preference only — see
+    # ``_exact_or_latest_usable_state``.
+    lineage_cycle_id: str | None = None
+    lineage_lead_hours: int | None = None
+    if quarantine_required_lead_hours is not None and source_id not in (None, ""):
+        try:
+            lineage_lead_hours = int(quarantine_required_lead_hours)
+            lineage_cycle_id = cycle_id_for(
+                source_id,
+                cycle_time - timedelta(hours=lineage_lead_hours),
+            )
+        except (AttributeError, TypeError, ValueError):
+            lineage_cycle_id = None
+            lineage_lead_hours = None
+
+    lineage_preference_spent = False
     cursor = cycle_time
     last_rejection_code: str | None = None
     # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
@@ -193,6 +235,8 @@ def _select_forecast_initial_state(
             cycle_time=cycle_time,
             before_time=cursor,
             source_id=source_id,
+            lineage_cycle_id=lineage_cycle_id,
+            lineage_lead_hours=lineage_lead_hours,
         )
         if state is None:
             return InitialStateSelection(
@@ -225,6 +269,23 @@ def _select_forecast_initial_state(
         if rejection_code is not None:
             # Record the rejection on the candidate and advance to an older one.
             last_rejection_code = rejection_code
+            if not lineage_preference_spent and _state_matches_preferred_lineage(
+                state, lineage_cycle_id=lineage_cycle_id, lineage_lead_hours=lineage_lead_hours
+            ):
+                # ONE-SHOT PREFERENCE RESET (#1157 D2 R1).  The lineage is a
+                # preference, and a preferred entry that is usable but rejected
+                # downstream (package-version drift after a registry upgrade,
+                # max-lead, QC) must not turn it into a filter.  Advancing the
+                # cursor past T here would make the exact branch unreachable
+                # for the rest of the loop, and the file index has no
+                # earlier-valid-time fallback, so the rerun would land on a
+                # zeroed cold start — strictly worse than the wrong-lineage
+                # warm start today's code picks.  Drop the preference, keep the
+                # cursor at T, and redo the unfiltered exact lookup once.
+                lineage_preference_spent = True
+                lineage_cycle_id = None
+                lineage_lead_hours = None
+                continue
             cursor = state.valid_time - timedelta(microseconds=1)
             continue
 
@@ -654,12 +715,42 @@ def _exact_or_latest_usable_state(
     cycle_time: datetime,
     before_time: datetime,
     source_id: str | None,
+    lineage_cycle_id: str | None = None,
+    lineage_lead_hours: int | None = None,
 ) -> StateSnapshot | None:
+    """Exact state at ``cycle_time`` (else the latest usable one before ``before_time``).
+
+    ``lineage_cycle_id`` / ``lineage_lead_hours`` express the §8.7 quarantine
+    rerun's EXPECTED predecessor lineage (#1157 D2).  They are a PREFERENCE,
+    not a filter: the lineage-scoped lookup runs first, and whenever it does
+    not yield a USABLE snapshot — no lineage-matching entry, or one whose
+    ``usable_flag`` is false — the unfiltered lookup below repeats today's
+    selection byte-identically.  (The third miss shape, a preferred snapshot
+    that is usable here but rejected by the caller's downstream lineage/QC
+    validation, is handled by ``_select_forecast_initial_state``'s one-shot
+    preference reset, which re-enters this function with no lineage at all.)
+    Hard-filtering instead would turn a rerun
+    whose expected entry never existed into a zeroed cold start (the file
+    state index has no earlier-valid-time fallback), which is physically far
+    worse than the wrong-lineage warm start; that non-convergent shape is
+    terminated by the quarantine breaker, not here.  Both default to ``None``,
+    so every non-quarantine caller is unchanged.
+    """
     if self.state_manager is None:
         return None
     repository = getattr(self.state_manager, "repository", None)
     exact_provider = getattr(repository, "get_state_snapshot_by_model_time", None)
     if callable(exact_provider) and _ensure_utc(before_time) == _ensure_utc(cycle_time):
+        if lineage_cycle_id not in (None, "") or lineage_lead_hours is not None:
+            preferred = exact_provider(
+                model_id=model_id,
+                valid_time=_ensure_utc(cycle_time),
+                source_id=source_id,
+                cycle_id=lineage_cycle_id,
+                lead_hours=lineage_lead_hours,
+            )
+            if preferred is not None and preferred.usable_flag:
+                return preferred
         exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=source_id)
         if exact is not None and exact.usable_flag:
             return exact

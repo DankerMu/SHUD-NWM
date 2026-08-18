@@ -20,7 +20,6 @@ from services.orchestrator.scheduler_init_state_match import (
     init_state_field,
 )
 from services.orchestrator.scheduler_state import (
-    DURABLE_HYDRO_SUCCESS_STATUSES,
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
@@ -503,7 +502,6 @@ def build_candidates(
                         candidate,
                         cycle,
                         state_decision,
-                        raw_candidate_state,
                     )
                     if identity_quarantine is not None:
                         # REPLACE the skip decision (do not merely drop the
@@ -2024,37 +2022,48 @@ def _journal_predecessor_identity_quarantine(
     candidate: SchedulerCandidateLike,
     cycle: SchedulerSourceCycleLike,
     state_decision: CandidateStateDecision,
-    raw_candidate_state: Mapping[str, Any] | None,
 ) -> CandidateStateDecision | None:
     """Quarantine a completed-type skip whose journal lineage is stale (§8.7, #1107).
 
-    Returns a ``retry`` decision ONLY for a positive identity mismatch — the
-    recorded ``init_state_id`` shares cycle T's expected base key but carries
-    a different lineage suffix.  Returns ``None`` (leave the skip alone) for
-    every other shape: a non-completed skip reason, a missing lead-hours
-    provider, a ``hydro_run`` row that is not itself completed, no recorded
-    identity, a matching token, a suffix-less legacy id, or a different base
-    key (the legal env=false fallback warm start).
+    Returns a decision ONLY for a positive identity mismatch — the recorded
+    ``init_state_id`` shares cycle T's expected base key but carries a
+    different lineage suffix — either the ``retry`` quarantine or, once the
+    breaker is engaged (#1157), the ``blocked`` fail-stop.  Returns ``None``
+    (leave the skip alone) for every other shape: a non-completed skip reason,
+    a missing lead-hours provider, a repository without the identity accessor,
+    a ``hydro_run`` row that is not itself completed, no recorded identity, a
+    matching token, a suffix-less legacy id, or a different base key (the
+    legal env=false fallback warm start).
 
-    The surface can only DECLINE to skip, never admit a skip, so a
-    no-judgement outcome keeps the pre-#1107 behavior byte-identical.
+    The judged identity is read JOURNAL-ONLY through
+    ``completed_pipeline_init_state_id`` (#1157 D1), the same accessor the
+    discovery-side filter uses, so the two wirings agree on every shape the
+    accessor declines: a row whose id exists only in the run manifest
+    (``chain_repository_state`` backfill) or only under the bare ``state_id``
+    alias yields no judgement on both sides.  The accessor also owns the
+    COMPLETED-status gate, so a ``created``/``staged``/``submitted``
+    placeholder superseded by a pipeline terminal still declines judgement.
+
+    The surface can only DECLINE to skip or fail-stop, never admit a skip, so
+    a no-judgement outcome keeps the pre-#1107 behavior byte-identical.
     """
     if state_decision.reason not in _JOURNAL_IDENTITY_QUARANTINE_SKIP_REASONS:
         return None
     lead_hours_provider = context.required_lead_hours_for_candidate
     if not callable(lead_hours_provider):
         return None
-    hydro_run = raw_candidate_state.get("hydro_run") if isinstance(raw_candidate_state, Mapping) else None
-    if not isinstance(hydro_run, Mapping):
+    identity_provider = (
+        getattr(context.active_repository, "completed_pipeline_init_state_id", None)
+        if context.active_repository is not None
+        else None
+    )
+    if not callable(identity_provider):
         return None
-    if str(hydro_run.get("status") or "") not in DURABLE_HYDRO_SUCCESS_STATUSES:
-        # The judged identity must be the COMPLETED run's row.  A
-        # created/staged/submitted placeholder superseded by a pipeline
-        # terminal also carries an ``init_state_id``, but it does not describe
-        # the run that produced the completion — decline judgement instead of
-        # quarantining on it.
-        return None
-    recorded_init_state_id = _state_field(hydro_run, "state_id")
+    recorded_init_state_id = identity_provider(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+    )
     if recorded_init_state_id in (None, ""):
         return None
     try:
@@ -2076,6 +2085,26 @@ def _journal_predecessor_identity_quarantine(
     )
     if matches is not False:
         return None
+    occurrences = _scheduler_generation.journal_identity_quarantine_occurrence_count(
+        context.active_repository,
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        recorded_init_state_id=str(recorded_init_state_id),
+    )
+    if _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
+        return CandidateStateDecision(
+            "blocked",
+            "journal_predecessor_identity_quarantine_breaker_engaged",
+            _journal_predecessor_identity_blocked_evidence(
+                state_decision.evidence,
+                recorded_init_state_id=str(recorded_init_state_id),
+                expected_init_state_id=expected_init_state_id,
+                required_lead_hours=required_lead_hours,
+                skipped_reason=str(state_decision.reason or ""),
+                occurrences=occurrences,
+            ),
+        )
     return CandidateStateDecision(
         "retry",
         "journal_predecessor_identity_mismatch",
@@ -2111,6 +2140,52 @@ def _journal_predecessor_identity_retry_evidence(
                 "expected_init_state_id": expected_init_state_id,
                 "required_lead_hours": required_lead_hours,
                 "quarantined_skip_reason": skipped_reason,
+            },
+        }
+    )
+
+
+def _journal_predecessor_identity_blocked_evidence(
+    terminal_evidence: Mapping[str, Any],
+    *,
+    recorded_init_state_id: str,
+    expected_init_state_id: str,
+    required_lead_hours: int,
+    skipped_reason: str,
+    occurrences: int,
+) -> dict[str, Any]:
+    """Evidence for the §8.7 quarantine breaker's fail-stop (#1157 D3).
+
+    ``blocked_journal_predecessor_identity_quarantine`` is deliberately absent
+    from both forced-resubmit whitelists (they match the decision string
+    literally), so nothing can revive the demoted candidate into a replacement
+    submission — the same anti-revival shape as
+    ``blocked_strict_warm_start_init_state_mismatch``.
+    """
+    return _evidence_safe(
+        {
+            **dict(terminal_evidence),
+            "decision": "blocked_journal_predecessor_identity_quarantine",
+            "reason": "journal_predecessor_identity_quarantine_breaker_engaged",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "native_shud_resubmitted": False,
+            "replacement_submitted": False,
+            "durable_output_reused": False,
+            "journal_predecessor_identity": {
+                "recorded_init_state_id": recorded_init_state_id,
+                "expected_init_state_id": expected_init_state_id,
+                "required_lead_hours": required_lead_hours,
+                "quarantined_skip_reason": skipped_reason,
+                "occurrences": occurrences,
+            },
+            "retry_policy": {
+                "automatic_retry_allowed": False,
+                "manual_retry_required": True,
+                "occurrences": occurrences,
+                "occurrence_threshold": (
+                    _scheduler_generation._JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
+                ),
             },
         }
     )

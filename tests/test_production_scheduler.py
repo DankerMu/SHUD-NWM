@@ -36,6 +36,7 @@ from services.orchestrator import scheduler_evidence as scheduler_evidence_modul
 from services.orchestrator import scheduler_evidence_payload as scheduler_evidence_payload_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
+from services.orchestrator import scheduler_generation as scheduler_generation_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
@@ -10088,6 +10089,111 @@ def test_completed_forecast_cycle_copyback_skips_stale_created_hydro_without_sub
     assert skipped["state_evidence"]["decision"] == "skip_terminal"
     assert skipped["state_evidence"]["terminal_source"] == "forecast_cycle"
     assert orchestrator.calls == []
+
+
+def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """§8.7 quarantine survives the real ``build_candidates`` routing (#1157 E7).
+
+    Same fixture shape as the copyback skip above — a ``complete``
+    ``forecast_cycle`` with matching copyback evidence, which without the
+    quarantine skips as ``terminal_completed_cycle`` — but the journal records
+    a stale predecessor.  Driving it through ``run_once`` (not a unit call on
+    ``_journal_predecessor_identity_quarantine``) is the point: it pins that
+    the quarantine is wired into the candidate construction path and that the
+    demoted skip really leaves ``skipped_candidates`` empty.
+    """
+
+    class JournalIdentityRawCandidateStateRepository(RawCandidateStateRepository):
+        """The candidate-state double plus the journal identity accessors.
+
+        The quarantine reads the recorded ``init_state_id`` JOURNAL-ONLY, off
+        the repository by ``getattr``, so both surfaces have to live on the
+        same object for the real wiring to reach a judgement.
+        """
+
+        def __init__(self, state: dict[str, Any], *, recorded_init_state_id: str) -> None:
+            super().__init__(state)
+            self.recorded_init_state_id = recorded_init_state_id
+
+        def completed_pipeline_init_state_id(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> str | None:
+            del source_id, cycle_time, model_id
+            return self.recorded_init_state_id
+
+        def completed_pipeline_init_state_id_occurrences(
+            self, *, source_id: str, cycle_time: datetime, model_id: str, init_state_id: str
+        ) -> int:
+            del source_id, cycle_time, model_id, init_state_id
+            return 0
+
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    # The scheduler floors 06Z back to the previous allowed cycle hour (00Z),
+    # so the expected predecessor lead is 6; a lead-12 token shares the base
+    # key and is therefore a POSITIVE mismatch, not a no-judgement shape.
+    _base, stale_init_state_id = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=12,
+    )
+    _base, expected_init_state_id = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=6,
+    )
+    assert stale_init_state_id != expected_init_state_id
+    active_repository = JournalIdentityRawCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": "created",
+            "pipeline_status": "created",
+            "forecast_cycle": {
+                "cycle_id": candidate.cycle_id,
+                "source_id": candidate.source_id,
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "complete",
+            },
+            "copyback_evidence": {
+                "stage": "copyback",
+                "status": "succeeded",
+                "source_id": candidate.source_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "run_id": candidate.run_id,
+                "candidate_id": candidate.candidate_id,
+                "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            },
+        },
+        recorded_init_state_id=stale_init_state_id,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    assert state_evidence["journal_predecessor_identity"] == {
+        "recorded_init_state_id": stale_init_state_id,
+        "expected_init_state_id": expected_init_state_id,
+        "required_lead_hours": 6,
+        "quarantined_skip_reason": "terminal_completed_cycle",
+    }
+    assert result.evidence["counts"]["submitted_count"] == 1
 
 
 def test_completed_forecast_cycle_copyback_identity_mismatch_does_not_skip(

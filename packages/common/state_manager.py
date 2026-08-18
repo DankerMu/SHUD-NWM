@@ -645,6 +645,10 @@ class PsycopgStateSnapshotRepository:
         cycle_id: str | None = None,
         lead_hours: int | None = None,
     ) -> StateSnapshot | None:
+        # Lineage filtering is intentionally file-provider-only (#1157 D5): the
+        # §8.7 quarantine loop that needs it exists only in db-free file-journal
+        # mode, so this provider has no consumer for the arguments and adding
+        # one would demand a real-DB oracle for no behavioural gain.
         del cycle_id, lead_hours
         if source_id is not None:
             row = self._fetch_optional(

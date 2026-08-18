@@ -81,6 +81,13 @@ ACCEPTED_PROJECTION_FIELDS = frozenset(
 )
 
 INIT_STATE_IDENTITY_FIELD = "init_state_identities"
+#: Models of this cohort whose submission is a §8.7 quarantine RERUN (#1157).
+#: Written once at reservation from the basins' quarantine retry decision; it
+#: is what lets the breaker tell "a convergence attempt already failed" apart
+#: from "an unrelated whitelisted resubmit happened to re-record the token".
+QUARANTINE_RERUN_PROVENANCE_FIELD = "journal_predecessor_quarantine_rerun_model_ids"
+#: The candidate-state decision whose reruns carry the provenance stamp.
+JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION = "retry_journal_predecessor_identity_mismatch"
 INIT_STATE_IDENTITY_ENTRY_FIELDS = frozenset(
     {
         "array_task_id",
@@ -149,6 +156,10 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     # (#1183), so the frozen ordinary-upsert table owns it like the rest of
     # the master's durable authority state.
     INIT_STATE_IDENTITY_FIELD,
+    # Same capture-once shape (#1157): the §8.7 quarantine-rerun provenance is
+    # decided by the basins this reservation was built from and must never be
+    # rewritten afterwards, or the breaker could be armed retroactively.
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
 )
 
 # Deliberately WITHOUT the init-state identity: member projection feeds
@@ -570,6 +581,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
         normalized.get(INIT_STATE_IDENTITY_FIELD),
         cohort_members=normalized.get("cohort_members"),
     )
+    normalized[QUARANTINE_RERUN_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
+        normalized.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+    )
     decision = normalized.get("reconciliation_decision")
     source = normalized.get("reconciliation_source")
     matched_id = normalized.get("matched_slurm_job_id")
@@ -862,6 +876,51 @@ def canonical_forecast_cohort_init_state_identities(
     return tuple(identities)
 
 
+def canonical_quarantine_rerun_model_ids(*, basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Project which basins of this cohort are §8.7 quarantine RERUNS (#1157).
+
+    Reservation is the last point that still holds the scheduler's decision for
+    each basin, so the provenance is captured here alongside the warm-start
+    identity map.  Only basins whose ``state_evidence.decision`` is the
+    quarantine retry are listed; every other submission — including the
+    whitelisted ``retry_terminal_run_manifest_missing`` /
+    ``retry_missing_forecast_output`` replacements that also re-record the
+    token — yields an empty list and therefore cannot arm the breaker.
+    """
+
+    model_ids: list[str] = []
+    for basin in basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, Mapping):
+            continue
+        if state_evidence.get("decision") != JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION:
+            continue
+        model_id = str(basin.get("model_id") or "")
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return tuple(model_ids)
+
+
+def normalize_quarantine_rerun_model_ids(value: Any) -> list[str]:
+    """Return the durable, de-duplicated §8.7 quarantine-rerun model list.
+
+    Absent / malformed input normalizes to ``[]``, which reads as "no rerun
+    provenance" — the deploy-safe direction, since journals written before
+    #1157 carry no such field and must leave the breaker disengaged.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    model_ids: list[str] = []
+    for item in value[:MAX_FORECAST_COHORT_MEMBERS]:
+        if not isinstance(item, str):
+            continue
+        model_id = item.strip()[:MAX_ACCEPTED_SUBMIT_TEXT_LENGTH]
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return model_ids
+
+
 def init_state_identity_for_task(value: Any, array_task_id: Any) -> dict[str, Any] | None:
     """Return one task's recorded identity from a master row's map, if any."""
 
@@ -1029,7 +1088,9 @@ __all__ = (
     "IDENTITY_MISMATCH_RELEASED_DECISION",
     "INIT_STATE_IDENTITY_ENTRY_FIELDS",
     "INIT_STATE_IDENTITY_FIELD",
+    "JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION",
     "MAX_FORECAST_COHORT_MEMBERS",
+    "QUARANTINE_RERUN_PROVENANCE_FIELD",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_contract_is_current",
     "accepted_submit_master_identity_is_structural",
@@ -1040,6 +1101,7 @@ __all__ = (
     "canonical_forecast_cohort_init_state_identities",
     "canonical_forecast_cohort_members",
     "canonical_forecast_stage",
+    "canonical_quarantine_rerun_model_ids",
     "forecast_cohort_digest",
     "forecast_cohort_identity_is_valid",
     "init_state_identity_for_task",
@@ -1048,5 +1110,6 @@ __all__ = (
     "normalize_accepted_submit_evidence",
     "normalize_candidate_projections",
     "normalize_init_state_identities",
+    "normalize_quarantine_rerun_model_ids",
     "ordered_cohort_members",
 )

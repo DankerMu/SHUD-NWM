@@ -1274,15 +1274,75 @@ def _seed_completed_journal_cycle(
     cycle_time: str,
     init_state_id: str | None,
     model_id: str = "model_a",
+    jobs: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write a completed latest-view entry, optionally pinning ``init_state_id``."""
     parsed = _dt(cycle_time)
-    latest = _journal_latest_view(cycle_time=parsed, model_id=model_id, hydro_status="complete")
+    latest = _journal_latest_view(
+        cycle_time=parsed,
+        model_id=model_id,
+        hydro_status="complete",
+        jobs=list(jobs or []),
+    )
     if init_state_id is not None:
         latest["hydro_run"]["init_state_id"] = init_state_id
     path = journal_root / "latest" / "gfs" / format_cycle_time(parsed) / f"{model_id}.json"
     _journal_write_json(path, latest)
     return path
+
+
+def _completed_submission_master(
+    cycle_time: str,
+    init_state_id: str,
+    *,
+    job_suffix: str = "",
+    model_id: str = "model_a",
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """One terminal-success cohort master that recorded ``init_state_id``.
+
+    One master row per completed forecast submission (#1183).  The §8.7 breaker
+    counts only those stamped as quarantine reruns (#1157 D3 R1);
+    ``quarantine_rerun_model_ids=None`` omits the field, the shape of an
+    unrelated whitelisted replacement and of any pre-#1157 journal.
+    """
+    parsed = _dt(cycle_time)
+    run_id = f"cycle_gfs_{format_cycle_time(parsed)}"
+    row: dict[str, Any] = {
+        "job_id": f"job_{run_id}_forecast{job_suffix}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", parsed),
+        "candidate_id": run_id,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "succeeded",
+        "model_id": None,
+        "init_state_identities": [
+            {"array_task_id": 0, "model_id": model_id, "init_state_id": init_state_id}
+        ],
+    }
+    if quarantine_rerun_model_ids is not None:
+        row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
+    return row
+
+
+def _breaker_engaged_masters(
+    cycle_time: str,
+    init_state_id: str,
+    *,
+    model_id: str = "model_a",
+) -> list[dict[str, Any]]:
+    """The original defect run plus the stamped rerun that failed to converge."""
+    return [
+        _completed_submission_master(cycle_time, init_state_id, model_id=model_id),
+        _completed_submission_master(
+            cycle_time,
+            init_state_id,
+            job_suffix="_retry_1",
+            model_id=model_id,
+            quarantine_rerun_model_ids=[model_id],
+        ),
+    ]
 
 
 def _journal_backed_scheduler(tmp_path: Path, journal_root: Path) -> ProductionScheduler:
@@ -1597,9 +1657,14 @@ def test_quarantined_cycle_exits_quarantine_after_rerun_records_expected_identit
 def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
     tmp_path: Path,
 ) -> None:
-    """3.5(b) ACCEPTED RESIDUAL: a re-run that re-selects the same wrong-suffix
-    state stays quarantined forever and keeps occupying the source's single
-    oldest-first backfill slot.
+    """3.5(b) a re-run that re-selects the same wrong-suffix state stays
+    quarantined and keeps occupying the source's single oldest-first backfill
+    slot -- as long as no provenance-stamped quarantine rerun master has
+    recorded that token even once.  This fixture writes no forecast cohort
+    master at all, so the #1157 breaker counts zero occurrences and stays
+    disengaged; the slot-release behaviour once a STAMPED master carries the
+    token is pinned separately below, next to its mirror leg pinning that
+    unstamped same-token masters keep the slot however many there are.
 
     This is the deterministic env=false base-key re-selection class
     (``chain_forecast_state.py`` exact lookup with no cycle_id/lead_hours ->
@@ -1631,6 +1696,244 @@ def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
     assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
     # Still head-of-line (``available_gaps[:1]``) -> resubmitted once per round.
     assert _selected_backfill_cycles(scheduler) == [_IDENTITY_TARGET_CYCLE]
+
+
+# ---------------------------------------------------------------------------
+# §8.7 quarantine breaker (#1157 D4): a cycle whose ONLY reason for being a gap
+# is a quarantine that a provenance-stamped rerun already re-recorded stops
+# holding the source's single oldest-first execution slot — while still being
+# reported as a gap, never as complete.
+# ---------------------------------------------------------------------------
+
+
+def _discover_cycles_with_evidence(
+    scheduler: ProductionScheduler,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    cycles, evidence = scheduler._discover_cycles(
+        _dt(_IDENTITY_NOW), models=scheduler._discover_models()[0]
+    )
+    return (
+        [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles],
+        list(evidence),
+    )
+
+
+def test_breaker_engaged_gap_releases_the_backfill_execution_slot(tmp_path: Path) -> None:
+    """E4: the next gap executes; the released cycle is evidence-only and still a gap."""
+    journal_root = tmp_path / "journal"
+    stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    expected_id = _init_state_id_for(
+        _IDENTITY_TARGET_CYCLE, lead_hours=_IDENTITY_REQUIRED_LEAD_HOURS
+    )
+    entry_path = _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=stale_id,
+        jobs=_breaker_engaged_masters(_IDENTITY_TARGET_CYCLE, stale_id),
+    )
+    before = entry_path.read_bytes()
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    # The later gap takes the slot; the breaker-engaged cycle does not.
+    assert selected == ["2026-05-21T06:00:00Z"]
+    # No ADMIT: the released cycle is still scored as a gap.
+    assert _completion_status(scheduler, _IDENTITY_TARGET_CYCLE) == "gap"
+
+    released = [
+        item
+        for item in evidence
+        if item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+    ]
+    assert len(released) == 1
+    assert released[0]["selection_status"] == "not_selected"
+    assert released[0]["cycle_time_utc"] == _IDENTITY_TARGET_CYCLE
+    quarantine = released[0]["journal_predecessor_identity_quarantine"]
+    assert quarantine["occurrence_threshold"] == 1
+    assert quarantine["models"] == [
+        {
+            "model_id": "model_a",
+            "recorded_init_state_id": stale_id,
+            "expected_init_state_id": expected_id,
+            "occurrences": 1,
+        }
+    ]
+    audit = next(item for item in evidence if item.get("type") == "backfill_audit")
+    assert audit["breaker_released_gap_count"] == 1
+    assert audit["selected_count"] == 1
+    # Read-only invariant: the breaker never rewrites the journal.
+    assert entry_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("leg", ["defect_run_only", "unstamped_replacement"])
+def test_unstamped_recordings_keep_the_backfill_execution_slot(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """E4 (R1) control: without a stamped rerun the cycle keeps its slot.
+
+    ``unstamped_replacement`` is the discovery-side face of the Class-B
+    defect: two same-token masters exist, but the second came from an
+    unrelated whitelisted resubmit.  Releasing the slot here would strand a
+    cycle whose quarantine rerun has not even been attempted.
+    """
+    journal_root = tmp_path / "journal"
+    stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    jobs = [_completed_submission_master(_IDENTITY_TARGET_CYCLE, stale_id)]
+    if leg == "unstamped_replacement":
+        jobs.append(
+            _completed_submission_master(
+                _IDENTITY_TARGET_CYCLE, stale_id, job_suffix="_retry_1"
+            )
+        )
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=stale_id,
+        jobs=jobs,
+    )
+    scheduler = _journal_backed_scheduler(tmp_path, journal_root)
+
+    selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    assert selected == [_IDENTITY_TARGET_CYCLE]
+    assert not any(
+        item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+        for item in evidence
+    )
+
+
+def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path) -> None:
+    """E4 mixed leg: one breaker-engaged model must not starve a real one.
+
+    ``model_b`` has no journal entry at all for cycle T, so the cycle is a gap
+    for a genuine reason as well.  Releasing the slot here would leave
+    ``model_b``'s real work permanently unexecuted, which is the opposite of
+    the fail-toward-liveness the breaker is for.
+    """
+    journal_root = tmp_path / "journal"
+    stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    _seed_completed_journal_cycle(
+        journal_root,
+        cycle_time=_IDENTITY_TARGET_CYCLE,
+        init_state_id=stale_id,
+        jobs=_breaker_engaged_masters(_IDENTITY_TARGET_CYCLE, stale_id),
+    )
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=FileOrchestrationJournalRepository(journal_root),
+        models=[_model("model_a", "basin_a"), _model("model_b", "basin_b")],
+    )
+
+    selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    assert selected == [_IDENTITY_TARGET_CYCLE]
+    assert not any(
+        item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+        for item in evidence
+    )
+
+
+def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path) -> None:
+    """E4 (R1 / C1) partial engagement: a second model still owed a rerun keeps the slot.
+
+    Both models are journal-completed with their OWN wrong-suffix token, so the
+    cycle is a gap purely from §8.7 — but only ``model_a`` has a stamped rerun
+    behind it.  ``model_b``'s quarantine has never been retried, so the cycle
+    still has work the scheduler can progress and must keep the execution slot.
+
+    This is the discriminating leg for the per-model conjunct: turning
+    ``_breaker_engaged_gap_identities``' "any non-engaged stale model keeps the
+    slot" return into a skip releases this cycle, which the assertions below
+    catch.
+    """
+    journal_root = tmp_path / "journal"
+    stale_a = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
+    stale_b = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12, model_id="model_b")
+    parsed = _dt(_IDENTITY_TARGET_CYCLE)
+    run_id = f"cycle_gfs_{format_cycle_time(parsed)}"
+
+    def master(job_suffix: str, identities: list[dict[str, Any]], stamp: list[str] | None) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "job_id": f"job_{run_id}_forecast{job_suffix}",
+            "run_id": run_id,
+            "cycle_id": cycle_id_for("gfs", parsed),
+            "candidate_id": run_id,
+            "job_type": "run_shud_forecast_array",
+            "stage": "forecast",
+            "status": "succeeded",
+            "model_id": None,
+            "init_state_identities": identities,
+        }
+        if stamp is not None:
+            row["journal_predecessor_quarantine_rerun_model_ids"] = list(stamp)
+        return row
+
+    jobs = [
+        master(
+            "",
+            [
+                {"array_task_id": 0, "model_id": "model_a", "init_state_id": stale_a},
+                {"array_task_id": 1, "model_id": "model_b", "init_state_id": stale_b},
+            ],
+            None,
+        ),
+        # model_a's quarantine rerun came back with the same stale lineage;
+        # model_b's has never run, so model_b is NOT breaker-engaged.
+        master(
+            "_retry_1",
+            [{"array_task_id": 0, "model_id": "model_a", "init_state_id": stale_a}],
+            ["model_a"],
+        ),
+    ]
+    # The cohort masters are cycle-scoped, so each model's own latest view must
+    # carry them for that model's journal read to see them.
+    for model_id, stale_id in (("model_a", stale_a), ("model_b", stale_b)):
+        _seed_completed_journal_cycle(
+            journal_root,
+            cycle_time=_IDENTITY_TARGET_CYCLE,
+            init_state_id=stale_id,
+            model_id=model_id,
+            jobs=jobs,
+        )
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=FileOrchestrationJournalRepository(journal_root),
+        models=[_model("model_a", "basin_a"), _model("model_b", "basin_b")],
+    )
+
+    # Fixture guard: model_a IS engaged, model_b is not — otherwise this leg
+    # would pass for the trivial reason that nothing was engaged at all.
+    repository = FileOrchestrationJournalRepository(journal_root)
+    assert (
+        repository.completed_pipeline_init_state_id_occurrences(
+            source_id="gfs", cycle_time=parsed, model_id="model_a", init_state_id=stale_a
+        )
+        == 1
+    )
+    assert (
+        repository.completed_pipeline_init_state_id_occurrences(
+            source_id="gfs", cycle_time=parsed, model_id="model_b", init_state_id=stale_b
+        )
+        == 0
+    )
+
+    selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    assert selected == [_IDENTITY_TARGET_CYCLE]
+    assert not any(
+        item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+        for item in evidence
+    )
 
 
 class _StubScheduler:

@@ -35,6 +35,7 @@ from services.orchestrator.accepted_submit_identity import (
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
@@ -48,6 +49,7 @@ from services.orchestrator.accepted_submit_identity import (
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
+    normalize_quarantine_rerun_model_ids,
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
@@ -205,6 +207,11 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     # frozen check compare persisted-against-persisted — a silent drop instead
     # of the required ``file_journal_evidence_invariant_invalid``.
     INIT_STATE_IDENTITY_FIELD,
+    # Merged for the same reason (#1157): a divergent incoming provenance list
+    # must REACH the frozen check and be rejected, never silently keep the
+    # persisted one — retroactively arming the breaker is the failure this
+    # guards against.
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -627,6 +634,90 @@ class FileOrchestrationJournalRepository:
         if recorded in (None, ""):
             return None
         return str(recorded).strip() or None
+
+    def completed_pipeline_init_state_id_occurrences(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        init_state_id: str,
+    ) -> int:
+        """Count FAILED quarantine-convergence attempts that re-recorded ``init_state_id``.
+
+        The §8.7 quarantine breaker (#1157) asks "has a quarantine rerun of
+        this cycle+model already completed and come back with the same stale
+        token?".  The original defect run needs no counting — the caller's own
+        positive mismatch witnesses it — so only reruns are counted, and only
+        those the journal can PROVE were quarantine reruns:
+
+        - the row must be a terminal-success cohort MASTER row
+          (``accepted_submit_row_kind`` == ``"master"``); the per-model
+          terminal rows that reconcile COPIES the identity onto carry distinct
+          ``job_id`` values and would double-count one submission, so they are
+          excluded — a submission's master row plus its per-model terminal row
+          count as 1,
+        - its ``init_state_identities`` map must record the token under an
+          entry naming THIS ``model_id`` (a cohort master carries one entry per
+          member; another model's entry is not this candidate's lineage),
+        - and its ``journal_predecessor_quarantine_rerun_model_ids`` provenance
+          must list THIS ``model_id``.  Masters minted by unrelated
+          whitelisted replacements — ``retry_terminal_run_manifest_missing``,
+          ``retry_missing_forecast_output`` after a Slurm failure — re-record
+          the same token but carry no such provenance, and must not pre-arm
+          the breaker into fail-stopping the FIRST quarantine judgement.
+
+        Read from the memoized ``_cycle_rows`` view (``pipeline_jobs`` is keyed
+        by ``job_id`` and collapse-free), never from the bounded
+        ``candidate_state`` payload, so ``candidate_state_job_limit``
+        truncation cannot undercount.
+
+        Returns ``0`` — never raises — when the count cannot be read (no
+        journal rows, unreadable rows, empty/blank token) and for every journal
+        written before #1157, whose rows carry no provenance field at all.
+        Callers treat ``0`` as "breaker disengaged" (fail toward liveness: one
+        more rerun beats a wrong fail-stop, and a pre-#1157 deployment simply
+        keeps today's behavior until its first stamped rerun lands).
+
+        No journal mutation and no run-manifest reads: this reports what the
+        JOURNAL recorded.  Scheduler wiring consumes it via
+        ``getattr(repo, ..., None)`` (repo convention, cf.
+        ``scheduler_backfill_predecessor.py:226``), so it is intentionally
+        absent from the ``ActiveCandidateRepository`` Protocol.
+        """
+        token = str(init_state_id or "").strip()
+        if not token:
+            return 0
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+        except FileOrchestrationJournalError:
+            return 0
+        occurrences = 0
+        for job in _current_terminal_jobs(rows.pipeline_jobs.values()):
+            try:
+                if not _job_is_terminal_success(job):
+                    continue
+                if not _job_matches_candidate(
+                    job,
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                ):
+                    continue
+                if accepted_submit_row_kind(job) != "master":
+                    continue
+                if model_id not in normalize_quarantine_rerun_model_ids(
+                    job.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+                ):
+                    continue
+                if _master_row_records_init_state_id(job, model_id=model_id, init_state_id=token):
+                    occurrences += 1
+            except (AttributeError, TypeError, ValueError):
+                # One unreadable row must not blank the whole count; skipping it
+                # can only undercount, which leaves the breaker disengaged.
+                continue
+        return occurrences
 
     def active_slurm_jobs(
         self,
@@ -5878,6 +5969,13 @@ class FileOrchestrationJournalRepository:
             INIT_STATE_IDENTITY_FIELD: _bounded_init_state_identities(
                 record.get(INIT_STATE_IDENTITY_FIELD)
             ),
+            # Explicit member of the closed constructor for the same reason
+            # (#1157): absent here the reservation's provenance stamp would be
+            # dropped on write and the later frozen-value check would raise on
+            # the phantom change.
+            QUARANTINE_RERUN_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
+                record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+            ),
             "restart_stage": record.get("restart_stage"),
             "submission_attempt": record.get("submission_attempt", 1),
             "submission_attempt_started_at": _optional_format_datetime(
@@ -8751,6 +8849,24 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+def _master_row_records_init_state_id(
+    job: Mapping[str, Any], *, model_id: str, init_state_id: str
+) -> bool:
+    """Whether a cohort master's identity map names this model with this token."""
+
+    identities = job.get(INIT_STATE_IDENTITY_FIELD)
+    if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
+        return False
+    for entry in identities:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("model_id") or "") != model_id:
+            continue
+        if str(entry.get("init_state_id") or "").strip() == init_state_id:
+            return True
+    return False
 
 
 def _job_is_current_terminal_completion(job: Mapping[str, Any]) -> bool:
