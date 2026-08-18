@@ -716,6 +716,50 @@ def strict_warm_start_evidence(
     producer_cycle_time = _scheduler._ensure_utc(candidate.cycle_time_utc) - _scheduler.timedelta(
         hours=required_lead_hours
     )
+    # Issue #1152: split the two operator populations that reach this single
+    # typed reason.  §8.6 steps back exactly ONE level per pass, so the gap
+    # self-heals only when the emitted predecessor would itself be ADMITTED —
+    # which is decided by the predecessor's own gate, not by a timestamp.  So
+    # run that very verification here: the same provider call the predecessor
+    # will make, at ``producer_cycle_time`` (= T − required_lead_hours) with
+    # this candidate's package checksum and lead hours.  ``ready=True`` covers
+    # identity, generation/lineage, ``usable_flag`` and state-object
+    # availability/content in one shot; anything short of that (no earlier
+    # history, a ≥2-cycle hole, a wrong-generation entry sitting exactly at the
+    # slot, an index entry whose object is gone) is a fixpoint — the emitted
+    # predecessor re-evaluates to a block every pass and the successor defers
+    # forever, so only an operator publishing the missing state can close it.
+    #
+    # Neither ``history_exists`` nor ``latest_usable_state.valid_time`` is a
+    # sound discriminator: ``usable_state_history_evidence`` is generation- and
+    # object-blind (``state_manager.py`` :1297-1317), so both read "self-heal"
+    # on geometries the predecessor's gate rejects.  Not wrapped in try/except
+    # on purpose: this is the same provider call already made unprotected at
+    # the top of this function, and swallowing a raise here would be exactly
+    # the false reassurance this signal exists to prevent.  Additive fields
+    # only: the gate decision and the ``failure`` block below are unchanged.
+    self_heal_probe = scheduler._db_free_state_index_provider().strict_warm_start_evidence(
+        model_id=candidate.model_id,
+        source_id=candidate.source_id,
+        valid_time=producer_cycle_time,
+        model_package_version=candidate.model_package_uri,
+        model_package_checksum=checksum_str,
+        required_lead_hours=required_lead_hours,
+    )
+    self_heal_expected = bool(self_heal_probe.get("ready"))
+    operator_signal: dict[str, Any] = {
+        "self_heal_expected": self_heal_expected,
+        "operator_action_required": not self_heal_expected,
+        # Compact probe receipt: operators must be able to see WHY self-heal
+        # was ruled out without re-running the gate.
+        "self_heal_probe": {
+            "ready": self_heal_expected,
+            "reason": self_heal_probe.get("reason"),
+        },
+    }
+    if not self_heal_expected:
+        operator_signal["operator_action"] = "backfill_predecessor_state"
+        operator_signal["runbook"] = "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     return _scheduler._evidence_safe(
         {
             **dict(evidence),
@@ -734,6 +778,7 @@ def strict_warm_start_evidence(
                 "history_required_exact_successor": True,
             },
             "state_history": history,
+            **operator_signal,
             "failure": {
                 "classifier": "file_state_snapshot_index_unavailable",
                 "reason_code": "STATE_SNAPSHOT_INDEX_PRIOR_CHECKPOINT_MISSING_AFTER_HISTORY",
