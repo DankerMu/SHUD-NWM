@@ -43,4 +43,4 @@
       tests/test_warm_start_chaining.py
 - [x] 3.3 uv run ruff check packages workers tests
 - [x] 3.4 openspec validate checkpoint-ic-header-shape-residue --strict --no-interactive
-- [ ] 3.5 merge 后 node-27 oracle receipt：3.2 两套件，记入 #1430
+- [x] 3.5 merge 后 node-27 oracle receipt：3.2 两套件，记入 #1430
