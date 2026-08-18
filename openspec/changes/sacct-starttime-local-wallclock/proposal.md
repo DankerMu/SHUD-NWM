@@ -17,12 +17,15 @@ sacct 按**宿主本地时区**解释——窗口整体平移宿主 offset：UTC
 - `real_backend.py:466` 采纳 issue 推荐修法：strftime 前显式 `.astimezone()` 转宿主
   本地时区——`(self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).astimezone().strftime(...)`。
   一行改动，保留 `_now()` 注入缝，与 sacct 解释口径对齐。
-- TZ-pinned 回归测试：monkeypatch `_now()` 固定 UTC 时刻 + `monkeypatch.setenv("TZ", ...)`
-  + `time.tzset()`，在 `Asia/Shanghai`（UTC+8）/ `America/New_York`（负 offset，
-  必须含 DST 两侧至少一侧的固定时刻）/ `UTC` 三档断言 `--starttime=` **完整字符串**
-  （替换现有 `tests/test_real_slurm_gateway.py` 只 `startswith` 的弱断言处不动、新增
-  强断言用例）。测试收尾必须恢复原 TZ 并再次 `tzset()`（fixture finalizer），避免
-  污染同进程其余用例。
+- TZ-pinned 回归测试：**复用 #1117 已落地的 `_pinned_local_timezone(tz_name)`
+  contextmanager**（`tests/test_real_slurm_gateway.py:3381-3394`，自带 TZ 设置/tzset/
+  finally 恢复），并沿用同文件 `@pytest.mark.skipif(not hasattr(time, "tzset"), ...)`
+  惯例；monkeypatch `_now()` 固定 UTC 时刻，在 `Asia/Shanghai`（UTC+8）/
+  `America/New_York`（固定 `_now()=2026-07-12T04:00:00Z` → 期望
+  `--starttime=2026-07-11T00:00:00`，EDT，now 与 now-24h 同侧、双双避开 DST 过渡）/
+  `UTC` 三档断言 `--starttime=` **完整字面串**（期望值写死字面量，禁止用
+  zoneinfo/timedelta 现算——否则测试镜像实现，红证失去判别力）。既有 startswith
+  弱断言用例不动。
 - 显式 `start_time` 传入路径零变化（不二次换算）。
 
 ## Non-Goals
@@ -32,7 +35,7 @@ sacct 按**宿主本地时区**解释——窗口整体平移宿主 offset：UTC
   但 start/end 同向平移、窗口整体前移——在 UTC+8 上意味着最近 8h 完成的作业不在扫描窗，
   对 absence-proof 可能是更强失真）：本单只做**只读核实并回报**，不修——它与 #1116
   （absence-proof 不健全，本批在队）同面，路由裁决在核实结果出来后由 orchestrator 定
-  （并入 #1116 处理或另立单）。
+  （并入 #1116 处理或另立单）；核实报告落 PR body 偏离记录 + #1282 comment，不许悬空。
 - 调用方显式时间参数的语义（保持"调用方自负"）。
 
 ## Risk triage
