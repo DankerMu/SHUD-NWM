@@ -45,7 +45,19 @@ class LocalObjectStore:
     object_store_prefix: str = ""
 
     def __post_init__(self) -> None:
-        root = Path(self.root).expanduser()
+        # ``Path.expanduser()`` raises an errno-less ``RuntimeError`` when the home
+        # directory cannot be determined ("~nosuchuser/store", or "~/store" with no
+        # HOME and no passwd entry).  The family primitive used elsewhere for this
+        # throw face is not applicable here: keeping the literal would anchor the
+        # store at the cwd and really create a "~nosuchuser" directory.  Convert it
+        # into the domain error instead, so the callers that already handle
+        # ``ObjectStoreError`` keep their fail-closed attributions (#1441).  Kept
+        # separate from the ``ensure_directory_no_follow`` boundary below because
+        # ``ObjectStoreError`` is itself a ``RuntimeError``.
+        try:
+            root = Path(self.root).expanduser()
+        except RuntimeError as error:
+            raise ObjectStoreError(f"Local object store root is not expandable: {self.root!r}: {error}") from error
         root = root if root.is_absolute() else Path.cwd() / root
         try:
             ensure_directory_no_follow(root)

@@ -1132,10 +1132,6 @@ def _artifact_state_containers(state: Mapping[str, Any]) -> list[Mapping[str, An
     return containers
 
 
-def _artifact_uri_is_missing(candidate: SchedulerCandidateLike, artifact_uri: str) -> bool:
-    return _artifact_uri_missing_status(candidate, artifact_uri)[0]
-
-
 def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri: str) -> tuple[bool, str | None]:
     value = artifact_uri.strip()
     if not value:
