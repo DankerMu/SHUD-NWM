@@ -91,7 +91,7 @@ backfill 才能闭合缺口：
 |---|---|---|
 | 几何 | `valid_time == T − lead_hours` 上有当代、`usable_flag=true`、lineage 相符、对象在位且 checksum 正确的 checkpoint——那正是被发出的 predecessor cycle 自己的 warm-start 入参，它跑完就会产出 T 需要的那一格 | 缺口 ≥2 格（最新可用 state 早于 T − lead_hours，此时 `history_exists` 仍是 `true`）、完全没有严格早于 T 的可用 checkpoint（`history_exists=false`）、该格上坐着**旧 generation** 条目、或条目在但 state 对象丢失/读不出/checksum 不符 |
 | §8.6 backfill 结局 | 发出的 predecessor 自己的 warm start 已就绪，被它自己那道 §8 门放行并进入本 pass 的 `candidates[]`（`status=emitted`；真实门端到端已钉在 `tests/test_scheduler_backfill_predecessor.py::test_emitted_predecessor_admitted_when_self_heal_expected`），跑完落地后缺口闭合 | 发出的 predecessor 自身**通常**再次被 gate 拦下（typed reason 视失败面而定：缺口几何下是**同一个** reason，错代/对象丢失下是 `state_snapshot_index_*` 的对应 reason），逐级后退不落地；**例外见表下"declared-cutover 边界"**——该边界上 predecessor 反而被放行 |
-| 是否自愈 | 是——等 predecessor cycle 跑完即可，**前提是 §8.6 本 pass 真的把 predecessor 发出去了**（发射记录校验见表下） | 否——不做人工干预会永远 defer；**唯一例外**是 declared-cutover 边界（见表下），那里 predecessor 本 pass 已被发出，等它落地即可 |
+| 是否自愈 | 是——等 predecessor cycle 跑完即可，**前提是 §8.6 本 pass 真的把 predecessor 发出去了**（发射记录校验见表下） | 否——不做人工干预会永远 defer；**典型例外**是 declared-cutover 边界（见表下），那里 predecessor 本 pass 已被发出，等它落地即可（原则上任何让 predecessor 落在 matrix admit 分支的几何都会产生同样的保守假阳性——判据以发射记录 `status` 为准，不以分支名为准） |
 | evidence 信号 | `self_heal_expected=true`、`operator_action_required=false`、`self_heal_probe={"ready": true, "reason": null}`；不带 `operator_action` / `runbook` | `self_heal_expected=false`、`operator_action_required=true`、`operator_action="backfill_predecessor_state"`、`runbook` 指向本文、`self_heal_probe.reason` 给出被判死的具体原因 |
 
 分诊的第一跳是 `operator_action_required`，不必再自己解析 `state_history`；
@@ -197,7 +197,10 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
   且 `self_heal_probe.reason` 不变——**并且**同 pass 的发射记录是
   `status=blocked`：两者同时成立才是"再退一级也没用"的证据。发射记录为
   `status=emitted` 时不是 stall（典型是上面的 declared-cutover 边界，
-  predecessor 已被放行、正在跑）。
+  predecessor 已被放行、正在跑）。连续多个 pass 都是 `status=emitted` 而
+  `state_history.latest_usable_state.valid_time` 始终不动 ⇒ 问题在 predecessor
+  的执行/发布侧（Slurm 提交、SHUD 运行或 state 发布链路），不是 state 缺口，
+  按对应链路排查而非补 state。
   **不要**去读被发出的 predecessor 那条记录来判断链是否收敛：那组字段是单级
   语义（见上节），缺口 ≥2 格时它可能显示 `self_heal_expected=true`。
 - successor 的 `state_history.latest_usable_state.valid_time` 在多个 pass
@@ -233,8 +236,11 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
    - 一、读 `operator_action_required`。为 `true` **也不能直接动手**：先做
      第二步核对发射记录——`status=emitted` 说明 §8.6 本 pass 已经把 predecessor
      发出去且它被自己那道门放行了（典型是 declared-cutover 边界上的假阳性），
-     此时**不要**手工调度它，等它跑完落地即可；只有 `status=blocked`（或非
-     transient 的 skip）才继续进第 2 步定位缺格。为 `false`
+     此时**不要**手工调度它，等它跑完落地即可；但连续多个 pass 都是
+     `status=emitted` 而 `state_history.latest_usable_state.valid_time` 始终
+     不动 ⇒ 问题在 predecessor 的执行/发布侧（Slurm 提交、SHUD 运行或 state
+     发布链路），不是 state 缺口，按对应链路排查而非补 state。只有
+     `status=blocked`（或非 transient 的 skip）才继续进第 2 步定位缺格。为 `false`
      说明 gate 已用 predecessor 自己那道门的全量验证探测过
      （`self_heal_probe.ready=true`），被发出的 predecessor 的 warm start 已
      就绪——但先别停手。
