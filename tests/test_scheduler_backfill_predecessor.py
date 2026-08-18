@@ -965,3 +965,190 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
     # Non-goal guard: the gate decision / failure block are unchanged.
     assert predecessor_evidence["failure"]["retryable"] is True
     assert predecessor_evidence["failure"]["permanent"] is False
+
+
+def test_emitted_predecessor_admitted_when_self_heal_expected(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    """#1152 round-3: the POSITIVE leg of the operator signal, end-to-end.
+
+    Same real-gate wiring as
+    ``test_emitted_predecessor_reblocks_with_operator_action_under_real_gate``
+    (``NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true``, both raw manifests
+    staged, predecessor cycle deliberately absent from ``cycles``); the ONLY
+    delta is the state-index geometry, which becomes the self-heal one: a
+    single current-generation entry sitting exactly on the emitted
+    predecessor's own warm-start slot (``valid_time`` 2026-05-21T00Z produced
+    by ``gfs_2026052012`` at ``lead_hours`` 12, candidate checksum, state
+    object intact).
+
+    This pins the claim the ``self_heal_expected=True`` branch actually makes:
+    the successor still blocks with the typed reason and names NO operator
+    action, and the §8.6-emitted predecessor is genuinely ADMITTED by its own
+    §8 gate (``status="emitted"`` on the emission record, candidate present in
+    ``candidates``) — i.e. the gap really does close on the next natural pass.
+    Without this test the runbook's "``operator_action_required=false`` → stand
+    down" instruction rests only on the probe's own return value.
+    """
+    import json
+    from pathlib import Path
+
+    from services.orchestrator import scheduler_generation as generation
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+        _write_missing_forcing_repair_raw_manifest,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, Path(tmp_path) / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    predecessor_cycle_time = _pdt("2026-05-21T00:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = fixture["package_checksum"]
+    if len(candidate_checksum) != 64 or any(
+        ch not in "0123456789abcdef" for ch in candidate_checksum
+    ):
+        candidate_checksum = "b" * 64
+    # Self-heal geometry: the ONE current-generation entry sits exactly on the
+    # emitted predecessor's own warm-start slot (T − lead_hours = 00Z).
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_prior_history",
+                valid_time="2026-05-21T00:00:00Z",
+                cycle_id="gfs_2026052012",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = Path(tmp_path) / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(generation.CUTOVER_DECLARATION_ENV, str(declaration_path))
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=predecessor_cycle_time
+    )
+    _write_missing_forcing_repair_raw_manifest(
+        roots["object_store_root"], cycle_time=cycle_time
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    # The successor still blocks with the typed reason, and names no operator
+    # action: this is the self-heal population.
+    successor_blocked = [
+        entry for entry in blocked if entry.cycle_time_utc == cycle_time
+    ]
+    assert len(successor_blocked) == 1
+    successor_evidence = successor_blocked[0].state_evidence
+    assert (
+        successor_blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    assert successor_evidence["self_heal_expected"] is True
+    assert successor_evidence["operator_action_required"] is False
+    assert successor_evidence["self_heal_probe"] == {"ready": True, "reason": None}
+    assert "operator_action" not in successor_evidence
+    assert "runbook" not in successor_evidence
+
+    # The §8.6-emitted predecessor is ADMITTED by its own §8 gate — the claim
+    # ``self_heal_expected=True`` makes, proven end-to-end rather than by
+    # re-reading the probe.
+    summary = (
+        successor_blocked[0]
+        .state_evidence.get("predecessor_backfill", {})
+        .get("summary", {})
+    )
+    records = summary.get("records") or []
+    predecessor_records = [
+        record
+        for record in records
+        if record.get("predecessor_cycle_time")
+        == predecessor_cycle_time.isoformat()
+    ]
+    assert len(predecessor_records) == 1, records
+    assert predecessor_records[0]["status"] == "emitted", records
+    admitted = [
+        entry for entry in candidates if entry.cycle_time_utc == predecessor_cycle_time
+    ]
+    assert len(admitted) == 1, [entry.cycle_time_utc for entry in candidates]
+    # ...and it is NOT parked on blocked.
+    assert [
+        entry for entry in blocked if entry.cycle_time_utc == predecessor_cycle_time
+    ] == []

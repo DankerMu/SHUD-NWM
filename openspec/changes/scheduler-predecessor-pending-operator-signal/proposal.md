@@ -53,8 +53,13 @@ Issue #1152: 当 §8.6 predecessor-backfill 撞上 no-earlier-history 几何
 - 不实现 #1118 的跨 pass no-progress circuit breaker（机制未落地，本单为
   该 typed reason 的 evidence 形状 + 测试 + runbook；#1118 落地时应消费本单
   新增的 `operator_action_required` 字段而非另起判据）。
-- 不改 legacy（非 §8）路径——该路径在 `history_exists=False` 时 passthrough
-  返回 None，不发 blocked evidence，无需信号。
+- 不改 legacy（非 §8）路径。边界口径（与 spec delta 一致）：该路径在
+  `history_exists=False` 几何下 passthrough 返回 `None`，不发 blocked
+  evidence；但在 `history_exists=True` 几何下它**照样发出这个 typed
+  reason**，只是那份 evidence **不带**本单新增的 signal 字段。因此
+  **字段缺席 ≠ 会自愈**——运维在那里必须退回 runbook 记的人工判据
+  （identity + generation/lineage + `usable_flag` + state 对象校验四件事
+  做完），本单不给该站点补字段。
 - 不改 emitter 的发射/去重/cap 逻辑。
 
 ## Impact

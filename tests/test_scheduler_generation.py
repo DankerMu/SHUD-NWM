@@ -1542,8 +1542,12 @@ def test_multi_cycle_gap_flags_operator_action_despite_earlier_history(
         state_evidence.get("registry_cutover_transition", {}).get("decision")
         == "block_predecessor_pending"
     )
-    # The discriminator is NOT history_exists — it is True here — but the
-    # latest usable state's valid_time vs required_prior_cycle_time.
+    # Round-2: the discriminator is NOT history_exists — it is True here — and
+    # NOT a valid_time comparison either; it is the emitted predecessor's OWN
+    # full warm-start probe (``strict_warm_start_evidence(
+    # valid_time=required_prior_cycle_time, …).ready``).  The valid_time values
+    # asserted below merely document this fixture's geometry (latest usable
+    # state one cycle short of the predecessor slot); they are not the rule.
     assert state_evidence["state_history"]["history_exists"] is True
     assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
     assert (

@@ -15,10 +15,11 @@ typed reason 出现在两个位置，含义相同：
 
 - 候选级：pass evidence 的 `candidates[].reason` /
   `blocked_candidates[].reason` 与对应的 `state_evidence`。
-- 排队级：被 §8.6 backfill 发出的 predecessor 会以自己的 typed reason
-  落进 `blocked_candidates[]`，并在 successor 的
-  `state_evidence.predecessor_backfill.summary.records[]` 里留下一条
-  `status=blocked` 的发射记录。
+- 排队级：被 §8.6 backfill 发出的 predecessor 一律在 successor 的
+  `state_evidence.predecessor_backfill.summary.records[]` 里留下一条发射
+  记录——它自己被门放行时是 `status=emitted`（并进 `candidates[]`），被自己
+  那道门拦下时是 `status=blocked`（并以自己的 typed reason 进
+  `blocked_candidates[]`）。`status=skipped` 表示门根本没跑（见"处置"第 1 步）。
 
 ## `state_snapshot_index_prior_checkpoint_missing_after_history`
 
@@ -89,16 +90,49 @@ backfill 才能闭合缺口：
 |  | 探测 `ready=true` | 探测 `ready=false` |
 |---|---|---|
 | 几何 | `valid_time == T − lead_hours` 上有当代、`usable_flag=true`、lineage 相符、对象在位且 checksum 正确的 checkpoint——那正是被发出的 predecessor cycle 自己的 warm-start 入参，它跑完就会产出 T 需要的那一格 | 缺口 ≥2 格（最新可用 state 早于 T − lead_hours，此时 `history_exists` 仍是 `true`）、完全没有严格早于 T 的可用 checkpoint（`history_exists=false`）、该格上坐着**旧 generation** 条目、或条目在但 state 对象丢失/读不出/checksum 不符 |
-| §8.6 backfill 结局 | 发出的 predecessor 自己的 warm start 已就绪，被 gate 放行并真的跑起来，落地后缺口闭合 | 发出的 predecessor 自身再次被 gate 拦下（typed reason 视失败面而定：缺口几何下是**同一个** reason，错代/对象丢失下是 `state_snapshot_index_*` 的对应 reason），逐级后退永不落地 |
-| 是否自愈 | 是——等 predecessor cycle 跑完即可 | 否——不做人工干预会永远 defer |
+| §8.6 backfill 结局 | 发出的 predecessor 自己的 warm start 已就绪，被它自己那道 §8 门放行并进入本 pass 的 `candidates[]`（`status=emitted`；真实门端到端已钉在 `tests/test_scheduler_backfill_predecessor.py::test_emitted_predecessor_admitted_when_self_heal_expected`），跑完落地后缺口闭合 | 发出的 predecessor 自身再次被 gate 拦下（typed reason 视失败面而定：缺口几何下是**同一个** reason，错代/对象丢失下是 `state_snapshot_index_*` 的对应 reason），逐级后退永不落地 |
+| 是否自愈 | 是——等 predecessor cycle 跑完即可，**前提是 §8.6 本 pass 真的把 predecessor 发出去了**（发射记录校验见表下） | 否——不做人工干预会永远 defer |
 | evidence 信号 | `self_heal_expected=true`、`operator_action_required=false`、`self_heal_probe={"ready": true, "reason": null}`；不带 `operator_action` / `runbook` | `self_heal_expected=false`、`operator_action_required=true`、`operator_action="backfill_predecessor_state"`、`runbook` 指向本文、`self_heal_probe.reason` 给出被判死的具体原因 |
 
-分诊只看 `operator_action_required` 一个布尔即可，不必再自己解析
-`state_history`；两个字段是上面那次 probe 的直接派生（`self_heal_expected`
-等于 `self_heal_probe.ready`，`operator_action_required` 是它的取反）。
+分诊的第一跳是 `operator_action_required`，不必再自己解析 `state_history`；
+两个字段是上面那次 probe 的直接派生（`self_heal_expected` 等于
+`self_heal_probe.ready`，`operator_action_required` 是它的取反）。
 `self_heal_probe.reason` 只作解释用，不参与判定。任何验证短缺（条目缺失、
 错代、对象丢失、evidence 畸形）一律取 `false`，即倒向"需要人工介入"，
 绝不倒向"会自愈"。
+
+**但只有这个布尔不足以停手**：它只回答"state 那一格齐不齐"，不回答"§8.6
+本 pass 到底有没有把 predecessor 发出去"——两者互相独立（raw manifest 未就
+绪时 §8.6 根本不发，state 却可能完好）。要按"会自愈"停手，还必须在**同一条
+successor 记录**的 `state_evidence.predecessor_backfill.summary.records[]` 里
+找到该 predecessor 的发射记录（按 `predecessor_cycle_time` 时间戳比对），且其
+`status` ∈ {`emitted`, `blocked`}——即 §8 gate 真的对 predecessor 执行过。
+不满足时缺口**不会**自己闭合，且要修的东西也不是 state：
+
+- `status=skipped` 且 `reason` 为 `predecessor_raw_manifest_not_ready` /
+  `predecessor_raw_manifest_env_unwired` → 修 predecessor cycle 的 raw
+  manifest（或补上 `NHMS_SCHEDULER_NFS_RAW_MANIFEST_*` env 接线），不是补
+  state。
+- `status=skipped` 且 `reason=predecessor_model_not_available` → 该 model 本
+  pass 不在 registry 可用集里，修模型可用性。
+- `status=skipped` 且 `reason` 为 `predecessor_candidate_construction_failed` /
+  `predecessor_gate_failed` → 是构造/门执行本身出错，按 pass 日志排查，别当
+  数据缺口处置。
+- **完全没有**该 predecessor 的记录 → 本 pass 的发射撞到 256 条上限被截断
+  （截断记录不挂在任何 successor 上，特征是其他 successor 的
+  `summary.pass_totals` 里出现 `truncated`），先降 pending 规模或分批。
+- `status=skipped` 且 `reason=predecessor_already_present` → predecessor 已在
+  本 pass 的列表里：落在 `candidates[]` 是良性的（它这轮就跑），落在
+  `blocked_candidates[]` 则要对**它那条记录**再走一遍本节分诊。
+- `status=skipped` 且 `reason=predecessor_backfill_active_pipeline` → 上一轮
+  pipeline 还在飞，良性，等下一个自然 pass。
+
+**summarized pass 的例外**：当 pass evidence 的 `limit.candidate_lists` 为
+`summarized` 或 `dropped` 时，bounded 摘要只保留 `operator_action_required`
+（`scheduler_evidence_payload.py` 的
+`_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`），`predecessor_backfill.summary`
+的 records 已被丢掉。此时**光凭这个布尔不能停手**——先去找未摘要的完整证据
+（journal / 未截断的 pass 日志）拿到发射记录再判。
 
 **单级语义（重要）**：这组字段只回答"**本条记录所属候选**的单级 backfill 会不
 会闭合它自己的缺口"，不描述整条 backfill 链。因此：
@@ -111,8 +145,12 @@ backfill 才能闭合缺口：
   发一次 backfill 能救 predecessor 自己"，**不构成整条链已收敛的证据**。链是否
   卡住只看 successor 的 `operator_action_required`。
 - 若被发出的 predecessor 撞上 declaration 级或 wrong-generation 一类的 block
-  （`block_declaration_missing` / `block_wrong_generation` 等），它那条记录
-  **完全没有**这组字段——这同样是永久 stall 信号，别把"字段缺席"读成"会自愈"。
+  （transition 决策 `block_declaration_missing` / `block_wrong_generation`
+  等，落到 `reason` 上是 `registry_cutover_declaration_missing` /
+  `registry_cutover_declaration_stale` /
+  `state_snapshot_index_generation_mismatch` 一类——运维要 grep 的是后者），
+  它那条记录**完全没有**这组字段：这组字段只挂在本 typed reason 上。这同样
+  是永久 stall 信号，别把"字段缺席"读成"会自愈"。
 
 注意：`operator_action_required=true` 不等于"系统坏了"。fail-closed 是
 正确行为——它拒绝用错误 generation 或错误时刻的 state 静默启动一次
@@ -144,26 +182,57 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
   `operator_action_required=true`。
 
 反例（不要按本节处置）：如果 summary 里的记录是
-`status=skipped` 且 `reason` 为
-`predecessor_raw_manifest_env_unwired` /
+`status=skipped`（`predecessor_raw_manifest_env_unwired` /
 `predecessor_raw_manifest_not_ready` /
 `predecessor_backfill_active_pipeline` /
-`predecessor_already_present`，那么 §8 gate 根本没对 predecessor 执行，
-问题在 raw manifest 或在途 pipeline，不是 state 缺口。
+`predecessor_already_present` /
+`predecessor_model_not_available` /
+`predecessor_candidate_construction_failed` /
+`predecessor_gate_failed`），那么 §8 gate 根本没对 predecessor 执行，问题在
+raw manifest / 模型可用性 / 在途 pipeline / 发射本身，不是 state 缺口——逐
+reason 的处置见"处置"第 1 步的分支表。
+
+**另一类 stall：`operator_action_required=false` 也会卡住。** state 那一格是
+齐的，但 §8.6 每个 pass 都因上面那些 `skipped` 原因（典型是 raw manifest 长
+期 not-ready，或 env 未接线）发不出 predecessor，于是 successor 每 pass 照样
+blocked 且永不推进。识别特征：连续多个 pass 上 `operator_action_required`
+恒为 `false`、`self_heal_probe.ready=true`，而 `predecessor_backfill.summary`
+里同一个 `predecessor_cycle_time` 的记录始终是 `status=skipped`（或该
+predecessor 始终没有记录）。这类 stall **不能**用补 state 解决。
 
 ### 处置
 
-1. **确认群体**。取**被发现的 successor** 候选的 `state_evidence`，读
-   `operator_action_required`。为 `false` 就停手——它意味着 gate 已用
-   predecessor 自己那道门的全量验证探测过（`self_heal_probe.ready=true`），
-   被发出的 predecessor 的 warm start 已就绪，等下一个自然 pass 它跑完缺口
-   即自闭；此时任何手工补 state 都是在制造错误 lineage。
+1. **确认群体**（两步，缺一不可）。取**被发现的 successor** 候选的
+   `state_evidence`：
+   - 一、读 `operator_action_required`。为 `true` 直接进第 2 步；为 `false`
+     说明 gate 已用 predecessor 自己那道门的全量验证探测过
+     （`self_heal_probe.ready=true`），被发出的 predecessor 的 warm start 已
+     就绪——但先别停手。
+   - 二、在同一份 `state_evidence` 的
+     `predecessor_backfill.summary.records[]` 里核对该 predecessor 的发射
+     记录：`status` ∈ {`emitted`, `blocked`} 才说明 §8.6 真的把它推给了 gate，
+     这时才可以停手等下一个自然 pass（此时任何手工补 state 都是在制造错误
+     lineage）。`status=skipped`（`predecessor_raw_manifest_not_ready` /
+     `predecessor_model_not_available` 等）或**记录缺席**（cap 截断）时，缺口
+     不会自己闭合，但要修的是 raw manifest / 模型可用性 / 发射上限，**不是**
+     补 state——按上一节"只有这个布尔不足以停手"的分支表处置，别进第 4 步。
+   - 若本 pass evidence 是 `limit.candidate_lists=summarized` / `dropped` 的
+     摘要，records 已被丢掉，第二步做不了：先取未摘要的完整证据再判，不要只
+     凭布尔停手。
 2. **定位缺哪一格**。为 `true` 时读 `required_prior_cycle_id` /
    `required_prior_cycle_time` 与 `registry_cutover_transition.generation`
    —— 这三个值唯一确定了需要补的 state identity（source、cycle、
    lead_hours、generation）。
-3. **看 `self_heal_probe.reason` 定性**——它就是 predecessor 那道门给出的
-   typed 失败原因，省掉自己翻 index 的一步：
+3. **看 `self_heal_probe.reason` 定性**——省掉自己翻 index 的一步。注意口径：
+   它是 **provider 级**的 reason，即
+   `strict_warm_start_evidence(valid_time=required_prior_cycle_time, …)` 这一
+   次查找的失败原因，**不是**被发出的 predecessor 那条 blocked 记录上的
+   `reason`。两者可以不同：predecessor 自己那道门要先过 §8 transition
+   matrix，可能在到达 provider 之前就以别的 typed reason 拦下（例如 probe 给
+   `state_snapshot_index_model_package_checksum_mismatch`，而 predecessor 落
+   `blocked_candidates[]` 时带的是 `state_snapshot_index_generation_mismatch`
+   或 `registry_cutover_declaration_missing`）。**不要**拿 probe 字符串去 grep
+   `blocked_candidates[].reason`，那会漏。各 reason 的含义：
    `state_snapshot_index_exact_checkpoint_missing` = 该 identity 压根不在
    index 里（走第 4 步补 state）；`*_model_package_checksum_mismatch` /
    `*_cycle_id_mismatch` / `*_lead_hours_mismatch` = 该格坐着**错代或错
@@ -186,8 +255,10 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
      lineage。
 6. **验证收敛**。补齐后的下一个自然 pass，**successor** 的
    `operator_action_required` 应翻为 `false`（`self_heal_probe.ready=true`），
-   或直接进入 warm continue 被提交；`predecessor_backfill.summary` 不再新增
-   `status=blocked` 记录。缺口原本 ≥2 格时，每补一格只前进一格，需要按上述
+   或直接进入 warm continue 被提交；同时 `predecessor_backfill.summary` 里该
+   predecessor 的记录应从 `status=blocked` 变为 `status=emitted`（它被自己那
+   道门放行进了 `candidates[]`）——**两者都要看**：只翻布尔而记录仍是
+   `skipped`，说明卡在发射侧而不是 state 侧。缺口原本 ≥2 格时，每补一格只前进一格，需要按上述
    判据逐 pass 复核直到 successor 的 `operator_action_required` 翻转——中途
    predecessor 记录上出现的 `self_heal_expected=true` 不算收敛（单级语义）。
 
@@ -208,7 +279,10 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
   `latest_usable_state.valid_time` 是不够的。
 - 判据不只看 `valid_time`：该格上坐着**错误 generation** 的 checkpoint 时，
   successor 自己的精确查找发生在 `valid_time == T`（不是该格），因此**并不会**
-  被改判成 wrong-generation 一类 reason——它照样落在本 reason 上。真正兜住
+  被改判成 wrong-generation 一类 reason——它照样落在本 reason 上（前提是 index
+  里另有当代 history 让 transition matrix 仍判 `block_predecessor_pending`；
+  若那条旧代条目是 index 里**唯一**的条目，matrix 会走 wrong-generation /
+  cold-start 分支，reason 就不是本条了）。真正兜住
   这一类的是判据本身：probe 会跑完 generation/lineage 与对象校验，
   `self_heal_probe.reason` 会点名具体失败（如
   `state_snapshot_index_model_package_checksum_mismatch`、
