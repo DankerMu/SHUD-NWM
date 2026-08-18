@@ -14835,11 +14835,11 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
 #
 # The construction invariant below is deliberately narrow: it covers a loop in
 # the FINAL segment of a root that is not a containment base for other
-# configured paths.  ``WORKSPACE_ROOT`` / lock / evidence still abort in
-# ``_confined_path`` (``scheduler_runtime_roots.py:558``) and parent-segment
-# loops still abort in the preserve-final helpers (``:597`` / ``:604``); those
-# three sites are outside this issue and tracked separately, which is why the
-# parent-loop shapes below are exercised on the helper directly.
+# configured paths.  ``WORKSPACE_ROOT`` / lock / evidence used to abort in
+# ``_confined_path`` and parent-segment loops in the preserve-final helpers,
+# which is why the parent-loop shapes below are exercised on the helper
+# directly; those sites were outside this issue and are closed by #1520, whose
+# construction-level cases sit in the block right after this one.
 # ---------------------------------------------------------------------------
 
 
@@ -14980,6 +14980,218 @@ def test_slurm_preflight_blocks_symlink_loop_object_store_root_built_by_real_con
     object_store_check = preflight["checks"]["storage_roots"]["object_store_root"]
     assert object_store_check["contained"] is False
     assert object_store_check["compute_node_visible"] is False
+
+
+# ---------------------------------------------------------------------------
+# #1520: the same construction chain's remaining bare ``resolve()`` sites, the
+# ones #1423 above had to leave standing.  ``_confined_path`` resolved a
+# containment base's parent, and both preserve-final helpers resolved a parent
+# segment, with ``Path.resolve()`` -- which raises an errno-LESS ``RuntimeError``
+# on a symlink loop up to 3.12 (``strict=False`` does NOT help; GH-113838 only
+# lands in 3.13) and quietly returns the unresolved path from 3.13 on.  So a
+# loop in a containment base's final segment, or in ANY configured root's parent
+# segment, aborted construction on every production interpreter while 3.13+ ran
+# on to a structured verdict.
+#
+# The fix applies the paradigm PR #1349 / #1423 settled -- strict realpath, one
+# non-strict realpath fallback, classification left to the downstream check --
+# to the parent segment, leaving the final component untouched.  Every
+# expectation below is version-agnostic and holds on 3.11 through 3.14; the
+# discriminating arm is <=3.12, where these same calls raised.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_residue_env(monkeypatch: pytest.MonkeyPatch, workspace_root: Path) -> None:
+    """A db-backed config whose only configured root is ``workspace_root``."""
+
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("SLURM_SHARED_LOG_ROOT", raising=False)
+    for env_name in (
+        "OBJECT_STORE_ROOT",
+        "LOG_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+
+
+def test_resolve_residue_confined_path_canonicalises_parent_segment_loop(tmp_path: Path) -> None:
+    # Site ``scheduler_runtime_roots.py:558``.  The containment base itself is
+    # the loop, so the parent chain of everything confined under it is
+    # uncanonicalizable -- the shape ``WORKSPACE_ROOT``/``NHMS_SCHEDULER_LOCK_ROOT``
+    # reach in production.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "confined-loop")
+
+    # Loop as the direct parent, and one component deeper in the parent chain.
+    assert (
+        scheduler_module._confined_path(loop / "production-scheduler.lock", canonical_tmp, "lock_path")
+        == canonical_tmp / "confined-loop-a" / "production-scheduler.lock"
+    )
+    assert (
+        scheduler_module._confined_path(loop / "scheduler" / "evidence", canonical_tmp, "evidence_dir")
+        == canonical_tmp / "confined-loop-a" / "scheduler" / "evidence"
+    )
+    # A relative value still lands under the containment base.
+    assert (
+        scheduler_module._confined_path(Path("confined-loop-a") / "lock", canonical_tmp, "lock_path")
+        == canonical_tmp / "confined-loop-a" / "lock"
+    )
+
+
+def test_resolve_residue_confined_path_keeps_final_segment_loop_verbatim(tmp_path: Path) -> None:
+    # The final component is deliberately NOT resolved, before or after the fix:
+    # a loop there is carried through untouched for the downstream check.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "final-confined-loop")
+
+    assert scheduler_module._confined_path(loop, canonical_tmp, "evidence_dir") == (
+        canonical_tmp / "final-confined-loop-a"
+    )
+
+
+def test_resolve_residue_preserve_final_helpers_canonicalise_parent_segment_loop(tmp_path: Path) -> None:
+    # Sites ``scheduler_runtime_roots.py:597`` and ``:604``.  Both geometries:
+    # the loop as the final component (parent is sound) and the loop inside the
+    # parent chain (where the old bare resolve aborted on <=3.12).
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "preserve-loop")
+
+    assert scheduler_module._config_path_preserve_final_component(loop) == canonical_tmp / "preserve-loop-a"
+    assert (
+        scheduler_module._config_path_preserve_final_component(loop / "tail")
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(loop, canonical_tmp)
+        == canonical_tmp / "preserve-loop-a"
+    )
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(loop / "tail", canonical_tmp)
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+    # The relative-base geometry is unchanged: a relative value is joined onto
+    # the base before the parent segment is canonicalised.
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(Path("preserve-loop-a") / "tail", canonical_tmp)
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+
+
+def test_resolve_residue_helpers_keep_missing_path_semantics(tmp_path: Path) -> None:
+    # ENOENT zero-regression: configuration construction validates no existence,
+    # and the product stays the old non-strict resolve product verbatim (that
+    # call raises on no supported CPython for a loop-free path, so the
+    # cross-check below is a genuine independent oracle).
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    missing = tmp_path / "nfs-not-mounted-yet" / "deep" / "leaf"
+    expected = canonical_tmp / "nfs-not-mounted-yet" / "deep" / "leaf"
+
+    assert scheduler_module._config_path_preserve_final_component(missing) == expected
+    assert scheduler_module._config_path_preserve_final_component(missing) == missing.parent.resolve() / missing.name
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(
+            Path("nfs-not-mounted-yet") / "deep" / "leaf",
+            canonical_tmp,
+        )
+        == expected
+    )
+    assert scheduler_module._confined_path(missing, canonical_tmp, "evidence_dir") == expected
+    assert not expected.exists()
+
+
+def test_resolve_residue_confined_path_keeps_non_loop_containment_refusal(tmp_path: Path) -> None:
+    # The containment verdict -- type, wording and field name -- is untouched
+    # for loop-free inputs, whether or not the offending parent exists.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    workspace_root = canonical_tmp / "workspace"
+    workspace_root.mkdir()
+    existing_outside = canonical_tmp / "outside"
+    existing_outside.mkdir()
+
+    for outside in (existing_outside / "production-scheduler.lock", canonical_tmp / "gone" / "lock"):
+        with pytest.raises(ValueError) as excinfo:
+            scheduler_module._confined_path(outside, workspace_root, "lock_path")
+        assert str(excinfo.value) == "production scheduler lock_path must be under workspace_root"
+
+
+@pytest.mark.parametrize(
+    ("root_env", "expected_message"),
+    [
+        # WORKSPACE_ROOT reaches the evidence directory's safety check, which
+        # reads the kernel's ELOOP off lstat().  The field name it reports is
+        # `evidence_dir` even though the loop sits on WORKSPACE_ROOT; that
+        # attribution quirk predates this change and is a declared non-goal, so
+        # it is pinned here rather than corrected.
+        ("WORKSPACE_ROOT", "production scheduler evidence_dir must be a safe directory"),
+        ("NHMS_SCHEDULER_LOCK_ROOT", "production scheduler lock_path must be under workspace_root"),
+    ],
+)
+def test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_env: str,
+    expected_message: str,
+) -> None:
+    # The construction anchor for site :558.  On <=3.12 both of these raised an
+    # errno-less RuntimeError out of ``_confined_path`` before any check could
+    # speak; they now reach the same structured, field-named ValueError that
+    # 3.13+ already produced.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, "final-segment-loop")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv(root_env, str(loop))
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == expected_message
+
+
+def test_resolve_residue_config_parent_segment_loop_object_store_root_constructs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The construction anchor for sites :597/:604, on a root that is not a
+    # containment base: on <=3.12 the parent-segment loop aborted construction
+    # in the preserve-final helper, while 3.13+ built the canonical form below.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, "parent-segment-loop")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(loop / "tail"))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert config.object_store_root == canonical_tmp / "parent-segment-loop-a" / "tail"
+    # The preflight path keeps the same canonical form, so the storage preflight
+    # sees the loop and owns the verdict.
+    assert config._object_store_root_preflight_path == canonical_tmp / "parent-segment-loop-a" / "tail"
+
+
+def test_resolve_residue_config_keeps_missing_lock_root_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # ENOENT zero-regression through the construction chain: a lock root may
+    # legitimately name a directory the scheduler creates later.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    canonical_workspace = Path(os.path.realpath(workspace_root))
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(workspace_root / "not-created-yet" / "scheduler"))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.lock_path == canonical_workspace / "not-created-yet" / "scheduler" / "production-scheduler.lock"
+    assert not config.lock_path.exists()
 
 
 # ---------------------------------------------------------------------------
