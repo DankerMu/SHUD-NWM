@@ -2326,6 +2326,48 @@ def test_checkpoint_ic_normalization_keeps_the_tolerant_no_minute_index_branch(
     assert checkpoint_path.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_ic_normalization_clamps_nothing_without_a_minute_index(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    """Residual clamping needs the same two numeric header tokens the minute index does.
+
+    ``normalize_state_negative_residuals`` bails out at ``_header_counts is None``
+    on exactly the headers that yield no minute index, so a clampable negative
+    residual under such a header is left alone and no ``.normalized`` is written:
+    the tolerant branch's ``normalized_value_count != 0`` arm is unreachable from
+    here (reported on #1430, not repaired in a tests-only change).
+    """
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = tmp_path / "demo.cfg.ic.update"
+    body = ("1\t0.1\t0.1\t0.1\t-0.001000\t0.1", "2\t0.1\t0.1\t0.1\t0.1\t0.1", "1\t0.5")
+    checkpoint_path.write_text("\n".join((header, *body)) + "\n", encoding="utf-8")
+    before = checkpoint_path.read_bytes()
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        normalized_path, evidence = state_cli._normalized_checkpoint_ic_file(
+            _checkpoint_for(checkpoint_path, valid_time)
+        )
+
+    assert normalized_path == checkpoint_path
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert evidence["normalized_value_count"] == 0
+    assert checkpoint_path.read_bytes() == before
+    assert checkpoint_path.read_text(encoding="utf-8").splitlines()[0] == header
+    assert caplog.records == []
+
+
 def _rekey_run_context() -> state_cli.StateRunContext:
     return state_cli.StateRunContext(
         run_id="fcst_gfs_2026080100_demo_model",

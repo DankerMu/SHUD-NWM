@@ -603,8 +603,53 @@ def test_unreadable_required_file_degrades_status_to_partial(
     assert model["checksums"]
 
 
+def test_checksum_walk_skips_root_escaping_files_without_calling_them_unreadable(tmp_path: Path) -> None:
+    """The unsafe-symlink skip is its own arm inside the checksum walk.
+
+    Driven directly, because discovery never gets an escaping path this far:
+    ``_match_required_files`` already drops it, so a discovery-level fixture
+    would leave the walk's resolve-None ``continue`` unexecuted and would stay
+    green even if that arm were folded into the unreadable verdict. Here the
+    walk is handed a ``required_files`` mapping that names the escaping file, so
+    the arm runs: no checksum entry AND no unreadable entry.
+    """
+
+    root = tmp_path / "basins"
+    input_dir = root / "basin-a" / "input" / "alias-a"
+    input_dir.mkdir(parents=True)
+    readable = input_dir / "alias-a.tsd.mf"
+    readable.write_text("tsd.mf\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "alias-a.cfg.para"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("cfg.para\n", encoding="utf-8")
+    escaping = input_dir / "alias-a.cfg.para"
+    try:
+        escaping.symlink_to(outside)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    warnings: list[basins_discovery.DiscoveryWarning] = []
+    checksums, unreadable = basins_discovery._checksums_for_required_files(
+        input_dir,
+        {"cfg_para": ["alias-a.cfg.para"], "tsd_mf": ["alias-a.tsd.mf"]},
+        root.resolve(),
+        warnings,
+    )
+
+    assert unreadable == []
+    assert [warning.code for warning in warnings] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert [warning.path for warning in warnings] == [str(escaping)]
+    # The escaping file is skipped; the rest of the walk is untouched.
+    assert checksums == {"alias-a.tsd.mf": hashlib.sha256(readable.read_bytes()).hexdigest()}
+
+
 def test_required_file_escaping_the_root_stays_on_the_symlink_channel(tmp_path: Path) -> None:
-    """The unsafe-symlink skip is not folded into the unreadable state."""
+    """Payload-level observation: an escaping required file reads as missing, not unreadable.
+
+    It never reaches the checksum walk (``_match_required_files`` drops it), so
+    this pins what an operator sees, not the walk's own symlink arm — that arm is
+    pinned by ``test_checksum_walk_skips_root_escaping_files_without_calling_them_unreadable``.
+    """
 
     root = tmp_path / "basins"
     input_dir = make_valid_model(root / "basin-a", "alias-a")

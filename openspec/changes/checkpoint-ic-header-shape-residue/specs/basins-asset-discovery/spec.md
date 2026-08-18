@@ -9,9 +9,11 @@ surface the unreadable files as their own collection (mirroring the
 existing invalid-required-files mechanism — the status expression consumes
 the collection directly, since quirks alone do not drive status), the
 model's status SHALL drop from "valid" to "partial" through that
-collection, an observable quirk naming the unreadable file SHALL be
-recorded alongside a warning, and the discovery payload SHALL carry the
-collection under its own key alongside the invalid-required-files key.
+collection, an observable quirk marking the model as carrying an
+unreadable required file SHALL be recorded — with the file named by the
+collection entry and the accompanying warning, not by the quirk token
+itself — and the discovery payload SHALL carry the collection under its
+own key alongside the invalid-required-files key.
 The missing-required-files semantics stay unchanged (a matched file is
 never reported as missing), the pre-existing unsafe-symlink arm (a resolve
 outside the root, which already warns) keeps its own semantics and is not
@@ -22,9 +24,9 @@ existing shape.
 
 WHEN a required file matched by discovery raises OSError during stat or
 hashing
-THEN the model's status is "partial" with a quirk naming the unreadable
-file, a warning is recorded, and the file does not appear in
-missing_required_files
+THEN the model's status is "partial" with an unreadable-required-file
+quirk, the file is named in the collection entry and the recorded
+warning, and the file does not appear in missing_required_files
 
 #### Scenario: readable required files keep the valid status
 
