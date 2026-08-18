@@ -23,7 +23,7 @@
 - [x] 3.2 uv run pytest -q tests/test_gateway_reconcile.py
 - [x] 3.3 uv run ruff check .（untracked 投影 E501 既知例外照会话惯例记录）
 - [x] 3.4 openspec validate reconcile-sacct-window-local-wallclock --strict --no-interactive
-- [ ] 3.5 merge 后双义务：(a) node-27 oracle receipt（3.2 套件）记入 #1559；
+- [x] 3.5 merge 后双义务：(a) node-27 oracle receipt（3.2 套件）记入 #1559；
       (b) **具名 post-merge 义务**——node-22 30s 实机 sacct 对照（同裸串下
       `sacct --starttime=<裸本地串>` vs `TZ=UTC sacct ...` 行数/区间应不同），
       作为前提唯一实证记入 #1559；并在 #1116 留前提解除注记

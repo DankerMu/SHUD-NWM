@@ -61,7 +61,7 @@
 - [x] 3.2 uv run pytest -q tests/test_gateway_reconcile.py（全量）
 - [x] 3.3 uv run ruff check services tests
 - [x] 3.4 openspec validate comment-absence-capability-gate --strict --no-interactive
-- [ ] 3.5 merge 后双 receipt 记入 #1116：(a) node-27 oracle receipt（3.2 套件 +
+- [x] 3.5 merge 后双 receipt 记入 #1116：(a) node-27 oracle receipt（3.2 套件 +
       定向选择器）；(b) node-22 真探针 receipt——在 node-22 上以真实
       `scontrol show config` 驱动 `default_comment_storage_probe` 确认返回 False
       （集群 `AccountingStoreFlags=(null)` 输入串已于 2026-08-18 前置实测，见
