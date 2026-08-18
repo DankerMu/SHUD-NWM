@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import stat
 import sys
@@ -37,9 +38,12 @@ from packages.common.state_manager import (
 from packages.common.state_qc import (
     MAX_STATE_IC_BYTES,
     cfg_ic_header_minute_index,
+    cfg_ic_header_shape,
     normalize_state_negative_residuals,
 )
 from workers.data_adapters.base import cycle_id_for, parse_cycle_time
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,11 @@ STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE = "STATE_SAVE_SOURCE_MANIFEST_INCOMPLETE"
 STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH = "STATE_SAVE_SOURCE_ARTIFACT_CHECKSUM_MISMATCH"
 STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED = "STATE_SAVE_SOURCE_CHECKPOINTS_UNCAPTURED"
 STATE_SAVE_SOURCE_FINAL_IC_MISSING = "STATE_SAVE_SOURCE_FINAL_IC_MISSING"
+# #1430 checkpoint IC header shape reasons. Same grep contract as the admission
+# reasons above; kept separate because these judge an artifact's CONTENT at
+# normalization / rekey time rather than the publish source's admissibility.
+STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID = "STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID"
+STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED = "STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED"
 
 _REQUIRED_PROVENANCE_KEYS = (
     "run_id",
@@ -266,6 +275,17 @@ def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> tuple[Path, d
         normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
         atomic_write_bytes_no_follow(normalized, ("\n".join(lines) + "\n").encode("utf-8"))
         return normalized, normalization.evidence()
+    # #1430: a minute index is about to be OVERWRITTEN, so the header's shape has
+    # to hold first. On the #1197 two-token shape the located "minute" token is
+    # the mesh-state column count, and writing an epoch-minute over it mints the
+    # same poisoned IC that made SHUD allocate ~183 GB. Refuse to publish this
+    # checkpoint instead of producing the file.
+    shape = cfg_ic_header_shape(header)
+    if not shape.valid:
+        raise StateManagerError(
+            f"{STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID}: checkpoint IC {checkpoint.ic_file} header is not a "
+            f"publishable SHUD layout: {shape.reason}"
+        )
     expected_minute = _ensure_utc(checkpoint.valid_time).timestamp() / 60.0
     try:
         observed_minute = float(header[minute_index])
@@ -316,6 +336,19 @@ def _checkpoint_header_minute(path: Path) -> float | None:
     header = lines[0].split()
     minute_index = cfg_ic_header_minute_index(header)
     if minute_index is None:
+        return None
+    # #1430: same gate as the overwrite face. Reading a column count as a minute
+    # would rekey the snapshot's valid_time from it, and valid_time is the key the
+    # next cycle's warm start looks up. No minute means the caller keeps the
+    # manifest-declared time.
+    shape = cfg_ic_header_shape(header)
+    if not shape.valid:
+        LOGGER.warning(
+            "%s: checkpoint IC %s header is not a rekeyable SHUD layout (%s); keeping the manifest-declared time",
+            STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED,
+            path,
+            shape.reason,
+        )
         return None
     try:
         return float(header[minute_index])

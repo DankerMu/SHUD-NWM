@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
 
+from workers.model_registry import basins_discovery
 from workers.model_registry.basins_discovery import BasinsDiscoveryError, _walk_files, discover_basins_inventory
 from workers.model_registry.cli import _argparse_main
 
@@ -541,6 +544,102 @@ def test_multiple_matched_sp_mesh_files_are_rejected_as_ambiguous(tmp_path: Path
     assert "alias-a.sp.mesh" in ambiguous and "zz-second.sp.mesh" in ambiguous
     # Ambiguity is its own reason, not a shape verdict on the (well-formed) IC.
     assert "numeric token(s)" not in ambiguous
+
+
+# ---------------------------------------------------------------------------
+# Unreadable required files (#1430). The checksum walk used to `continue` past an
+# OSError: a required file that was matched by glob but could not be stat'ed or
+# hashed left no checksum entry, no quirk and no warning, so "present but
+# unreadable" registered as a healthy model.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failing_call", ["stat", "sha256"])
+def test_unreadable_required_file_degrades_status_to_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_call: str,
+) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "alias-a.tsd.lai"
+
+    if failing_call == "stat":
+        real_stat = Path.stat
+
+        def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+            if self.name == unreadable_name:
+                raise OSError(errno.EACCES, "simulated stat failure")
+            return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+    else:
+        real_sha256 = basins_discovery._sha256
+
+        def fake_sha256(path: Path) -> str:
+            if path.name == unreadable_name:
+                raise OSError(errno.EIO, "simulated hash failure")
+            return real_sha256(path)
+
+        monkeypatch.setattr(basins_discovery, "_sha256", fake_sha256)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert model["default_publish_eligible"] is False
+    # Matched by glob, so it is NOT missing -- and not a content-shape verdict either.
+    assert model["missing_required_files"] == []
+    assert model["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [unreadable_name]
+    assert "unreadable_required_file" in model["quirks"]
+    assert "unsafe_symlink_outside_root" not in model["quirks"]
+    assert [
+        warning["path"] for warning in inventory["warnings"] if warning["code"] == "BASINS_REQUIRED_FILE_UNREADABLE"
+    ] == [str(Path(model["input_dir"]) / unreadable_name)]
+    # The rest of the walk is unaffected: only the unreadable file lost its checksum.
+    assert unreadable_name not in model["checksums"]
+    assert model["checksums"]
+
+
+def test_required_file_escaping_the_root_stays_on_the_symlink_channel(tmp_path: Path) -> None:
+    """The unsafe-symlink skip is not folded into the unreadable state."""
+
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+    outside = tmp_path / "outside" / "domain.shp"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("domain.shp\n", encoding="utf-8")
+    escaping = input_dir / "gis" / "domain.shp"
+    escaping.unlink()
+    escaping.symlink_to(outside)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert model["unreadable_required_files"] == []
+    assert "unreadable_required_file" not in model["quirks"]
+    assert model["missing_required_files"] == ["gis/domain.shp"]
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+
+
+def test_readable_required_files_keep_valid_status_and_checksum_shape(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "valid"
+    assert model["unreadable_required_files"] == []
+    assert "unreadable_required_file" not in model["quirks"]
+    expected_checksums = {
+        relative_name: hashlib.sha256((input_dir / relative_name).read_bytes()).hexdigest()
+        for matches in model["required_files"].values()
+        for relative_name in matches
+    }
+    assert model["checksums"] == expected_checksums
 
 
 def make_valid_model(

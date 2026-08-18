@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import errno
 import fcntl
 import inspect
@@ -2207,6 +2208,263 @@ def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(t
     assert evidence["normalized_unsat_row_count"] == 1
     assert evidence["max_unsat_correction_m"] == pytest.approx(0.014834)
     assert run_state_variable_qc(normalized_path).passed is True
+
+
+# #1430 checkpoint IC header shape gate. The runtime rule "LAST numeric token is
+# the minute-time" degenerates on the #1197 two-token header ``23106\t6``: index 1
+# is the mesh-state COLUMN COUNT, not a minute. These fixtures pin both consumption
+# faces in ``state_cli`` -- the normalization overwrite face and the rekey read face.
+_INCIDENT_CHECKPOINT_HEADER = "23106\t6"
+_CHECKPOINT_BODY_LINES = ("1\t0.1\t0.1\t0.1\t0.1\t0.1", "2\t0.1\t0.1\t0.1\t0.1\t0.1", "1\t0.5")
+
+
+def _write_checkpoint_ic(path: Path, header: str) -> Path:
+    path.write_text("\n".join((header, *_CHECKPOINT_BODY_LINES)) + "\n", encoding="utf-8")
+    return path
+
+
+def _checkpoint_for(path: Path, valid_time: datetime, *, lead_hours: int | None = 6) -> state_cli.StateCheckpoint:
+    return state_cli.StateCheckpoint(
+        valid_time=valid_time,
+        ic_file=path,
+        original_shud_filename=path.name,
+        lead_hours=lead_hours,
+    )
+
+
+def _normalized_sibling(path: Path) -> Path:
+    return path.with_name(f".{path.name}.normalized")
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("two_token_incident", _INCIDENT_CHECKPOINT_HEADER),
+        ("five_numeric_tokens", "23106\t6\t3\t2\t29070720.000000"),
+    ],
+)
+def test_checkpoint_ic_normalization_refuses_headers_whose_minute_index_is_unsafe(
+    tmp_path: Path,
+    case: str,
+    header: str,
+) -> None:
+    """AC-1: the overwrite face refuses instead of writing a #1197-shaped poisoned IC."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "lh-gl.cfg.ic.update", header)
+    before = checkpoint_path.read_bytes()
+
+    with pytest.raises(StateManagerError, match=state_cli.STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID):
+        state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert checkpoint_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("case", "header", "expects_rewrite"),
+    [
+        ("native_three_token_noop", None, False),
+        ("native_three_token_rekey", "2\t1\t720.000000", True),
+        ("compat_four_token_rekey", "2\t1\t0\t720.000000", True),
+    ],
+)
+def test_checkpoint_ic_normalization_keeps_valid_shapes_byte_for_byte(
+    tmp_path: Path,
+    case: str,
+    header: str | None,
+    expects_rewrite: bool,
+) -> None:
+    """AC-3: three- and four-token headers keep today's normalization behavior."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    expected_minute = valid_time.timestamp() / 60.0
+    header_line = header if header is not None else f"2\t1\t{expected_minute:.6f}"
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.cfg.ic.update", header_line)
+
+    normalized_path, evidence = state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert evidence["normalized_value_count"] == 0
+    if not expects_rewrite:
+        assert normalized_path == checkpoint_path
+        assert not _normalized_sibling(checkpoint_path).exists()
+        return
+    assert normalized_path == _normalized_sibling(checkpoint_path)
+    rewritten_header = header_line.split()
+    rewritten_header[-1] = f"{expected_minute:.6f}"
+    assert normalized_path.read_text(encoding="utf-8") == (
+        "\n".join(("\t".join(rewritten_header), *_CHECKPOINT_BODY_LINES)) + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("empty_header_line", "   "),
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_ic_normalization_keeps_the_tolerant_no_minute_index_branch(
+    tmp_path: Path,
+    case: str,
+    header: str,
+) -> None:
+    """The gate never widens the refuse set to headers the code never consumes."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.cfg.ic.update", header)
+    before = checkpoint_path.read_bytes()
+
+    normalized_path, _evidence = state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert normalized_path == checkpoint_path
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert checkpoint_path.read_bytes() == before
+
+
+def _rekey_run_context() -> state_cli.StateRunContext:
+    return state_cli.StateRunContext(
+        run_id="fcst_gfs_2026080100_demo_model",
+        model_id="demo_model",
+        end_time=_dt("2026-08-01T06:00:00Z"),
+        output_uri=None,
+        source_id="GFS",
+        cycle_time=_dt("2026-08-01T00:00:00Z"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("two_token_incident", _INCIDENT_CHECKPOINT_HEADER),
+        ("five_numeric_tokens", "23106\t6\t3\t2\t29070720.000000"),
+    ],
+)
+def test_checkpoint_header_time_does_not_rekey_on_unsafe_header_shapes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    """AC-2: the read face keeps the manifest-declared valid time (06:00 stays 06:00)."""
+
+    del case
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header)
+    checkpoint = _checkpoint_for(checkpoint_path, _dt("2026-08-01T06:00:00Z"))
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        assert state_cli._checkpoint_header_minute(checkpoint_path) is None
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed.valid_time == _dt("2026-08-01T06:00:00Z")
+    assert rekeyed.lead_hours == 6
+    assert any(
+        state_cli.STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header", "expected_valid_time", "expected_lead_hours"),
+    [
+        ("native_three_token_rekey", "2\t1\t120.000000", "2026-08-01T02:00:00Z", 2),
+        ("compat_four_token_rekey", "2\t1\t0\t120.000000", "2026-08-01T02:00:00Z", 2),
+        ("native_three_token_noop", None, "2026-08-01T06:00:00Z", 6),
+    ],
+)
+def test_checkpoint_header_time_keeps_rekey_behavior_for_valid_shapes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str | None,
+    expected_valid_time: str,
+    expected_lead_hours: int,
+) -> None:
+    """AC-3 on the read face: valid shapes still rekey, and the no-op stays a no-op."""
+
+    del case
+    declared_valid_time = _dt("2026-08-01T06:00:00Z")
+    header_line = header if header is not None else f"2\t1\t{declared_valid_time.timestamp() / 60.0:.6f}"
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header_line)
+    checkpoint = _checkpoint_for(checkpoint_path, declared_valid_time)
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed.valid_time == _dt(expected_valid_time)
+    assert rekeyed.lead_hours == expected_lead_hours
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("empty_header_line", "   "),
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_header_time_keeps_the_tolerant_no_minute_index_branch(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    del case
+    declared_valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header)
+    checkpoint = _checkpoint_for(checkpoint_path, declared_valid_time)
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        assert state_cli._checkpoint_header_minute(checkpoint_path) is None
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed is checkpoint
+    # No minute index was ever consumed, so there is nothing to warn about.
+    assert caplog.records == []
+
+
+def test_state_cli_takes_ic_header_shape_verdicts_only_from_the_shared_helper() -> None:
+    """AC-4: one shape rule in the tree -- ``state_qc.cfg_ic_header_shape``."""
+
+    tree = ast.parse(Path(state_cli.__file__).read_text(encoding="utf-8"))
+
+    imported_from_state_qc = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "packages.common.state_qc"
+        for alias in node.names
+    }
+    assert "cfg_ic_header_shape" in imported_from_state_qc
+
+    shape_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "cfg_ic_header_shape"
+    ]
+    # Exactly the two consumption faces: normalization overwrite and header read.
+    assert len(shape_calls) == 2
+
+    # No second token-counting rule: state_cli never measures the header itself...
+    assert [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and ("header" in ast.unparse(node).lower() or "token" in ast.unparse(node).lower())
+    ] == []
+    # ...nor keeps its own copy of the accepted token counts.
+    assert [
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and "TOKEN" in target.id.upper()
+    ] == []
 
 
 def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_path: Path) -> None:
