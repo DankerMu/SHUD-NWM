@@ -37,6 +37,9 @@ the pre-change output
 
 #### Scenario: page freeze and cache identity are unchanged
 
-WHEN a querier session renders its pages under any host timezone
+WHEN a querier session renders its pages under any host timezone that
+stays stable for the session's duration
 THEN the page set is frozen once per session and the page-cache keys
-deduplicate exactly as before
+deduplicate exactly as before (a mid-session timezone change re-renders
+the same frozen UTC page to a different key, costing only a redundant
+sacct re-query — never a wrong verdict)
