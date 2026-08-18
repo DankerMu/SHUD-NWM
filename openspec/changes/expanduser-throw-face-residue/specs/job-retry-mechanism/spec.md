@@ -15,7 +15,11 @@ created on disk — so the unified artifact probe and the sidecar provenance
 tier, which already catch `ObjectStoreError`, keep producing their existing
 distinguishable fail-closed attributions instead of crashing the scheduling
 pass. Expandable and tilde-free values keep their existing behavior
-byte-for-byte in all these lanes.
+byte-for-byte in all these lanes, with one recorded acceptance: a
+`.`-prefixed value whose first surviving component is a tilde (the `./~/x`
+class) moves from expand-and-admit to the relative-path rejection at the
+str-input sites — a fail-closed direction pinned as an explicit carve-out
+in the byte-compatibility tests.
 
 #### Scenario: unexpandable tilde in db-free selector values yields structured rejections
 
@@ -45,4 +49,6 @@ written
 WHEN selector values or the object-store root have no tilde or expand
 normally
 THEN adjudication results and constructor behavior are byte-for-byte
-identical to the pre-change behavior
+identical to the pre-change behavior, except the recorded `./~/x`
+acceptance (that class now takes the fail-closed relative-path rejection
+at the str-input sites)

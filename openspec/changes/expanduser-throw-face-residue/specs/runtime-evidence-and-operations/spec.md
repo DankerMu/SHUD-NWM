@@ -18,8 +18,11 @@ allowed-roots walk's ENOENT tolerance arm (which admits a cwd-anchored
 root with no blocker) and the per-root storage check's structured
 containment/visibility verdicts — so the preflight always returns its
 structured result instead of aborting the scheduling pass. Values whose tilde does expand, and values
-without a tilde, keep their existing verdicts byte-for-byte, and no new
-blocker reason is introduced.
+without a tilde, keep their existing verdicts byte-for-byte — except the
+recorded `./~/x` acceptance (a `.`-prefixed value whose first surviving
+component is a tilde now takes the fail-closed cwd-anchored verdict at the
+str-input storage check instead of expanding) — and no new blocker reason
+is introduced.
 
 #### Scenario: unexpandable tilde in allowed storage roots is tolerated without crashing the preflight
 
@@ -43,4 +46,5 @@ configured/contained/visible verdict without raising
 
 WHEN a configured root has no tilde or its tilde expands normally
 THEN the preflight verdict is byte-for-byte identical to the pre-change
-behavior
+behavior, except the recorded `./~/x` acceptance at the str-input storage
+check (fail-closed, pinned in the byte-compatibility carve-out)
