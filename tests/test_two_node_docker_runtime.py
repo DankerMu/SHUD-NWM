@@ -3154,6 +3154,22 @@ def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority
     assert scheduler_env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == env["NHMS_OBJECT_STORE_COPYBACK_ROOT"]
 
 
+def test_node22_db_free_env_template_declares_pipeline_runtime_roots() -> None:
+    env = docker_runtime.parse_env_file(
+        REPO_ROOT / "infra/env/compute.scheduler-dbfree.env.example"
+    )
+
+    for key in ("WORKSPACE_ROOT", "OBJECT_STORE_ROOT", "OBJECT_STORE_PREFIX", "NHMS_BASINS_ROOT"):
+        assert env[key].strip(), f"{key} must be defined non-empty in the db-free template"
+
+    allowed_roots = env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+    for key in ("WORKSPACE_ROOT", "OBJECT_STORE_ROOT"):
+        assert env[key] in allowed_roots, (
+            f"{key}={env[key]} must be one of NHMS_SCHEDULER_ALLOWED_ROOTS so"
+            " preflight admits the template's own values"
+        )
+
+
 @pytest.mark.parametrize(
     ("key", "value", "expected_code"),
     [
