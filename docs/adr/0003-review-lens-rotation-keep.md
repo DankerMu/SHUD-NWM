@@ -77,3 +77,10 @@ catches core=2 vs rotated=171 (rotated share 98.8%). Direction unchanged
 and still overwhelming: **keep rotation** stands under the same
 autonomous default-keep rule. Next revisit on maintainer override or a
 materially changed attribution ratio.
+
+## Revisit log
+
+- 2026-08-18（PR #1531 / issue #1152 合并后 audit 再次 DECIDABLE）：样本扩至
+  75 个多轮 merged PR，later-round catches core=16 vs rotated=180。轮换收益
+  比首次裁定（2:8）更悬殊，**维持 keep**，无行为变更。仍为 autonomous
+  default-keep，maintainer 可覆盖。
