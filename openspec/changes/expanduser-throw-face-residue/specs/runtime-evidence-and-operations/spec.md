@@ -7,20 +7,24 @@ configured root values (in both the allowed-roots walk and the per-root
 storage check) without ever letting the expansion escape the preflight as
 an exception: when the home directory cannot be determined (an unknown `~user`
 prefix, or a plain `~` with no usable home-directory source), the unexpanded
-value SHALL flow on as an ordinary path into the existing non-absolute and
-containment arms and produce the existing structured blocker or verdict
-shape, so the preflight always returns its structured result instead of
-aborting the scheduling pass. Values whose tilde does expand, and values
+value SHALL flow on as an ordinary path into the existing arms — the
+allowed-roots walk's ENOENT tolerance arm (which admits a cwd-anchored
+root with no blocker) and the per-root storage check's structured
+containment/visibility verdicts — so the preflight always returns its
+structured result instead of aborting the scheduling pass. Values whose tilde does expand, and values
 without a tilde, keep their existing verdicts byte-for-byte, and no new
 blocker reason is introduced.
 
-#### Scenario: unexpandable tilde in allowed storage roots yields a structured preflight result
+#### Scenario: unexpandable tilde in allowed storage roots is tolerated without crashing the preflight
 
 WHEN `allowed_storage_roots` contains `~nosuchuser/roots` (or a plain `~/…`
 with no determinable home directory)
 THEN `_slurm_preflight` returns its structured status/blockers result — no
-RuntimeError escapes — and the affected root is adjudicated by the existing
-fail-closed arms
+RuntimeError escapes — and the affected root flows through the existing
+ENOENT tolerance arm and is admitted as a cwd-anchored containment root
+with no blocker (the existing arm never produces a blocker for
+not-yet-existing roots; the resulting phantom-root geometry is the
+already-tracked #1427 adjacency and is documented, not changed, here)
 
 #### Scenario: unexpandable tilde in a storage root field yields the existing check verdict
 

@@ -26,11 +26,14 @@
 
 - **四站点走家族原语**（#1424/PR #1435 定稿修法）：`Path(...).expanduser()` →
   `Path(os.path.expanduser(...))`。不可展开的 `~user/...` 原样留存为相对路径，从各自
-  **既有** `is_absolute()` / containment / blocker 臂 fail-closed 走掉：
-  `_preflight_allowed_roots` 与 `_storage_root_check` 产出既有结构化 blocker/判定；
-  `_db_free_selector_allowed_roots` → `db_free_allowed_root_relative` 类 rejection；
-  `_db_free_selector_path_rejection` → `db_free_selector_path_relative` 类 rejection。
-  终态 reason 以 task 0 探针实测为准（沿 #1424 先例记录法）。
+  **既有**臂走掉——fixture review 已预探真实终态：`_preflight_allowed_roots` 走
+  **既有 ENOENT 容忍臂静默收编**（cwd 锚定、不产 blocker——该臂 docstring 明言
+  ENOENT 永不 blocker；phantom-root 几何属 #1427 邻接面，本 change 照实记录、不改
+  判定，即 issue #1436 验收 2 的「或按既有臂容忍」分支）；`_storage_root_check`
+  走 ENOENT 臂后 contained/visible 阶梯 → `*_OUT_OF_ROOT`/`*_NOT_VISIBLE` 结构化
+  判定；`_db_free_selector_allowed_roots` → `db_free_allowed_root_relative` 类
+  rejection；`_db_free_selector_path_rejection` → `db_free_selector_path_relative`
+  类 rejection。终态 reason 以 task 0 探针实测复核为准（沿 #1424 先例记录法）。
 - **object-store root 不照抄原语**（#1441 issue 已论证副作用：原样留存的 `~unknown/store`
   会锚到 cwd 并**真建**字面 `~unknown` 目录）：把 `:48` 展开纳入既有错误转换边界，
   不可展开时抛 `ObjectStoreError`（RuntimeError 子类，纯收窄）。两个已复核调用点
@@ -55,6 +58,9 @@
 - `services/orchestrator/` 其余约 40 处 `.expanduser()` 站点与 `LocalObjectStore` 其余
   构造站点（`scheduler_file_providers.py`、`tile_publisher/`、`workers/**` 等）：两 issue
   均声明未逐一审计，本 change 只治五处已复核站点，不做全仓扫（扩面需另立单）。
+- 第六副本 `packages/common/safe_fs.py:23`（`_expand_path` 的裸 `Path(path).expanduser()`，
+  约 10 个 safe_fs 入口的共享前奏）：fixture review 发现，两 issue 均未跟踪；本修复后
+  `LocalObjectStore` 交给 safe_fs 的已是绝对路径，无前导 tilde 可达——另行立单承接。
 - S3 适配面与 object-key 校验语义不变。
 
 ## Risk triage
@@ -71,6 +77,9 @@
 - 不含 `~` 的绝对路径与可展开 `~/...` 在五处的判定结果逐字不变（含 ENOENT 臂、
   db-free 词法回退臂、object-store 现有全部用例）。
 - `_slurm_preflight` blocker 结构与 reason 码集合不变（只是不再崩，不新增 reason）。
+- **接受的新状态**：不可展开 tilde 的 allowed root 由 ENOENT 容忍臂以 cwd 锚定形态
+  收编进 containment base（不产 blocker）——这是家族原语的既定语义（#1424 同款），
+  其 phantom-root 面由 #1427 承接，本 change 不扩其 scope。
 - `ObjectStoreError` 语义：仍是 RuntimeError 子类；`:49` cwd 锚定与
   `ensure_directory_no_follow` 对合法 root 的行为不变。
 - 既有 receiver 判别式钉测对 artifact-guard lane 的约束不放松。
