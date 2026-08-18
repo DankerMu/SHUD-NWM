@@ -9756,15 +9756,23 @@ def _symlink_over_directory(path: Path, *, stash: Path) -> None:
 def _journal_tree_bytes(root: Path) -> dict[str, bytes]:
     """Durable journal content only; the empty flock files are not records.
 
-    ``recurse_symlinks=True`` is load-bearing: the tampered scenes replace
-    ``journal/<source>`` with a symlink, and a write that leaked through it
-    lands in the decoy.  A non-recursing walk stops at the symlink and reports
-    the leaked bytes as "nothing changed".
+    Following symlinks during the walk is load-bearing: the tampered scenes
+    replace ``journal/<source>`` with a symlink, and a write that leaked
+    through it lands in the decoy.  A non-following walk stops at the symlink
+    and reports the leaked bytes as "nothing changed".  The symlinks
+    themselves are dropped from the result — only the bytes behind them count.
+    Precondition: the tamper fixtures keep their decoys OUTSIDE ``root``, so
+    the tree has no symlink cycle; ``followlinks=True`` would loop forever on
+    one and no cycle detection is added here on purpose.
     """
 
     return {
         str(path.relative_to(root)): path.read_bytes()
-        for path in sorted(root.rglob("*", recurse_symlinks=True))
+        for path in sorted(
+            Path(dirpath) / name
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=True)
+            for name in filenames
+        )
         if not path.is_symlink() and path.is_file() and ".locks" not in path.parts
     }
 
@@ -10138,11 +10146,16 @@ def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
 ) -> None:
     """E7e — parity on the lanes that already absorb journal faults.
 
-    The carrier must not inherit the public journal error: the broad handlers
-    on this lane would catch a subclass BEFORE the choke frame converts it,
-    which is the silent-empty failure mode this change exists to remove.  The
-    ``issubclass`` line is what pins that; the observables below pin the other
-    half — the fault stays absorbed to the SAME answer a corrupt journal file
+    The carrier must not inherit the public journal error.  At head every
+    probe consumption sits directly inside a choke frame's ``try``, so no
+    broad handler on this lane can reach a carrier before conversion; the
+    ``issubclass`` line is a forward-looking guard against FUTURE shapes —
+    conversion moved outward, or a broad handler introduced between a probe
+    and its choke frame — where a subclass would be swallowed into the
+    silent-empty failure mode this change exists to remove.  (The
+    fixture-review-era measurement of that hazard was taken against the
+    pre-choke-frame code shape.)  The observables below pin the other half —
+    the fault stays absorbed to the SAME answer a corrupt journal file
     already yields, so no lane gains loudness here.  They are pinned
     absolutely rather than against each other because a common-mode drift
     (both lanes degrading to ``[]``) would satisfy an equality.

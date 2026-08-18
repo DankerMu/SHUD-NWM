@@ -6504,8 +6504,9 @@ class FileOrchestrationJournalRepository:
         """
         directory = self._journal_directory(source_id=source_id)
         cycle_segment = format_cycle_time(cycle_time)
-        # Defense in depth, as in _next_sequence_unlocked: the rollover probe
-        # must never leak the carrier past this append frame.
+        # Defense in depth here, unlike _next_sequence_unlocked's public
+        # insert_pipeline_event lane: no public lane reaches this frame today
+        # (reaching the append means an earlier probe already succeeded).
         try:
             segments = self._cycle_segment_paths(directory, cycle_segment)
         except _JournalProbeContainmentError as error:
