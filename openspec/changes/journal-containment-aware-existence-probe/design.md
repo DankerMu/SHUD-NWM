@@ -85,7 +85,7 @@ handler（:6615 / :6251 / :2762）**在转换前**吞掉，把 containment fault
   **该一致性问题已实测坐实**（PR review round-1 B2）：`_stat_signature` 跟随 symlink 父组件，
   空槽指纹在"真实空目录"与"symlink→空目录"下同为 all-None，长活实例（scheduler 每进程一个
   repository，`scheduler_core.py:110`）的 warm `_cycle_rows` 缓存在 tamper 后继续静默返回
-  缓存的 `[]`（fresh 实例返回 blocked 行）。按本条预授权报偏离不修，路由 follow-up issue；
+  缓存的 `[]`（fresh 实例返回 blocked 行）。按本条预授权报偏离不修，已路由 **#1567**；
   写路径不受影响（warm 缓存下 frame 2 照常 raise，实测）。
 
 ## D6: choke-frame 转换（round-1 P1-1/P2-2 + round-2 P1-1/P1-2 驱动，终版）
@@ -186,7 +186,8 @@ token 为 `file_journal_unreadable`。实测行为表：
 ## 残余风险（PR body 落字项）
 
 - warm `_cycle_rows` 指纹缓存在 tamper 后继续静默返回缓存 `[]`（D4 坐实项；pre-existing
-  cache idiom，报偏离不修，路由 follow-up issue；spec 措辞已按此收窄）。
+  cache idiom，报偏离不修，已路由 **#1567**；spec 措辞已按此收窄）。
+- `chain_forecast_submission.py:164` 只捕 `OrchestratorError` 的 handler 非对称已路由 **#1568**。
 - probe 成本量级见 D5（披露项，非回归）。
 - `self.root` 未 resolve（:502）：部署配置的 journal root 自身若经 symlink 到达——round-1
   correctness 实测该项**高估**：root 本身 symlink 时 base 与 head 行为一致（写
