@@ -42,7 +42,7 @@ A1 观察条目上的布尔标注，消费义务闭合且状态模型保持 subj
 
 1. **pass 级**：只在 `scheduler_runtime.py:1417` 的完整 pass 写盘点前观察。
    其余 11 个写盘点（早退 :711/:765/:805/:839/:897/:985、异常 :1458、prelock
-   :596/:641/:681、callback scheduler_core.py:2006）payload 候选列表为空/无
+   :596/:641/:681、callback scheduler_runtime.py:2006）payload 候选列表为空/无
    restart_reconcile——在那里观察等于每次早退清空全部计数；`lock_contended`
    （:711）还在未持租约下运行，共享写有并发风险。实现上**不得**挂
    `scheduler_core.py:914` 的共享 `_write_evidence` 方法（8 站点全走它，是最
