@@ -348,6 +348,31 @@ class FileOrchestrationJournalError(RuntimeError):
         self.evidence = dict(evidence or {})
 
 
+class _JournalProbeContainmentError(Exception):
+    """A containment fault raised by an existence probe, carried to a choke frame.
+
+    Deliberately NOT a ``FileOrchestrationJournalError`` subclass: the broad
+    ``except FileOrchestrationJournalError`` handlers sitting between the
+    probes and their choke frames would swallow it back into the silent empty
+    result this probe exists to eliminate.
+    """
+
+    def __init__(self, *, field: str, error_type: str) -> None:
+        super().__init__(field)
+        self.field = field
+        self.error_type = error_type
+
+
+def _probe_containment_failure(error: _JournalProbeContainmentError) -> FileOrchestrationJournalError:
+    """Convert a probe containment fault to the lane's reader-fault type."""
+
+    return FileOrchestrationJournalError(
+        "file_journal_unreadable",
+        field=error.field,
+        evidence={"error_type": error.error_type},
+    )
+
+
 def _submit_file_manual_retry_job(gateway: Any, request: SubmitJobRequest) -> Any:
     job_type = request.resolved_job_type()
     if job_type in _ARRAY_MANUAL_RETRY_JOB_TYPES:
@@ -6310,23 +6335,29 @@ class FileOrchestrationJournalRepository:
         cycle_segment = format_cycle_time(cycle_time)
         source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
-        for source_segment in source_segments:
-            for surface in ("journal", "pipeline-events"):
-                # The floor must span ALL segments: a sequence reused across a
-                # rollover boundary is silent state corruption.
-                segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
-                for segment_index, path in enumerate(segment_paths):
-                    if not self._sequence_regular_file_exists(path):
-                        continue
-                    records = self._read_jsonl(path, segment_index=segment_index)
-                    sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
-        sequences.extend(
-            self._latest_replay_sequences_unlocked(
-                source_id=source_id,
-                cycle_time=cycle_time,
-                source_segments=source_segments,
+        # Defense in depth only: every public caller hits the read frame's
+        # precondition read first.  This keeps the carrier contained on any
+        # path that lacks one.
+        try:
+            for source_segment in source_segments:
+                for surface in ("journal", "pipeline-events"):
+                    # The floor must span ALL segments: a sequence reused across a
+                    # rollover boundary is silent state corruption.
+                    segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
+                    for segment_index, path in enumerate(segment_paths):
+                        if not self._sequence_regular_file_exists(path):
+                            continue
+                        records = self._read_jsonl(path, segment_index=segment_index)
+                        sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+            sequences.extend(
+                self._latest_replay_sequences_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    source_segments=source_segments,
+                )
             )
-        )
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
         return max(sequences, default=0) + 1
 
     def _latest_replay_sequences_unlocked(
@@ -6353,31 +6384,34 @@ class FileOrchestrationJournalRepository:
                 sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
 
-    def _sequence_regular_file_exists(self, path: Path) -> bool:
+    def _probe_stat_mode(self, path: Path) -> int | None:
+        """Stat one journal slot under the hardened readers' containment rules.
+
+        ``None`` means genuine absence — the entry itself or any parent
+        component missing under a chain of real directories, which includes a
+        wholly uninitialized journal tree.  A symlinked parent component, a
+        symlink occupying the slot, or any other stat fault leaves through the
+        carrier: bare ``os.stat(follow_symlinks=False)`` does not follow the
+        final component but does follow symlinked parents, which turned a
+        tampered tree into "absent".
+        """
         try:
-            mode = os.stat(path, follow_symlinks=False).st_mode
+            return stat_no_follow(path, containment_root=self.root).st_mode
         except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
+            return None
+        except (SafeFilesystemError, OSError) as error:
+            raise _JournalProbeContainmentError(
                 field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
+                error_type=type(error).__name__,
             ) from error
-        return stat.S_ISREG(mode)
+
+    def _sequence_regular_file_exists(self, path: Path) -> bool:
+        mode = self._probe_stat_mode(path)
+        return mode is not None and stat.S_ISREG(mode)
 
     def _sequence_directory_exists(self, path: Path) -> bool:
-        try:
-            mode = os.stat(path, follow_symlinks=False).st_mode
-        except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
-                field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
-            ) from error
-        return stat.S_ISDIR(mode)
+        mode = self._probe_stat_mode(path)
+        return mode is not None and stat.S_ISDIR(mode)
 
     def _next_event_id_unlocked(
         self,
@@ -6470,7 +6504,12 @@ class FileOrchestrationJournalRepository:
         """
         directory = self._journal_directory(source_id=source_id)
         cycle_segment = format_cycle_time(cycle_time)
-        segments = self._cycle_segment_paths(directory, cycle_segment)
+        # Defense in depth, as in _next_sequence_unlocked: the rollover probe
+        # must never leak the carrier past this append frame.
+        try:
+            segments = self._cycle_segment_paths(directory, cycle_segment)
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
         path = segments[-1] if segments else directory / _journal_segment_name(cycle_segment, 0)
         try:
             existing = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
@@ -6762,21 +6801,13 @@ class FileOrchestrationJournalRepository:
     def _journal_segment_exists(self, path: Path) -> bool:
         """Probe a segment slot without hiding a non-regular occupant.
 
-        A symlinked or otherwise unsafe segment counts as present so the
-        hardened reader stays the sole authority for that failure, exactly as
-        it is for an unsegmented cycle log today.
+        A safe but non-regular occupant (a directory, a FIFO) counts as
+        present so the hardened reader stays the sole authority for that
+        failure, exactly as it is for an unsegmented cycle log today.  A
+        symlink in the slot is a containment fault of the probe itself now,
+        which surfaces the same reason token the reader would have raised.
         """
-        try:
-            os.stat(path, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
-                field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
-            ) from error
-        return True
+        return self._probe_stat_mode(path) is not None
 
     def _cycle_segment_signatures(self, directory: Path, cycle_segment: str) -> tuple[Any, ...]:
         """Stat identity of every segment slot a cycle log may occupy.
@@ -6793,7 +6824,14 @@ class FileOrchestrationJournalRepository:
         """Replay every segment of one cycle event log in segment order."""
 
         records: list[dict[str, Any]] = []
-        for segment_index, path in enumerate(self._cycle_segment_paths(directory, cycle_segment)):
+        # Every public lane — read, and write via its precondition read —
+        # routes through here, so this frame defines the public contract for
+        # a probe containment fault.
+        try:
+            segment_paths = self._cycle_segment_paths(directory, cycle_segment)
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
+        for segment_index, path in enumerate(segment_paths):
             records.extend(self._read_jsonl(path, segment_index=segment_index))
         return records
 
