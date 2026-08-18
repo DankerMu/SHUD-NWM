@@ -64,7 +64,7 @@ Issue #1432（PR #1429 terminal-state 复审 B2 defer 路由，pre-existing）�
 
 ## Evidence mapping
 
-- 验收 1-4 → tasks 1.1-1.3 + 2.1（payload 断言 + 口径一致锁；import 通道现无任何 `BASINS_REGISTRY_MODEL_NOT_IMPORTABLE` 断言，需从零建 harness——`tests/test_basins_registry_import.py` 已有真 discovery 驱动可复用）；验收 5 → 2.2
+- 验收 1-4 → tasks 1.1-1.3 + 2.1（payload 断言 + 口径一致性按检查确认——键名字面量测试 + 评审对真值点逐字核对，非机器锁；import 通道现无任何 `BASINS_REGISTRY_MODEL_NOT_IMPORTABLE` 断言，需从零建 harness——`tests/test_basins_registry_import.py` 已有真 discovery 驱动可复用）；验收 5 → 2.2
   （IC 头部畸形 → 拒因见 `*.cfg.ic` 文件名，**新建 sibling 测试**——既有
   `:1030-1062` 用例是 missing 几何、无 IC 旋钮，不得改造）；验收 6 → 2.3
   （reingest 透传链）；验收 7 → 2.4（旧键完整锁）。
