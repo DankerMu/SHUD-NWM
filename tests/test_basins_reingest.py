@@ -202,6 +202,38 @@ def test_aggregate_script_writes_totals(
     assert seen_model_ids == {model_id_a, model_id_b}
 
 
+def test_reingest_package_leg_forwards_refusal_causes(tmp_path: Path) -> None:
+    """Drives the **package leg** (``basins_reingest.py:117-125``): a malformed IC
+    header makes discovery mark the model partial, publish refuses it, and the
+    existing ``getattr(error, "details", None)`` passthrough must surface the same
+    cause keys (#1432). No database: publish refuses before the import leg."""
+
+    basins_root, basin_slug, model_id = _stage_qhh_sample_basin(tmp_path)
+    input_name = f"alias-{basin_slug}"
+    ic_path = basins_root / basin_slug / "input" / input_name / f"{input_name}.cfg.ic"
+    ic_path.write_text("23106\t6\n1\t0.1\n", encoding="utf-8")
+
+    with pytest.raises(BasinsReingestError) as excinfo:
+        reingest_basin(
+            basin_slug=basin_slug,
+            model_id=model_id,
+            package_version="vbasins-reingest-refusal",
+            basins_root=basins_root,
+            database_url=None,
+            work_dir=tmp_path / "work",
+            output_path=tmp_path / "receipt.json",
+        )
+
+    payload = excinfo.value.to_payload()
+    assert payload["error_code"] == "BASINS_MODEL_NOT_PUBLISHABLE"
+    assert payload["basin_slug"] == basin_slug
+    assert payload["model_id"] == model_id
+    assert payload["status"] == "partial"
+    assert payload["missing_required_files"] == []
+    assert [reason.split(":")[0] for reason in payload["invalid_required_files"]] == [f"{input_name}.cfg.ic"]
+    assert payload["unreadable_required_files"] == []
+
+
 # ---------------------------------------------------------------------------
 # CLI surface coverage (argparse path runs without Click installed).
 # ---------------------------------------------------------------------------
