@@ -30,8 +30,10 @@
       可追根因；同实例第二次调用不重复；env 可读时零该 token
 - [x] 2.4 回归锁：显式 false + 已完成 → 仍 terminal-skip（None，D8.9）；
       显式 true → strict 行为逐字不变
-- [x] 2.5 backfill 面钉住（有意行为变更；**须构造 journal-complete 的
-      predecessor**——否则改动前后同为 predecessor_gate_failed，锁空转）：
+- [x] 2.5 backfill 面钉住（有意行为变更；seam 级契约——真实 pass 坏 env 下
+      候选主循环先于 emitter 失败，见 proposal 可达性口径；**须构造
+      journal-complete 的 predecessor**——否则改动前后同为
+      predecessor_gate_failed，锁空转）：
       坏 env + journal-complete predecessor 下从「折叠 False 短路 → gate=None
       → 放行」变「strict 抛出 → `predecessor_gate_failed` 跳过」且 WARNING
       已归因；**改动前该用例红（形状=放行）**

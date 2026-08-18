@@ -43487,8 +43487,8 @@ def _warm_start_toggle_state_entries(roots: Mapping[str, Path], checksum: str) -
     Each entry sits exactly at its own cycle's expected warm-start identity
     (``valid_time`` = cycle, ``cycle_id`` = cycle - 12h, ``lead_hours`` = 12),
     so both the 12Z candidate and its 00Z predecessor see current-generation
-    history and land on the §8 warm-continue tail — the branch that reads the
-    orchestrator env a second time (scheduler_generation_gate.py:679).
+    history and land on the §8 warm-continue tail — the branch that re-reads the
+    orchestrator env via ``_db_free_strict_warm_start_required_for``.
     """
     entries = []
     for valid_time, producer_cycle_id in (
@@ -43593,7 +43593,7 @@ def _spy_on_strict_warm_start_evidence(
     unreadable-env warning landed BEFORE the strict path was taken.  Entry —
     not a non-``None`` return — is the positive signal that the terminal-skip
     shortcut was not taken: the strict path can legitimately return ``None``
-    itself (scheduler_generation_gate.py:447).
+    itself (e.g. the legacy history-exists early return).
     """
     calls: list[dict[str, Any]] = []
     real = scheduler_generation_gate_module.strict_warm_start_evidence
