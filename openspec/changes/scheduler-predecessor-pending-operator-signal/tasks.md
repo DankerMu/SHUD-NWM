@@ -27,12 +27,19 @@
 - [x] 1.1 在 §8 blocked evidence（`state_snapshot_index_prior_checkpoint_missing_after_history`）
       附加 `self_heal_expected` / `operator_action_required` /（条件性）
       `operator_action` + `runbook` 字段；不改 `failure` 块与 gate 判定。
-- [x] 1.2 `tests/test_scheduler_generation.py`：两个几何的字段断言——
-      history_exists=True → `self_heal_expected=True, operator_action_required=False`
+      **Round-1 修订**：判据从 `history_exists` 恒等收紧为
+      `latest_usable_state.valid_time == required_prior_cycle_time`
+      （datetime 比较；malformed/缺失 → False，fail toward escalation）。
+- [x] 1.2 `tests/test_scheduler_generation.py`：三个几何的字段断言——
+      精确 predecessor state 存在（entry @ T−lead）→
+      `self_heal_expected=True, operator_action_required=False`
       （底座：`test_env_override_does_not_admit_missing_predecessor`）；
-      history_exists=False → `operator_action_required=True` 且 `runbook` 字段
+      无更早历史 → `operator_action_required=True` 且 `runbook` 字段
       字面值 == `docs/runbooks/scheduler-dbfree-typed-reasons.md`
-      （底座：`test_env_override_blocks_predecessor_pending_without_earlier_history`）。
+      （底座：`test_env_override_blocks_predecessor_pending_without_earlier_history`）；
+      **≥2 格缺口**（唯一 entry @ T−2·lead，history_exists=True）→
+      `operator_action_required=True`
+      （`test_multi_cycle_gap_flags_operator_action_despite_earlier_history`）。
 - [x] 2.1 `tests/test_scheduler_backfill_predecessor.py`：env-wired
       （`NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true`）真实 §8 gate 集成测试，
       钉住 no-earlier-history 几何下被发出的 predecessor 自身评估为同
@@ -57,9 +64,11 @@
       `tests/test_scheduler_generation.py::test_env_override_blocks_predecessor_pending_without_earlier_history`
       的 fixture 底座）。
 - [x] 3.1 新建 `docs/runbooks/scheduler-dbfree-typed-reasons.md`：该 typed
-      reason 的含义、`history_exists` 两类群体区分、处置（发布/回填缺失
-      predecessor state）、§8.6 stall 识别特征（每 pass 追加 blocked
-      predecessor、successor 持续 defer）。
+      reason 的含义、两类群体区分（判据 = `latest_usable_state.valid_time`
+      是否等于 `required_prior_cycle_time`，**不是** `history_exists`）、处置
+      （发布/回填缺失 predecessor state）、§8.6 stall 识别特征（每 pass 追加
+      blocked predecessor、successor 持续 defer、multi-gap 下 history_exists
+      恒 True）。
 - [x] 4.1 验证：`uv run pytest -q tests/test_scheduler_backfill_predecessor.py
       tests/test_scheduler_generation.py` + `uv run ruff check .` +
       `openspec validate scheduler-predecessor-pending-operator-signal --strict --no-interactive` +

@@ -20,8 +20,12 @@ Issue #1152: 当 §8.6 predecessor-backfill 撞上 no-earlier-history 几何
   `scheduler_generation_gate.py` §8 路径的
   `state_snapshot_index_prior_checkpoint_missing_after_history` blocked
   evidence 上附加 additive operator signal 字段：
-  - `self_heal_expected`: `bool(state_history.history_exists)`
-  - `operator_action_required`: `not history_exists`
+  - `self_heal_expected`: 当且仅当
+    `state_history.latest_usable_state.valid_time == required_prior_cycle_time`
+    （被发出的 §8.6 predecessor 自己的精确 warm-start state 存在，单级
+    backfill 能闭合缺口）。**Round-1 修订**：最初的 `history_exists` 恒等
+    派生在 ≥2 格缺口几何下给假阴性（reviewer CONFIRMED），已收紧。
+  - `operator_action_required`: `not self_heal_expected`
   - `operator_action_required=True` 时附
     `operator_action: "backfill_predecessor_state"` 与
     `runbook: "docs/runbooks/scheduler-dbfree-typed-reasons.md"`（字面值钉死，

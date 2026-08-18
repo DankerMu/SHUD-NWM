@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from packages.common import state_qc as _state_qc
@@ -69,6 +71,28 @@ MAX_PACKAGED_IC_PROBE_BYTES = _generation.MAX_PACKAGED_IC_PROBE_BYTES
 #: local name while the constant has a single definition site (the cohort
 #: carrier in ``chain_forecast_cycle`` reads it from there).
 PACKAGED_IC_BOOTSTRAP_MODE = _generation.PACKAGED_IC_BOOTSTRAP_MODE
+
+
+def _evidence_time(value: Any) -> datetime | None:
+    """Parse an evidence timestamp string to a UTC-aware ``datetime``.
+
+    Evidence timestamps cross module boundaries as ``…Z`` strings produced by
+    two independent formatters (``state_manager._format_time`` for the history
+    probe, ``scheduler._format_utc`` for gate-computed times), so comparisons
+    must go through parsed datetimes rather than raw strings.  An absent or
+    malformed value yields ``None``; callers treat that as "cannot prove
+    equality" (Issue #1152: never resolve toward false reassurance).
+    """
+    if isinstance(value, datetime):
+        return _scheduler._ensure_utc(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            # py>=3.11 (pyproject floor) parses the trailing ``Z`` directly.
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+        return _scheduler._ensure_utc(parsed)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -717,18 +741,31 @@ def strict_warm_start_evidence(
         hours=required_lead_hours
     )
     # Issue #1152: split the two operator populations that reach this single
-    # typed reason.  With strictly-earlier usable history the gap self-heals
-    # once the predecessor cycle lands; without it, the §8.6 predecessor
-    # emission re-evaluates to this very shape every pass and the successor
-    # defers forever — only an operator publishing the missing predecessor
-    # state can close it.  Additive fields only: the gate decision and the
+    # typed reason.  §8.6 steps back exactly ONE level per pass, so the gap
+    # self-heals only when the emitted predecessor's own exact warm-start
+    # state already exists — i.e. the latest usable state sits exactly at
+    # ``producer_cycle_time`` (= T − required_lead_hours).  Any other geometry
+    # (no earlier history at all, or a ≥2-cycle hole whose newest usable state
+    # is older than the predecessor) is a fixpoint: the emitted predecessor
+    # re-evaluates to this very shape every pass and the successor defers
+    # forever, so only an operator publishing the missing state can close it.
+    # ``history_exists`` alone is NOT the discriminator — it is True in the
+    # ≥2-cycle stall too.  A missing/malformed ``valid_time`` resolves to
+    # operator_action_required=True (fail toward escalation, never toward
+    # false reassurance).  Additive fields only: the gate decision and the
     # ``failure`` block below are unchanged.
-    history_exists = bool(history.get("history_exists"))
+    latest_usable_state = history.get("latest_usable_state")
+    latest_usable_time = (
+        _evidence_time(latest_usable_state.get("valid_time"))
+        if isinstance(latest_usable_state, Mapping)
+        else None
+    )
+    self_heal_expected = latest_usable_time is not None and latest_usable_time == producer_cycle_time
     operator_signal: dict[str, Any] = {
-        "self_heal_expected": history_exists,
-        "operator_action_required": not history_exists,
+        "self_heal_expected": self_heal_expected,
+        "operator_action_required": not self_heal_expected,
     }
-    if not history_exists:
+    if not self_heal_expected:
         operator_signal["operator_action"] = "backfill_predecessor_state"
         operator_signal["runbook"] = "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     return _scheduler._evidence_safe(
