@@ -35,7 +35,7 @@
 - [x] 3.3 uv run pytest -q tests/test_production_scheduler.py —— 1504 passed（3.14 与 3.11 双臂）
 - [x] 3.4 uv run ruff check services tests —— All checks passed
 - [x] 3.5 openspec validate runtime-roots-resolve-residue --strict --no-interactive —— valid
-- [ ] 3.6 merge 后 node-27（3.11.15）oracle receipt：`uv run pytest -q
+- [x] 3.6 merge 后 node-27（3.11.15）oracle receipt：`uv run pytest -q
       tests/test_production_scheduler.py -k "resolve_residue"` 应 9 passed，
       receipt 记入 issue #1520（沿 #1423 tasks 3.5 先例；CI 3.11 + node-27 3.11.15
       共同构成 ≤3.12 崩溃臂的回归护栏）

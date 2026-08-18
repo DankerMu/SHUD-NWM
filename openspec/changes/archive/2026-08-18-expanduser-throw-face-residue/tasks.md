@@ -57,4 +57,4 @@
 - [x] 3.3 `uv run pytest -q tests/test_production_scheduler.py -k "artifact or sidecar or expanduser or tilde"`（#1441 Verification 原文选择器）
 - [x] 3.4 `uv run ruff check services tests packages`
 - [x] 3.5 openspec validate expanduser-throw-face-residue --strict --no-interactive
-- [ ] 3.6 merge 后 node-27 oracle receipt：定向选择器 + object-store 套件，记入 #1436/#1441
+- [x] 3.6 merge 后 node-27 oracle receipt：定向选择器 + object-store 套件，记入 #1436/#1441
