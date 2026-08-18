@@ -8,8 +8,10 @@ Issue #1152: 当 §8.6 predecessor-backfill 撞上 no-earlier-history 几何
 自身再次评估为同形状 blocked，逐级后退永不落地。这不是 bug（gate fail-closed
 正确），但存在三个契约/可观测性缺口：
 
-1. `history_exists=False`（必须人工补 state）与 `history_exists=True`
-   （等 predecessor 落地即自愈）在 blocked evidence 上不可区分。
+1. "会自愈"（单级 backfill 能闭合缺口）与"必须人工补 state"两类群体在
+   blocked evidence 上不可区分。（注：issue 原文以 `history_exists` 作二分；
+   round-1/round-2 审查证实该二分及其 valid_time 收紧版都会给假阴性，最终
+   判据见 What Changes——`history_exists` 不是判据。）
 2. emitter 该几何零真实门测试——`tests/test_scheduler_backfill_predecessor.py`
    全部用桩 gate。
 3. 该 typed reason 在 `docs/` 零命中，无 runbook。
@@ -20,12 +22,21 @@ Issue #1152: 当 §8.6 predecessor-backfill 撞上 no-earlier-history 几何
   `scheduler_generation_gate.py` §8 路径的
   `state_snapshot_index_prior_checkpoint_missing_after_history` blocked
   evidence 上附加 additive operator signal 字段：
-  - `self_heal_expected`: 当且仅当
-    `state_history.latest_usable_state.valid_time == required_prior_cycle_time`
-    （被发出的 §8.6 predecessor 自己的精确 warm-start state 存在，单级
-    backfill 能闭合缺口）。**Round-1 修订**：最初的 `history_exists` 恒等
-    派生在 ≥2 格缺口几何下给假阴性（reviewer CONFIRMED），已收紧。
+  - `self_heal_expected`: 当且仅当被发出的 §8.6 predecessor 自己的精确
+    warm-start 验证**全量通过**——复用 provider 的
+    `strict_warm_start_evidence(valid_time=required_prior_cycle_time, …)`
+    要求 `ready=True`（覆盖 identity、generation/lineage、`usable_flag`、
+    state 对象存在性与内容校验）。任何验证短缺（错代条目、对象丢失、条目
+    缺失、evidence 畸形）→ `operator_action_required=True`（fail toward
+    escalation）。另附 `self_heal_probe: {ready, reason}` 供运维看到判据依据。
+    **修订史**：round-1 前为 `history_exists` 恒等（≥2 格缺口假阴性）；
+    round-1 收紧为 `latest_usable_state.valid_time` 相等（generation-blind +
+    对象丢失两类假阴性，round-2 双 reviewer CONFIRMED）；round-2 收紧为
+    provider 全量验证。
   - `operator_action_required`: `not self_heal_expected`
+  - **单级语义**：字段只回答"本候选的单级 backfill 会不会闭合"；运维分诊
+    只看被发现 successor 的记录，emitted-predecessor 记录上的该字段不构成
+    链式收敛证据。
   - `operator_action_required=True` 时附
     `operator_action: "backfill_predecessor_state"` 与
     `runbook: "docs/runbooks/scheduler-dbfree-typed-reasons.md"`（字面值钉死，
@@ -53,4 +64,6 @@ Issue #1152: 当 §8.6 predecessor-backfill 撞上 no-earlier-history 几何
 - `tests/test_scheduler_backfill_predecessor.py`（env-wired 真实门测试）
 - `tests/test_scheduler_generation.py`（operator signal 字段断言）
 - `docs/runbooks/scheduler-dbfree-typed-reasons.md`（新建）
+- `services/orchestrator/scheduler_evidence_payload.py`（bounded summarization
+  保留 `operator_action_required`，round-2 C1）
 - spec delta: `file-state-snapshot-index`

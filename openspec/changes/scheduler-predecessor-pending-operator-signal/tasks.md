@@ -25,21 +25,37 @@
 ## Tasks
 
 - [x] 1.1 在 §8 blocked evidence（`state_snapshot_index_prior_checkpoint_missing_after_history`）
-      附加 `self_heal_expected` / `operator_action_required` /（条件性）
-      `operator_action` + `runbook` 字段；不改 `failure` 块与 gate 判定。
+      附加 `self_heal_expected` / `operator_action_required` / `self_heal_probe` /
+      （条件性）`operator_action` + `runbook` 字段；不改 `failure` 块与 gate 判定。
       **Round-1 修订**：判据从 `history_exists` 恒等收紧为
       `latest_usable_state.valid_time == required_prior_cycle_time`
       （datetime 比较；malformed/缺失 → False，fail toward escalation）。
-- [x] 1.2 `tests/test_scheduler_generation.py`：三个几何的字段断言——
-      精确 predecessor state 存在（entry @ T−lead）→
-      `self_heal_expected=True, operator_action_required=False`
+      **Round-2 修订（终态）**：valid_time 判据仍给两类假阴性
+      （`usable_state_history_evidence` 既 generation-blind 又 object-blind，
+      `state_manager.py` :1297-1317），判据改为直接跑 predecessor 自己那道门的
+      同一次验证——`strict_warm_start_evidence(valid_time=required_prior_cycle_time,
+      model_package_checksum=候选 checksum, required_lead_hours=…)` 要求
+      `ready=True`；另附 `self_heal_probe={ready, reason}`。`_evidence_time`
+      helper 随判据下线一并删除（无其他消费者）。
+- [x] 1.2 `tests/test_scheduler_generation.py`：五个几何的字段断言——
+      精确 predecessor state 存在（entry @ T−lead，当代 + 对象在位）→
+      `self_heal_expected=True, operator_action_required=False,
+      self_heal_probe.ready=True`
       （底座：`test_env_override_does_not_admit_missing_predecessor`）；
       无更早历史 → `operator_action_required=True` 且 `runbook` 字段
       字面值 == `docs/runbooks/scheduler-dbfree-typed-reasons.md`
       （底座：`test_env_override_blocks_predecessor_pending_without_earlier_history`）；
       **≥2 格缺口**（唯一 entry @ T−2·lead，history_exists=True）→
       `operator_action_required=True`
-      （`test_multi_cycle_gap_flags_operator_action_despite_earlier_history`）。
+      （`test_multi_cycle_gap_flags_operator_action_despite_earlier_history`）；
+      **round-2 新增两个假阴性几何**——错代条目坐在 T−lead 上
+      （`test_wrong_generation_state_at_predecessor_slot_flags_operator_action`，
+      `self_heal_probe.reason == state_snapshot_index_model_package_checksum_mismatch`）、
+      当代条目在 T−lead 但 state 对象已删
+      （`test_missing_state_object_at_predecessor_slot_flags_operator_action`，
+      `self_heal_probe.reason == state_snapshot_index_object_missing`）；两者的
+      `latest_usable_state.valid_time` 都等于 `required_prior_cycle_time`，
+      round-1 判据在此读作 `self_heal_expected=True`（已 red-proof）。
 - [x] 2.1 `tests/test_scheduler_backfill_predecessor.py`：env-wired
       （`NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true`）真实 §8 gate 集成测试，
       钉住 no-earlier-history 几何下被发出的 predecessor 自身评估为同
@@ -64,20 +80,35 @@
       `tests/test_scheduler_generation.py::test_env_override_blocks_predecessor_pending_without_earlier_history`
       的 fixture 底座）。
 - [x] 3.1 新建 `docs/runbooks/scheduler-dbfree-typed-reasons.md`：该 typed
-      reason 的含义、两类群体区分（判据 = `latest_usable_state.valid_time`
-      是否等于 `required_prior_cycle_time`，**不是** `history_exists`）、处置
-      （发布/回填缺失 predecessor state）、§8.6 stall 识别特征（每 pass 追加
-      blocked predecessor、successor 持续 defer、multi-gap 下 history_exists
-      恒 True）。
+      reason 的含义、两类群体区分（判据 = predecessor 自己那道门的全量
+      warm-start 验证 `ready`，**不是** `history_exists`，**也不是**
+      `latest_usable_state.valid_time` 相等）、处置（按 `self_heal_probe.reason`
+      分流：缺格 → 回填 state；错代 / unusable / 对象丢失 → 先修条目或对象）、
+      §8.6 stall 识别特征（每 pass 追加 blocked predecessor、successor 持续
+      defer、multi-gap 下 history_exists 恒 True）。
+      **Round-2 修订**：补单级语义边界（分诊只读被发现 successor 的记录；
+      emitted-predecessor 记录同带该字段但单级语义，≥2 格链里可能读到
+      `self_heal_expected=true`，不构成链收敛证据；predecessor 若撞
+      declaration 级 / wrong-generation block 则该组字段完全缺席）；修正
+      `predecessor_cycle_time` 与 `required_prior_cycle_time` 的"恒等于"
+      （同一时刻、不同序列化：`+00:00` vs `Z`，按时间戳比对）、
+      `submitted_count` 为 pass 级聚合、strict 短路 reason 视具体失败而定、
+      以及"错代条目会被改判成 wrong-generation reason"这一错误说法。
+- [x] 3.2（round-2 C1）`services/orchestrator/scheduler_evidence_payload.py`：
+      `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 保留 `operator_action_required`，
+      使 runbook 的单布尔分诊在 summarized pass 上仍可执行；
+      `tests/test_production_scheduler.py::test_bounded_candidate_summary_retains_predecessor_pending_operator_signal`
+      钉住（含二次 summary 幂等）。
 - [x] 4.1 验证：`uv run pytest -q tests/test_scheduler_backfill_predecessor.py
-      tests/test_scheduler_generation.py` + `uv run ruff check .` +
+      tests/test_scheduler_generation.py` + `uv run pytest -q
+      tests/test_production_scheduler.py` + `uv run ruff check .` +
       `openspec validate scheduler-predecessor-pending-operator-signal --strict --no-interactive` +
       `npx --yes markdownlint-cli2 "docs/runbooks/scheduler-dbfree-typed-reasons.md"`
       （CI Markdown Lint 门对 `docs/**` 必跑）。
 
 ## Evidence mapping
 
-- selected pack `evidence contract` → tasks 1.2 / 2.1（正负两几何 + 真实门）
-  + spec delta scenario。
+- selected pack `evidence contract` → tasks 1.2 / 2.1 / 3.2（五个几何 + 真实门
+  + bounded 摘要层）+ spec delta scenario。
 - 非目标（不改判定行为）→ 既有 `test_env_override_blocks_predecessor_pending_*`
   回归绿证明 reason/failure 块不变。

@@ -951,6 +951,17 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
         predecessor_evidence["runbook"]
         == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     )
+    # Round-2 single-level semantics: the field on an EMITTED predecessor's own
+    # record answers only "does MY own single-level backfill close MY gap".
+    # Here it reads True because the predecessor's own probe (at
+    # predecessor_cycle_time − lead) finds nothing either; in a ≥2-gap chain
+    # the same field can read self_heal_expected=True on this record while the
+    # successor is still stalled, so chain convergence is read off the
+    # SUCCESSOR's record only (runbook: 单级语义).
+    assert predecessor_evidence["self_heal_probe"] == {
+        "ready": False,
+        "reason": "state_snapshot_index_exact_checkpoint_missing",
+    }
     # Non-goal guard: the gate decision / failure block are unchanged.
     assert predecessor_evidence["failure"]["retryable"] is True
     assert predecessor_evidence["failure"]["permanent"] is False

@@ -16714,6 +16714,42 @@ def test_bounded_evidence_summarizes_candidate_rows_with_identity_and_incident_f
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_bounded_candidate_summary_retains_predecessor_pending_operator_signal() -> None:
+    """#1152: the single-boolean triage must survive bounded summarization.
+
+    §8.6 stalls append a blocked predecessor row every pass, so the passes that
+    carry this evidence are exactly the ones most likely to overflow
+    ``max_evidence_bytes`` and get summarized.  Dropping
+    ``operator_action_required`` there would make the runbook's triage step
+    ("read one boolean") unexecutable precisely where it is needed.
+    """
+
+    row = {
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_a:forecast_gfs_deterministic",
+        "model_id": "model_a",
+        "status": "blocked",
+        "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+        "state_evidence": {
+            "mode": "db_free_state_continuity",
+            "required_prior_cycle_time": "2026-05-21T00:00:00Z",
+            "self_heal_expected": False,
+            "operator_action_required": True,
+            "operator_action": "backfill_predecessor_state",
+            "runbook": "docs/runbooks/scheduler-dbfree-typed-reasons.md",
+            "self_heal_probe": {"ready": False, "reason": "state_snapshot_index_object_missing"},
+            "state_history": {"detail": _bounded_incident_verbose_text("predecessor-pending-history")},
+        },
+    }
+
+    summary = scheduler_evidence_payload_module._bounded_candidate_summary(row)
+
+    assert summary["operator_action_required"] is True
+    assert summary["reason"] == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    assert set(summary) <= _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS
+    # Idempotent: a second pass over the already-summarized row keeps it.
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(summary) == summary
+
+
 def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() -> None:
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_summary_idempotent")
 
@@ -30056,6 +30092,7 @@ _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS = frozenset(
         "decision",
         "missing_forcing_repair_status",
         "quarantined_skip_reason",
+        "operator_action_required",
         "summary_error",
     }
 )

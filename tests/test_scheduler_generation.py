@@ -1395,6 +1395,9 @@ def test_env_override_does_not_admit_missing_predecessor(
     assert state_evidence["operator_action_required"] is False
     assert "operator_action" not in state_evidence
     assert "runbook" not in state_evidence
+    # Round-2: the signal is the predecessor's OWN full warm-start probe, not
+    # a valid_time comparison — here it verifies clean and reports ready.
+    assert state_evidence["self_heal_probe"] == {"ready": True, "reason": None}
     # Non-goal guard: the failure block is untouched by the additive signal.
     assert state_evidence["failure"]["retryable"] is True
     assert state_evidence["failure"]["permanent"] is False
@@ -1554,7 +1557,350 @@ def test_multi_cycle_gap_flags_operator_action_despite_earlier_history(
         state_evidence["runbook"]
         == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     )
+    # Round-2: the predecessor's own probe finds nothing at 00Z at all.
+    assert state_evidence["self_heal_probe"] == {
+        "ready": False,
+        "reason": "state_snapshot_index_exact_checkpoint_missing",
+    }
     # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
+
+
+def test_wrong_generation_state_at_predecessor_slot_flags_operator_action(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1152 round-2: OLD-generation checkpoint at T − lead → operator action.
+
+    Fixture = the T15(b) self-heal anchor with the entry at the predecessor
+    slot (2026-05-21T00Z) swapped to an OLD-generation checksum, plus a
+    current-generation entry one cycle further back (2026-05-20T12Z) so the
+    transition matrix still reaches ``block_predecessor_pending``.
+
+    ``usable_state_history_evidence`` is generation-blind (it filters on
+    ``usable_flag`` only, ``state_manager.py`` :1297-1304), so the history
+    probe's ``latest_usable_state.valid_time`` DOES equal
+    ``required_prior_cycle_time`` here — a valid_time-only predicate would
+    label this self-healing.  It is not: the emitted §8.6 predecessor's own
+    gate verifies lineage and blocks permanently on the generation mismatch.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            # OLD-generation checkpoint sitting exactly at the predecessor
+            # slot (T − lead_hours = 2026-05-21T00Z).
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum="a" * 64,
+                state_id="state_old_gen_at_predecessor_slot",
+                valid_time="2026-05-21T00:00:00Z",
+                cycle_id="gfs_2026052012",
+                lead_hours=12,
+            ),
+            # Current-generation history further back so the matrix takes the
+            # current-generation branch (block_predecessor_pending).
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_two_cycle_gap",
+                valid_time="2026-05-20T12:00:00Z",
+                cycle_id="gfs_2026052000",
+                lead_hours=12,
+            ),
+        ],
+    )
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    # Non-goal guard: the typed reason is unchanged by the round-2 predicate.
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # The generation-blind trap this test exists for: the history probe DOES
+    # report a usable state exactly at required_prior_cycle_time.
+    assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == "2026-05-21T00:00:00Z"
+    )
+    # …and the signal still says "operator", because the provider probe runs
+    # the predecessor's OWN lineage verification.
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    assert state_evidence["self_heal_probe"]["ready"] is False
+    assert (
+        state_evidence["self_heal_probe"]["reason"]
+        == "state_snapshot_index_model_package_checksum_mismatch"
+    )
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
+
+
+def test_missing_state_object_at_predecessor_slot_flags_operator_action(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1152 round-2: current-gen entry at T − lead whose object is GONE.
+
+    Fixture = the T15(b) self-heal anchor verbatim, then the predecessor
+    slot's state object is deleted from the object store after the index was
+    published.  ``usable_state_history_evidence`` never opens the object
+    (``state_manager.py`` :1297-1317), so the history probe still reports the
+    entry as the latest usable state; the emitted §8.6 predecessor's own gate
+    opens it and blocks on ``state_snapshot_index_object_missing``
+    (``state_manager.py`` :2546-2551).
+    """
+    from packages.common.object_store import LocalObjectStore
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    predecessor_entry = _old_generation_state_entry(
+        roots,
+        old_package_checksum=candidate_checksum,
+        state_id="state_current_gen_prior_history",
+        valid_time="2026-05-21T00:00:00Z",
+        cycle_id="gfs_2026052012",
+        lead_hours=12,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[predecessor_entry],
+    )
+    # Delete the state object AFTER publishing so the index still advertises
+    # a usable current-generation entry at the predecessor slot.
+    LocalObjectStore(roots["object_store_root"], "s3://nhms").resolve_path(
+        predecessor_entry["state_uri"]
+    ).unlink()
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # Object-blind history probe: still the latest usable state at T − lead.
+    assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == "2026-05-21T00:00:00Z"
+    )
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    assert state_evidence["self_heal_probe"]["ready"] is False
+    assert (
+        state_evidence["self_heal_probe"]["reason"]
+        == "state_snapshot_index_object_missing"
+    )
     assert state_evidence["failure"]["retryable"] is True
     assert state_evidence["failure"]["permanent"] is False
 
@@ -1726,6 +2072,11 @@ def test_env_override_blocks_predecessor_pending_without_earlier_history(
         state_evidence["runbook"]
         == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
     )
+    # Round-2: the predecessor's own probe finds nothing at 00Z at all.
+    assert state_evidence["self_heal_probe"] == {
+        "ready": False,
+        "reason": "state_snapshot_index_exact_checkpoint_missing",
+    }
     # Non-goal guard: the failure block is untouched by the additive signal.
     assert state_evidence["failure"]["retryable"] is True
     assert state_evidence["failure"]["permanent"] is False

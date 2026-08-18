@@ -33,8 +33,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from packages.common import state_qc as _state_qc
@@ -71,28 +69,6 @@ MAX_PACKAGED_IC_PROBE_BYTES = _generation.MAX_PACKAGED_IC_PROBE_BYTES
 #: local name while the constant has a single definition site (the cohort
 #: carrier in ``chain_forecast_cycle`` reads it from there).
 PACKAGED_IC_BOOTSTRAP_MODE = _generation.PACKAGED_IC_BOOTSTRAP_MODE
-
-
-def _evidence_time(value: Any) -> datetime | None:
-    """Parse an evidence timestamp string to a UTC-aware ``datetime``.
-
-    Evidence timestamps cross module boundaries as ``…Z`` strings produced by
-    two independent formatters (``state_manager._format_time`` for the history
-    probe, ``scheduler._format_utc`` for gate-computed times), so comparisons
-    must go through parsed datetimes rather than raw strings.  An absent or
-    malformed value yields ``None``; callers treat that as "cannot prove
-    equality" (Issue #1152: never resolve toward false reassurance).
-    """
-    if isinstance(value, datetime):
-        return _scheduler._ensure_utc(value)
-    if isinstance(value, str) and value.strip():
-        try:
-            # py>=3.11 (pyproject floor) parses the trailing ``Z`` directly.
-            parsed = datetime.fromisoformat(value.strip())
-        except ValueError:
-            return None
-        return _scheduler._ensure_utc(parsed)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -742,28 +718,44 @@ def strict_warm_start_evidence(
     )
     # Issue #1152: split the two operator populations that reach this single
     # typed reason.  §8.6 steps back exactly ONE level per pass, so the gap
-    # self-heals only when the emitted predecessor's own exact warm-start
-    # state already exists — i.e. the latest usable state sits exactly at
-    # ``producer_cycle_time`` (= T − required_lead_hours).  Any other geometry
-    # (no earlier history at all, or a ≥2-cycle hole whose newest usable state
-    # is older than the predecessor) is a fixpoint: the emitted predecessor
-    # re-evaluates to this very shape every pass and the successor defers
+    # self-heals only when the emitted predecessor would itself be ADMITTED —
+    # which is decided by the predecessor's own gate, not by a timestamp.  So
+    # run that very verification here: the same provider call the predecessor
+    # will make, at ``producer_cycle_time`` (= T − required_lead_hours) with
+    # this candidate's package checksum and lead hours.  ``ready=True`` covers
+    # identity, generation/lineage, ``usable_flag`` and state-object
+    # availability/content in one shot; anything short of that (no earlier
+    # history, a ≥2-cycle hole, a wrong-generation entry sitting exactly at the
+    # slot, an index entry whose object is gone) is a fixpoint — the emitted
+    # predecessor re-evaluates to a block every pass and the successor defers
     # forever, so only an operator publishing the missing state can close it.
-    # ``history_exists`` alone is NOT the discriminator — it is True in the
-    # ≥2-cycle stall too.  A missing/malformed ``valid_time`` resolves to
-    # operator_action_required=True (fail toward escalation, never toward
-    # false reassurance).  Additive fields only: the gate decision and the
-    # ``failure`` block below are unchanged.
-    latest_usable_state = history.get("latest_usable_state")
-    latest_usable_time = (
-        _evidence_time(latest_usable_state.get("valid_time"))
-        if isinstance(latest_usable_state, Mapping)
-        else None
+    #
+    # Neither ``history_exists`` nor ``latest_usable_state.valid_time`` is a
+    # sound discriminator: ``usable_state_history_evidence`` is generation- and
+    # object-blind (``state_manager.py`` :1297-1317), so both read "self-heal"
+    # on geometries the predecessor's gate rejects.  Not wrapped in try/except
+    # on purpose: this is the same provider call already made unprotected at
+    # the top of this function, and swallowing a raise here would be exactly
+    # the false reassurance this signal exists to prevent.  Additive fields
+    # only: the gate decision and the ``failure`` block below are unchanged.
+    self_heal_probe = scheduler._db_free_state_index_provider().strict_warm_start_evidence(
+        model_id=candidate.model_id,
+        source_id=candidate.source_id,
+        valid_time=producer_cycle_time,
+        model_package_version=candidate.model_package_uri,
+        model_package_checksum=checksum_str,
+        required_lead_hours=required_lead_hours,
     )
-    self_heal_expected = latest_usable_time is not None and latest_usable_time == producer_cycle_time
+    self_heal_expected = bool(self_heal_probe.get("ready"))
     operator_signal: dict[str, Any] = {
         "self_heal_expected": self_heal_expected,
         "operator_action_required": not self_heal_expected,
+        # Compact probe receipt: operators must be able to see WHY self-heal
+        # was ruled out without re-running the gate.
+        "self_heal_probe": {
+            "ready": self_heal_expected,
+            "reason": self_heal_probe.get("reason"),
+        },
     }
     if not self_heal_expected:
         operator_signal["operator_action"] = "backfill_predecessor_state"

@@ -27,6 +27,11 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     ("decision", ("decision",)),
     ("missing_forcing_repair_status", ("missing_forcing_repair", "status")),
     ("quarantined_skip_reason", ("journal_predecessor_identity", "quarantined_skip_reason")),
+    # #1152: the §8.6 predecessor-pending triage boolean.  Stalls are exactly
+    # the passes that overflow the byte budget (one more blocked predecessor
+    # row per pass), so dropping it here would make the runbook's
+    # single-boolean triage unexecutable where it is needed most.
+    ("operator_action_required", ("operator_action_required",)),
 )
 _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
