@@ -6335,9 +6335,9 @@ class FileOrchestrationJournalRepository:
         cycle_segment = format_cycle_time(cycle_time)
         source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
-        # Defense in depth only: every public caller hits the read frame's
-        # precondition read first.  This keeps the carrier contained on any
-        # path that lacks one.
+        # Public contract for the insert_pipeline_event lane, which computes the
+        # sequence floor before any precondition read; for the other write lanes
+        # this is defense in depth behind the read frame's conversion.
         try:
             for source_segment in source_segments:
                 for surface in ("journal", "pipeline-events"):

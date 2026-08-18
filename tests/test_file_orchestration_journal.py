@@ -9754,11 +9754,17 @@ def _symlink_over_directory(path: Path, *, stash: Path) -> None:
 
 
 def _journal_tree_bytes(root: Path) -> dict[str, bytes]:
-    """Durable journal content only; the empty flock files are not records."""
+    """Durable journal content only; the empty flock files are not records.
+
+    ``recurse_symlinks=True`` is load-bearing: the tampered scenes replace
+    ``journal/<source>`` with a symlink, and a write that leaked through it
+    lands in the decoy.  A non-recursing walk stops at the symlink and reports
+    the leaked bytes as "nothing changed".
+    """
 
     return {
         str(path.relative_to(root)): path.read_bytes()
-        for path in sorted(root.rglob("*"))
+        for path in sorted(root.rglob("*", recurse_symlinks=True))
         if not path.is_symlink() and path.is_file() and ".locks" not in path.parts
     }
 
@@ -9940,6 +9946,38 @@ def test_directory_occupying_a_segment_slot_still_reaches_the_hardened_reader(
     assert caught.value.reason == "file_journal_unreadable"
 
 
+def test_sequence_floor_probe_is_containment_aware_at_its_own_seam(tmp_path: Path) -> None:
+    """E3 sibling — the floor probe pinned directly, not through its caller.
+
+    ``_cycle_segment_paths`` pre-filters every path this probe receives today,
+    so no end-to-end lane can distinguish it from a bare ``os.stat``.  The pin
+    lives at the seam so a #1165-family change to that pre-filtering cannot
+    silently hand the probe an uncontained path.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with pytest.raises(journal_module._JournalProbeContainmentError):
+        repository._sequence_regular_file_exists(root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl")
+
+    # The other half of the seam's contract: under a chain of real directories
+    # a missing entry is still plain absence, never a fault.
+    honest = FileOrchestrationJournalRepository(tmp_path / "honest")
+    (tmp_path / "honest" / "journal" / "gfs").mkdir(parents=True)
+    assert (
+        honest._sequence_regular_file_exists(
+            tmp_path / "honest" / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl"
+        )
+        is False
+    )
+
+
 def _reserved_cohort_master_on_disk(base: Path) -> tuple[Any, dict[str, Any]]:
     repository, record = _reserved_cohort_master(base, member_count=2)
     assert repository.reserve_pipeline_job(dict(record)) is not None
@@ -10103,7 +10141,11 @@ def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
     The carrier must not inherit the public journal error: the broad handlers
     on this lane would catch a subclass BEFORE the choke frame converts it,
     which is the silent-empty failure mode this change exists to remove.  The
-    goal is equal loudness with a reader fault, not more.
+    ``issubclass`` line is what pins that; the observables below pin the other
+    half — the fault stays absorbed to the SAME answer a corrupt journal file
+    already yields, so no lane gains loudness here.  They are pinned
+    absolutely rather than against each other because a common-mode drift
+    (both lanes degrading to ``[]``) would satisfy an equality.
     """
 
     assert not issubclass(journal_module._JournalProbeContainmentError, FileOrchestrationJournalError)
@@ -10118,19 +10160,16 @@ def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
     corrupt, _ = _terminally_failed_cohort_master(corrupt_root)
     _corrupt_cohort_cycle_log(corrupt)
 
-    assert tampered._cycle_materialization_model_ids_unlocked(
-        source_id="gfs",
-        cycle_time=_COHORT_CYCLE,
-    ) == corrupt._cycle_materialization_model_ids_unlocked(
-        source_id="gfs",
-        cycle_time=_COHORT_CYCLE,
-    )
-    assert tampered.has_completed_pipeline(
-        source_id="gfs",
-        cycle_time=_COHORT_CYCLE,
-        model_id="model_0",
-    ) == corrupt.has_completed_pipeline(
-        source_id="gfs",
-        cycle_time=_COHORT_CYCLE,
-        model_id="model_0",
-    )
+    for repository in (tampered, corrupt):
+        assert repository._cycle_materialization_model_ids_unlocked(
+            source_id="gfs",
+            cycle_time=_COHORT_CYCLE,
+        ) == ["model_0", "model_1"]
+        assert (
+            repository.has_completed_pipeline(
+                source_id="gfs",
+                cycle_time=_COHORT_CYCLE,
+                model_id="model_0",
+            )
+            is False
+        )
