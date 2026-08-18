@@ -251,16 +251,28 @@ Match by submit time inside the reservation's attempt window and by user/account
 
 ### Disposition — what exists today
 
-1. **Fix the cluster, which is the only automatic exit.** Set `AccountingStoreFlags=job_comment`
-   in `slurm.conf` and `scontrol reconfigure` (a cluster-admin action, not a repo command).
-   The probe then passes and reconcile resumes binding and demoting normally. Note the flag
-   is applied at submission time: it does **not** retroactively attach comments to jobs
-   already submitted, so it unwedges future attempts, not the rows already held.
+1. **Fix the cluster — but only after every held row has been through the in-flight
+   check above and confirmed dead.** Set `AccountingStoreFlags=job_comment` in
+   `slurm.conf` and `scontrol reconfigure` (a cluster-admin action, not a repo command).
+   **Warning — ordering matters:** the moment the probe turns True the gate opens for
+   **all** held rows, not just future attempts. Jobs submitted while the flag was off
+   carry an empty accounting `Comment` forever (the flag applies at submission time and
+   is not retroactive), so the comment search still cannot see them: a held row whose
+   job is **still running** on a just-fixed cluster is immediately judged a confirmed
+   absence past grace, demoted to `reservation_lost` with `absence_retry_permitted`,
+   and the next pass reclaims and re-`sbatch`es the cohort — the exact double
+   submission this gate exists to prevent. With every held row confirmed dead first,
+   reconfiguring is safe and doubles as the demotion mechanism: the next pass demotes
+   each dead row through the normal absence path and the retry is minted legitimately.
 2. **In flight:** do not touch the row. Let the job reach its terminal state — but be aware
    reconcile still cannot bind it, because binding needs the comment match that this cluster
    cannot serve. The row remains held, so it still ends up in case 3.
-3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window): **there
-   is no safe operator mechanism to demote the row today.** Verified against the code:
+3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window): if the
+   cluster can be reconfigured **and every other held row is also confirmed dead**, case 1
+   is the demotion mechanism — reconfigure and let the next pass demote through the normal
+   absence path. When reconfiguring is not an option (or any other held row may still be
+   alive, making the cluster-wide gate flip unsafe), **there is no safe row-scoped operator
+   mechanism to demote the row today.** Verified against the code:
    - The manual-retry surface (`POST /api/v1/runs/{run_id}/retry`, `RetryService` /
      the file journal's `record_manual_repair`) only accepts a latest job whose status is
      `failed` / `submission_failed` / `partially_failed` / `permanently_failed` /
