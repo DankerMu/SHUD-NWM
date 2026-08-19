@@ -453,6 +453,27 @@ def _state_jobs(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         return [dict(state)]
     return []
 
+def _job_is_cycle_scope_row(job: Mapping[str, Any]) -> bool:
+    """Row-level cycle-scope test, shared by every derivation that scans the row list.
+
+    Mirrors the journal's strict ``_is_model_less_cycle_scope_job`` semantics: cycle
+    scope requires an empty ``model_id`` AND the ``cycle_<source>_<stamp>[_suffix]``
+    run-id grammar.  ``model_id`` alone is not sufficient — model-less rows can also
+    carry the candidate's OWN ``fcst_...`` run id, and treating those as cycle scope
+    would silently discard the operator-pinned attempt number.  Scheduler state
+    carries no source/cycle context, so the grammar is checked by prefix.
+
+    It lives here rather than in ``scheduler_state_manual_retry`` (which re-exports it
+    under the same name) because this module is the import floor: the stage-scoped
+    attempt derivation below and ``scheduler_state_failure``'s candidate-scoped
+    failed-stage resolver both need the same judgement, and one predicate with three
+    consumers cannot drift the way three copies would (#1179 D5).
+    """
+
+    if job.get("model_id") not in (None, ""):
+        return False
+    return str(job.get("run_id") or "").startswith("cycle_")
+
 def _state_events(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     value = state.get("pipeline_events") or state.get("events")
     max_events = _state_event_limit(state)
@@ -499,6 +520,28 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     channel is pre-existing behaviour, tracked in #1579, not something the floors
     fix or promise.
 
+    A stage that names no canonical downstream restart stage — ``download``, the
+    one production cycle stage outside ``DOWNSTREAM_RESTART_STAGES`` — is derived
+    the same way against the row's RAW authoritative stage name (#1298).  Before
+    that arm existed such a stage short-circuited to the flat count, which the
+    journal's clean-reservation invariant has reset to 0, so a candidate whose only
+    live failure sat at a non-canonical stage lost the durable record of its
+    consumed ``_retry_<n>`` identity and re-minted it.  Two boundaries of that arm:
+
+    * it subtracts cycle-scope rows itself.  The canonical arm's exclusion is a
+      side effect of stage matching, but a raw-name match would pair the
+      candidate's own single-basin ``download`` row with the cohort's model-less
+      one — the identity filter keeps source-cycle download rows on purpose — and
+      charge the cohort's persisted counter to this candidate.
+    * it is WINDOW-SENSITIVE: ``stage_retry_attempt_floors`` covers canonical
+      stages only (#1179), so a non-canonical stage's maximum-attempt row
+      truncated out of the ``job_limit`` window is not restored.  The floors key
+      domain is deliberately not widened for it — the shapes that reach this arm
+      (single-basin cycles, a handful of rows) sit far from the truncation.
+
+    The canonical arm's derivation is unchanged byte for byte, including its
+    existing count of model-less cohort rows at the same canonical stage.
+
     Without ``stage`` the flat-first order and the cross-job recorded-count max
     are preserved byte-for-byte for the evidence-owner / manual-retry consumers,
     and the floors never leak in: they are per-stage maxima over the UNFILTERED
@@ -511,10 +554,32 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     flat = _state_flat_retry_attempt(state)
     canonical_stage = _canonical_downstream_stage(stage)
     if canonical_stage is None:
+        if stage not in (None, ""):
+            return max(flat or 0, _state_non_canonical_stage_retry_attempt(state, str(stage)))
         if flat is not None:
             return flat
         return _state_job_retry_attempt(state, None)
     return max(flat or 0, _state_job_retry_attempt(state, canonical_stage))
+
+def _state_non_canonical_stage_retry_attempt(state: Mapping[str, Any], stage: str) -> int:
+    """Maximum attempt the CANDIDATE-scope rows at raw stage name ``stage`` carry (#1298).
+
+    Same counting rule as ``_job_retry_attempt``'s matching branch — the higher of a
+    row's recorded ``retry_count`` and its ``_retry_<n>`` id suffix — over the rows
+    whose authoritative stage field equals ``stage`` literally.  No canonical
+    normalization: the argument is by definition a stage the alias table does not
+    name, so equality is the only identity available.  Cycle-scope rows are
+    subtracted here; see ``_state_retry_attempt`` for why.
+    """
+
+    return max(
+        (
+            effective_retry_attempt(job.get("job_id"), _coerce_int(job.get("retry_count"), default=0))
+            for job in _state_jobs(state)
+            if _job_stage_name(job) == stage and not _job_is_cycle_scope_row(job)
+        ),
+        default=0,
+    )
 
 def _state_flat_retry_attempt(state: Mapping[str, Any]) -> int | None:
     for key in ("retry_attempt", "attempt", "retry_count"):
