@@ -33,6 +33,7 @@ from services.orchestrator.scheduler_state_rows import (
     _canonical_downstream_stage,
     _event_has_failure_signal,
     _is_source_cycle_download_stage,
+    _job_is_cycle_scope_row,
     _pipeline_job_is_repaired_stage_evidence,
     _state_events,
     _state_has_only_unsubmitted_auto_retry_placeholders,
@@ -61,12 +62,56 @@ _ARTIFACT_PROBE_ERROR_REASON = "artifact_probe_error"
 
 
 def _failed_stage(state: Mapping[str, Any]) -> str | None:
+    """Which stage of this CYCLE failed, scope-blind on purpose.
+
+    The restart router and the downstream-evidence channels want exactly that: a model-less
+    cohort row may legitimately name the stage a restart resumes from.  Consumers that spend
+    the answer as the candidate's own ATTEMPT budget read ``_candidate_failed_stage`` below.
+    """
+
+    return _resolve_failed_stage(state, candidate_scope=False)
+
+def _candidate_failed_stage(state: Mapping[str, Any]) -> str | None:
+    """The failed stage as an ATTEMPT axis: the candidate's own, never the cohort's (#1300).
+
+    ``pipeline_jobs`` is the unfiltered cycle-wide list, so the scope-blind row scan can name
+    a multi-basin cycle's model-less cohort row.  Feeding that stage to
+    ``_state_retry_attempt`` inverts the derivation's own cross-scope protection: the cohort's
+    durably persisted counter is counted while the candidate's own row is zeroed for "not
+    matching the stage", so the cohort's 7th retry became the candidate's attempt (a manual
+    retry jumping 3 -> 8) and its retry-limit budget (a first-failure candidate demoted to
+    ``retry_limit_exhausted``) — silently, with no evidence of whose counter it was.
+
+    Resolving nothing is the honest answer for a cohort-only geometry: the consumers then fall
+    back to the flat and restarted-stage-family paths, which are candidate-scoped by
+    construction.  A layered "cycle stage, but not yours" return value would have no
+    consumer — the ones that want the cycle's stage stayed on ``_failed_stage``.
+    """
+
+    return _resolve_failed_stage(state, candidate_scope=True)
+
+def _resolve_failed_stage(state: Mapping[str, Any], *, candidate_scope: bool) -> str | None:
+    """The one failed-stage resolution, with the cycle-scope subtraction as its only axis.
+
+    The two public spellings differ in exactly one conjunct, so they share a body rather than
+    mirroring one: a change to the explicit-key order or the repaired-evidence skip must not
+    be applicable to one and forgotten on the other.
+
+    The EXPLICIT-key branch is common on purpose.  A top-level ``failed_stage``/``stage`` is
+    not always candidate scope — ``chain_repository_state`` can cast it from an
+    ``active_source_cycle_failure``, i.e. a cycle-scope source-cycle download row — but that
+    geometry is exactly the one #1287's download AC depends on, so #1300 narrows the ROW SCAN
+    only.
+    """
+
     for key in ("failed_stage", "stage", "restart_stage"):
         value = state.get(key)
         if value not in (None, ""):
             return str(value)
     for job in reversed(_state_jobs(state)):
         if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
+        if candidate_scope and _job_is_cycle_scope_row(job):
             continue
         status = str(job.get("status") or "")
         if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
@@ -184,7 +229,10 @@ def _failure_policy_payload(
     manual: bool = False,
 ) -> dict[str, Any]:
     error_code = _state_error_code(state) or default_error_code or "UNKNOWN_FAILURE"
-    stage = _failed_stage(state)
+    # This payload classifies THIS candidate against THIS candidate's budget, so its stage
+    # axis is the candidate-scoped resolver (#1300).  The restart router keeps reading the
+    # scope-blind ``_failed_stage`` for its own ``stage``/``restart_stage`` keys.
+    stage = _candidate_failed_stage(state)
     attempt = _state_retry_attempt(state, stage=stage)
     retry_limit = _state_retry_limit(state)
     classification = classify_failure(error_code, attempt=attempt, retry_limit=retry_limit, manual=manual)
@@ -1897,7 +1945,9 @@ def _cancelled_state_evidence(
         "retry_policy": {
             "automatic_retry_allowed": False,
             "manual_retry_required": True,
-            "attempt": _state_retry_attempt(state, stage=_failed_stage(state)),
+            # Candidate-scoped stage axis: a cohort row's counter is not this candidate's
+            # attempt (#1300).
+            "attempt": _state_retry_attempt(state, stage=_candidate_failed_stage(state)),
             "retry_limit": _state_retry_limit(state),
         },
         "identity": {
@@ -1914,7 +1964,9 @@ def _manual_retry_state_evidence(
     failure = _failure_policy_payload(state, manual=True)
     manual = _manual_retry_payload(state)
     prior_failure = _prior_failure_reason(state) or failure["reason_code"]
-    previous_attempt = _state_retry_attempt(state, stage=_failed_stage(state))
+    # Candidate-scoped stage axis (#1300): with a cohort-only geometry this resolves nothing
+    # and the derivation falls through to the flat and restarted-stage-family paths.
+    previous_attempt = _state_retry_attempt(state, stage=_candidate_failed_stage(state))
     new_attempt = _manual_retry_new_attempt(state, previous_attempt=previous_attempt)
     evidence = {
         **base_evidence,
