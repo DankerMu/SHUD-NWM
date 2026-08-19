@@ -7093,6 +7093,491 @@ def test_projected_repaired_cancelled_candidate_row_reopens_the_only_failure_lef
     assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
 
 
+_MULTI_REPAIR_FORCING_JOB_ID = "job_model_a_forcing"
+_MULTI_REPAIR_FORCING_RETRY_JOB_ID = "job_model_a_forcing_retry_1"
+_MULTI_REPAIR_FORECAST_JOB_ID = "job_model_a_forecast"
+_MULTI_REPAIR_FORECAST_RETRY_JOB_ID = "job_model_a_forecast_retry_1"
+_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID = "job_model_a_convert"
+
+
+def _multi_repair_candidate_job(
+    *,
+    job_id: str,
+    stage: str,
+    job_type: str,
+    status: str,
+    updated_at: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A candidate-scoped row of the model_a fixture at one stage."""
+
+    job: dict[str, Any] = {
+        "job_id": job_id,
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "cycle_id": "gfs_2026052106",
+        "model_id": "model_a",
+        "stage": stage,
+        "job_type": job_type,
+        "status": status,
+        "retry_count": 0,
+        "updated_at": updated_at,
+    }
+    job.update(overrides)
+    return job
+
+
+def _multi_repair_jobs(*, include_unrepaired_convert: bool) -> list[dict[str, Any]]:
+    """Two DISTINCT-stage failures on one candidate, each repaired by its own manual retry.
+
+    The operator repaired ``forcing`` first and ``forecast`` later, which is the whole #1460
+    trigger: the newer repair used to win a ``break`` and the older one lost its annotation.
+
+    ``include_unrepaired_convert`` adds a failed ``convert`` row that NO retry repairs.  It
+    shares neither ``stage`` nor ``job_type`` with either retry job, so ``_jobs_share_stage``
+    must never sweep it into the repaired set -- the over-claim guard for the widened
+    annotation face.
+    """
+
+    jobs = [
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORCING_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at="2026-05-21T06:01:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORCING_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at="2026-05-21T06:05:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORECAST_JOB_ID,
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at="2026-05-21T06:10:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORECAST_RETRY_JOB_ID,
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at="2026-05-21T06:15:00Z",
+        ),
+    ]
+    if include_unrepaired_convert:
+        jobs.insert(
+            0,
+            _multi_repair_candidate_job(
+                job_id=_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID,
+                stage="convert",
+                job_type="convert_canonical",
+                status="failed",
+                error_code="NODE_FAILURE",
+                updated_at="2026-05-21T06:02:00Z",
+            ),
+        )
+    return jobs
+
+
+def _multi_repair_events() -> list[dict[str, Any]]:
+    """One ``record_manual_repair`` event per repair, linking each retry to its target."""
+
+    return [
+        _projected_repair_event(
+            entity_id=_MULTI_REPAIR_FORCING_RETRY_JOB_ID,
+            previous_job_id=_MULTI_REPAIR_FORCING_JOB_ID,
+            retry_count=1,
+            event_id=41,
+            created_at="2026-05-21T06:05:00Z",
+        ),
+        _projected_repair_event(
+            entity_id=_MULTI_REPAIR_FORECAST_RETRY_JOB_ID,
+            previous_job_id=_MULTI_REPAIR_FORECAST_JOB_ID,
+            retry_count=1,
+            event_id=42,
+            created_at="2026-05-21T06:15:00Z",
+        ),
+    ]
+
+
+def test_projected_second_stage_repair_does_not_evict_the_first_repairs_annotation() -> None:
+    """#1460 E1: every repaired failure keeps its annotation, not just the newest one.
+
+    ``_candidate_manual_stage_repair_state`` walked the successful manual retries newest-first
+    and ``break``-ed on the first one that claimed anything, so an operator who repaired
+    ``forcing`` and then ``forecast`` lost the FORCING row's annotation entirely: no
+    ``repair_status``, no ``repaired_by_job_id``, ``active_blocker`` still in the truthy domain.
+    Every downstream consumer then resurrected it as a live blocker and pulled the restart stage
+    back to a stage that had already been repaired.
+
+    The convert row is the counter-guard: widening the annotation face to the UNION of each
+    retry job's claim set must not let ``_jobs_share_stage`` claim a failure nobody repaired.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=True),
+        events=_multi_repair_events(),
+    )
+
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+    for failed_job_id, retry_job_id in (
+        (_MULTI_REPAIR_FORCING_JOB_ID, _MULTI_REPAIR_FORCING_RETRY_JOB_ID),
+        (_MULTI_REPAIR_FORECAST_JOB_ID, _MULTI_REPAIR_FORECAST_RETRY_JOB_ID),
+    ):
+        row = rows[failed_job_id]
+        assert row["status"] == "failed"
+        assert row["repair_status"] == "repaired"
+        assert row["repaired_by_job_id"] == retry_job_id
+        assert row["superseded_by_job_id"] == retry_job_id
+        assert row["active_blocker"] is False
+
+    # Over-claim guard: only the repaired STAGES' rows carry annotations.
+    unrepaired = rows[_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID]
+    assert unrepaired["status"] == "failed"
+    assert "repair_status" not in unrepaired
+    assert "repaired_by_job_id" not in unrepaired
+    assert "superseded_by_job_id" not in unrepaired
+    assert "active_blocker" not in unrepaired
+
+
+def test_projected_multi_repair_evidence_still_names_the_newest_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1460 E2: widening the annotation face must not move the SINGLE evidence winner.
+
+    ``latest_repair`` is a ``max`` over the accumulated pairs keyed on (retry truth, failed
+    truth).  Every pair the older ``forcing`` retry contributes has a strictly lower retry truth,
+    and first-write-wins keeps the newest retry's own claims intact, so the winner is the same
+    ``forecast`` pair the ``break`` used to hand it -- and the restart stage derived from it must
+    not slide back to the already-repaired ``forcing``.
+
+    ``restart_stage`` is ``_stage_after("forecast")``, which the compute-terminal toggle moves to
+    ``state_save_qc``, so the toggle is pinned unset.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=True),
+        events=_multi_repair_events(),
+    )
+
+    evidence = state["repaired_stage_evidence"]
+    assert evidence["original_failed_job_id"] == _MULTI_REPAIR_FORECAST_JOB_ID
+    assert evidence["repairing_retry_job_id"] == _MULTI_REPAIR_FORECAST_RETRY_JOB_ID
+    assert evidence["manual_retry_event_id"] == 42
+    assert evidence["stage"] == "forecast"
+    assert evidence["restart_stage"] == "parse"
+    assert evidence["restart_from_stage"] == "parse"
+    # The evidence carries a restart stage, so it -- not a completed-stage scan -- supplies the
+    # projection, exactly as it did before the annotation face widened.
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+    assert state["completed_stage_evidence"] == evidence
+
+
+@pytest.mark.parametrize("include_unrepaired_convert", [False, True])
+def test_projected_multi_repair_leaves_neither_repaired_stage_live(include_unrepaired_convert: bool) -> None:
+    """#1460 E3: both repaired stages drop out of the live-failure domain downstream.
+
+    The annotation face is the only thing that tells the blocker scan a failure is historical, so
+    the evicted ``forcing`` annotation used to resurrect that row as a live candidate-scope
+    failure -- ``_restarted_stage_family`` then replayed a stage the operator had already
+    repaired.  With the unrepaired ``convert`` row present the family must be exactly
+    ``{"convert"}``: a strictly sharper statement than "empty", because it shows the two repaired
+    stages dropped out while the untouched failure stayed.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=include_unrepaired_convert),
+        events=_multi_repair_events(),
+    )
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    rows = {job["job_id"]: job for job in decision_state["pipeline_jobs"]}
+    for failed_job_id in (_MULTI_REPAIR_FORCING_JOB_ID, _MULTI_REPAIR_FORECAST_JOB_ID):
+        assert scheduler_state_manual_retry_module._job_row_is_live_failure(rows[failed_job_id]) is False
+
+    expected_family = {"convert"} if include_unrepaired_convert else set()
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == expected_family
+    assert (
+        scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state)
+        is include_unrepaired_convert
+    )
+
+
+def _projected_forecast_cycle(candidate: scheduler_module.SchedulerCandidate) -> dict[str, Any]:
+    """The raw-manifest binding without which ``chain_source_cycle`` calls nothing repaired."""
+
+    return {
+        "cycle_id": "gfs_2026052106",
+        "source_id": "gfs",
+        "cycle_time": candidate.cycle_time_utc,
+        "status": "raw_complete",
+        "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+    }
+
+
+def _projected_source_cycle_repair_rows(target_status: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The repaired cycle-scope download pair, plus the event linking retry to target."""
+
+    return (
+        [
+            _projected_cycle_download_job(status=target_status, retry_count=1),
+            _projected_cycle_download_job(
+                job_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                status="succeeded",
+                error_code=None,
+                slurm_job_id="7101",
+                retry_count=1,
+                manual_retry_marker=True,
+                submitted_at="2026-05-21T06:12:00Z",
+                finished_at="2026-05-21T06:20:00Z",
+                updated_at="2026-05-21T06:20:00Z",
+            ),
+        ],
+        [
+            _projected_repair_event(
+                entity_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                previous_job_id=_PROJECTED_DOWNLOAD_JOB_ID,
+                retry_count=1,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            )
+        ],
+    )
+
+
+def _projected_gap_and_control_states(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    target_status: str = "failed",
+    own_jobs: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The gap shape and its control: identical candidate rows, source-cycle repair added or not."""
+
+    own = own_jobs if own_jobs is not None else [_projected_succeeded_own_forecast_job()]
+    repair_jobs, repair_events = _projected_source_cycle_repair_rows(target_status)
+    forecast_cycle = _projected_forecast_cycle(candidate)
+    gap = _projected_state_from_rows(
+        candidate,
+        jobs=[*own, *repair_jobs],
+        events=repair_events,
+        forecast_cycle=forecast_cycle,
+    )
+    control = _projected_state_from_rows(candidate, jobs=list(own), events=[], forecast_cycle=forecast_cycle)
+    # Premise: the gap shape really IS the gap shape -- repaired evidence present and carrying no
+    # restart stage of its own -- and the control really carries no repair at all.
+    assert "restart_stage" not in gap["repaired_stage_evidence"]
+    assert "repaired_stage_evidence" not in control
+    return gap, control
+
+
+@pytest.mark.parametrize("target_status", ["failed", "cancelled"])
+def test_projected_source_cycle_repair_gap_attempt_arithmetic_matches_the_control(
+    target_status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E6 (+ E7 parity): repairing an upstream download must not move this candidate's numbers.
+
+    The suppressed ``restart_stage`` collapsed ``_failed_stage`` to ``None``, which is what pushed
+    ``_manual_retry_new_attempt`` off the "canonical downstream stage" path and onto the
+    restarted-family floor -- re-minting attempt numbers the retries had already spent.  With the
+    completed-stage projection restored, every one of those derivations must read exactly as it
+    does for a candidate whose cycle never needed a download repair.
+
+    ``failed``/``cancelled`` are the ``REPAIRABLE_PIPELINE_STATUSES`` parity legs (#1449): both
+    reach this path and neither may develop behaviour of its own.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(candidate, target_status=target_status)
+
+    # Premise: the projection really annotated the repaired target on this leg.
+    target_row = next(job for job in gap["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    assert target_row["status"] == target_status
+    assert target_row["repair_status"] == "repaired"
+
+    # The two orthogonal facts coexist, and the completed half is the candidate's own.
+    assert gap["completed_stage_evidence"] == control["completed_stage_evidence"]
+    assert gap["completed_stage_evidence"]["job_id"] == "job_model_a_forecast"
+    assert gap["restart_stage"] == control["restart_stage"] == "parse"
+    assert gap["restart_from_stage"] == control["restart_from_stage"] == "parse"
+
+    # And the downstream derivations converge on the control's values.
+    failed_stage = scheduler_state_failure_module._failed_stage
+    candidate_failed_stage = scheduler_state_failure_module._candidate_failed_stage
+    fallback_previous_attempt = scheduler_state_manual_retry_module._fallback_previous_attempt
+    new_attempt = scheduler_module._manual_retry_new_attempt
+
+    assert failed_stage(gap) is not None
+    assert failed_stage(gap) == failed_stage(control)
+    assert candidate_failed_stage(gap) == candidate_failed_stage(control)
+    assert fallback_previous_attempt(gap, 0) == fallback_previous_attempt(control, 0)
+    assert new_attempt(gap, previous_attempt=0) == new_attempt(control, previous_attempt=0) == 1
+
+
+def test_projected_gap_shape_completed_evidence_names_job_matches_the_control() -> None:
+    """#1461 E11 (must-preserve 8): the #1308 pin gate's INPUT helper must not move.
+
+    The gap shape is the first geometry where ``repaired_stage_evidence`` coexists with a
+    completed-stage evidence that is a SCAN product -- i.e. one carrying a real ``job_id``.  The
+    gate's own docstring used to reason that the repaired-copy writer produces no ``job_id`` and
+    therefore no false hit; that reasoning is no longer exhaustive, so the helper's verdict is
+    pinned against the control directly.
+
+    The claim is deliberately helper-level: the gate itself (``:400-421``) short-circuits on any
+    entity id the repaired evidence names, an asymmetry that predates this change.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(candidate)
+
+    names_job = scheduler_state_manual_retry_module._state_completed_stage_evidence_names_job
+    for entity_id in ("job_model_a_forecast", _PROJECTED_DOWNLOAD_JOB_ID, _PROJECTED_DOWNLOAD_RETRY_JOB_ID):
+        assert names_job(gap, entity_id) == names_job(control, entity_id)
+    # Non-vacuity: the helper does answer True for the row the scan actually named.
+    assert names_job(gap, "job_model_a_forecast") is True
+
+
+@pytest.mark.parametrize(
+    ("own_job", "expected_restart_stage", "expected_native_resubmit"),
+    [
+        pytest.param(
+            {"job_id": "job_model_a_forcing", "stage": "forcing", "job_type": "produce_forcing_array"},
+            "forecast",
+            True,
+            id="forcing_completed",
+        ),
+        pytest.param({}, "parse", False, id="forecast_completed"),
+    ],
+)
+def test_projected_gap_shape_completed_upstream_retry_decision_matches_the_control(
+    own_job: dict[str, Any],
+    expected_restart_stage: str,
+    expected_native_resubmit: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E12 (must-preserve 8): the newly reachable DECISION channel must match the control.
+
+    Restoring the completed-stage projection makes ``_completed_upstream_stage_retry_evidence``
+    reachable for a candidate whose upstream download was repaired -- a ``retry_after_completed_stage``
+    decision that can resubmit SHUD natively.  That is a decision channel, not bookkeeping, so both
+    the verdict and its ``native_shud_resubmitted`` face are pinned against the no-repair control.
+    Both restart stages are exercised because only ``forecast`` sets the native-resubmit flag.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(
+        candidate,
+        own_jobs=[_projected_succeeded_own_forecast_job(**own_job)],
+    )
+
+    gap_evidence = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(candidate, gap, {})
+    control_evidence = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(candidate, control, {})
+
+    assert gap_evidence is not None
+    assert gap_evidence["decision"] == "retry_after_completed_stage"
+    assert gap_evidence["restart_stage"] == expected_restart_stage
+    assert gap_evidence["native_shud_resubmitted"] is expected_native_resubmit
+    assert gap_evidence == control_evidence
+
+
+def _projected_cohort_succeeded_job(stage: str, *, retry_count: int = 3, **overrides: Any) -> dict[str, Any]:
+    """A cycle-scope cohort row that SUCCEEDED at ``stage``, carrying the cohort's own counter."""
+
+    job: dict[str, Any] = {
+        "job_id": f"job_{_PROJECTED_CYCLE_RUN_ID}_{stage}",
+        "run_id": _PROJECTED_CYCLE_RUN_ID,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "stage": stage,
+        "job_type": _BATCH_S_COHORT_JOB_TYPES[stage],
+        "status": "succeeded",
+        "retry_count": retry_count,
+        "updated_at": "2026-05-21T06:25:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E13 (must-preserve 9): the geometry D2 newly opens, pinned by ABSOLUTE values.
+
+    ``chain_repository_state.py:822`` fires only when the candidate owns no rows and the sole
+    surviving fact is repaired evidence.  Combine that with the gap shape and a cycle whose
+    cohort already succeeded at ``forecast``, and this candidate gets a restart stage derived
+    from the COHORT for the first time.  ``_candidate_failed_stage``'s explicit-key leg is
+    scope-blind by design, so ``_state_retry_attempt(state, stage=...)`` reads the cohort's
+    counter -- the same direction a candidate with no repaired evidence already takes, but a
+    newly reachable geometry, so it is pinned rather than inferred.
+
+    The cohort row must succeed at ``convert``/``forcing``/``forecast``: a ``publish`` or
+    ``state_save_qc`` success trips ``_has_terminal_completion_stage_success`` and suppresses the
+    scan, which would make this leg measure nothing.
+
+    NO control-group equality is asserted here, on purpose.  The flat top-level ``retry_count``
+    differs between the two groups for a reason that predates this change:
+    ``chain_repository_state.py:829-831`` backfills ``retry_count_jobs`` from the source-cycle
+    rows when the candidate owns none, so this shape reads 1 (the download pair's count) where a
+    no-repair control reads 0 (measured).  ``_state_retry_attempt`` takes the max of the flat and
+    the stage-matching values, so a control equality here would either be masked by that max or
+    fail for a reason D2 does not own.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    repair_jobs, repair_events = _projected_source_cycle_repair_rows("failed")
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[*repair_jobs, _projected_cohort_succeeded_job("forecast", retry_count=3)],
+        events=repair_events,
+        forecast_cycle=_projected_forecast_cycle(candidate),
+    )
+
+    # Premise: the ``:822`` branch really fired -- no candidate rows, no exposed failure left.
+    assert [job for job in state["pipeline_jobs"] if job.get("model_id") == "model_a"] == []
+    assert state["pipeline_status"] is None
+    assert state["stage"] is None
+    assert state["failed_stage"] is None
+    assert "repaired_stage_evidence" in state
+
+    # (a) the candidate takes the cohort's completed stage as its restart point.
+    assert state["completed_stage_evidence"]["job_id"] == f"job_{_PROJECTED_CYCLE_RUN_ID}_forecast"
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+
+    # (b) the cohort-derived attempt values, as absolutes.
+    assert scheduler_state_rows_module._state_retry_attempt(state, stage="forecast") == 3
+    assert state["retry_count"] == 1
+    assert scheduler_state_failure_module._candidate_failed_stage(state) == "parse"
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+
+
 def _projected_repaired_cycle_download_facts(target_status: str) -> dict[str, Any]:
     """Every observable of the repaired cycle-download shape, for one target status.
 
@@ -7164,26 +7649,28 @@ def _projected_repaired_cycle_download_facts(target_status: str) -> dict[str, An
     }
 
 
-def test_projected_repaired_cancelled_cycle_download_is_bit_for_bit_the_failed_leg() -> None:
+def test_projected_repaired_cancelled_cycle_download_is_bit_for_bit_the_failed_leg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """#1294 round-4 G3: the newly reachable evidence-selection path is PARITY, not new semantics.
 
     Widening the repaired-annotation producer to ``REPAIRABLE_PIPELINE_STATUSES`` makes a repaired
     ``cancelled`` cohort download reach the source-cycle evidence-selection path that until now
     only ``failed`` rows could reach.  This anchor measures both legs through the real projection
     and requires every observable to be identical: the repaired evidence itself (stage + both job
-    ids), the ABSENCE of ``completed_stage_evidence`` / ``restart_stage`` / ``restart_from_stage``,
+    ids), the restored ``completed_stage_evidence`` / ``restart_stage`` / ``restart_from_stage``,
     the nulled ``failed_stage``, the row-level annotations, the manual-retry attempt arithmetic and
     the operator-visible decision.  Any future drift that gives ``cancelled`` its own behaviour on
     this path reds here.
 
-    PRE-EXISTING DEFECT, deliberately locked as-is: a source-cycle ``repaired_stage_evidence``
-    carries no ``restart_stage``, so ``chain_repository_state`` takes the ``if`` branch and the
-    ``elif`` that would derive ``completed_stage_evidence`` from the succeeded own forecast row
-    never runs -- the resume-after-completed-stage evidence is SUPPRESSED.  That suppression is
-    not this change's doing: the ``failed`` leg has behaved exactly this way on master, bit for
-    bit, and it is routed as its own tracked issue.  This test locks the two legs to one
-    behaviour; it does NOT assert that the behaviour is correct.
+    The suppressed half this anchor used to lock as a disclosed pre-existing defect is #1461, now
+    fixed: a source-cycle ``repaired_stage_evidence`` carries no ``restart_stage``, and the
+    completed-stage scan used to hang off that branch as an ``elif``, so the candidate's own
+    succeeded forecast produced no resume evidence at all.  The two facts are orthogonal and now
+    coexist -- on BOTH legs, which is what keeps this a parity anchor rather than a new asymmetry.
     """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
 
     cancelled_facts = _projected_repaired_cycle_download_facts("cancelled")
     failed_facts = _projected_repaired_cycle_download_facts("failed")
@@ -7193,10 +7680,11 @@ def test_projected_repaired_cancelled_cycle_download_is_bit_for_bit_the_failed_l
     assert cancelled_facts["repaired_stage_evidence"]["stage"] == "download"
     assert cancelled_facts["repaired_stage_evidence"]["original_failed_job_id"] == _PROJECTED_DOWNLOAD_JOB_ID
     assert cancelled_facts["repaired_stage_evidence"]["repairing_retry_job_id"] == _PROJECTED_DOWNLOAD_RETRY_JOB_ID
-    # The suppressed half -- absent on BOTH legs, which is the whole point of the anchor.
-    assert cancelled_facts["completed_stage_evidence"] == "<absent>"
-    assert cancelled_facts["restart_stage"] == "<absent>"
-    assert cancelled_facts["restart_from_stage"] == "<absent>"
+    # The restored half -- present on BOTH legs, derived from the candidate's own succeeded forecast.
+    assert cancelled_facts["completed_stage_evidence"]["job_id"] == "job_model_a_forecast"
+    assert cancelled_facts["completed_stage_evidence"]["stage"] == "forecast"
+    assert cancelled_facts["restart_stage"] == "parse"
+    assert cancelled_facts["restart_from_stage"] == "parse"
     assert cancelled_facts["failed_stage"] is None
     # And everything else the two legs expose, compared as one object so no observable is missed.
     assert cancelled_facts == failed_facts
@@ -45494,24 +45982,28 @@ def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
 # resolves while job rows survive.  The five shapes, and what each one does:
 #
 # 1. the candidate has a surviving candidate-scoped row: the projection writes THAT row's
-#    stage into the top-level ``stage`` key (``chain_repository_state.py:853-856``), so the
+#    stage into the top-level ``stage`` key (``chain_repository_state.py:856-859``), so the
 #    explicit-key branch decides and nothing changes (pinned by
 #    ``test_surviving_candidate_row_keeps_the_top_level_failed_stage_path_out_of_cycle_scope``);
 # 2. the candidate's live failure is a ``cancelled`` row or hydro run -- invisible to the
 #    projection's failed-job selection -- while the cohort row survives: the shape #1300
 #    reproduced (``test_cohort_stage_counter_*``);
-# 3. the repaired-stage-evidence branch (``chain_repository_state.py:822-827``) clears the
+# 3. the repaired-stage-evidence branch (``chain_repository_state.py:825-830``) clears the
 #    failed job while retaining every row -- but it fires only when the candidate owns NO
 #    rows (``failed_task is None and not candidate_jobs``), which is not the head shape
-#    below.  Its sibling nulling block (``:875-885``) does write ``stage``/``failed_stage``
+#    below.  Its sibling nulling block (``:884-896``) does write ``stage``/``failed_stage``
 #    None while retaining rows, but only inside ``if restart_stage not in (None, "")``, so
 #    its output always carries a non-empty ``restart_stage`` that the explicit-key loop
-#    reads third.  Neither branch casts "candidate row present + no top-level stage key";
+#    reads third.  Since #1461 the completed-stage scan (``:902-916``) is an independent
+#    ``if`` rather than that block's ``elif``, so repaired evidence carrying NO restart stage
+#    no longer suppresses it: that only ever ADDS a non-empty ``restart_stage``, i.e. it
+#    moves shapes further away from this row-scan branch, never towards it.  No branch here
+#    casts "candidate row present + no top-level stage key";
 # 4. the identity filter's ``_strip_top_level_pipeline_decision_fields``
 #    (``scheduler_state_identity_filter.py:678``) removes those keys from the decision
 #    state while retaining rows;
 # 5. the top-level key is cast by ``active_source_cycle_failure``
-#    (``chain_repository_state.py:817-821``) -- a CYCLE-SCOPE source-cycle download row.
+#    (``chain_repository_state.py:820-824``) -- a CYCLE-SCOPE source-cycle download row.
 #    That is the explicit-key branch and stays byte-for-byte unchanged: #1287's download AC
 #    depends on it (pinned by the ``download`` case of ``test_cohort_stage_counter_*``).
 #
