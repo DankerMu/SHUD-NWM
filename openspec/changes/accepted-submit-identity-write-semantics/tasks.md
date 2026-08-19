@@ -109,7 +109,10 @@
 - [x] 6.2 `uv run ruff check .` 干净。
 - [x] 6.3 `openspec validate accepted-submit-identity-write-semantics --strict --no-interactive` 通过。
 - [x] 6.4 变异证死三组：删 candidate 冻结闸 → J9-J11 红；**把 `INIT_STATE_IDENTITY_FIELD` 加入
-  reclaim 回填 key 元组（`:1944`）并让该拷贝对 versioned master 也生效** → J13/J15 红
+  reclaim 回填 key 元组（`:1944`）并让该拷贝对 versioned master 也生效** → 该用例在
+  **J13 断言处**红（`test_reclaimed_reservation_keeps_the_first_attempts_init_state_mapping`；
+  J13/J15 是同一函数里的顺序断言，变异体死在 J13 处，J15 不再执行，故可观测的红只有一处
+  ——Phase 7 终审 N1，勿按「两条独立腿转红」预期核对）
   （**单独翻转 `if not versioned_master:` 杀不死这两腿**——该守卫包住的元组根本不含该字段，
   评审已实测变异存活，fixture review P1-1）；删**构造期「released ⇒ reservation_lost」守卫**
   （改动前 `:262` / 终态 `accepted_submit_identity.py:267-268`）→ J3

@@ -196,7 +196,8 @@ J13-J14 = #1188（reclaim 后 master 行 keep-first + 连带断言 attempt/ancho
 J16 = D-B 新闸门的负向 oracle（must-preserve 8）；
 J17 = D-B1 落点纪律的反向钉（must-preserve 10）——不带该键的 candidate upsert 保持 silent-keep。
 变异证死：删 candidate 闸门 → J9-J11 红；**把 `INIT_STATE_IDENTITY_FIELD` 加入 reclaim 回填
-key 元组（`file_orchestration_journal.py:1944`）并让该拷贝对 versioned master 也生效** → J13/J15 红；
+key 元组（`file_orchestration_journal.py:1944`）并让该拷贝对 versioned master 也生效** →
+该用例在 **J13 断言处**红（J13/J15 同属一个测试函数的顺序断言，J15 不再执行，Phase 7 N1）；
 删**构造期「released ⇒ reservation_lost」守卫**（改动前 `:262` / 终态
 `accepted_submit_identity.py:267-268`）→ J3 红；**勿照 `:262` 旧坐标施变异**——终态该行是
 `if decision == "matched_bound":`，是另一条闸（round-2 P2-1）。
