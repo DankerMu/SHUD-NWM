@@ -187,7 +187,20 @@ L2 的诚实边界：它证明的是「守卫消费身份而非字符串」，**
 
 ## 「不 hang」怎么断言
 
-别名 root 在**取任何锁之前**就被拒，所以修后本就不可能 hang；断言的作用是把「回归重新变成挂起」钉死。
+别名 root 在**取任何锁之前**就被拒，所以修后本就不可能 hang。
+
+> **本节立论已被 round-1 独立 verifier 证伪，保留原文并在此更正**（诚实记账，不重写历史）：
+> 我原写「断言的作用是把『回归重新变成挂起』钉死」——**错的**。别名是在**探针缝位**注入的
+> （monkeypatch `directory_identity_no_follow` 返回固定 tuple），两个 root 在真实 FS 上仍是**genuinely 不同的目录**；
+> 而 provider 锁是**按路径取**的（`provider_atomic.py:200` `provider_lock_path(path)`，进程内 gate 按
+> `os.path.abspath` 取 key `:162`）⇒ 两个不同 root 拿到**两个不同 lockfile**，`:219` 的 `fcntl.flock` 自死锁
+> **即便守卫回归并走到 merge 也结构性不可达**。实测：string-compare mutant 下两条用例都在 ~0.3s 以普通断言 /
+> `FileNotFoundError` 变红，**从不以挂起变红**。
+>
+> 所以这道 tripwire 的真实价值是**通用的「守卫路径不返回」网**（未来某个死循环/意外阻塞），
+> **不是** #1192 死锁的回归网，且以探针注入的别名**永远成不了**那个网 —— 真网需要真 bind mount，无可移植免 root 构造。
+> 保留它的理由是：fixture B.3 已强制、成本极低、无害。两处用例的 docstring 已按此口径更正。
+> spec 里那句 "returns within a bounded timeout rather than blocking" **不改** —— 它被实现字面满足，只是不具判别力。
 
 机制约束：
 - 被测调用放进 **`threading.Thread(..., daemon=True)`**，`thread.join(5.0)`，`if thread.is_alive(): pytest.fail("hang regression")`。
