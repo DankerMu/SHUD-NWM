@@ -102,15 +102,18 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
 
 - chain 层 resume 场景构造（stub repository 捕获 projector 入参——issue
   探针先例；或 monkeypatch spy 包装 `project_forecast_cohort_tasks`）；
-  真实 journal 面复用既有先例（`tests/test_orchestration_chain.py:12049`
+  journal 面红证（tasks 2.2）**自建 geometry-2 底座**（`_bind_cohort_master`
+  非终态 bound master + 终态快照 resume，不复用既有骨架）；幂等零写入锁
+  （tasks 2.2c）复用既有先例（`tests/test_orchestration_chain.py:12049`
   file journal + `_resume_cycle_stage` + 真实 projector；`:9007` crash→
-  reconcile→resume replay），断言对账翻转可观测量与幂等零写入。
+  reconcile→resume replay）。
 
 ## Evidence mapping
 
 - 验收 1（resume 已终态支 projector 收到真实 Slurm id）→ tasks 2.1 红证。
-- 验收 2（对账翻转可观测量：matched_bound + matched_slurm_job_id 写实 +
-  零 mismatch 事件；幂等零写入锁）→ tasks 2.2。
+- 验收 2a（对账翻转可观测量：matched_bound + matched_slurm_job_id 写实 +
+  零 mismatch 事件 + total>0）→ tasks 2.2 红证。
+- 验收 2b（幂等零写入锁）→ tasks 2.2c。
 - 验收 3（空/非数字 master id fail-closed 明确契约）→ tasks 2.3 两腿。
 - 验收 4（兄弟腿不回归 + docstring 例外同步）→ tasks 3.1 三套件全绿 +
   tasks 2.2b。
