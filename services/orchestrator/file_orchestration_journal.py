@@ -180,7 +180,8 @@ _JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
 # The forecast and cohort shapes now live in run_identity (#1405) so retention
 # adjudicates deletions against the same canonical identities; they are
 # imported above under their historical private names. This strict cohort
-# variant stays here — its only consumer (:9778) needs an exact cohort id.
+# variant stays here — its only consumer, the cohort branch of
+# `_model_id_from_run_identity`, needs an exact cohort id.
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 _CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
 _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
