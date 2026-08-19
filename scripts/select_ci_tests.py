@@ -524,6 +524,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_frontier.py",
             "tests/test_retry.py",
             "tests/test_retry_cancel_consistency.py",
+            "tests/test_run_identity.py",
             "tests/test_run_tree_copyback.py",
             "tests/test_scheduler_backfill_predecessor.py",
             "tests/test_scheduler_file_provider_refresh.py",

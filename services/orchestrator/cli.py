@@ -95,19 +95,27 @@ def _publish_qdown(*, cycle_id: str) -> dict[str, object]:
         raise PublishError("PUBLISH_QDOWN_FAILED", f"q_down publication failed: {error}") from error
 
 
-def _cleanup_frontier(*, now: datetime) -> FrontierReadResult:
+def _cleanup_frontier(*, now: datetime) -> tuple[FrontierReadResult, str | None]:
     """Resolve the pipeline frontier for a manual cleanup (issue #1407).
 
     The evidence directory derivation is inside the guard on purpose: building
     ``ProductionSchedulerConfig`` runs confinement checks that raise, and a
     traceback here would be an unprotected-deletion decision made by an
     exception. Any failure becomes a fail-closed ``unavailable`` result.
+
+    The directory is returned alongside the read (issue #1503) because the
+    three commonest blocker reasons carry no receipt path, so the payload would
+    otherwise never say *where* the CLI looked — and ``WORKSPACE_ROOT``'s
+    relative default under a wrong working directory reads exactly like
+    genuinely missing evidence. ``None`` means the directory itself could not
+    be resolved.
     """
     try:
         evidence_dir = ProductionSchedulerConfig().evidence_dir
     except Exception:  # noqa: BLE001 - derivation failure must fail closed, not crash
-        return FrontierReadResult(status="unavailable", reason="evidence_dir_unresolved")
-    return read_latest_pass_frontier(evidence_dir, now=now, max_age=frontier_max_age_from_env())
+        return FrontierReadResult(status="unavailable", reason="evidence_dir_unresolved"), None
+    result = read_latest_pass_frontier(evidence_dir, now=now, max_age=frontier_max_age_from_env())
+    return result, str(evidence_dir)
 
 
 def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, object]:
@@ -132,7 +140,7 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
         dry_run=dry_run,
         retention_days=retention_days if retention_days is not None else base.retention_days,
     )
-    frontier = _cleanup_frontier(now=now)
+    frontier, evidence_dir = _cleanup_frontier(now=now)
     if frontier.status != "ok":
         config = replace(config, dry_run=True)
     result = run_retention(
@@ -148,11 +156,15 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
         # Top-level because retention's frontier block nulls its source whenever
         # the bound is null; the mirrored "receipt:none" label must survive that.
         payload["frontier_source"] = frontier.source
+        payload["evidence_dir"] = evidence_dir
     else:
         payload["frontier_blocker"] = {
             "reason": frontier.reason,
             "forced_dry_run": True,
             "receipt_path": frontier.receipt_path,
+            # Always present, null only when the directory could not be
+            # resolved: the blocker shape must not vary by reason (#1503).
+            "evidence_dir": evidence_dir,
         }
     return payload
 

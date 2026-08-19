@@ -29,6 +29,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from services.orchestrator.run_identity import parse_run_cycle
+
 # Per-cycle prefixes whose second path segment ({source}) contains cycle
 # directories named ``%Y%m%d%H``. Confirmed against worker key construction:
 #   raw/{source}/{cycle}/...        (workers/data_adapters/*_adapter.py)
@@ -36,9 +38,9 @@ from typing import Any
 #   forcing/{source}/{cycle}/...    (workers/forcing_producer/producer.py)
 CYCLE_SCOPED_PREFIXES: tuple[str, ...] = ("raw", "canonical", "forcing")
 
-# ``runs/{run_id}/...`` holds per-run workspace artifacts (chain.py). Run ids
-# embed the compact cycle, e.g. ``fcst_gfs_2026051600_<model>`` or carry a
-# trailing ``_%Y%m%d%H`` token.
+# ``runs/{run_id}/...`` holds per-run workspace artifacts (chain.py). Only the
+# canonical run-id shapes (``services.orchestrator.run_identity``) are admitted
+# here, e.g. ``fcst_gfs_2026051600_<model>``; anything else is preserved.
 RUNS_PREFIX = "runs"
 
 # Always-protected top-level prefixes (published display products).
@@ -175,12 +177,14 @@ def _parse_cycle_name(name: str) -> datetime | None:
 
 
 def _extract_run_cycle(run_id: str) -> datetime | None:
-    """Find an embedded ``%Y%m%d%H`` token inside a run id."""
-    for token in run_id.split("_"):
-        parsed = _parse_cycle_name(token)
-        if parsed is not None:
-            return parsed
-    return None
+    """Resolve the cycle of a canonical run id, or None (#1405).
+
+    Delegates to the shared canonical shapes so a deletion surface admits only
+    names the pipeline actually mints. The previous token scan took the first
+    ``_``-separated token that parsed as ``%Y%m%d%H``, which both accepted
+    stray non-run directories and could bind a run to the wrong timestamp.
+    """
+    return parse_run_cycle(run_id)
 
 
 def _dir_size(path: Path) -> int:

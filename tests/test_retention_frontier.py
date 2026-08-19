@@ -324,10 +324,12 @@ def test_evidence_dir_derivation_failure_is_unresolved(
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "outside" / "evidence"))
 
-    result = cli._cleanup_frontier(now=NOW)
+    result, evidence_dir = cli._cleanup_frontier(now=NOW)
 
     assert (result.status, result.reason) == ("unavailable", "evidence_dir_unresolved")
     assert result.active_lower_bound is None
+    # Nothing to disclose: the derivation itself failed (#1503).
+    assert evidence_dir is None
 
 
 # ---------------------------------------------------------------------------

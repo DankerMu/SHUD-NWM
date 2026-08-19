@@ -339,3 +339,89 @@ def test_cleanup_entrypoints_agree_on_frontier_exempt_fixture(
         assert click_payload[key] == argparse_payload[key]
     assert click_payload["frontier_source"] == "receipt:scheduler_pass"
     assert "pipeline_frontier_exempt" in _skipped_reasons(click_payload)
+
+
+# ---------------------------------------------------------------------------
+# I5 (#1503) - the payload discloses which evidence directory was consulted.
+#
+# Under the three commonest blocker reasons ``receipt_path`` is always null, so
+# without this key a mis-resolved workspace root (the relative default under a
+# wrong cwd) is indistinguishable from genuinely missing evidence.
+# ---------------------------------------------------------------------------
+def test_blocker_discloses_the_probed_evidence_dir_when_it_is_missing(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absent = env["workspace"] / "scheduler" / "absent-evidence"
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(absent))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["frontier_blocker"]["reason"] == "evidence_dir_missing"
+    assert payload["frontier_blocker"]["receipt_path"] is None
+    assert payload["frontier_blocker"]["evidence_dir"] == str(absent)
+
+
+def test_blocker_discloses_the_probed_evidence_dir_without_a_readable_receipt(
+    env: dict[str, Path],
+) -> None:
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["frontier_blocker"]["reason"] == "no_readable_receipt"
+    assert payload["frontier_blocker"]["receipt_path"] is None
+    assert payload["frontier_blocker"]["evidence_dir"] == str(env["evidence_dir"])
+
+
+def test_unresolved_evidence_dir_carries_the_key_as_an_explicit_null(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The key stays present so the payload shape does not vary by reason."""
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "elsewhere" / "evidence"))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["frontier_blocker"]["reason"] == "evidence_dir_unresolved"
+    assert "evidence_dir" in payload["frontier_blocker"]
+    assert payload["frontier_blocker"]["evidence_dir"] is None
+
+
+def test_ok_path_discloses_the_evidence_dir_at_the_payload_top_level(
+    env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    bound = (NOW - timedelta(days=20)).replace(minute=0, second=0, microsecond=0)
+    _write_cycle(env["store"], "raw", "gfs", _cycle_name(bound))
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(bound))
+
+    assert cli._click_main(["cleanup", "--retention-days", "14"]) == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+
+    assert "frontier_blocker" not in payload
+    assert payload["frontier_source"] == "receipt:scheduler_pass"
+    assert payload["evidence_dir"] == str(env["evidence_dir"])
+
+
+def test_blocker_evidence_dir_is_the_absolute_path_the_relative_default_derived(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The disclosed path is the one actually probed, not the configured string.
+
+    This is the #1503 motivating scenario: with no evidence root configured the
+    workspace root's relative default is resolved against the current working
+    directory, so an operator running from the wrong cwd silently probes an
+    empty tree. The key only distinguishes that from genuinely missing evidence
+    if it carries the derived absolute path.
+    """
+    monkeypatch.delenv("NHMS_SCHEDULER_EVIDENCE_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "ws-relative")
+    monkeypatch.chdir(tmp_path)
+    _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["frontier_blocker"]["reason"] == "evidence_dir_missing"
+    disclosed = payload["frontier_blocker"]["evidence_dir"]
+    assert disclosed is not None
+    assert Path(disclosed).is_absolute()
+    assert (
+        Path(disclosed).resolve()
+        == (tmp_path / "ws-relative" / "scheduler" / "evidence").resolve()
+    )
