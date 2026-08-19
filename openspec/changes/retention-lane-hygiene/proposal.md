@@ -84,7 +84,7 @@
 - 保留 `DEFAULT_RETENTION_WINDOW_DAYS = 14`（`:46`）及 `:40-45` drift-lock
   注释（措辞按「extractor 已删」现实微调，常量与值不动）；
   `scripts/node27_timeseries_retention.py:74` import 不动；
-  `tests/test_node27_timeseries_retention.py:457-458` identity+值双钉不动。
+  `tests/test_node27_timeseries_retention.py:504-505` identity+值双钉不动。
 - PR body 回链 #1233 两条评论（终版白名单文法+攻击语料 /
   obsolete 关闭证据），知识以链接形态保存。
 
@@ -118,7 +118,7 @@
 - #1503：blocker 既有三键不动；fail-closed/dry-run 强制不动；
   `tests/test_cli_cleanup_frontier.py` 既有断言零改动全绿。
 - #1395：`DEFAULT_RETENTION_WINDOW_DAYS` identity+值双钉
-  （`tests/test_node27_timeseries_retention.py:457-458`）仍绿；
+  （`tests/test_node27_timeseries_retention.py:504-505`）仍绿；
   `tests/test_storage.py` 保留的 `validate_object_path` 17 条 + override
   precedence 2 条仍绿。
 

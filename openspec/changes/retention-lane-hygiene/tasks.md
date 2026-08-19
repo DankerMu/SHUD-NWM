@@ -50,6 +50,12 @@
       携非空 `evidence_dir` == 实际探测绝对路径（**改动前红：键不存在**）；
       `evidence_dir_unresolved` → 键存在值 null 且 CLI 不抛；ok 路径顶层
       payload 携 `evidence_dir`；既有 fail-closed 断言零改动全绿
+- [ ] 2.3b (#1503, round-1 T1) 派生臂判别腿：delenv
+      `NHMS_SCHEDULER_EVIDENCE_ROOT` + 相对 `WORKSPACE_ROOT` +
+      `monkeypatch.chdir(tmp_path)`，断言 blocker 的 `evidence_dir`
+      `is_absolute()` 且 == 派生路径 `<cwd>/<workspace>/scheduler/evidence`
+      ——钉住「absolute path actually probed」的 spec 口径（env 回显 mutation
+      下该腿红），覆盖 #1503 动机场景（错 cwd 相对默认可区分）
 - [x] 2.4 (#1395) 删除后残留 grep（见 3.2）+ 保留面三锁复跑绿：
       `DEFAULT_RETENTION_WINDOW_DAYS` identity+值双钉、validate_object_path
       17 条、override precedence 2 条
