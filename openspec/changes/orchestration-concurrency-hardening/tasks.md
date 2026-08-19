@@ -10,8 +10,13 @@
       reducer `_apply_journal_record` 纯内存可整段入锁）、
       `_write_pipeline_job_direct_unlocked` 的 pop（:6139）、
       `_locked_cycle_write` 两处 `.clear()`（:6719/:6725）。
-      锁内**只做 dict 存取**——零 IO/零 JSON 解析/`_clone_cycle_rows`
-      在锁外。锁序单向：`_cache_lock` 内不得获取 `_write_lock`/flock
+      锁内**零 IO / 零 JSON 解析 / 零二次取锁**；三条读路径
+      （`_cycle_rows` / `_direct_jobs` / `_read_bytes`）的命中值 clone
+      在锁外，**唯一例外**是 `_apply_record_to_cycle_rows_cache`——按本条
+      「全体入锁」要求，其 `_clone_cycle_rows` + 纯内存 reducer 一并在锁内，
+      使「整表扫描→读→改→写回」对并发读侧原子（代码注释见
+      `file_orchestration_journal.py:6615-6618`）；该段纯内存，不违反锁序。
+      锁序单向：`_cache_lock` 内不得获取 `_write_lock`/flock
       （写锁内进 cache 锁允许）
 - [x] A.2 红证（概率竞态的压测构造）：单 repository 实例、小容量强制
       持续驱逐、2+ 读线程 hammer `_cycle_rows`/`_read_bytes_limited_cached`

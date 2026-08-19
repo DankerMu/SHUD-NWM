@@ -44,9 +44,12 @@ public pass **都**打到了 forecast sbatch。四个候选竞态面自 2026-07-
   （新 `_cache_lock`，不复用 `_write_lock`——写路径持 `_write_lock` 时
   仍会读 cache（`_apply_record_to_cycle_rows_cache` 读
   `_cycle_rows_cache`、`:4885` 类站点经 `_read_optional_json` 走
-  `_read_bytes_limited_cached`），非重入 Lock 复用必死锁）。锁内只做
-  dict 存取——零 IO、零 JSON 解析、**clone（`_clone_cycle_rows`）也在
-  锁外**，避免热路径串行化。锁序单向：`_write_lock → _cache_lock` 允许，
+  `_read_bytes_limited_cached`），非重入 Lock 复用必死锁）。锁内**零 IO、
+  零 JSON 解析、零二次取锁**；三条读路径的命中值 clone 在锁外以免热路径
+  串行化，**唯一例外**是 `_apply_record_to_cycle_rows_cache`——「全体入锁」
+  要求其 `_clone_cycle_rows` + 纯内存 reducer 一并在锁内，保证
+  「整表扫描→读→改→写回」对并发读侧原子（该段纯内存，且已持
+  `_write_lock`，不引入新串行化面）。锁序单向：`_write_lock → _cache_lock` 允许，
   反向禁止（cache 辅助函数均纯 dict/纯内存 reducer，已核可达）。
 - **变更站点全集**（round-0 审补齐，缺一即修复不完整）：
   三处 `next(iter(...))` 驱逐（`:4200-4202` / `:4121-4123` /
