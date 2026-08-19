@@ -43,7 +43,12 @@ overrides-blocker 判定）；chain 侧绕过了它。
   消费者随净化愈合，审计 + 测试钉）。
 - `_manual_retry_scoped_cycle_execution`：现状保持 + 显式边界（design D3 重写后的
   理由：job id 派生 run-id 命名空间化 + 生产单 basin 候选恒带
-  `orchestration_run_id`，marker 非 scoping 决定项）。
+  `orchestration_run_id`——**该"marker 非 scoping 决定项"只对
+  `_candidate_scoped_cycle_execution` 这个消费者成立**；第二个消费者
+  `_replacement_retry_scoped_cycle_execution`（首行短路 →
+  `_active_orchestration_conflicts`）上 `orchestration_run_id` 不同解，带 marker
+  的候选可穿过 markerless 孪生会被拦的重复编排冲突门。该分叉是既有行为、本 issue
+  不改，作为显式记录的边界留存）。
 - `tests/test_orchestration_chain.py`：陈旧 marker + 被占终态 `retry_1` 行 → 目标
   `retry_2` 且真实提交的回归钉；新鲜 marker 精确身份既有腿保持通过；判别器三态腿。
 - spec delta：manual-retry 场景下 chain 侧 attempt 采信的新鲜度要求。

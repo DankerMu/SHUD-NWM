@@ -100,17 +100,16 @@ def log_ignored_manual_retry_attempt_claim(
     Both consumers of :func:`has_active_manual_retry_decision` emit through here so
     the two write points share one field schema.
 
-    The message states only what the emitting site knows.  Neither site can know what
-    the stage will do with the claim gone: outside ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``
-    a terminal failed row is RESUMED and nothing is submitted at all, so a promise of
-    "the next free retry attempt" would be false there; and the chain site fires even on
-    a pass whose direct operator field was honoured, where it is false again.
+    The message states only what the emitting site knows, and stops there.  Neither site
+    can know what the stage then does: outside ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` a
+    terminal failed row is RESUMED and nothing is targeted or submitted at all, and the
+    chain site fires even on a pass whose direct operator field was honoured.  So the
+    record says the claim is unused and says nothing about attempt targeting.
     """
 
     LOGGER.warning(
         "%s: manual_retry attempt claim ignored - no active manual-retry decision on this evidence; "
-        "the marker-claimed attempt is not used; attempt targeting falls back to this decision "
-        "lane's own derivation "
+        "the marker-claimed attempt is not used "
         "(site=%s candidate_id=%s basin_id=%s cycle_id=%s claimed_attempt=%s decision=%s reason=%s)",
         MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN,
         site,

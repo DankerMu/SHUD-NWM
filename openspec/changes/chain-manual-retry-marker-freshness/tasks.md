@@ -12,10 +12,10 @@
 - [x] 1.3 **evidence 分支 gate（纵深）**：`_retry_attempt_from_basins` 的
       `state_evidence.manual_retry` 分支同谓词判别；direct 字段两分支逐字节不变
 - [x] 1.4 丢弃 claim 时结构化 warning（design D4 措辞："no active manual-retry
-      decision"，两写点同 schema）；措辞只说写点可知内容——"the marker-claimed
-      attempt is not used; attempt targeting falls back to this decision lane's own
-      derivation"，**不得**承诺 "falling through to the next free retry attempt"
-      （out-of-force resume 几何下零提交，该承诺为假；round-1 D1 修正）
+      decision"，两写点同 schema）；措辞只说写点可知内容并**就此打住**——"the
+      marker-claimed attempt is not used"，对 attempt targeting/下游结果一字不提
+      （out-of-force resume 几何下什么都没 target、零提交；chain 写点在 direct
+      字段被采信时同样为假；round-1 D1 + 终评 Note-1）
 - [x] 1.5 `_manual_retry_scoped_cycle_execution` 现状保持 + 注释挂账（design D3
       重写后的理由口径）
 - [x] 1.6 spec delta 场景与实现一致（含 D5 的 :467 交叉引用句）

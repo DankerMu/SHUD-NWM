@@ -12421,10 +12421,11 @@ def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(
     assert records, "the marker leg must leave a drop record"
     message = records[0].getMessage()
     assert "the marker-claimed attempt is not used" in message
-    assert "attempt targeting falls back to this decision lane's own derivation" in message
     # The record must not promise a fall-through the resume path never performs: this
-    # leg submitted nothing, and the emitting site cannot know resubmit-vs-resume.
+    # leg targeted nothing and submitted nothing, and the emitting site cannot know
+    # resubmit-vs-resume, so it says nothing about attempt targeting either.
     assert "falling through" not in message
+    assert "targeting" not in message
 
 
 def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(tmp_path: Path) -> None:
