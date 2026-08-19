@@ -75,12 +75,19 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
   gateway 腿真实 id 不变；resume 非终态支（poll 后 gateway 形状）取值不变；
   resume 已终态支从 pipeline job id 变真实 id——从恒 defer 变 matched_bound
   对账，这是**有意行为修复**；空/非数字从静默退化变响亮抛出）。
-  **申报的连带翻转**：改后 resume 已终态支会真正走进投影写路径
-  （journal:3287-3312）——已投影完毕且字段一致时 diff 闸（:3313-3327）保证
-  零写入（幂等，测试钉住）；字段不一致时（如晚一趟 sacct 退化）master 行
-  `error_code`/`log_uri`/`finished_at` 会被新鲜聚合覆写——`status` 有 #1312
-  粘性保护而 `error_code` 没有，该粘性缺口路由 follow-up issue（实现期间
-  scribe 立案），本单如实申报不掩盖；
+  **申报的连带翻转（round-1 verifier 修正版）**：改后 resume 已终态支会
+  真正走进投影写路径（journal:3287-3312）。round-1 三条 CONFIRMED 证明
+  原申报低估了这道门：(i) `sticky_master_status`（journal:3282-3286）**只**
+  护 `permanently_failed`，succeeded master 会被第二趟不一致聚合覆写成
+  `partially_failed` 而 `candidate_projections` 因 per-task 首写粘性
+  （:3139-3151）不动——自相矛盾持久行；(ii) resume 腿的 `existing_job` 来自
+  净化公开读，占位符 `[object-uri]` 会经 `advertised_uri` 被洗进持久
+  `log_uri`（projector 批量写 :3357 不过 `_strip_redaction_placeholders`），
+  每次 resume 已完成 cohort 都发生、日志尾读永久坏。**处置（tasks §4）**：
+  已终态且投影完整的 master，resume 腿不再进投影写路径（恢复 pre-fix 零
+  写入语义；bound 未投影 master 仍进，验收 2a 不受影响）；占位符
+  `advertised_uri` 进投影前按 withheld(None) 处理。`error_code` 无粘性的
+  缺口已路由 #1589；projector 写路径绕过 strip 属 pre-existing，另行立案；
   test-evidence selected（测试盲区实锤：全仓 14 处 `master_slurm_job_id`
   测试引用全部直调 journal API 手写数字 id，chain 层 id 推导零覆盖——红证
   必须在 chain 层伪造 resume 场景取证）；其余 not selected。

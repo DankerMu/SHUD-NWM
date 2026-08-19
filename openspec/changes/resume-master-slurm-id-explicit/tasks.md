@@ -56,3 +56,27 @@
 - [x] 3.3 openspec validate resume-master-slurm-id-explicit --strict --no-interactive
 - [ ] 3.4 merge 后 node-27 receipt（3.1 三套件；全量红按 #1513 已知例外
       口径核对）记 #1410
+
+## 4. Round-1 fix（verifier CONFIRMED×3，全 FIX_NOW）
+
+- [ ] 4.1 **F1 status 覆写闸**：durable master 已终态**且**投影完整
+      （complete 判据对齐 journal:3085-3111）时，resume 腿不进投影写路径
+      （chain 层收口——chain_stage_execution resume 支或
+      chain_array_accounting 调用侧，**journal 零改动**）；bound 未投影
+      master（geometry-2）仍进投影，2.2 断言不动仍绿
+- [ ] 4.2 **F2 占位符 withheld**：净化往返回来的占位 `advertised_uri`
+      （`[object-uri]`）进投影前按 None 处理（chain_workspace.py:100-107
+      或 chain_stage_execution.py:882-884 单点），杜绝洗进持久 `log_uri`
+- [ ] 4.3 **F3 2.2c 锁复明**：`_spy_cohort_projections` 断言 resume 趟
+      projector 返回 `{"total": 0, "pipeline_status": 0, "pipeline_event": 0}`
+      + `log_uri` 改用未净化 durable 读逐字节比对（净化读比 URI 恒同形，
+      是瞎锁）；4.1/4.2 修完后该锁自然转绿，作共同回归证据
+- [ ] 4.4 **红证（F1）**：公开入口两趟 `orchestrate_cycle`，第二趟聚合改
+      `["failed","succeeded"]`——修复前红形：succeeded master 被覆写
+      `partially_failed`+`NODE_FAILURE` 且 candidate_projections 不动；
+      修复后：durable 行零语义字段变化
+- [ ] 4.5 follow-up 立案：projector 批量写（journal:3357
+      `_journal_record_for_write`）与 `_write_pipeline_job_unlocked` 绕过
+      `_strip_redaction_placeholders`（:8700-8718 契约）——pre-existing，
+      版位含 reconcile.py:1097 腿核查
+- [ ] 4.6 三套件重跑 + ruff + openspec validate
