@@ -38,4 +38,4 @@
       在任何 `scheduler_state*` 模块中
 - [x] 3.3 uv run ruff check services tests
 - [x] 3.4 openspec validate durable-status-name-split --strict --no-interactive
-- [ ] 3.5 follow-up issue（`"complete"` 成员差是否统一）已立案并链接于 PR
+- [x] 3.5 follow-up issue（`"complete"` 成员差是否统一）已立案并链接于 PR（#1581）
