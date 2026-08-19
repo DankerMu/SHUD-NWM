@@ -50,8 +50,15 @@ mandated 缝位不可翻盘论证、上游 idempotency 键选取的下一步指�
 - [x] C.2 uv run ruff check .
 - [x] C.3 openspec validate orchestration-concurrency-hardening --strict --no-interactive
       ——已在 De-batch 裁剪**之后**重跑通过（终态一推纪律）
-- [ ] C.4 merge 后 node-27 receipt（C.1 三套件；#1513 已知例外口径）
+- [x] C.4 merge 后 node-27 receipt（C.1 三套件；#1513 已知例外口径）
       记 #1380（#1356 已 descope 拆回，不在本 PR 记账）
+      **落账**：node-27 隔离 worktree `/home/nwm/nwm-receipt-1380` @ master
+      `90ffb358`。默认 umask(0002)：81 failed / 2249 passed——80 条全是
+      #1513（`provider_lock_parent_unsafe`，A/B 实证：同主机同 commit 同测试
+      默认 umask 红 2.78s、`umask 022` 绿 1.40s）+ 1 条 #1356 已知 flake。
+      `umask 022` 干净重跑：**2329 passed / 1 failed（26m49s）**，唯一失败
+      为 #1356 flake（[IFS]，`assert 3 == 2`，chain:9450）。
+      **零 #1380 归因回归。**
 
 ## D. Round-1 fix（verifier CONFIRMED×2 + ride-along Notes）
 
