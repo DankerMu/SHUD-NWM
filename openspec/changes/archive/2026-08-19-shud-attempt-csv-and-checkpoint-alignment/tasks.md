@@ -381,7 +381,7 @@
 
       **落账**：`Change 'shud-attempt-csv-and-checkpoint-alignment' is valid`
 
-- [ ] C.4 merge 后 node-27 receipt（C.1 三套件）：**直接在 `umask 022` 下跑**
+- [x] C.4 merge 后 node-27 receipt（C.1 三套件）：**直接在 `umask 022` 下跑**
       ——默认 umask(0002) 会有 ~80 条 #1513 file-provider 预置红淹掉真实回归
       （2026-08-19 实测口径，见 #1513 评论）。记 #1491 与 #1317
 
@@ -568,3 +568,7 @@
 
       **PR body 待更新**：「已知限制 2」里的「失败路径 context 跑两次」
       → **三次**（早探 + 原地重试 + 历史站点），该调用只读
+      **落账**：node-27 隔离 worktree `/home/nwm/nwm-receipt-1603` @ master
+      `ea7585ef`，`umask 022` 下跑 C.1 三套件 → **649 passed / 0 failed
+      (22m51s)**，exit 0。与本地 macOS 的 649 passed **逐个相同**，
+      零 #1513 噪音（umask 口径生效）、零回归。记 #1491 与 #1317。
