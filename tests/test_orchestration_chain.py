@@ -7120,9 +7120,14 @@ def test_psycopg_candidate_state_terminal_stage_manual_repair_keeps_its_evidence
     always has, from the other producer.  The evidence is retained and the inner projection does
     not fire, so the five stale failure fields keep their values.
 
-    The completed-stage scan is now reached on this shape, and the terminal-completion guard is
-    what decides it: the succeeded ``state_save_qc`` retry row is itself a terminal completion
-    success, so no restart marker is armed here either (E9's guard, on the sibling producer).
+    The scan's CONDITION is now reached on this shape -- the ``elif`` no longer swallows it -- but
+    the terminal-completion guard short-circuits it before ``_best_completed_stage_success_evidence``
+    is ever called, because a succeeded ``state_save_qc`` retry is itself a terminal completion
+    success.  The candidate's own succeeded ``forecast`` row is what makes that decision
+    observable: it is exactly what the scan would return if the guard were gone (a
+    ``restart_stage="parse"`` marker on a candidate whose terminal stage is already repaired), so
+    the guard, and nothing else, is what keeps ``completed_stage_evidence`` absent here.  Same
+    guard as E9, on the manual-stage producer instead of the source-cycle one.
     """
 
     from services.orchestrator.chain_repository_state import _has_terminal_completion_stage_success
@@ -7147,6 +7152,7 @@ def test_psycopg_candidate_state_terminal_stage_manual_repair_keeps_its_evidence
                 error_message="state save qc failed",
                 updated_at="2026-05-01T01:00:00Z",
             ),
+            _own_succeeded_forecast_job(),
         ],
         events=[
             _own_manual_repair_event(
@@ -7167,7 +7173,10 @@ def test_psycopg_candidate_state_terminal_stage_manual_repair_keeps_its_evidence
     assert state["pipeline_status"] == "failed"
     assert state["stage"] == "state_save_qc"
     assert state["error_code"] == "NODE_FAILURE"
-    # ... and the scan it no longer blocks is held by the terminal-completion guard instead.
+    # ... and the scan the repaired branch no longer blocks is held by the terminal-completion
+    # guard instead, with a completed forecast row sitting right there for it to have returned.
+    forecast_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_model_b_forecast")
+    assert forecast_row["status"] == "succeeded"
     assert _has_terminal_completion_stage_success(state["pipeline_jobs"]) is True
     assert "completed_stage_evidence" not in state
     assert "restart_stage" not in state

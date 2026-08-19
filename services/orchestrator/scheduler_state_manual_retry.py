@@ -245,12 +245,17 @@ def _state_completed_stage_evidence_names_job(state: Mapping[str, Any], entity_i
 
     That copy is no longer the only way this key coexists with repaired evidence.  Since #1461
     the scan is an independent ``if`` (``chain_repository_state.py:902-916``), so repaired
-    evidence carrying no ``restart_stage`` — the source-cycle variant always, a manual-stage
-    repair of a terminal stage sometimes — leaves the SCAN's payload here, ``job_id`` and all.
-    On that shape this guard answers exactly as it does for a candidate with no repair at all
-    (the two payloads are produced by the same scan from the same rows), so the verdict is
-    unchanged; what is no longer true is the claim that a state carrying repaired evidence can
-    never present a ``job_id`` here.
+    evidence carrying no ``restart_stage`` leaves the SCAN's payload here, ``job_id`` and all.
+    That is the source-cycle variant's shape.  The manual-stage variant reaches it structurally —
+    the one ``_FORECAST_STAGE_ORDER`` member with no ``_stage_after`` is ``state_save_qc`` — but
+    never observably: its own succeeded ``state_save_qc`` retry row satisfies
+    ``_has_terminal_completion_stage_success``, so the scan is suppressed by that guard and this
+    key stays absent on that shape.
+
+    On the source-cycle shape this guard answers exactly as it does for a candidate with no
+    repair at all (the two payloads are produced by the same scan from the same rows), so the
+    verdict is unchanged; what is no longer true is the claim that a state carrying repaired
+    evidence can never present a ``job_id`` here.
     """
 
     completed_stage = state.get("completed_stage_evidence")

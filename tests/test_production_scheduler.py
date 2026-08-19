@@ -7300,6 +7300,13 @@ def test_projected_multi_repair_leaves_neither_repaired_stage_live(include_unrep
     repaired.  With the unrepaired ``convert`` row present the family must be exactly
     ``{"convert"}``: a strictly sharper statement than "empty", because it shows the two repaired
     stages dropped out while the untouched failure stayed.
+
+    The same annotation face decides a DECISION channel, so it is pinned by absolute value here
+    (must-preserve 8): ``_completed_upstream_stage_retry_evidence`` refuses on any surviving
+    failure signal, so with both repairs annotated the fully-repaired leg yields a real
+    ``retry_after_completed_stage`` verdict, while the leg still carrying the live ``convert``
+    failure yields ``None``.  Before #1460 the evicted ``forcing`` annotation kept the failure
+    signal alive on BOTH legs and this channel was unreachable either way.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -7320,6 +7327,180 @@ def test_projected_multi_repair_leaves_neither_repaired_stage_live(include_unrep
         scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state)
         is include_unrepaired_convert
     )
+
+    # The decision channel the annotation face opens, as absolutes on the real projection chain.
+    completed_retry = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(
+        candidate, decision_state, {}
+    )
+    if include_unrepaired_convert:
+        assert completed_retry is None
+    else:
+        assert completed_retry is not None
+        assert completed_retry["decision"] == "retry_after_completed_stage"
+        assert completed_retry["restart_stage"] == "parse"
+        assert completed_retry["restart_from_stage"] == "parse"
+        assert completed_retry["native_shud_resubmitted"] is False
+
+
+_SHARED_CLAIM_EARLY_FAILURE_JOB_ID = "job_model_a_forcing_early"
+_SHARED_CLAIM_EARLY_RETRY_JOB_ID = "job_model_a_forcing_early_retry_1"
+_SHARED_CLAIM_LATE_FAILURE_JOB_ID = "job_model_a_forcing_late"
+_SHARED_CLAIM_LATE_RETRY_JOB_ID = "job_model_a_forcing_late_retry_1"
+
+
+def _shared_claim_repair_rows(
+    *,
+    early_failure_at: str,
+    early_retry_at: str,
+    late_failure_at: str,
+    late_retry_at: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Two SAME-stage failures on one candidate, each with its own successful manual retry.
+
+    Same stage is the whole point: ``_jobs_share_stage`` lets the stage-widening sweep of ONE
+    retry claim the OTHER retry's failure too, so the two retries' claim sets overlap and the
+    tie-break at ``chain_repository_state.py:401`` decides who owns the shared row.  The four
+    timestamps are the geometry knob -- disjoint or interleaved claim windows.
+    """
+
+    jobs = [
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at=early_failure_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_EARLY_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at=early_retry_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at=late_failure_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_LATE_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at=late_retry_at,
+        ),
+    ]
+    events = [
+        _projected_repair_event(
+            entity_id=_SHARED_CLAIM_EARLY_RETRY_JOB_ID,
+            previous_job_id=_SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+            retry_count=1,
+            event_id=51,
+            created_at=early_retry_at,
+        ),
+        _projected_repair_event(
+            entity_id=_SHARED_CLAIM_LATE_RETRY_JOB_ID,
+            previous_job_id=_SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+            retry_count=1,
+            event_id=52,
+            created_at=late_retry_at,
+        ),
+    ]
+    return jobs, events
+
+
+def test_projected_shared_claim_row_is_owned_by_the_newest_retry() -> None:
+    """#1460 E14: the accumulation's tie-break is first-write-wins == NEWEST-wins.
+
+    Removing the ``break`` made every successful retry contribute a claim set, and the sets
+    overlap: the retries walk truth-descending, so the later ``late`` retry's stage-widening
+    sweep reaches back over the ``early`` failure (truth below its own) and claims it as well.
+    ``chain_repository_state.py:401`` then refuses to let the older ``early`` retry overwrite
+    that claim, which is what keeps the annotation naming the repair that actually left the
+    stage healthy.  Last-write-wins would hand the shared row to the older retry instead.
+
+    Claim windows are DISJOINT here -- ``late``'s failure is newer than ``early``'s retry, so the
+    ``:385`` upper bound keeps it out of the older retry's sweep.  That geometry moves the row
+    attribution only; the interleaved sibling leg is where the evidence winner moves too.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    jobs, events = _shared_claim_repair_rows(
+        early_failure_at="2026-05-21T06:01:00Z",
+        early_retry_at="2026-05-21T06:05:00Z",
+        late_failure_at="2026-05-21T06:07:00Z",
+        late_retry_at="2026-05-21T06:12:00Z",
+    )
+    state = _projected_state_from_rows(candidate, jobs=jobs, events=events)
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+
+    # The shared row: claimed by BOTH retries, owned by the newest one.
+    shared = rows[_SHARED_CLAIM_EARLY_FAILURE_JOB_ID]
+    assert shared["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert shared["superseded_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert shared["repair_status"] == "repaired"
+    assert shared["active_blocker"] is False
+    assert rows[_SHARED_CLAIM_LATE_FAILURE_JOB_ID]["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+
+    # The repairing halves mirror it: the newest retry carries BOTH failures, oldest failure
+    # first (``_annotated_manual_stage_repair_jobs`` sorts by failed truth), and the older retry
+    # carries no repair face at all.
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repairs_job_ids"] == [
+        _SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+        _SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+    ]
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repair_status"] == "repair_succeeded"
+    assert "repair_status" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+    assert "repairs_job_ids" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+
+
+def test_projected_interleaved_shared_claims_keep_the_newest_retry_naming_the_evidence() -> None:
+    """#1460 E15: with INTERLEAVED claim windows the tie-break also owns the evidence winner.
+
+    Both retries are newer than both failures, so each retry's sweep claims the other's target
+    and the two claim sets are IDENTICAL.  Under first-write-wins the newest retry writes both
+    entries and the older retry writes nothing.  Under last-write-wins the older retry overwrites
+    both, so the newest retry is left in no entry at all -- the ``max`` that picks
+    ``latest_repair`` can then only land on the older one, and ``repaired_stage_evidence`` names
+    the wrong retry and quotes the wrong ``record_manual_repair`` event.  That is the geometry in
+    which the comment at ``chain_repository_state.py:397-400`` -- first-write-wins is what keeps
+    ``latest_repair`` naming the pair it named before -- is falsifiable.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    jobs, events = _shared_claim_repair_rows(
+        early_failure_at="2026-05-21T06:01:00Z",
+        late_failure_at="2026-05-21T06:02:00Z",
+        early_retry_at="2026-05-21T06:03:00Z",
+        late_retry_at="2026-05-21T06:04:00Z",
+    )
+    state = _projected_state_from_rows(candidate, jobs=jobs, events=events)
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+
+    for failed_job_id in (_SHARED_CLAIM_EARLY_FAILURE_JOB_ID, _SHARED_CLAIM_LATE_FAILURE_JOB_ID):
+        assert rows[failed_job_id]["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+        assert rows[failed_job_id]["active_blocker"] is False
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repairs_job_ids"] == [
+        _SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+        _SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+    ]
+    assert "repair_status" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+
+    # The evidence winner -- and the event id every downstream consumer quotes -- is the newest
+    # repair, not the retry that merely claimed the same rows last.
+    evidence = state["repaired_stage_evidence"]
+    assert evidence["repairing_retry_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert evidence["original_failed_job_id"] == _SHARED_CLAIM_LATE_FAILURE_JOB_ID
+    assert evidence["manual_retry_event_id"] == 52
 
 
 def _projected_forecast_cycle(candidate: scheduler_module.SchedulerCandidate) -> dict[str, Any]:
@@ -7444,8 +7625,9 @@ def test_projected_gap_shape_completed_evidence_names_job_matches_the_control() 
     therefore no false hit; that reasoning is no longer exhaustive, so the helper's verdict is
     pinned against the control directly.
 
-    The claim is deliberately helper-level: the gate itself (``:400-421``) short-circuits on any
-    entity id the repaired evidence names, an asymmetry that predates this change.
+    The claim is deliberately helper-level: the gate itself
+    (``scheduler_state_manual_retry.py:416-437``) short-circuits on any entity id the repaired
+    evidence names (arm ``:426-427``), an asymmetry that predates this change.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -7503,8 +7685,14 @@ def test_projected_gap_shape_completed_upstream_retry_decision_matches_the_contr
     assert gap_evidence == control_evidence
 
 
-def _projected_cohort_succeeded_job(stage: str, *, retry_count: int = 3, **overrides: Any) -> dict[str, Any]:
-    """A cycle-scope cohort row that SUCCEEDED at ``stage``, carrying the cohort's own counter."""
+def _projected_cohort_job(
+    stage: str,
+    *,
+    status: str = "succeeded",
+    retry_count: int = 3,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A cycle-scope cohort row at ``stage``, carrying the cohort's own retry counter."""
 
     job: dict[str, Any] = {
         "job_id": f"job_{_PROJECTED_CYCLE_RUN_ID}_{stage}",
@@ -7513,7 +7701,7 @@ def _projected_cohort_succeeded_job(stage: str, *, retry_count: int = 3, **overr
         "model_id": None,
         "stage": stage,
         "job_type": _BATCH_S_COHORT_JOB_TYPES[stage],
-        "status": "succeeded",
+        "status": status,
         "retry_count": retry_count,
         "updated_at": "2026-05-21T06:25:00Z",
     }
@@ -7526,7 +7714,7 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
 ) -> None:
     """#1461 E13 (must-preserve 9): the geometry D2 newly opens, pinned by ABSOLUTE values.
 
-    ``chain_repository_state.py:822`` fires only when the candidate owns no rows and the sole
+    ``chain_repository_state.py:825-830`` fires only when the candidate owns no rows and the sole
     surviving fact is repaired evidence.  Combine that with the gap shape and a cycle whose
     cohort already succeeded at ``forecast``, and this candidate gets a restart stage derived
     from the COHORT for the first time.  ``_candidate_failed_stage``'s explicit-key leg is
@@ -7534,13 +7722,20 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
     counter -- the same direction a candidate with no repaired evidence already takes, but a
     newly reachable geometry, so it is pinned rather than inferred.
 
-    The cohort row must succeed at ``convert``/``forcing``/``forecast``: a ``publish`` or
-    ``state_save_qc`` success trips ``_has_terminal_completion_stage_success`` and suppresses the
-    scan, which would make this leg measure nothing.
+    The completed cohort row must succeed at ``convert``/``forcing``/``forecast``: a ``publish``
+    or ``state_save_qc`` success trips ``_has_terminal_completion_stage_success`` and suppresses
+    the scan, which would make this leg measure nothing.
+
+    The second cohort row -- ``parse``, FAILED, counter 7 -- is what gives the attempt assertions
+    a consumer: the derived stage is ``parse``, so that is the axis production reads on, and only
+    a row at that stage carries a counter distinguishable from the flat one.  It must be FAILED:
+    a SUCCEEDED ``parse`` row would win ``_best_completed_stage_success_evidence``'s stage-order
+    ``max`` and move the derived stage to ``state_save_qc``, whose cohort row does not exist --
+    the attempt would collapse back onto the flat value and the leg would measure nothing again.
 
     NO control-group equality is asserted here, on purpose.  The flat top-level ``retry_count``
     differs between the two groups for a reason that predates this change:
-    ``chain_repository_state.py:829-831`` backfills ``retry_count_jobs`` from the source-cycle
+    ``chain_repository_state.py:832-834`` backfills ``retry_count_jobs`` from the source-cycle
     rows when the candidate owns none, so this shape reads 1 (the download pair's count) where a
     no-repair control reads 0 (measured).  ``_state_retry_attempt`` takes the max of the flat and
     the stage-matching values, so a control equality here would either be masked by that max or
@@ -7553,12 +7748,16 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
     repair_jobs, repair_events = _projected_source_cycle_repair_rows("failed")
     state = _projected_state_from_rows(
         candidate,
-        jobs=[*repair_jobs, _projected_cohort_succeeded_job("forecast", retry_count=3)],
+        jobs=[
+            *repair_jobs,
+            _projected_cohort_job("forecast", retry_count=3),
+            _projected_cohort_job("parse", status="failed", retry_count=7, error_code="NODE_FAILURE"),
+        ],
         events=repair_events,
         forecast_cycle=_projected_forecast_cycle(candidate),
     )
 
-    # Premise: the ``:822`` branch really fired -- no candidate rows, no exposed failure left.
+    # Premise: the ``:825-830`` branch really fired -- no candidate rows, no exposed failure left.
     assert [job for job in state["pipeline_jobs"] if job.get("model_id") == "model_a"] == []
     assert state["pipeline_status"] is None
     assert state["stage"] is None
@@ -7571,11 +7770,16 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
     assert state["restart_stage"] == "parse"
     assert state["restart_from_stage"] == "parse"
 
-    # (b) the cohort-derived attempt values, as absolutes.
-    assert scheduler_state_rows_module._state_retry_attempt(state, stage="forecast") == 3
+    # (b) the cohort-derived attempt values, as absolutes, read through the COMBINATION production
+    # uses (``scheduler_state_failure.py:1950,1969``): the stage axis is the derived failed stage,
+    # never a literal, so the counter that reaches ``retry_policy.attempt`` /
+    # ``manual_retry.previous_attempt`` is the cohort ``parse`` row's, not the flat 1.
+    derived_stage = scheduler_state_failure_module._candidate_failed_stage(state)
+    assert derived_stage == "parse"
+    previous_attempt = scheduler_state_rows_module._state_retry_attempt(state, stage=derived_stage)
+    assert previous_attempt == 7
     assert state["retry_count"] == 1
-    assert scheduler_state_failure_module._candidate_failed_stage(state) == "parse"
-    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=previous_attempt) == 8
 
 
 def _projected_repaired_cycle_download_facts(target_status: str) -> dict[str, Any]:
