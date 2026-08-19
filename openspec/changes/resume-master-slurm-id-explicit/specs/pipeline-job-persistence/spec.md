@@ -23,12 +23,23 @@ unchanged — it was correct and was being fed the wrong value.
 
 #### Scenario: resume reconciles with the real Slurm identity
 
-WHEN an already-terminal forecast-cohort pipeline row is resumed
+WHEN an already-terminal forecast-cohort pipeline row that still owes
+its projection is resumed
 THEN the projection receives the row's recorded Slurm id (not the
 pipeline job id) and reconciles as matched-bound against the stored
-identity — no identity-mismatch defer, no pollution event — and when the
-row is already fully projected with identical aggregation fields the
-reconciled pass writes nothing (the existing change gate holds)
+identity — no identity-mismatch defer, no pollution event
+
+#### Scenario: a settled master is never re-projected
+
+WHEN a resumed forecast-cohort master is already terminal and its
+recorded projections fully cover the cohort with terminal outcomes
+THEN the resume pass does not re-enter the projection at all: the
+durable row's outcome prevails over whatever this pass re-aggregates,
+and the row's semantic fields stay byte-identical even when the fresh
+aggregation disagrees with the stored one — and when the settled row has
+no published log, the pass still publishes the log file to its
+deterministic location (the row's log pointer stays unset until a typed
+write for it exists)
 
 #### Scenario: the submit leg is unchanged
 
