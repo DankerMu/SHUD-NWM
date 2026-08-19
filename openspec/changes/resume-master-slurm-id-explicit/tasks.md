@@ -124,9 +124,9 @@
       `should_persist_logs is False`）；N2 `tests/test_orchestration_chain.py:14193`
       docstring "the identity can only be pinned here" 改为
       "唯一全生命周期回放钉住身份的 geometry"（geometry-2 同 mutant 下也红）
-- [ ] 5.4 B 消费侧行-报告矛盾：DEFER 并案 #1589（同一 divergent-second-pass
+- [x] 5.4 B 消费侧行-报告矛盾：DEFER 并案 #1589（同一 divergent-second-pass
       几何；报告侧对齐=让存储状态覆盖新鲜 Slurm 读，是设计裁定）——编排者
-      评论互链
+      评论互链（#1589 comment-5340064657，三面并案口径）
 - [x] 5.5 三套件重跑 + ruff + openspec validate（1173 passed = round-1 的
       1154 + 本轮 19 条新测；ruff `services tests` 全过；openspec strict 通过）
       ——连带：2.1 `test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id`
