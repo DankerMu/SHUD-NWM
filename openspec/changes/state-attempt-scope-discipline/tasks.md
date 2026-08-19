@@ -24,14 +24,19 @@
 
 - [x] E1 (#1298 主判别，红先行): 唯一活失败 = model-scoped `cancelled` 的
       `download_retry_4` 行、顶层 `retry_count=0`、无 `failed_stage` →
-      `_manual_retry_new_attempt` 1→**5**
+      `_manual_retry_new_attempt` 1→**5**；并按 attempt 来源参数化——id 后缀行之外
+      再加一条无可解析后缀、`retry_count=4` 的 `<run_id>_retry_active` 生产形状行
+      （手动重试首次铸造的 id，attempt 只存在于 recorded 计数上），两格同答 5
 - [x] E2 (#1298 对照): 同形 canonical `forecast_retry_4` 仍 5；round-4 判别形
       （stage-blind 8 / 无 floor 1 / 正确 3）不回归（既有腿复跑确认未改）
 - [x] E3 (#1298): `stage=None` 臂逐字节不变——evidence-owner / manual-retry 无 stage
-      消费者既有腿全绿 + 非 canonical 行存在时 stage-less 读数不变的判别断言
+      消费者既有腿全绿 + 非 canonical 行存在时 stage-less 读数不变的判别断言；同一
+      flat-less 状态上并列钉 `stage="download"` 读 4（扁平键被剥离的子域：新臂窄扫描
+      相对 master 的 stage-blind 跨行 max 是收窄，两臂在同一状态上分离）
 - [x] E4 (#1298 scope 纪律，变异咬红): model-less `cycle_` run-id 的 cohort download 行
       `retry_count=7` 与候选 model-scoped `download_retry_4` 并存 → 新臂读 4 不读 7；
-      变异（删 cycle-scope 排除）该腿红
+      变异（删 cycle-scope 排除）该腿红；并在状态副本上钉住 flat 合成项
+      （`retry_count=6` → 读 6，变异"去 `max(flat or 0, …)`"咬红）
 - [x] E5 (#1298 边界钉): 非 canonical 最大 attempt 行截出 `job_limit` 窗外 → 新臂读窗内
       值（floors 不覆盖非 canonical——现状钉，docstring 边界的活体证据）
 - [x] E6 (#1299 主表格，红先行): 顶层 `pipeline_status` ∈ {cancelled, failed,
@@ -53,13 +58,17 @@
       路径不变（`previous_attempt == 2`）；`_failed_stage` 其余消费点（重启路由至少
       一腿）行为不变；**gate 打开面回归钉**——`_candidate_failed_stage` 为 None 而
       `_failed_stage` 为 canonical 的几何下 family floor 打开且只抬值（方向安全钉）
-- [x] E12 (#1300 可达形状): repaired-stage-evidence 分支（顶层 stage 置 None + 行保留）
-      形状并入 E9 参数化；可达枚举结论写入测试模块注释，**并点名真实可达通道 =
-      repaired-stage-evidence 分支与 identity filter 的 top-level 剥离**（E9 头部形状在
-      DB 投影下不可直接构造——投影会把候选存活行 stage 写进顶层）
+- [x] E12 (#1300 可达形状): 顶层 stage 置 None + 行保留的形状并入 E9 参数化；可达枚举
+      结论写入测试模块注释，**并点名 E9 头部形状的真实可达通道只有 identity filter 的
+      top-level 剥离**（投影会把候选存活行 stage 写进顶层；repaired-stage-evidence 分支
+      要求候选无行，其 nulling 块又恒写非空 `restart_stage`——故 `explicit_none` 轴是
+      合成形状，钉"键缺失 ≡ 键为 None"的等价性）
 - [x] E13 (#1298/#1300 交互): `_candidate_failed_stage` 解析出候选自身 model-scoped
       download 失败 → 分类/攻击面读到 download 真值（新臂）且不吃 cohort（E4 同几何
-      对照）
+      对照）；按 `retry_limit` 参数化钉住新 attempt 的分类后果——9 仍 retryable、3 判
+      `limit_exhausted`/`permanent`（`attempt == 4` 两格都保住），并加一格去 marker 的
+      决策级断言 `action == "blocked"` / `reason == "retry_limit_exhausted"`
+      （master 同形为 retry）
 - [x] E14 (#1298 AC-4 活体证据): `scheduler_candidates` strict-warm-start 预算读点
       （常量 `"forecast"`，canonical）在非 canonical 行存在的几何下读数不变——新臂
       不可达该读点的回归钉

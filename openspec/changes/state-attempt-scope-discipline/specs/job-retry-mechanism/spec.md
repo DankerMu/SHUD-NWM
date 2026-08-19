@@ -120,7 +120,16 @@ restored — an explicit boundary of this rule. In the
 unnameable-stage case a candidate whose visible family-stage row
 already consumed attempt N therefore derives at least N + 1
 whether or not that family stage is canonical; with no live
-failure at all the fallback stays `previous_attempt + 1`. Marker-shaped events remain excluded from
+failure at all the fallback stays `previous_attempt + 1`. The same
+non-canonical derivation reaches the scheduler's cross-pass
+failure policy, not only the fallback floor: a candidate whose own
+non-canonical row consumed attempt N is classified against N
+instead of the reset flat count, so at a `retry_limit` of N or
+below that classification reports the limit exhausted and the
+candidate is permanently blocked where it was previously retried —
+the configured limit binding retries even for misclassified
+failures, as this capability's effective-attempt requirement
+already mandates for the cross-pass failure policy. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
@@ -310,17 +319,28 @@ drive the retry decision it was written to request.
   the derived `new_attempt` falls back to `previous_attempt + 1`;
   the pin refusal itself charges nothing, and the attempt and
   failure-policy consumers resolve the candidate's own failed stage
-  through a candidate-scoped derivation whose row scan skips
+  through a candidate-scoped derivation whose ROW SCAN skips
   cycle-scope rows — a multi-basin cohort row's stage never becomes
-  the candidate's failed-stage axis, so the cohort's persisted
-  retry counter is not charged to the candidate's attempt or
-  retry-limit budget through the stage-scoped derivation (the
+  the candidate's failed-stage axis through that scan, so the
+  cohort's persisted retry counter is not charged to the
+  candidate's attempt or retry-limit budget through it. Two
+  channels stay outside that narrowing as declared boundaries of
+  this rule: the explicit top-level stage-key branch is unchanged
+  and can still be cast cycle-wide (from an active source-cycle
+  download failure, or a `restart_stage` minted from
+  completed-stage evidence scanned over the unfiltered rows), and
+  the download acceptance this capability already carries depends
+  on that branch; and the canonical stage-scoped derivation keeps
+  its existing count of model-less cohort rows at the same
+  canonical stage byte for byte (tracked separately in #1586). The
   stage-less flat-first derivation on a state carrying no flat
-  retry record still maxes over every row's recorded count — a
-  window-sensitive pre-existing channel outside this rule, tracked
-  with the flat-component boundary in #1579, and unreachable off
-  the production projections, which always write a top-level
-  `retry_count`); when the candidate itself has no nameable
+  retry record likewise still maxes over every row's recorded
+  count — a window-sensitive pre-existing channel outside this
+  rule, tracked with the flat-component boundary in #1579; the
+  projection always writes a top-level `retry_count`, but the
+  identity filter's top-level strip removes it and re-attaches the
+  rows afterwards, so that channel remains reachable on the
+  decision path. When the candidate itself has no nameable
   live failure the candidate-scoped derivation resolves no stage
   and those consumers fall back to the flat and family-floor paths,
   while the restart-routing and downstream-evidence consumers keep

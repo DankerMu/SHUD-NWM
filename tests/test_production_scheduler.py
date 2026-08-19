@@ -45316,8 +45316,13 @@ def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
 # 2. the candidate's live failure is a ``cancelled`` row or hydro run -- invisible to the
 #    projection's failed-job selection -- while the cohort row survives: the shape #1300
 #    reproduced (``test_cohort_stage_counter_*``);
-# 3. the repaired-stage-evidence branch (``chain_repository_state.py:822-827``) sets
-#    ``stage``/``failed_stage`` to None EXPLICITLY while retaining every row;
+# 3. the repaired-stage-evidence branch (``chain_repository_state.py:822-827``) clears the
+#    failed job while retaining every row -- but it fires only when the candidate owns NO
+#    rows (``failed_task is None and not candidate_jobs``), which is not the head shape
+#    below.  Its sibling nulling block (``:875-885``) does write ``stage``/``failed_stage``
+#    None while retaining rows, but only inside ``if restart_stage not in (None, "")``, so
+#    its output always carries a non-empty ``restart_stage`` that the explicit-key loop
+#    reads third.  Neither branch casts "candidate row present + no top-level stage key";
 # 4. the identity filter's ``_strip_top_level_pipeline_decision_fields``
 #    (``scheduler_state_identity_filter.py:678``) removes those keys from the decision
 #    state while retaining rows;
@@ -45326,11 +45331,12 @@ def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
 #    That is the explicit-key branch and stays byte-for-byte unchanged: #1287's download AC
 #    depends on it (pinned by the ``download`` case of ``test_cohort_stage_counter_*``).
 #
-# Shapes 3 and 4 are the TRUE reachable channels for the head shape used below: with a
+# Shape 4 is the ONLY true reachable channel for the head shape used below: with a
 # surviving candidate row the DB projection always writes shape 1's top-level ``stage``,
 # so "candidate row present + no top-level stage" cannot be cast by the projection
-# directly.  Case 3's literal output (the keys present with a ``None`` value) is carried as
-# the second parametrization axis of ``test_cohort_stage_counter_*``.
+# directly.  The second parametrization axis of ``test_cohort_stage_counter_*`` (the keys
+# present with a ``None`` value) is therefore a SYNTHETIC shape pinning an equivalence --
+# absent keys and null keys must read alike -- not a second reachable channel.
 
 _BATCH_S_COHORT_JOB_TYPES = {
     "forecast": "run_shud_forecast_array",
@@ -45409,17 +45415,39 @@ def _batch_s_stamped_job(*, stage: str, attempt: int, **overrides: Any) -> dict[
         pytest.param("forecast", 4, id="canonical_forecast"),
     ],
 )
+@pytest.mark.parametrize(
+    ("job_overrides", "expected_id_only_attempt"),
+    [
+        pytest.param({}, 4, id="attempt_from_id_suffix"),
+        pytest.param(
+            {"job_id": "cycle_gfs_2026052106_retry_active", "retry_count": 4},
+            0,
+            id="attempt_from_recorded_count",
+        ),
+    ],
+)
 def test_non_canonical_family_stage_fallback_floor_mints_the_next_attempt(
     stage: str,
     expected_attempt: int,
+    job_overrides: dict[str, Any],
+    expected_id_only_attempt: int,
 ) -> None:
     """#1298 (E1/E2): the family floor must read a NON-canonical stage's consumed attempt too.
 
-    The candidate's only live failure is a ``cancelled`` row whose id carries the consumed
-    ``_retry_4`` suffix; the top-level ``retry_count`` is 0 (the journal's clean-reservation
+    The candidate's only live failure is a ``cancelled`` row that records the consumed
+    attempt 4; the top-level ``retry_count`` is 0 (the journal's clean-reservation
     invariant) and no failed stage resolves, so ``_fallback_previous_attempt``'s gate is open
-    and the family floor is what decides.  The two cases differ in ONE field -- the row's
+    and the family floor is what decides.  The stage cases differ in ONE field -- the row's
     ``stage`` literal -- and must answer identically.
+
+    The second axis is WHERE the row's attempt is recorded, because the arm's counting rule
+    takes the higher of the two.  ``attempt_from_id_suffix`` is the auto-retry shape
+    (``_pipeline_retry_job_id`` mints ``_retry_4`` while the master row's counter is 0).
+    ``attempt_from_recorded_count`` is the FIRST manual retry of a run:
+    ``retry._next_manual_retry_job_id_for_run`` mints ``<run_id>_retry_active``, which
+    ``split_retry_job_identity`` cannot parse, and ``_create_pending_manual_retry_job``
+    carries the attempt in ``retry_count`` alone -- so on that row the recorded counter is
+    the only attempt evidence and dropping it re-mints a consumed identity.
 
     Before the fix ``_state_retry_attempt(state, stage="download")`` short-circuited to the
     flat 0 because ``download`` is not in ``DOWNSTREAM_RESTART_STAGES``, so the floor
@@ -45429,22 +45457,33 @@ def test_non_canonical_family_stage_fallback_floor_mints_the_next_attempt(
     """
 
     candidate = _scheduler_candidate_fixture()
+    job = _batch_s_stamped_job(
+        stage=stage,
+        attempt=4,
+        status="cancelled",
+        error_code=None,
+        **job_overrides,
+    )
     state = _decision_path_state(
         candidate,
         events=[_decision_path_cycle_download_marker()],
-        jobs=[_batch_s_stamped_job(stage=stage, attempt=4, status="cancelled", error_code=None)],
+        jobs=[job],
         failed_stage=None,
     )
 
     decision_state = _decision_path_filtered_state(candidate, state)
 
-    # Premise: the row survived filtering, it really is candidate scope, the gate really is
-    # open, and the family really is the single stage under test.
+    # Premise: the row survived filtering, it really is candidate scope, its attempt really
+    # comes from the axis under test, the gate really is open, and the family really is the
+    # single stage under test.
     assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
-        f"job_cycle_gfs_2026052106_{stage}_retry_4"
+        job_overrides.get("job_id", f"job_cycle_gfs_2026052106_{stage}_retry_4")
     ]
     assert (
         scheduler_state_rows_module._job_is_cycle_scope_row(decision_state["pipeline_jobs"][0]) is False
+    )
+    assert (
+        scheduler_state_rows_module.effective_retry_attempt(job["job_id"], 0) == expected_id_only_attempt
     )
     assert scheduler_state_failure_module._candidate_failed_stage(decision_state) is None
     assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {stage}
@@ -45464,8 +45503,15 @@ def test_stage_less_state_retry_attempt_is_unchanged_beside_non_canonical_rows()
     ``download_retry_4``: with a flat key the flat value wins outright (0, even though rows
     carry more), and without any flat key the answer is the max over EVERY row's recorded
     count -- cycle-scope rows included (7).  That second reading is the pre-existing
-    window-sensitive flat channel of #1579, unreachable off the production projections
-    (which always write a top-level ``retry_count``), and this batch does not narrow it.
+    window-sensitive flat channel of #1579; the projection always writes a top-level
+    ``retry_count``, but the identity filter's top-level strip removes it while the rows
+    survive, so the channel stays reachable on the decision path and this batch does not
+    narrow it.
+
+    The same flat-less state is also the sharpest place to pin the two arms apart: with a
+    ``stage`` argument the answer is the candidate's own 4 (the new arm's candidate-scope
+    scan), without one it is the cohort's 7.  That is the ``flat is None`` sub-domain, where
+    the new arm NARROWS master's stage-blind cross-row max rather than widening it.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -45489,6 +45535,7 @@ def test_stage_less_state_retry_attempt_is_unchanged_beside_non_canonical_rows()
     assert decision_state["retry_count"] == 0
     assert scheduler_state_rows_module._state_retry_attempt(decision_state) == 0
     assert scheduler_state_rows_module._state_retry_attempt(flat_less) == 7
+    assert scheduler_state_rows_module._state_retry_attempt(flat_less, stage="download") == 4
 
 
 def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter() -> None:
@@ -45501,6 +45548,13 @@ def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter()
 
     Mutation pin: delete the ``not _job_is_cycle_scope_row(job)`` conjunct from
     ``_state_non_canonical_stage_retry_attempt`` and this test reds with 7 / 8.
+
+    The last assertion pins the other half of the arm's composition -- the flat term the
+    canonical arm also carries.  The projection aggregates the flat ``retry_count`` as a max
+    across the candidate's rows at ALL stages, so a flat value above the row-derived one is
+    ordinary; dropping the ``max(flat or 0, ...)`` wrapper lowers the answer and reds here.
+    It is asserted on a copy so the leg's own ``previous_attempt == 0`` premise (which needs
+    flat 0) is untouched.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -45532,6 +45586,12 @@ def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter()
     assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"download"}
 
     assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="download") == 4
+    assert (
+        scheduler_state_rows_module._state_retry_attempt(
+            {**decision_state, "retry_count": 6}, stage="download"
+        )
+        == 6
+    )
     previous_attempt = _production_previous_attempt(decision_state)
     assert previous_attempt == 0
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 5
@@ -45781,11 +45841,14 @@ def _batch_s_cohort_stage_state(
 ) -> dict[str, Any]:
     """#1300's head shape: a cohort row beside the candidate's own consumed ``cancelled`` row.
 
-    ``top_level_shape`` selects between the two reachable ways the top-level stage keys can
-    be missing (see the reachability enumeration at the top of this block): ``absent`` is the
-    identity filter's ``_strip_top_level_pipeline_decision_fields``, ``explicit_none`` is the
-    literal output of the projection's repaired-stage-evidence branch, which sets
-    ``stage``/``failed_stage`` to ``None`` while retaining every row.
+    ``top_level_shape`` selects how the top-level stage keys go missing (see the reachability
+    enumeration at the top of this block).  ``absent`` is the real channel: the identity
+    filter's ``_strip_top_level_pipeline_decision_fields`` pops the keys while the rows are
+    re-attached after the strip.  ``explicit_none`` is a SYNTHETIC shape -- no projection
+    branch emits null stage keys beside a surviving candidate row -- and what it pins is the
+    resolver's equivalence: a key absent and a key present with a ``None`` value must both
+    fall through to the row scan, so a future projection change that starts writing the keys
+    null cannot flip the answer.
     """
 
     state = _decision_path_state(
@@ -46016,7 +46079,27 @@ def test_gate_open_surface_floors_only_within_the_restarted_stage_family() -> No
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 3
 
 
-def test_candidate_scoped_non_canonical_failure_reaches_the_policy_axis_without_the_cohort_counter() -> None:
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize(
+    ("retry_limit", "with_marker", "expected_classification", "expected_decision"),
+    [
+        pytest.param(9, True, (True, False, False), None, id="within_limit"),
+        pytest.param(3, True, (False, True, True), None, id="limit_exhausted"),
+        pytest.param(
+            3,
+            False,
+            (False, True, True),
+            ("blocked", "retry_limit_exhausted"),
+            id="limit_exhausted_blocks_the_decision",
+        ),
+    ],
+)
+def test_candidate_scoped_non_canonical_failure_reaches_the_policy_axis_without_the_cohort_counter(
+    retry_limit: int,
+    with_marker: bool,
+    expected_classification: tuple[bool, bool, bool],
+    expected_decision: tuple[str, str] | None,
+) -> None:
     """#1298 x #1300 (E13): the two fixes meet on one state and neither leaks.
 
     The candidate's own ``model_id``-stamped ``download_retry_4`` row is FAILED, so
@@ -46025,18 +46108,27 @@ def test_candidate_scoped_non_canonical_failure_reaches_the_policy_axis_without_
     stage through the new arm, which excludes the very cohort row (counter 7) the scan just
     skipped.  Both halves are load-bearing: without #1300 the axis is the cohort's row all
     the same, and without #1298 a resolved ``download`` axis short-circuits to the flat 0.
+
+    ``retry_limit`` is the second axis because the new attempt value is not only reported,
+    it CLASSIFIES.  Master answered the flat 0 here and stayed retryable at every limit; the
+    candidate's own consumed attempt 4 now exhausts a limit of 3, and the marker-less cell
+    carries that through to the emitted decision (``blocked`` / ``retry_limit_exhausted``
+    where master retried).  That is the main spec's "the configured retry limit bounds
+    retries even for misclassified failures" taking effect on a non-canonical stage; the
+    marker-bearing cells stay on the manual-retry rung, which claims the decision first, so
+    the demotion is only observable without a marker (E10's shape at the opposite verdict).
     """
 
     candidate = _scheduler_candidate_fixture()
     state = _decision_path_state(
         candidate,
-        events=[_batch_s_cohort_marker("download")],
+        events=[_batch_s_cohort_marker("download")] if with_marker else [],
         jobs=[
             _decision_path_cycle_download_job(retry_count=7),
             _batch_s_stamped_job(stage="download", attempt=4, status="failed", error_code="NODE_FAILURE"),
         ],
         failed_stage=None,
-        retry_limit=9,
+        retry_limit=retry_limit,
     )
 
     decision_state = _decision_path_filtered_state(candidate, state)
@@ -46049,6 +46141,14 @@ def test_candidate_scoped_non_canonical_failure_reaches_the_policy_axis_without_
     assert scheduler_state_failure_module._candidate_failed_stage(decision_state) == "download"
     assert payload["stage"] == "download"
     assert payload["attempt"] == 4
+    assert (payload["retryable"], payload["permanent"], payload["limit_exhausted"]) == (
+        expected_classification
+    )
+
+    if expected_decision is not None:
+        decision = scheduler_module._candidate_state_decision(candidate, state)
+        assert decision is not None
+        assert (decision.action, decision.reason) == expected_decision
 
 
 def test_strict_warm_start_budget_state_retry_attempt_is_unreachable_from_the_non_canonical_arm() -> None:

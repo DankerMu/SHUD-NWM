@@ -10,7 +10,11 @@
 - fixture 级别：expanded（三 issue 合批、S+S+M、强交互设计）。
 - 必须保全的行为（must-preserve）：
   1. `_state_retry_attempt(state, stage=None)` 臂**逐字节不变**（evidence-owner /
-     manual-retry 无 stage 消费者）。
+     manual-retry 无 stage 消费者）。该臂"无扁平键时跨行取 max（含 cycle-scope 行）"的
+     既有面是 #1579 的账，**且在决策路径上真实可达**——identity filter 的
+     `_strip_top_level_pipeline_decision_fields` 会剥掉顶层 `retry_count`/`attempt`/
+     `retry_attempt` 而在剥离**之后**重挂行；投影恒写顶层 `retry_count` 不等于该臂读得到它。
+     本批不收窄它，但措辞不得声称"生产不可达"。
   2. canonical 臂**逐字节不变**（含对 model-less cohort 同 stage 行的既有统计——那是
      #1586 的行扫描通道面，本批不碰）。
   3. #1287 AC：`download` 列 `new_attempt == 3`（PR #1293 兑现），在 #1298 加臂后
@@ -64,10 +68,15 @@ stage-scoped 读点（#1179 design D3.0 矩阵为底）逐个裁定"变宽是否
 | 读点 | stage 来源 | 非 canonical 可达？ | 裁定 |
 |---|---|---|---|
 | `scheduler_candidates` 预算读点 | 常量 `"forecast"` | 否 | 不受影响 |
-| `failure._failure_policy_payload`（经 `_failed_stage`）| D3 改为 `_candidate_failed_stage` | 是（download 等） | **预期变宽**：候选自身 model-scoped download 失败的 attempt 真值进入分类——方向正确（E13 对照） |
-| `failure` cancelled 分支 / manual fallback `previous_attempt` | 同上 | 是 | 预期变宽，E1 主判别腿 |
+| `failure._failure_policy_payload`（经 `_failed_stage`）| D3 改为 `_candidate_failed_stage` | 是（download 等） | **扁平键存在时预期变宽**：候选自身 model-scoped download 失败的 attempt 真值进入分类——方向正确（E13 对照，含 `retry_limit=3` 的分类/决策后果格） |
+| `failure` cancelled 分支 / manual fallback `previous_attempt` | 同上 | 是 | 扁平键存在时预期变宽，E1 主判别腿 |
 | `manual_retry._fallback_previous_attempt` family floor | `_restarted_stage_family`（候选作用域） | 是 | **本 issue 的修复目标** |
 | `manual_retry` 其余 / `evidence_owner` | `stage=None` 臂 | — | 逐字节不变（E3） |
+
+"变宽"限定于**扁平键存在**：`_state_flat_retry_attempt` 为 None 时（identity filter 剥掉顶层
+`retry_count` 而保留行），master 该子域走 stage-blind 的跨行 max，新臂改走候选作用域窄扫描，
+取值**可低于** master。方向与 #1293 round-4 一致（正是要减掉跨 stage / 跨作用域记账），
+本批以 E3 的 `_state_retry_attempt(flat_less, stage="download") == 4` 钉住该子域。
 
 ## D2 (#1299): 合成行的行身份判据 + 文本对齐
 
@@ -127,19 +136,32 @@ def _candidate_failed_stage(state):
   'download' 时三消费点经由它读到的行为已被 PR #1293 判别形钉住），本批只改**行扫描**
   分支的作用域纪律；显式键的 cycle-scope 铸造面并入可达枚举，不在本批收窄。
 - **可达形状枚举**（#1300 AC 要求，实现时闭合、写入测试注释；E9 的头部形状在 DB 投影下
-  不可直接构造——投影会把候选存活行的 stage 写进顶层——**真实可达通道是
-  repaired-stage-evidence 分支与 identity filter 的 top-level 剥离**，测试注释必须点明）：
+  不可直接构造——投影会把候选存活行的 stage 写进顶层——**该头部形状的真实可达通道只有
+  identity filter 的 top-level 剥离（下第 4 条）**，测试注释必须点明）：
   1. 候选有存活 candidate-scoped 行 → projection 顶层 `stage` 命中显式键，行为不变
      （E11 第二腿）。
   2. 活失败是 cancelled hydro run、无存活 candidate 行 → 顶层 `stage=None`、cohort 行
      存活 → 本批修复的主形状（E9/E10）。
-  3. repaired-stage-evidence 分支显式置 `stage`/`failed_stage` 为 None 且保留全部行 →
-     同形状可达，E9 参数化覆盖。
+  3. repaired-stage-evidence 分支（`chain_repository_state.py` 的
+     `elif failed_task is None and not candidate_jobs and isinstance(repaired_stage_evidence, Mapping)`）
+     清空 failed job 并保留全部行，但**要求候选自身无行**，与 E9 头部形状不符；其兄弟
+     nulling 块（`if restart_stage not in (None, "")` 内显式置 `stage`/`failed_stage`
+     为 None）恒同时写非空 `restart_stage`，显式键循环第三个键即命中。故该分支**不产出**
+     "候选有行 + 顶层无 stage 键"。E9 的 `explicit_none` 轴因此是**合成形状**，钉的是
+     "键缺失 ≡ 键为 None"的等价性（防投影未来改写成写 null 时答案翻转），不是第二条
+     可达通道。
   4. identity filter 对 model-less canonical cohort 行的过滤：部分状态下 cohort 行被滤掉
      （形状不可达即无害）；source-cycle download 行有保留 carve-out（download 非
      canonical，不进 `_candidate_failed_stage` 的候选行扫描——被 cycle-scope 排除）。
-  5. 顶层显式键由 cycle-scope 失败铸造（`active_source_cycle_failure`）→ 显式键分支，
-     行为不变（本批边界，见上）。
+  5. 顶层显式键由 cycle-scope 来源铸造 → 显式键分支，行为不变（本批边界，见上）。两条
+     铸造通道：`active_source_cycle_failure`（cycle-scope source-cycle download 行）铸
+     `failed_stage`/`stage`；`_best_completed_stage_success_evidence` 扫**未过滤**行后
+     铸顶层 `restart_stage`（`chain_repository_state.py` 的 `elif not
+     _has_terminal_completion_stage_success(jobs) and (completed_stage_evidence := ...)`，
+     注释自陈 state_save_qc 是无 run_id/model_id 的 cycle-scope cohort 行）。故"cohort 行
+     的 stage 绝不成为候选失败 stage 轴"只在**行扫描**分支为真——显式键分支上 cycle-scope
+     铸造仍可命名 stage，这是本批显式声明的边界（#1287 的 download AC 依赖它），delta 措辞
+     必须带此限定。
 
 ## D4: 交互矩阵（三修复 × 关键读点）
 
