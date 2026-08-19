@@ -314,6 +314,7 @@ def record_cycle_stage_status_override(
     aggregation: ArrayAggregation,
     log_uri: str | None,
     *,
+    master_slurm_job_id: str,
     deps: ArrayAccountingDependencies | None = None,
 ) -> dict[str, Any]:
     deps = deps or _default_dependencies()
@@ -326,6 +327,19 @@ def record_cycle_stage_status_override(
             raise OrchestratorError(
                 "ACCEPTED_SUBMIT_PROJECTION_UNAVAILABLE",
                 "forecast cohort terminal projection API is unavailable",
+            )
+        # A durable accepted submit always carries a purely numeric Slurm id, so
+        # anything else can only lose the downstream identity comparison and
+        # decay into a silent defer.  Fail closed here instead (#1410).
+        if not master_slurm_job_id.isdigit():
+            raise OrchestratorError(
+                "SLURM_MASTER_IDENTITY_UNAVAILABLE",
+                "forecast cohort terminal projection requires a numeric master Slurm job id",
+                {
+                    "pipeline_job_id": pipeline_job_id,
+                    "stage": stage.stage,
+                    "master_slurm_job_id": master_slurm_job_id,
+                },
             )
         tasks = {task.task_id: task for task in aggregation.task_results}
         expected_task_ids = {
@@ -359,7 +373,6 @@ def record_cycle_stage_status_override(
                     "native_shud_resubmitted": False,
                 }
             )
-        master_slurm_job_id = str(terminal.get("job_id") or terminal.get("slurm_job_id") or "")
         try:
             projector(
                 pipeline_job_id,

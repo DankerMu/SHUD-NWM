@@ -13639,12 +13639,14 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     passes return ``PipelineResult("failed")``.
 
     What it does NOT pin is projection stickiness (design D9 deviation (b),
-    tasks.md:69): pass two finds the master already terminal and exits through
-    the resume defer branch, so ``project_forecast_cohort_tasks``' sticky line
-    is never reached and this test stays green under a sticky revert.  The red
-    proof for stickiness lives in the journal-level unit tests
-    (``test_cohort_projection_keeps_a_permanently_failed_master_sticky`` and its
-    write-through twin).
+    tasks.md:69).  Since #1410 pass two does reach
+    ``project_forecast_cohort_tasks`` — the resume leg now hands it the row's
+    real Slurm id, so the identity guard matches instead of deferring — but the
+    assertions below still cannot see the sticky line: they count
+    ``permanently_failed`` events, and a committed projection emits
+    ``status_change``.  The red proof for stickiness lives in the journal-level
+    unit tests (``test_cohort_projection_keeps_a_permanently_failed_master_sticky``
+    and its write-through twin).
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -14031,3 +14033,273 @@ def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(
     assert len(mark_failures) == 1
     assert mark_failures[0]["details"]["reason"] == expected_reason
     assert mark_failures[0]["status_to"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# #1410: the cohort projection receives the master Slurm identity explicitly.
+# ---------------------------------------------------------------------------
+
+
+_COHORT_JOB_ID = "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+
+
+def _forecast_cohort_basins() -> list[dict[str, Any]]:
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    return basins
+
+
+def _forecast_cohort_context(
+    orchestrator: ForecastOrchestrator,
+    basins: list[dict[str, Any]],
+    *,
+    run_id: str,
+) -> CycleOrchestrationContext:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    return CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=run_id,
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+
+
+def _spy_cohort_projections(repository: Any) -> list[dict[str, Any]]:
+    """Record every ``project_forecast_cohort_tasks`` call and its result."""
+
+    real = repository.project_forecast_cohort_tasks
+    calls: list[dict[str, Any]] = []
+
+    def spy(job_id: str, **kwargs: Any) -> dict[str, int]:
+        result = real(job_id, **kwargs)
+        calls.append({"job_id": job_id, "result": result, **kwargs})
+        return result
+
+    repository.project_forecast_cohort_tasks = spy  # type: ignore[method-assign]
+    return calls
+
+
+def test_submit_leg_projects_the_cohort_with_the_gateway_master_slurm_id(tmp_path: Path) -> None:
+    """#1410 sibling leg: submit/poll keeps handing the projection the gateway id."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    calls = _spy_cohort_projections(repository)
+    _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+        "gfs", "2026050100", [dict(basin) for basin in basins]
+    )
+
+    master = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert master is not None
+    assert [call["master_slurm_job_id"] for call in calls] == [str(master["slurm_job_id"])]
+    assert str(master["slurm_job_id"]).isdigit()
+
+
+def test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id(tmp_path: Path) -> None:
+    """#1410: the already-terminal resume leg must not sniff the pipeline job id.
+
+    ``resume_cycle_stage`` keeps ``terminal = dict(job)`` — a pipeline row whose
+    ``job_id`` is the pipeline job id, not a Slurm id — so the projection has to
+    be handed the row's recorded ``slurm_job_id`` explicitly.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    job = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert job is not None
+    assert job["status"] == "succeeded"
+    master_slurm_job_id = str(job["slurm_job_id"])
+    assert master_slurm_job_id.isdigit()
+
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(job["run_id"]))
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, job)
+
+    assert [call["master_slurm_job_id"] for call in calls] == [master_slurm_job_id]
+
+
+def test_resume_of_a_bound_unprojected_cohort_master_reconciles_matched_bound(
+    tmp_path: Path,
+) -> None:
+    """#1410 geometry-2: a durable non-terminal bound master resumed from a terminal snapshot.
+
+    Before the fix the projection was fed the pipeline job id, the journal's
+    identity guard could never match it, and the master was genuinely written
+    to ``reconcile_unverified`` / ``SLURM_MASTER_IDENTITY_MISMATCH`` /
+    ``identity_mismatch_blocked``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = ImmediateTerminalSlurmClient()
+    real_project = repository.project_forecast_cohort_tasks
+
+    def crash_before_projection(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        raise RuntimeError("injected crash before terminal projection")
+
+    repository.project_forecast_cohort_tasks = crash_before_projection  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected crash"):
+        _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+            "gfs", "2026050100", [dict(basin) for basin in basins]
+        )
+    repository.project_forecast_cohort_tasks = real_project  # type: ignore[method-assign]
+
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    bound = reopened.get_pipeline_job(_COHORT_JOB_ID)
+    assert bound is not None
+    assert bound["status"] == "submitted"
+    assert bound["candidate_projections"] == []
+    master_slurm_job_id = str(bound["slurm_job_id"])
+    assert master_slurm_job_id.isdigit()
+
+    calls = _spy_cohort_projections(reopened)
+    orchestrator = _orchestrator(tmp_path, reopened, client)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(bound["run_id"]))
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**bound, "status": "succeeded"})
+
+    projected = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(_COHORT_JOB_ID)
+    assert projected is not None
+    assert projected["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in projected["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert projected["reconciliation_decision"] == "matched_bound"
+    assert str(projected["matched_slurm_job_id"]) == master_slurm_job_id
+    assert projected["error_code"] is None
+    assert [call["master_slurm_job_id"] for call in calls] == [master_slurm_job_id]
+    assert calls[0]["result"]["total"] > 0
+
+    from tests.test_file_orchestration_journal import _master_events
+
+    events = _master_events(reopened, projected)
+    assert [event for event in events if event["event_type"] == "reconcile_unverified"] == []
+    assert any(
+        event["event_type"] == "status_change"
+        and (event.get("details") or {}).get("slurm_job_id") == master_slurm_job_id
+        for event in events
+    )
+
+
+def test_resume_of_a_fully_projected_cohort_master_writes_nothing(tmp_path: Path) -> None:
+    """#1410 idempotency lock: the reconciled resume pass must not rewrite the master."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    before = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert before is not None
+    assert before["status"] == "succeeded"
+
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(before["run_id"]))
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, before)
+
+    after = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(_COHORT_JOB_ID)
+    assert after is not None
+    assert after["error_code"] == before["error_code"]
+    assert after["log_uri"] == before["log_uri"]
+    assert after["finished_at"] == before["finished_at"]
+    assert after["status"] == before["status"]
+    assert after["candidate_projections"] == before["candidate_projections"]
+
+
+class _CohortProjectionOnlyRepository:
+    """Minimal cohort repository: the projector must never be reached."""
+
+    supports_accepted_submit_reconcile = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def project_forecast_cohort_tasks(self, job_id: str, **kwargs: Any) -> dict[str, int]:
+        self.calls.append({"job_id": job_id, **kwargs})
+        return {"total": 1, "pipeline_status": 1, "pipeline_event": 0}
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+        del job_id
+        return None
+
+
+@pytest.mark.parametrize("master_slurm_job_id", ["", "job_cycle_x"])
+def test_cohort_override_fails_closed_without_a_numeric_master_slurm_id(
+    master_slurm_job_id: str,
+) -> None:
+    """#1410: an empty or non-numeric master identity is attributable, not silent."""
+
+    from services.orchestrator.chain_array_accounting import record_cycle_stage_status_override
+    from services.orchestrator.chain_types import ArrayAggregation, ArrayTaskResult
+
+    repository = _CohortProjectionOnlyRepository()
+    orchestrator = types.SimpleNamespace(repository=repository)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[
+            {
+                "task_id": 0,
+                "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026050100_model_0",
+                "model_id": "model_0",
+                "restart_stage": "forecast",
+            }
+        ],
+    )
+    aggregation = ArrayAggregation(
+        total=1,
+        succeeded=1,
+        failed=0,
+        cancelled=0,
+        task_results=(ArrayTaskResult(task_id=0, slurm_job_id="2001_0", status="succeeded"),),
+    )
+
+    with pytest.raises(OrchestratorError) as error:
+        record_cycle_stage_status_override(
+            orchestrator,
+            M3_STAGES[2],
+            context,
+            _COHORT_JOB_ID,
+            {"job_id": _COHORT_JOB_ID, "status": "succeeded"},
+            aggregation,
+            None,
+            master_slurm_job_id=master_slurm_job_id,
+        )
+
+    assert error.value.error_code == "SLURM_MASTER_IDENTITY_UNAVAILABLE"
+    assert error.value.details["pipeline_job_id"] == _COHORT_JOB_ID
+    assert error.value.details["stage"] == M3_STAGES[2].stage
+    assert repository.calls == []

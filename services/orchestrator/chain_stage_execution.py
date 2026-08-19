@@ -624,6 +624,11 @@ def submit_and_wait_cycle_stage(
         deps.aggregation_error_message(aggregation) if aggregation is not None else terminal.get("error_message")
     )
     if aggregation is not None:
+        # ``terminal`` is a gateway job here, so its ``job_id`` is the master
+        # Slurm id the gateway just reported.  Keep feeding that to the
+        # projection's identity guard: a gateway that reports a different master
+        # than the one we bound must still be caught, which the submitted
+        # ``slurm_job_id`` could never do (it always matches the durable row).
         durable_outcome = orchestrator._record_cycle_stage_status_override(
             stage,
             context,
@@ -631,6 +636,7 @@ def submit_and_wait_cycle_stage(
             terminal,
             aggregation,
             log_uri or None,
+            master_slurm_job_id=str(terminal.get("job_id") or slurm_job_id),
         )
         result_status = str(durable_outcome.get("status") or result_status)
         result_error_code = durable_outcome.get("error_code")
@@ -900,6 +906,7 @@ def resume_cycle_stage(
                 terminal,
                 aggregation,
                 log_uri,
+                master_slurm_job_id=str(job["slurm_job_id"]),
             )
             status = str(durable_outcome.get("status") or status)
             if publication_attempt is not None:
