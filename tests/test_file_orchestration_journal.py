@@ -9256,6 +9256,15 @@ def test_master_public_snapshot_replay_still_fails_closed(tmp_path: Path) -> Non
 
     assert error.value.reason == "file_journal_evidence_invariant_invalid"
     assert error.value.field == "init_state_identities"
+    # Documentation, not an oracle: at this entry point no single-guard mutation
+    # can falsify this line. The contract-current structural master arm always
+    # ends at ``file_orchestration_journal.py:1757``
+    # (``return _public_scheduler_row(existing)``), so the write below it is
+    # unreachable for this row and the row cannot change. Only a two-site
+    # mutation (also deleting that early return) flips it. Kept because deleting
+    # an assertion mid-review reads as weakening the oracle — but the evidence
+    # narrative must not claim it proves zero-write. The same caveat applies to
+    # the byte-identical half of #1180 J5/J7/J8.
     assert repository.get_pipeline_job(job_id) == public_master
 
 

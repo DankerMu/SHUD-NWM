@@ -1,5 +1,9 @@
 # Tasks: accepted-submit-identity-write-semantics
 
+> **坐标基线**：本文件所有代码行号引用为**改动前坐标**（base `a2d50fd4`），实现后已漂移；
+> 唯一例外是显式标注「终态坐标」的条目。old→new 映射见 PR 终报；复跑 6.4 的变异配方时
+> **按名索引而非行号**，直接照搬本文件行号会变异错行并得到假的「变异体存活」。
+
 ## 1. 红先行 / 现状锁（先写先跑，记录 pre-change 红或现状绿）
 
 - [x] 1.1 **J9（#1187 主腿，红先行）**：per-model（candidate）终态行的公共 round-trip upsert
@@ -24,10 +28,35 @@
 - [x] 2.4 **J4**：非 identity-mismatch decision 携带非零 streak → `ValueError`。
 - [x] 2.5 **J5-J8**：归一化侧**四条**一一对应——`:566-568`（streak 类型）、`:600-602`（decision 为
   None 而 streak≠0）、`:626-628`（`identity_mismatch_released` 而 `status != "reservation_lost"`）、
-  `:630-632`（非 identity decision 携带 streak）。**落盘入口必须是 `upsert_pipeline_job` 打在已存在
-  的 versioned master 行上**（评审实测四条全部由该入口可达；`release_identity_blocked_reservation`
-  结构上够不到 `:626`/`:630`，直调函数会让零写入断言变空断言——fixture review P1-5）。期望 typed
-  error **且** `get_pipeline_job(job_id)` 与写前逐字节一致。
+  `:630-632`（非 identity decision 携带 streak）。落盘入口**默认** `upsert_pipeline_job` 打在已存在
+  的 versioned master 行上，期望 typed error **且** `get_pipeline_job(job_id)` 与写前逐字节一致；
+  `release_identity_blocked_reservation` 结构上够不到 `:626`/`:630`（fixture review P1-5）。
+  **原文前提「评审实测四条全部由该入口可达」已被 round-1 实测证伪**，三处 carve-out 如下（机制与
+  入口枚举见 design「入口可达性账」）：
+  - `:566-568`（J5）：**无 carve-out，原地不动**。它在该入口上结构性安全——断言
+    `file_journal_evidence_type_invalid`，而 #1183 冻结闸只可能抛 `..._invariant_invalid`；
+    双站点同删（J5+J6 守卫）后仍红。
+  - `:600-602`（J6）：**改由 `reserve_pipeline_job` 入口隔离**。normalize 的 candidate 臂在 `:539`
+    （终态坐标 `:560`）提前 return（该组不变量只对 master 行生效），而对 contract-current master 行，全覆盖冻结表
+    （`ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS` 含 `identity_blocked_streak`）抢先拒掉任何
+    ordinary upsert 分歧，且抛出的 `(reason, field)` 与归一化守卫**完全相同** → 单独删守卫该腿仍绿。
+    reserve 入口的 clean-reservation dirty-field 集合不含该字段，故守卫在此承重：零写入改以
+    「raise 后 `get_pipeline_job(...) is None`」表达，并带同形 `streak=0` 的合法 record 作污染对照。
+    **不得**复用 `_assert_invariant_left_no_trace`（insert 语义下没有「先前的行」）。
+  - `:626-628`/`:630-632`（J7/J8）：**落盘腿原样保留，另各追加一条
+    `normalize_accepted_submit_evidence` 直调隔离腿**。reserve 的 clean-reservation 闸在调归一化
+    **之前**抢先拒绝带 decision 的新预约，且载荷无法同时合法（带 decision 时归一化要求
+    `submit_outcome` 非空，而它本身是该闸的 dirty field）；**迄今实测的落盘入口**（upsert /
+    reserve / generic transition / release）**皆无法隔离这两个站点**——该枚举是实测边界，
+    **不是**「没有任何落盘入口能隔离」的证明，将来若有人找到可隔离入口，直调腿可被取代。
+    两个站点经四入口实测无任何活调用方能违反，即**纯防御性守卫**，直调是目前唯一可能的 oracle。
+  - **fixture review P1-5 的部分修订（必须落字）**：P1-5 反对的是用直调**替代**落盘腿——那会让
+    零写入断言变空断言。此处是**追加**：J7/J8 的落盘腿与其零写入断言原样保留，直调腿只承担
+    「单删该守卫即转红」的隔离声明。保留的落盘腿旁须加注释，写明其对自身守卫的判别力依赖持久行
+    decision-free/source-free（一次自然的 fixture 编辑即可使其静默空转）。
+  - **同时记录**：`get_pipeline_job` 「逐字节一致」这半边在 upsert 入口是**恒真**的（终态坐标
+    `file_orchestration_journal.py:1757` 对 contract-current structural master 无条件 return），
+    断言保留但不得再被叙述成「证明了零写入」。
 
 ## 3. #1187 对称冻结（D-B）
 
@@ -82,6 +111,18 @@
 - [x] 6.4 变异证死三组：删 candidate 冻结闸 → J9-J11 红；**把 `INIT_STATE_IDENTITY_FIELD` 加入
   reclaim 回填 key 元组（`:1944`）并让该拷贝对 versioned master 也生效** → J13/J15 红
   （**单独翻转 `if not versioned_master:` 杀不死这两腿**——该守卫包住的元组根本不含该字段，
-  评审已实测变异存活，fixture review P1-1）；删 `:262` 或 `:626`/`:630` 任一不变量 → 对应 J 腿红。
+  评审已实测变异存活，fixture review P1-1）；删 `:262` → 对应 J 腿红。
   各自应用→红→回退→绿，记录红-绿对照。
-- [x] 6.5 所有代码行号引用在**终态**上重新自核（本仓注释/docstring 行号会静默漂移；Batch R 的 V6 即此类）。
+  **#1180 归一化四条的变异表（round-1 补全 + 按终态 oracle 重指；`:566`/`:600` 原文漏列）**——
+  每条守卫**单独删除**均须转红，且**只能**由下列 oracle 证死：
+
+  | 守卫（改动前 / 终态坐标） | 变异体 | 终态 oracle |
+  |---|---|---|
+  | `:566` / `:586-589` | 删 G5 | `test_normalization_invariants_reject_the_ordinary_upsert_path[J5_streak_type]` |
+  | `:600` / `:620-623` | 删 G6 | `test_reserve_rejects_a_streak_carried_without_a_decision`（**新增行**：原 `J6_streak_without_decision` 参数在 upsert 入口被冻结闸兜底，删守卫仍绿，已实测；reserve 入口删守卫后 `NO RAISE` 且行落盘） |
+  | `:626` / `:646-649` | 删 G7 | `test_normalization_isolates_the_released_reservation_invariant`（直调；删守卫后归一化 `DID NOT RAISE`。原 `J7_...` upsert 腿今天也会一并转红，属附带、非隔离证据） |
+  | `:630` / `:650-653` | 删 G8 | `test_normalization_isolates_the_foreign_decision_streak_invariant`（直调；同上，原 `J8_...` upsert 腿一并转红属附带） |
+
+- [x] 6.5 所有代码行号引用在**终态**上重新自核（本仓注释/docstring 行号会静默漂移；Batch R 的 V6 即此类）：
+  已在终态逐条自核并记录 old→new 映射（见 PR 终报）；**fixture 文本按已登记 deviation 保留改动前坐标、
+  未回改**，该口径由本文件顶部的坐标基线 banner 声明，显式标注「终态坐标」的条目除外。

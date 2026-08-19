@@ -1,5 +1,9 @@
 # Design: accepted-submit-identity-write-semantics
 
+> **坐标基线**：本文件所有代码行号引用为**改动前坐标**（base `a2d50fd4`），实现后已漂移；
+> 唯一例外是显式标注「终态坐标」的条目。old→new 映射见 PR 终报；阅读与复算变异时
+> **按名索引而非行号**，直接照搬本文件行号会变异错行。
+
 ## 风险三角（fixture level: expanded）
 
 - **风险**：journal 行是 scheduler 判定的真值源；三条缺口都在「写入证据」侧。#1187 已能把 durable
@@ -20,6 +24,16 @@
 - #1188：方向 fail-safe（陈旧身份 → conflict → 重跑，读侧只能「拒绝跳过」不能「准许跳过」），
   且当前 cohort 几何下该映射对 verdict 不可见（#1185 未落地）。
 - #1180：当前仓内所有合法写入方都天然满足这些不变量。
+- #1180 归一化第三、四条（`:626-628`/`:630-632`，终态坐标 `:646-649`/`:650-653`）**是纯防御性守卫**：
+  迄今实测的落盘入口（`upsert_pipeline_job` / `reserve_pipeline_job` / generic
+  `transition_pipeline_job_submit_evidence` / typed `release_identity_blocked_reservation`，机制见
+  D-A）**皆无法隔离这两个站点**——每条入口都有更早的闸抢先，或根本无法表达该非法几何。
+  该枚举是**实测边界，不是「没有任何入口」的证明**（写路径入口按 `grep "def .*pipeline_job"` 枚举，
+  `record_pipeline_job_reconciliation` / `permit_pipeline_job_retry` / `project_forecast_cohort_tasks`
+  等未穷尽）。**推论**：对一个无活可达路径的防御性守卫，`normalize_accepted_submit_evidence` 直调是
+  目前**唯一可能**的 oracle，而不是「落盘腿的廉价替代」；将来若有人找到可隔离的落盘入口，直调腿可被取代。
+  这同时也是 spec「每道守卫都有单独删除即转红的负测」（`specs/pipeline-job-persistence/spec.md:91`）在这两个站点上的**正当兑现方式**——
+  不是绕开该承诺，而是在无活可达路径的前提下唯一能兑现它的形式。
 
 **推论**：本 change 的价值全部在「把未裁定的语义钉死 + 给防御性守卫配 oracle」，任何声称修复了活体
 故障的措辞都是过诺。
@@ -33,15 +47,45 @@
   而它恰是 #1180 称为「唯一守卫」的归一化对应臂）：`:566-568`（streak 类型）、`:600-602`
   （decision 为 None 而 streak≠0）、**`:626-628`（`identity_mismatch_released` 而
   `status != "reservation_lost"`）**、`:630-632`（非 identity decision 携带 streak）。
-- **落盘入口必须是 `upsert_pipeline_job` 打在已存在的 versioned master 行上**（评审实测四条 raise
-  全部由该入口可达且写前写后 `get_pipeline_job` 逐字节一致）。**不要**用 issue #1180 建议的
-  `release_identity_blocked_reservation`——它硬编码 `status="reservation_lost"` 且 `streak < 1`
-  先被自己的 typed 闸挡下，结构上够不到 `:626`/`:630`。直调函数会让「逐字节一致」退化成空断言。
+- 落盘入口**首选** `upsert_pipeline_job` 打在已存在的 versioned master 行上。**不要**用 issue #1180
+  建议的 `release_identity_blocked_reservation`——它硬编码 `status="reservation_lost"`（终态坐标
+  `file_orchestration_journal.py:3030`），只能产出**合法**形状，结构上够不到 `:626`/`:630`。
+- **round-1 实测更正（原文两处前提已被证伪，机制见下「入口可达性账」）**：
+  (i)「评审实测四条 raise 全部由该入口可达」**为假**——`:600-602` 在该入口上被 #1183 的
+  `ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS` 冻结闸（终态坐标
+  `file_orchestration_journal.py:1747-1754`）抢先，且抛出的 `(reason, field)` 与归一化守卫**完全相同**，
+  单独删守卫该腿仍绿；`:626`/`:630` 今天虽红，但判别力是 fixture 偶然（持久行恰好 decision-free/
+  source-free，写入在更靠前的字段上也分歧）。
+  (ii)「写前写后 `get_pipeline_job` 逐字节一致」在该入口是**恒真**的——contract-current structural
+  master 分支恒以 `return _public_scheduler_row(existing)`（终态坐标
+  `file_orchestration_journal.py:1757`）结束，写入对该类行不可达。该半边断言保留（删断言易被误读为
+  削弱 oracle），但**不得**再被叙述成「证明了零写入」。真正的零写入证据在新增的 reserve 腿上，
+  以「raise 后 `get_pipeline_job(...) is None`」表达。
 
 做法：在 `tests/test_gateway_reconcile.py` 已有的 `file_journal_evidence_invariant_invalid` 家族旁加两组
 参数化——一组打构造（期望 `ValueError`），一组打落盘路径（期望 `AcceptedSubmitEvidenceError` /
 `FileOrchestrationJournalError` **且** `get_pipeline_job(job_id)` 与写前逐字节一致）。参数矩阵至少
 覆盖 `streak = -1 / 1.0 / True / "1"`。**零写入断言是硬要求**，只 `pytest.raises` 不够（issue AC 原文）。
+
+### 入口可达性账（round-1 三方独立实测；决定终态腿形状，勿凭直觉推翻）
+
+| 归一化守卫（改动前 / 终态坐标） | 结论 |
+|---|---|
+| `:566` / `:586-589`（streak 类型） | upsert 入口**结构性安全**：断言 `..._type_invalid`，冻结闸只可能抛 `..._invariant_invalid`，双站点同删仍红。**原地不动** |
+| `:600` / `:620-623`（decision 为 None 而 streak≠0） | upsert 入口**不可隔离**（冻结表含该字段，`(reason, field)` 相同）；`reserve_pipeline_job` 可达且双向翻转已验（HEAD `RAISE` + 行不存在；删守卫 `NO RAISE` + 行落盘）。**移到 reserve 入口** |
+| `:626` / `:646-649`、`:630` / `:650-653` | 四个落盘入口**皆无法隔离**（机制见下表）。**落盘腿原地保留 + 追加直调隔离腿** |
+
+四个落盘入口的出局机制（**这是实测枚举，不是「没有任何入口」的证明**——措辞纪律见「可达性账」）：
+
+| 入口 | 抢先者 |
+|---|---|
+| `upsert_pipeline_job` | 全覆盖冻结表（终态 `file_orchestration_journal.py:1747-1754`）抢先，`(reason, field)` 与断言相同 |
+| `reserve_pipeline_job` | clean-reservation 闸（终态 `:1810`）在调归一化（终态 `:1814`）**之前**抛 `file_journal_clean_reservation_required`；且载荷无法同时合法——带 decision 时归一化要求 `submit_outcome` 非空，而它本身是该闸的 dirty field |
+| generic `transition_pipeline_job_submit_evidence`（终态 `:2158`） | 两重独立阻断：`AcceptedSubmitTransition` 孪生守卫构造期 `ValueError`（终态 `accepted_submit_identity.py:267`/`:269`）；且 decision 白名单（终态 `file_orchestration_journal.py:313-321`，`:2185-2193` 强制）排除 `identity_mismatch_released`。**注意**：该路径**确实会归一化**（transition 后载荷经 `_validate_outgoing_record`（终态 `:6402`）送进 `normalize_accepted_submit_evidence`），杀死隔离的是**上游抢先**，不是「该路径不归一化」 |
+| typed `release_identity_blocked_reservation`（终态 `:2957`） | 硬编码 `status="reservation_lost"`（终态 `:3030`），只能产出合法形状，无法表达非法几何 |
+
+可复用结论：任何候选入口须**同时**满足「带 decision 的 master 载荷在此合法」与
+「无冻结表/前置闸/孪生 dataclass 守卫抢先于归一化」。
 
 ## D-B（#1187）裁定：per-model 行走**对称冻结**
 
@@ -144,7 +188,7 @@ authority anchor 绝不从 lock 外的陈旧请求行拷贝）；方向 fail-saf
 
 ## Evidence mapping
 
-J1-J4 = #1180 构造期四条；J5-J8 = #1180 归一化四条（各含零写入断言）；
+J1-J4 = #1180 构造期四条；J5-J8 = #1180 归一化四条（终态腿形状见下表）；
 J9-J11 = #1187（round-trip 不洗白、显式空值不抹平、内容错误被拒，均至 durable 层）；
 J12 = D-B2 master PUBLIC 复放现状锁；
 J13-J14 = #1188（reclaim 后 master 行 keep-first + 连带断言 attempt/anchor/status，
@@ -153,7 +197,20 @@ J16 = D-B 新闸门的负向 oracle（must-preserve 8）；
 J17 = D-B1 落点纪律的反向钉（must-preserve 10）——不带该键的 candidate upsert 保持 silent-keep。
 变异证死：删 candidate 闸门 → J9-J11 红；**把 `INIT_STATE_IDENTITY_FIELD` 加入 reclaim 回填
 key 元组（`file_orchestration_journal.py:1944`）并让该拷贝对 versioned master 也生效** → J13/J15 红；
-删 `:262` 或 `:626`/`:630` 任一 → 对应 J 腿红。
+删 `:262` → 对应 J 腿红。
+
+**#1180 归一化四条的变异矩阵（原文只列了 `:626`/`:630` 两条，漏 `:566`/`:600`；round-1 按终态
+oracle 归属补全）**——四条守卫**各自单独删除**均须转红，红-绿对照见 tasks 6.4：
+
+| 守卫（改动前 / 终态坐标） | 终态 oracle | 判别力从何而来 |
+|---|---|---|
+| `:566` / `:586-589` | J5 原 upsert 腿（原地不动） | `reason` 分歧：断言 `..._type_invalid`，冻结闸只能抛 `..._invariant_invalid` |
+| `:600` / `:620-623` | **新的 `reserve_pipeline_job` 腿** | raise + `get_pipeline_job(...) is None`（该入口无冻结闸兜底） |
+| `:626` / `:646-649` | **新的直调隔离腿**（原 upsert 腿保留） | 直调 `normalize_accepted_submit_evidence`；删守卫后归一化**不再抛错**（非被兄弟守卫接住） |
+| `:630` / `:650-653` | **新的直调隔离腿**（原 upsert 腿保留） | 同上 |
+
+保留的 J7/J8 upsert 腿今天确实转红，但那是**fixture 偶然**（持久行 decision-free/source-free）；
+它们钉的是落盘路径的 typed 拒绝，隔离声明由直调腿承担。
 
 **#1188 变异体的重要更正**（fixture review P1-1 实测）：单独翻转 `if not versioned_master:`
 （`:1943`；注意文件里**另有一个**同名守卫在 `:1849`）**杀不死** J13/J15——被它包住的回填 key 元组

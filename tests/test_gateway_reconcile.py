@@ -145,29 +145,33 @@ def _store() -> PipelineStore:
     return PipelineStore(Session(engine))
 
 
-def _file_cohort_repository(
-    tmp_path: Any,
+def _versioned_master_reservation_record(
     *,
     created_at: datetime | None = None,
     member_count: int = 18,
     expected_user: str | None = None,
     expected_account: str | None = None,
     corrupt_digest: bool = False,
-    with_runtime_rows: bool = True,
     submit_outcome: str | None = "submit_result_ambiguous",
     versioned: bool = True,
     source_id: str = "gfs",
     init_state_identities: Any = None,
-) -> Any:
+) -> dict[str, Any]:
+    """The clean reservation payload ``_file_cohort_repository`` persists.
+
+    Extracted so a test can hand ``reserve_pipeline_job`` the very same shape
+    without laundering it through the public projection first (#1180 J6): on the
+    insert path the contract marker and the row kind come from the incoming
+    record, and the public view is not a valid write payload (design D-B2).
+    """
+
     from packages.common.source_identity import normalize_source_id
     from services.orchestrator.accepted_submit_identity import (
         ACCEPTED_SUBMIT_CONTRACT_VERSION,
         forecast_cohort_digest,
     )
     from services.orchestrator.chain_config import scenario_for_source
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
     canonical_source_id = normalize_source_id(source_id)
     source_id = canonical_source_id.lower()
@@ -212,6 +216,40 @@ def _file_cohort_repository(
         record.pop("accepted_submit_contract_version")
     if corrupt_digest:
         record["cohort_digest"] = "0" * 64
+    return record
+
+
+def _file_cohort_repository(
+    tmp_path: Any,
+    *,
+    created_at: datetime | None = None,
+    member_count: int = 18,
+    expected_user: str | None = None,
+    expected_account: str | None = None,
+    corrupt_digest: bool = False,
+    with_runtime_rows: bool = True,
+    submit_outcome: str | None = "submit_result_ambiguous",
+    versioned: bool = True,
+    source_id: str = "gfs",
+    init_state_identities: Any = None,
+) -> Any:
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    source_id = normalize_source_id(source_id).lower()
+    record = _versioned_master_reservation_record(
+        created_at=created_at,
+        member_count=member_count,
+        expected_user=expected_user,
+        expected_account=expected_account,
+        corrupt_digest=corrupt_digest,
+        submit_outcome=submit_outcome,
+        versioned=versioned,
+        source_id=source_id,
+        init_state_identities=init_state_identities,
+    )
     repository.reserve_pipeline_job(record)
     if versioned and submit_outcome == "submit_result_ambiguous":
         from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
@@ -12491,13 +12529,16 @@ def test_non_identity_decision_cannot_carry_a_streak(tmp_path: Any) -> None:
             "J5",
             id="J5_streak_type",
         ),
-        pytest.param(
-            {"identity_blocked_streak": 2},
-            "file_journal_evidence_invariant_invalid",
-            "identity_blocked_streak",
-            "J6",
-            id="J6_streak_without_decision",
-        ),
+        # J7/J8: these two legs pin the durable path's typed refusal, but their
+        # discriminating power over their OWN guard is a fixture accident. The
+        # persisted master here is decision-free and source-free, so each write
+        # also diverges on a field the #1183 ordinary-upsert freeze table
+        # (:1747-1754) reaches earlier; rebuild the same scenario on a persisted
+        # row that already carries a decision/source and the freeze fallback
+        # raises the identical (reason, field). One natural fixture edit turns
+        # them into silent no-ops. The isolation claim for
+        # ``accepted_submit_identity.py:646-649`` / ``:650-653`` is therefore
+        # carried by the two direct-call legs below, not by these.
         pytest.param(
             {
                 "reconciliation_decision": "identity_mismatch_released",
@@ -12529,12 +12570,23 @@ def test_normalization_invariants_reject_the_ordinary_upsert_path(
     expected_field: str,
     leg: str,
 ) -> None:
-    """#1180 J5-J8: the same four guards on the durable write path.
+    """#1180 J5/J7/J8: three of the guards on the durable write path.
 
-    ``upsert_pipeline_job`` against an already-persisted versioned master is the
-    entry point that actually reaches all four normalization arms, so the
-    "left no trace" half of the assertion is a real claim about durable state
-    rather than a no-op around a direct function call.
+    ``upsert_pipeline_job`` against an already-persisted versioned master keeps
+    the "left no trace" half of the assertion a real claim about durable state
+    rather than a no-op around a direct function call — but see the caveat above
+    the J7/J8 params, and note that the byte-identical half is itself vacuous at
+    this entry point (``file_orchestration_journal.py:1757`` returns the existing
+    row unconditionally for a contract-current structural master).
+
+    Only J5 isolates its own guard here: it asserts
+    ``file_journal_evidence_type_invalid``, and the freeze fallback can only ever
+    raise ``file_journal_evidence_invariant_invalid``. The fourth guard (the
+    former J6 param, ``accepted_submit_identity.py:620-623``) cannot be isolated
+    at this entry point at all and now lives in
+    ``test_reserve_rejects_a_streak_carried_without_a_decision``; J7/J8 are
+    isolated by ``test_normalization_isolates_the_released_reservation_invariant``
+    and ``test_normalization_isolates_the_foreign_decision_streak_invariant``.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
@@ -12547,3 +12599,143 @@ def test_normalization_invariants_reject_the_ordinary_upsert_path(
     assert error.value.reason == expected_reason
     assert error.value.field == expected_field
     _assert_invariant_left_no_trace(repository, tmp_path, leg, public, durable)
+
+
+def test_reserve_rejects_a_streak_carried_without_a_decision(tmp_path: Any) -> None:
+    """#1180 J6: a fresh reservation cannot open with a non-zero streak.
+
+    This guard (``accepted_submit_identity.py:620-623``) is unreachable in
+    isolation through ``upsert_pipeline_job``: ``identity_blocked_streak`` sits
+    in the #1183 ordinary-upsert freeze table
+    (``ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS``), whose loop raises the
+    identical ``(reason, field)`` before normalization can, so deleting the guard
+    alone leaves that leg green.
+
+    ``reserve_pipeline_job`` has no such fallback — its clean-reservation
+    dirty-field set (``file_orchestration_journal.py:1779-1808``) deliberately
+    omits the counter — so the insert path is where this guard alone decides.
+    Zero-write is expressed as row absence rather than via
+    ``_assert_invariant_left_no_trace``: on an insert there is no prior row, and
+    that helper is unconditionally true at the upsert entry point anyway.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    # Contamination control: the same shape with a zero streak reserves cleanly,
+    # so a red run here is the guard talking and not a malformed record. Its own
+    # repository, because with the guard deleted the illegal record below lands
+    # and would turn this into an ordinary job-id conflict.
+    control = FileOrchestrationJournalRepository(tmp_path / "streak-insert-control" / "journal")
+    legal = _versioned_master_reservation_record(member_count=1)
+    legal["identity_blocked_streak"] = 0
+    assert control.reserve_pipeline_job(legal) is not None
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "streak-insert" / "journal")
+    record = _versioned_master_reservation_record(member_count=1)
+    record["identity_blocked_streak"] = 2
+    record["reconciliation_decision"] = None
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.reserve_pipeline_job(record)
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "identity_blocked_streak"
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# #1180 J7/J8 isolation legs. Every durable write entry point measured so far
+# (``upsert_pipeline_job`` / ``reserve_pipeline_job`` / the generic
+# ``transition_pipeline_job_submit_evidence`` / the typed
+# ``release_identity_blocked_reservation``) is blocked from isolating
+# ``accepted_submit_identity.py:646-649`` and ``:650-653`` by something that
+# raises first: the ordinary-upsert freeze table, the clean-reservation gate,
+# the ``AcceptedSubmitTransition`` twin guards plus the decision whitelist, and a
+# hard-coded ``status="reservation_lost"`` respectively. That enumeration is a
+# measurement, not a proof that no entry point exists; if one is found these legs
+# can be superseded. They are a SUPPLEMENT — the durable J7/J8 legs above and
+# their zero-write assertions stay exactly as they were, which is what fixture
+# review P1-5 was protecting. Both sites are purely defensive: no live caller can
+# violate them, so the direct call is the only oracle available today.
+# ---------------------------------------------------------------------------
+
+
+def _direct_normalization_payload(**mutation: Any) -> dict[str, Any]:
+    """A contract-current master payload for direct normalization calls."""
+
+    return {
+        **_versioned_master_reservation_record(member_count=1),
+        "status": "reserved",
+        "submit_outcome": "submit_result_ambiguous",
+        **mutation,
+    }
+
+
+def test_normalization_isolates_the_released_reservation_invariant() -> None:
+    """#1180 J7 (isolation): ``identity_mismatch_released`` needs a lost reservation.
+
+    Single-fault geometry on purpose — the streak stays 0 so the sibling guard at
+    ``:650-653`` is structurally silent and cannot stand in for the one under
+    test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+
+    legal = _direct_normalization_payload(
+        reconciliation_decision="identity_mismatch_released",
+        reconciliation_source="slurm_exact_comment",
+        status="reservation_lost",
+        identity_blocked_streak=0,
+    )
+    assert normalize_accepted_submit_evidence(legal)["status"] == "reservation_lost"
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            _direct_normalization_payload(
+                reconciliation_decision="identity_mismatch_released",
+                reconciliation_source="slurm_exact_comment",
+                status="reserved",
+                identity_blocked_streak=0,
+            )
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "reconciliation_decision"
+
+
+def test_normalization_isolates_the_foreign_decision_streak_invariant() -> None:
+    """#1180 J8 (isolation): the counter belongs to identity-mismatch decisions.
+
+    Single-fault geometry: the only illegal thing about the payload is the streak
+    riding an ``absence_retry_permitted`` decision.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+
+    legal = _direct_normalization_payload(
+        reconciliation_decision="absence_retry_permitted",
+        reconciliation_source="slurm_exact_comment",
+        identity_blocked_streak=0,
+    )
+    assert normalize_accepted_submit_evidence(legal)["identity_blocked_streak"] == 0
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            _direct_normalization_payload(
+                reconciliation_decision="absence_retry_permitted",
+                reconciliation_source="slurm_exact_comment",
+                identity_blocked_streak=1,
+            )
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "identity_blocked_streak"
