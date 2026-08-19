@@ -491,6 +491,8 @@ class ForecastOrchestratorCycleMixin:
         terminal: dict[str, _chain.Any],
         aggregation: _chain.ArrayAggregation,
         log_uri: str | None,
+        *,
+        master_slurm_job_id: str,
     ) -> dict[str, _chain.Any]:
         return _chain.chain_array_accounting.record_cycle_stage_status_override(
             self,
@@ -500,6 +502,7 @@ class ForecastOrchestratorCycleMixin:
             terminal,
             aggregation,
             log_uri,
+            master_slurm_job_id=master_slurm_job_id,
             deps=_chain._array_accounting_dependencies(),
         )
 

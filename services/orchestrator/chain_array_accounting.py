@@ -11,6 +11,7 @@ from packages.common.redaction import redact_payload
 from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
+    ordered_cohort_members,
 )
 from services.orchestrator.chain_types import (
     ArrayAggregation,
@@ -305,6 +306,55 @@ def require_complete_array_accounting(
     )
 
 
+# A master the journal already drove to one of these has nothing left to
+# reconcile; ``reconcile_unverified`` is deliberately absent, it is the marker
+# of a projection that still owes a decision.
+SETTLED_COHORT_MASTER_STATUSES = frozenset(
+    {"succeeded", "partially_failed", "failed", "cancelled", "permanently_failed"}
+)
+
+
+def settled_cohort_master(row: Any) -> bool:
+    """Return whether a durable cohort master is terminal and fully projected.
+
+    Completeness is the journal's own criterion (``project_forecast_cohort_tasks``
+    coverage gate): the recorded projections name exactly the cohort members and
+    every one of them carries a terminal task outcome.  Re-projecting such a
+    master can only overwrite settled evidence with a fresher accounting read,
+    while the per-task projections stay first-write sticky — the two then
+    contradict each other (#1410 round-1).
+    """
+
+    if not isinstance(row, Mapping):
+        return False
+    if not accepted_submit_contract_is_current(row) or accepted_submit_row_kind(row) != "master":
+        return False
+    if str(row.get("status") or "") not in SETTLED_COHORT_MASTER_STATUSES:
+        return False
+    members: set[int] = set()
+    for member in ordered_cohort_members(row.get("cohort_members")):
+        task_id = member.get("array_task_id")
+        if not str(task_id if task_id is not None else "").isdigit():
+            return False
+        members.add(int(task_id))
+    if not members:
+        return False
+    projections = row.get("candidate_projections")
+    if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
+        return False
+    projected: set[int] = set()
+    for item in projections:
+        if not isinstance(item, Mapping):
+            return False
+        task_id = item.get("array_task_id")
+        if not str(task_id if task_id is not None else "").isdigit():
+            return False
+        if item.get("array_task_outcome") not in {"succeeded", "failed"}:
+            return False
+        projected.add(int(task_id))
+    return projected == members
+
+
 def record_cycle_stage_status_override(
     orchestrator: Any,
     stage: StageDefinition,
@@ -314,6 +364,7 @@ def record_cycle_stage_status_override(
     aggregation: ArrayAggregation,
     log_uri: str | None,
     *,
+    master_slurm_job_id: str,
     deps: ArrayAccountingDependencies | None = None,
 ) -> dict[str, Any]:
     deps = deps or _default_dependencies()
@@ -326,6 +377,19 @@ def record_cycle_stage_status_override(
             raise OrchestratorError(
                 "ACCEPTED_SUBMIT_PROJECTION_UNAVAILABLE",
                 "forecast cohort terminal projection API is unavailable",
+            )
+        # A durable accepted submit always carries a purely numeric Slurm id, so
+        # anything else can only lose the downstream identity comparison and
+        # decay into a silent defer.  Fail closed here instead (#1410).
+        if not master_slurm_job_id.isdigit():
+            raise OrchestratorError(
+                "SLURM_MASTER_IDENTITY_UNAVAILABLE",
+                "forecast cohort terminal projection requires a numeric master Slurm job id",
+                {
+                    "pipeline_job_id": pipeline_job_id,
+                    "stage": stage.stage,
+                    "master_slurm_job_id": master_slurm_job_id,
+                },
             )
         tasks = {task.task_id: task for task in aggregation.task_results}
         expected_task_ids = {
@@ -359,7 +423,6 @@ def record_cycle_stage_status_override(
                     "native_shud_resubmitted": False,
                 }
             )
-        master_slurm_job_id = str(terminal.get("job_id") or terminal.get("slurm_job_id") or "")
         try:
             projector(
                 pipeline_job_id,
