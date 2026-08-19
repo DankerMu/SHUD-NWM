@@ -147,5 +147,5 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - [x] 2.6 (round-3/retro) E16/E13e/E13f/E17 腿 + E14/E15 改钉 decision_state + E18 消费者
       矩阵落 design D3 + tasks E13(b)/docstring 口径对齐 + download 逃生门注释 +
       rows.py:46-51 注释收窄
-- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + 串味 follow-up
+- [x] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + 串味 follow-up
       编号（flat 通道 #1579 / 行扫描通道 #1586）写入 PR body
