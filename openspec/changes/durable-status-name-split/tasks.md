@@ -11,19 +11,29 @@
 
 ## 2. Tests
 
-- [ ] 2.1 成员关系回归锁（tests/test_retry.py）：
+- [ ] 2.1 成员关系回归锁（tests/test_retry.py，新增 import
+      `scheduler_state_types`）三条联立：
+      `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}`；
+      `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES ==
+      {"succeeded", "parsed", "published", "complete"}`（单独钉 4 成员侧，
+      挡「scheduler 侧被统一成 3 成员」的合流方向）；
       `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES ==
-      scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES - {"complete"}`
-      且逐字等于 `{"succeeded", "parsed", "published"}`
+      DURABLE_HYDRO_SUCCESS_STATUSES - {"complete"}`
 
 ## 3. Verification
 
 - [ ] 3.1 uv run pytest -q tests/test_retry.py
       tests/test_file_orchestration_journal.py
       tests/test_retry_cancel_consistency.py（现有断言零改动全绿）
-- [ ] 3.2 rename 零残留：`grep -rn "DURABLE_HYDRO_SUCCESS_STATUSES"
-      services/orchestrator/retry.py services/orchestrator/file_orchestration_journal.py`
-      仅允许出现在注释交叉引用中，不得再作为符号引用
+- [ ] 3.2 rename 零残留（全仓正反两向 grep，期望残留写死为清单）：
+      (a) `grep -rn "DURABLE_HYDRO_SUCCESS_STATUSES" services packages apps
+      workers tests` 命中必须恰为：`scheduler_state_types.py:30` 定义（含
+      1.3 对称注释）、`scheduler_state.py:163`、
+      `scheduler_state_decision.py:46`/`:214`、`scheduler_state_compat.py:20`、
+      `retry.py`/`file_orchestration_journal.py` 内**仅注释**交叉引用、
+      tests/test_retry.py 新锁中对 `scheduler_state_types` 限定引用；
+      (b) 反向：`grep -rn "MANUAL_RETRY_DURABLE_SUCCESS_STATUSES"` 不得出现
+      在任何 `scheduler_state*` 模块中
 - [ ] 3.3 uv run ruff check services tests
 - [ ] 3.4 openspec validate durable-status-name-split --strict --no-interactive
 - [ ] 3.5 follow-up issue（`"complete"` 成员差是否统一）已立案并链接于 PR

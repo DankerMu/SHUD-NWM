@@ -18,12 +18,19 @@ changes.
 
 WHEN the manual-retry set and the scheduler durable-success set are
 compared
-THEN the manual-retry set equals the scheduler set minus `"complete"`,
-equals exactly `{"succeeded", "parsed", "published"}`, and a regression
-test asserts this relationship
+THEN the manual-retry set equals exactly `{"succeeded", "parsed",
+"published"}`, the scheduler set equals exactly `{"succeeded", "parsed",
+"published", "complete"}` (pinned separately, so collapsing the scheduler
+set down to three members — the one merge direction that would change
+behavior — also fails), the manual-retry set equals the scheduler set
+minus `"complete"`, and a regression test asserts all three relationships
 
 #### Scenario: manual retry behavior is unchanged
 
-WHEN a run's durable hydro status is `"complete"`
-THEN both manual-retry paths continue to treat it as retryable (no
-refusal), exactly as before the rename
+WHEN a run's durable hydro status is one of the three manual-retry
+members
+THEN both manual-retry paths continue to refuse the retry exactly as
+before the rename; and `"complete"` — absent from the manual-retry set
+and unreachable on the DB lane (it is not a `hydro.run_status` enum
+value) — continues not to trigger the refusal, asserted at the constant
+level rather than by driving the DB lane
