@@ -35,7 +35,7 @@ scheduler_state_types 撞名。读者（与 grep）无法从名字区分语义�
   `:7863`）同步改名。旧名从 retry.py 删除（全仓无其他消费者、无测试直接
   引用，不留 alias）。
 - `scheduler_state_types.py:30` 的 4 成员版**保持原名不动**（消费面广 +
-  compat frozen `__all__` 钉住该名字）。
+  compat re-export 面（import-time 守卫）钉住该名字）。
 - 两处定义各加注释：显式声明与对方的成员差（`"complete"`）、语义边界与
   本 change 名，杜绝再次同名合流。
 - 新增回归锁测试（三条联立，缺一不可）：
@@ -59,7 +59,7 @@ scheduler_state_types 撞名。读者（与 grep）无法从名字区分语义�
   （`chain.py:216` / `chain_repository.py:19` 的 `COMPLETED_HYDRO_STATUSES`
   ——tests/ 对该名零命中，无 parity 锁）由独立 follow-up issue 跟踪，本单
   实现期间用 issue-scribe 立案并把上述 enum 证据写进 issue body。
-- `scheduler_state_compat.py` frozen `__all__` 不动。
+- `scheduler_state_compat.py` re-export 面（import-time 守卫）不动。
 - 两个谓词的判定逻辑、异常类型、调用面均不动。
 
 ## Risk triage

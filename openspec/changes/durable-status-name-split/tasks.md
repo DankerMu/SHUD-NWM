@@ -30,7 +30,8 @@
       workers tests` 命中必须恰为：`scheduler_state_types.py:30` 定义（含
       1.3 对称注释）、`scheduler_state.py:163`、
       `scheduler_state_decision.py:46`/`:214`、`scheduler_state_compat.py:20`、
-      `retry.py`/`file_orchestration_journal.py` 内**仅注释**交叉引用、
+      `retry.py`/`file_orchestration_journal.py` 内至多只允许注释交叉引用
+      （可为零命中）、
       tests/test_retry.py 新锁中对 `scheduler_state_types` 限定引用；
       (b) 反向：`grep -rn "MANUAL_RETRY_DURABLE_SUCCESS_STATUSES"` 不得出现
       在任何 `scheduler_state*` 模块中
