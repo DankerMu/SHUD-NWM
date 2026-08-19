@@ -509,11 +509,18 @@ rows and the candidate's own hydro run only (the blocker scan's
 state-level `pipeline_status` and pipeline-event sources are not
 live-failure sources here: a top-level failed `pipeline_status`
 records the cycle failure being repaired, and counting it would
-make the only-failure-left arm unreachable; on the production read
-paths this exclusion is enforced by projection shape — a surviving
-marker proves real job rows exist beside it — rather than by an
-in-module filter, and hardening the module against synthesized
-job-row-less shapes is tracked as #1299): a
+make the only-failure-left arm unreachable; the module enforces
+this exclusion itself with a row-identity predicate — an id-less
+synthesized row (every legitimate production row carries a job id
+on both read paths) is never a live-failure source, closing the
+top-level `pipeline_status` leak on job-row-less synthesized and
+compacted states, while the production projections' shape
+guarantee — a surviving marker proves real job rows exist beside
+it — remains as defence in depth; id-bearing rows, including the
+single-mapping and flattened historical state shapes that embed a
+job id, derive exactly as before — a flattened state that embeds
+both a job id and a failing status still reads as a live failure,
+exactly as today): a
 candidate-scope (non-cycle-scope) job row in a failed or
 `cancelled` status counts, and so does a hydro run whose status is
 `failed`, `cancelled`, or `permanently_failed`; repaired
@@ -558,13 +565,33 @@ retry count regardless of row status — a repaired `_retry_3` row at
 a family stage still proves attempt 3 was spent — while a consumed
 suffix at a stage outside the family (a cross-stage forcing row or
 a cohort stage counter) never contributes to this floor (the floor
-only raises the caller's value). In that unnameable-stage case a
-candidate whose visible family-stage row already consumed attempt
-N derives at least N + 1 whenever that family stage is itself a
-canonical downstream restart stage; at a non-canonical family
-stage the derivation degenerates to the candidate's flat record
-and the floor adds nothing (tracked as #1298); with no live
-failure at all the fallback stays `previous_attempt + 1`. Marker-shaped events remain excluded from
+only raises the caller's value). At a family stage that is NOT a
+canonical downstream restart stage the floor uses the same
+stage-scoped derivation by the row's raw authoritative stage name:
+non-cycle-scope rows whose stage field equals the family stage
+contribute their durable attempt through the same
+effective-attempt chain, while model-less cycle-scope rows at that
+same raw stage name (a cohort download counter) never contribute —
+the non-canonical arm carries the candidate-scope discipline from
+its first day, and the canonical arm's derivation is unchanged
+byte for byte. The non-canonical arm reads only the projected row
+window: the truncation-carried per-stage upper bounds cover
+canonical downstream stages only, so a non-canonical stage's
+maximum-attempt row truncated out of the `job_limit` window is not
+restored — an explicit boundary of this rule. In the
+unnameable-stage case a candidate whose visible family-stage row
+already consumed attempt N therefore derives at least N + 1
+whether or not that family stage is canonical; with no live
+failure at all the fallback stays `previous_attempt + 1`. The same
+non-canonical derivation reaches the scheduler's cross-pass
+failure policy, not only the fallback floor: a candidate whose own
+non-canonical row consumed attempt N is classified against N
+instead of the reset flat count, so at a `retry_limit` of N or
+below that classification reports the limit exhausted and the
+candidate is permanently blocked where it was previously retried —
+the configured limit binding retries even for misclassified
+failures, as this capability's effective-attempt requirement
+already mandates for the cross-pass failure policy. Marker-shaped events remain excluded from
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
@@ -752,12 +779,34 @@ drive the retry decision it was written to request.
   (stale — resolved/succeeded, ACTIVE, repaired stage evidence, or
   an unsubmitted auto-retry placeholder),
   the derived `new_attempt` falls back to `previous_attempt + 1`;
-  the pin refusal itself charges nothing, but when the candidate's
-  own failed stage resolves to a canonical downstream stage the
-  caller's `previous_attempt` is already that stage's stage-scoped
-  derivation, so a multi-basin cohort row at that same stage is
-  still counted there — pre-existing failed-stage cycle-blindness,
-  unchanged by this change and tracked as #1300
+  the pin refusal itself charges nothing, and the attempt and
+  failure-policy consumers resolve the candidate's own failed stage
+  through a candidate-scoped derivation whose ROW SCAN skips
+  cycle-scope rows — a multi-basin cohort row's stage never becomes
+  the candidate's failed-stage axis through that scan, so the
+  cohort's persisted retry counter is not charged to the
+  candidate's attempt or retry-limit budget through it. Two
+  channels stay outside that narrowing as declared boundaries of
+  this rule: the explicit top-level stage-key branch is unchanged
+  and can still be cast cycle-wide (from an active source-cycle
+  download failure, or a `restart_stage` minted from
+  completed-stage evidence scanned over the unfiltered rows), and
+  the download acceptance this capability already carries depends
+  on that branch; and the canonical stage-scoped derivation keeps
+  its existing count of model-less cohort rows at the same
+  canonical stage byte for byte (tracked separately in #1586). The
+  stage-less flat-first derivation on a state carrying no flat
+  retry record likewise still maxes over every row's recorded
+  count — a window-sensitive pre-existing channel outside this
+  rule, tracked with the flat-component boundary in #1579; the
+  projection always writes a top-level `retry_count`, but the
+  identity filter's top-level strip removes it and re-attaches the
+  rows afterwards, so that channel remains reachable on the
+  decision path. When the candidate itself has no nameable
+  live failure the candidate-scoped derivation resolves no stage
+  and those consumers fall back to the flat and family-floor paths,
+  while the restart-routing and downstream-evidence consumers keep
+  the unscoped derivation unchanged
 - **AND** the candidate's own live failure that blocks the pin
   includes a `cancelled` model-scoped job row (a cancelled forecast
   with a cross-stage cycle-download marker of `retry_count` 5
@@ -1029,6 +1078,48 @@ drive the retry decision it was written to request.
   `new_attempt` matching its `retry_count`, and the foreign
   marker-shaped event is not treated as an active blocker — the
   candidate's `manual_retry_requested` remains truthful
+
+#### Scenario: A non-canonical family stage keeps its consumed attempt
+
+- **WHEN** the candidate's only live candidate-scope failure is a
+  model-scoped `cancelled` `download` row whose id carries a
+  consumed `_retry_4` suffix, the state's flat `retry_count` is 0,
+  and no failed stage is resolvable
+- **THEN** the fallback attempt derivation floors at that row's
+  stage-scoped attempt and mints `new_attempt` 5 instead of
+  re-minting the consumed attempt 1
+
+#### Scenario: The non-canonical arm never reads cycle-scope rows
+
+- **WHEN** a model-less cycle-scope `download` row persisting
+  `retry_count` 7 coexists with the candidate's own model-scoped
+  `download_retry_4` row and the family resolves the `download`
+  stage
+- **THEN** the stage-scoped derivation reads 4 — the cohort
+  counter contributes nothing to the candidate's floor
+
+#### Scenario: A synthesized id-less row is not a live failure
+
+- **WHEN** a state carries a failing top-level `pipeline_status`
+  (`cancelled`, `failed`, or `permanently_failed`), no job rows
+  (`pipeline_jobs` missing or empty), and an adopted marker whose
+  `retry_count` is 5
+- **THEN** the operator pin is honoured with `new_attempt` 5 —
+  the synthesized row derived from the state's own top-level
+  fields never closes the only-failure-left arm
+
+#### Scenario: A cohort stage counter never charges the candidate's budget
+
+- **WHEN** a multi-basin cycle's model-less cohort row at a
+  canonical stage persists `retry_count` 7 (with or without a
+  marker minted over it), the candidate's own live failure is a
+  `cancelled` forecast row with a consumed `_retry_2` suffix, and
+  the projected state resolves no top-level failed stage
+- **THEN** the manual-retry attempt derivation yields 3 (the
+  candidate's own record plus one) rather than inheriting the
+  cohort's counter, and the automatic-retry policy classifies the
+  candidate against its own attempt — a first-failure candidate is
+  not demoted to `retry_limit_exhausted` by the cohort's counter
 
 ### Requirement: Forcing provenance SHALL be read through aligned witnessed tiers with a visible source
 
