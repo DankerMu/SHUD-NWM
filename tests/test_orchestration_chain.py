@@ -14190,7 +14190,9 @@ def test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id(tmp_
     running: the projection deferred, leaving the row ``reconcile_unverified``
     with no projections, which is the shape a later resume still owes a
     projection for.  A settled master takes the round-1 short-circuit instead
-    and never reaches the projector, so the identity can only be pinned here.
+    and never reaches the projector, so this is the only full-lifecycle replay
+    that still pins the identity — geometry-2 pins it too, from a base built
+    directly rather than replayed.
     The resumed snapshot is terminal, which is what selects the leg under test —
     the leg that never polls and therefore has no gateway job id to sniff.
     """
@@ -14468,3 +14470,331 @@ def test_cohort_override_fails_closed_without_a_numeric_master_slurm_id(
     assert error.value.details["pipeline_job_id"] == _COHORT_JOB_ID
     assert error.value.details["stage"] == M3_STAGES[2].stage
     assert repository.calls == []
+
+
+class _ForecastLogFetchFailureSlurmClient(FakeCycleSlurmClient):
+    """Fails the forecast master's log fetch while ``fail_forecast_log_fetch`` is set.
+
+    A first pass whose publication failed after the projection committed is the
+    only way to reach a settled cohort master that owns no log at all.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.fail_forecast_log_fetch = True
+
+    def fetch_logs(self, job_id: str) -> dict[str, Any]:
+        if self.fail_forecast_log_fetch and self.jobs[job_id]["stage"] == "forecast":
+            self.fetch_log_calls.append(job_id)
+            raise RuntimeError("gateway log fetch failed")
+        return super().fetch_logs(job_id)
+
+
+def test_settled_cohort_master_republishes_the_log_its_first_pass_never_wrote(tmp_path: Path) -> None:
+    """#1410 round-2 A: the settled gate skips the projection, not the publication.
+
+    Publication and projection are two side effects of one branch.  The first
+    pass publishes before it projects, so a gateway log fetch that fails leaves
+    a master that is settled and yet carries no log and no ``log_uri`` — and
+    every later pass short-circuits on the settled gate.  Skipping the durable
+    write must not also strand the evidence: the log is republished under the
+    same deterministic candidate URI until it lands.  The row pointer stays
+    untouched, there being no typed write for it (#1592).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _ForecastLogFetchFailureSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    with pytest.raises(OrchestratorError) as first_pass:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+    assert first_pass.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+
+    settled = _durable_cohort_master(repository.root)
+    assert settled["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in settled["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert settled["log_uri"] is None
+    master_slurm_job_id = str(settled["slurm_job_id"])
+    candidate_uri = f"s3://nhms/runs/{settled['run_id']}/logs/forecast.log"
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 1
+    assert not orchestrator.object_store.exists(candidate_uri)
+
+    client.fail_forecast_log_fetch = False
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(settled["run_id"]))
+    resumed = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert resumed is not None
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, resumed)
+
+    assert calls == []
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 2
+    assert orchestrator.object_store.exists(candidate_uri)
+    republished = _durable_cohort_master(repository.root)
+    assert republished["log_uri"] is None
+    assert _cohort_master_semantics(republished) == _cohort_master_semantics(settled)
+
+    # Still deterministic on the third pass: same URI, same content, no error.
+    # The snapshot now claims a pointer the record does not have — a caller
+    # belief that must not talk the pass out of publishing.
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**resumed, "log_uri": candidate_uri})
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 3
+    assert orchestrator.object_store.read_bytes(candidate_uri) == b"ok"
+    assert calls == []
+
+
+def test_settled_cohort_master_with_a_stored_log_never_republishes(tmp_path: Path) -> None:
+    """#1410 round-2 A negative arm: the durable pointer decides, not the snapshot.
+
+    The resumed snapshot here has lost its ``log_uri`` — the caller's row can
+    always disagree with the record, which is why the recovery path exists.  A
+    log that the durable row already points at must not be fetched and written
+    a second time from an accounting pass that never produced it.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    before = _durable_cohort_master(repository.root)
+    stored_log_uri = str(before["log_uri"])
+    assert stored_log_uri.startswith("s3://")
+    published = orchestrator.object_store.read_bytes(stored_log_uri)
+    fetches_before = list(client.fetch_log_calls)
+
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(before["run_id"]))
+    snapshot = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert snapshot is not None
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**snapshot, "log_uri": None})
+
+    assert calls == []
+    assert client.fetch_log_calls == fetches_before
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+    assert orchestrator.object_store.read_bytes(stored_log_uri) == published
+
+
+def test_resume_gate_reads_the_durable_master_not_a_settled_looking_snapshot(tmp_path: Path) -> None:
+    """#1410 round-2 C: a settled-shaped snapshot cannot short-circuit the projection.
+
+    The caller hands in whatever it last read; only the record knows whether the
+    cohort was ever projected.  Here the durable master is bound and unprojected
+    while the snapshot claims a terminal status and full coverage — the
+    projection is still owed and must run.
+    """
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import (
+        _PERMANENT_FAILURE_MASTER_SLURM_JOB_ID as MASTER_SLURM_JOB_ID,
+    )
+    from tests.test_file_orchestration_journal import _bind_cohort_master, _reserved_cohort_master
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    job_id = str(record["job_id"])
+    bound = repository.get_pipeline_job(job_id)
+    assert bound is not None
+    assert bound["status"] == "submitted"
+    assert not bound.get("candidate_projections")
+    assert settled_cohort_master(bound) is False
+
+    snapshot = {
+        **bound,
+        "status": "succeeded",
+        "candidate_projections": [
+            _cohort_projection(member, "succeeded", master_slurm_job_id=MASTER_SLURM_JOB_ID)
+            for member in record["cohort_members"]
+        ],
+    }
+    assert settled_cohort_master(snapshot) is True
+
+    client = _BoundCohortMasterSlurmClient(
+        MASTER_SLURM_JOB_ID,
+        run_id=str(record["run_id"]),
+        task_count=len(record["cohort_members"]),
+    )
+    calls = _spy_cohort_projections(repository)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator._resume_cycle_stage(M3_STAGES[2], _cohort_context_from_members(record), snapshot)
+
+    assert [call["master_slurm_job_id"] for call in calls] == [MASTER_SLURM_JOB_ID]
+    assert calls[0]["result"]["total"] > 0
+    projected = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+    assert projected is not None
+    assert projected["status"] == "succeeded"
+    assert projected["reconciliation_decision"] == "matched_bound"
+
+
+def _cohort_projection(
+    member: Mapping[str, Any],
+    outcome: str,
+    *,
+    master_slurm_job_id: str = "17667",
+) -> dict[str, Any]:
+    """One durable ``candidate_projections`` entry in its normalized shape."""
+
+    return {
+        "array_task_id": member["array_task_id"],
+        "candidate_id": member["candidate_id"],
+        "run_id": member["run_id"],
+        "model_id": member["model_id"],
+        "array_task_outcome": outcome,
+        "task_slurm_job_id": f"{master_slurm_job_id}_{member['array_task_id']}",
+        "error_code": None,
+    }
+
+
+def _settled_master_row(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """A durable master row that is terminal and covers its whole cohort.
+
+    The authority markers come from the journal suite's reservation fixture, so
+    the row carries the real contract version, ``cohort_members`` and
+    ``cohort_digest`` rather than hand-rolled look-alikes.
+    """
+
+    from tests.test_file_orchestration_journal import _reserved_cohort_master
+
+    _, record = _reserved_cohort_master(tmp_path, member_count=2)
+    row: dict[str, Any] = {
+        **record,
+        "status": "succeeded",
+        "slurm_job_id": "17667",
+        "candidate_projections": [
+            _cohort_projection(member, "succeeded") for member in record["cohort_members"]
+        ],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_settled_cohort_master_accepts_a_terminal_fully_projected_master(tmp_path: Path) -> None:
+    """#1410 round-2 C: the one shape the resume gate is allowed to short-circuit on."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path)) is True
+
+
+@pytest.mark.parametrize("status", ["submitted", "running", "reconcile_unverified"])
+def test_settled_cohort_master_rejects_a_non_terminal_status(tmp_path: Path, status: str) -> None:
+    """``reconcile_unverified`` is the marker of a projection that still owes a decision."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, status=status)) is False
+
+
+def test_settled_cohort_master_rejects_an_unprojected_master(tmp_path: Path) -> None:
+    """Terminal is not enough: a master with no projections still owes them."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, candidate_projections=[])) is False
+
+
+def test_settled_cohort_master_rejects_partial_cohort_coverage(tmp_path: Path) -> None:
+    """Coverage is the journal's own criterion: the projections must name every member."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    assert settled_cohort_master({**row, "candidate_projections": row["candidate_projections"][:1]}) is False
+
+
+def test_settled_cohort_master_rejects_a_non_terminal_task_outcome(tmp_path: Path) -> None:
+    """An ``unverified`` task means the cohort accounting never closed."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    projections = [dict(item) for item in row["candidate_projections"]]
+    projections[-1]["array_task_outcome"] = "unverified"
+    assert settled_cohort_master({**row, "candidate_projections": projections}) is False
+
+
+def test_settled_cohort_master_rejects_an_empty_cohort(tmp_path: Path) -> None:
+    """A master without members has nothing to have covered."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, cohort_members=[])) is False
+
+
+@pytest.mark.parametrize("row", [None, "job_cycle_gfs_2026072000_forecast", 17667, ["succeeded"]])
+def test_settled_cohort_master_rejects_a_non_mapping_row(row: Any) -> None:
+    """Anything that is not a row cannot be a settled master."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_rejects_a_row_outside_the_cohort_stage(tmp_path: Path) -> None:
+    """Only a forecast cohort master row classifies as ``master`` at all."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path, stage="download", job_type="download_gfs")
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_rejects_a_row_without_the_contract_marker(tmp_path: Path) -> None:
+    """A marker-free row is historical compatibility data, never a settled master."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    row.pop(ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD)
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_refuses_to_judge_a_corrupt_contract_marker(tmp_path: Path) -> None:
+    """An explicit but unknown marker is corruption: loud, not quietly unsettled."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+        AcceptedSubmitEvidenceError,
+    )
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path, **{ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD: "nhms.accepted_submit.v0"})
+    with pytest.raises(AcceptedSubmitEvidenceError):
+        settled_cohort_master(row)
+
+
+def test_display_log_publication_withholds_a_sanitized_placeholder_pointer(tmp_path: Path) -> None:
+    """#1410 N1: ``[object-uri]`` is a withheld pointer, not a log URI.
+
+    The placeholder must neither be advertised (it would be laundered into
+    durable state) nor be republished over (the log it stands for was published
+    by some earlier pass).
+    """
+
+    orchestrator = _orchestrator(tmp_path, FakeCycleRepository(), FakeCycleSlurmClient())
+    publication = orchestrator._display_log_publication_for_pipeline_job(
+        {
+            "job_id": _COHORT_JOB_ID,
+            "run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "log_uri": "[object-uri]",
+        }
+    )
+
+    assert publication is not None
+    assert publication.advertised_uri is None
+    assert publication.should_persist_logs is False
+    # The candidate is the placeholder itself, which is inert only because
+    # nothing may persist under it.
+    assert publication.candidate_uri == "[object-uri]"

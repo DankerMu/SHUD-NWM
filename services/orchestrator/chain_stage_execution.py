@@ -902,6 +902,23 @@ def resume_cycle_stage(
         )
         if settled_master is not None:
             status = str(settled_master.get("status") or status)
+            if not settled_master.get("log_uri"):
+                # The projection and the log publication are two side effects of
+                # one branch, and only the projection is settled: a first pass
+                # whose ``fetch_logs`` failed committed the projection and then
+                # raised, leaving a settled master with no log at all.  Publish
+                # it here, or no pass ever will (#1410 round-2).  The decision
+                # reads the durable row for the same reason the gate does — the
+                # caller snapshot may carry the sanitized ``[object-uri]`` of a
+                # log that really was published, and the stored ``None`` is the
+                # only honest "never published".  The row pointer is left alone:
+                # no typed write accepts one for a master row (#1592).
+                publication = orchestrator._display_log_publication_for_pipeline_job(settled_master)
+                if publication is not None:
+                    deferred_publish_attempt = orchestrator._try_publish_log_for_advertise(
+                        str(job["slurm_job_id"]),
+                        publication,
+                    )
         elif (
             accepted_submit_projection
             or str(job.get("status")) not in deps.terminal_job_statuses

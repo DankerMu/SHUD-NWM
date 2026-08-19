@@ -96,7 +96,7 @@
 
 ## 5. Round-2 fix（verifier：A/C CONFIRMED+FIX_NOW，B CONFIRMED+DEFER）
 
-- [ ] 5.1 **A 日志发布副作用恢复**：settled 闸命中且 durable `log_uri` 为空
+- [x] 5.1 **A 日志发布副作用恢复**：settled 闸命中且 durable `log_uri` 为空
       时，仍跑 `_display_log_publication_for_pipeline_job` +
       `_try_publish_log_for_advertise`（`chain_workspace.py:103` 的
       `should_persist_logs = existing_log_uri is None` 已自带闸；发布错误照旧
@@ -105,13 +105,21 @@
       回写车道并入 #1592）。红证：pass-1 发布失败留下 settled master +
       `log_uri=None`，HEAD 上 pass-2 resume 零 fetch_logs、object store 无
       日志文件；修复后 fetch_logs 被调、文件落盘
-- [ ] 5.2 **C settled 契约单测**（纯 Mapping，无需编排）：终态+空投影→False；
+      ——实现：`chain_stage_execution.py:905-921`，发布入参用 **durable 行**
+      （`settled_master`），非入参快照：净化公开读把真 URI 映成
+      `[object-uri]`（truthy → `should_persist_logs=False`），故"durable
+      `log_uri` 为空"恒等于"真的没发布过"；快照可能带陈旧指针而骗停发布。
+      三腿 mutant 实证（闸读快照 / 发布入参读快照 / 两者同时）均能红
+- [x] 5.2 **C settled 契约单测**（纯 Mapping，无需编排）：终态+空投影→False；
       终态+缺成员投影/outcome∉{succeeded,failed}→False；终态+cohort_members
       空→False（与 journal `_job_needs_restart_reconcile:8296` 方向一致）；
       非 Mapping/None/非 master kind/过期 contract→False；
       **durable-vs-snapshot**：快照 settled 而存储行未 settled 时闸按存储行
       判（projector 仍被调用）——F1 再入口钉死
-- [ ] 5.3 Note ride-along：N1 `chain_workspace` 占位符单测
+      ——附加口径：contract marker **缺失**→False（历史兼容行），marker
+      **存在但版本非法**→`AcceptedSubmitEvidenceError` 抛出（不静默判 False），
+      按实收敛各一条
+- [x] 5.3 Note ride-along：N1 `chain_workspace` 占位符单测
       （`log_uri="[object-uri]"` 行 → `advertised_uri is None` 且
       `should_persist_logs is False`）；N2 `tests/test_orchestration_chain.py:14193`
       docstring "the identity can only be pinned here" 改为
@@ -119,7 +127,8 @@
 - [ ] 5.4 B 消费侧行-报告矛盾：DEFER 并案 #1589（同一 divergent-second-pass
       几何；报告侧对齐=让存储状态覆盖新鲜 Slurm 读，是设计裁定）——编排者
       评论互链
-- [ ] 5.5 三套件重跑 + ruff + openspec validate
+- [x] 5.5 三套件重跑 + ruff + openspec validate（1173 passed = round-1 的
+      1154 + 本轮 19 条新测；ruff `services tests` 全过；openspec strict 通过）
       ——连带：2.1 `test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id`
       的 geometry 改为"首趟 accounting 不完整→durable `reconcile_unverified`
       未投影 + 终态快照 resume"（原 geometry 已终态且投影完整，被 4.1 闸短路，
