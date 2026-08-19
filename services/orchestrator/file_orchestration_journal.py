@@ -39,6 +39,7 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
+    accepted_submit_candidate_immutable_evidence,
     accepted_submit_contract_is_current,
     accepted_submit_master_identity_is_structural,
     accepted_submit_master_immutable_identity,
@@ -1668,6 +1669,7 @@ class FileOrchestrationJournalRepository:
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
             persisted_master_identity: dict[str, Any] | None = None
             persisted_master_state: dict[str, Any] | None = None
+            persisted_candidate_evidence: dict[str, Any] | None = None
             if existing is None:
                 _validate_accepted_submit_evidence(row)
                 if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
@@ -1710,6 +1712,16 @@ class FileOrchestrationJournalRepository:
                                 "file_journal_evidence_invariant_invalid",
                                 field=field,
                             )
+                elif accepted_submit_contract_is_current(
+                    existing
+                ) and accepted_submit_row_kind(existing) == "candidate":
+                    # Derived per-model rows freeze their lineage evidence the
+                    # same way the master freezes its map (#1187). The contract
+                    # marker is required for the same reason it is on the master
+                    # arm: normalization only owns this field on contract-current
+                    # rows, so marker-free historical per-model rows must keep
+                    # their pre-change behaviour.
+                    persisted_candidate_evidence = _accepted_submit_candidate_evidence(existing)
                 row = dict(existing)
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
@@ -1717,6 +1729,21 @@ class FileOrchestrationJournalRepository:
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
+            if persisted_candidate_evidence is not None:
+                # Compared AFTER the merge on purpose: the merge loop copies
+                # only explicitly carried keys, so an upsert that omits the
+                # field compares the persisted value against itself and keeps
+                # it silently, exactly as before this gate existed. Comparing
+                # the incoming row instead would pit the closed constructor's
+                # unconditional default (an empty map) against a populated
+                # persisted one and fail every ordinary per-model upsert.
+                merged_candidate_evidence = _accepted_submit_candidate_evidence(row)
+                for field, persisted_value in persisted_candidate_evidence.items():
+                    if merged_candidate_evidence[field] != persisted_value:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field=field,
+                        )
             if persisted_master_state is not None:
                 merged_master_state = _accepted_submit_master_state(row)
                 for field, persisted_value in persisted_master_state.items():
@@ -1904,6 +1931,12 @@ class FileOrchestrationJournalRepository:
                     )
                 ):
                     return None
+            # The new attempt's row is derived from the PERSISTED row, so the
+            # init-state identity mapping it carries is the one captured at the
+            # first reservation. That is the adjudicated semantics (#1188):
+            # "stable from reservation onward" means from the FIRST reservation,
+            # and a reclaim does not refresh the mapping even though it opens a
+            # new submission attempt.
             row = (
                 apply_accepted_submit_transition(
                     existing,
@@ -1941,6 +1974,12 @@ class FileOrchestrationJournalRepository:
             # lock-external reclaim request.
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
             if not versioned_master:
+                # INIT_STATE_IDENTITY_FIELD is deliberately absent from this
+                # backfill set (#1188): keeping it out is what makes the reclaim
+                # keep-first, since a recomputed mapping on the lock-external
+                # request row would otherwise overwrite the first attempt's
+                # captured lineage. Same reason as the attempt anchor above —
+                # durable authority state never comes from outside the lock.
                 for key in (
                     "run_id",
                     "cycle_id",
@@ -8302,6 +8341,13 @@ def _accepted_submit_master_identity(row: Mapping[str, Any]) -> dict[str, Any]:
 def _accepted_submit_master_state(row: Mapping[str, Any]) -> dict[str, Any]:
     try:
         return accepted_submit_master_ordinary_upsert_state(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_candidate_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_candidate_immutable_evidence(row)
     except AcceptedSubmitEvidenceError as error:
         raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 

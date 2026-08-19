@@ -157,6 +157,7 @@ def _file_cohort_repository(
     submit_outcome: str | None = "submit_result_ambiguous",
     versioned: bool = True,
     source_id: str = "gfs",
+    init_state_identities: Any = None,
 ) -> Any:
     from packages.common.source_identity import normalize_source_id
     from services.orchestrator.accepted_submit_identity import (
@@ -204,6 +205,8 @@ def _file_cohort_repository(
             "created_at": created_at or cycle_time,
             "updated_at": created_at or cycle_time,
         }
+    if init_state_identities is not None:
+        record["init_state_identities"] = init_state_identities
     record["cohort_digest"] = forecast_cohort_digest(record)
     if not versioned:
         record.pop("accepted_submit_contract_version")
@@ -777,6 +780,141 @@ def test_file_cohort_reclaim_begins_attempt_with_fresh_locked_anchor_and_cas(
         transition=AcceptedSubmitTransition.accepted(status="submitted"),
     )
     assert committed.outcome == "applied"
+
+
+def _reclaim_init_state_identity(index: int, *, generation: str) -> dict[str, Any]:
+    """One well-formed per-model init-state identity for the reclaim cohort."""
+
+    return {
+        "array_task_id": index,
+        "model_id": f"model_{index}",
+        "init_state_id": f"state_gfs_model_{index}_2026071200_{generation}",
+        "init_state_checksum": f"sha256:{index}" + generation[-3:] + "a" * 59,
+        "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026071200/{generation}.cfg.ic",
+        "init_state_valid_time": "2026-07-12T00:00:00Z",
+    }
+
+
+def test_reclaimed_reservation_keeps_the_first_attempts_init_state_mapping(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1188 J13/J14/J15: reclaim is keep-first for the init-state mapping.
+
+    A reclaim opens a new submission attempt, so "stable from reservation" is
+    ambiguous at exactly this boundary. The adjudication is keep-first: the
+    reclaim request's freshly recomputed mapping is dropped and the first
+    attempt's mapping stays authoritative, all the way through to the terminal
+    per-model rows projected after the new attempt binds.
+    """
+
+    from datetime import timedelta
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    member_count = 2
+    attempt_one_started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    mapping_a = [
+        _reclaim_init_state_identity(index, generation="attempt_one")
+        for index in range(member_count)
+    ]
+    mapping_b = [
+        _reclaim_init_state_identity(index, generation="attempt_two")
+        for index in range(member_count)
+    ]
+    assert mapping_a != mapping_b
+
+    repository = _file_cohort_repository(
+        tmp_path / "keep-first",
+        created_at=attempt_one_started_at,
+        member_count=member_count,
+        init_state_identities=mapping_a,
+    )
+    journal_root = tmp_path / "keep-first" / "journal"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=_authoritative_absence_query,
+        grace=timedelta(seconds=120),
+        now=lambda: attempt_one_started_at + timedelta(seconds=121),
+    )[0]
+    assert outcome.action == "absence_retry_permitted"
+    attempt_one = repository.get_pipeline_job(job_id)
+    assert attempt_one["status"] == "reservation_lost"
+    assert _durable_pipeline_job_payloads(journal_root, job_id)[-1]["init_state_identities"] == (
+        mapping_a
+    )
+
+    locked_anchor = attempt_one_started_at + timedelta(seconds=123)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    reclaimed = repository.reclaim_pipeline_job_reservation(
+        {
+            **attempt_one,
+            "expected_submission_attempt": attempt_one["submission_attempt"],
+            "expected_submission_attempt_started_at": attempt_one["submission_attempt_started_at"],
+            "status": "reserved",
+            "submission_attempt": 2,
+            "submission_attempt_started_at": attempt_one_started_at + timedelta(seconds=122),
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "matched_slurm_job_id": None,
+            "init_state_identities": mapping_b,
+        }
+    )
+    monkeypatch.undo()
+
+    assert reclaimed is not None
+    # J14: the reclaim really took the success path — a request rejected by an
+    # identity gate would leave every one of these unchanged and make the
+    # keep-first assertion below vacuous.
+    assert reclaimed["submission_attempt"] == attempt_one["submission_attempt"] + 1
+    assert reclaimed["status"] == "reserved"
+    assert reclaimed["submission_attempt_started_at"] == locked_anchor.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert reclaimed["submission_attempt_started_at"] != attempt_one["submission_attempt_started_at"]
+
+    # J13: the new attempt kept the FIRST attempt's mapping, at the durable layer.
+    assert _durable_pipeline_job_payloads(journal_root, job_id)[-1]["init_state_identities"] == (
+        mapping_a
+    )
+
+    # J15: and the adjudication reaches the lineage evidence, not just the master.
+    _bind_current_file_cohort(
+        repository,
+        str(reclaimed["idempotency_key"]),
+        slurm_job_id="17667",
+    )
+    members = repository.get_pipeline_job(job_id)["cohort_members"]
+    repository.project_forecast_cohort_tasks(
+        job_id,
+        master_slurm_job_id="17667",
+        projections=[
+            {
+                **member,
+                "array_task_outcome": "succeeded",
+                "task_slurm_job_id": f"17667_{index}",
+                "restart_stage": "forecast",
+                "native_shud_resubmitted": False,
+            }
+            for index, member in enumerate(members)
+        ],
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+
+    for index in range(member_count):
+        terminal_job_id = (
+            f"job_fcst_gfs_2026071200_model_{index}_forecast_reconciled_17667_{index}"
+        )
+        terminal = _durable_pipeline_job_payloads(journal_root, terminal_job_id)[-1]
+        assert terminal["init_state_identities"] == [mapping_a[index]]
 
 
 @pytest.mark.parametrize(
@@ -12177,3 +12315,235 @@ def test_identity_mismatch_released_row_is_a_non_reclaimable_terminal(tmp_path: 
 
     retry_record["cohort_digest"] = forecast_cohort_digest(retry_record)
     assert repository.reserve_pipeline_job(retry_record) is not None
+
+
+# ---------------------------------------------------------------------------
+# #1180: the streak / identity-release invariants are the only guard on the
+# ``identity_mismatch_released`` terminal semantics, and they need oracles of
+# their own — a guard nobody tests is a guard a refactor silently deletes.
+# ---------------------------------------------------------------------------
+
+
+_INVARIANT_JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+
+def _accepted_submit_invariant_fixture(tmp_path: Any, name: str) -> tuple[Any, dict[str, Any], Any]:
+    """One persisted versioned master plus its durable payload, for zero-write."""
+
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    repository = _file_cohort_repository(tmp_path / name, member_count=1)
+    public = repository.get_pipeline_job(_INVARIANT_JOB_ID)
+    assert public["status"] == "reserved"
+    assert public["submit_outcome"] == "submit_result_ambiguous"
+    durable = _durable_pipeline_job_payloads(tmp_path / name / "journal", _INVARIANT_JOB_ID)[-1]
+    return repository, public, durable
+
+
+def _assert_invariant_left_no_trace(
+    repository: Any,
+    tmp_path: Any,
+    name: str,
+    public: dict[str, Any],
+    durable: Any,
+) -> None:
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) == public
+    assert _durable_pipeline_job_payloads(tmp_path / name / "journal", _INVARIANT_JOB_ID)[-1] == (
+        durable
+    )
+
+
+@pytest.mark.parametrize(
+    "streak",
+    [
+        pytest.param(-1, id="negative"),
+        pytest.param(1.0, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param("1", id="str"),
+    ],
+)
+def test_transition_rejects_a_streak_that_is_not_a_non_negative_int(
+    tmp_path: Any,
+    streak: Any,
+) -> None:
+    """#1180 J1: the counter's type gate (``bool`` included) rejects at construction."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "streak-type")
+
+    with pytest.raises(ValueError, match="identity blocked streak must be a non-negative integer"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "identity_mismatch_blocked",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                identity_blocked_streak=streak,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "streak-type", public, durable)
+
+
+def test_pre_outcome_transition_cannot_carry_a_streak(tmp_path: Any) -> None:
+    """#1180 J2: a new reserved attempt starts clean — no inherited counter."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "pre-outcome")
+
+    with pytest.raises(ValueError, match="pre-outcome transition must begin one reserved attempt"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition(None, status="reserved", identity_blocked_streak=1),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "pre-outcome", public, durable)
+
+
+def test_identity_released_transition_must_abandon_the_reservation(tmp_path: Any) -> None:
+    """#1180 J3: the release decision without ``reservation_lost`` is a lie.
+
+    This is the guard that keeps ``identity_mismatch_released`` meaning
+    "the reservation is gone"; recorded on a still-``reserved`` row it would
+    claim a convergence exit that never happened.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "released-status")
+
+    with pytest.raises(ValueError, match="identity released transition must abandon the reservation"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "identity_mismatch_released",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                identity_blocked_streak=3,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "released-status", public, durable)
+
+
+def test_non_identity_decision_cannot_carry_a_streak(tmp_path: Any) -> None:
+    """#1180 J4: the counter belongs to identity-mismatch transitions only."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "foreign-decision")
+
+    with pytest.raises(
+        ValueError, match="identity blocked streak belongs to identity-mismatch transitions"
+    ):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "absence_retry_permitted",
+                submit_outcome="submit_result_ambiguous",
+                status="reservation_lost",
+                identity_blocked_streak=1,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "foreign-decision", public, durable)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason", "expected_field", "leg"),
+    [
+        pytest.param(
+            {"identity_blocked_streak": -1},
+            "file_journal_evidence_type_invalid",
+            "identity_blocked_streak",
+            "J5",
+            id="J5_streak_type",
+        ),
+        pytest.param(
+            {"identity_blocked_streak": 2},
+            "file_journal_evidence_invariant_invalid",
+            "identity_blocked_streak",
+            "J6",
+            id="J6_streak_without_decision",
+        ),
+        pytest.param(
+            {
+                "reconciliation_decision": "identity_mismatch_released",
+                "reconciliation_source": "slurm_exact_comment",
+                "identity_blocked_streak": 3,
+            },
+            "file_journal_evidence_invariant_invalid",
+            "reconciliation_decision",
+            "J7",
+            id="J7_released_while_still_reserved",
+        ),
+        pytest.param(
+            {
+                "reconciliation_decision": "absence_retry_permitted",
+                "reconciliation_source": "slurm_exact_comment",
+                "identity_blocked_streak": 1,
+            },
+            "file_journal_evidence_invariant_invalid",
+            "identity_blocked_streak",
+            "J8",
+            id="J8_streak_on_a_foreign_decision",
+        ),
+    ],
+)
+def test_normalization_invariants_reject_the_ordinary_upsert_path(
+    tmp_path: Any,
+    mutation: dict[str, Any],
+    expected_reason: str,
+    expected_field: str,
+    leg: str,
+) -> None:
+    """#1180 J5-J8: the same four guards on the durable write path.
+
+    ``upsert_pipeline_job`` against an already-persisted versioned master is the
+    entry point that actually reaches all four normalization arms, so the
+    "left no trace" half of the assertion is a real claim about durable state
+    rather than a no-op around a direct function call.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, leg)
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job({**public, **mutation})
+
+    assert error.value.reason == expected_reason
+    assert error.value.field == expected_field
+    _assert_invariant_left_no_trace(repository, tmp_path, leg, public, durable)

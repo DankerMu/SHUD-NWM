@@ -9024,6 +9024,241 @@ def test_cohort_init_state_identity_is_frozen_and_out_of_the_cycle_scope_project
     ]
 
 
+# ---------------------------------------------------------------------------
+# #1187: derived per-model rows freeze the mapping exactly like the master row.
+# ---------------------------------------------------------------------------
+
+
+_TERMINAL_TASK_JOB_ID = "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0"
+
+
+def _durable_pipeline_job_payloads(journal_root: Path, job_id: str) -> list[dict[str, Any]]:
+    """Every durable jsonl payload written for one job id, oldest first.
+
+    The public read sanitizes ``*_uri`` values, so an assertion made against
+    ``get_pipeline_job`` cannot tell a laundered placeholder apart from a
+    correctly persisted URI. Only the jsonl payload can.
+    """
+
+    payloads: list[dict[str, Any]] = []
+    for path in sorted((journal_root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("record_type") != "pipeline_job":
+                continue
+            payload = record.get("payload") or {}
+            if payload.get("job_id") == job_id:
+                payloads.append(payload)
+    return payloads
+
+
+def _projected_cohort_with_identities(tmp_path: Path, *, member_count: int = 3) -> tuple[Any, dict[str, Any]]:
+    """Reserve, bind and project one cohort whose master carries identities."""
+
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(index) for index in range(member_count)],
+    )
+    assert repository.reserve_pipeline_job(record) is not None
+    _bind_and_project_cohort(repository, record, member_count=member_count)
+    return repository, record
+
+
+def test_per_model_row_public_round_trip_cannot_launder_the_durable_state_uri(
+    tmp_path: Path,
+) -> None:
+    """#1187 J9: a public round-trip must not wash ``s3://`` into a placeholder.
+
+    ``get_pipeline_job`` → ``upsert_pipeline_job`` on a derived per-model row
+    carries the display-sanitized mapping back into the write path. Without the
+    per-model freeze the merge accepts it and the durable lineage evidence is
+    replaced by ``[object-uri]``.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+    public_row = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    assert public_row["init_state_identities"] == [
+        {**_cohort_init_state_identity(0), "init_state_uri": "[object-uri]"}
+    ]
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(dict(public_row))
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "case"),
+    [
+        pytest.param(None, "explicit_none", id="explicit_none"),
+        pytest.param([], "explicit_empty", id="explicit_empty"),
+        pytest.param(
+            [{**_cohort_init_state_identity(0), "init_state_id": "state_forged"}],
+            "wrong_content",
+            id="structurally_valid_wrong_content",
+        ),
+    ],
+)
+def test_per_model_row_rejects_a_divergent_init_state_mapping(
+    tmp_path: Path,
+    payload: Any,
+    case: str,
+) -> None:
+    """#1187 J10/J11: erasing and forging are both divergence, both refused.
+
+    An explicit ``None``/``[]`` would flatten the lineage evidence; a payload
+    that is structurally valid but names a different state is the case a
+    placeholder-tolerant merge could never catch. Both must be rejected with
+    the durable mapping intact.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(
+            {**public_before, "init_state_identities": payload}
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+    assert repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID) == public_before
+    del case
+
+
+def test_per_model_freeze_is_typed_and_only_covers_contract_current_rows(
+    tmp_path: Path,
+) -> None:
+    """#1187 J16: the new gate's own negative oracle, plus its historical edge.
+
+    Half of this test is the gate firing with its exact typed error and zero
+    durable write; the other half is the boundary it must NOT cross — a
+    marker-free per-model row predates this contract, normalization does not
+    own its mapping, and gating it would change historical rows' behaviour.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS,
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+        accepted_submit_row_kind,
+    )
+
+    assert ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS == ("init_state_identities",)
+
+    # Correctly keyed to this row's own task, so the shape gate passes and only
+    # the freeze can reject it.
+    divergent = [{**_cohort_init_state_identity(0), "init_state_checksum": "sha256:" + "b" * 64}]
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    assert public_before[ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD] == ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(
+            {**public_before, "status": "failed", "init_state_identities": divergent}
+        )
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+
+    # The historical shape: same row kind, no contract marker. Its mapping is
+    # outside the accepted-submit contract, so the write still goes through.
+    legacy_job_id = "job_fcst_gfs_2026072000_model_0_forecast_legacy"
+    legacy = {
+        key: value
+        for key, value in public_before.items()
+        if key != ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+    }
+    legacy["job_id"] = legacy_job_id
+    legacy["init_state_identities"] = [_cohort_init_state_identity(0)]
+    assert repository.upsert_pipeline_job(dict(legacy)) is not None
+    # The marker, not the row kind, is what holds this row outside the gate.
+    assert accepted_submit_row_kind(repository.get_pipeline_job(legacy_job_id)) == "candidate"
+
+    rewritten = repository.upsert_pipeline_job({**legacy, "init_state_identities": divergent})
+    assert rewritten["init_state_identities"] == [
+        {**divergent[0], "init_state_uri": "[object-uri]"}
+    ]
+
+
+def test_per_model_upsert_that_omits_the_mapping_keeps_it_silently(tmp_path: Path) -> None:
+    """#1187 J17: the freeze must not fail closed on the constructor's default.
+
+    ``_pipeline_job_row`` injects this field unconditionally with an empty
+    default, so a gate that compared the incoming row instead of the merged one
+    would reject every ordinary per-model upsert that simply does not mention
+    the mapping. Today those writes succeed and keep the persisted value; that
+    must stay true.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    without_mapping = {
+        key: value for key, value in public_before.items() if key != "init_state_identities"
+    }
+    without_mapping["status"] = "failed"
+    without_mapping["error_code"] = "SLURM_TASK_FAILED"
+
+    updated = repository.upsert_pipeline_job(without_mapping)
+
+    assert updated["status"] == "failed"
+    durable_after = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_after["status"] == "failed"
+    assert durable_after["init_state_identities"] == durable_before["init_state_identities"]
+    assert durable_after["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+
+def test_master_public_snapshot_replay_still_fails_closed(tmp_path: Path) -> None:
+    """#1187 J12 (design D-B2): the public view is not a valid write payload.
+
+    The public read replaces object URIs with display placeholders, so an
+    unmodified replay of a public master snapshot presents a mapping the caller
+    does not actually hold. That is refused rather than special-cased — a
+    caller needing replay needs a durable read, not a laxer write gate.
+    """
+
+    member_count = 3
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(index) for index in range(member_count)],
+    )
+    assert repository.reserve_pipeline_job(record) is not None
+    job_id = str(record["job_id"])
+    public_master = repository.get_pipeline_job(job_id)
+    assert public_master["init_state_identities"] == [
+        {**_cohort_init_state_identity(index), "init_state_uri": "[object-uri]"}
+        for index in range(member_count)
+    ]
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(dict(public_master))
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert repository.get_pipeline_job(job_id) == public_master
+
+
 def test_hydro_run_row_records_initial_state_quality(tmp_path: Path) -> None:
     """#1164: the journal row carries the initial-state quality face.
 
