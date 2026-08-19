@@ -1,6 +1,6 @@
 ## A. Lane #1380（journal 读 cache 并发 + 捕获点归因）
 
-- [ ] A.1 `FileOrchestrationJournalRepository` 新增 `_cache_lock`
+- [x] A.1 `FileOrchestrationJournalRepository` 新增 `_cache_lock`
       （`threading.Lock`），三个 cache（`_cycle_rows_cache` /
       `_direct_jobs_cycle_cache` / `_read_bytes_cache`+`_read_bytes_cache_total`）
       的所有 get/store/evict/**iterate** 收进锁内。**站点全集**：
@@ -13,7 +13,7 @@
       锁内**只做 dict 存取**——零 IO/零 JSON 解析/`_clone_cycle_rows`
       在锁外。锁序单向：`_cache_lock` 内不得获取 `_write_lock`/flock
       （写锁内进 cache 锁允许）
-- [ ] A.2 红证（概率竞态的压测构造）：单 repository 实例、小容量强制
+- [x] A.2 红证（概率竞态的压测构造）：单 repository 实例、小容量强制
       持续驱逐、2+ 读线程 hammer `_cycle_rows`/`_read_bytes_limited_cached`
       **+ 1 个真实写线程**（走 `_locked_cycle_write`+append，覆盖 :6592
       整表遍历站点——审者本机实测 2 线程 74ms 得 "size changed"、加扫描
@@ -21,12 +21,12 @@
       排除站点）——**pre-fix 秒级稳定红**（捕获逐字红形 + 复现参数：
       线程数/时长/key 分布）；post-fix 同构造跑 ≥10× pre-fix 红所需
       时长全绿。测试常驻套件限时 2-3s 预算，不得引入慢测
-- [ ] A.3 捕获点归因：`scheduler_execution.py:716` except 分支写
+- [x] A.3 捕获点归因：`scheduler_execution.py:716` except 分支写
       `error_traceback_tail`（**最后 3 帧、总长 ≤2000 字符**，过
       `context.evidence_safe`——密钥/URL 脱敏口径；路径保留是设计意图，
       file:line 归因靠它）进 model_run_evidence；单测断言字段存在、
       含抛错帧文件名、长度守上限
-- [ ] A.4 cache 语义回归锁：`tests/test_file_orchestration_journal.py`
+- [x] A.4 cache 语义回归锁：`tests/test_file_orchestration_journal.py`
       全绿零断言改动；同 key 命中值与驱逐行为单线程逐字不变
 
 ## B. Lane #1356（先定性后修，issue 验收逐条）

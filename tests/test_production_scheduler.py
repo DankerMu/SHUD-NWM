@@ -26965,6 +26965,60 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
     assert "[redacted]" in artifact_text
 
 
+def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(tmp_path: Path) -> None:
+    """#1380 — a bare message string cannot locate the frame that raised.
+
+    The 2026-08-14 pass recorded ``dictionary changed size during iteration``
+    for all 17 IFS runs and nothing else, so the raising site had to be
+    guessed.  The tail keeps file:line (paths are not redacted; secrets and
+    URLs still are) and stays bounded.
+    """
+
+    class RaisingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise RuntimeError("dictionary changed size during iteration https://user:pass@example.test/x")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: RaisingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        tail = model_run["error_traceback_tail"]
+        assert model_run["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+        assert "test_production_scheduler.py" in tail
+        assert "in orchestrate_cycle" in tail
+        assert "RuntimeError: dictionary changed size during iteration" in tail
+        assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+        assert tail.count("  File \"") <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_FRAMES
+        assert "user:pass" not in tail
+
+
+def test_orchestrator_exception_traceback_tail_stays_within_the_character_cap() -> None:
+    def raise_with_a_long_message() -> None:
+        raise RuntimeError("x" * 8000)
+
+    try:
+        raise_with_a_long_message()
+    except RuntimeError as error:
+        tail = scheduler_execution_module._error_traceback_tail(error)
+
+    assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+    assert "raise_with_a_long_message" in tail
+
+
 @pytest.mark.parametrize("result_status", ["failed", "submission_failed"])
 def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
     tmp_path: Path,

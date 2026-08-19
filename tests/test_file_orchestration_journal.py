@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import itertools
 import json
 import logging
 import os
 import stat
+import threading
+import time
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -7873,6 +7876,177 @@ def test_file_journal_cycle_rows_cache_observes_continuation_segments(tmp_path: 
     assert reader._cycle_rows(
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
     ).pipeline_jobs["job_rotation"]["error_message"] == "rolled-over"
+
+
+def _hammer_until(
+    work: Callable[[], None],
+    *,
+    stop: threading.Event,
+    deadline: float,
+    failures: list[BaseException],
+    batch: int = 1,
+) -> Callable[[], None]:
+    def loop() -> None:
+        try:
+            while not stop.is_set() and time.monotonic() < deadline:
+                for _ in range(batch):
+                    work()
+        except BaseException as error:  # noqa: BLE001 - an unguarded cache race is what this asserts
+            failures.append(error)
+            stop.set()
+
+    return loop
+
+
+def _join_all(threads: list[threading.Thread]) -> None:
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), f"{thread.name} did not finish — cache/write lock order deadlock"
+
+
+def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path: Path) -> None:
+    """#1380 red proof — the stale-key sweep is the widest unguarded window.
+
+    ``_apply_record_to_cycle_rows_cache`` is the only full-table iteration
+    over ``_cycle_rows_cache``; every append inside a write window runs it
+    while other cohort threads sharing the repository keep storing and
+    evicting through ``_cache_cycle_rows``.  The cache is filled to its
+    production capacity first, so every store also evicts.  Unguarded, the
+    sweep thread raises ``RuntimeError: dictionary changed size during
+    iteration`` (or the equivalent ``dictionary keys changed`` variant —
+    the first is the message the 2026-08-14 production pass recorded) within
+    ~60ms; this runs an order of magnitude longer than that.
+    """
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    other_segment = format_cycle_time(_dt("2026-06-28T06:00:00Z"))
+    rows = journal_module._CycleRows()
+    for index in range(journal_module.MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES):
+        repository._cache_cycle_rows(("gfs", other_segment, f"model_{index}", ("gfs",)), rows, fingerprint=None)
+    repository._cache_cycle_rows(("gfs", cycle_segment, None, None), rows, fingerprint=None)
+    record = _journal_record(
+        record_type="forecast_cycle",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=None,
+        payload={
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "status": "raw_complete",
+        },
+    )
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    deadline = time.monotonic() + 0.7
+    stored = itertools.count()
+
+    def store_cycle_rows() -> None:
+        key = ("gfs", other_segment, f"churn_{next(stored)}", ("gfs",))
+        repository._cache_cycle_rows(key, rows, fingerprint=None)
+
+    def sweep_stale_keys() -> None:
+        repository._apply_record_to_cycle_rows_cache(source_id="gfs", cycle_time=cycle_time, record=record)
+
+    _join_all(
+        [
+            threading.Thread(
+                target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                name="store-a",
+            ),
+            threading.Thread(
+                target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                name="store-b",
+            ),
+            threading.Thread(
+                target=_hammer_until(sweep_stale_keys, stop=stop, deadline=deadline, failures=failures, batch=50),
+                name="sweep",
+            ),
+        ]
+    )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+    assert len(repository._cycle_rows_cache) <= journal_module.MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES
+
+
+def test_file_journal_read_caches_survive_concurrent_readers_and_a_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1380 — one repository instance shared by concurrent orchestration threads.
+
+    The scheduler builds a single ``active_repository`` per pass and hands it
+    to every per-cohort orchestrator in the submission thread pool, so the
+    read-side caches take concurrent lookups and evictions through the real
+    read paths while a writer holds the cycle write window.  Cache capacities
+    are squeezed to 2 so every read evicts.  Unlike the sweep test above this
+    one is IO-bound (a ``_cycle_rows`` miss costs milliseconds), so it is a
+    lock-order and end-to-end guard rather than a probabilistic race prover:
+    a reversed lock order deadlocks it.
+    """
+    monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES", 2)
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    cycle_times = [_dt(f"2026-06-28T{hour:02d}:00:00Z") for hour in range(4)]
+    writer_cycle = _dt("2026-06-29T00:00:00Z")
+    for cycle_time in [*cycle_times, writer_cycle]:
+        repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+        repository.upsert_pipeline_job(_rotation_job(cycle_time))
+    # The writer owns a cycle of its own: readers must not open a file that
+    # is being atomically replaced, which is a pre-existing safe_fs race and
+    # not the cache defect under test.
+    writer_segment = format_cycle_time(writer_cycle)
+    journal_files = sorted(
+        path
+        for path in journal_root.rglob("*")
+        if path.is_file() and path.suffix in {".json", ".jsonl"} and writer_segment not in str(path)
+    )
+    assert journal_files
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    deadline = time.monotonic() + 0.6
+
+    def read_cycle_rows() -> None:
+        for cycle_time in cycle_times:
+            for model_id in (None, "model_a"):
+                repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=model_id)
+
+    def read_journal_bytes() -> None:
+        for path in journal_files:
+            repository._read_bytes_limited_cached(path)
+
+    def append_records() -> None:
+        repository.update_forecast_cycle_status(
+            source_id="gfs", cycle_time=writer_cycle, status="raw_complete"
+        )
+
+    _join_all(
+        [
+            threading.Thread(
+                target=_hammer_until(read_cycle_rows, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-rows-a",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_cycle_rows, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-rows-b",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_journal_bytes, stop=stop, deadline=deadline, failures=failures),
+                name="read-bytes",
+            ),
+            threading.Thread(
+                target=_hammer_until(append_records, stop=stop, deadline=deadline, failures=failures),
+                name="writer",
+            ),
+        ]
+    )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
 
 
 def _segment_job_record(
