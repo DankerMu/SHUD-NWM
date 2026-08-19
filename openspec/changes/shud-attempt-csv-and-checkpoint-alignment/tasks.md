@@ -27,8 +27,8 @@
       staging 产物」比要求更强：一份 staging 产物也没有。
       删除原语：`unlink_no_follow(model_input_dir / name, containment_root=model_input_dir,
       missing_ok=True)`（`_clear_predecessor_direct_grid_station_csvs`，
-      `runtime.py:1254-1310`），目录/symlink 形态由原语自身拒绝；
-      名字来自 `_declared_direct_grid_station_csv_names`（`runtime.py:3268-3294`），
+      `runtime.py:1296-1347`），目录/symlink 形态由原语自身拒绝；
+      名字来自 `_declared_direct_grid_station_csv_names`（`runtime.py:3310-3336`），
       经 `_direct_grid_station_filename` 校验（无 `/`、无 `..`、必须 `.csv`），
       故 containment 是双保险，且**保留名结构上不可达**（无保留名以 `.csv` 结尾）。
       删除集合 = 「本次声明的 station CSV 名字」∩「`model_input_dir` 当前条目」，
@@ -80,8 +80,10 @@
       （`runtime.py:1222-1252`）以 **best-effort** 方式提前调用——任何异常
       吞掉并返回 `None`，`prepare_workspace` 在 model package staging **之后**
       于历史站点无条件重跑该调用并让它抛。于是：
-      成功路径记忆化（`_verify_forcing_object_checksums` 会 hash 每个成员，
-      绝不能跑两遍）；失败路径的**错误码与次序逐字不变**。
+      成功路径只解析 **1 次**（结果由 `prepare_workspace` 的局部变量复用，
+      **不是** memo 缓存——round-1 D.2 已纠正此措辞）；失败路径的
+      **错误码与次序逐字不变**（round-1 D.1 后失败路径解析 **3 次**：
+      早探 + 原地重试 + 历史站点，每次都重算全部成员哈希）。
       吞异常是 fail-**closed**：跳过卫生 = 退回本次改动前的行为（collision
       门照样拒），不会给任何路径新增覆盖写许可。
 
@@ -205,7 +207,7 @@
       行为逐字不变——既有用例全绿 + 该分支不经过新删除路径的结构论证
 
       **落账**：结构论证——`_clear_predecessor_direct_grid_station_csvs` 首行
-      `if not forcing_context.is_direct_grid: return`（`runtime.py:1284-1285`），
+      `if not forcing_context.is_direct_grid: return`（`runtime.py:1326-1327`），
       非 direct-grid manifest 一条 unlink 都不发起；`is_direct_grid` 来自与
       staging 层同一个 `_ForcingPackageContext`，不可能与拷贝分支的判定分叉。
       既有 `test_runtime_non_direct_grid_staging_leaves_residual_index_member_alive`
@@ -356,10 +358,12 @@
 - [x] C.1 `uv run pytest -q tests/test_shud_runtime.py tests/test_warm_start.py
       tests/test_orchestration_chain.py`
 
-      **落账**：`647 passed in 954.79s (0:15:54)`，exit 0，零 failed / 零 error。
+      **落账（round-0 口径，已被 D.5 取代——终态见 §D.5 的 649）**：
+      `647 passed in 954.79s (0:15:54)`，exit 0，零 failed / 零 error。
       本地 macOS，随机顺序插件启用（未加 `-p no:randomly`）——env 驱动的
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` 用例用 `monkeypatch.setenv`，
-      不泄漏到其他用例。新增 **11 个测试函数 / 18 个用例实例**：
+      不泄漏到其他用例。新增 **11 个测试函数 / 18 个用例实例**
+      （**终态 20 实例**——D.3 补的 `("0,6,18", [6, 12])` × 2 产地）：
       `tests/test_shud_runtime.py` Lane A 7 函数 8 实例（含
       `..._residue_that_will_not_unlink_fails_loud` 的 directory/symlink 参数化）
       + Lane B(a) 2 函数 2 实例（含 cfg-style 门控守门）；
@@ -396,7 +400,7 @@
       PR body「已知限制 2」的 justification（「那类 run 本来就在更早位置失败」）
       **被推翻**——只在失败确定性时成立。
       **最小修复边界（verD 已实测）**：
-      (a) `runtime.py:1249-1252` 早探失败后**在 model package staging 之前
+      (a) `runtime.py:1222-1294` 早探失败后**在 model package staging 之前
           原地重试一次再吞**（实测：`tests/test_shud_runtime.py` 260 passed
           零回归，且 C1 探针从 `CALLS:2 + COLLISION` 变成 `DID NOT RAISE`）；
       (b) **最终那次吞异常处必须留一行 log/receipt**（记 `run_id` + 被吞的
@@ -410,7 +414,7 @@
       **成本申报**：修法 (a) 会让确定性失败路径把 context 跑 **3 次**
       （现为 2 次），该函数目前只读——需在 PR body 已知限制里更新这个数字
 
-      **落账**：`runtime.py:1249-1281` 改为「早探 → 失败则原地重试一次 →
+      **落账**：`runtime.py:1222-1294` 改为「早探 → 失败则原地重试一次 →
       再失败才写 receipt 并 `return None`」，两次 `except Exception` 都不外抛
       （绑定约束照守，早探绝不直接抛）。receipt 走本文件既有惯例
       （`_log_recovery_refusal:938` 的 best-effort `_write_text_no_follow`
@@ -443,7 +447,7 @@
       ```
       即历史站点仍原样抛原码，同时留下 run_id + 被吞 error_code 各一
 - [x] D.2 **C4（CONFIRMED，Note，并入 D.1 同函数）docstring 与事实相反**：
-      `runtime.py:1240-1242` 的「The result is memoized … must not run twice」
+      `runtime.py:1251-1260` 的「The result is memoized … must not run twice」
       **无任何缓存机制**（只是调用者局部变量复用）。verD 实测三模式：
       happy `{reads:6, verify:1, ctx:1}`、fail_early `{ctx:2}`、
       fail_late `{reads:12, verify:2, ctx:2}`。改成事实描述（成功路径跑一次、
@@ -451,7 +455,7 @@
       `_verify_forcing_object_checksums` 跑两遍——**修完 D.1 后是三遍，按实际写**）
 
       **落账**：删掉「The result is memoized …」整句，改写为事实段落
-      （`runtime.py:1238-1246`）：成功路径解析 **1 次**、结果由
+      （`runtime.py:1251-1260`）：成功路径解析 **1 次**、结果由
       `prepare_workspace` 局部变量复用（**非 memo**）；确定性失败路径解析
       **3 次**——早探 + 原地重试 + 历史站点，且
       `_verify_forcing_object_checksums` 每次都重算全部声明成员的哈希。
@@ -490,8 +494,8 @@
 - [x] D.4 **C3（CONFIRMED，P2，FIX_NOW）A.8 新增用例是装饰品**：
       `tests/test_shud_runtime.py:3545` 用 `_drop_runtime_forcing_files` 把
       `forcing.files` 删光 → 非 direct-grid 车道 `checksum_entries` 为空 →
-      `declared_names` 恒空 → 在 `runtime.py:1287-1288` 就 return，**根本走不到**
-      它声称要钉的 guard。verD 实测：删掉 `runtime.py:1284-1285` 的
+      `declared_names` 恒空 → 在 `runtime.py:1329-1330` 就 return，**根本走不到**
+      它声称要钉的 guard。verD 实测：删掉 `runtime.py:1326-1327` 的
       `if not forcing_context.is_direct_grid: return` 后 `tests/test_shud_runtime.py`
       **260 passed**（与基线逐字相同）。
       **guard 本身必要且正确**（verD 用真实形状验证：未 drop 的
@@ -509,7 +513,7 @@
       **落账**：取修法 (ii)，**只改测试**（`tests/test_shud_runtime.py:3545-3592`），
       生产代码 guard 一字未动。去掉 `_drop_runtime_forcing_files(...)` 包裹
       —— 这是关键：保留 `forcing.files` 后该车道
-      `declared_names == {'forcing.csv'}` 非空，`runtime.py:1287-1288`
+      `declared_names == {'forcing.csv'}` 非空，`runtime.py:1329-1330`
       的空集早退不再兜底，唯一挡在删除路径前面的就是 `is_direct_grid` guard。
       原有「覆盖写仍生效」两条断言保留（现在才真正跑到 guard），再追加第三次
       `prepare_workspace`：残留换 symlink 形，断言
@@ -550,7 +554,7 @@
          ```
          即：合法配置 `0,6,18`（step 360、`12*60 % 360 == 0`）被过严门 typed 拒掉，
          两个产地各红一条
-      3. **D.4 / 删 guard mutant**（删掉 `runtime.py:1284-1285` 的
+      3. **D.4 / 删 guard mutant**（删掉 `runtime.py:1326-1327` 的
          `if not forcing_context.is_direct_grid: return`）：全文件
          `tests/test_shud_runtime.py` → **`1 failed, 259 passed in 26.18s`**
          （修前该 mutant 是 `260 passed` 零红）。红形逐字：

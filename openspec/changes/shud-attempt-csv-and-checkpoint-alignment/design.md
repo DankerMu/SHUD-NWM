@@ -6,14 +6,20 @@ Project profile: SHUD（NHMS/NWM 双端，node-22 计算 / node-27 数据+displa
 ## Change surface
 
 - `workers/shud_runtime/runtime.py`
-  - `_stage_standard_shud_forcing` 拷贝循环 `:1104-1120`（Lane A 删除点）
+  - Lane A 删除点：**实际落在 `prepare_workspace` 最顶端**（早于一切 staging）
+    ——`_clear_predecessor_direct_grid_station_csvs` + 早探
+    `_forcing_package_context_for_attempt_hygiene`。本行原写「`_stage_standard_shud_forcing`
+    拷贝循环 `:1104-1120`」是 round-0 的设想位置，A.1/A.2 落账后已改；
+    拷贝循环本身**未被改动**
   - `_validate_direct_grid_station_filename_target` `:3208-3224`（Lane A：
     **力争一字不动**；仅当机制 (ii) 需要才改签名，届时
     `tests/test_shud_runtime.py:3239` 的直接调用点跟着改）
   - `_recover_missing_state_checkpoints` `:767-920`（Lane B 半(a) cfg 注入）
 - `services/orchestrator/chain_manifests.py` `:486` 与 `:643`（Lane B 半(b)，
   **两份兄弟副本**）
-- `tests/test_shud_runtime.py`、`tests/test_warm_start.py`
+- `tests/test_shud_runtime.py`、`tests/test_warm_start.py`、
+  **`tests/test_orchestration_chain.py`**（Lane B(b) 两处产地的实际承载文件，
+  round-0 遗漏，B.3/B.4(b) 落账后补入）
 
 ## Must preserve
 
