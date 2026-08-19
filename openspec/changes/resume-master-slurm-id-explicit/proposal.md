@@ -27,7 +27,8 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
    本缺陷的实害是哑火不可观测 + 下述第 2 类伪事件，issue 原文对 per-task
    影响的陈述偏高，本 fixture 按实收敛。）
 2. 锁内读若非终态则写 `reconcile_unverified` + 身份污染伪事件，脏化
-   `identity_blocked_streak` 类读数。
+   `identity_blocked_streak` 类读数——该几何由 tasks 2.2 的 geometry-2
+   构造钉成真实持久化红证（bound 未投影 master + 终态快照 resume）。
 
 对照兄弟腿（当前正确，不得回归）：`chain_stage_execution.py:627` 的
 `terminal` 来自 gateway 形状（`:605`）；`reconcile.py:1097` 显式传
@@ -42,8 +43,10 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
   keyword-only 必填参数 `master_slurm_job_id: str`；`:362` 嗅探行删除。
   projector 分支内该值为**空或非数字**时 **fail-closed**：抛
   `OrchestratorError("SLURM_MASTER_IDENTITY_UNAVAILABLE", ...)`（含
-  pipeline_job_id/stage evidence）——不再退化成不可归因的失败（空 id 会
-  一路走到 accepted_submit_identity 的 `.isdigit()` 裸 ValueError）。
+  pipeline_job_id/stage evidence）。归因口径：file journal 契约下存量
+  master 的 `slurm_job_id` 恒为纯数字（journal:2033 强制），空/非数字
+  入参**永远**在 :3011 判不等而落进 defer 的静默/误标分支——fail-closed
+  的价值是把这条静默分支换成可归因错误。
   非 cohort 分支（不走 projector）不消费该参数。
 - wrapper `chain_forecast_orchestrator_cycle.py:486`
   `_record_cycle_stage_status_override` 签名同步透传。
