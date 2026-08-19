@@ -87,7 +87,13 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
   已终态且投影完整的 master，resume 腿不再进投影写路径（恢复 pre-fix 零
   写入语义；bound 未投影 master 仍进，验收 2a 不受影响）；占位符
   `advertised_uri` 进投影前按 withheld(None) 处理。`error_code` 无粘性的
-  缺口已路由 #1589；projector 写路径绕过 strip 属 pre-existing，另行立案；
+  缺口已路由 #1589；projector 写路径绕过 strip 属 pre-existing，已立
+  #1592。**Round-2 追加申报**：settled 闸首版连带跳过了日志发布副作用
+  （pass-1 发布失败的 cohort 日志永不重试）——tasks 5.1 修复为闸命中且
+  durable `log_uri` 为空时仍跑发布（文件落确定性 candidate URI；行指针
+  回写需 typed API，车道并入 #1592）；同趟消费侧仍按新鲜分歧聚合裁
+  basin/报 candidate 的行-报告矛盾，经 verifier 裁定为 pre-existing 语义
+  + 设计裁定，DEFER 并案 #1589（tasks 5.4）；
   test-evidence selected（测试盲区实锤：全仓 14 处 `master_slurm_job_id`
   测试引用全部直调 journal API 手写数字 id，chain 层 id 推导零覆盖——红证
   必须在 chain 层伪造 resume 场景取证）；其余 not selected。
