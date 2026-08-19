@@ -13639,14 +13639,15 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     passes return ``PipelineResult("failed")``.
 
     What it does NOT pin is projection stickiness (design D9 deviation (b),
-    tasks.md:69).  Since #1410 pass two does reach
-    ``project_forecast_cohort_tasks`` — the resume leg now hands it the row's
-    real Slurm id, so the identity guard matches instead of deferring — but the
-    assertions below still cannot see the sticky line: they count
-    ``permanently_failed`` events, and a committed projection emits
-    ``status_change``.  The red proof for stickiness lives in the journal-level
-    unit tests (``test_cohort_projection_keeps_a_permanently_failed_master_sticky``
-    and its write-through twin).
+    tasks.md:69).  This master is settled after pass one — terminal and
+    projected across its whole cohort — so the #1410 round-1 short-circuit keeps
+    pass two out of ``project_forecast_cohort_tasks`` altogether; the sticky
+    line inside the projection is never reached from here, and the assertions
+    below could not see it in any case, since they count ``permanently_failed``
+    events while a committed projection emits ``status_change``.  The red proof
+    for stickiness lives in the journal-level unit tests
+    (``test_cohort_projection_keeps_a_permanently_failed_master_sticky`` and its
+    write-through twin).
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -14184,27 +14185,50 @@ def test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id(tmp_
     ``resume_cycle_stage`` keeps ``terminal = dict(job)`` — a pipeline row whose
     ``job_id`` is the pipeline job id, not a Slurm id — so the projection has to
     be handed the row's recorded ``slurm_job_id`` explicitly.
+
+    The master is a full-lifecycle one whose first pass saw a task still
+    running: the projection deferred, leaving the row ``reconcile_unverified``
+    with no projections, which is the shape a later resume still owes a
+    projection for.  A settled master takes the round-1 short-circuit instead
+    and never reaches the projector, so the identity can only be pinned here.
+    The resumed snapshot is terminal, which is what selects the leg under test —
+    the leg that never polls and therefore has no gateway job id to sniff.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
     basins = _forecast_cohort_basins()
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    client = FakeCycleSlurmClient()
+    client = FakeCycleSlurmClient(array_results_by_stage={"forecast": ["succeeded", "running"]})
     orchestrator = _orchestrator(tmp_path, repository, client)
     orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
 
+    unverified = _durable_cohort_master(repository.root)
+    assert unverified["status"] == "reconcile_unverified"
+    assert not unverified["candidate_projections"]
+    master_slurm_job_id = str(unverified["slurm_job_id"])
+    assert master_slurm_job_id.isdigit()
+    assert master_slurm_job_id != _COHORT_JOB_ID
+    stored_log_uri = str(unverified["log_uri"])
+    assert stored_log_uri.startswith("s3://")
+
+    client.array_results_by_stage["forecast"] = ["succeeded", "succeeded"]
     job = repository.get_pipeline_job(_COHORT_JOB_ID)
     assert job is not None
-    assert job["status"] == "succeeded"
-    master_slurm_job_id = str(job["slurm_job_id"])
-    assert master_slurm_job_id.isdigit()
-
+    polls_before_resume = dict(client.poll_counts)
     calls = _spy_cohort_projections(repository)
     context = _forecast_cohort_context(orchestrator, basins, run_id=str(job["run_id"]))
-    orchestrator._resume_cycle_stage(M3_STAGES[2], context, job)
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**job, "status": "succeeded"})
 
+    assert client.poll_counts == polls_before_resume
     assert [call["master_slurm_job_id"] for call in calls] == [master_slurm_job_id]
+    projected = _durable_cohort_master(repository.root)
+    assert projected["status"] == "succeeded"
+    assert projected["reconciliation_decision"] == "matched_bound"
+    # The resumed snapshot only carried the sanitized ``[object-uri]``; the
+    # projection is handed no URI at all and leaves the stored one intact.
+    assert calls[0]["log_uri"] is None
+    assert projected["log_uri"] == stored_log_uri
 
 
 def test_resume_of_a_bound_unprojected_cohort_master_reconciles_matched_bound(
@@ -14273,8 +14297,47 @@ def test_resume_of_a_bound_unprojected_cohort_master_reconciles_matched_bound(
     )
 
 
+_COHORT_MASTER_SEMANTIC_FIELDS = (
+    "status",
+    "error_code",
+    "error_message",
+    "log_uri",
+    "finished_at",
+    "exit_code",
+    "candidate_projections",
+    "reconciliation_decision",
+    "matched_slurm_job_id",
+)
+
+
+def _durable_cohort_master(root: Path) -> dict[str, Any]:
+    """The master row as it is stored, without the public read's sanitization.
+
+    ``get_pipeline_job`` rewrites every object URI to ``[object-uri]``, so a real
+    ``log_uri`` and a laundered placeholder read back identical (#1410 F2/F3).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    row = FileOrchestrationJournalRepository(root)._pipeline_job_for_id_unlocked(_COHORT_JOB_ID)
+    assert row is not None
+    return dict(row)
+
+
+def _cohort_master_semantics(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: row.get(key) for key in _COHORT_MASTER_SEMANTIC_FIELDS}
+
+
 def test_resume_of_a_fully_projected_cohort_master_writes_nothing(tmp_path: Path) -> None:
-    """#1410 idempotency lock: the reconciled resume pass must not rewrite the master."""
+    """#1410 idempotency lock: the reconciled resume pass must not rewrite the master.
+
+    Both halves have to be able to fail.  The projector spy pins the write
+    itself — a settled master short-circuits before the projection, so no call
+    may reach it at all — and the row comparison reads the durable record
+    unsanitized, because the public read maps every object URI onto
+    ``[object-uri]`` and would happily accept a laundered placeholder as
+    "unchanged" (#1410 round-1 F3).
+    """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
@@ -14284,20 +14347,57 @@ def test_resume_of_a_fully_projected_cohort_master_writes_nothing(tmp_path: Path
     orchestrator = _orchestrator(tmp_path, repository, client)
     orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
 
-    before = repository.get_pipeline_job(_COHORT_JOB_ID)
-    assert before is not None
-    assert before["status"] == "succeeded"
+    public_before = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert public_before is not None
+    assert public_before["status"] == "succeeded"
+    before = _durable_cohort_master(repository.root)
+    assert str(before["log_uri"]).startswith("s3://")
 
+    calls = _spy_cohort_projections(repository)
     context = _forecast_cohort_context(orchestrator, basins, run_id=str(before["run_id"]))
-    orchestrator._resume_cycle_stage(M3_STAGES[2], context, before)
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, public_before)
 
-    after = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(_COHORT_JOB_ID)
-    assert after is not None
-    assert after["error_code"] == before["error_code"]
-    assert after["log_uri"] == before["log_uri"]
-    assert after["finished_at"] == before["finished_at"]
-    assert after["status"] == before["status"]
-    assert after["candidate_projections"] == before["candidate_projections"]
+    assert calls == []
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+
+
+def test_second_cycle_pass_never_rewrites_a_settled_cohort_master(tmp_path: Path) -> None:
+    """#1410 round-1 F1: a settled master outranks a divergent second accounting read.
+
+    The resume leg re-aggregates from Slurm before it decides anything, so a
+    second ``orchestrate_cycle`` pass whose accounting disagrees with the
+    committed one used to rewrite the master's derived status while the
+    per-task ``candidate_projections`` stayed first-write sticky — a row that
+    contradicts itself.  A master that is terminal and covers its whole cohort
+    is settled: the pass must read its outcome off the durable row and write
+    nothing.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    before = _durable_cohort_master(repository.root)
+    assert before["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in before["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+
+    client.array_results_by_stage["forecast"] = ["failed", "succeeded"]
+    second = orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+    assert [stage.status for stage in second.stages if stage.stage == "forecast"] == ["succeeded"]
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(_COHORT_JOB_ID)
+    assert reopened is not None
+    assert reopened["status"] == "succeeded"
 
 
 class _CohortProjectionOnlyRepository:

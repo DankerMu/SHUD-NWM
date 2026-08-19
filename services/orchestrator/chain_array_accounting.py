@@ -11,6 +11,7 @@ from packages.common.redaction import redact_payload
 from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
+    ordered_cohort_members,
 )
 from services.orchestrator.chain_types import (
     ArrayAggregation,
@@ -303,6 +304,55 @@ def require_complete_array_accounting(
             "unexpected_task_ids": unexpected_task_ids,
         },
     )
+
+
+# A master the journal already drove to one of these has nothing left to
+# reconcile; ``reconcile_unverified`` is deliberately absent, it is the marker
+# of a projection that still owes a decision.
+SETTLED_COHORT_MASTER_STATUSES = frozenset(
+    {"succeeded", "partially_failed", "failed", "cancelled", "permanently_failed"}
+)
+
+
+def settled_cohort_master(row: Any) -> bool:
+    """Return whether a durable cohort master is terminal and fully projected.
+
+    Completeness is the journal's own criterion (``project_forecast_cohort_tasks``
+    coverage gate): the recorded projections name exactly the cohort members and
+    every one of them carries a terminal task outcome.  Re-projecting such a
+    master can only overwrite settled evidence with a fresher accounting read,
+    while the per-task projections stay first-write sticky — the two then
+    contradict each other (#1410 round-1).
+    """
+
+    if not isinstance(row, Mapping):
+        return False
+    if not accepted_submit_contract_is_current(row) or accepted_submit_row_kind(row) != "master":
+        return False
+    if str(row.get("status") or "") not in SETTLED_COHORT_MASTER_STATUSES:
+        return False
+    members: set[int] = set()
+    for member in ordered_cohort_members(row.get("cohort_members")):
+        task_id = member.get("array_task_id")
+        if not str(task_id if task_id is not None else "").isdigit():
+            return False
+        members.add(int(task_id))
+    if not members:
+        return False
+    projections = row.get("candidate_projections")
+    if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
+        return False
+    projected: set[int] = set()
+    for item in projections:
+        if not isinstance(item, Mapping):
+            return False
+        task_id = item.get("array_task_id")
+        if not str(task_id if task_id is not None else "").isdigit():
+            return False
+        if item.get("array_task_outcome") not in {"succeeded", "failed"}:
+            return False
+        projected.add(int(task_id))
+    return projected == members
 
 
 def record_cycle_stage_status_override(

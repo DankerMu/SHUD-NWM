@@ -59,19 +59,29 @@
 
 ## 4. Round-1 fix（verifier CONFIRMED×3，全 FIX_NOW）
 
-- [ ] 4.1 **F1 status 覆写闸**：durable master 已终态**且**投影完整
+- [x] 4.1 **F1 status 覆写闸**：durable master 已终态**且**投影完整
       （complete 判据对齐 journal:3085-3111）时，resume 腿不进投影写路径
       （chain 层收口——chain_stage_execution resume 支或
       chain_array_accounting 调用侧，**journal 零改动**）；bound 未投影
       master（geometry-2）仍进投影，2.2 断言不动仍绿
-- [ ] 4.2 **F2 占位符 withheld**：净化往返回来的占位 `advertised_uri`
+      ——判据 `chain_array_accounting.settled_cohort_master`（cohort_members
+      覆盖 + 每项终态 outcome + 终态 status），resume 腿
+      `chain_stage_execution._durable_cohort_master` 按 **durable 行**（非入参
+      快照）判闸，命中则 status 取自 durable 行、零写入
+- [x] 4.2 **F2 占位符 withheld**：净化往返回来的占位 `advertised_uri`
       （`[object-uri]`）进投影前按 None 处理（chain_workspace.py:100-107
       或 chain_stage_execution.py:882-884 单点），杜绝洗进持久 `log_uri`
-- [ ] 4.3 **F3 2.2c 锁复明**：`_spy_cohort_projections` 断言 resume 趟
+      ——收在 `chain_workspace.display_log_publication_for_pipeline_job`，
+      判据用既有 `EVIDENCE_REDACTION_PLACEHOLDERS`；`log_uri=None` 对两个写
+      实现均为"不动存量"（journal:3311 `if log_uri is not None`、
+      chain_repository:781 `COALESCE`），已实证不会抹掉真实 URI
+- [x] 4.3 **F3 2.2c 锁复明**：`_spy_cohort_projections` 断言 resume 趟
       projector 返回 `{"total": 0, "pipeline_status": 0, "pipeline_event": 0}`
       + `log_uri` 改用未净化 durable 读逐字节比对（净化读比 URI 恒同形，
       是瞎锁）；4.1/4.2 修完后该锁自然转绿，作共同回归证据
-- [ ] 4.4 **红证（F1）**：公开入口两趟 `orchestrate_cycle`，第二趟聚合改
+      ——4.1 闸使 projector 根本不被调用，故按编排者给的替代口径断言
+      `calls == []`；durable 比对走 `_pipeline_job_for_id_unlocked` 未净化读
+- [x] 4.4 **红证（F1）**：公开入口两趟 `orchestrate_cycle`，第二趟聚合改
       `["failed","succeeded"]`——修复前红形：succeeded master 被覆写
       `partially_failed`+`NODE_FAILURE` 且 candidate_projections 不动；
       修复后：durable 行零语义字段变化
@@ -79,4 +89,12 @@
       `_journal_record_for_write`）与 `_write_pipeline_job_unlocked` 绕过
       `_strip_redaction_placeholders`（:8700-8718 契约）——pre-existing，
       版位含 reconcile.py:1097 腿核查
-- [ ] 4.6 三套件重跑 + ruff + openspec validate
+- [x] 4.6 三套件重跑 + ruff + openspec validate（1154 passed；ruff
+      `services tests` 全过；openspec strict 通过）
+      ——连带：2.1 `test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id`
+      的 geometry 改为"首趟 accounting 不完整→durable `reconcile_unverified`
+      未投影 + 终态快照 resume"（原 geometry 已终态且投影完整，被 4.1 闸短路，
+      projector 不再被调用，id 断言将永远空转）；身份断言原样保留并已用
+      定向 mutant（回退成 `terminal["job_id"]` 嗅探）验证仍会红。
+      2.2b docstring（`:13641`）随 4.1 再次失效，已按"settled master 第二趟
+      根本不进 projector"改写（断言不动）

@@ -13,6 +13,7 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitTransition,
     accepted_submit_pipeline_job_model_id,
 )
+from services.orchestrator.chain_array_accounting import settled_cohort_master
 from services.orchestrator.chain_config import SubmitDisposition
 from services.orchestrator.chain_types import (
     ArrayAggregation,
@@ -814,6 +815,24 @@ def run_local_publish_stage(
     )
 
 
+def _durable_cohort_master(
+    orchestrator: StageExecutionOrchestrator,
+    pipeline_job_id: str,
+) -> Mapping[str, Any] | None:
+    """The stored cohort master, but only while it is settled (#1410).
+
+    The resume caller hands in a snapshot that may disagree with the record —
+    the recovery path exists precisely because it does — so the decision has to
+    be read off the durable row.
+    """
+
+    reader = getattr(orchestrator.repository, "get_pipeline_job", None)
+    if not callable(reader):
+        return None
+    durable = reader(pipeline_job_id)
+    return durable if settled_cohort_master(durable) else None
+
+
 def resume_cycle_stage(
     orchestrator: StageExecutionOrchestrator,
     stage: StageDefinition,
@@ -872,7 +891,18 @@ def resume_cycle_stage(
             str(job["job_id"]),
         )
         status = aggregation.status
-        if (
+        # A cohort master that is already terminal and covers its whole cohort
+        # has nothing this pass can add: its outcome is the durable one, not the
+        # one this pass just re-aggregated from Slurm (#1410).  Skipping the
+        # write path here — not inside the journal — keeps the projection itself
+        # unconditional for the geometries that still owe one, above all a bound
+        # master that never got projected.
+        settled_master = (
+            _durable_cohort_master(orchestrator, str(job["job_id"])) if accepted_submit_projection else None
+        )
+        if settled_master is not None:
+            status = str(settled_master.get("status") or status)
+        elif (
             accepted_submit_projection
             or str(job.get("status")) not in deps.terminal_job_statuses
             or status != str(job.get("status"))
