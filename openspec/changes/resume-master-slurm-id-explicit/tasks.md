@@ -85,10 +85,12 @@
       `["failed","succeeded"]`——修复前红形：succeeded master 被覆写
       `partially_failed`+`NODE_FAILURE` 且 candidate_projections 不动；
       修复后：durable 行零语义字段变化
-- [ ] 4.5 follow-up 立案：projector 批量写（journal:3357
+- [x] 4.5 follow-up 立案：projector 批量写（journal:3357
       `_journal_record_for_write`）与 `_write_pipeline_job_unlocked` 绕过
       `_strip_redaction_placeholders`（:8700-8718 契约）——pre-existing，
       版位含 reconcile.py:1097 腿核查
+      ——已立 #1592（pre-existing @707cd338，与 #1187 相关不重复，互链
+      #1589/#1591；reconcile.py 腿今天不传 log_uri 记为现状证据）
 - [x] 4.6 三套件重跑 + ruff + openspec validate（1154 passed；ruff
       `services tests` 全过；openspec strict 通过）
       ——连带：2.1 `test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id`
