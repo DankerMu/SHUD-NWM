@@ -229,7 +229,7 @@ def _state_completed_stage_evidence_names_job(state: Mapping[str, Any], entity_i
     The twin refuses to pin a marker whose target row is no longer a live failure (its
     ``_job_row_is_live_failure`` test), reading the status off the ROW.  When the row is gone
     the state's ``completed_stage_evidence`` is the surviving surface of exactly that fact:
-    ``chain_repository_state._completed_stage_success_evidence`` (:241-265) builds it only from
+    ``chain_repository_state._completed_stage_success_evidence`` (:249-273) builds it only from
     a job in ``TERMINAL_PIPELINE_SUCCESS_STATUSES`` and stamps the winning row's ``job_id`` into
     it, and the mapping is a top-level state field the identity filter does not strip — so it
     outlives the very row deletion that creates the need for it.
@@ -239,10 +239,23 @@ def _state_completed_stage_evidence_names_job(state: Mapping[str, Any], entity_i
     ``..._retry_2`` ancestor and refuse a pin the twin grants.
 
     The OTHER writer of this key copies the repaired mapping into it
-    (``chain_repository_state.py:856-862``), and that payload (:222-238) carries no ``job_id``
+    (``chain_repository_state.py:884-891``), and that payload (:230-246) carries no ``job_id``
     key at all — ``mapping.get("job_id")`` is then ``None``, the comparison is against ``""``,
-    and a marker entity id can never equal it.  So the copy path produces no false hit and this
-    guard only ever tightens.
+    and a marker entity id can never equal it.  So the copy path produces no false hit.
+
+    That copy is no longer the only way this key coexists with repaired evidence.  Since #1461
+    the scan is an independent ``if`` (``chain_repository_state.py:902-916``), so repaired
+    evidence carrying no ``restart_stage`` leaves the SCAN's payload here, ``job_id`` and all.
+    That is the source-cycle variant's shape.  The manual-stage variant reaches it structurally —
+    the one ``_FORECAST_STAGE_ORDER`` member with no ``_stage_after`` is ``state_save_qc`` — but
+    never observably: its own succeeded ``state_save_qc`` retry row satisfies
+    ``_has_terminal_completion_stage_success``, so the scan is suppressed by that guard and this
+    key stays absent on that shape.
+
+    On the source-cycle shape this guard answers exactly as it does for a candidate with no
+    repair at all (the two payloads are produced by the same scan from the same rows), so the
+    verdict is unchanged; what is no longer true is the claim that a state carrying repaired
+    evidence can never present a ``job_id`` here.
     """
 
     completed_stage = state.get("completed_stage_evidence")
@@ -369,10 +382,13 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
 
     * the target succeeded after the write but the completed-stage evidence does not name it —
       a later-stage winner evicted it (``_best_completed_stage_success_evidence`` keeps one),
-      the projection took the repaired-copy branch (that payload carries no ``job_id``), or its
-      stage has no ``_stage_after`` successor at all (``download``/``state_save_qc``/``publish``
-      queue targets, whose producer can never name them); widening that producer is refused
-      because the same mapping drives restart routing (``chain_repository_state.py:884-886``);
+      the projection took the repaired-copy branch with a restart stage of its own (that payload
+      carries no ``job_id``; since #1461 repaired evidence WITHOUT a restart stage no longer
+      suppresses the scan, so that shape does carry one), the cycle-wide terminal-completion
+      guard suppressed the scan, or its stage has no ``_stage_after`` successor at all
+      (``download``/``state_save_qc``/``publish`` queue targets, whose producer can never name
+      them); widening that producer is refused because the same mapping drives restart routing
+      (``chain_repository_state.py:889-891``);
     * the target was repaired after the write without ``repaired_stage_evidence`` naming it
       (that mapping keeps one winner too);
     * the target was re-activated after the write — resubmitted out of a non-terminal failure

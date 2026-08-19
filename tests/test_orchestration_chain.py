@@ -6900,6 +6900,288 @@ def _manual_retry_event(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _own_succeeded_forecast_job(**overrides: Any) -> dict[str, Any]:
+    """The candidate's OWN succeeded forecast row, model-scoped to the ``_source_cycle_retry_state`` fixture."""
+
+    payload = {
+        "job_id": "job_model_b_forecast",
+        "run_id": "fcst_gfs_2026050100_model_b",
+        "cycle_id": "gfs_2026050100",
+        "model_id": "model_b",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "submitted_at": "2026-05-01T00:40:00Z",
+        "finished_at": "2026-05-01T00:55:00Z",
+        "updated_at": "2026-05-01T00:55:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_psycopg_candidate_state_source_cycle_repair_keeps_the_candidates_completed_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E5: repaired evidence without a restart stage must not suppress the completed-stage scan.
+
+    ``_source_cycle_repaired_stage_evidence`` never carries ``restart_stage`` (``download`` has no
+    ``_stage_after`` successor), so the projection's repaired branch stored the evidence and
+    projected nothing -- and the completed-stage scan hung off that branch as an ``elif``, so it
+    never ran either.  The candidate's own succeeded forecast, an orthogonal fact, was erased:
+    ``restart_stage`` vanished, ``_failed_stage`` collapsed to ``None`` and the manual-retry
+    attempt arithmetic was re-minted from the fallback floor.
+
+    Geometry premise: without a ``forecast_cycle`` whose status and ``manifest_uri`` bind the raw
+    manifest, ``chain_source_cycle`` refuses to call anything repaired at all and this leg would
+    measure nothing -- ``_source_cycle_retry_state`` supplies that binding.  ``restart_stage`` is
+    ``_stage_after("forecast")``, which the compute-terminal toggle would move to
+    ``state_save_qc``, so the toggle is pinned unset.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+            _own_succeeded_forecast_job(),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    # Premise: the source-cycle repair really happened, and its evidence carries no restart stage.
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["original_failed_job_id"] == "job_cycle_gfs_2026050100_download"
+    assert repaired["repairing_retry_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    assert repaired["stage"] == "download"
+    assert "restart_stage" not in repaired
+
+    # The two facts coexist: the upstream download was repaired AND this candidate reached forecast.
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["completed_stage_evidence"]["job_id"] == "job_model_b_forecast"
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+
+
+def _own_candidate_job(
+    *,
+    job_id: str,
+    stage: str,
+    job_type: str,
+    status: str,
+    updated_at: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A candidate-scoped row of the ``_source_cycle_retry_state`` fixture's model_b candidate."""
+
+    payload = {
+        "job_id": job_id,
+        "run_id": "fcst_gfs_2026050100_model_b",
+        "cycle_id": "gfs_2026050100",
+        "model_id": "model_b",
+        "stage": stage,
+        "job_type": job_type,
+        "status": status,
+        "retry_count": 0,
+        "updated_at": updated_at,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _own_manual_repair_event(*, entity_id: str, previous_job_id: str, event_id: int, created_at: str) -> dict[str, Any]:
+    """The ``record_manual_repair`` event linking a candidate-scoped retry to its target."""
+
+    return {
+        "event_id": event_id,
+        "entity_type": "pipeline_job",
+        "entity_id": entity_id,
+        "event_type": "retry",
+        "created_at": created_at,
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": 1,
+            "previous_job_id": previous_job_id,
+        },
+    }
+
+
+def test_psycopg_candidate_state_repaired_evidence_with_restart_stage_still_wins_the_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E8 (must-preserve 2): the non-gap shape must stay byte-identical.
+
+    A manual-stage repair of a NON-terminal stage carries its own ``restart_stage``, and that
+    payload -- not a completed-stage scan -- is what supplies ``completed_stage_evidence`` and
+    nulls the five stale failure fields.  The succeeded ``convert`` row is the discriminator: if
+    the scan ran anyway it would win a strictly EARLIER restart stage (``forcing``) and overwrite
+    the repair's own (``forecast``).
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _own_candidate_job(
+                job_id="job_model_b_convert",
+                stage="convert",
+                job_type="convert_canonical",
+                status="succeeded",
+                updated_at="2026-05-01T00:30:00Z",
+            ),
+            _own_candidate_job(
+                job_id="job_model_b_forcing_retry_1",
+                stage="forcing",
+                job_type="produce_forcing_array",
+                status="succeeded",
+                retry_count=1,
+                manual_retry_marker=True,
+                updated_at="2026-05-01T00:50:00Z",
+            ),
+            # The stale failed row was touched after the repair, so it is the row the projection
+            # would otherwise expose -- which is what makes the five nulled fields observable.
+            _own_candidate_job(
+                job_id="job_model_b_forcing",
+                stage="forcing",
+                job_type="produce_forcing_array",
+                status="failed",
+                error_code="NODE_FAILURE",
+                error_message="forcing failed",
+                updated_at="2026-05-01T01:00:00Z",
+            ),
+        ],
+        events=[
+            _own_manual_repair_event(
+                entity_id="job_model_b_forcing_retry_1",
+                previous_job_id="job_model_b_forcing",
+                event_id=30,
+                created_at="2026-05-01T00:50:00Z",
+            )
+        ],
+    )
+
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["stage"] == "forcing"
+    assert repaired["restart_stage"] == "forecast"
+    # The repaired payload IS the completed-stage evidence: the scan never ran, so the convert
+    # row's earlier restart stage is nowhere in the projection.
+    assert state["completed_stage_evidence"] == repaired
+    assert state["restart_stage"] == "forecast"
+    assert state["restart_from_stage"] == "forecast"
+    for key in ("pipeline_status", "stage", "failed_stage", "error_code", "error_message"):
+        assert state[key] is None
+
+
+def test_psycopg_candidate_state_terminal_completion_still_suppresses_the_scan_under_repaired_evidence() -> None:
+    """#1461 E9 (must-preserve 3): the cohort QC guard, not the ``elif``, is what suppresses.
+
+    ``_has_terminal_completion_stage_success`` scans the cycle-wide job base so a cycle-scope
+    ``state_save_qc``/``publish`` success can never be missed by a per-candidate filter.  Now that
+    the completed-stage scan is an independent ``if``, the guard is the ONLY thing standing
+    between a terminally completed candidate and a re-armed restart marker -- so it is pinned on
+    exactly the shape that reaches the scan for the first time.
+    """
+
+    from services.orchestrator.chain_repository_state import _has_terminal_completion_stage_success
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+            _own_succeeded_forecast_job(),
+            _own_candidate_job(
+                job_id="job_model_b_publish",
+                stage="publish",
+                job_type="publish_tiles",
+                status="succeeded",
+                updated_at="2026-05-01T01:05:00Z",
+            ),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    # Premise: this is the gap shape (repaired evidence, no restart stage of its own) AND the
+    # cycle already holds a terminal completion success.
+    assert "restart_stage" not in state["repaired_stage_evidence"]
+    assert _has_terminal_completion_stage_success(state["pipeline_jobs"]) is True
+
+    assert "completed_stage_evidence" not in state
+    assert "restart_stage" not in state
+    assert "restart_from_stage" not in state
+
+
+def test_psycopg_candidate_state_terminal_stage_manual_repair_keeps_its_evidence() -> None:
+    """#1461 E10: the manual-stage variant's own gap shape -- a repair with no ``_stage_after``.
+
+    ``state_save_qc`` is the last stage in ``_FORECAST_STAGE_ORDER``, so repairing it produces
+    repaired evidence carrying no ``restart_stage`` -- the same gap shape the source-cycle variant
+    always has, from the other producer.  The evidence is retained and the inner projection does
+    not fire, so the five stale failure fields keep their values.
+
+    The scan's CONDITION is now reached on this shape -- the ``elif`` no longer swallows it -- but
+    the terminal-completion guard short-circuits it before ``_best_completed_stage_success_evidence``
+    is ever called, because a succeeded ``state_save_qc`` retry is itself a terminal completion
+    success.  The candidate's own succeeded ``forecast`` row is what makes that decision
+    observable: it is exactly what the scan would return if the guard were gone (a
+    ``restart_stage="parse"`` marker on a candidate whose terminal stage is already repaired), so
+    the guard, and nothing else, is what keeps ``completed_stage_evidence`` absent here.  Same
+    guard as E9, on the manual-stage producer instead of the source-cycle one.
+    """
+
+    from services.orchestrator.chain_repository_state import _has_terminal_completion_stage_success
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _own_candidate_job(
+                job_id="job_model_b_state_save_qc_retry_1",
+                stage="state_save_qc",
+                job_type="save_state_snapshot",
+                status="succeeded",
+                retry_count=1,
+                manual_retry_marker=True,
+                updated_at="2026-05-01T00:50:00Z",
+            ),
+            _own_candidate_job(
+                job_id="job_model_b_state_save_qc",
+                stage="state_save_qc",
+                job_type="save_state_snapshot",
+                status="failed",
+                error_code="NODE_FAILURE",
+                error_message="state save qc failed",
+                updated_at="2026-05-01T01:00:00Z",
+            ),
+            _own_succeeded_forecast_job(),
+        ],
+        events=[
+            _own_manual_repair_event(
+                entity_id="job_model_b_state_save_qc_retry_1",
+                previous_job_id="job_model_b_state_save_qc",
+                event_id=31,
+                created_at="2026-05-01T00:50:00Z",
+            )
+        ],
+    )
+
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["stage"] == "state_save_qc"
+    assert "restart_stage" not in repaired
+    assert repaired["original_failed_job_id"] == "job_model_b_state_save_qc"
+
+    # The inner projection never fired, so the stale failure fields are untouched ...
+    assert state["pipeline_status"] == "failed"
+    assert state["stage"] == "state_save_qc"
+    assert state["error_code"] == "NODE_FAILURE"
+    # ... and the scan the repaired branch no longer blocks is held by the terminal-completion
+    # guard instead, with a completed forecast row sitting right there for it to have returned.
+    forecast_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_model_b_forecast")
+    assert forecast_row["status"] == "succeeded"
+    assert _has_terminal_completion_stage_success(state["pipeline_jobs"]) is True
+    assert "completed_stage_evidence" not in state
+    assert "restart_stage" not in state
+
+
 def test_psycopg_candidate_state_source_cycle_retry_success_repairs_stale_failed_download() -> None:
     state = _source_cycle_retry_state(
         jobs=[

@@ -394,10 +394,13 @@ def _candidate_manual_stage_repair_state(
         event = _manual_retry_event_for_job(str(retry_job.get("job_id") or ""), events) or chain_event
         for failed_job in failed_jobs:
             failed_job_id = str(failed_job.get("job_id") or "")
-            if failed_job_id:
+            # Every successful retry contributes its own claim set: a candidate repaired at two
+            # different stages must keep BOTH annotations (#1460).  The outer sort is truth-key
+            # descending, so first-write-wins is newest-wins for a row two retries both claim,
+            # which keeps ``latest_repair`` naming exactly the pair it named before.
+            if failed_job_id and failed_job_id not in repaired_by_failed_job_id:
                 repaired_by_failed_job_id[failed_job_id] = {"failed_job": failed_job, "retry_job": retry_job}
                 repair_events[failed_job_id] = event
-        break
     if not repaired_by_failed_job_id:
         return {}
     annotated_jobs = _annotated_manual_stage_repair_jobs(jobs, repaired_by_failed_job_id)
@@ -872,10 +875,17 @@ def candidate_state_from_rows(
     }
     if isinstance(run_manifest_initial_state, Mapping):
         state["run_manifest_initial_state"] = dict(run_manifest_initial_state)
+    # "Some upstream failure was repaired" and "this candidate completed through stage X" are
+    # orthogonal facts.  Only an actually PROJECTED repaired restart stage supersedes the scan;
+    # repaired evidence that carries none (the source-cycle variant never does, and a
+    # manual-stage repair of a terminal stage has no ``_stage_after``) must leave the
+    # candidate's own completed stages alone (#1461).
+    repaired_restart_projected = False
     if isinstance(repaired_stage_evidence, Mapping):
         state["repaired_stage_evidence"] = dict(repaired_stage_evidence)
         restart_stage = repaired_stage_evidence.get("restart_stage")
         if restart_stage not in (None, ""):
+            repaired_restart_projected = True
             state["completed_stage_evidence"] = dict(repaired_stage_evidence)
             state["restart_stage"] = str(restart_stage)
             state["restart_from_stage"] = str(restart_stage)
@@ -889,12 +899,16 @@ def candidate_state_from_rows(
     # cohort job carrying no run_id/model_id, so a per-candidate filter can
     # never observe it and reconciled forecast jobs would re-arm the
     # state_save_qc restart marker forever.
-    elif not _has_terminal_completion_stage_success(jobs) and (
-        completed_stage_evidence := _best_completed_stage_success_evidence(
-            jobs,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            cycle_id=cycle_id,
+    if (
+        not repaired_restart_projected
+        and not _has_terminal_completion_stage_success(jobs)
+        and (
+            completed_stage_evidence := _best_completed_stage_success_evidence(
+                jobs,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                cycle_id=cycle_id,
+            )
         )
     ):
         state["completed_stage_evidence"] = completed_stage_evidence
