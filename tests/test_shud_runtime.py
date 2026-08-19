@@ -3547,13 +3547,23 @@ def test_runtime_non_direct_grid_second_attempt_behaviour_is_unchanged(tmp_path:
 
     ``_copy_staged_file_no_follow`` (:1121) already overwrites, so re-preparation
     was never blocked here and no station CSV is ever unlinked in this lane.
+
+    The manifest keeps its runtime ``forcing.files`` on purpose: that is what
+    makes the declared-name set NON-empty (``{'forcing.csv'}``) on this lane, so
+    the only thing standing between it and the deletion path is the
+    ``is_direct_grid`` guard.  Dropping the files instead would empty the set and
+    the case would return at the emptiness check, nailing nothing.  The residue
+    is therefore also replayed in symlink form: the guard holding means the
+    symlink is adjudicated by the copy primitive (``WORKSPACE_PATH_UNSAFE``), not
+    by a deletion this lane must never attempt
+    (``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED``).
     """
 
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
     runtime = _runtime(tmp_path, FakeHydroRunRepository())
-    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
     model_input_dir = input_dir / "alias-a"
@@ -3565,6 +3575,14 @@ def test_runtime_non_direct_grid_second_attempt_behaviour_is_unchanged(tmp_path:
     runtime.prepare_workspace(manifest, input_dir)
 
     assert (model_input_dir / "forcing.csv").read_bytes() == expected
+
+    (model_input_dir / "forcing.csv").unlink()
+    (model_input_dir / "forcing.csv").symlink_to(model_input_dir / "elsewhere.csv")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
 
 
 def test_runtime_direct_grid_rejects_non_csv_station_filename_before_unbounded_member_read(

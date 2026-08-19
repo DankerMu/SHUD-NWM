@@ -11955,8 +11955,16 @@ def test_forecast_manifest_assembly_rejects_unreachable_state_checkpoint_hours(
 
 
 @pytest.mark.parametrize(
+    # "0,12"     -> [12],     single-element set
+    # "0,6,12,18"-> [6],      single-element set
+    # "0,6,18"   -> [6, 12],  MULTI-element and still fully reachable: step 360 and
+    #               12*60 % 360 == 0.  The two single-element rows above cannot tell
+    #               the real "every hour must divide the step" gate from an over-strict
+    #               "hour must EQUAL min(checkpoint_hours)" one, because on a
+    #               single-element set the two predicates coincide.  This row is the
+    #               one that dies under the over-strict gate.
     ("allowed_cycle_hours", "expected_hours"),
-    [("0,12", [12]), ("0,6,12,18", [6])],
+    [("0,12", [12]), ("0,6,12,18", [6]), ("0,6,18", [6, 12])],
 )
 @pytest.mark.parametrize(
     ("site", "builder"),

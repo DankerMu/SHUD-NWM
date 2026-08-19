@@ -388,7 +388,7 @@
 > （「全目录清」变异实为 10 failed 含 A.5 本身红，套件稳健度高于 reviewer 评价），
 > 整条 DISCARD，不立 follow-up。
 
-- [ ] D.1 **C1（CONFIRMED，P2，FIX_NOW）早探吞掉瞬时失败 → 卫生静默跳过 →
+- [x] D.1 **C1（CONFIRMED，P2，FIX_NOW）早探吞掉瞬时失败 → 卫生静默跳过 →
       #1491 的楔死原样复发**。verD 亲验：monkeypatch 使
       `_prepare_forcing_package_context` 第一次抛、之后委托真实实现 →
       `CALLS: 2` + `DIRECT_GRID_STATION_FILENAME_COLLISION ... : forcing.csv`；
@@ -409,14 +409,55 @@
       以及 **A.7 冻结 e2e** `..._station_filename_collision_fails_without_overwriting_sp_att`。
       **成本申报**：修法 (a) 会让确定性失败路径把 context 跑 **3 次**
       （现为 2 次），该函数目前只读——需在 PR body 已知限制里更新这个数字
-- [ ] D.2 **C4（CONFIRMED，Note，并入 D.1 同函数）docstring 与事实相反**：
+
+      **落账**：`runtime.py:1249-1281` 改为「早探 → 失败则原地重试一次 →
+      再失败才写 receipt 并 `return None`」，两次 `except Exception` 都不外抛
+      （绑定约束照守，早探绝不直接抛）。receipt 走本文件既有惯例
+      （`_log_recovery_refusal:938` 的 best-effort `_write_text_no_follow`
+      写进 `log_dir`，不新引入 logger）：新增
+      `_log_attempt_hygiene_probe_skip`，log_dir 按 `execute()` 同一布局
+      `Path(config.workspace_root)/"runs"/<run_id>/"logs"` 推导，写
+      `attempt_hygiene_probe.err.log` 一行；helper 整体（含会抛 `ValueError` 的
+      `_safe_path_component`）包在 `(OSError, ValueError, SHUDRuntimeError,
+      SafeFilesystemError)` 里吞掉，保证早探恒不抛。
+
+      零回归：`uv run pytest -q -p no:randomly tests/test_shud_runtime.py`
+      → `260 passed in 26.05s`，与基线逐字相同。
+
+      **修后判别力（C1 探针，`-s` 逐字）**：探针 monkeypatch 实例的
+      `_prepare_forcing_package_context` 第一次抛 `OSError`、之后委托真实实现，
+      在留有前次 attempt 残留的第二次 `prepare_workspace` 上——
+      ```
+      CALLS: 2
+      OUTCOME: DID NOT RAISE
+      STATION CSV BYTES RESTAGED: True
+      ```
+      （verD 修前口径是 `CALLS: 2` + `DIRECT_GRID_STATION_FILENAME_COLLISION
+      ... : forcing.csv`，楔死解除）。
+
+      **receipt 逐字**（两次都确定性失败时）：
+      ```
+      HISTORICAL SITE RAISED: FORCING_PACKAGE_MANIFEST_READ_FAILED
+      RECEIPT: direct-grid attempt-start hygiene skipped for run
+               fcst_gfs_2026050100_demo_model: FORCING_PACKAGE_MANIFEST_READ_FAILED
+      ```
+      即历史站点仍原样抛原码，同时留下 run_id + 被吞 error_code 各一
+- [x] D.2 **C4（CONFIRMED，Note，并入 D.1 同函数）docstring 与事实相反**：
       `runtime.py:1240-1242` 的「The result is memoized … must not run twice」
       **无任何缓存机制**（只是调用者局部变量复用）。verD 实测三模式：
       happy `{reads:6, verify:1, ctx:1}`、fail_early `{ctx:2}`、
       fail_late `{reads:12, verify:2, ctx:2}`。改成事实描述（成功路径跑一次、
       结果由调用者局部复用非 memo；失败路径该调用连同
       `_verify_forcing_object_checksums` 跑两遍——**修完 D.1 后是三遍，按实际写**）
-- [ ] D.3 **C2（CONFIRMED，P2，FIX_NOW）B.5 零回归守门对「过严门」判别力为零**：
+
+      **落账**：删掉「The result is memoized …」整句，改写为事实段落
+      （`runtime.py:1238-1246`）：成功路径解析 **1 次**、结果由
+      `prepare_workspace` 局部变量复用（**非 memo**）；确定性失败路径解析
+      **3 次**——早探 + 原地重试 + 历史站点，且
+      `_verify_forcing_object_checksums` 每次都重算全部声明成员的哈希。
+      同段补上重试存在的理由（`DIRECT_GRID_STATION_FILENAME_COLLISION`
+      不在 `TRANSIENT_ERROR_CODES` 里，调度层永不重试）
+- [x] D.3 **C2（CONFIRMED，P2，FIX_NOW）B.5 零回归守门对「过严门」判别力为零**：
       verD 把判据换成 `hour != min(checkpoint_hours)`（过严门）后跑**全文件**
       `tests/test_orchestration_chain.py` → **355 passed**，与基线逐字相同。
       根因：两条 aligned 参数的 checkpoint 集合**都是单元素**（`[12]` / `[6]`），
@@ -429,7 +470,24 @@
       `_forecast_state_checkpoint_hours(72)` 推导，**不要手写**），保留现有
       `update_ic_step_minutes == min(expected_hours) * 60` 断言。一条参数即可
       杀死过严门，**不改被测代码**
-- [ ] D.4 **C3（CONFIRMED，P2，FIX_NOW）A.8 新增用例是装饰品**：
+
+      **落账**：`tests/test_orchestration_chain.py:11957-11967` aligned 参数表
+      补 `("0,6,18", [6, 12])`（只改参数表 + 表头注释，**零生产代码改动**）。
+      期望值由真实函数推导，非手写：
+      ```
+      $ NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,6,18 uv run python -c \
+        "from services.orchestrator.chain_manifest_contracts import \
+         _forecast_state_checkpoint_hours as f; print(f(72))"
+      allowed=0,6,18 horizon=72 -> [6, 12]
+      update_ic_step_minutes = 360
+        6*60 % 360 = 0
+        12*60 % 360 = 0
+      ```
+      （builder 的 `_CHECKPOINT_ALIGNMENT_HORIZON_HOURS = 72`，与推导口径一致）。
+      新参数 × 2 产地 = **+2 用例实例**：
+      `pytest -k keeps_aligned_cycle_configurations_unchanged` → `6 passed`
+      （修前 4）。修后判别力见 D.5 的过严门 mutant
+- [x] D.4 **C3（CONFIRMED，P2，FIX_NOW）A.8 新增用例是装饰品**：
       `tests/test_shud_runtime.py:3545` 用 `_drop_runtime_forcing_files` 把
       `forcing.files` 删光 → 非 direct-grid 车道 `checksum_entries` 为空 →
       `declared_names` 恒空 → 在 `runtime.py:1287-1288` 就 return，**根本走不到**
@@ -447,5 +505,17 @@
       (i) spy `runtime_module.unlink_no_follow`，断言第二次 attempt **零调用**；
       (ii) 残留换成 symlink/directory 形态，断言仍是 `WORKSPACE_PATH_UNSAFE`
       （而非 `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`）
+
+      **落账**：取修法 (ii)，**只改测试**（`tests/test_shud_runtime.py:3545-3592`），
+      生产代码 guard 一字未动。去掉 `_drop_runtime_forcing_files(...)` 包裹
+      —— 这是关键：保留 `forcing.files` 后该车道
+      `declared_names == {'forcing.csv'}` 非空，`runtime.py:1287-1288`
+      的空集早退不再兜底，唯一挡在删除路径前面的就是 `is_direct_grid` guard。
+      原有「覆盖写仍生效」两条断言保留（现在才真正跑到 guard），再追加第三次
+      `prepare_workspace`：残留换 symlink 形，断言
+      `error_code == "WORKSPACE_PATH_UNSAFE"`（拷贝原语判的），而非
+      `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`（本车道不该发起的删除判的）。
+      `pytest -k non_direct_grid_second_attempt_behaviour_is_unchanged`
+      → `1 passed`。判别力见 D.5 的删 guard mutant
 - [ ] D.5 修复后复跑 C.1 三套件 + C.2 + C.3，并**逐条给出修后判别力证据**：
       D.1 的 C1 探针不再楔死、D.3 的过严门 mutant 必红、D.4 的删 guard mutant 必红

@@ -1235,11 +1235,25 @@ class SHUDRuntime:
         validation) ahead of model package staging, changing observable ordering:
         ``test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att``
         asserts the staged ``.sp.att`` bytes after a raise that happens inside
-        this very call.  So the probe is best-effort: on ANY failure it returns
-        ``None`` and :meth:`prepare_workspace` re-runs the call at its historical
-        site, where it raises exactly as before.  The result is memoized on
-        success because :meth:`_verify_forcing_object_checksums` hashes every
-        declared member and must not run twice.
+        this very call.  So the probe is best-effort: on a failure that survives
+        the retry below it returns ``None`` and :meth:`prepare_workspace` re-runs
+        the call at its historical site, where it raises exactly as before.
+
+        A failure is retried ONCE in place, before the model package is staged.
+        The call is read-only, and a TRANSIENT failure (a flaky object-store read
+        of the package manifest or a member) would otherwise swallow the hygiene
+        for a run whose next attempt then hits the collision gate on its own
+        predecessor's station CSVs — #1491's wedged ``run_id``, reproduced
+        verbatim, on a code (``DIRECT_GRID_STATION_FILENAME_COLLISION``) that is
+        deliberately absent from ``TRANSIENT_ERROR_CODES`` and therefore never
+        retried at the scheduler level.
+
+        Call count, since this call is NOT memoized (:meth:`prepare_workspace`
+        merely reuses the returned object in a local): a successful attempt
+        resolves the context once; an attempt whose failure is deterministic
+        resolves it three times — this probe, the in-place retry, and the
+        historical call site — and :meth:`_verify_forcing_object_checksums`
+        re-hashes every declared member on each.
 
         Skipping the hygiene on a swallowed failure is fail-CLOSED: staging then
         behaves exactly as it did before this change (the collision gate refuses),
@@ -1248,8 +1262,36 @@ class SHUDRuntime:
 
         try:
             return self._prepare_forcing_package_context(manifest)
-        except Exception:  # noqa: BLE001 - re-raised verbatim at the historical call site
+        except Exception:  # noqa: BLE001 - a transient shape gets the in-place retry below
+            pass
+        try:
+            return self._prepare_forcing_package_context(manifest)
+        except Exception as error:  # noqa: BLE001 - re-raised verbatim at the historical call site
+            self._log_attempt_hygiene_probe_skip(manifest, error)
             return None
+
+    def _log_attempt_hygiene_probe_skip(self, manifest: dict[str, Any], error: BaseException) -> None:
+        """Leave the swallowed probe failure in this run's log dir.
+
+        Without it the hygiene lane is the silent one: operations cannot tell
+        "the cleanup ran and found no residue" from "the cleanup never ran
+        because the forcing package could not be resolved", which is exactly the
+        difference between a healthy retry and a wedged ``run_id``.
+        """
+
+        try:
+            run_id = _safe_path_component(str(manifest.get("run_id") or ""))
+            log_dir = Path(self.config.workspace_root) / "runs" / run_id / "logs"
+            _write_text_no_follow(
+                log_dir / "attempt_hygiene_probe.err.log",
+                f"direct-grid attempt-start hygiene skipped for run {run_id}: "
+                f"{getattr(error, 'error_code', type(error).__name__)}\n",
+                containment_root=log_dir,
+            )
+        except (OSError, ValueError, SHUDRuntimeError, SafeFilesystemError):
+            # Diagnostics are best-effort, and this probe must never raise: the
+            # historical call site is the one that reports this failure.
+            return
 
     def _clear_predecessor_direct_grid_station_csvs(
         self,
