@@ -38,7 +38,9 @@ scheduler_state_types 撞名。读者（与 grep）无法从名字区分语义�
   compat re-export 面（import-time 守卫）钉住该名字）。
 - 两处定义各加注释：显式声明与对方的成员差（`"complete"`）、语义边界与
   本 change 名，杜绝再次同名合流。
-- 新增回归锁测试（三条联立，缺一不可）：
+- 新增回归锁测试（三条成员断言 + 一条别名回流锁：断言 retry 模块上
+  **不存在**旧属性名——挡「旧名并存别名」逃逸形状；纯 rename-back 由
+  import 边自然炸）：
   `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}`、
   `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES ==
   {"succeeded", "parsed", "published", "complete"}`、
@@ -75,11 +77,14 @@ scheduler_state_types 撞名。读者（与 grep）无法从名字区分语义�
 - manual retry 两条孪生路径（DB `retry.py:563` / file journal `:7863`）行为
   逐字不变：3 成员逐字不变 ↔ `tests/test_retry_cancel_consistency.py:686-711`
   参数化断言（`["succeeded","parsed","published"]` → `RetryNotFoundError` +
-  零 mutation）与 `:714-738`（API 404 面）不变；file 孪生由
-  `tests/test_file_orchestration_journal.py` 既有 manual-retry 断言锁。
-  （注：`"complete"` 在 DB 车道不可测——hydro.run_status enum 无该值，该
-  测试文件自己的 `HYDRO_RUN_STATUS_ENUM`:22-34 也没有；spec Scenario 2 的
-  「complete 不阻断」只能在 file 孪生/常量层面断言。）
+  零 mutation）与 `:714-738`（API 404 面）不变；file 孪生拒绝臂在改动前
+  **零测试覆盖**（round-1 T1 实测：既有 journal manual-retry 用例全走 False
+  臂），由本单**新增** file 车道用例补锁（tasks 2.2）：durable 三成员参数化
+  → 拒绝 + 零 mutation；`"complete"` → 重试照常（钉住「file 孪生被改接到
+  4 成员集」的合流方向——`"complete"` 仅 file 车道可表示，journal 不校验
+  status 值域，`file_orchestration_journal.py:1623` 显式并列处理）。
+  （注：`"complete"` 在 DB 车道不可测——hydro.run_status enum 无该值；spec
+  Scenario 2 的「complete 不阻断」在 file 车道 + 常量层面双重断言。）
 - `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` 名字、成员、全部
   消费面不动；`scheduler_state_compat` re-export 面（含 import-time 守卫）
   不动。
@@ -99,9 +104,9 @@ scheduler_state_types 撞名。读者（与 grep）无法从名字区分语义�
   `scheduler_state_types` import）。
 - 验收 3（两孪生谓词行为不变）→ tasks 3.1 三套件全绿：DB 谓词锁 =
   `test_retry_cancel_consistency.py:686-711`/`:714-738`；file 孪生锁 =
-  `test_file_orchestration_journal.py` 既有 manual-retry 断言；
+  本单新增 tasks 2.2 用例（改动前该臂零覆盖，见 Must preserve）；
   `test_retry.py` 不覆盖 `retry.py:563`（对 hydro_run 零引用），在本单中
-  只承载新的常量关系锁。
+  承载常量关系锁与别名回流锁（tasks 2.1）。
 - Verification：`uv run pytest -q tests/test_retry.py
   tests/test_file_orchestration_journal.py tests/test_retry_cancel_consistency.py`
   + ruff + openspec validate；follow-up issue 立案链接记入 PR。

@@ -30,7 +30,10 @@ minus `"complete"`, and a regression test asserts all three relationships
 WHEN a run's durable hydro status is one of the three manual-retry
 members
 THEN both manual-retry paths continue to refuse the retry exactly as
-before the rename; and `"complete"` — absent from the manual-retry set
-and unreachable on the DB lane (it is not a `hydro.run_status` enum
-value) — continues not to trigger the refusal, asserted at the constant
-level rather than by driving the DB lane
+before the rename — the DB lane pinned by its existing parametrized
+refusal test, the file-journal lane pinned by a new refusal-arm test
+(that arm had no coverage before this change); and `"complete"` — absent
+from the manual-retry set and unreachable on the DB lane (it is not a
+`hydro.run_status` enum value) but representable on the file-journal
+lane — continues not to trigger the refusal, asserted both on the
+file-journal lane and at the constant level
