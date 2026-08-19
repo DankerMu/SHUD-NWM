@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common import provider_atomic, state_manager
+from packages.common import provider_atomic, safe_fs, state_manager
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.safe_fs import SafeFilesystemError
@@ -774,6 +775,150 @@ def test_replay_refuses_identical_and_overlapping_roots(
     assert identical_payload["reason"] == "roots_identical"
     assert overlapping_payload["reason"] == "roots_overlap"
     assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_refuses_alias_roots_reporting_one_filesystem_identity(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two distinct realpaths, one inode: the guard must still refuse (#1192).
+
+    The injection replaces the probe the guard actually calls, so it pins that
+    the guard consumes filesystem identity rather than the resolved path
+    string.  Under the pre-#1192 string comparison this alias pair is read as
+    two different roots, the replay proceeds, and the scoped merge takes the
+    provider destination lock twice on one lockfile and blocks forever.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    alias_destination = fixture.root / "alias-destination"
+    alias_destination.mkdir()
+    _inject_alias_identity(monkeypatch, fixture.reference_root, alias_destination)
+
+    exit_code = _call_without_hanging(
+        lambda: replay.main(
+            [
+                "--reference-root",
+                str(fixture.reference_root),
+                "--destination-root",
+                str(alias_destination),
+                "--cycle",
+                "gfs_2026072000",
+                "--enforce",
+            ]
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert payload["reason"] == "roots_identical"
+    assert not (alias_destination / "scheduler/state-index/index-last.json").exists()
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_still_refuses_a_symlink_alias_destination_root(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Symlink aliases are caught by `.resolve()`, NOT by the identity probe.
+
+    `_resolved_root` folds the link away before the guard runs, so both roots
+    arrive as one resolved path and the identity comparison holds trivially.
+    The probe itself cannot take this input: its per-component no-follow walk
+    rejects a symlink final component outright. Do not read this test as
+    evidence that the helper handles symlinks.
+
+    Accepted limit recorded alongside (proposal Known Limits): the overlap
+    check stays a resolved-path string comparison, so an alias that makes one
+    root a *child* of the other stays undetectable. No test claims otherwise.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    alias = fixture.root / "reference-alias"
+    alias.symlink_to(fixture.reference_root, target_is_directory=True)
+
+    exit_code = replay.main(
+        [
+            "--reference-root",
+            str(fixture.reference_root),
+            "--destination-root",
+            str(alias),
+            "--cycle",
+            "gfs_2026072000",
+            "--enforce",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert payload["reason"] == "roots_identical"
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def _inject_alias_identity(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
+    """Make `roots` report one filesystem identity through the guard's probe.
+
+    Patched on the replay module's own namespace, which is where the guard
+    resolves the name -- patching `packages.common.safe_fs` instead would leave
+    the production call point untouched.  No portable, root-free construction
+    produces two concurrently existing realpaths over one inode (see the honest
+    limit in tests/test_safe_fs.py), so the alias is injected at this seam.
+    """
+
+    resolved = {root.resolve() for root in roots}
+    real_probe = safe_fs.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() in resolved:
+            return (0x1192, 0x1192)
+        return real_probe(path)
+
+    monkeypatch.setattr(replay, "directory_identity_no_follow", probe)
+
+
+def _call_without_hanging(call: Any) -> Any:
+    """Run `call` on a daemon thread and fail if it has not returned in 5s.
+
+    This is a generic non-return net for the guard path, nothing narrower: if
+    the guard ever stops returning -- blocks, spins, waits on any lock -- the
+    suite fails in 5s instead of wedging the session.  `daemon=True` is not
+    optional -- a non-daemon thread keeps the interpreter alive at exit waiting
+    for exactly the thread that never finishes.  A thread stuck here goes on
+    holding whatever fd it took for the rest of this pytest session.
+
+    It **cannot** reproduce the `fcntl.flock` self-deadlock that motivates the
+    guard (provider_atomic.py:219 takes the blocking path without LOCK_NB).
+    That deadlock is real in production, where a bind-mount alias makes two
+    realpaths name one directory, so the scoped merge locks one lockfile twice.
+    Here the alias is injected at the probe seam, so on the real filesystem the
+    two roots stay genuinely distinct directories; the provider lock is
+    path-keyed (`provider_lock_path`, and the in-process gate keys on
+    `os.path.abspath`), so even a regressed guard that reaches the merge takes
+    two distinct lockfiles and returns.  Measured: under a string-compare
+    mutant these tests red in ~0.3s on an ordinary assertion or
+    `FileNotFoundError`, never by hanging.  Reproducing the deadlock would need
+    a real bind mount, which has no portable root-free construction (see the
+    honest limit in tests/test_safe_fs.py).
+    """
+
+    outcome: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # noqa: BLE001 -- re-raised on the caller's thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5.0)
+    if thread.is_alive():
+        pytest.fail("hang regression: the same-root guard did not return within 5s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def test_replay_enforce_requires_private_receipt_root(

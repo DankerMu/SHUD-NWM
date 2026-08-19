@@ -335,8 +335,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#1192), not by editing the shared constant:
+        # safe_fs.py owns tests/test_safe_fs.py, but the constant also serves the
+        # seven journal patterns below, whose selection must not move. A separate
+        # stop_on_match rule for safe_fs.py would instead SHIFT selection --
+        # first match wins, so the journal closure would drop out entirely. The
+        # result here is the union: today's journal closure PLUS the helper's own
+        # suite, which a safe_fs-only change previously could not reach at all.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[0],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
         stop_on_match=True,
     ),
     PathTestRule(

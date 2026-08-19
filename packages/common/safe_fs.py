@@ -29,6 +29,27 @@ def verify_directory_no_follow(path: Path) -> Path:
     return target
 
 
+def directory_identity_no_follow(path: Path) -> tuple[int, int]:
+    """Return ``(st_dev, st_ino)`` for an existing directory, opened without following symlinks.
+
+    Only **already-resolved** paths may be passed.  The per-component walk
+    rejects every symlink component *including the final one* (ENOTDIR on
+    macOS, ELOOP on Linux), so a raw path whose last component is a symlink
+    raises instead of reporting the link target's identity.
+
+    The pair is deliberately a bare tuple rather than an ``os.stat_result`` so
+    callers cannot compare on any other field.  The identity it carries is
+    limited to aliases sharing a filesystem superblock.
+    """
+
+    fd = _open_directory_no_follow(path)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return info.st_dev, info.st_ino
+
+
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
     """Create a directory via no-follow directory descriptors and return its configured path."""
 

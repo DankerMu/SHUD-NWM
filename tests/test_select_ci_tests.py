@@ -164,10 +164,14 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # file_orchestration_journal.py rule (its own read-cache suite and the
     # backfill suite that drives it), which is additive to the redirect rather
     # than a widening of it.
+    # `tests/test_safe_fs.py` is #1192's at-site addition to the safe_fs.py rule:
+    # the helper's own suite, which a safe_fs-only change could not reach before.
+    # Additive to the redirect, exactly like the two journal importer targets.
     assert selected == sorted(
         {
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+            "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
         }
     )
