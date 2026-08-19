@@ -43088,8 +43088,8 @@ def test_attempt_floors_narrow_with_the_rows_identity_filtering_deletes(tmp_path
     assert decision.evidence["retry_policy"]["attempt"] == 0
 
 
-def test_attempt_floors_narrow_on_the_shared_cycle_aggregate_arm() -> None:
-    """E13b (#1179) -- the same narrowing on the shared-cycle-aggregate filter arm.
+def test_attempt_floors_are_erased_on_the_shared_cycle_aggregate_arm() -> None:
+    """E13b (#1179) -- the shared-cycle-aggregate arm erases the carried attempts.
 
     With no candidate-scoped row at all the projection reports a shared-cycle
     aggregate, and the filter scopes that aggregate down to the candidate's own
@@ -43097,6 +43097,12 @@ def test_attempt_floors_narrow_on_the_shared_cycle_aggregate_arm() -> None:
     surviving that scoping as a floor and still answering
     ``_state_retry_attempt(stage="convert")``; erasing the pipeline decision
     surface has to erase the carried attempts with it.
+
+    It is the STRIP half that does it on this arm, not a narrowing call: the
+    floors keys were added to ``_strip_top_level_pipeline_decision_fields``
+    alongside ``retry_attempt``/``attempt``/``retry_count`` (E13d), and both of
+    this arm's branches reach a strip unless the top-level source-cycle blocker
+    holds (E13e). Design D1.6 states the same division.
     """
 
     from services.orchestrator.scheduler_state_rows import (
@@ -43196,6 +43202,306 @@ def test_stripping_the_pipeline_decision_surface_takes_the_attempt_floors() -> N
     assert state == {"candidate_id": "kept"}
 
 
+#: An execution-cohort run id, in the shape
+#: ``scheduler_execution.candidate_execution_cohort_run_id`` mints: the cycle run
+#: id, the cohort's stage, and a digest of its member candidates. The identity
+#: filter's cycle-run exemption (``_stage_cycle_run_matches_candidate``) admits
+#: only the BARE cycle run id, so this row is authoritative for no candidate at
+#: all even though the journal hands it to every one of them.
+_RETENTION_COHORT_RUN_ID = f"{_RETENTION_CYCLE_RUN_ID}_forecast_cohort_ab12cd34ef56"
+
+
+def _retention_terminal_evidence(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The terminal-skip evidence the strict-warm-start ladder carries at that read.
+
+    Built by the real evidence owner, so ``candidate_identity`` -- the only thing
+    the narrowing needs -- is the production payload rather than a stand-in.
+    """
+
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+
+    return {
+        **_candidate_state_evidence(_retention_candidate(), state),
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+    }
+
+
+def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
+    """E16 (#1179) -- the budget read applies the candidate-authority narrowing.
+
+    This is the one attempt read that takes the RAW projected state: the
+    identity-filtered decision state is a local of
+    ``_candidate_state_decision_evaluated`` and never flows back to it. A cohort
+    row truncated out of the window therefore used to spend a budget that is not
+    its own, and the resulting ``blocked`` decision is in neither force-resubmit
+    whitelist -- the candidate's FIRST strict-warm-start mismatch would wedge
+    with no automatic remedy.
+
+    The wedge half is the counterweight, and the reason the fix narrows the
+    floors rather than running the whole decision state here: the bare cycle run
+    id is the cycle's own row, authoritative for every candidate of the cycle,
+    and its floor must still block (E5). Running
+    ``_candidate_state_decision_state`` instead would take the shared-cycle
+    aggregate arm and strip that floor away.
+    """
+
+    job_limit = 5
+    filler = _retention_publish_filler(job_limit + 1)
+    cohort = _retention_job(
+        f"job_{_RETENTION_COHORT_RUN_ID}_forecast",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=1,
+        retry_count=3,
+        run_id=_RETENTION_COHORT_RUN_ID,
+    )
+
+    cohort_state = _retention_state([cohort, *filler], job_limit=job_limit, retry_limit=3)
+
+    assert cohort["job_id"] not in _retention_job_ids(cohort_state)
+    assert _retention_floors(cohort_state) == {"forecast": 3}
+
+    cohort_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        _retention_terminal_evidence(cohort_state),
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        cohort_state,
+    )
+
+    assert (cohort_decision.action, cohort_decision.reason) == (
+        "retry",
+        "strict_warm_start_terminal_init_state_mismatch",
+    )
+    assert "retry_policy" not in cohort_decision.evidence
+
+    wedge_state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *filler],
+        job_limit=job_limit,
+        retry_limit=3,
+    )
+
+    wedge_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        _retention_terminal_evidence(wedge_state),
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        wedge_state,
+    )
+
+    assert (wedge_decision.action, wedge_decision.reason) == ("blocked", "strict_warm_start_retry_budget_exhausted")
+    assert wedge_decision.evidence["retry_policy"]["attempt"] == 87
+
+
+def test_attempt_floors_narrow_on_the_source_cycle_blocker_sub_branch() -> None:
+    """E13e (#1179) -- the aggregate arm's blocker branch narrows rather than strips.
+
+    The shared-cycle-aggregate arm normally erases the whole pipeline decision
+    surface, floors included (E13b). Its source-cycle-blocker branch is the one
+    place that does NOT: when the top-level failure IS the source-cycle download
+    blocker, the top-level keys are kept so the blocker stays visible, and the
+    narrowing call is then the only thing standing between a non-candidate-scoped
+    contributor and the decision surface.
+
+    NOTE the shape: ``_top_level_source_cycle_download_blocker`` compares the
+    candidate identity against the STATE's ``run_id``, and every producer writes
+    the candidate's own run id there, so no projection reachable today lands in
+    this branch with floors still attached. The state below is a real projection
+    with that one field replaced. The leg exists so the guard cannot be deleted
+    as dead while the predicate that gates it stays live -- deleting the
+    narrowing call makes it fail.
+    """
+
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_identity_filter import (
+        _candidate_identity_from_evidence,
+        _candidate_scoped_shared_cycle_aggregate_state,
+        _top_level_source_cycle_download_blocker,
+    )
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 3
+    download = _retention_job(
+        f"job_{_RETENTION_CYCLE_RUN_ID}_download",
+        stage="download",
+        job_type="download_source_cycle",
+        status="failed",
+        minutes=30,
+    )
+    download["error_code"] = "GFS_DOWNLOAD_TIMEOUT"
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        *_retention_publish_filler(job_limit, first_minute=10),
+        download,
+    ]
+
+    projected = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    assert projected["shared_cycle_aggregate"] is True
+    assert projected["failed_stage"] == "download"
+    assert _retention_floors(projected) == {"forecast": 87}
+
+    evidence = _candidate_state_evidence(_retention_candidate(), projected)
+    expected = _candidate_identity_from_evidence(evidence["candidate_identity"])
+    blocker_state = {**projected, "run_id": _RETENTION_CYCLE_RUN_ID}
+    assert _top_level_source_cycle_download_blocker(expected, blocker_state) is True
+
+    filtered = _candidate_scoped_shared_cycle_aggregate_state(blocker_state, evidence)
+
+    # The blocker itself stays visible -- this branch skipped the strip ...
+    assert filtered["failed_stage"] == "download"
+    assert filtered["pipeline_status"] == "failed"
+    # ... so the narrowing is what drops the cycle-scope contributor's attempt.
+    assert filtered[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _state_retry_attempt(filtered, stage="forecast") == 0
+
+
+def test_attempt_floors_narrow_on_the_inconclusive_source_cycle_arm() -> None:
+    """E13f (#1179) -- the inconclusive-source-cycle arm narrows the floors too.
+
+    When truncation leaves a source-cycle download failure unresolvable, the
+    filter deletes every row referencing the unresolved job ids rather than
+    letting an unprovable failure drive a decision. A floor whose only
+    contributor is such a row has to leave with them -- the arm runs BEFORE the
+    strip that would otherwise cover it, so the narrowing call is load-bearing
+    here.
+
+    The wedge row's ``previous_job_id`` link to the unresolved download job is
+    written explicitly: it is a real pipeline-job field (``retry.py`` stamps it
+    on every minted retry) but no production writer links a forecast row to a
+    source-cycle download job, so this pins the arm's contract rather than an
+    observed geometry. The control half -- the same rows without the link --
+    keeps the floor, so the assertion is about the reference and nothing else.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    manifest_uri = "s3://nhms/raw/gfs/2026072000/manifest.json"
+    forecast_cycle = {"cycle_id": _RETENTION_CYCLE_ID, "status": "raw_complete", "manifest_uri": manifest_uri}
+    job_limit = 4
+
+    def _download(suffix: str, *, status: str, minutes: int) -> dict[str, Any]:
+        return _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_download_{suffix}",
+            stage="download",
+            job_type="download_source_cycle",
+            status=status,
+            minutes=minutes,
+        )
+
+    # Two unrepaired download failures and a later success that could be either
+    # one's retry: with the window truncated the link is unprovable, which is
+    # what the projection reports as ``inconclusive_truncated``.
+    failed_a = _download("a", status="failed", minutes=30)
+    failed_b = _download("b", status="failed", minutes=31)
+    repair_candidate = _download("retry", status="succeeded", minutes=32)
+    wedge = _retention_forecast_retry_job(87, minutes=1)
+    own = _retention_own_failed_forecast_job(minutes=20)
+
+    def _project(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        state = chain_repository_state_module.candidate_state_from_rows(
+            source_id="GFS",
+            cycle_time=_dt(_RETENTION_CYCLE_TIME),
+            model_id="model_a",
+            run_id=_RETENTION_RUN_ID,
+            forcing_version_id="forc_gfs_2026072000_model_a",
+            candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+            hydro_run={"run_id": _RETENTION_RUN_ID, "status": "published", "init_state_id": None},
+            pipeline_jobs=jobs,
+            pipeline_events=[],
+            forcing_version=None,
+            forecast_cycle=forecast_cycle,
+            retry_limit=3,
+            job_limit=job_limit,
+            event_limit=job_limit,
+        )
+        assert state is not None
+        return state
+
+    rows = [wedge, failed_a, failed_b, repair_candidate, own]
+    control = _project([dict(row) for row in rows])
+
+    assert control["source_cycle_repair_evidence"]["status"] == "inconclusive_truncated"
+    assert control["source_cycle_repair_evidence"]["unresolved_failed_job_ids"] == [
+        failed_a["job_id"],
+        failed_b["job_id"],
+    ]
+    # Not the aggregate arm: the candidate's own row is in the window.
+    assert control["shared_cycle_aggregate"] is False
+    assert _retention_floors(control) == {"forecast": 87}
+    assert _retention_decision_state(control)[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+
+    linked_wedge = {**wedge, "previous_job_id": failed_a["job_id"]}
+    state = _project([linked_wedge, failed_a, failed_b, repair_candidate, own])
+
+    assert _retention_floors(state) == {"forecast": 87}
+
+    decision_state = _retention_decision_state(state)
+
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _state_retry_attempt(decision_state, stage="forecast") == 0
+
+
+def test_tied_attempt_floor_contributors_keep_the_floor_alive() -> None:
+    """E17 (#1179) -- a stage's floor survives while ANY contributor does.
+
+    The floor builder records EVERY row that reached a stage's maximum, not the
+    first: the rows arrive freshest-first, so recording only the first would
+    record the freshest -- here the foreign model's row -- and the narrowing
+    would then drop a floor the candidate's own cycle row still proves. The
+    freshness order is the load-bearing part of this geometry, not decoration.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 5
+    wedge = _retention_forecast_retry_job(87, minutes=1)
+    foreign = _retention_job(
+        "job_fcst_gfs_2026072000_model_b_forecast_retry_87",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=2,
+        run_id="fcst_gfs_2026072000_model_b",
+        model_id="model_b",
+    )
+    jobs = [
+        wedge,
+        foreign,
+        *_retention_publish_filler(job_limit, first_minute=10),
+        _retention_own_failed_forecast_job(minutes=20),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    window = _retention_job_ids(state)
+    assert wedge["job_id"] not in window
+    assert foreign["job_id"] not in window
+    assert _retention_floors(state) == {"forecast": 87}
+    # Freshest first: the foreign row is the one a "record the first" builder
+    # would have kept, and it is the one identity filtering deletes.
+    assert [str(row["job_id"]) for row in state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]] == [
+        foreign["job_id"],
+        wedge["job_id"],
+    ]
+
+    decision_state = _retention_decision_state(state)
+
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+    assert [
+        str(row["job_id"]) for row in decision_state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]
+    ] == [wedge["job_id"]]
+    assert _state_retry_attempt(decision_state, stage="forecast") == 87
+
+
 def test_carried_attempt_floor_makes_a_transient_failure_permanent() -> None:
     """E14 (#1179) -- the failure policy moves with the attempt, on purpose.
 
@@ -43207,6 +43513,10 @@ def test_carried_attempt_floor_makes_a_transient_failure_permanent() -> None:
     (``scheduler_state_failure`` :418/:473/:1481/:1557/:1641/:1689/:1723) close
     and ``_permanent_failure_evidence`` starts answering. That is this issue's
     budget binding, not a bookkeeping detail, so it is pinned here.
+
+    Both consumers are fed the identity-filtered decision state, which is what
+    the production ladder passes them -- the narrowing is part of the answer,
+    not a detour around it.
     """
 
     from services.orchestrator.scheduler_state_failure import (
@@ -43230,14 +43540,16 @@ def test_carried_attempt_floor_makes_a_transient_failure_permanent() -> None:
     assert state["error_code"] == "SLURM_TIMEOUT"
     assert state["retry_count"] == 0
 
-    failure = _failure_policy_payload(state)
+    decision_state = _retention_decision_state(state)
+
+    failure = _failure_policy_payload(decision_state)
 
     assert failure["attempt"] == 87
     assert failure["retryable"] is False
     assert failure["permanent"] is True
     assert failure["limit_exhausted"] is True
 
-    permanent = _permanent_failure_evidence(_retention_candidate(), state, {})
+    permanent = _permanent_failure_evidence(_retention_candidate(), decision_state, {})
 
     assert permanent is not None
     assert (permanent["decision"], permanent["reason"]) == ("permanent_failure", "retry_limit_exhausted")
@@ -43253,6 +43565,10 @@ def test_manual_retry_mints_the_carried_attempt_when_the_stage_is_nameable() -> 
     and collide with an attempt the journal had already spent; with the floor
     carried it mints ``_retry_88``. This is a persisted identity change, so it
     gets its own pin.
+
+    Fed the identity-filtered decision state, as the production ladder feeds it:
+    the mint reads the floor only because the wedge row is the cycle's own and
+    survives the narrowing.
     """
 
     from services.orchestrator.chain_runtime_utils import _pipeline_retry_job_id, _retry_attempt_from_basins
@@ -43282,7 +43598,9 @@ def test_manual_retry_mints_the_carried_attempt_when_the_stage_is_nameable() -> 
     assert own_retry["job_id"] in _retention_job_ids(state)
     assert _failed_stage(state) == "forecast"
 
-    evidence = _manual_retry_state_evidence(_retention_candidate(), state, {})
+    decision_state = _retention_decision_state(state)
+
+    evidence = _manual_retry_state_evidence(_retention_candidate(), decision_state, {})
 
     assert evidence["manual_retry"]["allowed"] is True
     assert evidence["manual_retry"]["previous_attempt"] == 87

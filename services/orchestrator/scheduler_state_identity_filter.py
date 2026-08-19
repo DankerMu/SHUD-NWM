@@ -125,6 +125,10 @@ def _candidate_authoritative_stage_retry_attempt_floor_state(
     _narrow_stage_retry_attempt_floors(
         filtered,
         lambda row: _state_row_has_authoritative_candidate_proof(expected, row)
+        # Unreachable today -- a floor contributor is always a canonical
+        # DOWNSTREAM stage row and ``download`` is not one -- and kept for
+        # symmetry with the row loop's predicate, so promoting download into the
+        # floors cannot silently drop this escape.
         or _global_source_cycle_download_blocker_job(row, evidence),
     )
     return filtered
@@ -316,6 +320,8 @@ def _candidate_scoped_shared_cycle_aggregate_state(
         _narrow_stage_retry_attempt_floors(
             filtered,
             lambda row: _shared_cycle_row_is_candidate_scoped(expected, row)
+            # Same unreachable-but-symmetric escape as the authority narrowing
+            # above: no floor contributor carries a ``download`` stage.
             or _global_source_cycle_download_blocker_job(row, evidence),
         )
         filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
@@ -325,15 +331,14 @@ def _candidate_scoped_shared_cycle_aggregate_state(
         if filtered.get("pipeline_events") == []:
             filtered.pop("pipeline_events", None)
         return filtered
+    # This branch needs no floor narrowing: the strip below is unconditional and
+    # pops both floor keys outright, so a narrowing call here would only ever run
+    # on an empty mapping.
     _strip_top_level_pipeline_decision_fields(filtered)
     filtered["pipeline_jobs"] = [
         dict(job) for job in _state_jobs(filtered) if _shared_cycle_row_is_candidate_scoped(expected, job)
     ]
     filtered.pop("jobs", None)
-    _narrow_stage_retry_attempt_floors(
-        filtered,
-        lambda row: _shared_cycle_row_is_candidate_scoped(expected, row),
-    )
     filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
     filtered.pop("events", None)
     if filtered.get("pipeline_jobs") == []:

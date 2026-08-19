@@ -51,6 +51,16 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 - **WHEN** a stage's only upper-bound contributor is a row that candidate-identity filtering judges non-authoritative for the candidate (for example a model-less suffixed cohort row) and the filtered row population drops it
 - **THEN** the filtered state carries no upper bound for that stage, and the candidate's own first failure classifies exactly as it did before this change — retriable, attempt zero — instead of inheriting the foreign row's attempt
 
+#### Scenario: The strict-warm-start budget reads the narrowed upper bounds
+
+- **WHEN** the strict-warm-start terminal-mismatch budget evaluates a candidate whose only upper-bound contributor for the forecast stage is a non-authoritative cycle-cohort row truncated out of the window with its attempt at the retry limit
+- **THEN** the budget derivation sees no upper bound for that stage — the raw projected state is narrowed by the same authority predicates before the read — and the decision remains the retry decision instead of the blocked demotion
+
+#### Scenario: Tied contributors keep the upper bound alive through filtering
+
+- **WHEN** a stage's maximum attempt is carried by two tied contributing rows outside the window — a fresher row that identity filtering judges non-authoritative and an older candidate-authoritative row
+- **THEN** the filtered state still carries the stage's upper bound at that maximum, because at least one contributor survives the predicates
+
 #### Scenario: The failure policy binds to the carried upper bound
 
 - **WHEN** the reverse truncation geometry carries a stage upper bound `N` at the retry limit and the candidate's own in-window row fails with a transient error code on that stage

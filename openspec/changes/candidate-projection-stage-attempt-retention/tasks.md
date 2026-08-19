@@ -69,7 +69,9 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - E13 identity 收窄（round-2 R2-A）: (a) **真实 journal 端到端腿**——model-less 带后缀
   cohort 行（retry_count=N）+ 候选自己首次失败行，无截断：filtered decision 为
   ('retry','retry_failed_candidate')、payload attempt==0（floors 被收窄；红证据 = 当前
-  head 读出 N/permanent）；(b) shared-cycle-aggregate 臂（identity_filter:221-241）同断言；
+  head 读出 N/permanent）；(b) shared-cycle-aggregate 臂（identity_filter:284-343）同断言——
+  该臂上 floors 由 **strip 半边**（:328 无条件 strip + strip 列表含 floors 键）兜住，不是收窄
+  调用（design D1.6 口径；测试名与 docstring 已随 round-3 改为 "erased on the ... arm"）；
   (c) E1/E5 wedge 行（裸 cycle run id）floor 存活——收窄不误伤；(d) strip 列表含 floors 键。
 - E14 payload 决策面钉（round-2 R2-B）: 逆序几何 + 候选自己窗内 transient 失败行 →
   `_failure_policy_payload` {attempt: N, retryable: False, permanent: True} +
@@ -77,6 +79,32 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - E15 nameable mint 钉（round-2 R2-D）: 窗内候选权威 failed `_retry_2` 行 + 窗外
   `_retry_87` → mint `previous_attempt==87` / `new_attempt==88`（改前铸 `_retry_3`；去
   floor 并入变异必须红）。
+- E16 预算读点收窄（round-3 R3-A，修法 1a）: cohort 行（`cycle_..._forecast_cohort_<digest>`
+  形状）出窗 + `retry_count >= retry_limit` → strict-warm-start 决策为
+  `('retry','strict_warm_start_terminal_init_state_mismatch')` 非 blocked（红证据 = 当前
+  head 读出 blocked）；E5 wedge 几何（裸 cycle run id）必须继续 blocked——**修法 1b
+  （读点前跑完整 `_candidate_state_decision_state`）明令禁止**（aggregate 臂 strip 会打死
+  E5，verifier (e) 实测）。
+- E13e blocker 子分支腿（round-3 R3-B）: `top_level_source_cycle_blocker` 为真使 :312-313
+  strip 被跳过的几何 → 非 candidate-scoped 贡献行的 floor 被 :316 收窄删除（删 :316-320
+  变异必须红）。**实测偏离**：`_top_level_source_cycle_download_blocker` 比对的是 state 顶层
+  `run_id`，任何 producer 写的都是候选自己的 run_id ⇒ **当前无投影可产出带 floors 进入该
+  分支的 state**（原 verifier "生产可达" 只成立到"分支进入"，不到"floors 活着到 :316"）。
+  腿改为 guard 钉：真实投影 + 只替换该字段，docstring 显式声明这一点；收窄保留而非删除
+  （谓词是 master 既有活代码，删了就是不变量缺口）。
+- E13f inconclusive 臂腿（round-3 R3-B）: `_inconclusive_source_cycle_decision_state` 路径
+  上 state 真带 floors、贡献行引用 unresolved job id → floor 被收窄（删 :143 收窄调用变异
+  必须红）。几何全部由真实投影产出（两条未修复 download 失败 + 更新的成功 download +
+  截断 ⇒ `inconclusive_truncated`）；**唯一显式写入的是贡献行的 `previous_job_id` 指向
+  unresolved download job**——该字段是真实 pipeline-job 字段（`retry.py` 每次铸 retry 都
+  写），但无生产写点把 forecast 行链到 source-cycle download 行，故此腿钉的是该臂契约而非
+  实测几何；对照半边（同几何去掉该链接）floor 保留，证明断言只咬这条引用。
+- E17 并列贡献行腿（round-3 R3-C）: 同 stage 两条并列 max 贡献行都出窗——foreign 行
+  **必须比候选权威行更新鲜**（floors 建在倒序列表上，"只记第一条"记最新，否则腿是假的）
+  → 过滤后 floor 仍为 N（"只记第一条、平手不入"变异必须红）。
+- E18 消费者矩阵（retro 纠正动作核心）: grep 穷尽 `_state_retry_attempt(` 与
+  `STAGE_RETRY_ATTEMPT_FLOORS_KEY` 全部读点，逐点标注"经过收窄 / 不经过 / 为什么安全"，
+  矩阵落 design D3——下一轮 review 校验矩阵而非重新考古。
 - E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat or retention or floor"`；
   `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py
   tests/test_gateway_reconcile.py`；`uv run ruff check .`；
@@ -114,5 +142,9 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - [x] 1.3 (round-2) D1.6 identity 收窄实现（贡献行元数据 + 三处 filter 收窄 + strip 键）
 - [x] 2.5 (round-2) E13/E14/E15 腿 + D1.7 措辞收窄（rows.py 两处 docstring + runbook 句）
       + rows.py:36-39 "always present" 注释限定
+- [x] 1.4 (round-3/retro) 修法 1a：scheduler_candidates.py:2225 读点前收窄 + 删 :333 死代码
+- [x] 2.6 (round-3/retro) E16/E13e/E13f/E17 腿 + E14/E15 改钉 decision_state + E18 消费者
+      矩阵落 design D3 + tasks E13(b)/docstring 口径对齐 + download 逃生门注释 +
+      rows.py:46-51 注释收窄
 - [ ] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + flat 串味
       follow-up issue 编号写入 PR body

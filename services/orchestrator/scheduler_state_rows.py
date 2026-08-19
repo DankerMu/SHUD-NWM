@@ -43,12 +43,16 @@ from workers.data_adapters.base import format_cycle_time
 STAGE_RETRY_ATTEMPT_FLOORS_KEY = "stage_retry_attempt_floors"
 STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY = "stage_retry_attempt_floor_sources"
 
-#: Fields copied out of a contributing row into its floor-source record.  The
-#: set is the union of what the identity/scope predicates that filter ROWS read
-#: (``_legacy_identity_values`` aliases, ``_state_row_references_job_ids`` job
-#: id keys, and the source-cycle download-blocker predicate's status/stage
-#: fields), so re-running any of them over the record answers as it does over
-#: the row it came from.
+#: Fields copied out of a contributing row into its floor-source record: the
+#: ROW-LEVEL fields the identity/scope predicates read (``_legacy_identity_values``
+#: aliases, ``_state_row_references_job_ids`` job id keys, and the source-cycle
+#: download-blocker predicate's status/stage fields), plus the nested ``identity``
+#: payload ``_legacy_identity_values`` treats as aliases of them.  Deeper nested
+#: proofs (``task_identity`` / ``failed_task`` / ``details.task_results``, which
+#: ``_nested_state_identity_payloads`` also reads) do NOT ride along, so a record
+#: can answer non-authoritative where its row answered authoritative.  The
+#: direction is conservative -- the floor is dropped, i.e. pre-#1179 behaviour --
+#: and no production job row carrying such a payload has been found.
 STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS = (
     "job_id",
     "pipeline_job_id",

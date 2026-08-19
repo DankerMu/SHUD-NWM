@@ -92,11 +92,22 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
      `_state_row_has_authoritative_candidate_proof`（+ source-cycle blocker 逃生门）；
      放公共尾还顺带堵住"legacy_sources 为空即整函数早退"的漏洞——那条路径上窗外外来
      贡献行本来一次也不会被判。
-   - `_inconclusive_source_cycle_decision_state`（:105-110）：`_state_row_references_job_ids`。
-   - `_candidate_scoped_shared_cycle_aggregate_state`（:221-241）：
-     `_shared_cycle_row_is_candidate_scoped`（+ blocker 逃生门）。该臂两条可达分支都先
-     调 `_strip_top_level_pipeline_decision_fields`，所以实际由 strip 半边兜住；收窄调用
-     是 top-level blocker 成立时的那半边。
+   - `_inconclusive_source_cycle_decision_state`（:143）：`_state_row_references_job_ids`；
+     跑在该函数自己的 :152 strip 之前，是活收窄（E13f 钉，删调用必红）。
+   - `_candidate_scoped_shared_cycle_aggregate_state`（:316）：
+     `_shared_cycle_row_is_candidate_scoped`（+ blocker 逃生门）。该臂的**非** blocker 分支
+     :328 无条件 strip，floors 由 strip 半边兜住（E13b/E13d）；收窄调用只在 blocker 分支
+     且 top-level blocker 成立时（:312-313 跳过 strip）承重（E13e 钉）。**round-3 R3-B 已删**
+     非 blocker 分支上原 :333 的第二次收窄调用——它恒在 :328 之后拿到空 floors，行为等价。
+   - **round-3 R3-A 第四处**：`scheduler_candidates.py:2233` 的 raw 读点前直接调
+     `_candidate_authoritative_stage_retry_attempt_floor_state`（见 D3.0）。
+   - 逃生门与可达性备注：两处 `_global_source_cycle_download_blocker_job` 逃生门**当前恒不
+     可达**（floor 贡献行的 stage 必是 canonical downstream stage，`download` 不在其中），
+     与行循环谓词同构保留、防 download 转正漂移，代码内已注明。:316 那处的门控前提
+     `_top_level_source_cycle_download_blocker` 拿 **state 顶层 `run_id`** 与候选身份比，
+     而任何 producer 写的都是候选自己的 run_id——**当前无投影可产出该形状**（round-3 实测；
+     该谓词是 master 既有代码，口径问题不在本 change 范围）。E13e 因此是 guard 钉：几何用
+     真实投影 + 替换该一个字段，作用是让这条收窄不能被当死代码删掉。
    `STAGE_RETRY_ATTEMPT_FLOORS_KEY`（连同 sources 键）同时加入
    `_strip_top_level_pipeline_decision_fields`（:579-618）——它与 `retry_attempt`/
    `attempt`/`retry_count` 同列；在 shared-cycle-aggregate 臂上这半边是**承重**的
@@ -130,11 +141,55 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
 
 ## D3: 消费面核对 + 行为边界（v2 修订）
 
+### D3.0 消费者矩阵（round-3 retro 纠正动作；下一轮 review 的 focus 首条）
+
+不变量：**载带的 stage-attempt 真值必须在每一个消费点上受与行群体相同的候选身份/可见域
+纪律约束**。矩阵按 `grep -rn '_state_retry_attempt(' 与
+'STAGE_RETRY_ATTEMPT_FLOORS?_?…_KEY'` 全集列出（行号 = 本 commit）。判据只有两条：
+**stage-less 读点结构性不可能读到 floors**（`_state_retry_attempt` 的 `canonical_stage is
+None` 分支走 flat-first / `_state_job_retry_attempt(state, None)`，后者不并入 floor——
+E12'' 钉）；**stage-scoped 读点必须吃已收窄的 state**。
+
+services/（生产读点）：
+
+| 读点 | stage 参数 | state 来源 | 收窄 | 结论 |
+|---|---|---|---|---|
+| `scheduler_state_failure.py:188` `_failure_policy_payload` | `_failed_stage(state)` | 8 个调用方（:418/:473/:1481/:1557/:1641/:1689/:1723/:1914）各自的 `state`，全部由 `scheduler_state_decision.py` 以 `decision_state` 传入 | 是（`_candidate_state_decision_state` 公共尾） | 安全；E13a/E14 钉 |
+| `scheduler_state_failure.py:1444` `_completed_upstream_stage_retry_evidence` | `restart_stage` | decision.py:145 `decision_state` | 是 | 安全 |
+| `scheduler_state_failure.py:1900` `_cancelled_state_evidence` | `_failed_stage(state)` | decision.py:382 `decision_state` | 是 | 安全 |
+| `scheduler_state_failure.py:1917` `_manual_retry_state_evidence` | `_failed_stage(state)` | decision.py:273 `decision_state` | 是 | 安全；E15 钉 |
+| `scheduler_candidates.py:2233` strict-warm-start L2 预算 | 常量 `"forecast"` | **raw** provider 直出（decision_state 是 `_candidate_state_decision_evaluated` 的局部量，不回流） | 是——**读点前显式施加** `_candidate_authoritative_stage_retry_attempt_floor_state(state, terminal_evidence)`（round-3 R3-A 修法 1a） | E16 钉；**禁止**改用完整 `_candidate_state_decision_state`（aggregate 臂 strip 打死 E5） |
+| `scheduler_state_manual_retry.py:982` `_fallback_previous_attempt` | `_restarted_stage_family(state)` | 唯一调用链 `_manual_retry_new_attempt` ← failure.py:1918，同 `decision_state` | 是 | 安全 |
+| `scheduler_state_manual_retry.py:115/:125` marker 默认 attempt | 无 | `_manual_retry_markers(state)` | 不适用 | stage-less，floors 结构性不可达 |
+| `scheduler_state_manual_retry.py:693/:705` blocker 记录 | 无 | `_latest_manual_retry_blocker(state)` | 不适用 | 同上 |
+| `scheduler_state_evidence_owner.py:110` evidence `retry.attempt` | 无 | **raw**（evidence 在 filter 之前构建） | 不适用 | 同上——这是 raw 读点仍安全的唯一理由，改成 stage-scoped 必须同时接收窄 |
+| `scheduler_state_rows.py:542` `_state_stage_retry_attempt_floor` | — | 仅被 `_state_job_retry_attempt` 在 `canonical_stage is not None` 时调用 | — | floors 的唯一读函数，无旁路 |
+| `scheduler_state_identity_filter.py:187/:190/:209/:210` | — | 收窄器自身 | — | 三处调用点：:125 authority（公共尾，承重）、:143 inconclusive 臂（E13f）、:316 aggregate-blocker 子分支（E13e） |
+| `scheduler_state_identity_filter.py:715-716` strip 列表 | — | `_strip_top_level_pipeline_decision_fields` | — | 与 `retry_attempt`/`attempt`/`retry_count` 同列；aggregate 臂 :328 无条件 strip 由它承重（E13b/E13d） |
+| `chain_repository_state.py:849-850` | — | 写点（唯一 producer） | — | `stage_retry_attempt_floors(jobs)` 于截断前构建 |
+
+tests/（读点性质，逐条不列）：`tests/test_production_scheduler.py` 内 stage-scoped 读点
+分三类——(1) `_retention_*` 投影 raw state 上直接读（:42296/:42450/:42507-42508/:42555-42558/
+:42618-42622/:42650-42651/:42702/:42759/:42833/:42882/:42907/:42943）：**有意读 raw**，钉的是
+floors 载带本身（截断不变量），不涉及候选身份面；(2) `decision_state` / `_retention_decision_state`
+上读（:5862/:5940/:6006/:6256-6257/:43081/:43128-43133/:43178-43180/:43356-43357/
+:43436-43446/:43491-43502 + E14/E15 消费点）：钉收窄后的真值；(3) 手写 state（:12205/:12261/
+:12337/:12345/:12355-12356/:12443、:42645 `foreign`）：不带 floors 键，钉"非本投影产出的
+state 行为逐字节不变"。`tests/test_file_orchestration_journal.py:3466` 走 decision_state。
+`tests/test_production_scheduler.py:5700` `_production_previous_attempt` 是生产 composition
+的镜像 helper，随其调用方吃到的 state 走。
+
+矩阵的维护义务：**新增任何 stage-scoped 读点，必须在此表登记并说明它吃的是哪层 state**。
+
+### D3.1 各消费点行为边界
+
 stage-scoped 调用点逐一核对并在 PR 记录结论：
 
-- `scheduler_candidates.py:2225`（auto L2 预算，stage 是常量 `"forecast"`）：floors 直接
+- `scheduler_candidates.py:2233`（auto L2 预算，stage 是常量 `"forecast"`）：floors 直接
   命中——逆序几何下 `("blocked", "strict_warm_start_retry_budget_exhausted")`（E5）。
-  **这是 issue #1179 的目标面，不依赖 `_failed_stage` 行可见性。**
+  **这是 issue #1179 的目标面，不依赖 `_failed_stage` 行可见性。** round-3 R3-A 修订：
+  该读点吃 raw state，收窄在读点上显式施加（D3.0 表 + D1.6 第四条），窗外 cohort 行的
+  attempt 不再花候选的预算（E16）；窗内 cycle-wide 行经 flat 通道的串味仍是既有面（#1579）。
 - **`scheduler_state_failure.py:188/:1444/:1900` 是决策级变化，不只是记账（round-2 R2-B
   修订）**：stage 可命名时 `_failure_policy_payload` 的 attempt 读出真值，`classify_failure`
   在真值 ≥ retry_limit 时把 transient 失败判成 `permanent=True / limit_exhausted=True`，
