@@ -20,7 +20,7 @@ dict cache**（`_cycle_rows_cache` / `_direct_jobs_cycle_cache` /
 全在 `_write_lock` 之外，`_cycle_rows` 是 15+ 调用点的热路径——两读线程
 并发插入/驱逐同一 dict 即得该 RuntimeError；**窗口最宽的一条是读-写
 交错**：写线程持 `_write_lock` 在 `_apply_record_to_cycle_rows_cache`
-（`:6592`）整表遍历 `_cycle_rows_cache`，读线程锁外插入/驱逐同一 dict
+（`:6592`，落地后 `:6622`）整表遍历 `_cycle_rows_cache`，读线程锁外插入/驱逐同一 dict
 （读侧填充不持 `_write_lock`）。全 git 史无并发修复记录。
 
 **#1356（CI 偶发红，按 P1 对待直到证伪）**：
@@ -100,7 +100,7 @@ idempotency 键选取。本 PR 保留的唯一 Lane B 产物：flaky 首轮断�
   并发域 + 生产事故域）。Repair intensity: medium。
 - Risk packs: **concurrency selected**（Lane A 锁序：`_cache_lock` 与
   `_write_lock`/flock 的嵌套顺序必须单向——cache 锁内不得进写锁；
-  Lane B 的 hook 必须生产 no-op）；**state-semantics selected**
+  ~~Lane B 的 hook 必须生产 no-op~~——Lane B 已 descope，hook 未落地）；**state-semantics selected**
   （submit-once 不变量的定性分叉；cache 加锁不得改变读值语义）；
   **test-evidence selected**（#1380 红证是概率性竞态——必须给出
   "在 pre-fix 上 N 秒内稳定红"的压测构造 + 修后同构造长跑绿；
@@ -136,18 +136,18 @@ openspec validate），B 连同 hook 缝位勘察证据回 #1356 记录。拆分
   **+ 1 个真实写线程**（`_locked_cycle_write`+append，覆盖 :6592
   读-写交错），pre-fix 秒级红（RuntimeError），post-fix 长跑绿；
   catch 点单测断言 evidence 含 traceback tail。
-- Lane B：注入 hook 屏障（монkeypatch 模块级 no-op），确定性交错两个
-  public pass；行 dump 走真实 file journal。
+- ~~Lane B：注入 hook 屏障~~——已 descope，hook 未落地；保留的 dump
+  诊断走真实 file journal（`query_pipeline_jobs_by_cycle` 公共 API）。
 
 ## Evidence mapping
 
 - #1380 验收（并发不再炸 + 可归因）→ tasks A.2 hammer 红证 + A.3
   traceback 单测。
-- #1356 验收 1（确定性复现 + 行 dump）→ tasks B.1。
-- #1356 验收 2（书面定性 + 判据）→ tasks B.2（落账进 PR body 与本
-  proposal 修订）。
-- #1356 验收 3/4（按定性修复 + 负向测试）→ tasks B.3。
-- #1356 验收 5（20 轮受压全绿）→ tasks B.4。
+- #1356 验收 → **descope**（tasks B.* 已删）：验收 1 未达成（四构造
+  记录 + 反证行 dump 已评论落账 #1356）；验收 2 定性 unqualified；
+  验收 5 的 40 轮本地受压全绿；接力载体 = #1356 评论 + 保留的失败时
+  dump 诊断。
 - Verification：`uv run pytest -q tests/test_orchestration_chain.py
   tests/test_file_orchestration_journal.py tests/test_production_scheduler.py`
-  + ruff + openspec validate；merge 后 node-27 receipt 记两 issue。
+  + ruff + openspec validate；merge 后 node-27 receipt 记 #1380
+  （#1356 已 descope）。
