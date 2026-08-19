@@ -881,13 +881,26 @@ def _inject_alias_identity(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> Non
 def _call_without_hanging(call: Any) -> Any:
     """Run `call` on a daemon thread and fail if it has not returned in 5s.
 
-    The regression this pins is not slowness: it is `fcntl.flock` blocking
-    FOREVER (provider_atomic.py:219 takes the blocking path without LOCK_NB)
-    once an alias root is mistaken for a second root and the scoped merge locks
-    the same lockfile twice.  `daemon=True` is not optional -- a non-daemon
-    thread keeps the interpreter alive at exit waiting for exactly the thread
-    that never finishes.  A thread stuck here goes on holding its lockfile fd
-    for the rest of this pytest session.
+    This is a generic non-return net for the guard path, nothing narrower: if
+    the guard ever stops returning -- blocks, spins, waits on any lock -- the
+    suite fails in 5s instead of wedging the session.  `daemon=True` is not
+    optional -- a non-daemon thread keeps the interpreter alive at exit waiting
+    for exactly the thread that never finishes.  A thread stuck here goes on
+    holding whatever fd it took for the rest of this pytest session.
+
+    It **cannot** reproduce the `fcntl.flock` self-deadlock that motivates the
+    guard (provider_atomic.py:219 takes the blocking path without LOCK_NB).
+    That deadlock is real in production, where a bind-mount alias makes two
+    realpaths name one directory, so the scoped merge locks one lockfile twice.
+    Here the alias is injected at the probe seam, so on the real filesystem the
+    two roots stay genuinely distinct directories; the provider lock is
+    path-keyed (`provider_lock_path`, and the in-process gate keys on
+    `os.path.abspath`), so even a regressed guard that reaches the merge takes
+    two distinct lockfiles and returns.  Measured: under a string-compare
+    mutant these tests red in ~0.3s on an ordinary assertion or
+    `FileNotFoundError`, never by hanging.  Reproducing the deadlock would need
+    a real bind mount, which has no portable root-free construction (see the
+    honest limit in tests/test_safe_fs.py).
     """
 
     outcome: dict[str, Any] = {}

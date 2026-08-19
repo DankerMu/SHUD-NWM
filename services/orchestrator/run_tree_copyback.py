@@ -203,14 +203,21 @@ def _existing_directory(path: Path, field: str) -> Path:
 
 
 def _directory_identity(path: Path, field: str) -> tuple[int, int]:
-    """Filesystem identity of an already-resolved root, or the existing refusal."""
+    """Filesystem identity of an already-resolved root, or the existing refusal.
+
+    Both operands of the identity comparison probe through here, so the message
+    has to name the one that actually failed -- an operator told "object-store
+    root" while the copyback root is the broken mount debugs the wrong side
+    (#1192).  The code stays the shared `OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE`.
+    """
 
     try:
         return directory_identity_no_follow(path)
     except (OSError, SafeFilesystemError) as error:
+        operand = "Object-store copyback root" if field == "copyback_root" else "Object-store root"
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE",
-            "Object-store root is unavailable for run-tree copyback.",
+            f"{operand} is unavailable for run-tree copyback.",
             {field: str(path), "error": str(error)},
         ) from error
 
