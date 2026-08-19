@@ -12626,8 +12626,13 @@ def test_reserve_rejects_a_streak_carried_without_a_decision(tmp_path: Any) -> N
 
     # Contamination control: the same shape with a zero streak reserves cleanly,
     # so a red run here is the guard talking and not a malformed record. Its own
-    # repository, because with the guard deleted the illegal record below lands
-    # and would turn this into an ordinary job-id conflict.
+    # repository, and the separation is load-bearing already at HEAD: the control
+    # record carries the very job id the absence assertion below queries
+    # (``_versioned_master_reservation_record(...)["job_id"] == _INVARIANT_JOB_ID``),
+    # so a shared repository would make that assertion find the CONTROL's row and
+    # go red with the guard intact. Under mutation it also matters: with the guard
+    # deleted the illegal record lands and would turn this into an ordinary job-id
+    # conflict. Do not consolidate the two repositories.
     control = FileOrchestrationJournalRepository(tmp_path / "streak-insert-control" / "journal")
     legal = _versioned_master_reservation_record(member_count=1)
     legal["identity_blocked_streak"] = 0
@@ -12658,8 +12663,10 @@ def test_reserve_rejects_a_streak_carried_without_a_decision(tmp_path: Any) -> N
 # measurement, not a proof that no entry point exists; if one is found these legs
 # can be superseded. They are a SUPPLEMENT — the durable J7/J8 legs above and
 # their zero-write assertions stay exactly as they were, which is what fixture
-# review P1-5 was protecting. Both sites are purely defensive: no live caller can
-# violate them, so the direct call is the only oracle available today.
+# review P1-5 was protecting. Measured across those same four entry points, no
+# live caller can violate either site — i.e. both are purely defensive as far as
+# anyone has measured, on the same basis and with the same limits as the
+# enumeration above — so the direct call is the only oracle available today.
 # ---------------------------------------------------------------------------
 
 

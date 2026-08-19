@@ -111,7 +111,11 @@
 - [x] 6.4 变异证死三组：删 candidate 冻结闸 → J9-J11 红；**把 `INIT_STATE_IDENTITY_FIELD` 加入
   reclaim 回填 key 元组（`:1944`）并让该拷贝对 versioned master 也生效** → J13/J15 红
   （**单独翻转 `if not versioned_master:` 杀不死这两腿**——该守卫包住的元组根本不含该字段，
-  评审已实测变异存活，fixture review P1-1）；删 `:262` → 对应 J 腿红。
+  评审已实测变异存活，fixture review P1-1）；删**构造期「released ⇒ reservation_lost」守卫**
+  （改动前 `:262` / 终态 `accepted_submit_identity.py:267-268`）→ J3
+  （`test_identity_released_transition_must_abandon_the_reservation`）红。
+  ⚠️ **不要照改动前坐标 `:262` 删**：终态上那一行是另一条闸（`if decision == "matched_bound":`），
+  照旧坐标施变异会删错守卫、产出假阴性；以守卫名 + 终态坐标为准（round-2 P2-1）。
   各自应用→红→回退→绿，记录红-绿对照。
   **#1180 归一化四条的变异表（round-1 补全 + 按终态 oracle 重指；`:566`/`:600` 原文漏列）**——
   每条守卫**单独删除**均须转红，且**只能**由下列 oracle 证死：
@@ -124,5 +128,9 @@
   | `:630` / `:650-653` | 删 G8 | `test_normalization_isolates_the_foreign_decision_streak_invariant`（直调；同上，原 `J8_...` upsert 腿一并转红属附带） |
 
 - [x] 6.5 所有代码行号引用在**终态**上重新自核（本仓注释/docstring 行号会静默漂移；Batch R 的 V6 即此类）：
-  已在终态逐条自核并记录 old→new 映射（见 PR 终报）；**fixture 文本按已登记 deviation 保留改动前坐标、
-  未回改**，该口径由本文件顶部的坐标基线 banner 声明，显式标注「终态坐标」的条目除外。
+  已在终态逐条自核并记录 old→new 映射，**映射表落在 PR body 的「fixture 坐标 old→new 映射表」一节**
+  （改动前该引用悬空——只写「见终报」而终报未落表，round-2 P2-2(b)）；**fixture 文本按已登记
+  deviation 保留改动前坐标、未回改**，该口径由本文件顶部的坐标基线 banner 声明，
+  显式标注「终态坐标」的条目除外（该 carve-out 经 round-2 逐条验证成立，14 处全部正确）。
+  **round-2 更正**：首轮自核漏审了 6.4 里的 `:262`（唯一一处陈旧坐标会造成实害的地方，P2-1），
+  已在上一条补名 + 补终态坐标；本勾以此次补审为准。

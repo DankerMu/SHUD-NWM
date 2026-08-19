@@ -1980,6 +1980,11 @@ class FileOrchestrationJournalRepository:
                 # request row would otherwise overwrite the first attempt's
                 # captured lineage. Same reason as the attempt anchor above —
                 # durable authority state never comes from outside the lock.
+                # Two halves, not one: for a versioned master the enclosing
+                # ``if not versioned_master:`` never runs, so keep-first there
+                # rests on the guard AND on this omission. Adding the field back
+                # to the tuple alone would not change versioned-master behaviour,
+                # and flipping the guard alone would not either; both must hold.
                 for key in (
                     "run_id",
                     "cycle_id",
