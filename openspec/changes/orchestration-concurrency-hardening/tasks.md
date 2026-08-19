@@ -60,9 +60,9 @@
 
 ## C. Verification
 
-- [ ] C.1 uv run pytest -q tests/test_orchestration_chain.py
+- [x] C.1 uv run pytest -q tests/test_orchestration_chain.py
       tests/test_file_orchestration_journal.py tests/test_production_scheduler.py
-- [ ] C.2 uv run ruff check .
+- [x] C.2 uv run ruff check .
 - [ ] C.3 openspec validate orchestration-concurrency-hardening --strict --no-interactive
       ——若 B.2 定性触发 fixture 修订（追加 submit-once delta 或
       De-batch 裁剪），C.3 必须在该修订**之后**重跑（终态一推纪律）
