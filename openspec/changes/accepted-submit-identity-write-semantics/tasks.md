@@ -92,7 +92,7 @@
   终态行的 `init_state_identities` 与裁定值（A）一致——证明语义传到血统证据而不只 master 行。
 - [x] 4.3 实现：注释**落在真实成因处**——reclaim 回填 key 元组（`file_orchestration_journal.py:1944`）
   的遗漏本身，以及 `row` 由 `existing` 经 `apply_accepted_submit_transition(..., begin_attempt())`
-  派生处（`:1905-1911`）；说明该字段有意不随新 attempt 刷新，理由与 `submission_attempt_started_at`
+  派生处（`:1907-1914`）；说明该字段有意不随新 attempt 刷新，理由与 `submission_attempt_started_at`
   anchor 同源。**不要**把注释挂在 `if not versioned_master:` 守卫上——该守卫不是成因，且文件里有
   **两个**同名守卫（`:1849` 与 `:1943`）（fixture review P1-1）。spec 措辞收紧见 5.1。
 

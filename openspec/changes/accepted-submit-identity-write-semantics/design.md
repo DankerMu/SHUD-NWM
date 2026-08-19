@@ -49,7 +49,7 @@
   `status != "reservation_lost"`）**、`:630-632`（非 identity decision 携带 streak）。
 - 落盘入口**首选** `upsert_pipeline_job` 打在已存在的 versioned master 行上。**不要**用 issue #1180
   建议的 `release_identity_blocked_reservation`——它硬编码 `status="reservation_lost"`（终态坐标
-  `file_orchestration_journal.py:3030`），只能产出**合法**形状，结构上够不到 `:626`/`:630`。
+  `file_orchestration_journal.py:3035`），只能产出**合法**形状，结构上够不到 `:626`/`:630`。
 - **round-1 实测更正（原文两处前提已被证伪，机制见下「入口可达性账」）**：
   (i)「评审实测四条 raise 全部由该入口可达」**为假**——`:600-602` 在该入口上被 #1183 的
   `ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS` 冻结闸（终态坐标
@@ -81,8 +81,8 @@
 |---|---|
 | `upsert_pipeline_job` | 全覆盖冻结表（终态 `file_orchestration_journal.py:1747-1754`）抢先，`(reason, field)` 与断言相同 |
 | `reserve_pipeline_job` | clean-reservation 闸（终态 `:1810`）在调归一化（终态 `:1814`）**之前**抛 `file_journal_clean_reservation_required`；且载荷无法同时合法——带 decision 时归一化要求 `submit_outcome` 非空，而它本身是该闸的 dirty field |
-| generic `transition_pipeline_job_submit_evidence`（终态 `:2158`） | 两重独立阻断：`AcceptedSubmitTransition` 孪生守卫构造期 `ValueError`（终态 `accepted_submit_identity.py:267`/`:269`）；且 decision 白名单（终态 `file_orchestration_journal.py:313-321`，`:2185-2193` 强制）排除 `identity_mismatch_released`。**注意**：该路径**确实会归一化**（transition 后载荷经 `_validate_outgoing_record`（终态 `:6402`）送进 `normalize_accepted_submit_evidence`），杀死隔离的是**上游抢先**，不是「该路径不归一化」 |
-| typed `release_identity_blocked_reservation`（终态 `:2957`） | 硬编码 `status="reservation_lost"`（终态 `:3030`），只能产出合法形状，无法表达非法几何 |
+| generic `transition_pipeline_job_submit_evidence`（终态 `:2163`） | 两重独立阻断：`AcceptedSubmitTransition` 孪生守卫构造期 `ValueError`（终态 `accepted_submit_identity.py:267`/`:269`）；且 decision 白名单（终态 `file_orchestration_journal.py:313-321`，`:2190-2198` 强制）排除 `identity_mismatch_released`。**注意**：该路径**确实会归一化**（transition 后载荷经 `_validate_outgoing_record`（终态 `:6407`）送进 `normalize_accepted_submit_evidence`），杀死隔离的是**上游抢先**，不是「该路径不归一化」 |
+| typed `release_identity_blocked_reservation`（终态 `:2962`） | 硬编码 `status="reservation_lost"`（终态 `:3035`），只能产出合法形状，无法表达非法几何 |
 
 可复用结论：任何候选入口须**同时**满足「带 decision 的 master 载荷在此合法」与
 「无冻结表/前置闸/孪生 dataclass 守卫抢先于归一化」。
@@ -153,7 +153,7 @@ round-trip**——`file_orchestration_journal.py:7849` `row = get_pipeline_job(j
 
 reclaim 进入新 attempt 时**不**刷新 `init_state_identities`：回填 key 元组不含该字段的现状维持不变，
 并在**真实成因处**补显式注释——回填 key 元组的遗漏本身（`:1944`）与 `row` 由 `existing` 经
-`apply_accepted_submit_transition(..., begin_attempt())` 派生处（`:1905-1911`）——说明该字段有意
+`apply_accepted_submit_transition(..., begin_attempt())` 派生处（`:1907-1914`）——说明该字段有意
 不随新 attempt 刷新。**注释不挂在包住该元组的 `if not versioned_master:` 守卫上**（`:1943`；注意
 `:1849` 另有同名守卫）：该守卫不是成因（fixture review P1-1 实测单独翻转它变异存活）。
 spec 措辞从「自预约起不变」收紧为「自**首次**预约起不变，reclaim 不刷新」。
@@ -218,7 +218,7 @@ oracle 归属补全）**——四条守卫**各自单独删除**均须转红，�
 （`:1943`；注意文件里**另有一个**同名守卫在 `:1849`）**杀不死** J13/J15——被它包住的回填 key 元组
 （`:1944-1958`）根本不含 `INIT_STATE_IDENTITY_FIELD`。keep-first 的真实成因是「回填表遗漏该字段
 ＋ `row` 由 `existing` 经 `apply_accepted_submit_transition(..., begin_attempt())` 派生
-（`:1905-1911`）」，不是那个守卫。有效变异必须同时改守卫**和**回填表。
+（`:1907-1914`）」，不是那个守卫。有效变异必须同时改守卫**和**回填表。
 
 ## Disposition 记录
 

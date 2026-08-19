@@ -15,7 +15,7 @@ Batch J 合并交付三个 accepted-submit 证据完整性缺口（#1180 缺 ora
    显式 `None`/`[]` 直接抹平血统证据。改动前该字段不在可变表内会被 silent-keep，
    **per-model 覆写窗口是该修复新引入的**。
 2. **#1188 reclaim 静默丢弃重算映射**：reclaim 的新行由 `existing`（attempt #1 持久行）经
-   `apply_accepted_submit_transition(..., begin_attempt())` 派生（`:1905-1911`），而从 `request_row`
+   `apply_accepted_submit_transition(..., begin_attempt())` 派生（`:1907-1914`），而从 `request_row`
    回填的 key 元组（`:1944-1958`）**根本不含** `init_state_identities`——本次 pass 重算的映射被整体
    丢弃。（成因是**回填表遗漏该字段**，不是包住该循环的 `if not versioned_master:` 守卫：评审实测
    单独翻转该守卫变异存活。）keep-first 是该姿态的**副作用而非裁定结果**：spec 只写「值自预约起
