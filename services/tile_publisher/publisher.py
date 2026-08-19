@@ -23,6 +23,7 @@ from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
+    directory_identity_no_follow,
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
@@ -734,7 +735,24 @@ class TilePublisher:
             object_store_root=object_store_root,
         )
 
-        if copyback_root == object_store_root:
+        # Sameness is filesystem identity, not the resolved path string, so an
+        # aliased root (bind mount, second mount point of one export) cannot be
+        # mistaken for a distinct root and mirrored across (#1192).  Both
+        # operands are already resolved, which is the probe's precondition.
+        try:
+            same_root = directory_identity_no_follow(copyback_root) == directory_identity_no_follow(object_store_root)
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store staging root is unsafe for copyback.",
+                {
+                    "copyback_root": str(copyback_root_raw),
+                    "object_store_root": str(object_store_root_raw),
+                    "error": str(error),
+                },
+            ) from error
+
+        if same_root:
             self._validate_copyback_source_products(
                 unique_run_ids,
                 copyback_root=copyback_root,
@@ -872,7 +890,22 @@ class TilePublisher:
             object_store_root=object_store_root,
         )
 
-        if copyback_root == object_store_root:
+        # Identity, not the resolved path string -- see _copyback_run_products
+        # for why an aliased root must not reach the copy loop (#1192).
+        try:
+            same_root = directory_identity_no_follow(copyback_root) == directory_identity_no_follow(object_store_root)
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store staging root is unsafe for copyback.",
+                {
+                    "copyback_root": str(copyback_root_raw),
+                    "object_store_root": str(object_store_root_raw),
+                    "error": str(error),
+                },
+            ) from error
+
+        if same_root:
             return {
                 "status": "skipped",
                 "reason": "copyback_root_matches_object_store_root",

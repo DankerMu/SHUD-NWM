@@ -6,10 +6,12 @@ import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from packages.common import provider_atomic as provider_atomic_module
+from packages.common import safe_fs as safe_fs_module
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage
@@ -19,6 +21,7 @@ from packages.common.state_manager import (
     StateManagerError,
     publish_state_snapshot_index,
 )
+from services.orchestrator import run_tree_copyback as run_tree_copyback_module
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from tests.test_state_manager import _LockReleaseSeam
 
@@ -1189,3 +1192,108 @@ def test_copyback_run_trees_rejects_unsafe_run_id(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.code == "OBJECT_STORE_COPYBACK_UNSAFE_RUN_ID"
+
+
+def test_copyback_run_trees_skips_alias_root_reporting_one_filesystem_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two distinct realpaths, one inode: the same-root skip must still fire (#1192).
+
+    `extra_object_keys` carries the state-index key on purpose. Without it the
+    merge is never reached at all (run_tree_copyback.py:94-97) and "merge was
+    not called" would hold vacuously; with it, the assertion pins that the skip
+    happens *before* the merge takes the provider destination lock -- the lock
+    that self-deadlocks when an alias root passes as a second root.
+    """
+
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, run_id)
+    state_index = object_root / "scheduler" / "state-index" / "index-last.json"
+    state_index.parent.mkdir(parents=True)
+    publish_state_snapshot_index(
+        [],
+        state_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, tzinfo=UTC),
+    )
+    copyback_root.mkdir()
+    merge_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        run_tree_copyback_module,
+        "merge_state_snapshot_index_copyback",
+        lambda **kwargs: merge_calls.append(kwargs),
+    )
+    _inject_alias_identity(monkeypatch, object_root, copyback_root)
+
+    summary = _call_without_hanging(
+        lambda: copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+            extra_object_keys=["scheduler/state-index/index-last.json"],
+        )
+    )
+
+    assert summary == {
+        "status": "skipped",
+        "reason": "copyback_root_matches_object_store_root",
+        "root": str(copyback_root.resolve()),
+        "run_ids": [run_id],
+    }
+    assert merge_calls == []
+    assert list(copyback_root.iterdir()) == []
+
+
+def _inject_alias_identity(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
+    """Make `roots` report one filesystem identity through the guard's probe.
+
+    Patched on the run_tree_copyback module namespace, which is where the guard
+    resolves the name -- patching `packages.common.safe_fs` instead would leave
+    the production call point untouched. No portable, root-free construction
+    produces two concurrently existing realpaths over one inode (see the honest
+    limit in tests/test_safe_fs.py), so the alias is injected at this seam.
+    """
+
+    resolved = {root.resolve() for root in roots}
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() in resolved:
+            return (0x1192, 0x1192)
+        return real_probe(path)
+
+    monkeypatch.setattr(run_tree_copyback_module, "directory_identity_no_follow", probe)
+
+
+def _call_without_hanging(call: Any) -> Any:
+    """Run `call` on a daemon thread and fail if it has not returned in 5s.
+
+    The regression this pins is not slowness: it is `fcntl.flock` blocking
+    FOREVER (provider_atomic.py:219 takes the blocking path without LOCK_NB)
+    once an alias root is mistaken for a second root and the scoped merge locks
+    the same lockfile twice. `daemon=True` is not optional -- a non-daemon
+    thread keeps the interpreter alive at exit waiting for exactly the thread
+    that never finishes. A thread stuck here goes on holding its lockfile fd
+    for the rest of this pytest session.
+    """
+
+    outcome: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # noqa: BLE001 -- re-raised on the caller's thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5.0)
+    if thread.is_alive():
+        pytest.fail("hang regression: the same-root guard did not return within 5s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]

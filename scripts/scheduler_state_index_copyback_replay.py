@@ -46,6 +46,7 @@ from packages.common.provider_atomic import ProviderAtomicError, read_provider_s
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
+    directory_identity_no_follow,
     ensure_directory_no_follow,
     verify_directory_no_follow,
 )
@@ -763,8 +764,27 @@ def _resolved_root(value: Path | None, *, env: str, field: str) -> Path:
     return resolved
 
 
+def _root_identity(path: Path, *, field: str) -> tuple[int, int]:
+    """Filesystem identity of an already-resolved root, or the existing refusal.
+
+    A probe failure reuses ``root_unavailable`` -- the same reason
+    ``_resolved_root`` raises for an unusable root -- rather than introducing a
+    new code or degrading into a permissive pass.
+    """
+
+    try:
+        return directory_identity_no_follow(path)
+    except (OSError, SafeFilesystemError) as error:
+        raise ReplayError("root_unavailable", {"field": field, "path": str(path), "error": str(error)}) from error
+
+
 def _refuse_root_conflicts(reference: Path, destination: Path) -> None:
-    if reference == destination:
+    # Sameness is filesystem identity, not the resolved path string: bind mounts
+    # and second mount points of one export give two distinct realpaths for one
+    # directory, and letting such an alias pass here self-deadlocks on the
+    # provider destination lock (#1192).  Both operands are already resolved,
+    # which is the probe's precondition.
+    if _root_identity(reference, field="reference_root") == _root_identity(destination, field="destination_root"):
         raise ReplayError(
             "roots_identical",
             {"reference_root": str(reference), "destination_root": str(destination)},

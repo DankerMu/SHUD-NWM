@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
-from packages.common.safe_fs import SafeFilesystemError, verify_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    directory_identity_no_follow,
+    verify_directory_no_follow,
+)
 from services.tile_publisher.publisher import (
     PublishError,
     TilePublisher,
@@ -128,11 +132,12 @@ def discover_backfill_runs(session: Session) -> list[dict[str, Any]]:
 def run_backfill(config: BackfillConfig) -> dict[str, Any]:
     object_store_root_raw = _configured_path_no_resolve(config.object_store_root)
     copyback_root_raw = _configured_path_no_resolve(config.copyback_root)
-    object_store_root = _verify_object_store_root(object_store_root_raw)
+    object_store_root, object_store_identity = _verify_object_store_root(object_store_root_raw)
     _validate_copyback_root_boundary(
         copyback_root_raw=copyback_root_raw,
         object_store_root_raw=object_store_root_raw,
         object_store_root=object_store_root,
+        object_store_identity=object_store_identity,
         apply=config.apply,
     )
 
@@ -173,7 +178,23 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
             )
         except PublishError as error:
             raise _backfill_error_from_publish_error(error) from error
-        _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
+        # Wrapped so a probe failure stays a copyback-root diagnosis: a bare
+        # OSError would escape run_backfill and be caught by the CLI's generic
+        # handler as BACKFILL_FAILED, degrading the error code.
+        try:
+            copyback_identity = directory_identity_no_follow(copyback_root)
+        except (OSError, SafeFilesystemError) as error:
+            raise BackfillError(
+                "COPYBACK_ROOT_UNSAFE",
+                "NHMS_OBJECT_STORE_COPYBACK_ROOT must be a safe directory when it already exists.",
+                details={"copyback_root": str(copyback_root), "error": str(error)},
+            ) from error
+        _reject_same_copyback_root(
+            copyback_root=copyback_root,
+            object_store_root=object_store_root,
+            copyback_identity=copyback_identity,
+            object_store_identity=object_store_identity,
+        )
         target_store = LocalObjectStore(copyback_root, object_store_prefix=config.object_store_prefix)
         report["copyback_root"] = str(copyback_root)
     if not runs:
@@ -183,6 +204,7 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
         copyback_root, target_exists = _dry_run_copyback_root(
             copyback_root_raw=copyback_root_raw,
             object_store_root=object_store_root,
+            object_store_identity=object_store_identity,
         )
         if target_exists:
             target_store = LocalObjectStore(copyback_root, object_store_prefix=config.object_store_prefix)
@@ -306,9 +328,18 @@ def _with_parsed_forcing_lineage(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def _verify_object_store_root(object_store_root_raw: Path) -> Path:
+def _verify_object_store_root(object_store_root_raw: Path) -> tuple[Path, tuple[int, int]]:
+    """Verify OBJECT_STORE_ROOT and take its filesystem identity in one place.
+
+    The identity travels with the verified path so that no same-root call site
+    re-probes the object-store side: a probe failure there must be diagnosed as
+    ``OBJECT_STORE_ROOT_UNSAFE`` naming the object-store root, never as a
+    copyback-root failure naming the wrong root (#1192).
+    """
+
     try:
-        return verify_directory_no_follow(object_store_root_raw).resolve()
+        object_store_root = verify_directory_no_follow(object_store_root_raw).resolve()
+        return object_store_root, directory_identity_no_follow(object_store_root)
     except (OSError, SafeFilesystemError) as error:
         raise BackfillError(
             "OBJECT_STORE_ROOT_UNSAFE",
@@ -322,12 +353,14 @@ def _validate_copyback_root_boundary(
     copyback_root_raw: Path,
     object_store_root_raw: Path,
     object_store_root: Path,
+    object_store_identity: tuple[int, int],
     apply: bool,
 ) -> None:
     _reject_existing_same_copyback_root(
         copyback_root_raw=copyback_root_raw,
         object_store_root_raw=object_store_root_raw,
         object_store_root=object_store_root,
+        object_store_identity=object_store_identity,
     )
     if _paths_overlap(copyback_root_raw, object_store_root_raw) and copyback_root_raw != object_store_root_raw:
         raise BackfillError(
@@ -354,22 +387,40 @@ def _reject_existing_same_copyback_root(
     copyback_root_raw: Path,
     object_store_root_raw: Path,
     object_store_root: Path,
+    object_store_identity: tuple[int, int],
 ) -> None:
     if copyback_root_raw == object_store_root_raw:
-        _reject_same_copyback_root(copyback_root=object_store_root, object_store_root=object_store_root)
+        # Both configured strings are equal and this runs before resolution, so
+        # there is nothing to probe: the object-store identity stands for both.
+        _reject_same_copyback_root(
+            copyback_root=object_store_root,
+            object_store_root=object_store_root,
+            copyback_identity=object_store_identity,
+            object_store_identity=object_store_identity,
+        )
     try:
         copyback_root = verify_directory_no_follow(copyback_root_raw).resolve()
+        # Inside the existing try on purpose: this pre-check returns silently
+        # when the copyback root is absent or unreadable, and the probe must
+        # keep that lenient posture rather than escaping the pre-check.
+        copyback_identity = directory_identity_no_follow(copyback_root)
     except FileNotFoundError:
         return
     except (OSError, SafeFilesystemError):
         return
-    _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
+    _reject_same_copyback_root(
+        copyback_root=copyback_root,
+        object_store_root=object_store_root,
+        copyback_identity=copyback_identity,
+        object_store_identity=object_store_identity,
+    )
 
 
 def _dry_run_copyback_root(
     *,
     copyback_root_raw: Path,
     object_store_root: Path,
+    object_store_identity: tuple[int, int],
 ) -> tuple[Path, bool]:
     try:
         copyback_root = verify_directory_no_follow(copyback_root_raw).resolve()
@@ -381,7 +432,23 @@ def _dry_run_copyback_root(
             "NHMS_OBJECT_STORE_COPYBACK_ROOT must be a safe directory when it already exists.",
             details={"copyback_root": str(copyback_root_raw), "error": str(error)},
         ) from error
-    _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
+    # A separate try: the root was just verified to exist, so any probe failure
+    # here -- FileNotFoundError included -- is a real fault and keeps this
+    # path's strict posture instead of degrading into "target absent".
+    try:
+        copyback_identity = directory_identity_no_follow(copyback_root)
+    except (OSError, SafeFilesystemError) as error:
+        raise BackfillError(
+            "COPYBACK_ROOT_UNSAFE",
+            "NHMS_OBJECT_STORE_COPYBACK_ROOT must be a safe directory when it already exists.",
+            details={"copyback_root": str(copyback_root_raw), "error": str(error)},
+        ) from error
+    _reject_same_copyback_root(
+        copyback_root=copyback_root,
+        object_store_root=object_store_root,
+        copyback_identity=copyback_identity,
+        object_store_identity=object_store_identity,
+    )
     if _paths_overlap(copyback_root, object_store_root) and copyback_root != object_store_root:
         raise BackfillError(
             "COPYBACK_ROOT_OVERLAP",
@@ -394,8 +461,22 @@ def _dry_run_copyback_root(
     return copyback_root, True
 
 
-def _reject_same_copyback_root(*, copyback_root: Path, object_store_root: Path) -> None:
-    if copyback_root != object_store_root:
+def _reject_same_copyback_root(
+    *,
+    copyback_root: Path,
+    object_store_root: Path,
+    copyback_identity: tuple[int, int],
+    object_store_identity: tuple[int, int],
+) -> None:
+    """Refuse a copyback root that IS the object-store root.
+
+    Sameness is filesystem identity, not the resolved path string, so an
+    aliased root cannot be mistaken for a distinct root and copied across
+    (#1192).  Identities are computed by the caller: each call site owns its
+    probe and its failure posture explicitly.
+    """
+
+    if copyback_identity != object_store_identity:
         return
     raise BackfillError(
         "COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT",

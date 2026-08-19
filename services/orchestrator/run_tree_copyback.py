@@ -11,7 +11,12 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from packages.common.provider_atomic import ProviderAtomicError
-from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow, rmtree_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    directory_identity_no_follow,
+    ensure_directory_no_follow,
+    rmtree_no_follow,
+)
 from packages.common.state_manager import StateManagerError, merge_state_snapshot_index_copyback
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -43,7 +48,12 @@ def copyback_run_trees(
     object_root = _existing_directory(Path(object_store_root), "object_store_root")
     target_root = ensure_directory_no_follow(Path(copyback_root)).resolve()
 
-    if object_root == target_root:
+    # Sameness is filesystem identity, not the resolved path string: an aliased
+    # root (bind mount, second mount point of one export) resolves to a
+    # different string but is the same directory, and passing it through would
+    # self-deadlock on the provider destination lock during the state-index
+    # merge below (#1192).  Both operands are already resolved.
+    if _directory_identity(object_root, "object_store_root") == _directory_identity(target_root, "copyback_root"):
         for run_id in unique_run_ids:
             _validate_run_tree(object_root / _run_key(run_id), run_id=run_id)
         return {
@@ -184,6 +194,19 @@ def _existing_directory(path: Path, field: str) -> Path:
             raise FileNotFoundError(str(resolved))
         _reject_symlink_ancestors(resolved)
         return resolved
+    except (OSError, SafeFilesystemError) as error:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE",
+            "Object-store root is unavailable for run-tree copyback.",
+            {field: str(path), "error": str(error)},
+        ) from error
+
+
+def _directory_identity(path: Path, field: str) -> tuple[int, int]:
+    """Filesystem identity of an already-resolved root, or the existing refusal."""
+
+    try:
+        return directory_identity_no_follow(path)
     except (OSError, SafeFilesystemError) as error:
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE",

@@ -48,6 +48,13 @@
     "services/orchestrator/chain_runtime_utils.py",
     "services/orchestrator/scheduler_candidate_execution_evidence.py",
     "services/production_closure/readiness_scheduler_evidence.py",
+    "scripts/select_ci_tests.py",
+    "services/tile_publisher/publisher.py",
+    "tests/test_forcing_copyback_backfill.py",
+    "tests/test_run_tree_copyback.py",
+    "tests/test_scheduler_state_index_copyback_replay.py",
+    "tests/test_select_ci_tests.py",
+    "tests/test_tile_publisher.py",
     ".review-gate-issues.json"
   ]
 }
