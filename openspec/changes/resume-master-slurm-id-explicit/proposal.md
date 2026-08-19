@@ -93,7 +93,12 @@ defer（`identity_mismatch_blocked` / `SLURM_MASTER_IDENTITY_MISMATCH`）：
   的 docstring（"resume defer 分支使 sticky 行永不触达"）随本修复失效，
   **必须同步改写**（断言本身不动仍绿——`_permanently_failed_events` 只数
   `permanently_failed` 事件，投影发的是 status_change）。
-- resume 非终态支（poll 路径）取值与行为逐字不变。
+- resume 非终态支（poll 路径）取值**结果**与行为不变；取值**源**已与
+  终态支统一为显式绑定入参（`str(job["slurm_job_id"])`）。二者等价的依据：
+  `get_job_status` 恒回显入参 id（`real_backend.py:1457` 以请求 id 构造
+  记录，mock/fake 同理），故旧嗅探在该支取到的 `terminal["job_id"]` 与
+  绑定值恒相等，journal `:3011` 的比较在该支 pre/post 均为恒等式，无判别
+  力损失（verifier 四格探针实证）。
 - journal projector 与 defer 语义零改动（`tests/test_file_orchestration_journal.py`
   全绿）。
 - 非 cohort stage 的 override 路径行为不变。

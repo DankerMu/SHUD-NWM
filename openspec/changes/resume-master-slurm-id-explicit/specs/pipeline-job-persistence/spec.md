@@ -12,7 +12,10 @@ pipeline job id, and sniffing it fed the identity-mismatch guard a value
 that can never equal the stored Slurm id: every already-terminal
 resume-path projection was silently skipped (an idempotent no-op) or
 mis-recorded as an identity-pollution event (the non-terminal resume
-sub-path polls first and was already correct). An empty or non-numeric
+sub-path polls first and already produced the correct value — the poll
+echoes the requested id back, so the sniffed value equalled the bound id;
+the fix unifies that sub-path onto the same explicit bound argument with
+identical results). An empty or non-numeric
 supplied identity on the projection path SHALL fail closed with a
 distinct, attributable error instead of degrading into an
 unattributable failure. The identity-mismatch guard itself is
