@@ -52,9 +52,10 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
 
 ## D1: attempt-floor 载带（核心不变量，v2）
 
-**不变量：截断不得改变 attempt 推导的结果——对每个 canonical downstream stage，
-`_state_retry_attempt(state, stage=S)` 在截断后投影上的返回值 == 在未截断输入上的返回值。
-保护数值上界，不动行群体。**
+**不变量：截断不得改变 attempt 推导的 stage 行扫描分量——对每个 canonical downstream
+stage，floors 载带使 stage-scoped 行扫描 max 在截断前后一致。保护数值上界，不动行群体。**
+（措辞按 D1.7 收窄：flat `retry_count` 分量窗口敏感是既有面（#1579），
+`_state_retry_attempt` 整体返回值的绝对"截断不变等式"不成立，不得回写为绝对等式。）
 
 实现：
 
