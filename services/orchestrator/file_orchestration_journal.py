@@ -1784,6 +1784,10 @@ class FileOrchestrationJournalRepository:
                 "started_at": None,
                 "finished_at": None,
                 "exit_code": None,
+                # A null ``error_code`` here is the auto-retry isolation contract:
+                # a released reservation inherits it, so ``classify_failure`` reads
+                # UNKNOWN_FAILURE and never re-submits (spec:
+                # candidate-projection-stage-attempt-retention).
                 "error_code": None,
                 "error_message": None,
                 "log_uri": None,
@@ -1909,6 +1913,10 @@ class FileOrchestrationJournalRepository:
                     "started_at": None,
                     "finished_at": None,
                     "exit_code": None,
+                    # Same auto-retry isolation contract as the reservation write
+                    # above: a reclaimed reservation that is later released must
+                    # still classify as non-retriable (spec:
+                    # candidate-projection-stage-attempt-retention).
                     "error_code": None,
                     "error_message": None,
                     "cancellation_receipt_recorded": False,
@@ -2805,6 +2813,14 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
+            # This write produces ``absence_retry_permitted``, one of the reclaim doors
+            # the auto-retry isolation contract explicitly EXCLUDES: the row is meant to
+            # be retried (``_verified_accepted_submit_forecast_retry`` and
+            # ``reclaim_pipeline_job_reservation``'s precondition both key off this
+            # shape).  The null ``error_code`` here is only the fact that the transition
+            # introduces no new code; the isolation contract's subject is the
+            # ``identity_mismatch_released`` sub-shape below (spec:
+            # candidate-projection-stage-attempt-retention).
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
@@ -2955,6 +2971,10 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
+            # Released rows stay outside automatic retry BECAUSE this transition adds no
+            # ``error_code``: stamping a transient one here (SLURM_RESERVATION_LOST is on
+            # the transient list) would turn every release into an automatic duplicate
+            # submission (spec: candidate-projection-stage-attempt-retention).
             row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(

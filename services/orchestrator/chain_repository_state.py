@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
+from services.orchestrator.scheduler_state_rows import (
+    STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+    STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    stage_retry_attempt_floors,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
@@ -677,6 +682,15 @@ def candidate_state_from_rows(
             reverse=True,
         )
     ]
+    # Built BEFORE the truncation, over every row that passed the terminal
+    # filter: the row carrying a stage's maximum attempt may be older than
+    # ``job_limit`` fresher rows of other stages, and dropping it used to make
+    # the stage-scoped derivation read 0 (#1179).  The floors travel; the row
+    # selection below stays pure freshness, so no key derived from the row
+    # population moves.  The rows are cycle-wide and unfiltered here, so each
+    # floor also records the identity of the rows it came from: candidate-scope
+    # filtering narrows the floors with the rows it deletes.
+    retry_attempt_floors, retry_attempt_floor_sources = stage_retry_attempt_floors(jobs)
     jobs = sorted(
         jobs[:job_limit],
         key=lambda job: (
@@ -832,6 +846,8 @@ def candidate_state_from_rows(
         "forecast_cycle": forecast_cycle,
         "nfs_raw_manifest": dict(nfs_raw_manifest) if isinstance(nfs_raw_manifest, Mapping) else None,
         "pipeline_jobs": jobs,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY: retry_attempt_floors,
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY: retry_attempt_floor_sources,
         "pipeline_events": events,
         "pipeline_status": pipeline_status,
         "stage": (

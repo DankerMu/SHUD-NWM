@@ -24,6 +24,7 @@ from services.orchestrator.scheduler_state import (
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
     _call_candidate_state_provider,
+    _candidate_authoritative_stage_retry_attempt_floor_state,
     _candidate_canonical_product_id,
     _candidate_repaired_state_audit_evidence,
     _candidate_state_decision,
@@ -2219,9 +2220,21 @@ def _strict_warm_start_terminal_mismatch_decision(
     the candidate lands in the blocked list instead of the submission set, and it
     is deliberately absent from both force-resubmit whitelists (they match the
     decision string literally), so no replacement submission can revive it.
+
+    This is the one budget read that takes the RAW projected state rather than
+    the identity-filtered decision state (that one is a local of
+    ``_candidate_state_decision_evaluated`` and does not flow back here), so the
+    carried attempt floors (#1179) get the same candidate-authority narrowing
+    applied here, at the read.  Only the floor narrowing: running the whole
+    ``_candidate_state_decision_state`` would ALSO take the shared-cycle
+    aggregate arm, whose strip erases the floors of a candidate with no surviving
+    own row -- exactly the wedge geometry this budget exists to bind (#1173 E5).
     """
 
-    state = raw_candidate_state if isinstance(raw_candidate_state, Mapping) else {}
+    state = _candidate_authoritative_stage_retry_attempt_floor_state(
+        raw_candidate_state if isinstance(raw_candidate_state, Mapping) else {},
+        terminal_evidence,
+    )
     attempt = _state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
     retry_limit = _state_retry_limit(state)
     if retry_limit is not None and attempt >= retry_limit:
