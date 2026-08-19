@@ -104,16 +104,17 @@
   变更）。Repair intensity: low。
 - Risk packs: state-semantics selected（#1405 删除判据真值表：canonical 可
   解析 → 原三层裁决不变；不可解析 → 保留。B 类翻转方向 = fail-safe，
-  A 类修正方向 = 取对 cycle；cohort 回收不变）；test-evidence selected
-  （对抗性 run_id 四元组红证：A 类、B 类、尾部误报、cohort 仍可回收；
+  A 类修正方向 = 取对 cycle；cohort/analysis 回收不变）；test-evidence
+  selected（对抗性 run_id 红证族：A 类、B 类、非法日期、大小写、尾部误报、
+  cohort/analysis 仍可回收；
   #1503 两个 reason 的 evidence_dir 断言；#1395 删除后残留 grep）；其余
   not selected。
 
 ## Must preserve
 
-- #1405：合法 forecast/cohort run_id 的回收行为逐字不变（cutoff、frontier
-  豁免、within_retention_window 三层裁决顺序不动）；journal 内 4 个正则
-  用点行为不变。
+- #1405：合法 forecast/cohort（含尾段）/analysis run_id 的回收行为逐字不变
+  （cutoff、frontier 豁免、within_retention_window 三层裁决顺序不动）；
+  journal 内 6 行/7 处正则引用行为不变。
 - #1503：blocker 既有三键不动；fail-closed/dry-run 强制不动；
   `tests/test_cli_cleanup_frontier.py` 既有断言零改动全绿。
 - #1395：`DEFAULT_RETENTION_WINDOW_DAYS` identity+值双钉
@@ -130,7 +131,7 @@
 
 ## Evidence mapping
 
-- #1405 验收（判据收敛+四元组红证+cohort 不变）→ tasks 2.1/2.2。
+- #1405 验收（判据收敛+红证族+cohort/analysis 不变）→ tasks 2.1/2.2。
 - #1503 验收（两 reason 的 evidence_dir + ok 路径 + 形状合法）→ tasks 2.3。
 - #1395 验收（残留 grep 清单 + 保留面三锁）→ tasks 2.4 + 3.2。
 - Verification：`uv run pytest -q tests/test_retention.py
