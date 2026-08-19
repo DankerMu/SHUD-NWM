@@ -43,9 +43,10 @@
       `record_cycle_stage_status_override` 单测，两腿）
 - [x] 2.4 兄弟腿不回归：submit/poll 腿传真实 Slurm id 的行为锁（若既有
       测试已覆盖投影入参则引用之；否则补一条 spy 断言）
-- [ ] 2.5 follow-up 立案（实现期间 issue-scribe）：终态 master 行
+- [x] 2.5 follow-up 立案（实现期间 issue-scribe）：终态 master 行
       `error_code` 无 #1312 粘性——重投影字段不一致时可被新鲜聚合覆写
       （如 OUT_OF_MEMORY→SLURM_ARRAY_TASK_FAILED），链接记入 PR
+      ——已立 #1589（CONFIRMED @master 8a26fe6e，dedup 无命中，p2/合入后升 p1）
 
 ## 3. Verification
 
