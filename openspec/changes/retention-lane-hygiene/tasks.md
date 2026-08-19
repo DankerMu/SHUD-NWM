@@ -66,7 +66,7 @@
       原样存在、`scripts/node27_timeseries_retention.py:74` import 未改
 - [x] 3.3 uv run ruff check .
 - [x] 3.4 openspec validate retention-lane-hygiene --strict --no-interactive
-- [ ] 3.5 PR body 回链 #1233 两条评论（issuecomment-5154539095 /
+- [x] 3.5 PR body 回链 #1233 两条评论（PR #1585）（issuecomment-5154539095 /
       issuecomment-5300567380）
 - [ ] 3.6 merge 后 node-27 receipt（3.1 六套件；全量红按 #1513 已知例外
       口径核对）分别记 #1395/#1405/#1503
