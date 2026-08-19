@@ -9,7 +9,14 @@
 - fixture 级别：expanded（P1 + 双通道判别 + 消费者审计面）。
 - must-preserve：
   1. 新鲜 marker 的精确 attempt 身份（`test_manual_retry_terminal_stage_submits_new_attempt_identity`
-     ——scheduler 判定 fresh 时 chain 必须瞄准指定 `retry_<N>`）。
+     ——scheduler 判定 fresh 时 chain 必须瞄准指定 `retry_<N>`）。**限定**：仅当该
+     manual-retry 决策面活到 manifest 铸造点。更高优先的**在途 evidence 变换**
+     （典型：strict warm start 的 `_upgrade_retry_for_strict_warm_start_manifest`
+     以 `**dict(retry_evidence)` 重写 `decision`/`reason`、marker 块逐字保留）抢占该
+     决策面后，claim 按"无活跃决策"处置——不铸两键、留丢弃记录、attempt 降级为该
+     lane 自身派生（该 decision 在 force 集合内，仍真实提交）。这是有意行为（markerless
+     等价优先于 pin），非缺陷；残余的是审计面不一致（evidence 仍带
+     `retry_policy.attempt=N`），由 E11 钉住现状。
   2. **运维/API 当次显式传入**的 `basin.retry_attempt`/`manual_retry_attempt` 语义
      不变；但 **scheduler manifest 从持久 marker 铸出的同名字段**必须在铸造点受判
      （P0 修正：两者是不同来源的同名字段，纪律打在铸造点而非消费点）。
@@ -26,10 +33,19 @@
      `_manual_retry_scoped_cycle_execution` 仍 True 而真 markerless 为 False——生产
      无差异因单 basin 候选恒带 `orchestration_run_id`；孪生几何应带该键贴生产形状）。
      实现者不得为拉平等价面去 gate scoping 谓词的 evidence 臂（撞 D3 边界）。
-     wedge 的正确出口佐证（re-check 复核）：未耗尽行经 resume 失败结果进
+     wedge 的正确出口佐证（round-1 更正机理）：未耗尽行经 resume 失败结果进
      `_schedule_cycle_stage_retry` 自动重试 lane；已耗尽行的正门是运维再发一次
-     manual retry——此时 decision 落 `manual_retry` 且 `_manual_retry_state_evidence`
-     的字面量顺序使**计算值覆盖 raw echo 的 `new_attempt`**，新钉值不被旧值污染。
+     manual retry——新发一次会**新增一条 marker event**，`_manual_retry_payload`
+     从最新一条已采纳 marker event 重算 payload（`reversed(_state_events)` 扫到即
+     `break`），`new_attempt` 取该新事件的 `retry_count`（过 `_marker_event_pins_attempt`）
+     或 `_fallback_previous_attempt(...) + 1`。**保护来自 payload 被重新派生，不是
+     evidence 的字面量顺序**：`_manual_retry_new_attempt` 第一件事就是返回 payload
+     自带的 `new_attempt`（`scheduler_state_manual_retry.py:996-1004`），所以"计算值
+     覆盖 raw echo"的说法为假。生产 state provider（`chain_repository_state.
+     candidate_state_from_rows`）不产出 state 级 `state["manual_retry"]` mapping，
+     marker 恒为 event 派生，故 `dict(marker)` + `setdefault` 不会遮蔽新事件；测试
+     fixture 用的 state 级 mapping 形状则会（该形状下旧值原样再铸，正是 E7/E10 钉的
+     判别器输入，不是出口佐证）。
 - oracle：本地 pytest。issue AC-6 的 node-22 live 复跑取"说明不可得"分支：纯内存编排
   逻辑，node-22 是 Slurm 行为 oracle，本家族 oracle 为本地 pytest；P0 暴露的真实缺口
   是 **scheduler→chain 接缝**，以 seam 腿（E9）闭合，无需 node-22。
@@ -90,8 +106,23 @@ job 集合（`chain_runtime_utils.py:97` / `chain_forecast_cycle.py:479-489`）�
 与 attempt 派生无关；但 (a) job id 以 run_id 命名空间化（`chain.py:864-871` 前缀过
 滤），跨 run 的 job 混入不改变本 stage 前缀 max；(b) 生产单 basin 候选恒带
 `orchestration_run_id`（`scheduler_execution.py:352`，cohort run id 跨 pass 确定），
-该谓词在生产上不是 scoping 的决定项。陈旧 marker 在此的残余效应是 fail-open 的作用
-域放宽，无 attempt 铸造、无自锁。E6 钉住"scoped 谓词选择的 job 集合与 fall-through
+该谓词**在这个消费者上**不是 scoping 的决定项。陈旧 marker 在此的残余效应是 fail-open
+的作用域放宽，无 attempt 铸造、无自锁。
+
+**该谓词有第二个消费者**（round-1 更正，原文口径过窄）：
+`_replacement_retry_scoped_cycle_execution` 首行短路（`chain_runtime_utils.py:186-188`），
+其返回值喂 `_active_orchestration_conflicts`——True 时活着的 unsubmitted-retry
+placeholder 不再阻塞，且直接判"无冲突"而不再问 `has_active_pipeline`。这条臂上
+(b) 的论证**不成立**：`orchestration_run_id` 摆不平它，带 marker 的候选可以穿过
+markerless 孪生会被拦住的重复编排冲突门。该分叉是**既有行为**（修前经铸出的 direct
+字段进同一臂、修后经 evidence 臂，前后同 True，must-preserve 4 未破），因此它不在
+must-preserve 6 的三项等价面内——这也是等价句必须限定到三项面、不能写成"落在
+markerless 孪生的同一处"的原因。同源的还有 scheduler 侧
+`scheduler_state_decision._candidate_state_is_candidate_scoped_retry`（读同一
+`marker`/`requested`/`allowed` 三元组放宽候选准入，同样未 gate，pre-existing、
+fail-open 无 wedge）；全仓再无第三个未判别 marker 读者。
+
+E6 钉住"scoped 谓词选择的 job 集合与 fall-through
 派生的耦合"（陈旧 marker 存在时 `_next_retry_attempt_for_stage` 输入集合的行为现状），
 另加注释挂账。mint-gate 对 scoping 中性依赖 D3 现状保持：两键不铸后
 `_manual_retry_scoped_cycle_execution` 仍从 evidence 分支（`marker`/`requested`/

@@ -157,13 +157,24 @@ def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) ->
     """Whether a single-basin marker widens execution scope to that candidate.
 
     Deliberately NOT gated by the #1201 manual-retry claim judgement, even though it
-    reads the same marker.  It mints no attempt: it only helps choose (via
-    ``_candidate_scoped_cycle_execution``) the job set fed to
-    ``_next_retry_attempt_for_stage``, and (a) job ids are run-id-namespaced, so jobs
-    from another run never change this stage's prefix max, and (b) a production
-    single-basin candidate always carries ``orchestration_run_id``, which decides the
-    scope on its own — leaving the marker arm a fail-open widening with no wedge.
-    After the minting gate a judged-inactive claim still reaches this arm through
+    reads the same marker.  It mints no attempt, and it has TWO consumers:
+
+    - ``_candidate_scoped_cycle_execution``, which helps choose the job set fed to
+      ``_next_retry_attempt_for_stage``.  Harmless: (a) job ids are run-id-namespaced,
+      so jobs from another run never change this stage's prefix max, and (b) a
+      production single-basin candidate always carries ``orchestration_run_id``, which
+      reaches the same answer there anyway.
+    - ``_replacement_retry_scoped_cycle_execution``, whose first line short-circuits on
+      this predicate and whose result feeds ``_active_orchestration_conflicts``.  Here
+      (b) does NOT hold — ``orchestration_run_id`` does not settle that arm — so a
+      marker-carrying candidate can clear a duplicate-orchestration conflict gate at
+      which its markerless twin is held.  Pre-existing and unchanged by #1201 (before
+      the minting gate the minted direct field opened this arm; after it, the evidence
+      arm does), which is why the markerless equivalence #1201 claims is scoped to the
+      resubmit-vs-resume decision, the derived attempt and whether anything submits.
+
+    Both arms are fail-open widenings with no wedge.  After the minting gate a
+    judged-inactive claim still reaches this predicate through
     ``marker``/``requested``/``allowed``; that residual coupling is pinned by test,
     not repaired here (#1201 design D3).
     """

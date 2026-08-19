@@ -5,6 +5,7 @@ import dataclasses
 import importlib
 import inspect
 import json
+import logging
 import shlex
 import subprocess
 import sys
@@ -12369,7 +12370,10 @@ def test_wedged_marker_claim_forced_resubmit_targets_next_free_attempt(tmp_path:
     assert repository.jobs[f"{_MARKER_BASE_JOB_ID}_retry_2"]["slurm_job_id"] == "2001"
 
 
-def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(tmp_path: Path) -> None:
+def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """E1(b): a dropped claim leaves the candidate exactly where a markerless one stands.
 
     Outside the forced-resubmit set a terminal failed row is resumed — that is the
@@ -12377,30 +12381,50 @@ def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(tmp_path:
     equivalence face is deliberately three-valued: resubmit-vs-resume, the derived
     attempt, and whether anything was actually submitted.  The cycle-scoping predicate
     is NOT on that face (design D3): it still reads the marker and still returns True
-    here, which production never notices because ``orchestration_run_id`` decides
-    scoping on its own.
+    here.  Through ``_candidate_scoped_cycle_execution`` that is invisible in
+    production, because ``orchestration_run_id`` reaches the same answer; through
+    ``_replacement_retry_scoped_cycle_execution`` it is not, since that arm feeds
+    ``_active_orchestration_conflicts`` and a marker-carrying candidate can clear a
+    duplicate-orchestration gate its markerless twin is held at.  This fixture has no
+    active pipeline, so the two legs stay equal here — but that asymmetry is exactly
+    why the equivalence face is three-valued rather than universal.
+
+    This geometry is also what pins the drop record's wording (AC-4): nothing falls
+    through to a next free attempt here — nothing is submitted at all — so the record
+    may only state what the emitting site knows.
     """
 
     outcomes: dict[str, tuple[str, str, list[str]]] = {}
-    for label, claim in (("marker", 1), ("markerless", None)):
-        _store, repository = _wedged_marker_repository()
-        client = FakeCycleSlurmClient()
-        orchestrator = _orchestrator(tmp_path / label, repository, client)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        for label, claim in (("marker", 1), ("markerless", None)):
+            _store, repository = _wedged_marker_repository()
+            client = FakeCycleSlurmClient()
+            orchestrator = _orchestrator(tmp_path / label, repository, client)
 
-        result = orchestrator.orchestrate_cycle(
-            "gfs", "2026050100", _marker_claim_basins(decision="retry_transient_failure", claim=claim)
-        )
+            result = orchestrator.orchestrate_cycle(
+                "gfs", "2026050100", _marker_claim_basins(decision="retry_transient_failure", claim=claim)
+            )
 
-        forecast = result.stages[0]
-        outcomes[label] = (
-            forecast.status,
-            forecast.pipeline_job_id,
-            [submission["stage"] for submission in client.submissions],
-        )
+            forecast = result.stages[0]
+            outcomes[label] = (
+                forecast.status,
+                forecast.pipeline_job_id,
+                [submission["stage"] for submission in client.submissions],
+            )
 
     # Resumed the existing terminal row, derived no new attempt, submitted nothing.
     assert outcomes["marker"] == ("failed", f"{_MARKER_BASE_JOB_ID}_retry_1", [])
     assert outcomes["marker"] == outcomes["markerless"]
+
+    records = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    assert records, "the marker leg must leave a drop record"
+    message = records[0].getMessage()
+    assert "the marker-claimed attempt is not used" in message
+    assert "attempt targeting falls back to this decision lane's own derivation" in message
+    # The record must not promise a fall-through the resume path never performs: this
+    # leg submitted nothing, and the emitting site cannot know resubmit-vs-resume.
+    assert "falling through" not in message
 
 
 def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(tmp_path: Path) -> None:
@@ -12522,8 +12546,6 @@ def test_dropped_manual_retry_claim_is_logged_with_the_decision_actually_present
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """E5 (AC-4): the drop leaves queryable evidence instead of a silent downgrade."""
-
-    import logging
 
     basins = [
         {

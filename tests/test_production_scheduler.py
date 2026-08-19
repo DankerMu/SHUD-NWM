@@ -10128,6 +10128,84 @@ def test_completed_stage_resume_lane_marker_echo_is_dropped_without_calling_it_s
     assert "reason=resume_after_completed_stage" in message
 
 
+def test_manual_retry_claim_superseded_by_strict_warm_start_upgrade_degrades_to_derived_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1201 E11 — a FRESH manual-retry decision rewritten in flight loses its pin, by design.
+
+    ``_upgrade_retry_for_strict_warm_start_manifest`` applies to any surviving
+    ``action == "retry"`` decision, including the manual-retry lane, and
+    ``_strict_warm_start_retry_run_manifest_evidence`` spreads ``**dict(retry_evidence)``
+    while overwriting BOTH ``decision`` and ``reason`` — so a live operator claim can
+    reach the minting point under a decision face that is no longer manual retry.
+
+    The intended answer, pinned here, is that the claim is then treated as one with no
+    active decision: nothing is minted and the stage targets the superseding lane's own
+    derived attempt (that decision is in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``, so it
+    still submits).  Markerless equivalence outranks the attempt pin; design D0
+    must-preserve 1 is limited accordingly.
+
+    Audit-face residue, asserted so it is visible rather than assumed away: the evidence
+    still carries ``retry_policy.attempt`` and ``manual_retry.new_attempt`` = 4 while the
+    submitted suffix will be derived.  ``retry_policy`` has no non-test consumer outside
+    the evidence builders, so this is an audit inconsistency, not an operational one.
+    """
+
+    fresh_evidence: dict[str, Any] = {
+        "decision": "manual_retry",
+        "reason": "manual_retry_requested",
+        "restart_stage": "forecast",
+        "manual_retry": {
+            "marker": True,
+            "requested": True,
+            "allowed": True,
+            "previous_attempt": 3,
+            "new_attempt": 4,
+        },
+        "retry_policy": {"attempt": 4},
+        "run_manifest_initial_state": {"state_id": None, "quality": "cold_start_no_state"},
+    }
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_quality": "fresh",
+            "init_state_valid_time": "2026-05-21T00:00:00Z",
+        },
+    }
+
+    base = _scheduler_candidate_fixture()
+    fresh = scheduler_module._candidate_with_state_evidence(base, copy.deepcopy(fresh_evidence))
+    assert scheduler_module._candidate_manual_retry_attempt(fresh) == 4
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        CandidateStateDecision(action="retry", reason="manual_retry_requested", evidence=fresh_evidence),
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["reason"] == "strict_warm_start_retry_run_manifest_mismatch"
+    # The marker block and the recorded attempt survive the rewrite verbatim.
+    assert upgraded.evidence["manual_retry"]["new_attempt"] == 4
+    assert upgraded.evidence["manual_retry"]["allowed"] is True
+    assert upgraded.evidence["retry_policy"]["attempt"] == 4
+
+    superseded = scheduler_module._candidate_with_state_evidence(base, upgraded.evidence)
+    assert scheduler_module._candidate_manual_retry_attempt(superseded) is None
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        manifest = scheduler_module._candidate_basin_manifest(superseded, output_uri="s3://nhms/out/")
+
+    assert "retry_attempt" not in manifest
+    assert "manual_retry_attempt" not in manifest
+    (record,) = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    message = record.getMessage()
+    assert "claimed_attempt=4" in message
+    assert "decision=retry_strict_warm_start_retry_run_manifest_mismatch" in message
+
+
 def test_terminal_pipeline_success_overrides_stale_created_hydro_placeholder() -> None:
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()
