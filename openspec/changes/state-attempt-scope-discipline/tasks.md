@@ -75,9 +75,9 @@
 
 ## 3. Verification & Delivery
 
-- [ ] 3.1 命令全绿:
+- [x] 3.1 命令全绿:
       `uv run pytest -q tests/test_production_scheduler.py -k "fallback_floor or non_canonical or restarted_stage_family or state_retry_attempt or cohort_stage or cycle_scope or live_failure or synthesized"`
       · 四套件全量 · `uv run ruff check .` ·
       `openspec validate state-attempt-scope-discipline --strict --no-interactive`
-- [ ] 3.2 偏离记录 + spec 挂账销账确认（三处 "tracked as #129x" 全部消失）写入 PR body；
+- [x] 3.2 偏离记录 + spec 挂账销账确认（三处 "tracked as #129x" 全部消失）写入 PR body；
       PR `Closes #1298, closes #1299, closes #1300`
