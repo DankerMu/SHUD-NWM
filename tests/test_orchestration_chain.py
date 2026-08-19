@@ -5,6 +5,7 @@ import dataclasses
 import importlib
 import inspect
 import json
+import logging
 import shlex
 import subprocess
 import sys
@@ -12275,6 +12276,408 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     assert (
         client.submissions[0]["manifest"]["comment"]
         == "nhms_idem:cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
+    )
+
+
+# --- #1201: a manual-retry attempt claim needs an ACTIVE manual-retry decision ---
+#
+# Production shape (IFS/2026070512 hhe forecast): the candidate's persisted
+# ``manual_retry`` marker is echoed into every decision's ``state_evidence`` by the
+# evidence-owner face, so a claim of ``new_attempt`` 1 survived long after the
+# manual retry it described.  The chain read it into ``context.retry_attempt``, which
+# pinned the target job id to ``<stage>_retry_1`` — already occupied by a terminal row
+# bound to a Slurm job, which the reclaim predicate correctly refuses to take over.
+# Every pass then lost the reservation and skipped submission: the stage wedged.
+
+_MARKER_RUN_ID = "cycle_gfs_2026050100_forecast_model_0"
+_MARKER_BASE_JOB_ID = "job_cycle_gfs_2026050100_forecast_model_0_forecast"
+
+
+def _wedged_marker_repository() -> tuple[PipelineStore, StoreBackedCycleRepository]:
+    """Terminal, Slurm-bound rows on BOTH ``_forecast`` and ``_forecast_retry_1``."""
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    for job_id, slurm_job_id, idempotency_key in (
+        (_MARKER_BASE_JOB_ID, "6051", f"{_MARKER_RUN_ID}:forecast"),
+        (f"{_MARKER_BASE_JOB_ID}_retry_1", "6052", f"{_MARKER_RUN_ID}:forecast:retry_1"),
+    ):
+        job = store.create_job(
+            job_id=job_id,
+            run_id=_MARKER_RUN_ID,
+            cycle_id="gfs_2026050100",
+            job_type="run_shud_forecast_array",
+            slurm_job_id=slurm_job_id,
+            model_id="model_0",
+            stage="forecast",
+            status="failed",
+            idempotency_key=idempotency_key,
+        )
+        job.error_code = "SLURM_JOB_FAILED"
+        store.session.add(job)
+    store.session.commit()
+    return store, repository
+
+
+def _marker_claim_basins(*, decision: str, claim: int | None) -> list[dict[str, Any]]:
+    """One basin restarting at ``forecast``; ``claim=None`` is the markerless twin.
+
+    The twin carries ``orchestration_run_id`` exactly like the marker geometry: a
+    production single-basin candidate always does, and it is what decides cycle
+    scoping there.
+    """
+
+    basins = _basins(1)
+    state_evidence: dict[str, Any] = {"decision": decision, "restart_stage": "forecast"}
+    if claim is not None:
+        state_evidence["manual_retry"] = {"marker": True, "new_attempt": claim}
+    basins[0].update(
+        {
+            "orchestration_run_id": _MARKER_RUN_ID,
+            "restart_stage": "forecast",
+            "state_evidence": state_evidence,
+        }
+    )
+    return basins
+
+
+def test_wedged_marker_claim_forced_resubmit_targets_next_free_attempt(tmp_path: Path) -> None:
+    """E1(a): the #1201 live geometry — forced resubmit must reach ``_retry_2``.
+
+    ``retry_missing_forecast_output`` is in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``, so
+    the terminal row is resubmitted either way; what the claim decided was the TARGET.
+    """
+
+    store, repository = _wedged_marker_repository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle(
+        "gfs", "2026050100", _marker_claim_basins(decision="retry_missing_forecast_output", claim=1)
+    )
+
+    forecast = result.stages[0]
+    assert forecast.stage == "forecast"
+    assert forecast.pipeline_job_id == f"{_MARKER_BASE_JOB_ID}_retry_2"
+    assert forecast.status == "succeeded"
+    assert result.status == "complete"
+    assert client.submissions[0]["stage"] == "forecast"
+    assert "skipped_duplicate_submission" not in {stage.status for stage in result.stages}
+    # The occupied row the claim used to aim at is untouched.
+    occupied = store.get_job(f"{_MARKER_BASE_JOB_ID}_retry_1")
+    assert occupied is not None
+    assert (occupied.slurm_job_id, occupied.status) == ("6052", "failed")
+    assert repository.jobs[f"{_MARKER_BASE_JOB_ID}_retry_2"]["slurm_job_id"] == "2001"
+
+
+def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """E1(b): a dropped claim leaves the candidate exactly where a markerless one stands.
+
+    Outside the forced-resubmit set a terminal failed row is resumed — that is the
+    lane's own markerless policy, which this change neither widens nor narrows.  The
+    equivalence face is deliberately three-valued: resubmit-vs-resume, the derived
+    attempt, and whether anything was actually submitted.  The cycle-scoping predicate
+    is NOT on that face (design D3): it still reads the marker and still returns True
+    here.  Through ``_candidate_scoped_cycle_execution`` that is invisible in
+    production, because ``orchestration_run_id`` reaches the same answer; through
+    ``_replacement_retry_scoped_cycle_execution`` it is not, since that arm feeds
+    ``_active_orchestration_conflicts`` and a marker-carrying candidate can clear a
+    duplicate-orchestration gate its markerless twin is held at.  This fixture has no
+    active pipeline, so the two legs stay equal here — but that asymmetry is exactly
+    why the equivalence face is three-valued rather than universal.
+
+    This geometry is also what pins the drop record's wording (AC-4): nothing falls
+    through to a next free attempt here — nothing is submitted at all — so the record
+    may only state what the emitting site knows.
+    """
+
+    outcomes: dict[str, tuple[str, str, list[str]]] = {}
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        for label, claim in (("marker", 1), ("markerless", None)):
+            _store, repository = _wedged_marker_repository()
+            client = FakeCycleSlurmClient()
+            orchestrator = _orchestrator(tmp_path / label, repository, client)
+
+            result = orchestrator.orchestrate_cycle(
+                "gfs", "2026050100", _marker_claim_basins(decision="retry_transient_failure", claim=claim)
+            )
+
+            forecast = result.stages[0]
+            outcomes[label] = (
+                forecast.status,
+                forecast.pipeline_job_id,
+                [submission["stage"] for submission in client.submissions],
+            )
+
+    # Resumed the existing terminal row, derived no new attempt, submitted nothing.
+    assert outcomes["marker"] == ("failed", f"{_MARKER_BASE_JOB_ID}_retry_1", [])
+    assert outcomes["marker"] == outcomes["markerless"]
+
+    records = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    assert records, "the marker leg must leave a drop record"
+    message = records[0].getMessage()
+    assert "the marker-claimed attempt is not used" in message
+    # The record must not promise a fall-through the resume path never performs: this
+    # leg targeted nothing and submitted nothing, and the emitting site cannot know
+    # resubmit-vs-resume, so it says nothing about attempt targeting either.
+    assert "falling through" not in message
+    assert "targeting" not in message
+
+
+def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(tmp_path: Path) -> None:
+    """E2 judgement power: the fresh-marker identity leg with the direct field removed.
+
+    ``test_manual_retry_terminal_stage_submits_new_attempt_identity`` also sets
+    ``basin["manual_retry_attempt"]``, which shadows the ``state_evidence`` branch —
+    it would stay green even if that branch stopped honouring anything.  This twin
+    carries the claim ONLY on the evidence.
+    """
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    old_job = store.create_job(
+        job_id="job_cycle_gfs_2026050100_convert",
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        job_type="convert_canonical",
+        slurm_job_id="6051",
+        model_id=None,
+        stage="convert",
+        status="failed",
+        idempotency_key="cycle_gfs_2026050100:convert",
+    )
+    old_job.exit_code = 127
+    old_job.error_code = "SLURM_JOB_FAILED"
+    store.session.add(old_job)
+    store.session.commit()
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["state_evidence"] = {
+        "decision": "manual_retry",
+        "reason": "manual_retry_requested",
+        "manual_retry": {"allowed": True, "marker": True, "new_attempt": 4},
+        "fresh_ingestion": {"required": True, "mode": "full_chain"},
+    }
+    assert "manual_retry_attempt" not in basins[0]
+    assert "retry_attempt" not in basins[0]
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    retry_job_id = "job_cycle_gfs_2026050100_convert_retry_4"
+    assert result.status == "complete"
+    assert result.stages[0].pipeline_job_id == retry_job_id
+    assert repository.jobs[retry_job_id]["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
+
+
+def test_operator_direct_retry_attempt_fields_bypass_manual_retry_claim_judgement() -> None:
+    """E3: direct basin fields are the invocation's own input, not a scheduler projection."""
+
+    inactive_evidence = {"decision": "retry_transient_failure", "manual_retry": {"marker": True, "new_attempt": 1}}
+
+    assert chain_runtime_utils._retry_attempt_from_basins([{"retry_attempt": 5}]) == 5
+    assert chain_runtime_utils._retry_attempt_from_basins([{"manual_retry_attempt": 6}]) == 6
+    # Still honoured when the evidence alongside them carries no active decision.
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins([{"retry_attempt": 5, "state_evidence": inactive_evidence}])
+        == 5
+    )
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"manual_retry_attempt": 6, "state_evidence": inactive_evidence}]
+        )
+        == 6
+    )
+
+
+def test_wedged_marker_claim_leaves_no_marker_attempt_in_submission_consumers(tmp_path: Path) -> None:
+    """E4: the two ``context.retry_attempt`` consumers on the submit path.
+
+    Both read the same polluted field, so both are audited at their own seam: the
+    reservation evidence (``_reserve_cycle_stage``) and the SHUD runtime manifest
+    (``chain_manifests.build_forecast_runtime_manifest``).  The claim value is 7 so
+    "not the marker value" is distinguishable from the derived attempt.
+    """
+
+    reserve_records: list[dict[str, Any]] = []
+
+    class _ReconcileAwareRepository(StoreBackedCycleRepository):
+        supports_accepted_submit_reconcile = True
+
+        def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+            reserve_records.append(dict(record))
+            return super().reserve_pipeline_job(record)
+
+    store = _pipeline_store()
+    repository = _ReconcileAwareRepository(store)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _marker_claim_basins(decision="retry_missing_forecast_output", claim=7)
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=_MARKER_RUN_ID,
+        all_basins=normalized,
+        active_basins=list(normalized),
+        restart_stage="forecast",
+        retry_attempt=chain_runtime_utils._retry_attempt_from_basins(normalized),
+    )
+    assert context.retry_attempt is None
+
+    forecast_stage = M3_STAGES[2]
+    orchestrator._reserve_cycle_stage(
+        forecast_stage, context, f"{_MARKER_BASE_JOB_ID}_retry_2", f"{_MARKER_RUN_ID}:forecast:retry_2"
+    )
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, normalized[0])
+
+    assert reserve_records[0]["submission_attempt"] == 3
+    assert runtime_manifest["submission_attempt"] == 1
+    assert reserve_records[0]["submission_attempt"] != 7
+    assert runtime_manifest["submission_attempt"] != 7
+
+
+def test_dropped_manual_retry_claim_is_logged_with_the_decision_actually_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """E5 (AC-4): the drop leaves queryable evidence instead of a silent downgrade."""
+
+    basins = [
+        {
+            "basin_id": "basin_hhe",
+            "candidate_id": "ifs:2026-07-05T12:00:00Z:hhe:forecast_ifs_deterministic",
+            "cycle_id": "ifs_2026070512",
+            "state_evidence": {
+                "decision": "retry_transient_failure",
+                "manual_retry": {"marker": True, "new_attempt": 1},
+            },
+        }
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        assert chain_runtime_utils._retry_attempt_from_basins(basins) is None
+
+    (record,) = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    message = record.getMessage()
+    # The wording is deliberately "no active manual-retry decision", not "stale": a
+    # higher-priority lane may lawfully preempt a live marker.
+    assert "no active manual-retry decision" in message
+    assert "stale" not in message.lower()
+    assert "claimed_attempt=1" in message
+    assert "decision=retry_transient_failure" in message
+    assert "basin_id=basin_hhe" in message
+
+
+def test_manual_retry_scoped_cycle_execution_ignores_the_claim_judgement() -> None:
+    """E6 (design D3 boundary): the scoping predicate is deliberately left ungated.
+
+    It mints no attempt; it only helps choose the job set fed to
+    ``_next_retry_attempt_for_stage``.  Both halves of that statement are pinned here
+    so a later change that gates it has to say so.
+    """
+
+    from services.orchestrator import chain_forecast_cycle
+    from services.orchestrator.chain import _next_retry_attempt_for_stage
+
+    basin = {
+        "model_id": "model_0",
+        "run_id": "run_0",
+        "state_evidence": {
+            "decision": "retry_transient_failure",
+            "manual_retry": {"marker": True, "new_attempt": 1},
+        },
+    }
+    assert chain_runtime_utils._retry_attempt_from_basins([basin]) is None
+    assert chain_runtime_utils._manual_retry_scoped_cycle_execution([basin]) is True
+    assert chain_runtime_utils._candidate_scoped_cycle_execution([basin]) is True
+
+    repository = FakeCycleRepository()
+    repository.jobs = {
+        "job_run_0_forecast_retry_1": {
+            "job_id": "job_run_0_forecast_retry_1",
+            "run_id": "run_0",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "status": "failed",
+            "submitted_at": "2026-05-01T01:00:00Z",
+        },
+        "job_other_run_forecast_retry_9": {
+            "job_id": "job_other_run_forecast_retry_9",
+            "run_id": "other_run",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "status": "failed",
+            "submitted_at": "2026-05-01T02:00:00Z",
+        },
+    }
+    orchestrator = types.SimpleNamespace(
+        repository=repository,
+        _query_pipeline_jobs_by_cycle=lambda cycle_id: [
+            dict(job) for job in repository.jobs.values() if job["cycle_id"] == cycle_id
+        ],
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="run_0",
+        all_basins=[basin],
+        active_basins=[basin],
+    )
+
+    scoped_jobs = chain_forecast_cycle.query_pipeline_jobs_for_cycle_context(orchestrator, context)
+
+    # Run-scoped, so the other run's ``_retry_9`` never raises this stage's next attempt.
+    assert [job["job_id"] for job in scoped_jobs] == ["job_run_0_forecast_retry_1"]
+    assert _next_retry_attempt_for_stage(scoped_jobs, base_job_id="job_run_0_forecast", stage=M3_STAGES[2]) == 2
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        pytest.param(
+            {"decision": "manual_retry", "reason": "manual_retry_requested", "manual_retry": {"new_attempt": 3}},
+            3,
+            id="active-decision-honoured",
+        ),
+        pytest.param(
+            {"decision": "retry_transient_failure", "manual_retry": {"new_attempt": 3}},
+            None,
+            id="no-active-decision-dropped",
+        ),
+        pytest.param(
+            {"manual_retry": {"new_attempt": 3}},
+            None,
+            id="unjudgeable-fails-safe",
+        ),
+    ],
+)
+def test_manual_retry_claim_judgement_three_states(evidence: dict[str, Any], expected: int | None) -> None:
+    """E7: honour / drop / fail-safe drop, at the chain read side."""
+
+    assert chain_runtime_utils._retry_attempt_from_basins([{"state_evidence": evidence}]) == expected
+
+
+def test_reason_only_manual_retry_evidence_is_honoured() -> None:
+    """E8: the decision face is two keys; either one alone means an active decision."""
+
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"state_evidence": {"reason": "manual_retry_requested", "manual_retry": {"new_attempt": 2}}}]
+        )
+        == 2
+    )
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"state_evidence": {"decision": "manual_retry", "manual_retry": {"new_attempt": 2}}}]
+        )
+        == 2
     )
 
 

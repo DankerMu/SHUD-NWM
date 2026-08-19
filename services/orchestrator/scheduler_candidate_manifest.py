@@ -6,6 +6,10 @@ from typing import Any
 
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_candidates as _scheduler_candidates
+from services.orchestrator.retry_identity import (
+    has_active_manual_retry_decision,
+    log_ignored_manual_retry_attempt_claim,
+)
 
 CycleDiscovery = _scheduler.CycleDiscovery
 RegisteredSchedulerModel = _scheduler.RegisteredSchedulerModel
@@ -261,6 +265,13 @@ def _candidate_basin_manifest(
 
 
 def _candidate_manual_retry_attempt(candidate: SchedulerCandidate) -> int | None:
+    """The attempt this candidate's marker claims, or None when it must not be minted.
+
+    This is the production channel for #1201: the two fields minted from the return
+    value reach the chain as DIRECT basin fields and shadow every downstream read of
+    ``state_evidence``, so the claim judgement belongs here rather than at a consumer.
+    """
+
     state_evidence = candidate.state_evidence
     if not isinstance(state_evidence, Mapping):
         return None
@@ -269,14 +280,28 @@ def _candidate_manual_retry_attempt(candidate: SchedulerCandidate) -> int | None
         return None
     if manual_retry.get("allowed") is False:
         return None
+    claimed: int | None = None
     for key in ("new_attempt", "attempt", "retry_count"):
         try:
             value = int(manual_retry.get(key))
         except (TypeError, ValueError):
             continue
         if value > 0:
-            return value
-    return None
+            claimed = value
+            break
+    if claimed is None:
+        return None
+    if not has_active_manual_retry_decision(state_evidence):
+        log_ignored_manual_retry_attempt_claim(
+            state_evidence,
+            site="scheduler_candidate_manifest",
+            claimed_attempt=claimed,
+            candidate_id=candidate.candidate_id,
+            basin_id=candidate.basin_id,
+            cycle_id=candidate.cycle_id,
+        )
+        return None
+    return claimed
 
 
 def _apply_candidate_warm_start_fields(manifest: dict[str, Any], candidate: SchedulerCandidate) -> None:

@@ -45,6 +45,7 @@
     "tests/test_orchestration_chain.py",
     "tests/test_production_readiness_validation.py",
     "services/orchestrator/chain_forecast_execution.py",
+    "services/orchestrator/chain_runtime_utils.py",
     "services/orchestrator/scheduler_candidate_execution_evidence.py",
     "services/production_closure/readiness_scheduler_evidence.py",
     ".review-gate-issues.json"
