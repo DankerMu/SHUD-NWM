@@ -17,8 +17,11 @@ dict cache**（`_cycle_rows_cache` / `_direct_jobs_cycle_cache` /
 （ThreadPoolExecutor，`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 生产可 >1）
 跨源/cohort 并发调 `orchestrate_cycle`。三个 cache 的读侧填充与
 `next(iter(...))` LRU 驱逐（`:4200-4202` / `:4121-4123` / `:4388-4394`）
-全在 `_write_lock` 之外，`_cycle_rows` 是 15+ 调用点的热路径——两线程
-并发插入/驱逐同一 dict 即得该 RuntimeError。全 git 史无并发修复记录。
+全在 `_write_lock` 之外，`_cycle_rows` 是 15+ 调用点的热路径——两读线程
+并发插入/驱逐同一 dict 即得该 RuntimeError；**窗口最宽的一条是读-写
+交错**：写线程持 `_write_lock` 在 `_apply_record_to_cycle_rows_cache`
+（`:6592`）整表遍历 `_cycle_rows_cache`，读线程锁外插入/驱逐同一 dict
+（读侧填充不持 `_write_lock`）。全 git 史无并发修复记录。
 
 **#1356（CI 偶发红，按 P1 对待直到证伪）**：
 `test_file_journal_post_window_concurrent_public_cycles_submit_one_retry[IFS]`
@@ -144,9 +147,10 @@ openspec validate），B 连同 hook 缝位勘察证据回 #1356 记录。拆分
 ## Seams under test
 
 - Lane A：直接对单个 repository 实例多线程 hammer `_cycle_rows` /
-  `_read_bytes_limited_cached`（小容量强制持续驱逐 + 多 key 碰撞），
-  pre-fix 秒级红（RuntimeError），post-fix 长跑绿；catch 点单测断言
-  evidence 含 traceback tail。
+  `_read_bytes_limited_cached`（小容量强制持续驱逐 + 多 key 碰撞）
+  **+ 1 个真实写线程**（`_locked_cycle_write`+append，覆盖 :6592
+  读-写交错），pre-fix 秒级红（RuntimeError），post-fix 长跑绿；
+  catch 点单测断言 evidence 含 traceback tail。
 - Lane B：注入 hook 屏障（монkeypatch 模块级 no-op），确定性交错两个
   public pass；行 dump 走真实 file journal。
 

@@ -53,9 +53,10 @@
       曾/可能触发；
       test-only ⇒ 用例改屏障同步 + 注释写明被保护不变量，生产代码零改动
 - [ ] B.4 `uv run pytest -q "tests/test_orchestration_chain.py::test_file_journal_post_window_concurrent_public_cycles_submit_one_retry"`
-      两参数化 ×20 轮全绿——**慢环境 oracle 在 node-27**（issue 明确
-      本地 macOS 不够慢；主树被 #1341 占用时用隔离 git worktree），
-      本地受压跑（与 A.2 hammer 并跑）作先导、node-27 跑作 receipt 面
+      两参数化 ×20 轮全绿——**慢环境 oracle 在 node-27，且为合并门
+      （pre-merge）**（issue 明确本地 macOS 不够慢；主树被 #1341 占用
+      时用隔离 git worktree）；本地受压跑（与 A.2 hammer 并跑）作先导，
+      C.4 仅把 node-27 结果转录归档为 receipt
 
 ## C. Verification
 

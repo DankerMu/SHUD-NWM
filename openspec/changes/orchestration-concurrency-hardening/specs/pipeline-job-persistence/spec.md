@@ -9,8 +9,9 @@ hands one repository instance to every per-cohort orchestrator and fans
 them out across a thread pool: cache population, lookup, and eviction
 are mutually exclusive critical sections, and taking the cache mutex
 never acquires the journal write mutex inside it (single lock order).
-Cache semantics are unchanged: identical keys observe identical values
-and the eviction policy is untouched — only mutual exclusion is added.
+Single-threaded cache semantics are unchanged: identical keys observe
+identical values and the eviction policy is untouched — only mutual
+exclusion is added.
 
 #### Scenario: concurrent cohorts hammer the shared caches
 
