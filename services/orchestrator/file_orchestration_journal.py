@@ -70,7 +70,7 @@ from services.orchestrator.retry import (
     _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT,
     ACTIVE_RETRY_STATUSES,
     DOWNLOAD_SOURCE_CYCLE_JOB_TYPE,
-    DURABLE_HYDRO_SUCCESS_STATUSES,
+    MANUAL_RETRY_DURABLE_SUCCESS_STATUSES,
     MANUAL_RETRY_SOURCE_STATUSES,
     PARTIAL_OR_FAILED_HYDRO_STATUSES,
     RETRY_RUNTIME_ROOTS_SECRET_BEARING,
@@ -7860,7 +7860,7 @@ class FileJournalRetryService:
         )
         durable_run = self.repository._hydro_run_for(run_id)
         durable_status = str(durable_run.get("status") or "") if durable_run is not None else None
-        if durable_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+        if durable_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
             return None, None
         active_job = next((job for job in safe_jobs if str(job.get("status") or "") in ACTIVE_RETRY_STATUSES), None)
         if active_job is not None:

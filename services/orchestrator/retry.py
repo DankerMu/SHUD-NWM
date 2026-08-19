@@ -73,7 +73,12 @@ ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
-DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
+# Manual-retry refusal predicate: a durable hydro run in one of these statuses makes the run
+# non-retryable by hand (RetryNotFoundError). Deliberately NOT the same set as
+# scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES, which additionally holds "complete":
+# that set answers "is the pipeline durably done?" for scheduler decisions, this one answers
+# "may an operator retry this run?". Do not merge the two (see change durable-status-name-split).
+MANUAL_RETRY_DURABLE_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
 DOWNLOAD_SOURCE_CYCLE_JOB_TYPE = "download_source_cycle"
@@ -560,7 +565,7 @@ class RetryService:
                 raise RetryNotFoundError(run_id)
 
             durable_run_status = _hydro_run_status(self.store, run_id) if has_hydro_run_table else None
-            if durable_run_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+            if durable_run_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
                 raise RetryNotFoundError(run_id)
 
             jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
