@@ -541,6 +541,14 @@ class FileOrchestrationJournalRepository:
         self.max_json_depth = int(max_json_depth)
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
+        # The production scheduler shares one repository instance across a
+        # thread pool of per-cohort orchestrators, so every read-side cache
+        # access below (lookup, store, eviction, whole-table iteration) is a
+        # critical section guarded by `_cache_lock`. Lock order is one-way:
+        # a thread holding `_write_lock` may take `_cache_lock`, never the
+        # reverse — nothing under `_cache_lock` does IO, JSON work, or takes
+        # another lock. Helpers suffixed `_cache_locked` require it held.
+        self._cache_lock = threading.Lock()
         self._cycle_rows_cache: dict[
             tuple[str, str, str | None, tuple[str, ...]],
             tuple[tuple[Any, ...] | None, _CycleRows],
@@ -3908,8 +3916,11 @@ class FileOrchestrationJournalRepository:
             if in_write_window
             else self._cycle_rows_source_fingerprint(source_segments=source_segments, cycle_segment=cycle_segment)
         )
-        cached = self._cycle_rows_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._cycle_rows_cache.get(cache_key)
         if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
+            # Cached rows are never mutated in place after being stored, so
+            # cloning a hit outside the mutex cannot observe a torn value.
             return _clone_cycle_rows(cached[1])
         # Model-scoped reads build from the model's own latest view plus
         # model-filtered journal records. They must not derive hydro_run /
@@ -4106,7 +4117,8 @@ class FileOrchestrationJournalRepository:
                 / format_cycle_time(cycle_time)
             ),
         )
-        cached = self._direct_jobs_cycle_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._direct_jobs_cycle_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return [dict(job) for job in cached[1]]
         jobs = [
@@ -4118,9 +4130,11 @@ class FileOrchestrationJournalRepository:
             )
         ]
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
-        if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
-            self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
-        self._direct_jobs_cycle_cache[cache_key] = (signature, [dict(job) for job in jobs])
+        entry = (signature, [dict(job) for job in jobs])
+        with self._cache_lock:
+            if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
+                self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
+            self._direct_jobs_cycle_cache[cache_key] = entry
         return jobs
 
     def _cycle_rows_source_fingerprint(
@@ -4197,9 +4211,11 @@ class FileOrchestrationJournalRepository:
         fingerprint: tuple[Any, ...] | None,
     ) -> None:
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
-        if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
-            self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
-        self._cycle_rows_cache[cache_key] = (fingerprint, _clone_cycle_rows(rows))
+        entry = (fingerprint, _clone_cycle_rows(rows))
+        with self._cache_lock:
+            if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
+                self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
+            self._cycle_rows_cache[cache_key] = entry
 
     def _latest_paths(self, source_segment: str, cycle_segment: str, *, model_id: str | None) -> list[Path]:
         directory = self.root / "latest" / source_segment / cycle_segment
@@ -4374,7 +4390,8 @@ class FileOrchestrationJournalRepository:
             self._read_bytes_cache_drop(key)
         if probe is not None and stat.S_ISREG(probe.st_mode):
             signature = (probe.st_mtime_ns, probe.st_size, probe.st_ino)
-            cached = self._read_bytes_cache.get(key)
+            with self._cache_lock:
+                cached = self._read_bytes_cache.get(key)
             if cached is not None and cached[0] == signature:
                 return cached[1], cached[2]
         content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
@@ -4385,24 +4402,30 @@ class FileOrchestrationJournalRepository:
     def _read_bytes_cache_store(self, key: str, signature: tuple[int, int, int], content: bytes) -> None:
         if len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES:
             return
-        self._read_bytes_cache_drop(key)
-        while self._read_bytes_cache and (
-            len(self._read_bytes_cache) >= MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
-            or self._read_bytes_cache_total + len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES
-        ):
-            self._read_bytes_cache_drop(next(iter(self._read_bytes_cache)))
-        self._read_bytes_cache[key] = (signature, content, False)
-        self._read_bytes_cache_total += len(content)
+        with self._cache_lock:
+            self._read_bytes_cache_drop_cache_locked(key)
+            while self._read_bytes_cache and (
+                len(self._read_bytes_cache) >= MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
+                or self._read_bytes_cache_total + len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES
+            ):
+                self._read_bytes_cache_drop_cache_locked(next(iter(self._read_bytes_cache)))
+            self._read_bytes_cache[key] = (signature, content, False)
+            self._read_bytes_cache_total += len(content)
 
     def _read_bytes_cache_drop(self, key: str) -> None:
+        with self._cache_lock:
+            self._read_bytes_cache_drop_cache_locked(key)
+
+    def _read_bytes_cache_drop_cache_locked(self, key: str) -> None:
         entry = self._read_bytes_cache.pop(key, None)
         if entry is not None:
             self._read_bytes_cache_total -= len(entry[1])
 
     def _read_bytes_cache_mark_validated(self, key: str, content: bytes) -> None:
-        entry = self._read_bytes_cache.get(key)
-        if entry is not None and entry[1] is content:
-            self._read_bytes_cache[key] = (entry[0], entry[1], True)
+        with self._cache_lock:
+            entry = self._read_bytes_cache.get(key)
+            if entry is not None and entry[1] is content:
+                self._read_bytes_cache[key] = (entry[0], entry[1], True)
 
     def _read_optional_json(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -6136,7 +6159,8 @@ class FileOrchestrationJournalRepository:
             direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
         self._atomic_write_json_unlocked(direct_path, record)
         self._sync_reconcile_inventory_for_row_unlocked(row)
-        self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
+        with self._cache_lock:
+            self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
 
     def _reconcile_inventory_anchor_exists_unlocked(self, path: Path) -> bool:
         try:
@@ -6588,24 +6612,31 @@ class FileOrchestrationJournalRepository:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)
         base_key = (source_id, cycle_segment, None, None)
-        stale_keys = [
-            key for key in self._cycle_rows_cache if key[0] == source_id and key[1] == cycle_segment and key != base_key
-        ]
-        for key in stale_keys:
-            self._cycle_rows_cache.pop(key, None)
-        cached = self._cycle_rows_cache.get(base_key)
-        if cached is None:
-            return
-        updated = _clone_cycle_rows(cached[1])
-        try:
-            self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
-            updated.pipeline_events = _dedupe_events(updated.pipeline_events)
-        except FileOrchestrationJournalError:
-            self._cycle_rows_cache.pop(base_key, None)
-            return
-        # In-window entries carry no fingerprint: hits are trusted while the
-        # cycle flock is held, and the window clears the cache on exit.
-        self._cycle_rows_cache[base_key] = (None, updated)
+        # The whole update runs under `_cache_lock`: the stale-key sweep is the
+        # only full-table iteration over `_cycle_rows_cache`, and the reducer
+        # below is pure in-memory work, so read/modify/write stays atomic
+        # against readers populating or evicting the same dict.
+        with self._cache_lock:
+            stale_keys = [
+                key
+                for key in self._cycle_rows_cache
+                if key[0] == source_id and key[1] == cycle_segment and key != base_key
+            ]
+            for key in stale_keys:
+                self._cycle_rows_cache.pop(key, None)
+            cached = self._cycle_rows_cache.get(base_key)
+            if cached is None:
+                return
+            updated = _clone_cycle_rows(cached[1])
+            try:
+                self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
+                updated.pipeline_events = _dedupe_events(updated.pipeline_events)
+            except FileOrchestrationJournalError:
+                self._cycle_rows_cache.pop(base_key, None)
+                return
+            # In-window entries carry no fingerprint: hits are trusted while the
+            # cycle flock is held, and the window clears the cache on exit.
+            self._cycle_rows_cache[base_key] = (None, updated)
 
     def _materialize_latest_unlocked(
         self,
@@ -6716,13 +6747,15 @@ class FileOrchestrationJournalRepository:
     @contextmanager
     def _locked_cycle_write(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
         with self._write_lock:
-            self._cycle_rows_cache.clear()
+            with self._cache_lock:
+                self._cycle_rows_cache.clear()
             self._ensure_root_unlocked()
             try:
                 with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
                     yield
             finally:
-                self._cycle_rows_cache.clear()
+                with self._cache_lock:
+                    self._cycle_rows_cache.clear()
 
     @contextmanager
     def _cycle_file_lock_unlocked(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:

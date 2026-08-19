@@ -9443,8 +9443,20 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(run_public_cycle, range(2)))
 
-    assert client.forecast_attempts == 2
     attempt_two_repo = FileOrchestrationJournalRepository(root)
+    # #1356: the first-round count is the flaky assertion — carry the cycle's
+    # rows so a red run names the job_id that took the extra submission
+    # instead of only reporting the count.
+    assert client.forecast_attempts == 2, [
+        (
+            row["job_id"],
+            row["idempotency_key"],
+            row["status"],
+            row["submission_attempt"],
+            row.get("reconciliation_decision"),
+        )
+        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    ]
     attempt_two = attempt_two_repo.query_reserved_unbound_jobs()[0]
     assert attempt_two.submission_attempt == 2, [
         (

@@ -27149,6 +27149,100 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
     assert "[redacted]" in artifact_text
 
 
+def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(tmp_path: Path) -> None:
+    """#1380 — a bare message string cannot locate the frame that raised.
+
+    The 2026-08-14 pass recorded ``dictionary changed size during iteration``
+    for all 17 IFS runs and nothing else, so the raising site had to be
+    guessed.  The tail keeps file:line (paths are not redacted; secrets and
+    URLs still are) and stays bounded.
+    """
+
+    class RaisingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise RuntimeError("dictionary changed size during iteration https://user:pass@example.test/x")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: RaisingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        tail = model_run["error_traceback_tail"]
+        assert model_run["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+        assert "test_production_scheduler.py" in tail
+        assert "in orchestrate_cycle" in tail
+        assert "RuntimeError: dictionary changed size during iteration" in tail
+        assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+        # No leading-indent match: ``_error_traceback_tail`` strips the tail,
+        # which eats the first frame's two-space indent.
+        assert tail.count('File "') <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_FRAMES
+        assert "user:pass" not in tail
+
+
+def test_orchestrator_exception_traceback_tail_stays_within_the_character_cap() -> None:
+    def raise_with_a_long_message() -> None:
+        raise RuntimeError("x" * 8000)
+
+    try:
+        raise_with_a_long_message()
+    except RuntimeError as error:
+        tail = scheduler_execution_module._error_traceback_tail(error)
+
+    assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+    assert "raise_with_a_long_message" in tail
+
+
+def test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_frames() -> None:
+    """The frame budget is 3, not "as deep as the stack happens to be".
+
+    A ``<= ERROR_TRACEBACK_TAIL_FRAMES`` assertion moves with the constant, so
+    raising the budget would go unnoticed until a 17-run pass wrote 17 full
+    stacks into the durable evidence.  This pins the number against a stack
+    deeper than the budget.
+    """
+
+    def innermost() -> None:
+        raise RuntimeError("deep")
+
+    def middle() -> None:
+        innermost()
+
+    def outer(depth: int) -> None:
+        if depth:
+            outer(depth - 1)
+            return
+        middle()
+
+    try:
+        outer(12)
+    except RuntimeError as error:
+        tail = scheduler_execution_module._error_traceback_tail(error)
+
+    assert tail.count('File "') == 3
+    # Well under the character cap, so three frames is the frame budget
+    # talking and not front-truncation doing the trimming for it.
+    assert len(tail) < scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS // 2
+    assert "in innermost" in tail
+    assert "in middle" in tail
+    # Only the deepest ``outer`` recursion level survives the tail, and the
+    # test frame that started the stack is dropped.
+    assert tail.count("in outer") == 1
+    assert "in test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_frames" not in tail
+
+
 @pytest.mark.parametrize("result_status", ["failed", "submission_failed"])
 def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
     tmp_path: Path,

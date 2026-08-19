@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -129,6 +130,35 @@ class SchedulerExecutionContext:
     # context without an active pass (e.g. unit-test fixtures for helpers
     # here that never reach a real ``run_once``).
     timing: Any | None = None
+
+
+# #1380: the dispatch catch-all below used to persist only a message string,
+# which left an occasional production failure ("dictionary changed size during
+# iteration", pass ``scheduler_2026081411_99f6e3ed6e15``) with no way to name
+# the frame that raised. The tail is bounded so a 17-candidate pass adds at
+# most ~34 KB to the durable evidence.
+ERROR_TRACEBACK_TAIL_FRAMES = 3
+ERROR_TRACEBACK_TAIL_MAX_CHARS = 2000
+_ERROR_TRACEBACK_TAIL_MESSAGE_CHARS = 500
+
+
+def _error_traceback_tail(error: BaseException) -> str:
+    """Bounded traceback tail naming the raising frame.
+
+    File paths are kept on purpose — ``evidence_safe`` redacts secrets and
+    URLs, and file:line is the whole point of the field.
+    """
+    frames = traceback.format_list(
+        traceback.extract_tb(error.__traceback__)[-ERROR_TRACEBACK_TAIL_FRAMES:]
+    )
+    summary = f"{type(error).__name__}: {error}"
+    if len(summary) > _ERROR_TRACEBACK_TAIL_MESSAGE_CHARS:
+        summary = summary[: _ERROR_TRACEBACK_TAIL_MESSAGE_CHARS - 1] + "…"
+    tail = ("".join(frames) + summary).strip()
+    if len(tail) > ERROR_TRACEBACK_TAIL_MAX_CHARS:
+        # Truncate from the front: the raising frame sits at the end.
+        tail = "…" + tail[-(ERROR_TRACEBACK_TAIL_MAX_CHARS - 1) :]
+    return tail
 
 
 def _is_missing_source_data_error(error: Exception) -> bool:
@@ -721,6 +751,7 @@ def _execute_candidate_cohort_impl(
                 orchestrator_dispatch_ms_share
             )
         safe_error_message = context.evidence_safe(getattr(error, "message", str(error)))
+        safe_error_traceback_tail = context.evidence_safe(_error_traceback_tail(error))
         error_code = str(getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"))
         for candidate in submitted_candidates:
             output_uri = candidate_output_uris.get(candidate.candidate_id)
@@ -736,6 +767,7 @@ def _execute_candidate_cohort_impl(
                     "cycle_id": cycle_id,
                     "error_code": error_code,
                     "error_message": safe_error_message,
+                    "error_traceback_tail": safe_error_traceback_tail,
                     **context.candidate_model_run_review_evidence(
                         candidate,
                         output_uri=output_uri,
