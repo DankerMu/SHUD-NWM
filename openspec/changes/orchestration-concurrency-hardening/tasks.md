@@ -47,3 +47,34 @@ mandated 缝位不可翻盘论证、上游 idempotency 键选取的下一步指�
       ——已在 De-batch 裁剪**之后**重跑通过（终态一推纪律）
 - [ ] C.4 merge 后 node-27 receipt（C.1 三套件；#1513 已知例外口径）
       记 #1380（#1356 已 descope 拆回，不在本 PR 记账）
+
+## D. Round-1 fix（verifier CONFIRMED×2 + ride-along Notes）
+
+- [ ] D.1 **F1 守卫挂死**（先做——D.2 会加线程）：`_join_all`
+      （tests/test_file_orchestration_journal.py:7901-7906）改为
+      `daemon=True` + 超时分支 `stop.set()` + assert 移到 join 循环
+      **之后** + **共享绝对 deadline**（`limit = monotonic()+30`，
+      `join(timeout=max(0, limit-monotonic()))`——verifier 实测逐线程
+      30s 会叠加成 2 线程 60s/4 线程 120s）；修后守卫判别力不降
+      （verifier 已用真实反转验证：报出双卡线程名 + rc=1 正常退出）
+- [ ] D.2 **F2 双 cache 零回归保护**：新增第三把 hammer（~0.5s
+      deadline）**直驱** `_read_bytes_cache_store` /
+      `_read_bytes_cache_drop` / `_read_bytes_cache_mark_validated`，
+      cache 预填至 `MAX_FILE_JOURNAL_READ_CACHE_ENTRIES` 使每 store
+      必驱逐；测试期间 `sys.setswitchinterval(1e-6)`（try/finally 或
+      monkeypatch 恢复——全局旋钮）——verifier 实测 pre-fix 红收敛到
+      1-4ms（6/6），锁后 1.0s 绿（≥250× 裕度）；oracle=崩溃（RuntimeError
+      两变体），**不要**断言 `_read_bytes_cache_total` 漂移（verifier
+      实测 drift=0 不可作 oracle）。**不要**改造 e2e 读线程（该路径
+      IO-bound，pre-fix 实测绿，钉不住）。`_direct_jobs_cycle_cache`：
+      要么把 :4135-4136 驱逐与 :6163 pop 对打（pre-fix 形状=
+      StopIteration 兄弟形），要么在本 task 注记「argued, not tested」
+      ——二选一显式落账
+- [ ] D.3 ride-along：(a) 帧数断言修正——`.strip()` 吃掉首帧缩进使
+      `count('  File "')` 少 1（revC-a C2），改用不受缩进影响的计数
+      （如 `count('File "')`）并**钉住帧预算**（帧数 3→50 的 mutant
+      须红，revC-b N1）；(b) 用 setswitchinterval 后重测两把既有
+      hammer 的 to-red，据实决定 0.7s deadline 是否需升 1.0s（fixture
+      A.2 ≥10× 裕度按新实测口径记录在测试注释）
+- [ ] D.4 journal 套件全绿零既有断言改动 + uv run ruff check . +
+      openspec validate orchestration-concurrency-hardening --strict --no-interactive
