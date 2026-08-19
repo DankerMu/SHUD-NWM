@@ -45,5 +45,5 @@
       tests/test_production_scheduler.py
 - [x] 3.3 uv run ruff check services tests
 - [ ] 3.4 openspec validate warm-start-env-toggle-trivalue --strict --no-interactive
-- [ ] 3.5 merge 后 node-27 receipt（定向选择器 + 3.2 两套件；全量红按 #1513
+- [x] 3.5 merge 后 node-27 receipt（定向选择器 + 3.2 两套件；全量红按 #1513
       环境类已知例外口径核对）记入 #1196
