@@ -380,3 +380,72 @@
 - [ ] C.4 merge 后 node-27 receipt（C.1 三套件）：**直接在 `umask 022` 下跑**
       ——默认 umask(0002) 会有 ~80 条 #1513 file-provider 预置红淹掉真实回归
       （2026-08-19 实测口径，见 #1513 评论）。记 #1491 与 #1317
+
+## D. Round-1 fix（verifier verD 裁定：4 CONFIRMED，3 条 FIX_NOW）
+
+> 两位独立 reviewer（revD-a 文件 IO/错误处理、revD-b 红证/legacy/spec）各自实测出
+> 候选，verD 独立复验并给出最小修复边界。候选 5 的子主张 (b) 被 verD 实测**推翻**
+> （「全目录清」变异实为 10 failed 含 A.5 本身红，套件稳健度高于 reviewer 评价），
+> 整条 DISCARD，不立 follow-up。
+
+- [ ] D.1 **C1（CONFIRMED，P2，FIX_NOW）早探吞掉瞬时失败 → 卫生静默跳过 →
+      #1491 的楔死原样复发**。verD 亲验：monkeypatch 使
+      `_prepare_forcing_package_context` 第一次抛、之后委托真实实现 →
+      `CALLS: 2` + `DIRECT_GRID_STATION_FILENAME_COLLISION ... : forcing.csv`；
+      且该码 `transient=False`（`retry.py` 12 个码不含它）→ run_id 永久卡死。
+      PR body「已知限制 2」的 justification（「那类 run 本来就在更早位置失败」）
+      **被推翻**——只在失败确定性时成立。
+      **最小修复边界（verD 已实测）**：
+      (a) `runtime.py:1249-1252` 早探失败后**在 model package staging 之前
+          原地重试一次再吞**（实测：`tests/test_shud_runtime.py` 260 passed
+          零回归，且 C1 探针从 `CALLS:2 + COLLISION` 变成 `DID NOT RAISE`）；
+      (b) **最终那次吞异常处必须留一行 log/receipt**（记 `run_id` + 被吞的
+          error_code）——这是本条里唯一无争议必须补的，否则运维无法区分
+          「卫生跑了但没用」与「卫生被静默跳过」。
+      **绑定约束（verD 实测，别踩）**：**不能**让早探直接抛。换成无条件
+      `return self._prepare_forcing_package_context(manifest)` 会红 3 条：
+      `..._invalid_package_manifest_fails_closed_without_sp_att_rewrite`、
+      `..._unreadable_package_manifest_fails_closed_without_sp_att_rewrite`、
+      以及 **A.7 冻结 e2e** `..._station_filename_collision_fails_without_overwriting_sp_att`。
+      **成本申报**：修法 (a) 会让确定性失败路径把 context 跑 **3 次**
+      （现为 2 次），该函数目前只读——需在 PR body 已知限制里更新这个数字
+- [ ] D.2 **C4（CONFIRMED，Note，并入 D.1 同函数）docstring 与事实相反**：
+      `runtime.py:1240-1242` 的「The result is memoized … must not run twice」
+      **无任何缓存机制**（只是调用者局部变量复用）。verD 实测三模式：
+      happy `{reads:6, verify:1, ctx:1}`、fail_early `{ctx:2}`、
+      fail_late `{reads:12, verify:2, ctx:2}`。改成事实描述（成功路径跑一次、
+      结果由调用者局部复用非 memo；失败路径该调用连同
+      `_verify_forcing_object_checksums` 跑两遍——**修完 D.1 后是三遍，按实际写**）
+- [ ] D.3 **C2（CONFIRMED，P2，FIX_NOW）B.5 零回归守门对「过严门」判别力为零**：
+      verD 把判据换成 `hour != min(checkpoint_hours)`（过严门）后跑**全文件**
+      `tests/test_orchestration_chain.py` → **355 passed**，与基线逐字相同。
+      根因：两条 aligned 参数的 checkpoint 集合**都是单元素**（`[12]` / `[6]`），
+      过严门恒等于真判据；两条 misaligned 参数的 `unreachable_hours` 在两个判据下
+      **逐字相同**，连红侧断言也无判别力。真实反例：`"0,6,18"` → hours `[6,12]`
+      / step 360、`12*60 % 360 == 0` **完全合法**却会被过严门 typed 拒掉
+      （`"0,8"` → `[8,16]`/480 同理）。
+      **最小修法**：`tests/test_orchestration_chain.py:11957-11959` 的 aligned
+      参数表补一条 `("0,6,18", [6, 12])`（期望值取自真实
+      `_forecast_state_checkpoint_hours(72)` 推导，**不要手写**），保留现有
+      `update_ic_step_minutes == min(expected_hours) * 60` 断言。一条参数即可
+      杀死过严门，**不改被测代码**
+- [ ] D.4 **C3（CONFIRMED，P2，FIX_NOW）A.8 新增用例是装饰品**：
+      `tests/test_shud_runtime.py:3545` 用 `_drop_runtime_forcing_files` 把
+      `forcing.files` 删光 → 非 direct-grid 车道 `checksum_entries` 为空 →
+      `declared_names` 恒空 → 在 `runtime.py:1287-1288` 就 return，**根本走不到**
+      它声称要钉的 guard。verD 实测：删掉 `runtime.py:1284-1285` 的
+      `if not forcing_context.is_direct_grid: return` 后 `tests/test_shud_runtime.py`
+      **260 passed**（与基线逐字相同）。
+      **guard 本身必要且正确**（verD 用真实形状验证：未 drop 的
+      `_shud_project_manifest_with_forcing_checksums` 本就声明
+      `relative_path: "shud/forcing.csv"`，`DECLARED_NAMES: {'forcing.csv'}` 非空；
+      去掉 guard 会让该车道发起本不存在的 unlink，并把 symlink/directory 形残留的
+      typed 码从 `WORKSPACE_PATH_UNSAFE` **翻转**成
+      `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`）——**不要动生产代码**。
+      **最小修法**：该用例去掉 `_drop_runtime_forcing_files(...)` 包裹，
+      并加一条真正钉 guard 的断言，二选一：
+      (i) spy `runtime_module.unlink_no_follow`，断言第二次 attempt **零调用**；
+      (ii) 残留换成 symlink/directory 形态，断言仍是 `WORKSPACE_PATH_UNSAFE`
+      （而非 `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`）
+- [ ] D.5 修复后复跑 C.1 三套件 + C.2 + C.3，并**逐条给出修后判别力证据**：
+      D.1 的 C1 探针不再楔死、D.3 的过严门 mutant 必红、D.4 的删 guard mutant 必红
