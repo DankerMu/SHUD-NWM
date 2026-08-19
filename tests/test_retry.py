@@ -164,16 +164,19 @@ def test_durable_success_sets_stay_split_by_exactly_complete() -> None:
     `retry.MANUAL_RETRY_DURABLE_SUCCESS_STATUSES` refuses a manual retry;
     `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` rules the pipeline durably
     done and additionally holds `"complete"`.  They carried the same name until
-    openspec change durable-status-name-split.  All three assertions are needed: the
-    first two pin each side against silent drift, and pinning the scheduler side
-    separately reds the one merge direction that would actually change behavior
-    (collapsing it to three members); the third pins the gap itself as exactly
-    `"complete"`.
+    openspec change durable-status-name-split.  The judging power sits in the first two
+    assertions, which pin each side against drift — pinning the scheduler side separately
+    reds the one merge direction that would actually change behavior (collapsing it to
+    three members).  The third is logically implied by them and is kept as executable
+    documentation of the relationship: the gap is exactly `"complete"`.  The last one
+    guards the other escape hatch, a re-added alias under the old name on `retry`; a plain
+    rename-back needs no guard, the module-level from-import fails on its own.
     """
 
     assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}
     assert scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES == {"succeeded", "parsed", "published", "complete"}
     assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES - {"complete"}
+    assert not hasattr(retry_module, "DURABLE_HYDRO_SUCCESS_STATUSES")
 
 
 def test_slurm_deadline_is_transient_on_every_classification_surface() -> None:

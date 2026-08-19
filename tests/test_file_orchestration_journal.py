@@ -3713,6 +3713,119 @@ def test_file_journal_manual_retry_uses_failed_source_when_durable_hydro_is_part
     assert event["details"]["prior_failure_reason"] == "OUTPUT_INCOMPLETE"
 
 
+def _durable_hydro_manual_retry_fixture(
+    tmp_path: Path,
+    *,
+    durable_status: str,
+) -> tuple[FileOrchestrationJournalRepository, FileJournalRetryService, datetime]:
+    """A file-lane run whose one retryable source job sits under a durable hydro status."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status("fcst_gfs_2026062800_model_a", durable_status)
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_durable_status_failed")
+    failed.update(
+        {
+            "status": "failed",
+            "error_code": "SLURM_TIMEOUT",
+            "created_at": "2026-06-28T00:00:00Z",
+            "updated_at": "2026-06-28T00:05:00Z",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(failed)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    return repository, service, cycle_time
+
+
+@pytest.mark.parametrize("durable_status", ["succeeded", "parsed", "published"])
+def test_file_journal_manual_retry_refuses_durable_hydro_success_without_mutation(
+    tmp_path: Path,
+    durable_status: str,
+) -> None:
+    """The file twin of the DB lane's durable-success refusal (openspec change durable-status-name-split).
+
+    Both operator entry points read `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES`; a run whose
+    durable hydro status is one of its members is refused even though a failed job would
+    otherwise be a perfectly good retry source.  The arm had no coverage before this change,
+    so a botched rename here could have swapped the set silently.
+    """
+
+    journal_root = tmp_path / "journal"
+    repository, service, cycle_time = _durable_hydro_manual_retry_fixture(tmp_path, durable_status=durable_status)
+    before_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7010", "status": "submitted"}
+
+    gateway = Gateway()
+
+    with pytest.raises(RetryNotFoundError):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    with pytest.raises(RetryNotFoundError):
+        service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+
+    after_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert gateway.requests == []
+    assert after_records == before_records
+    assert state is not None
+    assert state["pipeline_events_total"] == 0
+    assert {job["job_id"] for job in state["pipeline_jobs"]} == {"job_durable_status_failed"}
+
+
+def test_file_journal_manual_retry_proceeds_when_durable_hydro_status_is_complete(tmp_path: Path) -> None:
+    """`"complete"` is durable success for the scheduler but must not block a manual retry.
+
+    This is the lane-level half of the membership split: the DB lane cannot express
+    `"complete"` (no such `hydro.run_status` enum value) but the file journal can, so the
+    merge direction "add `complete` to the manual-retry set" is only observable here.
+    """
+
+    repository, service, cycle_time = _durable_hydro_manual_retry_fixture(tmp_path, durable_status="complete")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7011", "status": "submitted"}
+
+    gateway = Gateway()
+
+    repair = service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    retried = service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.job_id == "job_durable_status_failed"
+    assert repair.status == "manual_repair_requested"
+    assert retried.status == "submitted"
+    assert gateway.requests
+    assert state is not None
+    assert "job_durable_status_failed" in {job["job_id"] for job in state["pipeline_jobs"]}
+    assert retried.job_id in {job["job_id"] for job in state["pipeline_jobs"]}
+
+
 def test_file_journal_active_manual_retry_blocks_repair_and_submission_without_mutation(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
