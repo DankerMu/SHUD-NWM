@@ -15,11 +15,14 @@ and the eviction policy is untouched — only mutual exclusion is added.
 #### Scenario: concurrent cohorts hammer the shared caches
 
 WHEN multiple orchestration threads concurrently read cycle rows and
-journal files through one repository instance while cache eviction is
-continuously triggered
-THEN no thread observes a runtime iteration error or a torn cache entry,
-and every lookup returns a value equal to what a single-threaded run
-would have produced
+journal files through one repository instance — including a concurrent
+journal writer applying records — while cache eviction is continuously
+triggered
+THEN no thread observes a runtime iteration error or a torn cache
+entry (a value not produced by any single store), and single-threaded
+cache semantics are unchanged; cross-thread read freshness beyond this
+is explicitly out of scope (the pre-existing ownership-blind
+write-window staleness is declared, not fixed, by this change)
 
 #### Scenario: single-threaded behavior is unchanged
 

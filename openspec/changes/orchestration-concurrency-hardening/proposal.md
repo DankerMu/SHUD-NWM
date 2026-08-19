@@ -37,25 +37,46 @@ public pass **都**打到了 forecast sbatch。四个候选竞态面自 2026-07-
 ### Lane A（#1380，确定性修复）
 
 - `FileOrchestrationJournalRepository` 三个读侧 cache 的
-  get/store/evict 全部收进一把专用 `threading.Lock`（新 `_cache_lock`，
-  不复用 `_write_lock`——写路径已持 `_write_lock` 时仍会读 cache，复用
-  会自锁或扩大临界区）。锁内只做 dict 操作，不做 IO/JSON 解析（解析在
-  锁外完成后再 store），避免热路径串行化。
-- `_locked_cycle_write` 内两处 `self._cycle_rows_cache.clear()`
-  （`:6718-6725`）同样改经 `_cache_lock`。
-- 捕获点 `scheduler_execution.py:716` except 分支把
-  `traceback`（格式化尾部若干帧，evidence-safe 截断）写入
-  model_run_evidence 的新字段 `error_traceback_tail`——下次异常可归因，
-  不再靠错误串猜位置（issue 建议 2）。
+  get/store/evict/**iterate** 全部收进一把专用 `threading.Lock`
+  （新 `_cache_lock`，不复用 `_write_lock`——写路径持 `_write_lock` 时
+  仍会读 cache（`_apply_record_to_cycle_rows_cache` 读
+  `_cycle_rows_cache`、`:4885` 类站点经 `_read_optional_json` 走
+  `_read_bytes_limited_cached`），非重入 Lock 复用必死锁）。锁内只做
+  dict 存取——零 IO、零 JSON 解析、**clone（`_clone_cycle_rows`）也在
+  锁外**，避免热路径串行化。锁序单向：`_write_lock → _cache_lock` 允许，
+  反向禁止（cache 辅助函数均纯 dict/纯内存 reducer，已核可达）。
+- **变更站点全集**（round-0 审补齐，缺一即修复不完整）：
+  三处 `next(iter(...))` 驱逐（`:4200-4202` / `:4121-4123` /
+  `:4388-4394` 及 `_read_bytes_cache_total` 更新）；
+  **`_apply_record_to_cycle_rows_cache` 全体**（`:6592` `stale_keys`
+  整表遍历——全套 cache 里唯一整字典 iterate，窗口最宽、最可能真凶——
+  加 `:6595/:6596/:6604/:6608` 的 pop/get/store；其内 reducer
+  `_apply_journal_record` 为纯内存无锁无 IO，整段入 `_cache_lock` 不
+  违反锁序）；`_write_pipeline_job_direct_unlocked` 的
+  `_direct_jobs_cycle_cache.pop`（`:6139`）；`_locked_cycle_write`
+  两处 `.clear()`（`:6719` 与 `:6725`）。
+- 捕获点 `scheduler_execution.py:716` except 分支把 traceback 尾部
+  （**最后 3 帧、总长上限 2000 字符**，过 `context.evidence_safe`
+  ——其口径是密钥/URL 脱敏，**不承诺路径脱敏**；traceback 本身要用于
+  file:line 归因，路径保留是设计意图）写入 model_run_evidence 新字段
+  `error_traceback_tail`（issue 建议 2）。体积影响已声明：一趟最多
+  candidate_count × 2000 字符，17 候选 ≈ 34KB 上限，可接受。
 
 ### Lane B（#1356，先定性后修）
 
 1. **确定性复现装置**：在 reclaim CAS 与 sbatch 之间给测试注入交错点
-   ——`_run_cycle_chain` 提交决策路径上加一个测试可注入的同步 hook
-   （模块级 no-op 默认，测试 monkeypatch 成 threading.Barrier/Event；
-   生产零行为变化）。用它把两个 pass 钉进 issue 预言的交错窗口，稳定
-   产出 `forecast_attempts == 3`，并 dump `query_pipeline_jobs_by_cycle`
-   全部行（job_id / idempotency_key / status / submission_attempt /
+   ——缝位坐标（round-0 审校正）：
+   **`chain_stage_execution.py:239-247`**，即
+   `reservation = orchestrator._reserve_cycle_stage(...)` 之后、
+   `if orchestrator._reservation_already_inflight(reservation):` 之前，
+   加模块级 no-op hook（测试 monkeypatch 成 threading.Barrier/Event；
+   须为**模块级**——用例每线程各 new orchestrator/repository，
+   per-instance 方法拦不住）。**不得复用** `:232` 既有
+   `_before_cycle_stage_submit`：它在 reserve 之前且做实事（改 cycle
+   status）。生产零行为变化须有断言钉住（tasks B.1）。用它把两个 pass
+   钉进交错窗口，稳定产出 `forecast_attempts == 3`，复现**命令**与
+   注入点一并落账，并 dump `query_pipeline_jobs_by_cycle` 全部行
+   （job_id / idempotency_key / status / submission_attempt /
    reconciliation_decision）。
 2. **定性**（判据 = 第 3 次提交所用 job_id）：
    - 新 `#retry-N` job_id ⇒ **守卫被绕过**（主嫌成立）：修复 =
@@ -76,6 +97,14 @@ public pass **都**打到了 forecast sbatch。四个候选竞态面自 2026-07-
 - PG repository（`chain_repository.py`）的并发行为——共享单例路径只发
   file journal（db-free 生产面），PG 侧无本事故几何。
 - 三个 cache 的容量/命中率调优——只加互斥，不改语义。
+- **`in_write_window` ownership-blind 陈旧命中（pre-existing 残余
+  风险，声明不修）**：`_cycle_rows:3905` 用 `_write_lock.locked()` 判
+  写窗口，不认 owner——共享单例下 B 线程会因 A 线程持写锁而跳过
+  fingerprint 校验直接吃 cache 命中，单线程绝不发生。加 `_cache_lock`
+  不改这条；修它要动 `_write_lock` ownership 语义，超出本 change。
+  路由 issue-scribe 另立（编排者），不阻塞本 PR。同类已知项：
+  `_locked_cycle_write` 的全局 `.clear()` 会跨 cohort 抹掉他人 cache
+  entry（纯性能、pre-existing），一并记入该 issue。
 
 ## Risk triage
 
@@ -89,10 +118,22 @@ public pass **都**打到了 forecast sbatch。四个候选竞态面自 2026-07-
   "在 pre-fix 上 N 秒内稳定红"的压测构造 + 修后同构造长跑绿；
   #1356 红证必须是确定性屏障交错，不许 sleep 碰运气）；其余 not selected。
 
+## De-batch 出口（round-0 审新增）
+
+Lane A 是生产事故的确定性修复，Lane B 是可能卡住的调查——若 B.1 在
+一个 implementer pass 预算内产不出确定性 `forecast_attempts == 3`
+红形，**Lane B 整体拆出本 PR**：A 单独走完交付（tasks B.* 从本
+change 删除、本 proposal Lane B 节改为「已拆回 #1356」、重跑
+openspec validate），B 连同 hook 缝位勘察证据回 #1356 记录。拆分
+不算失败，算 descope，按 gates 口径落终态账。
+
 ## Must preserve
 
-- cache 语义零变化：同 key 同值、驱逐策略不变（只是互斥），
-  `tests/test_file_orchestration_journal.py` 全绿零断言改动。
+- cache **单线程语义逐字不变**：同 key 同值、驱逐策略不变（只加
+  互斥），`tests/test_file_orchestration_journal.py` 全绿零断言改动。
+  并发下的口径以 spec 场景为准（不抛 iteration error、无撕裂 entry）
+  ——「并发读值与单线程等价」**不承诺**（`in_write_window` pre-existing
+  陈旧命中见 Non-Goals）。
 - `orchestrate_cycle` 单线程行为逐字不变（三套件全绿）。
 - evidence schema 向后兼容：`error_traceback_tail` 是**新增**字段，
   现有消费者（evidence 校验、display）不得受影响。
