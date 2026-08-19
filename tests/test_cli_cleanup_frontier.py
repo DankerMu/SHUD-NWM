@@ -397,3 +397,31 @@ def test_ok_path_discloses_the_evidence_dir_at_the_payload_top_level(
     assert "frontier_blocker" not in payload
     assert payload["frontier_source"] == "receipt:scheduler_pass"
     assert payload["evidence_dir"] == str(env["evidence_dir"])
+
+
+def test_blocker_evidence_dir_is_the_absolute_path_the_relative_default_derived(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The disclosed path is the one actually probed, not the configured string.
+
+    This is the #1503 motivating scenario: with no evidence root configured the
+    workspace root's relative default is resolved against the current working
+    directory, so an operator running from the wrong cwd silently probes an
+    empty tree. The key only distinguishes that from genuinely missing evidence
+    if it carries the derived absolute path.
+    """
+    monkeypatch.delenv("NHMS_SCHEDULER_EVIDENCE_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "ws-relative")
+    monkeypatch.chdir(tmp_path)
+    _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["frontier_blocker"]["reason"] == "evidence_dir_missing"
+    disclosed = payload["frontier_blocker"]["evidence_dir"]
+    assert disclosed is not None
+    assert Path(disclosed).is_absolute()
+    assert (
+        Path(disclosed).resolve()
+        == (tmp_path / "ws-relative" / "scheduler" / "evidence").resolve()
+    )

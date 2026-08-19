@@ -50,7 +50,7 @@
       携非空 `evidence_dir` == 实际探测绝对路径（**改动前红：键不存在**）；
       `evidence_dir_unresolved` → 键存在值 null 且 CLI 不抛；ok 路径顶层
       payload 携 `evidence_dir`；既有 fail-closed 断言零改动全绿
-- [ ] 2.3b (#1503, round-1 T1) 派生臂判别腿：delenv
+- [x] 2.3b (#1503, round-1 T1) 派生臂判别腿：delenv
       `NHMS_SCHEDULER_EVIDENCE_ROOT` + 相对 `WORKSPACE_ROOT` +
       `monkeypatch.chdir(tmp_path)`，断言 blocker 的 `evidence_dir`
       `is_absolute()` 且 == 派生路径 `<cwd>/<workspace>/scheduler/evidence`
