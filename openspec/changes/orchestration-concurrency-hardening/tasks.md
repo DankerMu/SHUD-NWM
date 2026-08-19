@@ -50,14 +50,17 @@ mandated 缝位不可翻盘论证、上游 idempotency 键选取的下一步指�
 
 ## D. Round-1 fix（verifier CONFIRMED×2 + ride-along Notes）
 
-- [ ] D.1 **F1 守卫挂死**（先做——D.2 会加线程）：`_join_all`
+- [x] D.1 **F1 守卫挂死**（先做——D.2 会加线程）：`_join_all`
       （tests/test_file_orchestration_journal.py:7901-7906）改为
       `daemon=True` + 超时分支 `stop.set()` + assert 移到 join 循环
       **之后** + **共享绝对 deadline**（`limit = monotonic()+30`，
       `join(timeout=max(0, limit-monotonic()))`——verifier 实测逐线程
       30s 会叠加成 2 线程 60s/4 线程 120s）；修后守卫判别力不降
       （verifier 已用真实反转验证：报出双卡线程名 + rc=1 正常退出）
-- [ ] D.2 **F2 双 cache 零回归保护**：新增第三把 hammer（~0.5s
+      **落账**：修后用仓库外的运行期反转探针复验——2 线程真实锁反转，
+      30.0s（不再是 2×30s）后 `AssertionError ... still alive:
+      ['inv-a', 'inv-b']`、rc=1、解释器正常退出（daemon）；反转不入库
+- [x] D.2 **F2 双 cache 零回归保护**：新增第三把 hammer（~0.5s
       deadline）**直驱** `_read_bytes_cache_store` /
       `_read_bytes_cache_drop` / `_read_bytes_cache_mark_validated`，
       cache 预填至 `MAX_FILE_JOURNAL_READ_CACHE_ENTRIES` 使每 store
@@ -70,11 +73,31 @@ mandated 缝位不可翻盘论证、上游 idempotency 键选取的下一步指�
       要么把 :4135-4136 驱逐与 :6163 pop 对打（pre-fix 形状=
       StopIteration 兄弟形），要么在本 task 注记「argued, not tested」
       ——二选一显式落账
-- [ ] D.3 ride-along：(a) 帧数断言修正——`.strip()` 吃掉首帧缩进使
+      **落账（D.2 交付实测）**：新 hammer =
+      `test_file_journal_read_bytes_cache_mutators_stay_atomic_under_contention`
+      （0.5s deadline，四线程 store×2/drop+store/mark_validated，cache 预填
+      至 4096 使每 store 必驱逐），pre-fix（`_cache_lock` 运行期换成
+      no-op ctx manager）红 14/14、0.5-3.2ms（"dictionary changed size" /
+      "dictionary keys changed" 两变体），post-fix 全程绿 → ≥150× 裕度。
+      `_direct_jobs_cycle_cache` = **argued, not tested**：同法直驱
+      :4135-4136 驱逐（2 线程，实测 86.6k calls/s/线程）对打 :6163 pop 形状
+      （IO-free、遵守 `_cache_lock`），pre-fix 0.5s 绿 6/6、3.0s 绿 2/2——
+      该站点每次迭代夹一次目录扫描 IO（与 e2e 读线程同因），窗口钉不住；
+      其覆盖由 A.1 站点全集 + 同一把锁的结构性论证承担
+- [x] D.3 ride-along：(a) 帧数断言修正——`.strip()` 吃掉首帧缩进使
       `count('  File "')` 少 1（revC-a C2），改用不受缩进影响的计数
       （如 `count('File "')`）并**钉住帧预算**（帧数 3→50 的 mutant
       须红，revC-b N1）；(b) 用 setswitchinterval 后重测两把既有
       hammer 的 to-red，据实决定 0.7s deadline 是否需升 1.0s（fixture
       A.2 ≥10× 裕度按新实测口径记录在测试注释）
-- [ ] D.4 journal 套件全绿零既有断言改动 + uv run ruff check . +
+      **落账**：(a) `count('File "')` + 新增
+      `test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_frames`
+      （16 帧深栈、精确 ==3 + 长度远低于字符上限，排除"是字符上限在裁帧"），
+      3→50 runtime mutant 实测红。(b) sweep hammer pre-fix to-red：默认 5ms 切换间隔
+      42-73ms（0.7s 仅 9.6×，不足 10×）、1µs 下 0.6-1.3ms —— 决定
+      **保持 0.7s 但把 hammer 放进 `_fine_grained_thread_switching()`**
+      （≥500× 裕度，比升到 1.0s 更省时且更稳）；e2e 读 hammer pre-fix
+      在两种间隔下均绿 6/6（无 to-red 可算裕度），deadline 0.6s 不动，
+      其定位仍是锁序/端到端守卫
+- [x] D.4 journal 套件全绿零既有断言改动 + uv run ruff check . +
       openspec validate orchestration-concurrency-hardening --strict --no-interactive

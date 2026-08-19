@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import itertools
@@ -7,8 +8,10 @@ import json
 import logging
 import os
 import stat
+import sys
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
@@ -7898,12 +7901,47 @@ def _hammer_until(
     return loop
 
 
-def _join_all(threads: list[threading.Thread]) -> None:
+@contextlib.contextmanager
+def _fine_grained_thread_switching() -> Iterator[None]:
+    """Drop the GIL switch interval to 1µs for a cache-race hammer.
+
+    ``sys.setswitchinterval`` is a process-global knob, so it is restored on
+    the way out.  At the 5ms default a pure-memory hammer takes tens of
+    milliseconds to interleave badly enough to crash; at 1µs the same cohort
+    crashes in ~1ms, which is what buys the deadlines below their margin.
+    """
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous)
+
+
+def _join_all(threads: list[threading.Thread], *, stop: threading.Event) -> None:
+    """Join a hammer cohort under one absolute budget.
+
+    A per-thread ``join(timeout=30)`` multiplies by the cohort size (4 threads
+    deadlocked = 120s), and asserting inside the join loop leaves the later
+    threads unjoined and still running.  One shared deadline, ``stop`` set the
+    moment it lapses so a merely slow (not deadlocked) cohort can drain, and
+    daemon threads so a truly wedged worker cannot outlive the interpreter.
+    """
+    limit = time.monotonic() + 30.0
     for thread in threads:
+        thread.daemon = True
         thread.start()
+    timed_out = False
     for thread in threads:
-        thread.join(timeout=30)
-        assert not thread.is_alive(), f"{thread.name} did not finish — cache/write lock order deadlock"
+        thread.join(timeout=max(0.0, limit - time.monotonic()))
+        if thread.is_alive():
+            stop.set()
+            timed_out = True
+    stuck = [thread.name for thread in threads if thread.is_alive()]
+    assert not timed_out, (
+        f"cohort exceeded the 30s budget; still alive: {stuck or 'none (drained after stop)'}"
+        " — cache/write lock order deadlock"
+    )
 
 
 def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path: Path) -> None:
@@ -7916,8 +7954,13 @@ def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path
     production capacity first, so every store also evicts.  Unguarded, the
     sweep thread raises ``RuntimeError: dictionary changed size during
     iteration`` (or the equivalent ``dictionary keys changed`` variant —
-    the first is the message the 2026-08-14 production pass recorded) within
-    ~60ms; this runs an order of magnitude longer than that.
+    the first is the message the 2026-08-14 production pass recorded).
+
+    Measured on this cohort with ``_cache_lock`` neutralised at runtime
+    (6 runs each): 42-73ms to red at the default 5ms switch interval, 0.6-1.3ms
+    at 1µs.  The default interval only clears 0.7s/73ms ≈ 9.6x, so the hammer
+    runs under ``_fine_grained_thread_switching`` and the 0.7s deadline keeps
+    a ≥500x margin over the measured worst case.
     """
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -7942,7 +7985,6 @@ def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path
 
     failures: list[BaseException] = []
     stop = threading.Event()
-    deadline = time.monotonic() + 0.7
     stored = itertools.count()
 
     def store_cycle_rows() -> None:
@@ -7952,22 +7994,25 @@ def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path
     def sweep_stale_keys() -> None:
         repository._apply_record_to_cycle_rows_cache(source_id="gfs", cycle_time=cycle_time, record=record)
 
-    _join_all(
-        [
-            threading.Thread(
-                target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
-                name="store-a",
-            ),
-            threading.Thread(
-                target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
-                name="store-b",
-            ),
-            threading.Thread(
-                target=_hammer_until(sweep_stale_keys, stop=stop, deadline=deadline, failures=failures, batch=50),
-                name="sweep",
-            ),
-        ]
-    )
+    with _fine_grained_thread_switching():
+        deadline = time.monotonic() + 0.7
+        _join_all(
+            [
+                threading.Thread(
+                    target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-a",
+                ),
+                threading.Thread(
+                    target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-b",
+                ),
+                threading.Thread(
+                    target=_hammer_until(sweep_stale_keys, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="sweep",
+                ),
+            ],
+            stop=stop,
+        )
 
     assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
     assert len(repository._cycle_rows_cache) <= journal_module.MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES
@@ -7985,7 +8030,11 @@ def test_file_journal_read_caches_survive_concurrent_readers_and_a_writer(
     are squeezed to 2 so every read evicts.  Unlike the sweep test above this
     one is IO-bound (a ``_cycle_rows`` miss costs milliseconds), so it is a
     lock-order and end-to-end guard rather than a probabilistic race prover:
-    a reversed lock order deadlocks it.
+    a reversed lock order deadlocks it.  Measured with ``_cache_lock``
+    neutralised at runtime: green 6/6 for the full deadline at both the 5ms
+    default and a 1µs switch interval, i.e. it has no time-to-red to size a
+    margin against.  The ``_read_bytes_cache`` race is pinned by the direct
+    mutator hammer below instead.
     """
     monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES", 2)
     monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES", 2)
@@ -8043,10 +8092,87 @@ def test_file_journal_read_caches_survive_concurrent_readers_and_a_writer(
                 target=_hammer_until(append_records, stop=stop, deadline=deadline, failures=failures),
                 name="writer",
             ),
-        ]
+        ],
+        stop=stop,
     )
 
     assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+
+
+def test_file_journal_read_bytes_cache_mutators_stay_atomic_under_contention(tmp_path: Path) -> None:
+    """#1380 red proof — the read-bytes cache, driven at its mutator seam.
+
+    ``_read_bytes_cache_store`` / ``_read_bytes_cache_drop`` /
+    ``_read_bytes_cache_mark_validated`` are the entire mutation surface of
+    ``_read_bytes_cache``, and the store path advances ``next(iter(...))``
+    over the same dict while evicting.  The end-to-end reader test above
+    cannot reach that window — every iteration pays for real IO — so this one
+    drives the three mutators directly with the cache pre-filled to its
+    production capacity, which makes every store evict.
+
+    Measured with ``_cache_lock`` neutralised at runtime (a no-op context
+    manager, i.e. the pre-fix shape): red in 0.5-3.2ms, 14/14, with
+    ``RuntimeError: dictionary changed size during iteration`` or its
+    ``dictionary keys changed`` sibling — a ≥150x margin under the 0.5s
+    deadline.  The oracle is that crash, not the cache accounting:
+    ``_read_bytes_cache_total`` does not measurably drift pre-fix.
+
+    ``_direct_jobs_cycle_cache`` is not hammered here — see the note in
+    tasks.md D.2.
+    """
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    content = b"x" * 64
+    signature = (1, len(content), 1)
+    capacity = journal_module.MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
+    recycled_key = "recycled"
+    for index in range(capacity - 1):
+        repository._read_bytes_cache_store(f"seed-{index}", signature, content)
+    repository._read_bytes_cache_store(recycled_key, signature, content)
+    assert len(repository._read_bytes_cache) == capacity
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    stored = itertools.count()
+
+    def store_new_key() -> None:
+        repository._read_bytes_cache_store(f"churn-{next(stored)}", signature, content)
+
+    def drop_and_restore() -> None:
+        # Net-zero on cache size, so every concurrent store keeps evicting.
+        repository._read_bytes_cache_drop(recycled_key)
+        repository._read_bytes_cache_store(recycled_key, signature, content)
+
+    def mark_validated() -> None:
+        # ``content`` is the identical object that was stored, so this takes
+        # the read-modify-write branch rather than returning early.
+        repository._read_bytes_cache_mark_validated(recycled_key, content)
+
+    with _fine_grained_thread_switching():
+        deadline = time.monotonic() + 0.5
+        _join_all(
+            [
+                threading.Thread(
+                    target=_hammer_until(store_new_key, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-a",
+                ),
+                threading.Thread(
+                    target=_hammer_until(store_new_key, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-b",
+                ),
+                threading.Thread(
+                    target=_hammer_until(drop_and_restore, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="drop-restore",
+                ),
+                threading.Thread(
+                    target=_hammer_until(mark_validated, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="mark-validated",
+                ),
+            ],
+            stop=stop,
+        )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+    assert len(repository._read_bytes_cache) <= capacity
 
 
 def _segment_job_record(
