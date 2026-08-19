@@ -96,7 +96,7 @@ Manual re-entry, in order:
 
 1. Read the pass evidence: `candidates[].state_evidence.retry_policy.attempt` and
    `.retry_limit`. Stage-scoped `attempt` is `max(flat retry_count, suffix-derived
-   attempt of the stage-matching job rows)` (`scheduler_state_rows.py:425-453`): only
+   attempt of the stage-matching job rows)` (`scheduler_state_rows._state_retry_attempt`): only
    rows whose authoritative `stage` matches contribute their `*_retry_<N>` suffix, so a
    `reserved` master with `retry_count=0` still reports the real attempt count as long as
    a `*_forecast_retry_<N>` row survives the candidate-state job-limit truncation.
@@ -115,7 +115,10 @@ Manual re-entry, in order:
    attempt read (no `stage` argument) still answers with the flat candidate-scoped count
    and never sees the floors; a floor whose every contributing row is judged
    non-authoritative for the candidate leaves with those rows, so a cycle cohort row's
-   attempt cannot become this candidate's; and under the geometry where the failed row is
+   attempt cannot become this candidate's — that narrowing covers the FLOORS channel
+   only, and at the strict-warm-start budget read an in-window cycle-wide row still
+   reaches the number through the unnarrowed row-scan channel, a pre-existing surface
+   tracked in #1586; and under the geometry where the failed row is
    outside the window AND a succeeded terminal-stage row empties the stage keys,
    `_failed_stage` is `None`, so the manual-retry mint still re-derives `_retry_1` and
    no-ops on the existing key (an accepted boundary, tracked in #1577). When the stage IS

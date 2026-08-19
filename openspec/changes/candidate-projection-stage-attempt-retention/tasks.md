@@ -105,7 +105,8 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - E18 消费者矩阵（retro 纠正动作核心）: grep 穷尽 `_state_retry_attempt(` 与
   `STAGE_RETRY_ATTEMPT_FLOORS_KEY` 全部读点，逐点标注"经过收窄 / 不经过 / 为什么安全"，
   矩阵落 design D3——下一轮 review 校验矩阵而非重新考古。
-- E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat or retention or floor"`；
+- E8 命令: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or retry_attempt or truncat or retention or floor or mint"`
+  （`or mint` 是 round-4 补的——E15 此前不被该定向命令选中）；
   `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py
   tests/test_gateway_reconcile.py`；`uv run ruff check .`；
   `openspec validate candidate-projection-stage-attempt-retention --strict --no-interactive`。
@@ -146,5 +147,5 @@ guarantee 排除，D0；共享函数数值面已澄清）。
 - [x] 2.6 (round-3/retro) E16/E13e/E13f/E17 腿 + E14/E15 改钉 decision_state + E18 消费者
       矩阵落 design D3 + tasks E13(b)/docstring 口径对齐 + download 逃生门注释 +
       rows.py:46-51 注释收窄
-- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + flat 串味
-      follow-up issue 编号写入 PR body
+- [ ] 3.1 E8 全绿；偏离记录 + E9 receipt（含 AC-6 行数）+ #1572/#1577 + 串味 follow-up
+      编号（flat 通道 #1579 / 行扫描通道 #1586）写入 PR body

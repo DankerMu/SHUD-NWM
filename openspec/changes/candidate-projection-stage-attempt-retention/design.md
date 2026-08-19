@@ -85,21 +85,21 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
    source-cycle blocker 谓词读的 status/stage 字段；同 stage 取到 max 的全部行都算贡献
    行）。`scheduler_state_identity_filter` 在重写行群体的同时，**仅当某 stage 的全部贡献
    行被同一 authority/scope 谓词判出局时**删除该 stage 的 floor 条目。三处谓词：
-   - authority（evidence 路径 :67-77 的语义）——**落在公共尾 `_candidate_state_filtered_
-     decision_state`，不是 :67-77 行循环内**：行删除按 `legacy_sources` 的**下标**走，
+   - authority（evidence 路径 :69-79 的语义）——**落在公共尾 `_candidate_state_filtered_
+     decision_state`，不是 :69-79 行循环内**：行删除按 `legacy_sources` 的**下标**走，
      而贡献行没有下标（它可能在任何 filter 看到之前就被截断出行集），所以只能重跑
      `_candidate_state_identity_validation` 判定所依据的谓词
      `_state_row_has_authoritative_candidate_proof`（+ source-cycle blocker 逃生门）；
      放公共尾还顺带堵住"legacy_sources 为空即整函数早退"的漏洞——那条路径上窗外外来
      贡献行本来一次也不会被判。
-   - `_inconclusive_source_cycle_decision_state`（:143）：`_state_row_references_job_ids`；
-     跑在该函数自己的 :152 strip 之前，是活收窄（E13f 钉，删调用必红）。
-   - `_candidate_scoped_shared_cycle_aggregate_state`（:316）：
+   - `_inconclusive_source_cycle_decision_state`（:147）：`_state_row_references_job_ids`；
+     跑在该函数自己的 :156 strip 之前，是活收窄（E13f 钉，删调用必红）。
+   - `_candidate_scoped_shared_cycle_aggregate_state`（:320）：
      `_shared_cycle_row_is_candidate_scoped`（+ blocker 逃生门）。该臂的**非** blocker 分支
-     :328 无条件 strip，floors 由 strip 半边兜住（E13b/E13d）；收窄调用只在 blocker 分支
-     且 top-level blocker 成立时（:312-313 跳过 strip）承重（E13e 钉）。**round-3 R3-B 已删**
-     非 blocker 分支上原 :333 的第二次收窄调用——它恒在 :328 之后拿到空 floors，行为等价。
-   - **round-3 R3-A 第四处**：`scheduler_candidates.py:2233` 的 raw 读点前直接调
+     :337 无条件 strip，floors 由 strip 半边兜住（E13b/E13d）；收窄调用只在 blocker 分支
+     且 top-level blocker 成立时（:316-317 跳过 strip）承重（E13e 钉）。**round-3 R3-B 已删**
+     非 blocker 分支上原有的第二次收窄调用——它恒在该无条件 strip 之后拿到空 floors，行为等价。
+   - **round-3 R3-A 第四处**：`scheduler_candidates.py:2238` 的 raw 读点前直接调
      `_candidate_authoritative_stage_retry_attempt_floor_state`（见 D3.0）。
    - 逃生门与可达性备注：两处 `_global_source_cycle_download_blocker_job` 逃生门**当前恒不
      可达**（floor 贡献行的 stage 必是 canonical downstream stage，`download` 不在其中），
@@ -109,7 +109,7 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
      该谓词是 master 既有代码，口径问题不在本 change 范围）。E13e 因此是 guard 钉：几何用
      真实投影 + 替换该一个字段，作用是让这条收窄不能被当死代码删掉。
    `STAGE_RETRY_ATTEMPT_FLOORS_KEY`（连同 sources 键）同时加入
-   `_strip_top_level_pipeline_decision_fields`（:579-618）——它与 `retry_attempt`/
+   `_strip_top_level_pipeline_decision_fields`（:678 起）——它与 `retry_attempt`/
    `attempt`/`retry_count` 同列；在 shared-cycle-aggregate 臂上这半边是**承重**的
    （E13b 走的就是它）。**陷阱（verifier (e) 裁定）**：
    不得"从过滤后幸存的 pipeline_jobs 重算 floors"——E1/E5 的贡献行在 filter 之前就已被
@@ -118,9 +118,11 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
    保留其 floor。反向锚：tests/test_file_orchestration_journal.py:1493-1505（非候选行
    retry_count 不得成为本候选 attempt）。
 7. **flat 分量边界（round-2 R2-C，双镜头证实）**：floors 只保证 **stage 行扫描分量**的
-   截断不变；候选级 flat `retry_count` 聚合（chain_repository_state.py:826/:863，本 change
+   截断不变；候选级 flat `retry_count` 聚合（chain_repository_state.py:829/:867，本 change
    未动）仍随窗口塌陷，其跨 stage 串味（convert 行 retry_count 经 flat 通道进 forecast
-   预算）是既有行为，显式排除在保证外（follow-up issue **#1579**）。spec、
+   预算）是既有行为，显式排除在保证外（follow-up issue **#1579**）。**归因按通道分**：
+   #1579 只管 flat 通道；**行扫描通道**在 :2238 预算读点上的窗内 cycle-wide 串味是另一个
+   既有面，见 **#1586**。spec、
    本节与 `_state_retry_attempt`/`_state_job_retry_attempt` docstring 的措辞一律按此收窄，
    不得写绝对的"截断不变等式"。
 
@@ -145,7 +147,9 @@ DB 路径喂进来的 `job_limit+1` 行窗口上 floors 同样会被计算——
 
 不变量：**载带的 stage-attempt 真值必须在每一个消费点上受与行群体相同的候选身份/可见域
 纪律约束**。矩阵按 `grep -rn '_state_retry_attempt(' 与
-'STAGE_RETRY_ATTEMPT_FLOORS?_?…_KEY'` 全集列出（行号 = 本 commit）。判据只有两条：
+'STAGE_RETRY_ATTEMPT_FLOORS?_?…_KEY'` 全集列出。**本文档全部行号以符号名为准，行号只是
+写作时的快照、仅供定位参考**——随后的编辑会让它们漂移，核对请按符号名 grep，不要把行号
+当作断言。判据只有两条：
 **stage-less 读点结构性不可能读到 floors**（`_state_retry_attempt` 的 `canonical_stage is
 None` 分支走 flat-first / `_state_job_retry_attempt(state, None)`，后者不并入 floor——
 E12'' 钉）；**stage-scoped 读点必须吃已收窄的 state**。
@@ -158,15 +162,15 @@ services/（生产读点）：
 | `scheduler_state_failure.py:1444` `_completed_upstream_stage_retry_evidence` | `restart_stage` | decision.py:145 `decision_state` | 是 | 安全 |
 | `scheduler_state_failure.py:1900` `_cancelled_state_evidence` | `_failed_stage(state)` | decision.py:382 `decision_state` | 是 | 安全 |
 | `scheduler_state_failure.py:1917` `_manual_retry_state_evidence` | `_failed_stage(state)` | decision.py:273 `decision_state` | 是 | 安全；E15 钉 |
-| `scheduler_candidates.py:2233` strict-warm-start L2 预算 | 常量 `"forecast"` | **raw** provider 直出（decision_state 是 `_candidate_state_decision_evaluated` 的局部量，不回流） | 是——**读点前显式施加** `_candidate_authoritative_stage_retry_attempt_floor_state(state, terminal_evidence)`（round-3 R3-A 修法 1a） | E16 钉；**禁止**改用完整 `_candidate_state_decision_state`（aggregate 臂 strip 打死 E5） |
+| `scheduler_candidates.py:2238` strict-warm-start L2 预算 | 常量 `"forecast"` | **raw** provider 直出（decision_state 是 `_candidate_state_decision_evaluated` 的局部量，不回流） | 部分——**读点前显式施加** `_candidate_authoritative_stage_retry_attempt_floor_state(state, terminal_evidence)`（round-3 R3-A 修法 1a），**只有 authority 一臂**；跳过 inconclusive（:147）与 aggregate（:320）两臂 | E16 钉；**禁止**改用完整 `_candidate_state_decision_state`（aggregate 臂 strip 打死 E5） |
 | `scheduler_state_manual_retry.py:982` `_fallback_previous_attempt` | `_restarted_stage_family(state)` | 唯一调用链 `_manual_retry_new_attempt` ← failure.py:1918，同 `decision_state` | 是 | 安全 |
 | `scheduler_state_manual_retry.py:115/:125` marker 默认 attempt | 无 | `_manual_retry_markers(state)` | 不适用 | stage-less，floors 结构性不可达 |
 | `scheduler_state_manual_retry.py:693/:705` blocker 记录 | 无 | `_latest_manual_retry_blocker(state)` | 不适用 | 同上 |
 | `scheduler_state_evidence_owner.py:110` evidence `retry.attempt` | 无 | **raw**（evidence 在 filter 之前构建） | 不适用 | 同上——这是 raw 读点仍安全的唯一理由，改成 stage-scoped 必须同时接收窄 |
-| `scheduler_state_rows.py:542` `_state_stage_retry_attempt_floor` | — | 仅被 `_state_job_retry_attempt` 在 `canonical_stage is not None` 时调用 | — | floors 的唯一读函数，无旁路 |
-| `scheduler_state_identity_filter.py:187/:190/:209/:210` | — | 收窄器自身 | — | 三处调用点：:125 authority（公共尾，承重）、:143 inconclusive 臂（E13f）、:316 aggregate-blocker 子分支（E13e） |
-| `scheduler_state_identity_filter.py:715-716` strip 列表 | — | `_strip_top_level_pipeline_decision_fields` | — | 与 `retry_attempt`/`attempt`/`retry_count` 同列；aggregate 臂 :328 无条件 strip 由它承重（E13b/E13d） |
-| `chain_repository_state.py:849-850` | — | 写点（唯一 producer） | — | `stage_retry_attempt_floors(jobs)` 于截断前构建 |
+| `scheduler_state_rows.py:545` `_state_stage_retry_attempt_floor` | — | 仅被 `_state_job_retry_attempt` 在 `canonical_stage is not None` 时调用 | — | floors 的唯一读函数，无旁路 |
+| `scheduler_state_identity_filter.py:191/:194/:208/:213-215` | — | 收窄器 `_narrow_stage_retry_attempt_floors` 自身 | — | 三处调用点：:125 authority（公共尾，承重）、:147 inconclusive 臂（E13f）、:320 aggregate-blocker 子分支（E13e） |
+| `scheduler_state_identity_filter.py:720-721` strip 列表 | — | `_strip_top_level_pipeline_decision_fields` | — | 与 `retry_attempt`/`attempt`/`retry_count` 同列；aggregate 臂 :337 无条件 strip 由它承重（E13b/E13d） |
+| `chain_repository_state.py:693` | — | 写点（唯一 producer） | — | `stage_retry_attempt_floors(jobs)` 于截断前构建 |
 
 tests/（读点性质，逐条不列）：`tests/test_production_scheduler.py` 内 stage-scoped 读点
 分三类——(1) `_retention_*` 投影 raw state 上直接读（:42296/:42450/:42507-42508/:42555-42558/
@@ -185,11 +189,13 @@ state 行为逐字节不变"。`tests/test_file_orchestration_journal.py:3466` �
 
 stage-scoped 调用点逐一核对并在 PR 记录结论：
 
-- `scheduler_candidates.py:2233`（auto L2 预算，stage 是常量 `"forecast"`）：floors 直接
+- `scheduler_candidates.py:2238`（auto L2 预算，stage 是常量 `"forecast"`）：floors 直接
   命中——逆序几何下 `("blocked", "strict_warm_start_retry_budget_exhausted")`（E5）。
   **这是 issue #1179 的目标面，不依赖 `_failed_stage` 行可见性。** round-3 R3-A 修订：
   该读点吃 raw state，收窄在读点上显式施加（D3.0 表 + D1.6 第四条），窗外 cohort 行的
-  attempt 不再花候选的预算（E16）；窗内 cycle-wide 行经 flat 通道的串味仍是既有面（#1579）。
+  attempt 不再花候选的预算（E16）。**窗内串味按通道分别归因**：floors 通道已收窄；
+  flat `retry_count` 通道未收窄，是既有面 **#1579**；**行扫描通道**未收窄，也是既有面，
+  见 **#1586**。
 - **`scheduler_state_failure.py:188/:1444/:1900` 是决策级变化，不只是记账（round-2 R2-B
   修订）**：stage 可命名时 `_failure_policy_payload` 的 attempt 读出真值，`classify_failure`
   在真值 ≥ retry_limit 时把 transient 失败判成 `permanent=True / limit_exhausted=True`，

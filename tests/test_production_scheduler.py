@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import errno
 import hashlib
 import inspect
@@ -42422,6 +42423,23 @@ def _retention_floors(state: Mapping[str, Any]) -> dict[str, int]:
     return floors
 
 
+def _retention_floor_keys(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Deep snapshot of the two carried-floor keys, for the no-writeback pin."""
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    return copy.deepcopy(
+        {
+            key: state[key]
+            for key in (STAGE_RETRY_ATTEMPT_FLOORS_KEY, STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+            if key in state
+        }
+    )
+
+
 def test_attempt_floor_carries_the_out_of_window_forecast_attempt() -> None:
     """E1 (#1179) -- the reverse geometry: the wedge row is the OLDEST row.
 
@@ -43244,6 +43262,8 @@ def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
     and its floor must still block (E5). Running
     ``_candidate_state_decision_state`` instead would take the shared-cycle
     aggregate arm and strip that floor away.
+
+    Both halves also pin the narrowing as read-only over the caller's state.
     """
 
     job_limit = 5
@@ -43262,6 +43282,7 @@ def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
 
     assert cohort["job_id"] not in _retention_job_ids(cohort_state)
     assert _retention_floors(cohort_state) == {"forecast": 3}
+    cohort_floor_keys = _retention_floor_keys(cohort_state)
 
     cohort_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
         _retention_terminal_evidence(cohort_state),
@@ -43274,12 +43295,17 @@ def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
         "strict_warm_start_terminal_init_state_mismatch",
     )
     assert "retry_policy" not in cohort_decision.evidence
+    # The narrowing on the decision path must not flow back into the raw state
+    # this budget read takes: it is the caller's state, shared with every other
+    # read of the pass, and the narrowing is authoritative only for THIS read.
+    assert _retention_floor_keys(cohort_state) == cohort_floor_keys
 
     wedge_state = _retention_state(
         [_retention_forecast_retry_job(87, minutes=1), *filler],
         job_limit=job_limit,
         retry_limit=3,
     )
+    wedge_floor_keys = _retention_floor_keys(wedge_state)
 
     wedge_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
         _retention_terminal_evidence(wedge_state),
@@ -43289,6 +43315,7 @@ def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
 
     assert (wedge_decision.action, wedge_decision.reason) == ("blocked", "strict_warm_start_retry_budget_exhausted")
     assert wedge_decision.evidence["retry_policy"]["attempt"] == 87
+    assert _retention_floor_keys(wedge_state) == wedge_floor_keys
 
 
 def test_attempt_floors_narrow_on_the_source_cycle_blocker_sub_branch() -> None:
