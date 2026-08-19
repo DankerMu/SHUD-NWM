@@ -91,6 +91,13 @@ def read_latest_pass_frontier(evidence_dir: Path, *, now: datetime,
     payload 顶层加 `frontier_blocker = {"reason": ..., "forced_dry_run":
     true, "receipt_path": ...}`——运维仍能看到「本会删什么」，但一个字节
     都不删。不提供绕过 flag（proposal Non-Goals：escape hatch 否决）。
+
+> **Supersession（后续追加，原文不改）**：上面那条 `frontier_blocker`
+> 三键形状已被 #1503 / `retention-lane-hygiene` 扩展——blocker 增
+> `evidence_dir` 键（探测到的绝对路径；目录本身解析失败时为显式 null），
+> ok 路径 payload 顶层同增一个同名键。本文件是归档证据（记录当时的裁定），
+> 现行权威形状见 `openspec/specs/production-scheduler-orchestration/spec.md`。
+
 - **cleanup 的「receipt」= stdout JSON**（cli.py:467/:779 的
   `json.dumps`），非落盘文件；`frontier_blocker`/`frontier_source` 加在该
   payload 顶层，本 change 不引入落盘 receipt（fixture review P2-3）。

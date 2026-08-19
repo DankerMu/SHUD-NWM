@@ -1020,3 +1020,126 @@ def test_rounding_band_cycle_without_candidates_is_exempt(tmp_path: Path) -> Non
     # cycle would have been planned for deletion.
     unfloored = run(evidence_style_floor)
     assert _keys(unfloored.planned) == set(keys.values())
+
+
+# ---------------------------------------------------------------------------
+# Issue #1405 — run-workspace deletion recognizes only canonical run identities.
+#
+# The previous criterion split the run id on `_` and deleted on the first token
+# that happened to parse as `%Y%m%d%H`, so any stray directory carrying a
+# ten-digit token was adjudicated as an expired run workspace, and a forecast
+# run could bind to the wrong embedded timestamp.
+# ---------------------------------------------------------------------------
+
+_AGED = _cycle_name(NOW - timedelta(days=20))  # 2026051412, past the 14d cutoff
+
+
+def _plan_runs(root: Path, *names: str, active_lower_bound: datetime | None = None):
+    """Seed `runs/<name>` workspaces and return the wall-clock plan for them."""
+    for name in names:
+        _write(root, f"runs/{name}/output/out.nc")
+    return plan_retention(
+        object_store_root=root,
+        cutoff=NOW - timedelta(days=14),
+        retention_days=14,
+        enabled=True,
+        dry_run=True,
+        active_lower_bound=active_lower_bound,
+    )
+
+
+def test_non_run_directory_with_a_timestamp_token_is_preserved(tmp_path: Path) -> None:
+    """[#1405 B] A stray salvage capture is not a run workspace, so it survives."""
+    root = tmp_path / "object-store"
+    result = _plan_runs(root, f"manual_salvage_{_AGED}_keepme")
+
+    key = f"runs/manual_salvage_{_AGED}_keepme"
+    assert key not in _keys(result.planned)
+    assert _reasons(result.skipped)[key] == "unparseable_run_cycle"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"debug_snapshot_{_AGED}",
+        f"runs_{_AGED}_scratch",
+        f"FCST_GFS_{_AGED}_MODEL_A",
+        f"fcst_gfs_2026139999_model_{_AGED}",
+    ],
+    ids=["no-canonical-prefix", "foreign-writer", "uppercase", "illegal-canonical-date"],
+)
+def test_stray_run_directory_shapes_are_preserved(tmp_path: Path, name: str) -> None:
+    """[#1405 B] Names outside the canonical shapes never enter adjudication."""
+    root = tmp_path / "object-store"
+    result = _plan_runs(root, name)
+
+    assert f"runs/{name}" not in _keys(result.planned)
+    assert _reasons(result.skipped)[f"runs/{name}"] == "unparseable_run_cycle"
+
+
+def test_forecast_run_cycle_is_taken_from_the_canonical_position(tmp_path: Path) -> None:
+    """[#1405 A] A leading timestamp-like token must not outrank the cycle slot.
+
+    The canonical cycle here is inside the retention window, so binding to the
+    stray leading `2020010100` would age the workspace out and delete it.
+    """
+    root = tmp_path / "object-store"
+    fresh = _cycle_name(NOW - timedelta(days=3))
+    name = f"fcst_2020010100_{fresh}_model_a"
+    result = _plan_runs(root, name)
+
+    assert f"runs/{name}" not in _keys(result.planned)
+    assert _reasons(result.skipped)[f"runs/{name}"] == "within_retention_window"
+
+
+def test_trailing_timestamp_token_does_not_shift_the_forecast_cycle(tmp_path: Path) -> None:
+    """[#1405] A model id that looks like a timestamp leaves the cycle alone."""
+    root = tmp_path / "object-store"
+    name = f"fcst_gfs_{_AGED}_model_2026010100"
+    result = _plan_runs(root, name)
+
+    planned = {entry["key"]: entry for entry in result.planned}
+    assert planned[f"runs/{name}"]["cycle_time"] == (NOW - timedelta(days=20)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"fcst_gfs_{_AGED}_model_a",
+        f"cycle_gfs_{_AGED}",
+        f"cycle_gfs_{_AGED}_model_a",
+        f"analysis_era5_{_AGED}_2026060312_model_a",
+    ],
+    ids=["forecast", "cohort", "cohort-with-suffix", "analysis"],
+)
+def test_expired_canonical_run_workspaces_are_still_collected(tmp_path: Path, name: str) -> None:
+    """[#1405 invariant] Recycling of the three canonical shapes is unchanged."""
+    root = tmp_path / "object-store"
+    result = _plan_runs(root, name)
+
+    planned = {entry["key"]: entry for entry in result.planned}
+    assert planned[f"runs/{name}"]["reason"] == "run_cycle_aged_out"
+    # The analysis shape binds to its START timestamp, matching chain_analysis.
+    assert planned[f"runs/{name}"]["cycle_time"] == (NOW - timedelta(days=20)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_canonical_run_workspaces_keep_the_two_skip_tiers(tmp_path: Path) -> None:
+    """[#1405 invariant] Window and frontier adjudication order is untouched."""
+    root = tmp_path / "object-store"
+    aged_cycle = NOW - timedelta(days=20)
+    in_window = _cycle_name(NOW - timedelta(days=3))
+    result = _plan_runs(
+        root,
+        f"fcst_gfs_{_AGED}_model_a",
+        f"fcst_gfs_{in_window}_model_a",
+        active_lower_bound=aged_cycle,
+    )
+
+    reasons = _reasons(result.skipped)
+    assert reasons[f"runs/fcst_gfs_{_AGED}_model_a"] == PIPELINE_FRONTIER_EXEMPT_REASON
+    assert reasons[f"runs/fcst_gfs_{in_window}_model_a"] == "within_retention_window"
+    assert result.planned == []

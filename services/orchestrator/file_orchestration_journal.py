@@ -110,6 +110,12 @@ from services.orchestrator.retry_identity import (
     effective_retry_attempt,
     split_retry_job_identity,
 )
+from services.orchestrator.run_identity import (
+    CYCLE_COHORT_RUN_ID_RE as _CYCLE_COHORT_RUN_ID_RE,
+)
+from services.orchestrator.run_identity import (
+    FORECAST_RUN_ID_RE as _FORECAST_RUN_ID_RE,
+)
 from services.orchestrator.scheduler_file_providers import (
     _public_raw_manifest_evidence,
     _sanitize_file_provider_evidence_scalar,
@@ -171,9 +177,11 @@ _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_CYCLE_SEGMENTS * MAX_FILE_JOURN
 _UNSET = object()
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
-_FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
+# The forecast and cohort shapes now live in run_identity (#1405) so retention
+# adjudicates deletions against the same canonical identities; they are
+# imported above under their historical private names. This strict cohort
+# variant stays here — its only consumer (:9778) needs an exact cohort id.
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
-_CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
 _CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
 _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
