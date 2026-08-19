@@ -2,11 +2,16 @@
 
 - [ ] 1.1 (#1405) 新建 `services/orchestrator/run_identity.py`：
       `FORECAST_RUN_ID_RE`/`CYCLE_COHORT_RUN_ID_RE`（正则逐字迁自
-      file_orchestration_journal.py:169/:176）+
-      `parse_run_cycle(run_id) -> datetime | None`（形状匹配 → cycle 段
-      strptime `%Y%m%d%H` UTC aware；不匹配或 strptime 失败 → None）
+      file_orchestration_journal.py:174/:176；`_CYCLE_RUN_ID_RE`:175 严格
+      变体留在 journal 不迁）+ 新增
+      `ANALYSIS_RUN_ID_RE = ^analysis_([^_]+)_(\d{10})_(\d{10})_(.+)$`
+      （cycle=第一个 10 位段=start，对齐 chain_analysis.py:44/:57）+
+      `parse_run_cycle(run_id) -> datetime | None`（三形状之一匹配 →
+      canonical cycle 段 strptime `%Y%m%d%H` UTC aware；不匹配或 strptime
+      失败 → None）
 - [ ] 1.2 (#1405) `file_orchestration_journal.py` 两正则改从 run_identity
-      导入并保留旧私有名别名，模块内用点零改动
+      导入并保留旧私有名别名，模块内 6 行/7 处引用零改动
+      （:5938/:5941/:8451/:8460/:9486/:9772）
 - [ ] 1.3 (#1405) `retention.py` `_extract_run_cycle` 改 delegate
       `parse_run_cycle`；`_parse_cycle_name` 与 cycles/ 层扫描不动
 - [ ] 1.4 (#1503) `cli.py`：`_cleanup_frontier` 回传 evidence_dir；blocker
@@ -14,7 +19,9 @@
       null）；ok 路径顶层 payload 加同名键（与 frontier_source 并列）
 - [ ] 1.5 (#1503) 归档副本
       `openspec/changes/archive/2026-08-17-retention-frontier-out-of-pass/design.md`
-      blocker 形状段同步（含 ok 路径与 null 裁决的落地记录）
+      **只追加 supersession 指针**（形状经 #1503/retention-lane-hygiene
+      扩展，现行权威=openspec/specs/production-scheduler-orchestration），
+      :88-93 原文不动（DOC_STATUS 归档即证据）
 - [ ] 1.6 (#1395) 删 `packages/common/storage.py` helper 族+常量+
       `ArchiveConfigurationError`；`DEFAULT_RETENTION_WINDOW_DAYS`:46 与
       :40-45 注释保留（注释措辞按 extractor 已删微调）；删
@@ -24,15 +31,19 @@
 ## 2. Tests
 
 - [ ] 2.1 (#1405) run_identity 直测（新测试或并入 tests/test_retention.py）：
-      forecast/cohort 合法形状取对 cycle；`fcst_2020010100_2026081400_model_a`
-      → 2026081400（A 类修正）；`manual_salvage_2020010100_keepme` → None；
+      forecast/cohort（含尾段）/analysis 三形状取对 cycle（analysis →
+      start 段）；`fcst_2020010100_2026081400_model_a` → 2026081400（A 类
+      修正）；`manual_salvage_2020010100_keepme` → None；
       `fcst_gfs_<cycle>_model_2026010100` → cycle（尾部误报不干扰）；
-      10 位非法日期 token（如 2026139999）→ None
+      `fcst_gfs_2026139999_model_2026010100` → None（canonical 位非法日期，
+      不回落尾部 token）；大写 `FCST_...` → None；
+      `fcst_x_2026139999_y` → None（loose 也 None，非翻转，直测锁定）
 - [ ] 2.2 (#1405) retention 面行为钉（tests/test_retention.py，tmp_path 造
       `runs/<name>` 真目录喂 `_collect_run_targets` 或其公共入口）：
       B 类目录 → `skipped: unparseable_run_cycle`（**改动前红：进 planned
       删除**）；A 类目录 → 按正确 cycle 裁决（改动前红：按 2020 判老删除）；
-      过期 forecast 与过期 cohort → 仍进删除目标（回收不变锁）；
+      过期 forecast / 过期 cohort（带尾段）/ 过期 analysis → 仍进删除目标
+      （回收不变锁；analysis 腿为 P1-1 翻转防护，改动前后均可回收）；
       frontier 豁免/窗口内跳过两层裁决不变锁
 - [ ] 2.3 (#1503) tests/test_cli_cleanup_frontier.py：
       `evidence_dir_missing` 与 `no_readable_receipt` 两 reason 下 blocker

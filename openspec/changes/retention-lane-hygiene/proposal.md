@@ -17,7 +17,7 @@
   `services/orchestrator/retention.py:177-183` `_extract_run_cycle` 按 `_`
   切 token 取第一个可解析 `%Y%m%d%H` 的片段、不校验 run_id 整体形状，唯一
   调用点 `:289`（`_collect_run_targets`）直接喂删除 cutoff 与 frontier 豁免
-  闸。与 journal canonical 解析（`_FORECAST_RUN_ID_RE:169`、
+  闸。与 journal canonical 解析（`_FORECAST_RUN_ID_RE:174`、
   `_CYCLE_COHORT_RUN_ID_RE:176`）宽严分叉：A 类取错 token（当前构造路径
   不可达，形状防御）；B 类过度接受——`runs/` 下任何含 10 位数字 token 的
   非 run 目录（人工 salvage、调试留存）被当过期工作区删除，严格侧本会拒收。
@@ -32,18 +32,35 @@
 
 **#1405（先做——它决定新模块形状）**：
 - 新建 `services/orchestrator/run_identity.py`（小模块，零 services 依赖）：
-  迁入 `FORECAST_RUN_ID_RE`、`CYCLE_COHORT_RUN_ID_RE` 两个 canonical 正则 +
-  新函数 `parse_run_cycle(run_id) -> datetime | None`（匹配 forecast 或
-  cohort 形状 → 取 cycle 段 strptime `%Y%m%d%H`（UTC aware，与
-  retention `_parse_cycle_name` 口径一致）；形状不匹配或 strptime 失败 →
-  None）。
+  迁入 `FORECAST_RUN_ID_RE`（journal:174）、`CYCLE_COHORT_RUN_ID_RE`
+  （journal:176，带可选尾段的松变体——retention 必须继续回收带尾段的
+  cohort 目录，故选它而非 `_CYCLE_RUN_ID_RE:175` 严格变体；后者留在
+  journal 不迁，消费点 :9778 不动）+ 新增第三条 canonical 分支
+  `ANALYSIS_RUN_ID_RE = ^analysis_([^_]+)_(\d{10})_(\d{10})_(.+)$`
+  （cycle 取**第一个** 10 位段 = compact_start，与 `chain_analysis.py:44/:57`
+  的 `cycle_time=start_time` 口径一致、也与今日 loose 取值一致——analysis
+  工作区回收行为零变更）+ 函数
+  `parse_run_cycle(run_id) -> datetime | None`（匹配三形状之一 → 相应
+  cycle 段 strptime `%Y%m%d%H`（UTC aware，与 retention `_parse_cycle_name`
+  口径一致）；形状不匹配或 strptime 失败 → None）。
 - `file_orchestration_journal.py`：`_FORECAST_RUN_ID_RE`/`_CYCLE_COHORT_RUN_ID_RE`
-  改为从 run_identity 导入并保留旧私有名别名（模块内 4 个用点零改动）。
+  改为从 run_identity 导入并保留旧私有名别名（模块内 6 行 / 7 处引用
+  零改动：:5938/:5941/:8451/:8460/:9486/:9772）。
 - `retention.py`：`_extract_run_cycle` 改为 delegate `parse_run_cycle`
   （或直接替换调用点）；不匹配 canonical 形状 → `unparseable_run_cycle`
-  跳过（保留，fail-safe）。行为变更钉住：`manual_salvage_<10位>_keepme`
-  从「删除」变「保留」；`fcst_<10位>_<cycle>_model_a` 从「取错 token」变
-  「取 cycle 段」；`cycle_gfs_<cycle>` cohort 必须仍可回收（现行为保持）。
+  跳过（保留，fail-safe）。**行为翻转全清单**（五条，全部申报）：
+  (1) `manual_salvage_<10位>_keepme` 删除→保留（B 类主形状）；
+  (2) `fcst_<10位>_<cycle>_model_a` 取错 token→取 canonical cycle 段（A 类）；
+  (3) `fcst_gfs_<非法日期10位>_model_<合法10位>` 今日取尾部 token 按错
+  cycle 删除→保留（canonical 形状成立但 cycle 段 strptime 失败）；
+  (4) 大写目录名（如 `FCST_GFS_<cycle>_MODEL`）今日可删→保留（正则锚定
+  小写前缀）；
+  (5) 不变项锁：`cycle_gfs_<cycle>[_suffix]` cohort、
+  `analysis_era5_<start>_<end>_<model>` analysis 工作区均**仍可回收**、
+  取值与今日一致。
+  已知反向残差（记录，非翻转）：canonical 不校验 source 段闭集，
+  `fcst_salvage_<10位>_x` / `cycle_salvage_<10位>_x` 仍会被回收——B 类
+  是大幅收窄而非关闭，spec 措辞按此限定。
 - `_parse_cycle_name`（cycle 目录名解析，`:253` 消费）不动——它解析的是
   `cycles/` 层目录名，本就是纯 `%Y%m%d%H`，不在本单口径内。
 
@@ -52,10 +69,12 @@
   `"evidence_dir"` 键：解析成功 → 绝对路径字符串；`evidence_dir_unresolved`
   → 显式 null（键存在，形状稳定）。ok 路径顶层 payload 同样加
   `evidence_dir`（与 `frontier_source` 并列）——成功/失败两路口径一致。
-- 同步修订归档副本
+- 归档副本
   `openspec/changes/archive/2026-08-17-retention-frontier-out-of-pass/design.md`
-  的 blocker 形状段（:88-93）+ 本 change 对
-  `production-scheduler-orchestration` 既有条款的 MODIFIED delta。
+  **只追加不改写**（DOC_STATUS「归档即证据」）：在 blocker 形状段后加一条
+  supersession 指针（「形状经 #1503 / retention-lane-hygiene 扩展；现行
+  权威 = openspec/specs/production-scheduler-orchestration/spec.md」），
+  :88-93 原文不动；新形状的权威载体是本 change 的 MODIFIED delta。
 - fail-closed 判定逻辑零变更（纯加字段）。
 
 **#1395**：

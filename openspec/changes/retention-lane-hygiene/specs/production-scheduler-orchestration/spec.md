@@ -3,17 +3,22 @@
 ### Requirement: Run-workspace deletion recognizes only canonical run identities
 
 Retention SHALL admit a `runs/` workspace directory into deletion
-adjudication only when its name matches a canonical run-id shape (the
-forecast shape or the cycle-cohort shape, defined once and shared with
-the journal's parsers) and its cycle token parses as a real `%Y%m%d%H`
-timestamp; any other directory name is skipped as unparseable and
-preserved. The previous criterion — scan underscore-separated tokens and
-delete on the first one that happens to parse as a timestamp — treated
-any stray directory containing a ten-digit token (a manual salvage
-capture, a debugging snapshot, a foreign writer's output) as an expired
-run workspace, and could bind a forecast run to the wrong embedded
-timestamp. Recognized runs keep today's three-tier adjudication
-(retention window, frontier exemption, deletion) byte for byte.
+adjudication only when its name matches a canonical run-id shape — the
+forecast shape, the cycle-cohort shape, or the analysis shape (whose
+cycle is its start timestamp), defined once and shared with the
+journal's parsers — and the cycle token at the canonical position parses
+as a real `%Y%m%d%H` timestamp; any directory name matching none of the
+canonical shapes is skipped as unparseable and preserved. The previous
+criterion — scan underscore-separated tokens and delete on the first one
+that happens to parse as a timestamp — treated any stray directory
+containing a ten-digit token (a manual salvage capture, a debugging
+snapshot, a foreign writer's output) as an expired run workspace, and
+could bind a forecast run to the wrong embedded timestamp. The shape
+check does not validate the source segment against the closed source
+set, so a stray name that happens to imitate a full canonical shape is
+still collected — the over-acceptance surface is sharply narrowed, not
+closed. Recognized runs keep today's three-tier adjudication (retention
+window, frontier exemption, deletion) byte for byte.
 
 #### Scenario: non-run directories are preserved instead of deleted
 
@@ -31,9 +36,12 @@ parseable token
 
 #### Scenario: legitimate runs are still collected
 
-WHEN retention scans expired forecast-shaped and cycle-cohort-shaped run
-directories
-THEN both remain eligible for collection exactly as before the change
+WHEN retention scans expired forecast-shaped, cycle-cohort-shaped
+(optional suffix included), and analysis-shaped run directories
+THEN all three remain eligible for collection, with the same cycle
+binding as before the change (the analysis shape binds to its start
+timestamp, matching both the analysis lane's own cycle_time and the
+previous criterion's value)
 
 ## MODIFIED Requirements
 
