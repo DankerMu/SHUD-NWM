@@ -29,42 +29,21 @@
 - [x] A.4 cache 语义回归锁：`tests/test_file_orchestration_journal.py`
       全绿零断言改动；同 key 命中值与驱逐行为单线程逐字不变
 
-## B. Lane #1356（先定性后修，issue 验收逐条）
+## B. Lane #1356（已触发 De-batch 出口——B.1 四种构造产不出确定性红，
+## 拆回 #1356；反证与结构性结论见 proposal Lane B 节与 #1356 评论。
+## 以下任务随 descope 撤销，不在本 PR 交付；唯一保留产物 = flaky 断言
+## 失败时的行 dump 诊断）
 
-- [ ] B.1 确定性复现：hook 缝位 **`chain_stage_execution.py:239-247`**
-      （`_reserve_cycle_stage` 返回后、`_reservation_already_inflight`
-      判定前），模块级 no-op 默认（**不复用** :232
-      `_before_cycle_stage_submit`——在 reserve 前且做实事）；测试
-      monkeypatch 成 Barrier 钉交错窗口，稳定产出
-      `forecast_attempts == 3`；**复现命令 + 注入点落账**；失败时 dump
-      `query_pipeline_jobs_by_cycle` 全部行（job_id / idempotency_key /
-      status / submission_attempt / reconciliation_decision）随 PR 附
-      逐字证据；**补一条 no-op 断言**（默认 hook 生产零行为）。
-      **预算与出口**：一个 implementer pass 内产不出确定性红 ⇒ 触发
-      proposal「De-batch 出口」，Lane B 拆回 #1356，A 单独交付
-- [ ] B.2 书面定性（判据 = 第 3 次提交所用 job_id）：`#retry-N` 新键 =
-      守卫被绕过；同 job_id = CAS 本体洞；若钉死交错后仍无法产出 3 而
-      只能证明用例时序假设过紧 = test-only。结论落 PR body +
-      proposal 修订（守卫洞路线须追加 pipeline-job-persistence
-      submit-once spec delta 并重跑 openspec validate——编排者职责）
-- [ ] B.3 按定性修复：
-      守卫洞 ⇒ retry 铸键纳入同一 submit-once 判据 + 确定性并发负向
-      用例（未修必红/修后必绿）+ 说明生产链路（node-22 实投）是否
-      曾/可能触发；
-      test-only ⇒ 用例改屏障同步 + 注释写明被保护不变量，生产代码零改动
-- [ ] B.4 `uv run pytest -q "tests/test_orchestration_chain.py::test_file_journal_post_window_concurrent_public_cycles_submit_one_retry"`
-      两参数化 ×20 轮全绿——**慢环境 oracle 在 node-27，且为合并门
-      （pre-merge）**（issue 明确本地 macOS 不够慢；主树被 #1341 占用
-      时用隔离 git worktree）；本地受压跑（与 A.2 hammer 并跑）作先导，
-      C.4 仅把 node-27 结果转录归档为 receipt
+（B.1-B.4 任务体已随 descope 删除；勘察证据与结构性结论
+以 #1356 评论为准——含四种构造清单、同 retry 键反证行 dump、
+mandated 缝位不可翻盘论证、上游 idempotency 键选取的下一步指向）
 
 ## C. Verification
 
 - [x] C.1 uv run pytest -q tests/test_orchestration_chain.py
       tests/test_file_orchestration_journal.py tests/test_production_scheduler.py
 - [x] C.2 uv run ruff check .
-- [ ] C.3 openspec validate orchestration-concurrency-hardening --strict --no-interactive
-      ——若 B.2 定性触发 fixture 修订（追加 submit-once delta 或
-      De-batch 裁剪），C.3 必须在该修订**之后**重跑（终态一推纪律）
-- [ ] C.4 merge 后 node-27 receipt（C.1 三套件 + B.4 20 轮；#1513
-      已知例外口径）记 #1380 + #1356
+- [x] C.3 openspec validate orchestration-concurrency-hardening --strict --no-interactive
+      ——已在 De-batch 裁剪**之后**重跑通过（终态一推纪律）
+- [ ] C.4 merge 后 node-27 receipt（C.1 三套件；#1513 已知例外口径）
+      记 #1380（#1356 已 descope 拆回，不在本 PR 记账）

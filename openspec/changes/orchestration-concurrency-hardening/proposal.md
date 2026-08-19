@@ -65,33 +65,18 @@ public pass **都**打到了 forecast sbatch。四个候选竞态面自 2026-07-
   `error_traceback_tail`（issue 建议 2）。体积影响已声明：一趟最多
   candidate_count × 2000 字符，17 候选 ≈ 34KB 上限，可接受。
 
-### Lane B（#1356，先定性后修）
+### Lane B（#1356）——已触发 De-batch 出口，拆回 #1356
 
-1. **确定性复现装置**：在 reclaim CAS 与 sbatch 之间给测试注入交错点
-   ——缝位坐标（round-0 审校正）：
-   **`chain_stage_execution.py:239-247`**，即
-   `reservation = orchestrator._reserve_cycle_stage(...)` 之后、
-   `if orchestrator._reservation_already_inflight(reservation):` 之前，
-   加模块级 no-op hook（测试 monkeypatch 成 threading.Barrier/Event；
-   须为**模块级**——用例每线程各 new orchestrator/repository，
-   per-instance 方法拦不住）。**不得复用** `:232` 既有
-   `_before_cycle_stage_submit`：它在 reserve 之前且做实事（改 cycle
-   status）。生产零行为变化须有断言钉住（tasks B.1）。用它把两个 pass
-   钉进交错窗口，稳定产出 `forecast_attempts == 3`，复现**命令**与
-   注入点一并落账，并 dump `query_pipeline_jobs_by_cycle` 全部行
-   （job_id / idempotency_key / status / submission_attempt /
-   reconciliation_decision）。
-2. **定性**（判据 = 第 3 次提交所用 job_id）：
-   - 新 `#retry-N` job_id ⇒ **守卫被绕过**（主嫌成立）：修复 =
-     in-pass retry 铸出的新 job_id 也必须过同一 submit-once 判据
-     （reclaim/reserve 绝对性证明覆盖 retry 键），补确定性并发负向
-     用例（未修必红/修后必绿）；此时**追加** pipeline-job-persistence
-     spec delta（submit-once 不变量覆盖 retry 铸键），由编排者在定性
-     落账后修订 fixture 并重跑 openspec validate。
-   - 同一 job_id ⇒ 真·双重提交同一预约（CAS 本体洞）：按实修 CAS。
-   - 复现证明纯 test-only 时序假设 ⇒ 用例改屏障同步 + 注释写明被保护
-     不变量，**不动生产代码**（issue 备选路线的准入条件）。
-3. 20 轮受压重复验证（issue 验收）。
+实现 pass 内四种构造（mandated 缝位屏障 / 屏障下移 `reserve_candidate`
+CAS 内部 / 错峰启动 / 双参数化 ×20 轮受压 soak）均无法产出确定性
+`forecast_attempts == 3`，按本 proposal「De-batch 出口」条款拆回
+#1356（descope，勘察结论已评论落账至该 issue）。关键反证：两个并发
+pass 铸的是**同一把** retry 键（`...:forecast:retry_1`，恰一个
+created=True）——主嫌（retry 铸键绕过守卫）在该缝位被证伪；
+`_reservation_already_inflight` 是 hook 前已算好的 `ReservationResult`
+纯函数，mandated 缝位在构造上翻不了盘，下一轮排查应 instrument 上游
+idempotency 键选取。本 PR 保留的唯一 Lane B 产物：flaky 首轮断言失败
+时 dump 本 cycle 全部 job 行（断言值不变——下次 CI 红自带定性证据）。
 
 ## Non-Goals
 
