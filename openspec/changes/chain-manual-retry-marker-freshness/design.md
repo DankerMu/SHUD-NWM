@@ -132,7 +132,8 @@ E6 钉住"scoped 谓词选择的 job 集合与 fall-through
 
 丢弃 attempt claim 时结构化 warning：措辞为"manual_retry attempt claim ignored —
 no active manual-retry decision on this evidence"（不用 "stale"），含 basin/cycle
-标识、claim 值、实际 decision/reason、fall-through 说明。铸造点（manifest）与
+标识、claim 值、实际 decision/reason（终评 Note-1 后：止于写点可知处，不含任何
+下游 targeting/fall-through 从句——tasks 1.4 同口径）。铸造点（manifest）与
 evidence 分支两处共用同一日志 helper（或各发一条同 schema 的记录——实现者裁定，
 但字段 schema 必须一致）。E5 caplog 钉。
 
