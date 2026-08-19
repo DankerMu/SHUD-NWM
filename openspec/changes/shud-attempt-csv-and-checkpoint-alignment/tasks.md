@@ -517,5 +517,50 @@
       `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`（本车道不该发起的删除判的）。
       `pytest -k non_direct_grid_second_attempt_behaviour_is_unchanged`
       → `1 passed`。判别力见 D.5 的删 guard mutant
-- [ ] D.5 修复后复跑 C.1 三套件 + C.2 + C.3，并**逐条给出修后判别力证据**：
+- [x] D.5 修复后复跑 C.1 三套件 + C.2 + C.3，并**逐条给出修后判别力证据**：
       D.1 的 C1 探针不再楔死、D.3 的过严门 mutant 必红、D.4 的删 guard mutant 必红
+
+      **落账 — 三条验证命令（本地 macOS）**：
+      - C.1 `uv run pytest -q tests/test_shud_runtime.py tests/test_warm_start.py
+        tests/test_orchestration_chain.py` → `649 passed in 954.43s (0:15:54)`，
+        exit 0，零 failed / 零 error（基线 647，+2 = D.3 新参数 × 2 产地）。
+        随机顺序插件启用（未加 `-p no:randomly`）
+      - C.2 `uv run ruff check .` → `Found 1 error.`，仍是那条与本次改动无关的
+        未跟踪本地工具投影 `skills/subagent-workflow/scripts/review_gate.py:369`
+        E501（不修）；本次改动文件零告警
+      - C.3 `openspec validate shud-attempt-csv-and-checkpoint-alignment --strict
+        --no-interactive` → `Change 'shud-attempt-csv-and-checkpoint-alignment' is valid`
+
+      **落账 — 三条修后判别力（mutant 一律跑在 `git worktree add` 出来的临时工作树里，
+      跑完 `git worktree remove --force`；仓库内零变异残留，`git stash list` 为空）**：
+      1. **D.1 / C1 探针**（运行期 monkeypatch，非变异）：早探第一次抛 `OSError`、
+         之后委托真实实现 → `CALLS: 2` / `OUTCOME: DID NOT RAISE` /
+         `STATION CSV BYTES RESTAGED: True`。修前 verD 口径是同样的 `CALLS: 2`
+         但伴随 `DIRECT_GRID_STATION_FILENAME_COLLISION ... : forcing.csv`——楔死解除
+      2. **D.3 / 过严门 mutant**（`chain_manifests.py:433` 判据换成
+         `[hour for hour in checkpoint_hours if hour != min(checkpoint_hours)]`）：
+         全文件 `tests/test_orchestration_chain.py` → **`2 failed, 355 passed in
+         866.43s`**（修前该 mutant 是 `355 passed` 零红）。红形逐字：
+         ```
+         E  services.orchestrator.chain_types.OrchestratorError: Forecast state
+            checkpoint hours are not reachable under the derived restart cadence:
+            [12] (update_ic_step_minutes=360). ...
+         FAILED ...::test_forecast_manifest_assembly_keeps_aligned_cycle_configurations_unchanged[run-..-0,6,18-expected_hours2]
+         FAILED ...::test_forecast_manifest_assembly_keeps_aligned_cycle_configurations_unchanged[runtime-..-0,6,18-expected_hours2]
+         ```
+         即：合法配置 `0,6,18`（step 360、`12*60 % 360 == 0`）被过严门 typed 拒掉，
+         两个产地各红一条
+      3. **D.4 / 删 guard mutant**（删掉 `runtime.py:1284-1285` 的
+         `if not forcing_context.is_direct_grid: return`）：全文件
+         `tests/test_shud_runtime.py` → **`1 failed, 259 passed in 26.18s`**
+         （修前该 mutant 是 `260 passed` 零红）。红形逐字：
+         ```
+         >   assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
+         E   AssertionError: assert 'DIRECT_GRID_...LEANUP_FAILED' == 'WORKSPACE_PATH_UNSAFE'
+         E     - WORKSPACE_PATH_UNSAFE
+         E     + DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED
+         ```
+         即 verD 预测的那次 typed 码翻转被钉住了
+
+      **PR body 待更新**：「已知限制 2」里的「失败路径 context 跑两次」
+      → **三次**（早探 + 原地重试 + 历史站点），该调用只读
