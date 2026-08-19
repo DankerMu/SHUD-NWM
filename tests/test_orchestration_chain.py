@@ -11795,6 +11795,204 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
     assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 5
 
 
+def _patch_forecast_assembly_helpers(monkeypatch) -> None:
+    """Neutralize the assembly helpers that are irrelevant to checkpoint alignment.
+
+    Mirrors ``test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases``
+    minus its ``_forecast_state_checkpoint_hours`` patch, so the checkpoint hours
+    come from the REAL derivation driven by
+    ``NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC``.
+    """
+
+    from services.orchestrator import chain as chain_runtime
+
+    monkeypatch.setattr(
+        chain_runtime,
+        "_default_forcing_uri",
+        lambda source_id, compact_cycle, basin_version_id, model_id, store: (
+            f"patched://forcing/{source_id}/{compact_cycle}/{basin_version_id}/{model_id}/"
+        ),
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_station_metadata_for_basin",
+        lambda _basin: {
+            "schema_version": "patched.station.v1",
+            "state": "ready",
+            "station_count": 2,
+            "station_ids": ["s1", "s2"],
+            "source": "patched",
+            "quality_flag": "patched_station_ok",
+            "shud_station": "patched_station.txt",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_output_river_contract",
+        lambda _basin: {
+            "state": "ready",
+            "river_network_version_id": "patched-river",
+            "segment_count": 5,
+            "output_segment_count": 5,
+            "gis_segment_count": 9,
+            "river_segment_ids": ["r1"],
+            "identity_source": "patched",
+            "quality_flag": "patched_output_ok",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_project_name_for_basin",
+        lambda _basin, *, fallback: f"patched-project-{fallback}",
+    )
+
+
+_CHECKPOINT_ALIGNMENT_HORIZON_HOURS = 72
+"""#1317: pinned >= 19 so ``_forecast_state_checkpoint_hours``'s ``hour <= horizon``
+filter cannot drop the 19h lead the ``"0,5"`` minimal counter-example depends on."""
+
+
+def _build_forecast_run_manifest_for_alignment(tmp_path: Path) -> dict[str, Any]:
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    run_context = ForecastRunContext(
+        run_id="run-1",
+        source_id="gfs",
+        scenario_id="forecast_gfs_deterministic",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        model_id="model-1",
+        basin_id="basin-1",
+        basin_version_id="basin-v1",
+        river_network_version_id="river-v1",
+        segment_count=9,
+        model_package_uri="s3://models/model-1/",
+        forcing_version_id="forcing-v1",
+        forcing_package_uri="s3://forcing/gfs/",
+        start_time=cycle_time,
+        end_time=cycle_time + timedelta(hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS),
+        forecast_horizon_hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS,
+        run_manifest_uri="s3://runs/run-1/input/manifest.json",
+        output_uri="s3://runs/run-1/output/",
+        log_uri="s3://runs/run-1/logs/",
+        forcing_package_manifest_uri="s3://forcing/gfs/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:forcing-package",
+    )
+    return object.__new__(ForecastOrchestrator)._build_run_manifest(run_context)
+
+
+def _build_forecast_runtime_manifest_for_alignment(tmp_path: Path) -> dict[str, Any]:
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    basin = {
+        "run_id": "run-1",
+        "model_id": "model-1",
+        "basin_id": "basin-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "river-v1",
+    }
+    cycle_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs-2024010100",
+        run_id="cycle-run-1",
+        all_basins=[dict(basin)],
+        active_basins=[dict(basin)],
+    )
+    orchestrator = object.__new__(ForecastOrchestrator)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        forecast_horizon_hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS,
+    )
+    orchestrator.object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    return orchestrator._build_forecast_runtime_manifest(cycle_context, dict(basin))
+
+
+@pytest.mark.parametrize(
+    # "0,5"    -> hours [5, 19],     step 300, 19*60 % 300 == 240 (minimal counter-example)
+    # "0,5,12" -> hours [5, 7, 12],  step 300, 2 of 3 unreachable, T+12 warm-start lead included
+    ("allowed_cycle_hours", "unreachable_hours"),
+    [("0,5", [19]), ("0,5,12", [7, 12])],
+)
+@pytest.mark.parametrize(
+    ("site", "builder"),
+    [
+        ("run", _build_forecast_run_manifest_for_alignment),
+        ("runtime", _build_forecast_runtime_manifest_for_alignment),
+    ],
+)
+def test_forecast_manifest_assembly_rejects_unreachable_state_checkpoint_hours(
+    tmp_path: Path,
+    monkeypatch,
+    allowed_cycle_hours: str,
+    unreachable_hours: list[int],
+    site: str,
+    builder,
+) -> None:
+    """#1317 half (b) red: a checkpoint hour the cadence cannot divide is refused.
+
+    ``update_ic_step_minutes`` is ``min(checkpoint_hours) * 60`` and SHUD only
+    writes a restart when the elapsed minutes divide it, so ``"0,5"`` (hours
+    ``[5, 19]``, step 300, ``19*60 % 300 == 240``) declares a checkpoint hour that
+    is structurally impossible to produce. Pre-fix both sites emitted that
+    manifest silently and the run died much later with
+    ``STATE_CHECKPOINTS_MISSING``, indistinguishable from a broken solver.
+
+    Both production sites are driven independently: ``chain_manifests.py:486`` and
+    ``:643`` are sibling copies and covering only one leaves a live path.
+    """
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", allowed_cycle_hours)
+    _patch_forecast_assembly_helpers(monkeypatch)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        builder(tmp_path)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINT_HOURS_UNREACHABLE"
+    assert exc_info.value.details["unreachable_hours"] == unreachable_hours
+    assert exc_info.value.details["update_ic_step_minutes"] == 300
+    assert site in {"run", "runtime"}
+
+
+@pytest.mark.parametrize(
+    # "0,12"     -> [12],     single-element set
+    # "0,6,12,18"-> [6],      single-element set
+    # "0,6,18"   -> [6, 12],  MULTI-element and still fully reachable: step 360 and
+    #               12*60 % 360 == 0.  The two single-element rows above cannot tell
+    #               the real "every hour must divide the step" gate from an over-strict
+    #               "hour must EQUAL min(checkpoint_hours)" one, because on a
+    #               single-element set the two predicates coincide.  This row is the
+    #               one that dies under the over-strict gate.
+    ("allowed_cycle_hours", "expected_hours"),
+    [("0,12", [12]), ("0,6,12,18", [6]), ("0,6,18", [6, 12])],
+)
+@pytest.mark.parametrize(
+    ("site", "builder"),
+    [
+        ("run", _build_forecast_run_manifest_for_alignment),
+        ("runtime", _build_forecast_runtime_manifest_for_alignment),
+    ],
+)
+def test_forecast_manifest_assembly_keeps_aligned_cycle_configurations_unchanged(
+    tmp_path: Path,
+    monkeypatch,
+    allowed_cycle_hours: str,
+    expected_hours: list[int],
+    site: str,
+    builder,
+) -> None:
+    """#1317 zero-regression: the default ``0,12`` and evenly spaced configs are untouched."""
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", allowed_cycle_hours)
+    _patch_forecast_assembly_helpers(monkeypatch)
+
+    manifest = builder(tmp_path)
+
+    assert manifest["runtime"]["state_checkpoint_hours"] == expected_hours
+    assert manifest["runtime"]["update_ic_step_minutes"] == min(expected_hours) * 60
+    assert site in {"run", "runtime"}
+
+
 def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -> None:
     from services.orchestrator import chain as chain_runtime
     from services.orchestrator import chain_manifests

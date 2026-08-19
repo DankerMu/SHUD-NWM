@@ -558,6 +558,18 @@ class SHUDRuntime:
         _ensure_directory(input_dir)
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         _ensure_directory(model_input_dir, containment_root=input_dir)
+        # #1491 invariant: an attempt's starting point is what IT declares.
+        # ``input/<project>/`` is reused verbatim across every attempt of a
+        # deterministic ``run_id``, so the station CSVs a PREVIOUS attempt copied
+        # still sit on this attempt's declared targets and the (unchanged)
+        # collision gate turns a retryable failure into a permanently wedged
+        # run_id.  The anchor is SOURCE/TIME, not name: the residue is removed
+        # here, BEFORE anything this attempt stages exists, so a model package
+        # member / forcing package member / initial state that lands on a
+        # declared station CSV target is still adjudicated by that gate.
+        forcing_context = self._forcing_package_context_for_attempt_hygiene(manifest)
+        if forcing_context is not None:
+            self._clear_predecessor_direct_grid_station_csvs(model_input_dir, forcing_context)
         # #1164 invariant: packaged 候选集恒等于本次 staging 产物;禁止事后猜测.
         # A manifest that declares a packaged IC clears every staged ``*.cfg.ic``
         # BEFORE the package is re-staged, so the exactly-one search below sees
@@ -570,7 +582,11 @@ class SHUDRuntime:
         if _declares_packaged_initial_condition(manifest):
             self._clear_packaged_initial_states(model_input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
-        forcing_context = self._prepare_forcing_package_context(manifest)
+        if forcing_context is None:
+            # The hygiene probe swallowed this call's failure so that every
+            # pre-existing staging error still surfaces from its historical call
+            # site, in its historical order.  Redo it here and let it raise.
+            forcing_context = self._prepare_forcing_package_context(manifest)
         self._stage_artifact(
             manifest["forcing"]["forcing_uri"],
             model_input_dir,
@@ -841,6 +857,20 @@ class SHUDRuntime:
                 if project_mode:
                     end_day = _shud_start_day(manifest) + hour / 24.0
                     content = _replace_or_append(content, "END", _format_float(end_day), separator=separator)
+                    # #1317: SHUD writes a restart file only when the elapsed model
+                    # time divides Update_IC_STEP (MD_update.cpp:226-229), END
+                    # included -- so a rerun that inherited the manifest's cadence
+                    # cannot produce an hour that cadence does not divide.  This
+                    # loop is per-hour, so `hour * 60` divides THIS rerun's END by
+                    # construction and no gcd is involved.  Recovery is therefore
+                    # locally correct whatever the manifest configured.  Gated on
+                    # project mode to match `generate_cfg_para` (:619-624), the only
+                    # producer of this key: `_replace_or_append` appends a missing
+                    # key, so an ungated injection would hand a cfg-style file a key
+                    # its producer never writes.
+                    content = _replace_or_append(
+                        content, "Update_IC_STEP", str(hour * 60), separator=separator
+                    )
                 else:
                     end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
                     content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
@@ -1188,6 +1218,133 @@ class SHUDRuntime:
             checksum_entries=tuple(checksum_entries),
             is_direct_grid=is_direct_grid,
         )
+
+    def _forcing_package_context_for_attempt_hygiene(
+        self, manifest: dict[str, Any]
+    ) -> _ForcingPackageContext | None:
+        """Resolve the forcing package context early, for #1491 attempt-start hygiene.
+
+        The station CSV names this attempt declares are only knowable from the
+        forcing package, and the hygiene has to run BEFORE the model package is
+        staged — otherwise it could not tell "a previous attempt left this" from
+        "this attempt just staged this", which is exactly what the collision gate
+        must keep refusing.
+
+        Resolving it early would, however, move every failure this call can raise
+        (package manifest read/checksum, member checksums, station filename
+        validation) ahead of model package staging, changing observable ordering:
+        ``test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att``
+        asserts the staged ``.sp.att`` bytes after a raise that happens inside
+        this very call.  So the probe is best-effort: on a failure that survives
+        the retry below it returns ``None`` and :meth:`prepare_workspace` re-runs
+        the call at its historical site, where it raises exactly as before.
+
+        A failure is retried ONCE in place, before the model package is staged.
+        The call is read-only, and a TRANSIENT failure (a flaky object-store read
+        of the package manifest or a member) would otherwise swallow the hygiene
+        for a run whose next attempt then hits the collision gate on its own
+        predecessor's station CSVs — #1491's wedged ``run_id``, reproduced
+        verbatim, on a code (``DIRECT_GRID_STATION_FILENAME_COLLISION``) that is
+        deliberately absent from ``TRANSIENT_ERROR_CODES`` and therefore never
+        retried at the scheduler level.
+
+        Call count, since this call is NOT memoized (:meth:`prepare_workspace`
+        merely reuses the returned object in a local): a successful attempt
+        resolves the context once; an attempt whose failure is deterministic
+        resolves it three times — this probe, the in-place retry, and the
+        historical call site — and :meth:`_verify_forcing_object_checksums`
+        re-hashes every declared member on each.
+
+        Skipping the hygiene on a swallowed failure is fail-CLOSED: staging then
+        behaves exactly as it did before this change (the collision gate refuses),
+        it never gains permission to overwrite anything.
+        """
+
+        try:
+            return self._prepare_forcing_package_context(manifest)
+        except Exception:  # noqa: BLE001 - a transient shape gets the in-place retry below
+            pass
+        try:
+            return self._prepare_forcing_package_context(manifest)
+        except Exception as error:  # noqa: BLE001 - re-raised verbatim at the historical call site
+            self._log_attempt_hygiene_probe_skip(manifest, error)
+            return None
+
+    def _log_attempt_hygiene_probe_skip(self, manifest: dict[str, Any], error: BaseException) -> None:
+        """Leave the swallowed probe failure in this run's log dir.
+
+        Without it the hygiene lane is the silent one: operations cannot tell
+        "the cleanup ran and found no residue" from "the cleanup never ran
+        because the forcing package could not be resolved", which is exactly the
+        difference between a healthy retry and a wedged ``run_id``.
+        """
+
+        try:
+            run_id = _safe_path_component(str(manifest.get("run_id") or ""))
+            log_dir = Path(self.config.workspace_root) / "runs" / run_id / "logs"
+            _write_text_no_follow(
+                log_dir / "attempt_hygiene_probe.err.log",
+                f"direct-grid attempt-start hygiene skipped for run {run_id}: "
+                f"{getattr(error, 'error_code', type(error).__name__)}\n",
+                containment_root=log_dir,
+            )
+        except (OSError, ValueError, SHUDRuntimeError, SafeFilesystemError):
+            # Diagnostics are best-effort, and this probe must never raise: the
+            # historical call site is the one that reports this failure.
+            return
+
+    def _clear_predecessor_direct_grid_station_csvs(
+        self,
+        model_input_dir: Path,
+        forcing_context: _ForcingPackageContext,
+    ) -> None:
+        """Remove station CSV residue left by an EARLIER attempt of this run_id.
+
+        Scope contract: the deletion set is exactly the station CSV targets this
+        attempt declares (``shud/<name>.csv`` members of the checksum-verified
+        package manifest) that already exist as entries of ``model_input_dir`` —
+        never a whole-directory clear, never a name outside that set.  Reserved
+        project files (``{project}.sp.att`` and friends) are structurally out of
+        reach: ``_direct_grid_station_filename`` requires a ``.csv`` suffix and no
+        reserved name has one.  Every removal is ``unlink_no_follow`` anchored on
+        ``model_input_dir``, so directory-form and symlink-form residue are
+        refused by the primitive rather than followed out of the workspace.
+
+        Non-direct-grid staging never enters here: it copies the whole package
+        prefix through ``_copy_staged_file_no_follow`` (:1121), which already
+        overwrites, so it never had this defect and gains no deletion.
+
+        Fail-LOUD, no two-way branch (#1164 :meth:`_clear_packaged_initial_states`
+        is the exemplar, #1355 the sibling): a removal that cannot be completed
+        re-codes as ``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`` — the existing
+        code for this function family's deletion primitive, deliberately absent
+        from ``TRANSIENT_ERROR_CODES`` — and ends the attempt.  Because this runs
+        before ANY staging, such an abort also leaves no partially staged station
+        CSV set behind.
+        """
+
+        if not forcing_context.is_direct_grid:
+            return
+        declared_names = _declared_direct_grid_station_csv_names(forcing_context.checksum_entries)
+        if not declared_names:
+            return
+        try:
+            present = set(list_directory_no_follow(model_input_dir, containment_root=model_input_dir))
+        except (SafeFilesystemError, OSError) as error:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                "Run input workspace could not be listed for prior-attempt station CSV cleanup "
+                f"before direct-grid staging: {error}",
+            ) from error
+        for name in sorted(declared_names & present):
+            try:
+                unlink_no_follow(model_input_dir / name, containment_root=model_input_dir, missing_ok=True)
+            except (SafeFilesystemError, OSError) as error:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                    f"Prior-attempt direct-grid station CSV {name} could not be removed from the "
+                    f"run input workspace before direct-grid staging: {error}",
+                ) from error
 
     def _read_authoritative_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
@@ -3148,6 +3305,35 @@ def _direct_grid_station_filename(raw_token: str) -> str:
             f"Direct-grid SHUD forcing station Filename must be a safe single .csv filename: {raw_token}",
         )
     return token
+
+
+def _declared_direct_grid_station_csv_names(entries: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Station CSV target names this attempt declares, from its verified package manifest.
+
+    ``_direct_grid_runtime_checksum_entries`` builds the direct-grid entry set as
+    the station-index member plus one ``shud/<csv>`` entry per row of the
+    checksum-verified ``.tsd.forc``, so this is the same identity set the copy
+    loop later lands on — derived from the object store, not from whatever a
+    previous attempt happens to have left in the workspace.
+
+    A non-conforming name is skipped rather than raised on: this feeds hygiene
+    only, and the staging path adjudicates it (``DIRECT_GRID_STATION_FILENAME_INVALID``)
+    at its own site with its own ordering.
+    """
+
+    names: set[str] = set()
+    for entry in entries:
+        relative_path = str(entry.get("relative_path") or "").strip()
+        if not relative_path or relative_path in SHUD_FORCING_INDEX_MEMBERS:
+            continue
+        parts = PurePosixPath(relative_path).parts
+        if len(parts) != 2 or parts[0] != "shud":
+            continue
+        try:
+            names.add(_direct_grid_station_filename(parts[1]))
+        except SHUDRuntimeError:
+            continue
+    return names
 
 
 def _mapping_metadata_declares_direct_grid(metadata: Mapping[str, Any]) -> bool:
