@@ -22,6 +22,10 @@ from services.orchestrator.chain_types import (
     StageDefinition,
     StageRunResult,
 )
+from services.orchestrator.retry_identity import (
+    has_active_manual_retry_decision,
+    log_ignored_manual_retry_attempt_claim,
+)
 from workers.canonical_converter.converter import expected_converter_version
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -150,6 +154,20 @@ def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bo
 
 
 def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a single-basin marker widens execution scope to that candidate.
+
+    Deliberately NOT gated by the #1201 manual-retry claim judgement, even though it
+    reads the same marker.  It mints no attempt: it only helps choose (via
+    ``_candidate_scoped_cycle_execution``) the job set fed to
+    ``_next_retry_attempt_for_stage``, and (a) job ids are run-id-namespaced, so jobs
+    from another run never change this stage's prefix max, and (b) a production
+    single-basin candidate always carries ``orchestration_run_id``, which decides the
+    scope on its own — leaving the marker arm a fail-open widening with no wedge.
+    After the minting gate a judged-inactive claim still reaches this arm through
+    ``marker``/``requested``/``allowed``; that residual coupling is pinned by test,
+    not repaired here (#1201 design D3).
+    """
+
     if len(basins) != 1:
         return False
     basin = basins[0]
@@ -325,7 +343,22 @@ def _retry_attempt_from_basins(basins: Sequence[Mapping[str, Any]]) -> int | Non
                     manual_retry.get("new_attempt") or manual_retry.get("attempt") or manual_retry.get("retry_count")
                 )
                 if attempt is not None:
-                    attempts.append(attempt)
+                    # Defence in depth behind the manifest minting gate (#1201).
+                    # The direct fields above are the invocation's own input
+                    # (operator/API) and stay unjudged; a claim read out of
+                    # scheduler-emitted evidence is only honoured under an active
+                    # manual-retry decision.
+                    if has_active_manual_retry_decision(state_evidence):
+                        attempts.append(attempt)
+                    else:
+                        log_ignored_manual_retry_attempt_claim(
+                            state_evidence,
+                            site="chain_retry_attempt_from_basins",
+                            claimed_attempt=attempt,
+                            candidate_id=basin.get("candidate_id"),
+                            basin_id=basin.get("basin_id"),
+                            cycle_id=basin.get("cycle_id"),
+                        )
     if not attempts:
         return None
     return max(attempts)

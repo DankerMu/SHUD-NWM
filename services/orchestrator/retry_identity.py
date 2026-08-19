@@ -7,13 +7,22 @@ suffix carried by the job id.  Production ids stack suffixes
 
 This module is the single owner of that parsing; it deliberately has no
 dependencies so both the DB-free journal and the scheduler read side can use it.
+It also owns the manual-retry claim judgement (#1201), for the same reason: the
+scheduler manifest minting point and the chain read side must share ONE
+predicate, and neither may import the other's layer.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from typing import Any
 
+LOGGER = logging.getLogger(__name__)
+
 RETRY_JOB_ID_MARKER = "_retry_"
+
+MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN = "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED"
 
 
 def split_retry_job_identity(job_id: str | None) -> tuple[str, int]:
@@ -49,3 +58,59 @@ def _coerce_attempt(value: Any) -> int:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def has_active_manual_retry_decision(state_evidence: Any) -> bool:
+    """True when this evidence's decision face carries an ACTIVE manual-retry decision.
+
+    ``_manual_retry_state_evidence`` (the freshness-gated write point) stamps BOTH
+    ``decision == "manual_retry"`` and ``reason == "manual_retry_requested"``; the
+    evidence-owner face echoes the persisted ``manual_retry`` marker unconditionally
+    into every decision's ``base_evidence`` and stamps neither.  Reading the decision
+    face is therefore how a consumer tells an attempt claim backed by a live decision
+    from a bare echo.
+
+    The proposition is deliberately narrow: "no active manual-retry decision on THIS
+    evidence", not "the marker is stale".  A higher-priority lane (e.g.
+    ``resume_after_completed_stage``) returns before the manual-retry lane and carries
+    the same echo, so a live marker can lawfully appear under another decision.
+
+    Unjudgeable evidence (no ``decision``/``reason`` key) fails safe to False: dropping
+    a claim degrades to the next free attempt and still submits, while honouring a
+    wedged claim against an occupied terminal ``_retry_<n>`` row blocks the stage
+    forever (#1201).
+    """
+
+    if not isinstance(state_evidence, Mapping):
+        return False
+    return state_evidence.get("decision") == "manual_retry" or state_evidence.get("reason") == "manual_retry_requested"
+
+
+def log_ignored_manual_retry_attempt_claim(
+    state_evidence: Mapping[str, Any],
+    *,
+    site: str,
+    claimed_attempt: int,
+    candidate_id: Any = None,
+    basin_id: Any = None,
+    cycle_id: Any = None,
+) -> None:
+    """Record a dropped manual-retry attempt claim (AC-4: never degrade silently).
+
+    Both consumers of :func:`has_active_manual_retry_decision` emit through here so
+    the two write points share one field schema.
+    """
+
+    LOGGER.warning(
+        "%s: manual_retry attempt claim ignored - no active manual-retry decision on this evidence; "
+        "falling through to the next free retry attempt for the stage "
+        "(site=%s candidate_id=%s basin_id=%s cycle_id=%s claimed_attempt=%s decision=%s reason=%s)",
+        MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN,
+        site,
+        candidate_id,
+        basin_id,
+        cycle_id,
+        claimed_attempt,
+        state_evidence.get("decision"),
+        state_evidence.get("reason"),
+    )
