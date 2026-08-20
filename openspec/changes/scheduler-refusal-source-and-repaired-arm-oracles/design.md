@@ -157,11 +157,16 @@ sidecar 文件名、recompute 码表……），另 2 个（`:214`/`:215`）根�
 （`:947`，只有字段声明、无清单常量）**这一个名字**，不是"所有类"。
 `ImportFrom` 的 `*` 必须显式拒：星号导入下 AST 不知道绑了哪些名字。
 
-编排者按 Impl-A 实现了参考主体，对 **10 种**写法逐一实测：普通赋值（对照）与海象
+编排者按 Impl-A 实现了参考主体，对 **9 种**写法逐一实测：普通赋值（对照）与海象
 `_ = (_X := ...)` 由**映射变化**打红；元组解包、`if` 块、`try` 块、`for` 绑定、`with` 块、
-新增类的类属性、`setattr(sys.modules[__name__], ...)`（目标是 `Attribute` 非 `Name`）
-七种由**拒绝**打红。round-2 另在 Impl-A 上验了 `match` / `TypeAlias` / `AugAssign` 三种，
-同样被 catch-all 拒。
+新增类的类属性、模块对象属性赋值 `sys.modules[__name__]._X = ...`（目标是 `Attribute` 非
+`Name`，作为 `Assign` 被拒）七种由**拒绝**打红。round-2 另在 Impl-A 上验了
+`match` / `TypeAlias` / `AugAssign` 三种，同样被 catch-all 拒（合计 12 种）。
+
+**注意上一行写的是赋值拼法，不是 `setattr` 调用。** 二者射程不同：
+模块级裸 `setattr(sys.modules[__name__], "_X", ...)` 是一条 `Expr`，属于**放行**形式
+（实测 ADMITTED），它由下面的运行时交叉核对接，不由拒绝接。round-1 这里写成了 `setattr(...)`
+调用而括注却在描述赋值目标，是同一条的两种写法被混写——已改。
 
 **`Expr` 的裁定**：HEAD 该模块模块级 `Expr` 数为 **0**（无 module docstring），
 所以不放行 `Expr` 今天能顺带拦住 `global` 安装的那句裸调用——但那是**撞上的不是设计的**，
@@ -196,15 +201,29 @@ _install_extra_refusal()
 | HEAD 未变异 | 18 | 18 | 双向差集为空 → 绿（无假阳性） |
 | `global` 安装变异 | 18 | **19** | 运行时多出 `_DOWNSTREAM_EXTRA_REFUSAL_CODES` → **红** |
 
-round-2 独立复核把这条的射程测全（同一形状、四种造名通道，均在隔离副本内）：
+round-2 独立复核把这条的射程测全（同一形状、四种造名通道，均在隔离副本内）。
+**Phase 4/4.5 的交叉评审把下表证伪了两格，Phase 6 修好了实现并重测**——
+原表把"造新名"的结论错当成了整个运行时改绑类的结论：
 
-| 运行时造名通道 | 交叉核对结果 |
-|---|---|
-| `global` 安装 | STRAY `_DOWNSTREAM_EXTRA_REFUSAL_CODES` → 红 |
-| `globals()["_X"] = …` | STRAY 同上 → 红 |
-| `setattr(sys.modules[__name__], …)` | STRAY 同上 → 红 |
-| 装饰器 mutate `globals()` | STRAY 同上 → 红 |
-| star-import | **名字比对关不掉**——须由显式拒 `*` 关闭 |
+**读表前的前提，漏了它整张表都会被误读**：下面每一行的"安装"都指**由模块级调用驱动**
+（`def _install(): …` + 模块级 `_install()`——`FunctionDef` 与 `Expr` 都是放行形式，所以进不了主体
+也不触发拒绝）。写成**裸模块级语句**的 `globals()["_X"] = …` 根本到不了交叉核对：
+它是 `Assign(targets=[Subscript])`，而放行集只收**单 `Name` 目标**的 `Assign`，
+当场被 catch-all 拒（`unadmitted module-level statement form Assign`）。
+Phase 6 实施者在复现时发现编排者的 brief 把这两种拼法混写了，已按实测口径改正。
+
+| 运行时改绑通道（均为调用驱动）| round-2 原结论 | Phase 4.5 实测 | Phase 6 修复后 |
+|---|---|---|---|
+| `global` 安装**新名** | STRAY → 红 | 同 | 红 |
+| `globals()["_X"] = …`（新名，非 `__` 前缀）| STRAY → 红 | 同 | 红 |
+| `globals()["__X"] = …`（新名，**`__` 前缀**）| （未测，隐含红）| **绿——穿过** | 红（过滤器由 `startswith("__")` 收成 dunder 判定；HEAD 上受影响名字 0 个，零假红）|
+| 模块级 `setattr(sys.modules[__name__], …)` 造新名 | STRAY → 红 | 同 | 红 |
+| 装饰器 mutate `globals()` 造新名 | STRAY → 红 | 同 | 红 |
+| `global` 改绑一个 AST 记为 **`def`** 的名字 | （未测，隐含红）| **绿——穿过** | 红（交叉核对由名字平集升级成 kind 感知：59 个 `def` 运行时须是 `FunctionType`、1 个 `class` 须是 `type`、53 个 import 名**豁免**；HEAD 上零假红）|
+| `global` 改绑那个 **`class`** 名（`_ForcingSidecarProvenance`）| — | — | 红（Phase 6 实施者额外实测的一腿，编排者 brief 未要求；这才是"`def` **或** `class`"这个措辞的依据）|
+| `global` 改绑一个已盘点**常量** | — | **红**（走消费者映射：`global` 后的赋值目标是 Store 语境 `ast.Name`，照样记成消费者）| 红 |
+| `setattr` / `globals()[…]` 改绑已盘点常量、**同 kind** | — | **绿——穿过**（名字只以字符串字面量出现，无 `ast.Name`；名字与 kind 都没变）| **仍绿**——见下 |
+| star-import | **名字比对关不掉** | 同 | 由显式拒 `*` 关闭 |
 
 两个实现要点（否则这条会误报）：AST 侧的"已绑定名字"集合**必须**把
 `Import`/`ImportFrom`/`FunctionDef`/`ClassDef` 绑定的名字也算进去，否则会吐出 11 个
@@ -212,7 +231,20 @@ round-2 独立复核把这条的射程测全（同一形状、四种造名通道
 加上之后 `运行时 − 已绑定` 在 HEAD 上恰为空。第二，`ImportFrom` 的 `*` 必须**显式拒**，
 那是本条靠名字比对关不掉的唯一支路。
 
-把主体从"语法形状枚举"升级成"语法与运行时一致性"之后，整个"运行时造名"类一次关闭。
+把主体从"语法形状枚举"升级成"语法与运行时一致性"之后，关闭的是
+**运行时在模块体未绑定的名字上造名**，以及**改变已绑定名字之种类**的改绑。
+**不是整类。** 残留一格，实测且刻意不关：
+
+> **同名同 kind 的反射式改绑**——`setattr(sys.modules[__name__], "_已有常量名", 新值)` 或
+> `globals()["_已有常量名"] = 新值`。名字只以**字符串字面量**出现，不产生 `ast.Name`，
+> 映射逐字节不变；名字本来就在两个集合里，kind `frozenset → frozenset` 也没变。
+> 实测：把 `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 这样改宽，判据 `True → False`，
+> 守卫子集 **44 passed 全绿**。
+
+挡住它的**只有**取值断言。Phase 6 因此把该常量补进取值断言（5 钉 / 13 未钉），
+它是 #1418 主题族里唯一没钉值的一条；**其余 13 条不钉**——全量钉 18 条值是不欠的摩擦，
+按 follow-up issue 处置。注意 `global` 拼法**不**在这一格里：它的赋值目标是语法引用，
+会改消费者集合，已经红（实测 `1 failed, 43 passed`）。写这两者时不得混为一谈。
 
 **`AnnAssign` 不是可选项。** 本模块最要害的两份清单载体
 `_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE` / `_REMEDY_NON_CAUSAL_CODE_TABLE`（`:218` / `:222`）
@@ -230,6 +262,13 @@ round-2 独立复核把这条的射程测全（同一形状、四种造名通道
 2. 既有清单多出**第二个消费函数**（例：`_REMEDY_NON_CAUSAL_CODES` 同时被
    `_downstream_failure_restartable` 咨询）→ 该键的值集合变化。**这一条才是 AC-1 的真不变量**
    ——"只有一个被咨询的判据源"。
+   **射程精确化**：这里的"消费"指源码里的 `ast.Name` 引用。反射式取值
+   （`globals()["_REMEDY_NON_CAUSAL_CODES"]`）不产生 `ast.Name`，不在射程内；
+   把已钉消费者的名字用作**嵌套** `def` 的名字同样归到那个名字下，也不在射程内。
+   Phase 4.5 独立验证实测：这一类里**现实的**那个成员——把检查抽成 helper、把集合当参数传进去
+   （`def _code_refusal(failure, codes)` + `if _code_refusal(failure, _REMEDY_NON_CAUSAL_CODES)`）
+   ——**打红**（`1 failed, 42 passed`），因为 `ast.Name` 落在 `_downstream_failure_restartable` 里。
+   所以 kill #2 不是弱，是**精确**：只有反射拼法逃得掉，而那不是走神重构会写出来的东西。
 3. 换名清单 + 新判据函数（N5）→ 同时命中 1 与 2。
 
 **声明的摩擦**：任何**正当**新增模块级常量的改动都要同步更新期望映射。这是**有意**的：
@@ -260,8 +299,10 @@ AC-3 要求"新增一份换名清单要变红"，而"变红"与"正当新增也�
   `_REMEDY_NON_CAUSAL_CODES = frozenset({...旧黑名单...})`，键集合与消费映射**逐字不变**，
   结构守卫绿。堵这个洞的是 task 1.5 **保留**的四条常量取值断言——import 时后赋值胜出，
   模块属性的实际取值与钉死值不等即红。
-  **两条精确化（fixture 评审 F8）**：(a) 这只覆盖被取值断言点名的**那 4 个**常量，
-  另外 14 个（如 `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS`）的重复赋值对两条守卫都隐形；
+  **两条精确化（fixture 评审 F8）**：(a) 这只覆盖被取值断言点名的那几个常量。
+  round-1 交付时是 4 个，Phase 6 按交叉评审补钉了
+  `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS`（它是 #1418 主题族里唯一没钉值的一条），
+  于是**5 个被钉、13 个未钉**；那 13 个的重复赋值对两条守卫仍然都隐形；
   (b) 真正抓住 `_REMEDY_NON_CAUSAL_CODES` 重复赋值的是那条**直接**取值断言，**不是**表断言
   ——表在 `:222` 求值时就绑定了旧 frozenset 对象，后段重赋值改不到表里那个引用。
   **因此 task 1.4 删掉 `assert source.count("_REMEDY_NON_CAUSAL_CODES = ") == 1` 之所以安全，
@@ -281,9 +322,23 @@ return not failure.get("permanent")
 ```
 
 `code_recorded=True` 时裁决 = `not failure.get("permanent")`（`limit_exhausted is True` 先行
-短路），**完全不读任何码字段**。参数化断言这条恒等式，在码轴上必须**包含三条已退役的
-黑名单码**（`INVALID_MANIFEST`、`MANIFEST_SCHEMA_INVALID`、`MALFORMED_INPUT`）——它们正是
-复发时会被写回清单的那三个。
+短路），**完全不读任何码字段，也不读 classifier 字段**。参数化断言这条恒等式，码轴上必须包含
+**已退役黑名单五条码中的三条**（`INVALID_MANIFEST`、`MANIFEST_SCHEMA_INVALID`、
+`MALFORMED_INPUT`）。
+
+**"三条"是有意的截断，不是那份清单的全部。** `git show d53cff4a` 里被删掉的集合是**五条**：
+上面三条 + `OUT_OF_MEMORY` + `POLICY_BLOCKED`。后两条至今仍是 `_REMEDY_NON_CAUSAL_CODES`
+（`:200-207`）里的**活**永久码，也就是按码复发最可能先伸手的两条——它们**落在轴外**，
+即落在本守卫已声明的盲区里。轴外不打红是刻度不是缺陷（见下），但账要算清：
+这条轴买到的是 5 分之 3。
+
+**classifier 轴同样必须钉（Phase 6 补）。** 只钉码轴时，把 `code_recorded=False` 腿自己那份
+`_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 提到分流之上，判据 `True → False`，
+而**全量 1773 条全绿**。结构守卫对这一形状是**体制性**失明：映射早已把该常量钉给
+`_downstream_failure_restartable` 这同一个函数，新增引用既不加键也不改值集合，
+**任何拼法都动不了映射**。所以 classifier 轴是这一形状唯一可得的 oracle。
+它也不是刁钻形状——那正是"把 classifier 检查在顶上做一次"这种化简会写出来的东西，
+两行、无反射、无命名游戏。
 
 **每行必须同时设 `error_code` 与 `reason_code` 两个键。** 本模块读码走的是键链
 （`_RECORDED_FAILURE_CODE_KEYS`，`:312`，由 `_downstream_recorded_error_code` 消费），
@@ -299,8 +354,22 @@ return not failure.get("permanent")
 False → 红。
 
 **声明的边界**：只覆盖 downstream 这一条腿。换名清单接到 raw-manifest 或 model-package
-通道上，本守卫抓不到——那由 D2 的结构守卫接（那两条通道的清单都是模块级常量）。
-两条守卫是**合取**，各自堵对方的盲区，这是采纳 issue「两条可以合取采用」的理由。
+通道上，本守卫抓不到。**这里 round-1 写的"那由 D2 的结构守卫接（那两条通道的清单都是模块级
+常量）"是个非 sequitur，已删**：D2 接住的是**今天**那两腿上恰好写成模块级常量的清单，
+它对**新写**的一份毫无办法。实测——在 `_remedy_permits_permanent_failure` 头部塞一个
+函数级内联字面量，判据 `True → False`，**全量 1773 全绿**，两条守卫一条都没看见。
+
+诚实的刻度（Phase 4.5 实测校正）：那两腿并非不设防——用 `INVALID_MANIFEST` 写这份内联复发
+会被本文件里**九条既有的 raw-manifest / remedy 行为测试**顺带接住（`9 failed, 1844 passed`）；
+换成另两条退役码则完全绿（`1853 passed`）。
+（这九条的出处**不逐条溯源**：只有 `test_raw_manifest_abstention_unshadows_permanent_guard_for_remedy_permitted_code`
+头部带 `#1313` 标记，其余八条无法核实归属，故不写来源。）
+所以准确的话是：**#1418 这两条守卫对那两腿一条都没接**，接住的是别的 change 的既有覆盖，
+且只覆盖到一条码。本 change 的 spec delta 把这条边界写对了——
+「a function-local literal on the raw-manifest or model-package leg … is outside this requirement」。
+
+两条守卫是**合取**，各自堵对方的部分盲区，这是采纳 issue「两条可以合取采用」的理由；
+"各自堵对方盲区"是部分而非完全，上面那个内联形状就落在两者的公共盲区里。
 
 `code_recorded=False` 分支**不在**本守卫的断言域内：该分支按 #1313 D4 明确保留
 pre-#1313 的 classifier 拒绝行为，`_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 是它

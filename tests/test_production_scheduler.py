@@ -26698,14 +26698,36 @@ def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_man
 _SCHEDULER_STATE_FAILURE_ADMITTED_CLASS_NAMES = frozenset({"_ForcingSidecarProvenance"})
 
 
+def _runtime_binding_kind(value: object) -> str:
+    """The binding kind a module attribute's run-time VALUE looks like.
+
+    The three labels line up with the ones ``_module_level_constant_consumers`` reads off
+    the module body, so the caller can compare declared kind against observed kind name by
+    name.  ``import`` is deliberately not among them: an import can bind an object of any
+    kind (``scheduler_state_failure``'s own import names resolve to modules, functions,
+    classes and metaclasses alike), so import names are exempt from the comparison.
+    """
+
+    if inspect.isfunction(value):
+        return "function"
+    if isinstance(value, type):
+        return "class"
+    return "constant"
+
+
 def _module_level_constant_consumers(
     source: str, *, admitted_class_names: frozenset[str]
-) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+) -> tuple[dict[str, frozenset[str]], dict[str, str]]:
     """Inventory ``{module-level constant -> names of the functions that read it}``.
 
-    Returns that mapping plus the set of every name the module body binds (constants,
-    imports, ``def``s and ``class``es), which the caller cross-checks against the
-    imported module object.
+    Returns that mapping plus ``{name -> binding kind}`` for every name the module body
+    binds THROUGH AN ADMITTED FORM -- ``"import"``, ``"function"``, ``"class"`` or
+    ``"constant"`` -- which the caller cross-checks against the imported module object.
+    (A bare walrus hiding inside an admitted ``Expr`` binds a module-level name that is
+    not inventoried here; that is not a hole, it is precisely what the caller's stray-name
+    check catches.)  The kind travels with the name because a flat name set is blind to
+    binding kind: a ``global`` install onto a name the body binds as a ``def``, rebound to
+    a refusal set, moves no name at all.
 
     The subject is EVERY module-level constant: both ``ast.Assign`` and
     ``ast.AnnAssign``, with no filtering on the assigned value's shape.  Both
@@ -26728,42 +26750,46 @@ def _module_level_constant_consumers(
     the bare call that drives a ``global`` install -- but that is a coincidence, not a
     design: the first person to add a module docstring would get a false red.  The
     run-time name channel (``global``, ``globals()[...] = ...``, ``setattr`` on the
-    module, a decorator that mutates ``globals()``) is closed by the caller's
-    source-versus-module cross-check instead, which sees the stray name whatever
-    installed it.  The one channel that cross-check cannot close is a star-import,
-    whose bound names no source inventory can enumerate -- so a star-import is refused
-    here, explicitly.
+    module, a decorator that mutates ``globals()``) is left to the caller's
+    source-versus-module cross-check instead, which sees an install under a name the
+    module body does not bind, and -- because the kinds travel with the names -- a
+    rebinding of a ``def`` or ``class`` name to a value of some other kind.  What that
+    cross-check does NOT see is a same-name, same-kind rebinding of an already
+    inventoried constant; only a constant-VALUE assertion catches that one.  A
+    star-import is refused here explicitly because it is the one channel for which name
+    comparison is constitutionally unavailable: the names it binds are not knowable from
+    this module's source at all.
     """
 
     tree = ast.parse(source)
     constant_names: list[str] = []
-    bound_names: set[str] = set()
+    bound_kinds: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
-                bound_names.add((alias.asname or alias.name).split(".")[0])
+                bound_kinds[(alias.asname or alias.name).split(".")[0]] = "import"
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
                     raise AssertionError(
                         f"line {node.lineno}: star-import binds names no source inventory can enumerate"
                     )
-                bound_names.add(alias.asname or alias.name)
+                bound_kinds[alias.asname or alias.name] = "import"
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            bound_names.add(node.name)
+            bound_kinds[node.name] = "function"
         elif isinstance(node, ast.ClassDef) and node.name in admitted_class_names:
-            bound_names.add(node.name)
+            bound_kinds[node.name] = "class"
         elif isinstance(node, ast.Expr):
             continue
         elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             constant_names.append(node.targets[0].id)
-            bound_names.add(node.targets[0].id)
+            bound_kinds[node.targets[0].id] = "constant"
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
             # A value-less ``x: int`` binds nothing at run time, so admitting it would
             # make the caller's cross-check report it as a phantom.  It falls to the
             # catch-all below with every other unrecognised form.
             constant_names.append(node.target.id)
-            bound_names.add(node.target.id)
+            bound_kinds[node.target.id] = "constant"
         else:
             raise AssertionError(
                 f"line {node.lineno}: unadmitted module-level statement form {type(node).__name__}; "
@@ -26785,7 +26811,7 @@ def _module_level_constant_consumers(
             _attribute(child, owner)
 
     _attribute(tree, None)
-    return {name: frozenset(owners) for name, owners in consumers.items()}, frozenset(bound_names)
+    return {name: frozenset(owners) for name, owners in consumers.items()}, bound_kinds
 
 
 #: Every module-level constant of ``scheduler_state_failure`` and the functions that
@@ -26826,9 +26852,13 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     plain or an annotated assignment -- and an EXISTING constant gaining a second
     consumer changes it too, which is the acceptance line's actual claim.  What it
     replaced was an ``assert <literal> not in source`` scan that was measured green
-    against a one-line re-add, a re-indented re-add and a renamed re-add, and red on a
-    pure reformatting; a source-text comparison can produce both a false green and a
-    false red and buys neither.
+    against a one-line re-add, a re-indented re-add and a renamed re-add: a source-text
+    comparison is a false-GREEN source on every re-add that is not byte-identical to the
+    text it pins.  (Its false-RED direction, by contrast, was never reachable: both
+    retired literals span ``"MANIFEST_SCHEMA_INVALID",`` and that string has occurred
+    ZERO times in the module since ``d53cff4a``, the very commit that introduced the
+    scan, so no reformatting can make either ``not in`` fail.  A scan whose only live
+    direction is the false-green one buys nothing at all.)
 
     The friction is deliberate: adding or renaming a module-level constant legitimately
     also fails this test, once, until the pinned mapping is updated in the same change.
@@ -26839,35 +26869,57 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
 
     * a refusal set written INLINE in a function body has no module-level constant to
       inventory.  On the downstream recorded-code leg that is covered behaviourally by
-      ``test_downstream_failure_restartable_verdict_ignores_reason_code`` below; on the
-      raw-manifest and model-package legs the lists are module constants, so this guard
-      holds them.
+      ``test_downstream_failure_restartable_verdict_ignores_reason_code`` below.  On the
+      raw-manifest and model-package legs it is NOT covered.  Those legs are not
+      defenceless -- an inline re-refusal that includes ``INVALID_MANIFEST`` at the head
+      of ``_remedy_permits_permanent_failure`` was measured to turn nine pre-existing
+      raw-manifest/remedy behavioural tests elsewhere in this file red, incidentally --
+      but not one assertion of this #1418 guard catches any of it, and the same inline
+      literal spelled ``{"MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT"}`` was measured to
+      leave the WHOLE file green.  This change's own spec draws the same bound: a
+      function-local literal on the raw-manifest or model-package leg "is outside this
+      requirement".
     * a list living in ANOTHER module is outside #1313 AC-1, which is a proposition
       about this module, and is not extended here.
 
-    The four constant-VALUE assertions below are kept verbatim from #1313 round-1
-    V1-C1.  They are not redundant with the mapping: a duplicate assignment of the same
-    name later in the module leaves both the key set and every consumer set unchanged,
-    and only the value assertion sees it (the later binding wins at import).  That is
-    the sole reason it was safe to drop the retired ``source.count(...) == 1`` scan --
-    whoever removes them owes a duplicate-definition guard in their place.
+    Four of the five constant-VALUE assertions below are kept verbatim from #1313
+    round-1 V1-C1; the fifth is #1418's own.  None is redundant with the mapping: a
+    duplicate assignment of the same name later in the module leaves both the key set
+    and every consumer set unchanged, and only the value assertion sees it (the later
+    binding wins at import).  That is the sole reason it was safe to drop the retired
+    ``source.count(...) == 1`` scan -- whoever removes them owes a duplicate-definition
+    guard in their place.
     """
 
-    consumers, bound_names = _module_level_constant_consumers(
+    consumers, bound_kinds = _module_level_constant_consumers(
         Path(scheduler_state_failure_module.__file__).read_text(encoding="utf-8"),
         admitted_class_names=_SCHEDULER_STATE_FAILURE_ADMITTED_CLASS_NAMES,
     )
     assert consumers == _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS
 
-    # A syntactic subject cannot see a name bound at RUN time -- a ``global`` install,
-    # ``globals()[...] = ...``, ``setattr`` on the module object, or a decorator that
-    # mutates ``globals()``.  Each leaves the module body carrying only admitted forms
-    # and each leaves every consumer set unchanged, so the mapping above is blind to all
-    # four.  Cross-checking the inventoried names against the names the imported module
-    # actually carries closes the whole class at once.
-    runtime_names = {name for name in vars(scheduler_state_failure_module) if not name.startswith("__")}
-    assert runtime_names - bound_names == set()
+    # A syntactic subject cannot see a name bound at RUN time -- ``globals()[...] = ...``
+    # or ``setattr`` on the module object driven by a module-level CALL, or a decorator
+    # that mutates ``globals()``.  Each leaves the module body carrying only admitted
+    # forms (the call is an ``Expr``) and each leaves every consumer set unchanged, so the
+    # mapping above is blind to them.  (Written as a bare module-level statement instead,
+    # ``globals()["_X"] = ...`` is an ``Assign`` with a subscript target and never reaches
+    # here at all -- the accept-set refuses it.)  What catches the call-driven form is the
+    # cross-check below: a name the imported module carries and the module body does not
+    # bind.  The dunder filter is spelled BOTH ways round on purpose, so that an install
+    # under a ``__``-prefixed non-dunder name stays visible.
+    module_namespace = vars(scheduler_state_failure_module)
+    runtime_names = {n for n in module_namespace if not (n.startswith("__") and n.endswith("__"))}
+    assert runtime_names - set(bound_kinds) == set()
     assert set(consumers) - runtime_names == set()
+
+    # ... and, because the inventory carries each name's binding KIND, an install that
+    # REUSES a name the body already binds, whenever the value's kind differs from the
+    # declared one: a ``global`` install onto a name the body binds as a ``def``, rebound
+    # to a refusal set, is a stray name to nobody -- but it is a ``function`` declared and
+    # a ``constant`` observed.  Import names are exempt: an import binds any kind.
+    declared_kinds = {name: kind for name, kind in bound_kinds.items() if kind != "import"}
+    observed_kinds = {name: _runtime_binding_kind(module_namespace[name]) for name in declared_kinds}
+    assert observed_kinds == declared_kinds
 
     # Both arms are per-remedy tables over the SAME two rows (#1313 round-1
     # V1-C1); the ``changed_model_package`` row is the #1161 list verbatim on both
@@ -26888,15 +26940,40 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
         {"resource_configuration", "policy_blocked"}
     )
+    # The fifth, added by #1418: the one constant in this change's own subject family (a
+    # permanence refusal source) that carried no value pin.  A REFLECTIVE rebind of an
+    # already-inventoried constant to a same-kind value -- ``setattr(sys.modules[__name__],
+    # "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS", <wider set>)``, or the ``globals()[...]``
+    # spelling -- names the constant only as a STRING, so it adds no ``ast.Name`` to any
+    # consumer set, no stray name and no kind mismatch.  It was measured to flip the
+    # ``code_recorded=False`` verdict with every other assertion here green; only a value
+    # assertion sees it.  (The ``global`` spelling is a different shape and is already red
+    # via the mapping, since a Store-context ``ast.Name`` is attributed as a consumer.)
+    # Declared residual: that shape stays open on the module's other thirteen module-level
+    # constants, which carry no value pin here.  Five is what #1418's subject family owes;
+    # pinning all eighteen is friction this requirement does not buy.
+    assert scheduler_state_failure_module._DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS == frozenset(
+        {"malformed_input", "policy_blocked", "resource_configuration"}
+    )
 
 
-#: A module body using every admitted statement form at once.  It doubles as the
-#: positive control for the refusals below (a subject that refused everything would
-#: also be "fail-closed") and as the pin for two rules the production module cannot
-#: exercise today: a reference from a NESTED ``def`` counts under the nested function's
-#: own name, and a module-level reference (``_REFUSAL_TABLE``'s use of
-#: ``_REFUSAL_CODES``) is not a consumer at all.
+#: A module body using every admitted statement form at once -- all eight of them:
+#: ``Expr`` (the docstring), ``Import``, ``ImportFrom``, ``Assign``, ``AnnAssign``,
+#: ``ClassDef``, ``FunctionDef`` and ``AsyncFunctionDef``.  It doubles as the positive
+#: control for the refusals below (a subject that refused everything would also be
+#: "fail-closed") and as the pin for two rules the production module cannot exercise
+#: today: a reference from a NESTED ``def`` counts under the nested function's own name,
+#: and a module-level reference (``_REFUSAL_TABLE``'s use of ``_REFUSAL_CODES``) is not a
+#: consumer at all.
+#:
+#: The docstring is here because admitting ``Expr`` is this change's one contested
+#: ruling (argued in ``_module_level_constant_consumers``' own docstring): the module
+#: docstring nobody has written yet is the false red that ruling exists to avoid, so it
+#: is asserted rather than merely argued.  ``async def`` is here for the same reason --
+#: the production module carries none, and the accept-set admits it.
 _ADMITTED_MODULE_LEVEL_FORMS_SOURCE = '''\
+"""A module docstring: an admitted ``Expr`` that binds no name."""
+
 from __future__ import annotations
 
 import sys
@@ -26915,6 +26992,10 @@ def _judge(code: str) -> bool:
         return inner_code in _REFUSAL_CODES
 
     return _inner(code) or code in _REFUSAL_TABLE["raw"]
+
+
+async def _judge_async(code: str) -> bool:
+    return _judge(code)
 '''
 
 
@@ -26922,10 +27003,11 @@ def test_module_level_constant_subject_admits_every_supported_form() -> None:
     """The accept-set is not vacuous, and the two attribution rules hold.
 
     Without this control, a subject that raised on everything would satisfy every
-    refusal case below while inventorying nothing.
+    refusal case below while inventorying nothing.  The kind labels are pinned here too:
+    the caller's kind cross-check is only as good as the kind the inventory declares.
     """
 
-    consumers, bound_names = _module_level_constant_consumers(
+    consumers, bound_kinds = _module_level_constant_consumers(
         _ADMITTED_MODULE_LEVEL_FORMS_SOURCE, admitted_class_names=frozenset({"_Provenance"})
     )
     assert consumers == {
@@ -26935,22 +27017,36 @@ def test_module_level_constant_subject_admits_every_supported_form() -> None:
         # is NOT a consumer -- consumer sets count function-body references only.
         "_REFUSAL_TABLE": frozenset({"_judge"}),
     }
-    assert bound_names == frozenset(
-        {"annotations", "sys", "Mapping", "_REFUSAL_CODES", "_REFUSAL_TABLE", "_Provenance", "_judge"}
-    )
+    assert bound_kinds == {
+        "annotations": "import",
+        "sys": "import",
+        "Mapping": "import",
+        "_REFUSAL_CODES": "constant",
+        "_REFUSAL_TABLE": "constant",
+        "_Provenance": "class",
+        "_judge": "function",
+        # ``async def`` binds a name of kind ``function`` like any other ``def``: at run
+        # time a coroutine function IS a ``FunctionType``.
+        "_judge_async": "function",
+    }
 
 
-#: Module bodies that smuggle a refusal list past a mapping comparison.  Every one of
-#: them leaves the production module's inventoried mapping BYTE-IDENTICAL, which is why
-#: passing over an unrecognised form silently is an escape hatch rather than a
-#: convenience: the tuple-unpacking shape and the ``match`` shape were each built into a
-#: live recurrence that flipped ``_remedy_permits_permanent_failure``'s verdict on a real
-#: input while a mapping comparison stayed green.
+#: Module bodies that smuggle a refusal list past a mapping comparison -- and one binding
+#: form that carries no value at all, which must still be refused rather than passed
+#: over.  Every one of them leaves the production module's inventoried mapping
+#: BYTE-IDENTICAL, which is why passing over an unrecognised form silently is an escape
+#: hatch rather than a convenience: the tuple-unpacking shape and the ``match`` shape were
+#: each built into a live recurrence that flipped ``_remedy_permits_permanent_failure``'s
+#: verdict on a real input while a mapping comparison stayed green.
 #:
-#: The first case is one a "refuse these forms" implementation would enumerate; the rest
-#: are the point of the catch-all -- an implementation that merely listed the known
-#: escapes would pass over a ``match`` body, an augmented assignment, or whatever
-#: statement form the language grows next.
+#: Four of the seven -- tuple unpacking, the ``if`` body, the ``try`` body and the added
+#: class -- are the escapes #1418 design D2 enumerates, so a "refuse these forms"
+#: implementation written to that text would list all four.  The ``match`` body and the
+#: augmented assignment are the point of the catch-all: an implementation that merely
+#: listed the known escapes would pass over them, or whatever statement form the language
+#: grows next.  ``annotation_without_value`` is neither -- it is the accept-set's own
+#: boundary, an admitted form (``AnnAssign``) refused for lacking a value, since a name it
+#: "binds" would surface as a phantom in the caller's cross-check.
 _UNADMITTED_MODULE_LEVEL_FORMS = (
     pytest.param(
         '_REFUSAL_CODES, _SENTINEL = frozenset({"INVALID_MANIFEST"}), None\n',
@@ -26998,12 +27094,18 @@ def test_module_level_constant_subject_refuses_unadmitted_forms(source: str, ref
 
 
 def test_module_level_constant_subject_refuses_star_import() -> None:
-    """The one run-time-name channel the source-versus-module cross-check cannot close.
+    """The run-time-name channel for which name comparison is not even available.
 
-    ``global``, ``globals()[...] = ...``, ``setattr`` on the module and a
-    ``globals()``-mutating decorator all surface as a stray name on the imported module
-    object.  A star-import does not: the names it binds are not knowable from this
-    module's source at all, so the only way to close it is to refuse it.
+    An install under a name the module body does not bind -- a call that runs
+    ``globals()["_NEW"] = ...`` or ``setattr`` on the module object, a
+    ``globals()``-mutating decorator -- surfaces as a stray name on the imported module,
+    and a rebinding of a name the body binds as a ``def`` or ``class`` surfaces as a kind
+    mismatch.  Neither is what a star-import does:
+    the names it binds are not knowable from this module's source AT ALL, so there is no
+    inventory to compare against and refusal is the only available closure.  (The channel
+    that survives all of it is a same-name, same-kind rebinding of an inventoried
+    constant; that one is held by the constant-VALUE assertions above, for the five
+    constants they name.)
     """
 
     with pytest.raises(AssertionError, match="star-import"):
@@ -27014,17 +27116,40 @@ def test_module_level_constant_subject_refuses_star_import() -> None:
 
 
 #: The reason-code axis the downstream recorded-code verdict must be CONSTANT across.
-#: The first three are the codes the retired downstream blacklist carried -- the exact
-#: three a recurrence writes back -- plus one transient code and one reader-synthesized
-#: ``{STAGE}_FAILED`` default for contrast.  The axis is also the guard's scale: a
-#: refusal keyed on some code OUTSIDE it is not caught, and widening the axis is the
-#: only way to buy more.
+#: The retired downstream blacklist carried FIVE codes (``git show d53cff4a``:
+#: ``INVALID_MANIFEST``, ``MANIFEST_SCHEMA_INVALID``, ``MALFORMED_INPUT``,
+#: ``OUT_OF_MEMORY``, ``POLICY_BLOCKED``).  The first three below are three of those
+#: five, plus one transient code and one reader-synthesized ``{STAGE}_FAILED`` default
+#: for contrast.  The two left off are ``OUT_OF_MEMORY`` and ``POLICY_BLOCKED``, and they
+#: are the awkward two: both are still live permanence codes in
+#: ``_REMEDY_NON_CAUSAL_CODES`` (``services/orchestrator/scheduler_state_failure.py:200``),
+#: so a code-keyed recurrence is if anything likelier to reach for them first -- and they
+#: sit in this axis's blind spot.  The axis is the guard's scale: a refusal keyed on some
+#: code OUTSIDE it is not caught, and widening the axis is the only way to buy more.
 _DOWNSTREAM_RECORDED_CODE_AXIS = (
     "INVALID_MANIFEST",
     "MANIFEST_SCHEMA_INVALID",
     "MALFORMED_INPUT",
     "SLURM_TIMEOUT",
     "CONVERT_FAILED",
+)
+
+#: The CLASSIFIER axis the same verdict must be constant across.  A code axis alone
+#: pins nothing about a refusal keyed on ``classifier``: such a second refusal list --
+#: including one that reuses ``_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS``, which the
+#: structural guard already pins to this very function, so no spelling of it moves the
+#: mapping -- flips the recorded-code verdict while every syntactic assertion stays
+#: green.  All three members of that placeholder list are on this axis (a recurrence
+#: reaching for a ready-made classifier set reaches for that one), plus one classifier
+#: outside it and the empty string, which is what the module sees when a payload carries
+#: no classifier.  Same scale caveat as the code axis: a refusal keyed on a classifier
+#: OUTSIDE these five is not caught.
+_DOWNSTREAM_RECORDED_CLASSIFIER_AXIS = (
+    "",
+    "malformed_input",
+    "policy_blocked",
+    "resource_configuration",
+    "timeout",
 )
 
 #: ``(permanent, limit_exhausted, expected)`` on the ``code_recorded=True`` domain, one
@@ -27046,18 +27171,21 @@ _DOWNSTREAM_RECORDED_VERDICT_ROWS = (
 
 
 @pytest.mark.parametrize("permanent, limit_exhausted, expected", _DOWNSTREAM_RECORDED_VERDICT_ROWS)
+@pytest.mark.parametrize("classifier", _DOWNSTREAM_RECORDED_CLASSIFIER_AXIS)
 @pytest.mark.parametrize("code", _DOWNSTREAM_RECORDED_CODE_AXIS)
 def test_downstream_failure_restartable_verdict_ignores_reason_code(
-    code: str, permanent: bool, limit_exhausted: bool | None, expected: bool
+    code: str, classifier: str, permanent: bool, limit_exhausted: bool | None, expected: bool
 ) -> None:
-    """#1418 behavioural half: on recorded codes the verdict reads no code field at all.
+    """#1418 behavioural half: on recorded codes the verdict reads no refusal field at all.
 
     ``_downstream_failure_restartable`` is the leg the retired blacklist hung off.  With
     a genuinely recorded code its verdict is ``limit_exhausted`` and ``permanent``,
-    nothing else -- so pinning it as constant across the code axis fails on ANY
-    code-keyed second refusal reintroduced here, module constant or function-local
-    literal, whatever its name, indent or element order.  That is the half the structural
-    guard above cannot see, since an inline literal has no module-level constant.
+    nothing else -- so pinning it as constant across BOTH the code axis and the
+    classifier axis fails on any second refusal reintroduced here on either key, module
+    constant or function-local literal, whatever its name, indent or element order.  That
+    is the half the structural guard above cannot see: an inline literal has no
+    module-level constant, and a refusal that reuses an EXISTING constant of the same
+    function leaves the pinned mapping byte-identical.
 
     Each row sets ``error_code`` AND ``reason_code`` to the same value: the module reads a
     recorded code through a key chain, so a case setting only one of them would let a
@@ -27065,11 +27193,17 @@ def test_downstream_failure_restartable_verdict_ignores_reason_code(
 
     ``code_recorded=False`` is deliberately outside this test's domain.  That branch's
     classifier refusal list is its LEGITIMATE single source, preserved verbatim under
-    the #1313 placeholder ruling; asserting code-independence there would be red on HEAD
-    and would contradict that ruling.  It gets a positive case of its own below.
+    the #1313 placeholder ruling; asserting code- or classifier-independence there would
+    be red on HEAD and would contradict that ruling.  It gets a positive case of its own
+    below.
     """
 
-    failure: dict[str, Any] = {"error_code": code, "reason_code": code, "permanent": permanent}
+    failure: dict[str, Any] = {
+        "error_code": code,
+        "reason_code": code,
+        "classifier": classifier,
+        "permanent": permanent,
+    }
     if limit_exhausted is not None:
         failure["limit_exhausted"] = limit_exhausted
     assert scheduler_state_failure_module._downstream_failure_restartable(failure, code_recorded=True) is expected

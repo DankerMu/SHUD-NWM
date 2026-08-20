@@ -23,19 +23,33 @@ Permanence". The coverage is two conjoined guards over
   sufficient — an implementation refusing only the enumerated forms stays
   green, with a byte-identical mapping, while a second refusal list hides in
   a `match` body, a PEP 695 `type` alias, or an augmented assignment; each of
-  those has been measured, and the `match` case has been measured to flip the
-  shared judgement's verdict on a real input. Because a syntactic subject
-  cannot see a name bound at run time rather than in the module body — a
-  `global` install being the measured example — the guard SHALL additionally
-  cross-check that the names it inventoried from the source equal the
-  module-level constant names the imported module object actually carries,
-  and SHALL refuse a star-import, whose bound names no source inventory can
-  enumerate; and
+  those has been measured on Python 3.12+, and the `match` case has been
+  measured to flip the shared judgement's verdict on a real input (the PEP 695
+  alias is a parse error rather than a catch-all refusal on the 3.11
+  interpreter this project's CI pins, which refuses it earlier rather than
+  later). Because a syntactic subject cannot see a name bound at run time
+  rather than in the module body — a `global` install being the measured
+  example — the guard SHALL additionally cross-check the source inventory
+  against the imported module object: every module-level name the module
+  object carries SHALL have been inventoried from the source, every
+  inventoried constant SHALL be present on the module object, and every
+  inventoried name SHALL carry a runtime object of the kind its binding form
+  declares, since a `def` name resolving to a data value is a run-time rebind
+  and not a definition. The guard SHALL also refuse a star-import, whose bound
+  names no source inventory can enumerate; and
 - a **behavioural** guard asserting that, on the recorded-code domain
   (`code_recorded=True`), `_downstream_failure_restartable`'s verdict is
   determined by `limit_exhausted` and `permanent` alone and is constant
-  across the reason-code axis, with that axis including the three codes the
-  retired downstream blacklist carried.
+  across both a reason-code axis and a classifier axis. The code axis SHALL
+  include three of the five codes the retired downstream blacklist carried
+  (`INVALID_MANIFEST`, `MANIFEST_SCHEMA_INVALID`, `MALFORMED_INPUT`); its
+  other two, `OUT_OF_MEMORY` and `POLICY_BLOCKED`, remain live permanence
+  codes in `_REMEDY_NON_CAUSAL_CODES` and lie off the axis. The classifier
+  axis SHALL include every member of `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS`,
+  because the structural guard is constitutionally unable to see a refusal
+  keyed on that constant hoisted above the `code_recorded` split: the
+  reference lands inside the function the mapping already pins as its sole
+  consumer, so no spelling of that recurrence changes the mapping.
 
 The coverage obligation is bounded to what these two guards can decide: a
 second refusal list introduced as a module-level constant, or as an extra
@@ -47,7 +61,18 @@ a dependency on a code outside that axis is not caught, and widening the
 axis is the way to buy more. A refusal list that is neither a module-level constant of this
 module nor consulted on that leg — for example a function-local literal on
 the raw-manifest or model-package leg, or a list living in another module —
-is outside this requirement. Source-text literal comparison against
+is outside this requirement. Two further bounds are stated rather than
+closed. First, the run-time cross-check closes installs under a name the
+module body does not bind and rebinds that change a name's kind; a
+reflective rebind of an already-inventoried constant to a same-kind value
+(the name reaching the module object only as a string literal, so no
+syntactic reference exists to inventory) is closed only by the constant-value
+assertions the guard pins, and those name five of the module's eighteen
+module-level constants. The `global` spelling of that same rebind is caught,
+because its assignment target is a syntactic reference and therefore changes
+the constant's consumer set. Second, the accept-set's catch-all refuses any
+statement form the language grows next, but it cannot refuse a form the
+interpreter rejects before parsing completes. Source-text literal comparison against
 production source SHALL NOT be used to discharge this obligation: the
 retired guard's scan admitted a re-added blacklist written on one line, at a
 different indent, under a different name, or reordered so that neither
@@ -74,17 +99,22 @@ they are structurally the same event.
   mapping no longer equals the pinned mapping
 - **AND** when the list is instead introduced through a statement form
   outside the accept-set — measured examples: a tuple-unpacking target, an
-  assignment nested in a conditional, loop, `with`, `try` or `match` body, a
-  PEP 695 `type` alias, an augmented assignment, an attribute of a class
-  other than the one allowed by name — the guard fails by refusing that
-  form, not by a mapping difference; each of those forms leaves the mapping
-  byte-identical, so silently passing over them would admit the recurrence
-- **AND** when the list is installed at run time rather than bound in the
-  module body — the measured example being a `global` assignment executed by
+  assignment nested in a conditional, loop, `with`, `try` or `match` body, an
+  augmented assignment, an attribute of a class other than the one allowed by
+  name, and on Python 3.12+ a PEP 695 `type` alias — the guard fails by
+  refusing that form, not by a mapping difference; each of those forms leaves
+  the mapping byte-identical, so silently passing over them would admit the
+  recurrence
+- **AND** when the list is installed at run time under a name the module body
+  does not bind — the measured example being a `global` assignment executed by
   a module-level call — the guard fails on the source-versus-module
   cross-check, which is the only one of the three mechanisms that can see it:
   the syntactic subject neither inventories such a name nor refuses it, and
   consuming it changes no consumer set
+- **AND** when the run-time install instead rebinds a name the module body
+  already binds as a function or a class, the same cross-check fails on that
+  name's kind, since the inventoried `def` no longer resolves to a function
+  on the imported module object
 
 #### Scenario: an existing refusal list gaining a second consumer fails the suite
 
@@ -98,14 +128,30 @@ they are structurally the same event.
 
 - **WHEN** the downstream recorded-code leg's verdict is made to depend on a
   failure code that lies on the guard's pinned code axis — which includes at
-  minimum the three codes the retired downstream blacklist carried — by any
-  construct, including a function-local literal set and either spelling of
-  the code key the leg could read
+  minimum three of the five codes the retired downstream blacklist carried —
+  by any construct, including a function-local literal set and either
+  spelling of the code key the leg could read
 - **THEN** the behavioural guard fails, because the verdict is no longer
   constant across that axis for fixed `permanent` and `limit_exhausted`
 - **AND** a dependency introduced on a code outside the pinned axis is
   outside this scenario: the axis bounds what the guard can decide, and
   widening it is the way to buy more
+
+#### Scenario: a classifier-keyed second refusal on the downstream leg fails the suite
+
+- **WHEN** the downstream recorded-code leg's verdict is made to depend on
+  the failure classifier — the measured example being the
+  `code_recorded=False` leg's own placeholder refusal list hoisted above the
+  split, which is the shape an ordinary "check the classifier once at the
+  top" simplification produces
+- **THEN** the behavioural guard fails on the classifier axis, because the
+  verdict is no longer constant across it for fixed `permanent` and
+  `limit_exhausted`
+- **AND** the structural guard does not fail and cannot be made to: the
+  recurrence references a constant the pinned mapping already attributes to
+  that same function, so the mapping stays byte-identical on every spelling —
+  which is why the classifier axis, not a structural refinement, is the only
+  oracle available for this shape
 
 #### Scenario: reformatting production source keeps the suite green
 

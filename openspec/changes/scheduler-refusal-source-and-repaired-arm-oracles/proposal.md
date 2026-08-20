@@ -21,12 +21,13 @@
 
 - **#1418**：把 `test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list`
   的字符串扫描段替换为两条合取守卫——
-  - **结构守卫**：AST 反查 `scheduler_state_failure.py` 全部模块级 set/frozenset 常量的
-    **消费函数映射**，与钉死的期望映射整体比较。新增常量、既有常量多出第二个消费者、
-    换名的第二份清单，三者都改变该映射。
+  - **结构守卫**：AST 反查 `scheduler_state_failure.py` **全部模块级常量**（不按值形状筛选
+    ——两张要害的 remedy 表是注解赋值且值里没有 `frozenset` 字样，按 set/frozenset 筛会整个漏掉）
+    的**消费函数映射**，与钉死的期望映射整体比较，并对导入后的模块对象做名字与种类的
+    交叉核对。新增常量、既有常量多出第二个消费者、换名的第二份清单，三者都改变该映射。
   - **行为守卫**：参数化 `_downstream_failure_restartable` 在 `code_recorded=True` 域上的
-    裁决，钉死其**与 `reason_code` 取值无关**——任何按码清单的二次拒绝（模块级或函数内联、
-    任何写法）都会打红。
+    裁决，钉死其**与 `reason_code` 及 `classifier` 取值均无关**——按码或按 classifier 的
+    二次拒绝（模块级或函数内联、任何写法），只要落在钉死的轴上就会打红。
   - 该测试既有的四条常量取值断言（#1313 round-1 V1-C1 加入）**保留不动**。
 - **#1451**：在既有直接谓词单测旁新增参数化矩阵，覆盖 `active_blocker` 的
   `False` / `True` / 缺失 三态 × `repair_status` 有无，同时断言下游

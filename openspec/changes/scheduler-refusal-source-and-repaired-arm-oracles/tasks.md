@@ -44,9 +44,14 @@
       合成源码用例**至少两条**（round-2 P1-1）：一条喂元组解包（refuse-list 上的形式），
       **另一条必须喂一种不在 refuse-list 上的形式**（如 `match`-case 体或 PEP695 `type` alias），
       两条都断言抛错。只测前者钉的是枚举、不是 catch-all；后者才是 accept-set 边界唯一的 oracle。
-- [x] 1.3c **再加一条运行时交叉核对**（编排者自查，已实测）：AST 盘点出的名字集合必须等于
-      导入后模块对象上实际存在的模块级常量名集合（`vars(module)` 去掉 dunder、去掉本模块 AST
-      里的 import 名与 `def`/`class` 名、去掉模块对象与本模块定义的可调用对象）。
+- [x] 1.3c **再加一条运行时交叉核对**（编排者自查，已实测）：模块对象上的每个模块级名字
+      都必须被源码盘点过，每个被盘点的常量都必须在模块对象上，且每个被盘点的名字在运行时
+      必须是其绑定形式所声明的**种类**（`def` 名解析成数据值即为运行时改绑而非定义）。
+      过滤 `vars(module)` 时**判 dunder（前后都是 `__`），不是判 `__` 前缀**——后者会把
+      `__SECOND_REFUSAL_CODES` 这种非 dunder 的双下划线名一并丢掉，形成逃逸口；
+      import 名**豁免**种类检查（import 可以绑任何种类的对象）。
+      **本条不是名字集合"相等"**：`bound` 侧刻意含 import/`def`/`class` 名，
+      写成相等既不可实现也会误报。
       纯语法主体对 **`global` 安装式绑定完全失明**——变异后 body 只多出 `FunctionDef` 与
       `Expr`(调用)，两者都是已识别形式，既不入主体也不触发拒绝，且消费映射不变。
       实测：HEAD 上两侧均为 18、双向差集为空（无假阳性）；`global` 变异下运行时 19 vs AST 18，
@@ -62,18 +67,30 @@
       **1.4 删掉 `source.count(...) == 1` 之所以安全，唯一理由是这一条保留**：同名重复赋值
       对结构守卫完全隐形（键与消费映射逐字不变），只有取值断言能抓（import 时后赋值胜出）。
       见 design D2 盲区表最后一条。
+- [x] 1.5b **补第五条取值断言**（Phase 6，交叉评审 C4/M13）：钉
+      `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS ==
+      frozenset({"malformed_input", "policy_blocked", "resource_configuration"})`
+      （对 `d53cff4a` 逐字核过）。理由：同名同 kind 的**反射式**改绑
+      （`setattr(sys.modules[__name__], "<名>", 新值)`）穿过结构映射、穿过 dunder 修复、
+      也穿过 kind 感知交叉核对——名字只以字符串字面量出现，kind 也没变；**只有取值断言看得见**。
+      实测该常量被这样改宽时判据 `True → False` 而守卫子集 44 passed 全绿。
+      它是 #1418 主题族（permanence refusal source）里唯一没钉值的一条。
+      **其余 13 条不钉**：全量钉 18 条值是不欠的摩擦，走 follow-up issue。
 - [x] 1.6 测试注释写明这条守卫钉的是什么不变量（"被咨询的 refusal 判据源只有一个"）、
-      以及它**有意**带来的摩擦（正当新增模块级常量须同步更新期望映射），并写明它的两条
-      盲区（函数体内联清单、跨模块清单）各自由谁接（前者 → §2 行为守卫；后者 → 不在 #1313
-      AC-1 的命题域内）。
+      以及它**有意**带来的摩擦（正当新增模块级常量须同步更新期望映射），并写明它的
+      盲区各自由谁接（函数体内联清单 → §2 行为守卫，**且仅限 downstream 腿**；
+      跨模块清单 → 不在 #1313 AC-1 的命题域内；同名同 kind 反射式改绑 → 只被 1.5/1.5b 的
+      五条取值断言接住，另 13 条常量残留）。
+      **注释里不得出现"关闭整类"这类全称**——已实测至少三格穿过（见 design D2 的射程表）。
 
-## 2. #1418 行为守卫——`code_recorded=True` 域上裁决与 `reason_code` 无关
+## 2. #1418 行为守卫——`code_recorded=True` 域上裁决与 `reason_code`/`classifier` 均无关
 
 - [x] 2.1 新增 `@pytest.mark.parametrize` 用例，直接调
       `scheduler_state_failure_module._downstream_failure_restartable`。
-- [x] 2.2 码轴**必须包含**三条已退役的黑名单码 `INVALID_MANIFEST`、
-      `MANIFEST_SCHEMA_INVALID`、`MALFORMED_INPUT`（复发时会被写回清单的正是这三个），
-      外加至少一条 transient 码与一条 unknown-default 码作对照。
+- [x] 2.2 码轴**必须包含**已退役黑名单**五条码中的三条**——`INVALID_MANIFEST`、
+      `MANIFEST_SCHEMA_INVALID`、`MALFORMED_INPUT`；另两条 `OUT_OF_MEMORY`、`POLICY_BLOCKED`
+      至今仍是 `_REMEDY_NON_CAUSAL_CODES` 里的活永久码，**刻意落在轴外**（轴外不打红是刻度，
+      见 design D3）。外加至少一条 transient 码与一条 unknown-default 码作对照。
       **每行同时设 `error_code` 与 `reason_code` 两个键同值**（design D3）：本模块读码走
       键链，只设 `reason_code` 的用例对写成读 `error_code` 的内联复发整片失明。
 - [x] 2.3 断言：`code_recorded=True` **且无 `limit_exhausted`** 时裁决 == `not failure.get("permanent")`；
@@ -96,6 +113,18 @@
       （design D3）：该分支的 `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 按 #1313 D4
       是**正当的**唯一清单，卷进去会直接红且与 #1313 D4 打架。该分支可以另写正向用例，
       但不得断言"与 classifier 无关"。
+- [x] 2.5 **加 classifier 轴**（Phase 6，交叉评审 C1——本轮的锚点）：在
+      `code_recorded=True` 域内，裁决同样必须**与 classifier 取值无关**。轴上必须含
+      `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 的**全部三个成员**（复发最可能伸手的
+      正是它们）、至少一条清单外 classifier、以及空串。
+      与 2.2 码轴、`permanent`、`limit_exhausted` 做全交叉；前置已实测：
+      pristine HEAD 上 5 码 × 5 classifier × 2 × 2 = **100 例 0 违反**
+      `expected = False if limit_exhausted else not permanent`。
+      **理由（不可用结构守卫替代）**：把该 classifier 清单提到 `code_recorded` 分流之上，
+      判据 `True → False` 而**全量 1773 全绿**；结构守卫对此**体制性**失明——映射早已把该常量
+      钉给 `_downstream_failure_restartable` 这同一个函数，新增引用不加键也不改值集合，
+      任何拼法都动不了映射。注意本条与 2.4 不冲突：2.4 禁的是在
+      `code_recorded=False` 域上断言"与 classifier 无关"，本条只在 `code_recorded=True` 域内。
 
 ## 3. #1451 `active_blocker` 臂矩阵
 
@@ -146,8 +175,27 @@
       主体打红——这一条在 1.3b 未实现时必绿，是 F1 的回归证据。
 - [x] 5.2c **M12 `global` 安装式的第二清单**由 1.3c 的运行时交叉核对打红——这一条在
       1.3c 未实现时必绿（fail-closed 语法主体也拦不住），是编排者自查那条发现的回归证据。
+- [x] 5.2d **Phase 6 三条回归证据**（每条在修复前实测**存活于全量 1773**，修复后必须打红）：
+      - **M13 classifier 提升**：把 `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 的咨询提到
+        `code_recorded` 分流之上 → 由 2.5 的 classifier 轴打红（修复前：判据 `True → False`，
+        全量 **1773 passed**）。
+      - **M14 `__` 前缀运行时造名**：`globals()["__SECOND_REFUSAL_CODES"] = frozenset({…})`
+        由模块级调用安装并在判据里咨询 → 由 1.3c 收紧后的 dunder 判定打红
+        （修复前：判据 `True → False`，全量 **1773 passed**）。
+      - **M15 `def` 名跨 kind 改绑**：`def _second_codes(): ...` + 模块级调用
+        `global _second_codes; _second_codes = frozenset({…})` → 由 1.3c 的 kind 感知打红
+        （修复前：判据 `True → False`，守卫子集 43 passed）。
+      每条还须记录**修复在 pristine HEAD 上不产生假红**：100/100、`__` 前缀非 dunder 名空集、
+      59 个 `def` 全 `FunctionType` + 1 个 `class` 是 `type`。
+- [x] 5.2e **M16 同名同 kind 反射式改绑**（`setattr(sys.modules[__name__], "<已有常量名>", 更宽的值)`）
+      由 1.5b 的第五条取值断言打红（修复前：判据 `True → False`，守卫子集 44 passed）。
+      **同时记录残留**：该形状对另外 13 条未钉值常量仍然隐形——这是**声明的边界**，不是缺口。
 - [x] 5.3 M8（**函数内联**码清单）、M9 各自由行为守卫打红。
 - [x] 5.4 M10（`ruff format` 语义不变）**保持绿**——AC-4 的反向用例。
+      **口径校正（lens C 实测）**：M10 不只是空行调整。`ruff format --line-length 120` 在本模块上
+      是 **+29 / −8 行**，29 处新增里只有 **26** 处是空行，另 3 处是真折行重排——其中一处把
+      `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 由三行折成**一行**，
+      正是旧字符串扫描守卫失明的那种单行写法。M10 因此比"纯空白改动"这个说法**更强**。
 - [x] 5.5 四个被断言模块 sha256 与 base 逐字节相同。
 - [x] 5.6 `uv run pytest -q tests/test_production_scheduler.py` 全绿
       （base 基线：**1731 passed**）。
