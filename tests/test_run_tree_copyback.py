@@ -14,7 +14,7 @@ from packages.common import provider_atomic as provider_atomic_module
 from packages.common import safe_fs as safe_fs_module
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage
+from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage, provider_lock_path
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 from packages.common.state_manager import (
     FileStateSnapshotIndexRepository,
@@ -1279,19 +1279,38 @@ def _call_without_hanging(call: Any) -> Any:
     for exactly the thread that never finishes. A thread stuck here goes on
     holding whatever fd it took for the rest of this pytest session.
 
-    It **cannot** reproduce the `fcntl.flock` self-deadlock that motivates the
-    guard (provider_atomic.py:219 takes the blocking path without LOCK_NB).
+    The two caller shapes in this file differ in whether that can actually
+    happen, so the bound means different things to each.
+
+    For the **probe-seam** caller
+    (`test_copyback_run_trees_skips_alias_root_reporting_one_filesystem_identity`)
+    the helper cannot reproduce the `fcntl.flock` self-deadlock that motivates
+    the guard (provider_atomic.py:221 takes the blocking path without LOCK_NB).
     That deadlock is real in production, where a bind-mount alias makes two
     realpaths name one directory, so the scoped merge locks one lockfile twice.
-    Here the alias is injected at the probe seam, so on the real filesystem the
+    There the alias is injected at the probe seam, so on the real filesystem the
     two roots stay genuinely distinct directories; the provider lock is
     path-keyed (`provider_lock_path`, and the in-process gate keys on
     `os.path.abspath`), so even a regressed guard that reaches the merge takes
     two distinct lockfiles and returns. Measured: under a string-compare mutant
-    these tests red in ~0.3s on an ordinary assertion or `FileNotFoundError`,
-    never by hanging. Reproducing the deadlock would need a real bind mount,
+    that test reds in ~0.3s on an ordinary assertion or `FileNotFoundError`.
+    Reproducing the deadlock through that seam would need a real bind mount,
     which has no portable root-free construction (see the honest limit in
     tests/test_safe_fs.py).
+
+    For the **hardlink** caller
+    (`test_copyback_run_trees_state_index_lock_collision_is_classified_failed_closed`)
+    it is the other way round: nothing is injected, `os.link` puts the
+    destination lockfile on the source inode, so the two lock names reach one
+    file and the blocking `flock` genuinely self-deadlocks. The 5s join is a
+    real tripwire there and must not be removed. Measured under the branch-B
+    deletion mutant (state_manager.py:1980-1983 -> `return`): that test and its
+    replay sibling both consume the whole join budget -- `2 failed in 10.28s`
+    with four hang-regression occurrences and zero `provider_lock_parent_unsafe`,
+    against a `2 passed in 0.45s` pristine baseline. pyproject.toml carries no
+    `pytest-timeout` and no `addopts`, so this `thread.join(5.0)` is the only
+    bound in the process: drop it and a regression wedges the local session and
+    burns the CI unit-test job's full `timeout-minutes: 35`.
     """
 
     outcome: dict[str, Any] = {}
@@ -1310,3 +1329,118 @@ def _call_without_hanging(call: Any) -> Any:
     if "error" in outcome:
         raise outcome["error"]
     return outcome["value"]
+
+
+def test_copyback_run_trees_state_index_lock_collision_is_classified_failed_closed(
+    tmp_path: Path,
+) -> None:
+    """#1609: the pre-lock refusal carries no phase, so it must land fail-closed.
+
+    `copyback_run_trees` buckets merge failures by phase, and the no-phase bucket
+    is the fail-closed one precisely because every no-phase raise point sits
+    before the destination compare-and-swap.  This guard is the newest member of
+    that invariant: it fires before any lock is taken, so reporting
+    `..._COMMIT_UNCERTAIN` would send the operator to count entries in a shared
+    index nothing has touched.
+    """
+
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+
+    # The umask has to cover the whole construction, not just the call: the
+    # publish below takes a provider lock whose parent `ensure_directory_no_follow`
+    # creates with a bare `os.mkdir` (safe_fs.py:68), i.e. `0o777 & ~umask`. Under
+    # an ambient `umask 002` that is 0o775 and `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) fires during setup, before this test has proved
+    # anything. Everything is inside the `try` so a mid-construction raise cannot
+    # leak 0o077 into the rest of the session.
+    previous_umask = os.umask(0o077)
+    try:
+        _write_run(object_root, run_id, output_text="new\n")
+        state_index = object_root / "scheduler" / "state-index" / "index-last.json"
+        state_index.parent.mkdir(parents=True)
+        publish_state_snapshot_index(
+            [],
+            state_index,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+        destination_index = copyback_root / "scheduler" / "state-index" / "index-last.json"
+        destination_index.parent.mkdir(parents=True)
+        # Both lock parents private, or `provider_lock_parent_unsafe` would fire on
+        # the source acquisition and this would prove nothing about the guard.
+        state_index.parent.chmod(0o700)
+        destination_index.parent.chmod(0o700)
+        source_lock = provider_lock_path(state_index)
+        os.link(source_lock, provider_lock_path(destination_index))
+
+        with pytest.raises(RunTreeCopybackError) as error_info:
+            _call_without_hanging(
+                lambda: copyback_run_trees(
+                    object_store_root=object_root,
+                    copyback_root=copyback_root,
+                    run_ids=[run_id],
+                    extra_object_keys=["scheduler/state-index/index-last.json"],
+                )
+            )
+    finally:
+        os.umask(previous_umask)
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED"
+    assert error_info.value.code != "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN"
+    assert error_info.value.details["error_reason"] == "state_snapshot_index_copyback_lock_identical"
+    assert not destination_index.exists()
+
+
+@pytest.mark.parametrize(
+    ("failing_field", "expected_operand", "expected_detail_key"),
+    [
+        # Both operands of the identity comparison probe through
+        # `_directory_identity`, so an operator told the wrong root debugs the
+        # wrong mount.  PR #1608's F1 fixed exactly this; nothing pinned it.
+        pytest.param("object_store_root", "Object-store root", "object_store_root", id="object_store_side"),
+        pytest.param("copyback_root", "Object-store copyback root", "copyback_root", id="copyback_side"),
+    ],
+)
+def test_copyback_run_trees_root_identity_probe_failure_names_the_failing_operand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_field: str,
+    expected_operand: str,
+    expected_detail_key: str,
+) -> None:
+    """#1610: the same-root probe's own failure posture, both operands.
+
+    Without this the handler could be deleted, or moved out of its try, and CI
+    would stay green while the runtime code degraded from
+    `OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE` into a bare OSError traceback.
+    """
+
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, run_id)
+    copyback_root.mkdir()
+    target = (object_root if failing_field == "object_store_root" else copyback_root).resolve()
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(run_tree_copyback_module, "directory_identity_no_follow", probe)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE"
+    assert error_info.value.message == f"{expected_operand} is unavailable for run-tree copyback."
+    assert error_info.value.details[expected_detail_key] == str(target)
+    assert list(copyback_root.iterdir()) == []
