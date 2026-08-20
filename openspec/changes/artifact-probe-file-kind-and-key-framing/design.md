@@ -157,7 +157,7 @@ issue #1397 正文首列的方案「复用 `LocalObjectStore.normalize_key`」�
 
 **更强的是机械论证**（评审 round-2 补，把语义判断变成被迫结论）：`:650` 那支调
 `_artifact_blocker_evidence(...)`（`:671-681`）时**根本不传 `unsafe_reason`**
-（全文件只有 `:696` 与 `:738` 传），参数默认 `None`——其注释 `:663-665` 也明说
+（**该分支不传**；另三处 blocker 调用点——sidecar / forcing / copyback——都传），参数默认 `None`——其注释 `:663-665` 也明说
 「still fail-closed, **still repair-eligible**」。所以把新 token 路由进 `:650` 会让它变成
 **repair-ELIGIBLE**，正是 D2 的反面。`:684` 不是偏好，是**唯一与 D2 自洽的落点**；
 `:650` 在机械层面就不可用，与如何解读 #1203 无关。

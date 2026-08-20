@@ -3,8 +3,8 @@
 > **坐标取景（读本文件前先看这句）**：本文件所有 `:NNNN` 均为**规划期坐标**，量于实现前基线
 > `aafb50f9`，**有意不随实现漂移**——它们记录的是"当时在哪里决定的什么"，不是终态位置。
 > 实现落地后多数已平移（例如 2.2 的探针 `:1201` 现为 `:1257`、2.6 的
-> `_RAW_MANIFEST_ABSTENTION_REASONS` `:25522` 现为 `tests:26056`、3.13 的
-> `_ARTIFACT_GUARD_LANE_FUNCTIONS` `:15288-15297` 现为 `tests:15819`）。
+> `_RAW_MANIFEST_ABSTENTION_REASONS` `:25522` 现为 `tests:26175`、3.13 的
+> `_ARTIFACT_GUARD_LANE_FUNCTIONS` `:15288-15297` 现为 `tests:15938`）。
 > 要定位终态代码请按**符号名**grep，不要按本文件的行号。
 > （design.md 文末「坐标勘误」同框；**生产代码与测试里的注释坐标不适用本豁免**，那些必须是终态值。）
 
@@ -109,6 +109,17 @@
       (b) `_candidate_state_decision` 端到端仍产出**被收容的** `artifact_probe_error` blocker，
       而非中断整趟 pass。用例名
       `test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink`。
+- [x] 3.16 **#1397 AC-4 的两类**（Phase 7 终审 Note 1 新增；**初稿从头就没给这两类分配任务**，
+      3.4/3.5/3.9 只覆盖带路径段 prefix 与 must-preserve 表，是本 fixture 的一处漏配）：
+      **非 s3 prefix** 与 **percent 编码记录值**各有回归测试，覆盖**分类器与探针口径一致**
+      （不只是 store 层——`test_normalize_key_percent_decodes_only_the_s3_arm` 只钉了 store）。
+      正负成对：非 s3 prefix 下目录形仍判为需见证（#1365 不回归）、`s3://` 记录值在该 prefix 下
+      归一化抛 `ValueError` → 分类器 False → 探针 `(True, None)` repair-eligible（路由不变）。
+      **判别力实测**：把分类器回退到 raw 取景后，非 s3 用例与 percent 用例**各自转红**。
+      注（实现期更正）：终审建议的 `%20` 行**证不了**该变异——`%20` 不改变段数，raw 与
+      normalized 下 `validate_object_path` 答案相同；判别力由新增的 **`%2F`**（编码分隔符：
+      raw 见 1 段判无效、normalized 见 6 段判有效）承担。`%20` 行保留，钉的是"口径一致 +
+      解码后可解析"。
 
 ## 4. spec 与登记
 

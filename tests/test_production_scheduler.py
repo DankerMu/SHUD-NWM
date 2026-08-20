@@ -12457,17 +12457,29 @@ def test_file_kind_check_never_converts_a_present_verdict(
 #: (``object_store_validation.py`` ``_operational_prefix`` keeps ``parsed.path``).
 _PATH_SEGMENT_OBJECT_STORE_PREFIX = "s3://nhms/nwm"
 
+#: A deployment prefix with NO ``s3://`` scheme at all.  Every tracked config sets
+#: an ``s3://`` prefix (``.env.example``, ``infra/env/*.example``), so the bare-key
+#: arm of ``normalize_object_key`` -- the ``candidate.startswith(prefix.rstrip("/")
+#: + "/")`` branch, which exists only for this shape -- is exercised nowhere else.
+#: Two leftover segments rather than one, so a fix that special-cased a single
+#: stray segment would not satisfy it.
+_NON_S3_OBJECT_STORE_PREFIX = "nhms-prod/m10"
 
-@pytest.mark.parametrize("object_store_prefix", ["s3://nhms", _PATH_SEGMENT_OBJECT_STORE_PREFIX])
-def test_present_file_key_is_probed_as_recorded_under_either_prefix_shape(
+
+@pytest.mark.parametrize(
+    "object_store_prefix",
+    ["s3://nhms", _PATH_SEGMENT_OBJECT_STORE_PREFIX, _NON_S3_OBJECT_STORE_PREFIX],
+)
+def test_present_file_key_is_probed_as_recorded_under_any_prefix_shape(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     object_store_prefix: str,
 ) -> None:
     # #1397 regression: the classifier is consulted on the NORMALIZED key, so a
-    # deployment whose prefix carries a path segment is served identically to a
-    # bare-bucket one.  Before the fix the leftover ``nwm/`` segment made the
-    # validator reject a physically present FILE key as prefix-shaped.
+    # deployment whose prefix carries a path segment -- or carries no ``s3://``
+    # scheme at all (#1397 AC-4) -- is served identically to a bare-bucket one.
+    # Before the fix the leftover ``nwm/`` (resp. ``nhms-prod/m10/``) segments made
+    # the validator reject a physically present FILE key as prefix-shaped.
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
@@ -12586,6 +12598,113 @@ def test_foreign_bucket_reference_keeps_its_repair_eligible_null_residual(
 #: the closed-world validator refuses it as a file key and the classifier must
 #: answer True.
 _PACKAGE_PREFIX_URI = f"{_SQUATTED_OBJECT_FILE_KEY.rsplit('/', 1)[0]}/"
+
+
+def test_non_s3_prefix_keeps_the_witness_derivation_and_the_unnormalizable_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4, the two NON-file-key routings a scheme-less deployment prefix must
+    # keep.  The present-file-key half is the ``_NON_S3_OBJECT_STORE_PREFIX``
+    # parametrization above; without this negative half that half could be satisfied
+    # by a classifier that answered False for everything.
+    from packages.common.object_store import normalize_object_key
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _NON_S3_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+
+    # #1365 preserved: normalizing first must not cost a DIRECTORY-shaped package its
+    # witness.  The prefix segments come off, the five canonical segments stay
+    # prefix-shaped, and the manifest FILE key derived from the recorded value is
+    # what the probe resolves -- resolvable (no ``artifact_probe_error``) and absent,
+    # i.e. the ordinary repair-eligible missing-package verdict.
+    package_uri = f"{_NON_S3_OBJECT_STORE_PREFIX}/{_PACKAGE_PREFIX_URI}"
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == f"{_NON_S3_OBJECT_STORE_PREFIX}/{_SQUATTED_OBJECT_FILE_KEY}"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
+
+    # An ``s3://`` reference recorded under a scheme-less prefix makes the shared
+    # pure normalizer raise (it has no bucket to compare against), the classifier
+    # folds that into "probe it as recorded", and the probe's own ``ValueError`` leg
+    # yields the D4 repair-ELIGIBLE null-reason residual -- the same routing this
+    # reference had before normalize-first, and the same one the foreign-bucket case
+    # above documents.
+    unnormalizable = f"s3://nhms/{_SQUATTED_OBJECT_FILE_KEY}"
+    with pytest.raises(ValueError, match="must be an S3 URI"):
+        normalize_object_key(unnormalizable, _NON_S3_OBJECT_STORE_PREFIX)
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, unnormalizable) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, unnormalizable) == (True, None)
+
+
+#: Percent-encoded recorded FILE keys under a bare-bucket prefix (#1397 AC-4).  Only
+#: the ``s3://`` arm of ``normalize_object_key`` unquotes; the closed-world
+#: validator's own ``_normalize_object_path`` never does, which is how the two
+#: framings can disagree about one recorded reference.
+_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS = (
+    # ``%20`` inside a path segment -- the realistic shape, and the one the
+    # store-level pin ``test_normalize_key_percent_decodes_only_the_s3_arm`` uses.
+    # Segment COUNT is unchanged by decoding, so the validator answers the same
+    # either way: this row pins classifier/probe AGREEMENT and that the probe
+    # resolves the DECODED path, not the framing fix itself.
+    "s3://nhms/forcing/gfs/2026%2005%2021/basin_a_v1/model_a/forcing_package.json",
+    # ``%2F`` -- encoded SEPARATORS.  The raw framing sees one segment and rejects a
+    # physically present file key as prefix-shaped; the normalized framing sees six
+    # and admits it.  This is the row that actually discriminates the two framings.
+    "s3://nhms/forcing%2Fgfs%2F2026052106%2Fbasin_a_v1%2Fmodel_a%2Fforcing_package.json",
+)
+
+#: The decoded key ``_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS[0]`` resolves to.
+_PERCENT_DECODED_OBJECT_FILE_KEY = "forcing/gfs/2026 05 21/basin_a_v1/model_a/forcing_package.json"
+
+
+def test_percent_encoded_recorded_value_is_framed_alike_by_classifier_and_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4: a percent-encoded recorded reference must reach the classifier and
+    # the probe as the SAME key.  Before normalize-first the classifier asked the
+    # validator about the still-encoded value while the probe asked the store about
+    # the decoded one, so a present package could have a witness fabricated beneath
+    # its own file key.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, "s3://nhms")
+    for key in (_PERCENT_DECODED_OBJECT_FILE_KEY, _SQUATTED_OBJECT_FILE_KEY):
+        store.write_bytes_atomic(key, b'{"schema_version": "nhms.forcing_package.v1"}')
+
+    for recorded in _PERCENT_ENCODED_RECORDED_FILE_KEY_URIS:
+        # Independent oracle: the store really does resolve this encoded reference to
+        # a physically present object, so a "missing" verdict below would be false.
+        assert store.exists(recorded) is True
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+        # The production expression at the journal/direct call site, spelled out so
+        # the classifier and the probe are exercised as one framing decision.
+        probe_uri = (
+            scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+            if scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded)
+            else recorded
+        )
+        assert probe_uri == recorded
+        assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, probe_uri) == (False, None)
+
+    # #1365 preserved, the negative half: a percent-encoded DIRECTORY-shaped package
+    # still needs its witness, and the derived manifest FILE key is resolvable and
+    # absent -- the ordinary repair-eligible missing-package verdict, not a probe
+    # error.  A distinct cycle so no seeded object above can answer for it.
+    package_uri = "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/"
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/forcing_package.json"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
 
 
 def test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink(
@@ -12724,7 +12843,7 @@ def test_sidecar_tier_directory_witness_raises_the_ordinary_missing_package_bloc
     }
     # NOT the #1203 read-fault route, whose whole shape is a different blocker.
     assert "tier_status" not in decision.evidence["forcing_provenance"]
-    # The repair channel's own predicate (``scheduler_candidates`` :1617): a
+    # The repair channel's own predicate (``scheduler_candidates`` :1616): a
     # non-null unsafe reason is refused as ``forcing_artifact_reference_unsafe``.
     assert decision.evidence["artifact_guard"]["unsafe_reason"] not in (None, "")
 
