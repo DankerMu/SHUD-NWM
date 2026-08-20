@@ -71,6 +71,13 @@ PIPELINE_FRONTIER_EXEMPT_REASON = "pipeline_frontier_exempt"
 # root produced nothing.
 RUNS_ROOT_SYMLINK_REASON = "runs_root_symlink_skipped"
 
+# Skip reason for an additional root whose configured value is relative (#1318
+# task 5.1). Resolving it would anchor a deletion surface to whatever working
+# directory the process happens to have been started in; recorded rather than
+# dropped silently because -- unlike an unset root -- it is a misconfiguration
+# somebody has to see.
+EXTRA_ROOT_NOT_ABSOLUTE_REASON = "extra_root_not_absolute"
+
 
 @dataclass
 class RetentionConfig:
@@ -392,15 +399,26 @@ def _resolve_runs_only_roots(
     values: Sequence[Path | str | None],
     *,
     primary: Path | None,
-) -> list[Path]:
+) -> tuple[list[Path], list[dict[str, Any]]]:
     """Resolve, sanitise and de-duplicate the additional ``runs/``-only roots.
+
+    Returns the resolved roots plus the skip entries for the values that were
+    discarded loudly; this function is where *all* additional-root path hygiene
+    lives, and neither caller validates a root before handing it over.
 
     Hygiene (issue #1318 task 1.2): ``None``, empty and whitespace-only values
     are discarded **before** ``Path()`` is ever constructed --
     ``Path("").expanduser().resolve()`` is the process working directory, which
     would drag ``<cwd>/runs`` into the deletion surface, and
     ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is unset (``None``) on any deployment
-    that is not db-free.
+    that is not db-free. Those discards stay silent: an unset copyback root is
+    the normal case, not a misconfiguration.
+
+    A non-blank value that is still relative after ``expanduser()`` is discarded
+    **before** ``resolve()`` and recorded in ``skipped`` (task 5.1): resolving it
+    would anchor the deletion surface to the invocation working directory. The
+    value is stripped first, because ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` reaches
+    here as the bare environment string -- surrounding whitespace included.
 
     De-duplication is by resolved absolute path (design D5): the object-store
     root wins, because it is swept with the fuller cycle-prefix semantics.
@@ -409,20 +427,33 @@ def _resolve_runs_only_roots(
     equality is the only way to produce a duplicate target.
     """
     resolved: list[Path] = []
+    skipped: list[dict[str, Any]] = []
     seen: set[Path] = set()
     if primary is not None:
         seen.add(primary)
     for value in values:
         if value is None:
             continue
-        if isinstance(value, str) and not value.strip():
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            skipped.append(
+                {
+                    "key": RUNS_PREFIX,
+                    "root": str(value),
+                    "reason": EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+                }
+            )
             continue
-        candidate = Path(value).expanduser().resolve()
+        candidate = candidate.resolve()
         if candidate in seen:
             continue
         seen.add(candidate)
         resolved.append(candidate)
-    return resolved
+    return resolved, skipped
 
 
 def plan_retention(
@@ -469,7 +500,9 @@ def plan_retention(
     primary_root = (
         Path(object_store_root).expanduser().resolve() if object_store_root is not None else None
     )
-    extra_roots = _resolve_runs_only_roots(runs_only_roots, primary=primary_root)
+    extra_roots, extra_root_skipped = _resolve_runs_only_roots(
+        runs_only_roots, primary=primary_root
+    )
     result = RetentionResult(
         enabled=enabled,
         dry_run=dry_run,
@@ -500,6 +533,7 @@ def plan_retention(
     # check (task 1.2d): an unconfigured or missing OBJECT_STORE_ROOT used to
     # return early, which would have made the additional roots silently dead on
     # exactly the CLI path where OBJECT_STORE_ROOT is an unvalidated getenv.
+    result.skipped.extend(extra_root_skipped)
     for extra_root in extra_roots:
         extra_targets, extra_skipped = _collect_run_targets(
             extra_root,

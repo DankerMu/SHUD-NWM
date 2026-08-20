@@ -36,9 +36,13 @@ which window governed the additional roots. Deletion failures on an additional
 root SHALL be recorded per entry and SHALL NOT abort the sweep or the pass,
 including failures raised as safe-filesystem errors rather than OS errors.
 
-A root that is unset, empty, or blank SHALL be discarded before any path
-resolution, so that no additional root can resolve to the process working
-directory. An additional root SHALL NOT be derived from a relative default.
+An additional root SHALL be an explicitly configured absolute path. A root that
+is unset, empty, or blank SHALL be discarded before any path resolution, and a
+root whose configured value is relative SHALL be discarded with a recorded
+reason rather than resolved — so that no additional root can resolve against the
+process working directory. A root SHALL NOT be forwarded when its value comes
+from a built-in default rather than from explicit configuration, even where that
+default has already been anchored to an absolute path upstream.
 
 Deletion on an additional root SHALL stay inside that root. An additional root
 whose `runs/` entry is a symbolic link SHALL be skipped with a recorded reason
@@ -99,6 +103,30 @@ unchanged.
 - **THEN** the compacted retention block still carries the additional-root block
   naming the switch state, window, cutoff, and resolved roots
 - **AND** it still carries the pipeline-frontier block.
+
+#### Scenario: the pass forwards its configured additional roots
+
+- **WHEN** a scheduler pass runs its end-of-pass retention with additional-root
+  coverage enabled, and both the scheduler workspace root and the object-store
+  copyback root are explicitly configured
+- **THEN** both are among the resolved additional roots recorded in the receipt
+- **AND** an aged run workspace under either of them is selected, attributed to
+  the root it belongs to.
+
+#### Scenario: an additional root defaulted rather than configured is not swept
+
+- **WHEN** the scheduler workspace root is not explicitly configured, so its
+  value comes from the built-in default
+- **THEN** it is not forwarded as an additional root, and nothing beneath it is
+  selected for deletion
+- **AND** the resolved additional roots recorded in the receipt do not include it.
+
+#### Scenario: a relative additional root is discarded, not resolved
+
+- **WHEN** an additional root is configured with a relative value
+- **THEN** it is discarded with a recorded reason and never resolved
+- **AND** no directory under the process working directory is selected for
+  deletion.
 
 #### Scenario: an unset or blank additional root is discarded, not resolved
 

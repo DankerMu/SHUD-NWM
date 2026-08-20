@@ -1658,3 +1658,138 @@ def test_failed_removal_on_an_extra_root_is_isolated(tmp_path: Path, monkeypatch
     assert (workspace / doomed_key).exists()
     assert not (workspace / survivor_key).exists()
     assert result.freed_bytes == int(result.deleted[0]["size_bytes"])
+
+
+# ===========================================================================
+# Issue #1318 section 5 -- the additional roots the *pass* actually forwards.
+#
+# The module-level tests above drive ``run_retention`` directly, so they say
+# nothing about which roots ``ProductionScheduler._run_retention`` hands it.
+# That wiring is the deletion surface an operator gets, and it is the only
+# place where a root can come from a built-in default instead of from
+# configuration.
+# ===========================================================================
+
+
+def _seed_pass_env(monkeypatch) -> None:
+    """Enable real additional-root retention for a scheduler pass."""
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", "true")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", raising=False)
+
+
+def _pass_scheduler(**config_kwargs):
+    from services.orchestrator.scheduler import (
+        ProductionScheduler,
+        ProductionSchedulerConfig,
+        _BlockedModelRegistry,
+    )
+
+    config = ProductionSchedulerConfig(dry_run=False, **config_kwargs)
+    return ProductionScheduler(
+        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
+    )
+
+
+# --- 5.3 -------------------------------------------------------------------
+def test_pass_forwards_both_configured_extra_roots(tmp_path: Path, monkeypatch) -> None:
+    """[5.3] The pass-side wiring itself: with the gate open and both roots
+    explicitly configured, both are swept and each entry names its own root.
+
+    Deleting the ``runs_only_roots`` argument from
+    ``scheduler_runtime._run_retention`` must make this test fail -- that
+    four-line block had no coverage at all before this test existed.
+    """
+    _seed_pass_env(monkeypatch)
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    copyback = tmp_path / "copyback"
+    workspace_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+    copyback_key = _seed_run_workspace(copyback, NOW - timedelta(days=50))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
+
+    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "completed"
+    # (1) both configured roots reached retention
+    assert payload["extra_roots"]["roots"] == [str(workspace.resolve()), str(copyback.resolve())]
+    # (2) the aged run under each is selected and attributed to its own root
+    assert _entries_for(payload["planned"], workspace) == {workspace_key}
+    assert _entries_for(payload["planned"], copyback) == {copyback_key}
+    # (3) physical: both were really reclaimed
+    assert not (workspace / workspace_key).exists()
+    assert not (copyback / copyback_key).exists()
+
+
+# --- 5.4 -------------------------------------------------------------------
+def test_pass_does_not_sweep_a_defaulted_workspace_root(tmp_path: Path, monkeypatch) -> None:
+    """[5.4] ``WORKSPACE_ROOT`` unset means the workspace root is the built-in
+    relative default, which ``__post_init__`` anchors to the invocation working
+    directory. A default must never become a deletion surface, and the anchoring
+    means no absolute-path filter downstream can catch it."""
+    _seed_pass_env(monkeypatch)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    store = tmp_path / "object-store"
+    store.mkdir()
+    defaulted = cwd / ".nhms-workspace"
+    defaulted_key = _seed_run_workspace(defaulted, NOW - timedelta(days=90))
+
+    scheduler = _pass_scheduler(object_store_root=str(store))
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "completed"
+    assert payload["extra_roots"]["roots"] == []
+    assert str(defaulted.resolve()) not in {entry["root"] for entry in payload["planned"]}
+    assert payload["planned"] == []
+    # physical: the defaulted root's aged run workspace is still on disk
+    assert (defaulted / defaulted_key).exists()
+    assert (defaulted / defaulted_key / "output/out.nc").exists()
+
+
+# --- 5.5 -------------------------------------------------------------------
+def test_relative_extra_root_is_discarded_with_a_recorded_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """[5.5] A configured-but-relative root resolves against the working
+    directory. It is discarded before ``resolve()`` and recorded, so the receipt
+    says why that root produced nothing. ``NHMS_OBJECT_STORE_COPYBACK_ROOT``
+    arrives as the bare env string, so the value is stripped before judging."""
+    from services.orchestrator.retention import EXTRA_ROOT_NOT_ABSOLUTE_REASON
+
+    cwd = tmp_path / "cwd"
+    cwd_key = _seed_run_workspace(cwd, NOW - timedelta(days=90))
+    nested = cwd / "relative/copyback"
+    nested_key = _seed_run_workspace(nested, NOW - timedelta(days=90))
+    monkeypatch.chdir(cwd)
+    store = tmp_path / "object-store"
+    store.mkdir()
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(".", "  relative/copyback  "),
+    )
+
+    assert result.to_dict()["extra_roots"]["roots"] == []
+    assert result.planned == []
+    assert [
+        (entry["key"], entry["root"], entry["reason"])
+        for entry in result.skipped
+        if entry["reason"] == EXTRA_ROOT_NOT_ABSOLUTE_REASON
+    ] == [
+        ("runs", ".", EXTRA_ROOT_NOT_ABSOLUTE_REASON),
+        ("runs", "relative/copyback", EXTRA_ROOT_NOT_ABSOLUTE_REASON),
+    ]
+    # physical: nothing under the working directory was touched
+    assert (cwd / cwd_key / "output/out.nc").exists()
+    assert (nested / nested_key / "output/out.nc").exists()

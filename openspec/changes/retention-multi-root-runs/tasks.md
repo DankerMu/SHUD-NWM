@@ -147,3 +147,27 @@
 - [ ] 非合并门（运维后续，另行执行）：node-22 以
       `NHMS_RETENTION_EXTRA_ROOTS_ENABLED=true` + `NHMS_RETENTION_DRY_RUN=true` 跑一趟 pass，
       导出 `planned` 清单与 pass 耗时增量供人工审阅
+
+## 5. 交叉审查修复轮（Phase 5，2026-08-19；全部经独立 verifier 判 CONFIRMED/FIX_NOW）
+
+- [x] 5.1 **绝对路径闸**：`_resolve_runs_only_roots` 在 `expanduser()` 之后、`resolve()` **之前**丢弃
+      非绝对值，并记入 `skipped` 附可定位 reason。实证：`runs_only_roots=(".",)` 当前产出
+      `extra_roots.roots == ['<cwd>']` 且 `planned` 含 `<cwd>/runs/...`。
+      注意 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 是裸 env 串、两端都不 strip 不 resolve
+      （实测 `"  relative/copyback  "` 原样带空格进来），故先 strip 再判绝对。
+- [x] 5.2 **默认值不得成为删除面**：`scheduler_runtime.py:2010-2013` 仅在 `WORKSPACE_ROOT`
+      **显式非空**时才把 workspace 根作为额外根转发。
+      **5.1 覆盖不了这条**——`ProductionSchedulerConfig.__post_init__` 已用 `Path.cwd() / path`
+      把相对默认 `.nhms-workspace` 锚成绝对（`scheduler_config.py:277-283` → `:899`），到 retention 时已是绝对路径。
+- [x] 5.3 **pass 侧接线的测试覆盖**（本轮唯一"纯测试"缺口）：现状删掉
+      `scheduler_runtime.py:2010-2013` 整块，`tests/test_retention.py + test_cli_cleanup_frontier.py +
+      test_production_scheduler.py` 仍 **1742 passed / exit 0**。补一条闸门开的 pass 侧用例：
+      断言 `extra_roots.roots` 同时含两个转发根，且额外根下的老 run 进入 `planned` 且 `root` 正确。
+- [x] 5.4 5.2 的负向用例：`WORKSPACE_ROOT` 未设 + CWD 下有 `.nhms-workspace/runs/<老 run>`
+      → 该根不在 `extra_roots.roots`、该目录不进 `planned`、磁盘上仍存在。
+- [x] 5.5 5.1 的用例：相对值（`"."` 与带空格的 `"  relative/copyback  "`）被丢弃并记 `skipped`；
+      `<cwd>/runs` 不进 `planned` 且磁盘仍在。
+- [x] 5.6 更正 `scheduler_runtime.py:1986-1992` 的 docstring：删除"两个根都来自已校验的 SchedulerConfig /
+      经 db-free 拓扑 preflight"的说法——该 preflight 在非 db-free 模式下 `not_required` 早退
+      （`scheduler_config.py:698-706`），且 `object_store_copyback_root` 从未在 `__post_init__` 规范化。
+      改为如实描述：卫生由 `_resolve_runs_only_roots` 承担。
