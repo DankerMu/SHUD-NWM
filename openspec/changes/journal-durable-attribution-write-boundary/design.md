@@ -328,6 +328,10 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 - **J11**：`tests/test_file_orchestration_migration.py:263` 的子串存活 + `:9068` 的 master
   frozen 大声拒绝，两条既有用例改动后仍绿（must-preserve 10/11 的现状锁；
   若已被覆盖则直接引用，不重复造）。
+- **J12（D2b 的现状锁，实现期新增）**：`tests/test_file_orchestration_migration.py:1637`
+  （`test_historical_pipeline_event_runtime_roots_are_redacted_but_retry_recoverable`）
+  改动后仍绿——event lane 的公共渲染产出（`object_store_prefix` 渲染成 `"[object-uri]"`）
+  必须原样落盘，不被咽喉 strip 抹成 `null`。既有用例，直接引用不重复造。
 
 **变异证死**（红-绿对照，逐条单独施加）：
 
@@ -344,9 +348,19 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 | 粘性触发条件扩成 `in TERMINAL_PIPELINE_STATUSES` | **J8**（三个参数臂全红） |
 | 粘性窄扩成 `{"permanently_failed","cancelled"}` | **J8** 必须仍绿（不得误伤——`cancelled` 是声明的既存缺口，不在本单射程） |
 | 观测族也被粘住（D4 误实现成 B 方案） | **J7** |
+| **D2b 的 event lane carve-out 删除**（咽喉 strip 也作用于 `pipeline_event`） | **J12**（`test_file_orchestration_migration.py:1637`） |
 
 **判别力关键的四条**：J4b（defer 腿）、J5（投影腿）、J7、J8——J7/J8 是 D4/D5 两个方向的反向钉，
 J4b/J5 是 D3 两条腿各自的钉。缺任何一个，对应裁定就没有 oracle，下一次重构可以自由翻向。
+四条**实测全部逐字命中**（M5→J5、M6→J4b、M9→J8 三臂全红、M11→J7），M10 守卫实测 J8 全绿。
+
+**实测与预测的两处出入（实现期记录，非偏离）**——两条变异均**未存活**，只是杀死它的 oracle 与
+预测不同：
+
+| 变异 | 预测转红 | **实测转红** | 解释 |
+|---|---|---|---|
+| 咽喉 strip 调用删除 | J1、J3、J4 | **J1、J10** | D3 的入参 strip 在**更上游**：两条腿的 `log_uri` 占位符在进 `cohort_row`/`row` 之前就已成 `None`，故 J3/J4 不再需要咽喉即绿。咽喉本身仍被 J1（直调）与 J10（旁路 B 端到端）钉住 |
+| strip 改成子串匹配 | migration `:263` | **J2** | D2b 之后 event lane 不过咽喉，`:263` 的子串存活改由 carve-out 保护而非整值匹配；整值-vs-子串的判别力落在 J2 的 `message` 断言（job lane）上。`:263` 仍绿，作为 J11 现状锁不变 |
 
 ### 结构性 oracle 的缺口（声明，不造）
 

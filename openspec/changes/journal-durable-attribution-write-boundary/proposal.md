@@ -37,8 +37,14 @@
 - **#1592**：`_strip_redaction_placeholders` 下沉到 durable 写边界
   `_journal_record_for_write`（`:8014`）——与同族 sanitizer
   `_redact_durable_error_message_fields` **现有的双层布放完全同形**（它已同时在 `:6281`
-  与 `:8023` 出现）。两条旁路都过该函数，持久态由此全覆盖。`:6280` 的原调用点**保留**
-  （见 design D2）。
+  与 `:8023` 出现）。两条旁路（都只写 `pipeline_job`）都过该函数，job lane 持久态由此全覆盖。
+  `:6280` 的原调用点**保留**（见 design D2）。
+  **`pipeline_event` 走 carve-out**（实现期裁定 **D2b**）：咽喉 strip 跳过 event，因为
+  `_append_validated_record_unlocked` 在 `:6284` 的公共渲染**有意产出**占位符作为 durable
+  公共值，咽喉跑在它下游会把它抹成 `null`（实测打红
+  `tests/test_file_orchestration_migration.py:1637`）。原则是「strip 只清除**从调用方来的**
+  占位符，绝不跑在 journal 自己的公共渲染下游」；event lane 因此在 `:6280`
+  的**调用方边界**受保护，job lane 在 record 构造点受保护。
 - **#1589**：终态粘性从「只护 `status`」扩到「**归因族**随 `status` 一起粘」——粘性分支触发时
   `error_code` / `error_message` 保持 existing 值；`finished_at` / `exit_code` / `log_uri`
   这一族**观测事实**继续照常刷新（裁定与理由见 design D4）。触发条件仍是

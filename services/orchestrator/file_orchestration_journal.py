@@ -3344,17 +3344,34 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
-            # Terminal stickiness (#1312): a master already marked
-            # ``permanently_failed`` keeps that status while the projection
-            # still refreshes its evidence fields.  Without this, every later
-            # resume/reconcile pass would rewrite the derived
-            # ``{succeeded, partially_failed, failed}`` projection over the
-            # mark and oscillate.  Same shape as the defer path's terminal
-            # short-circuit in ``_defer_forecast_cohort_projection_unlocked``.
+            # Terminal stickiness (#1312, widened by #1589): a master already
+            # marked ``permanently_failed`` keeps that status AND the
+            # attribution family (``error_code``/``error_message``) it already
+            # carries, while the observational family (``finished_at`` /
+            # ``exit_code`` / ``log_uri``) still refreshes.  Without this, every
+            # later pass rewrote the derived
+            # ``{succeeded, partially_failed, failed}`` projection over the mark
+            # and oscillated; #1589 is the same disease one level down -- a row
+            # saying "permanently failed" while its error code is recomputed by
+            # the current pass is self-contradictory attribution.  Refreshing
+            # observational evidence under the mark is the intended behaviour
+            # and contradicts nothing, so it is deliberately NOT frozen (the
+            # defer path's whole-row short circuit is the rejected alternative).
+            #
+            # The trigger stays a literal ``permanently_failed`` comparison
+            # rather than ``in TERMINAL_PIPELINE_STATUSES``.  The criterion is a
+            # conjunction: the status must be externally applied -- not
+            # derivable by this projection, which yields only
+            # ``succeeded``/``partially_failed``/``failed`` -- AND already
+            # protected from status overwrite today.  ``permanently_failed`` is
+            # currently the only status meeting both; widening to the derived
+            # values would pin the first pass's conclusion forever, i.e. disable
+            # the projection.  ``cancelled`` meets the first condition but not
+            # the second (it has no status stickiness at all today); that is a
+            # pre-existing gap tracked separately, not something to fix here.
+            master_is_permanently_failed = str(existing.get("status") or "") == "permanently_failed"
             sticky_master_status = (
-                "permanently_failed"
-                if str(existing.get("status") or "") == "permanently_failed"
-                else projected_master_status
+                "permanently_failed" if master_is_permanently_failed else projected_master_status
             )
             cohort_row = apply_accepted_submit_transition(
                 existing,
@@ -3370,15 +3387,31 @@ class FileOrchestrationJournalRepository:
                     "candidate_projections": [
                         existing_projections[task_id] for task_id in sorted(existing_projections)
                     ],
-                    "error_code": projected_master_error_code,
+                    "error_code": (
+                        existing.get("error_code")
+                        if master_is_permanently_failed
+                        else projected_master_error_code
+                    ),
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
+            # #1589 (design D3): a display placeholder is a withheld value, not
+            # an instruction to overwrite.  Running the caller's evidence
+            # through the same strip the write boundary applies restores what
+            # these ``is not None`` guards were meant to ask -- "did the caller
+            # supply a real value?" -- so a round-tripped public row can no
+            # longer displace a real durable value that the boundary would then
+            # withhold, which would lose the value outright.  Non-string
+            # evidence (datetime, int) passes through unchanged.
+            finished_at = _strip_redaction_placeholders(finished_at)
+            exit_code = _strip_redaction_placeholders(exit_code)
+            master_error_message = _strip_redaction_placeholders(master_error_message)
+            log_uri = _strip_redaction_placeholders(log_uri)
             if finished_at is not None:
                 cohort_row["finished_at"] = _format_utc(finished_at)
             if exit_code is not None:
                 cohort_row["exit_code"] = exit_code
-            if master_error_message is not None:
+            if master_error_message is not None and not master_is_permanently_failed:
                 cohort_row["error_message"] = _durable_error_message(master_error_message)
             if log_uri is not None:
                 cohort_row["log_uri"] = log_uri
@@ -3560,6 +3593,14 @@ class FileOrchestrationJournalRepository:
                 "updated_at": _format_utc(_utcnow()),
             }
         )
+        # #1589 (design D3): same rule as the batched projection leg -- a
+        # display placeholder is a withheld value, not an overwrite.  This leg
+        # is separately reachable: pass 1 parks the row on
+        # ``reconcile_unverified``, which is not terminal, so the whole-row
+        # short circuit above does not stop a pass 2 carrying a placeholder.
+        finished_at = _strip_redaction_placeholders(finished_at)
+        exit_code = _strip_redaction_placeholders(exit_code)
+        log_uri = _strip_redaction_placeholders(log_uri)
         if finished_at is not None:
             row["finished_at"] = _format_utc(finished_at)
         if exit_code is not None:
@@ -6180,6 +6221,11 @@ class FileOrchestrationJournalRepository:
         self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        # Known boundary (#1592): this projects the UNSTRIPPED ``row``.  It is a
+        # caller-facing return value, not durable state -- the durable record and
+        # direct row file were both built from the stripped record above.  A
+        # caller that round-trips this value back into a write is caught by the
+        # strip at the write boundary, so it cannot become persistent pollution.
         return _public_scheduler_row(row)
 
     def _write_pipeline_job_direct_unlocked(
@@ -6277,6 +6323,11 @@ class FileOrchestrationJournalRepository:
         materialize_model_id: str | None = None,
         sequence: int | None = None,
     ) -> None:
+        # Caller-boundary strip: this sees the RAW payload, before the public
+        # event rendering below.  For pipeline_event this is the only
+        # anti-laundering layer there is -- ``_journal_record_for_write``
+        # deliberately skips events so it cannot erase that rendering's
+        # intentional placeholders (#1592 design D2b).  Do not remove it.
         payload = _strip_redaction_placeholders(payload)
         payload = _redact_durable_error_message_fields(record_type, payload)
         private_recovery_payload = dict(payload) if record_type == "pipeline_event" else None
@@ -8020,6 +8071,30 @@ def _journal_record_for_write(
     model_id: str | None,
     sequence: int,
 ) -> dict[str, Any]:
+    # #1592: every journal record is constructed here, so the anti-laundering
+    # strip belongs here rather than at each write call site.  Two durable write
+    # paths -- the cohort projection payload loop and
+    # ``_write_pipeline_job_unlocked`` -- never reach
+    # ``_append_validated_record_unlocked``, so a caller round-tripping a public
+    # row used to launder ``[object-uri]``/``[uri]`` into durable state through
+    # them.  Placed before the sibling error-message sanitizer, matching the
+    # existing order at that outer call site.
+    #
+    # THE PRINCIPLE, not an exception list: the anti-laundering strip removes
+    # placeholders that came FROM A CALLER.  It must never run downstream of the
+    # journal's own public rendering, because that rendering DELIBERATELY
+    # produces ``[object-uri]``/``[local-path]`` as the durable public value.
+    # ``_append_validated_record_unlocked`` sanitizes pipeline_event payloads
+    # (``_public_pipeline_event_payload``) AFTER its own caller-boundary strip
+    # and immediately before calling this function, so stripping events here
+    # would erase deliberate evidence rather than laundering -- turning a
+    # rendered "there was an object URI here" into "there was nothing here".
+    # The layering that follows is therefore: the event lane strips at the
+    # caller boundary, where its raw un-sanitized payload still exists; the job
+    # lane strips here, at the record constructor.  Anyone adding a second
+    # renderer must apply the same rule to it, not add another record_type here.
+    if record_type != "pipeline_event":
+        payload = _strip_redaction_placeholders(payload)
     payload = _redact_durable_error_message_fields(record_type, payload)
     record: dict[str, Any] = {
         "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
