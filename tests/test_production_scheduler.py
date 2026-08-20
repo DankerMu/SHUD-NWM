@@ -16760,11 +16760,21 @@ def test_resolve_residue_confined_path_keeps_non_loop_containment_refusal(tmp_pa
     ("root_env", "expected_message"),
     [
         # WORKSPACE_ROOT reaches the evidence directory's safety check, which
-        # reads the kernel's ELOOP off lstat().  The field name it reports is
-        # `evidence_dir` even though the loop sits on WORKSPACE_ROOT; that
-        # attribution quirk predates this change and is a declared non-goal, so
-        # it is pinned here rather than corrected.
-        ("WORKSPACE_ROOT", "production scheduler evidence_dir must be a safe directory"),
+        # reads the kernel's ELOOP off lstat().  The refusal still names
+        # `evidence_dir` -- that is the field under the guard -- but it now also
+        # carries the offending path and names workspace_root, because
+        # evidence_dir is only DERIVED from workspace_root and the operator set
+        # no evidence root at all.  #1520 declared that misattribution a
+        # non-goal and pinned it here; #1545 is the follow-up that corrects it,
+        # so the expectation is rewritten rather than pinned.  Templated because
+        # the message now embeds real paths; the lock-root row below has no
+        # placeholders and is compared byte-for-byte verbatim.
+        (
+            "WORKSPACE_ROOT",
+            "production scheduler evidence_dir must not resolve through a symlink loop: "
+            "{path} (the loop lies above the final component; check evidence_dir "
+            "and workspace_root {workspace_root})",
+        ),
         ("NHMS_SCHEDULER_LOCK_ROOT", "production scheduler lock_path must be under workspace_root"),
     ],
 )
@@ -16783,11 +16793,398 @@ def test_resolve_residue_config_final_segment_loop_converges_to_structured_refus
     loop = _symlink_loop_dir(tmp_path, "final-segment-loop")
     _resolve_residue_env(monkeypatch, workspace_root)
     monkeypatch.setenv(root_env, str(loop))
+    resolved_workspace_root = Path(os.path.realpath(loop))
+    offending_path = resolved_workspace_root / "scheduler" / "evidence"
 
     with pytest.raises(ValueError) as excinfo:
         ProductionSchedulerConfig()
 
-    assert str(excinfo.value) == expected_message
+    assert str(excinfo.value) == expected_message.format(
+        path=offending_path,
+        workspace_root=resolved_workspace_root,
+    )
+    if root_env == "WORKSPACE_ROOT":
+        # #1545's two acceptance points, asserted independently of the exact
+        # sentence: the refusal carries the offending path, and it lets the
+        # operator reach the workspace_root knob instead of pointing only at a
+        # derived evidence directory they never configured.
+        assert str(offending_path) in str(excinfo.value)
+        assert f"workspace_root {resolved_workspace_root}" in str(excinfo.value)
+
+
+# --- Undeterminable home directory in config construction (#1549) ------------
+#
+# `Path.expanduser()` throws a bare, errno-less RuntimeError when no home
+# directory can be determined.  Two production fields reach this module's own
+# bare expansions -- allowed_storage_roots and log_root -- and used to abort
+# construction there, producing no structured blocker at all.  Every other root
+# field aborts earlier in `_expanduser_for_mode`'s deliberate re-raise, which is
+# a standing design ruling and out of scope here.
+
+_UNKNOWN_HOME_ROOTS = "~nosuchuser_zz/roots"
+_UNKNOWN_HOME_LOGS = "~nosuchuser_zz/logs"
+_UNKNOWN_HOME_WORKSPACE = "~nosuchuser_zz/workspace"
+
+
+def _unknown_home_config(workspace_root: Path, *, db_free_required: bool) -> Any:
+    return ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        scheduler_db_free_required=db_free_required,
+    )
+
+
+def test_expanduser_residue_config_constructs_identically_on_both_database_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The acceptance anchor is an EQUALITY of products, not the absence of an
+    # exception: "it stopped throwing" would stay green even if the throw were
+    # traded for a value anchored at the wrong base.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+
+    db_backed = _unknown_home_config(workspace_root, db_free_required=False)
+    db_free = _unknown_home_config(workspace_root, db_free_required=True)
+
+    assert db_backed.allowed_storage_roots == db_free.allowed_storage_roots
+    assert db_backed.log_root == db_free.log_root
+    # The db-free arm's own product, spelled out: the tilde segment is kept
+    # verbatim, the allowed root is anchored at the cwd and the log root at
+    # workspace_root, so a base mix-up cannot hide behind the equality above.
+    canonical_cwd = Path(os.path.realpath(tmp_path))
+    canonical_workspace = Path(os.path.realpath(workspace_root))
+    assert db_backed.allowed_storage_roots == (canonical_cwd / _UNKNOWN_HOME_ROOTS,)
+    assert db_backed.log_root == canonical_workspace / _UNKNOWN_HOME_LOGS
+
+
+def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Compatibility-surface ledger item, not a live crash path: workspace_root
+    # re-raises earlier in `_expanduser_for_mode`, so this helper is asserted by
+    # calling it directly rather than through a field.
+    monkeypatch.chdir(tmp_path)
+
+    product = scheduler_module._config_path_preserve_final_component(_UNKNOWN_HOME_WORKSPACE)
+
+    assert product == scheduler_config_module._config_path_preserve_final_component_for_mode(
+        _UNKNOWN_HOME_WORKSPACE,
+        db_free_required=True,
+    )
+    assert product == Path(os.path.realpath(tmp_path)) / _UNKNOWN_HOME_WORKSPACE
+
+
+def test_expanduser_helpers_still_expand_a_determinable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The other half of the #1549 contract.  Every tilde above is deliberately
+    # UNEXPANDABLE, so all of it stays green even if the expansion is dropped
+    # altogether -- and master could leave that unpinned because it called
+    # stdlib expanduser() directly, while this change substitutes a hand-written
+    # wrapper whose happy branch is the one every real operator config takes.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    home = canonical_tmp / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._config_path_preserve_final_component("~/x") == home / "x"
+    assert scheduler_module._optional_config_path_relative_to("~/x", canonical_tmp) == home / "x"
+
+
+def test_expanduser_residue_preflight_classifies_structurally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The point of not throwing during construction: the value reaches the
+    # preflight, which owns classification and answers with a structured result.
+    # The codes below are what this geometry actually produces today -- the
+    # unresolvable root is admitted by the ENOENT tolerance arm and then fails
+    # to contain workspace_root, and neither missing lock nor evidence root
+    # exists yet.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+    config = ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        require_runtime_roots=True,
+    )
+
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"]] == [
+        "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
+        "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND",
+        "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND",
+    ]
+
+
+# --- Final-segment symlink verdicts (#1544) -----------------------------------
+#
+# The guard's final component used to be decided by a bare non-strict resolve,
+# which raises an errno-less RuntimeError on <=3.12 and silently ADOPTS a loop
+# on 3.13+.  Strict real-path plus an ELOOP split makes both interpreter arms
+# reach the same verdict; every other strict failure keeps the non-strict
+# product the arm has always used, so the accepting geometries below are
+# unchanged.  These assertions are about the converged behaviour and therefore
+# hold on every supported interpreter.
+
+
+def _guard_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    outside = Path(os.path.realpath(tmp_path)) / "outside"
+    outside.mkdir()
+    return workspace_root, outside
+
+
+def test_final_segment_loop_inside_workspace_is_a_structured_refusal(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    loop = _symlink_loop_dir(workspace_root, "inner-loop")
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(loop, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+def test_final_segment_symlink_whose_target_traverses_a_loop_names_the_looping_link(tmp_path: Path) -> None:
+    # ELOOP does not mean "the final component loops": here the final component
+    # is an ordinary, non-looping symlink and the cycle sits in the path its
+    # TARGET traverses.  The refusal must send the operator to the link that
+    # actually loops, not to the innocent one they configured.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    midloop = workspace_root / "midloop"
+    midloop.symlink_to(midloop)
+    link = workspace_root / "via-midloop"
+    link.symlink_to(midloop / "tail", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {link} "
+        f"(the symlink loop is at {midloop})"
+    )
+
+
+def test_final_segment_healthy_directory_symlink_is_accepted(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_to_a_file_is_refused_as_not_a_directory(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be a directory"
+
+
+def test_final_segment_symlink_escaping_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_absent_component_returns(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+
+    assert (
+        scheduler_module._require_safe_directory_final_component(
+            workspace_root / "absent",
+            workspace_root,
+            "evidence_dir",
+        )
+        is None
+    )
+
+
+def test_dangling_final_segment_symlink_pointing_inside_the_workspace_is_accepted(tmp_path: Path) -> None:
+    # THE regression fence for this change.  Strict real-path raises ENOENT on a
+    # dangling link, so a strict-only implementation would turn today's
+    # acceptance into a refusal and silently break working configurations.  The
+    # target MUST be inside the workspace: an outside target is refused for a
+    # different reason (see the next test), which would make this case red for
+    # the wrong cause.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(workspace_root / "never-created", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_dangling_final_segment_symlink_pointing_outside_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside / "never-created", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_symlink_reached_through_a_file_keeps_its_acceptance(tmp_path: Path) -> None:
+    # Strict real-path fails with ENOTDIR here, not ENOENT, and the geometry is
+    # accepted today: the non-strict fallback therefore has to cover every
+    # non-loop errno rather than ENOENT alone.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "a-file"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "tail", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(tmp_path: Path) -> None:
+    # Strict real-path fails with EACCES here -- a third non-loop errno the
+    # fallback has to carry.  HONEST LIMIT: the FINAL verdict on this geometry
+    # is not interpreter-independent, and that predates this change and lies
+    # outside it: `Path.exists()` swallows EACCES from 3.12 on but propagates
+    # PermissionError on 3.11, so master already accepts this on 3.14 and raises
+    # PermissionError on 3.11 at that later gate (tracked as #1623).  What this
+    # change owns is the real-path step, which must not turn EACCES into the
+    # loop refusal, and must not let it escape either.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "unreadable"
+    blocker.mkdir()
+    (blocker / "leaf").mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "leaf", target_is_directory=True)
+    blocker.chmod(0o600)
+    try:
+        if sys.version_info >= (3, 12):
+            # The CI interpreter gets NO tolerance: a blanket `except
+            # PermissionError` here would also swallow EACCES escaping the
+            # strict real-path step this change owns, i.e. it would stay green
+            # under exactly the regression it exists to fence.
+            verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+        else:
+            # 3.11 alone keeps the tolerance, for the later `Path.exists()`
+            # gate named above -- a divergence this change does not own.
+            try:
+                verdict = scheduler_module._require_safe_directory_final_component(
+                    link,
+                    workspace_root,
+                    "evidence_dir",
+                )
+            except PermissionError:
+                verdict = None
+    finally:
+        blocker.chmod(0o755)
+
+    assert verdict is None
+
+
+def test_final_segment_loop_refuses_on_the_database_backed_construction_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Every assertion above calls the guard directly, but the acceptance
+    # scenario is phrased about the CONFIGURATION being constructed.  The
+    # guard's only two call sites are both `evidence_dir` in scheduler_config,
+    # so this is the route an operator actually travels.
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(workspace_root, "loop-evidence")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(loop))
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+# --- Compatibility-surface path helpers (#1546) --------------------------------
+
+
+def test_compatibility_surface_helpers_normalize_a_loop(tmp_path: Path) -> None:
+    # Exposed only through the runtime-roots forwarders, so this is a ledger
+    # item rather than a live crash path: <=3.12 raised an errno-less
+    # RuntimeError here while 3.13+ adopted the loop.  Both now normalise.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(canonical_tmp, "compat-loop")
+
+    assert scheduler_module._resolve_optional_config_path(loop) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop, canonical_tmp) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop.name, canonical_tmp) == loop
+    # Normalisation itself, which the three equalities above cannot see: on an
+    # already-canonical input they are all satisfied by handing the value
+    # straight back.  This also pins the documented POSIX order -- symlinks
+    # first, `..` afterwards -- so the loop segment survives while the
+    # traversal through it collapses, which is what the old Path.resolve()
+    # produced on 3.13+ and what it refused to produce at all on <=3.12.
+    assert scheduler_module._resolve_optional_config_path(loop / "y" / ".." / "z") == loop / "z"
+    # The sibling helper carries its own copy of the paradigm, so it needs its
+    # own normalisation fence: fixing one of the two leaves the other handing
+    # the value back untouched.  Both spellings of the same value are pinned --
+    # absolute, and relative, where the base join is what goes through the
+    # canonicalisation.
+    assert scheduler_module._optional_config_path_relative_to(loop / "y" / ".." / "z", canonical_tmp) == loop / "z"
+    assert scheduler_module._optional_config_path_relative_to(f"{loop.name}/y/../z", canonical_tmp) == loop / "z"
+
+
+def test_compatibility_surface_helpers_keep_their_existing_contract(tmp_path: Path) -> None:
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    missing = canonical_tmp / "gone" / "leaf"
+
+    assert scheduler_module._resolve_optional_config_path(None) is None
+    assert scheduler_module._optional_config_path_relative_to(None, canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("", canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("gone/leaf", canonical_tmp) == missing
+    assert scheduler_module._resolve_optional_config_path(missing) == missing
+    assert not missing.exists()
+
+
+def test_compatibility_surface_relative_helper_keeps_an_undeterminable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # This one helper crosses both families: the bare expanduser belongs to the
+    # #1549 lane (keep the value, hand it down) and the bare resolve to the
+    # #1546 lane (normalise identically on every interpreter).  Fixing only one
+    # of the two leaves the other's throw in place.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._optional_config_path_relative_to(
+        _UNKNOWN_HOME_LOGS,
+        canonical_tmp,
+    ) == canonical_tmp / _UNKNOWN_HOME_LOGS
 
 
 def test_resolve_residue_config_parent_segment_loop_object_store_root_constructs(
