@@ -312,8 +312,11 @@ template/live drift is resolved.
 2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~380 s ≤
    NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`, the live
    default from `#1156`/`#1352`, no override installed). That wall bounds the
-   **whole tick**, not one chunk, and the runner has no in-loop elapsed guard:
-   overrunning it means the wrapper's `timeout` sends `TERM` mid-DDL.
+   **whole tick**, not one chunk, and the **compression legs have no in-loop
+   elapsed guard**: overrunning it means the wrapper's `timeout` sends `TERM`
+   mid-DDL. (The one guarded leg is the post-compression ANALYZE batch added by
+   `#1378`, which measures the remaining wall itself and skips rather than
+   overrun — see §4.7. It never lends budget back to compression.)
 
    The `380 s` is the **measured 2026-08-14 non-compress residual**: the
    observed 1836 s tick minus the 1456 s the §4.5 estimator gives for that
@@ -2102,6 +2105,72 @@ survive the cutover (measured:
 cutover and the text-column-retirement issue, the fact table has no
 database-enforced referential link to `core.river_segment`. Recorded in the
 ADR 0002 amendment.
+
+### 4.7 ingest 前沿 chunk 统计漂移 (`#1378`)
+
+生产 display 的 `GET /api/v1/layers/discharge/valid-times`（named-identity 分支）
+在 node-27 上从 0.56 ms 退化到 887 ms。索引全在场且 `indisvalid=t`，查询形状没变——
+病灶是**前沿 chunk 的 planner 统计**。
+
+#### 成因：新值不可见
+
+每个新 cycle 写入的 `run_id`/`run_key` 是该 chunk 统计里**不存在的值**。planner 对
+未见过的值估行 ≈ 0，于是在 `DISTINCT … ORDER BY valid_time DESC LIMIT` 下判定
+"顺 `valid_time` 索引逐行过滤很快就能凑够 LIMIT"，翻转掉 identity 键索引；实际前沿
+之外全是别的 run 的行，执行器一路扫（实测 `Rows Removed by Filter: 2,715,324`）。
+
+关键是**翻转由新 cycle 的第一批行触发，与修改行数体量无关**。整条 ingest 链
+（`scripts/node27_autopipeline.py`、`workers/output_parser`、
+`scripts/node27_timeseries_compression.py`）原本一个 ANALYZE 都没有，统计新鲜度
+完全押在 autovacuum 的 10% scale factor 上——250M 行的 chunk 允许 ~25M 行修改才触发
+autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_analyze`
+（2.7%/5.5%），远不到线。所以**不能用体量阈值治**：任何高阈值都会在每次刷新后留下
+一段"新 cycle 已进、统计未见"的必然复发窗口。
+
+#### 看护：两处显式 ANALYZE
+
+| 位置 | 触发 | 目标 | 上限 / 超时 |
+|---|---|---|---|
+| autopipe tick phase 3.5（publish 之后、summary 之前） | 本 tick **实际 ingest ≥ 1 个 run**（`already_ingested` 不算——那种 tick 没写行） | 两张 hypertable 的**未压缩** chunk 中 `n_mod_since_analyze >= 10_000` 者 | 每 tick 至多 3 个（按 `n_mod` 降序），逐条 `statement_timeout = 120 s`；被裁掉的进 `stats_guard.deferred`，下个 tick 补 |
+| 压缩 runner（全部压缩完成后、receipt 发布前） | 本次 run 记账中**到达 compressed 状态**的每个 chunk（正常 / 测量失败后 / lost-ack 对账三路径） | 该 chunk 本体 | 每条前算剩余墙钟 `wrapper_wall_seconds − elapsed − 120 s`（发布保留段），不足 30 s 则跳过剩余并记 `analyze_error: "wall_budget_exhausted"`；否则 `statement_timeout = min(300 s, 剩余)` |
+
+`10_000` 的下限不是"攒够才刷"：一个真实 run 写入的行数 = 段数 × 时步 ≫ 10⁴，被本 tick
+触及的 chunk 必然过槛；下限只用来跳过仅有零星迟到写入、本 tick 根本没碰的 chunk。
+
+两处**都不改各自的成败判定**：autopipe 的 guard 失败只写
+`stats_guard.status = "failed"` + `error`，tick 返回码不变；压缩 runner 的 ANALYZE
+失败/跳过不置 `any_errors`、不改 receipt 顶层 `outcome`、不改进程 rc——压缩是主目的，
+搭车的统计步骤没有资格把每日 unit 染红。停用开关：
+`NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。
+
+#### 复核（`pg_stat_user_tables`）
+
+```sql
+-- 前沿漂移量：哪些未压缩 chunk 攒着未被统计看见的修改
+SELECT c.chunk_name, s.n_mod_since_analyze, s.last_analyze, s.last_autoanalyze
+FROM timescaledb_information.chunks c
+JOIN pg_stat_user_tables s
+  ON s.schemaname = c.chunk_schema AND s.relname = c.chunk_name
+WHERE (c.hypertable_schema, c.hypertable_name) IN (
+    ('hydro', 'river_timeseries'),
+    ('met', 'forcing_station_timeseries')
+)
+  AND c.is_compressed = false
+ORDER BY s.n_mod_since_analyze DESC;
+```
+
+一个真跑过 guard 的 tick，其 summary JSON 的 `stats_guard.analyzed` 非空，且上面
+SQL 里对应 chunk 的 `last_analyze` 应刷到该 tick 时刻。
+
+#### 陷阱：PG15 非 owner 的 ANALYZE 是静默跳过
+
+PG 15 没有 `MAINTAIN` 权限位。非 owner（node-27 的 ingest 角色不一定是 chunk 的
+owner）执行 `ANALYZE` **只发一条 WARNING 然后"成功"返回**——rc 是 0，统计没动。
+所以 guard 在每条 ANALYZE 之后回读 `pg_stat_user_tables.last_analyze` 与执行前比对，
+没刷新就把该条目记 `status: "warning"`（如实上报，不改 tick 返回码）。看到 warning
+一律按"权限问题"查，别按"ANALYZE 没跑"查。回读走 autocommit 连接：ANALYZE 的累计
+统计要到事务提交后才对后续事务可见，同事务内回读只会读到旧值。统计上报还可能有
+亚秒级延迟，所以极快的 ANALYZE 偶发一次 warning 属正常——**连续**出现才是权限问题。
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 

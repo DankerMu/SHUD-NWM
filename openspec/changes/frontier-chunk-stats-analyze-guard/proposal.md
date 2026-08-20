@@ -47,7 +47,9 @@ ANALYZE 步骤，前沿 chunk 的 planner 统计完全依赖 autovacuum 的 10% 
 
 ## Impact
 
-- Affected specs: 新增 capability `frontier-chunk-statistics-freshness`。
+- Affected specs: 新增 capability `frontier-chunk-statistics-freshness`；
+  MODIFIED `hypertable-compression`（budget receipt requirement 的版本文案随
+  2.2 发射版本更新，场景字面量 2.1→2.2）。
 - Affected code: `scripts/node27_autopipeline.py`、
   `scripts/node27_timeseries_compression.py`、
   `schemas/timeseries_compression_receipt.schema.json`（2.2 bump）、

@@ -10,7 +10,7 @@
     "outcome"
   ],
   "properties": {
-    "schema_version": {"enum": ["1.0", "2.0", "2.1"]},
+    "schema_version": {"enum": ["1.0", "2.0", "2.1", "2.2"]},
     "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "mutation_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "provenance_state": {"enum": ["bound", "unavailable"]},
@@ -98,7 +98,7 @@
     },
     {
       "if": {
-        "properties": {"schema_version": {"const": "2.1"}},
+        "properties": {"schema_version": {"enum": ["2.1", "2.2"]}},
         "required": ["schema_version"]
       },
       "then": {
@@ -124,7 +124,7 @@
     {
       "if": {
         "properties": {
-          "schema_version": {"enum": ["2.0", "2.1"]},
+          "schema_version": {"enum": ["2.0", "2.1", "2.2"]},
           "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
         },
         "required": ["schema_version", "outcome"]
@@ -132,10 +132,28 @@
       "then": {"required": ["head_sha"]}
     },
     {
+      "if": {
+        "properties": {"schema_version": {"enum": ["1.0", "2.0", "2.1"]}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "selected": {
+            "items": {
+              "allOf": [
+                {"not": {"required": ["analyze_seconds"]}},
+                {"not": {"required": ["analyze_error"]}}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
       "then": {
         "required": ["failure", "provenance_state"],
-        "properties": {"schema_version": {"enum": ["2.0", "2.1"]}},
+        "properties": {"schema_version": {"enum": ["2.0", "2.1", "2.2"]}},
         "allOf": [
           {
             "if": {
@@ -190,6 +208,8 @@
         "before_bytes": {"type": "integer", "minimum": 0},
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
         "error": {"type": "string", "minLength": 1},
+        "analyze_seconds": {"type": ["number", "null"], "minimum": 0},
+        "analyze_error": {"type": "string", "minLength": 1},
         "mutation_state": {
           "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate"]
         }

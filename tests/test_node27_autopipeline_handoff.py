@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,17 @@ RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
 DIRECT_GRID_RUN = "fcst_gfs_2026070600_dg_0123456789abcdef"
 LEGACY_SAME_CYCLE_RUN = "fcst_gfs_2026070600_basins_qhh_shud"
 NODE27_DATABASE_URL = "postgresql://node27_writer:secret@127.0.0.1:55432/nhms"
+
+
+def _stats_guard_result(**overrides: Any) -> dict[str, Any]:
+    return {
+        "status": "completed",
+        "min_mods": autopipe.STATS_GUARD_MIN_MODS,
+        "max_chunks": autopipe.STATS_GUARD_MAX_CHUNKS,
+        "analyzed": [],
+        "deferred": [],
+        **overrides,
+    }
 
 
 def _write_run(object_store_root: Path, run_id: str, *, handoff: bool = True) -> None:
@@ -86,6 +98,10 @@ def _prepare_autopipe(
         return 7
 
     monkeypatch.setattr(autopipe, "_publish_display_runs", fake_publish)
+    # Phase 3.5 talks to the database directly; the handoff cases below are not
+    # about it, and an unstubbed guard would dial a real socket. The #1378 cases
+    # at the bottom of this file re-patch it with their own doubles.
+    monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", lambda _database_url: _stats_guard_result())
 
     reports = dict(apply_reports or {})
 
@@ -452,3 +468,260 @@ def test_parse_and_coverage_failures_preserve_forcing_evidence_and_isolation(
     assert details[RUN_B]["outcome"] == "ingested"
     assert details[RUN_B]["stage"] == "coverage"
     assert details[RUN_B]["coverage_refresh"] == "refresh_failed_rc7"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1378: phase 3.5 frontier-chunk statistics guard. The DB double records
+# every statement, so the ANALYZE, its statement_timeout and the last_analyze
+# read-back are asserted as behaviour rather than as a summary field alone.
+# ---------------------------------------------------------------------------
+
+CHUNK_SCHEMA = "_timescaledb_internal"
+_BEFORE = datetime(2026, 8, 20, 3, 0, tzinfo=UTC)
+_AFTER = datetime(2026, 8, 20, 4, 0, tzinfo=UTC)
+
+
+class _FakeCursor:
+    def __init__(
+        self,
+        statements: list[tuple[str, Any]],
+        candidates: list[tuple[str, str, int, datetime | None]],
+        last_analyze: dict[str, datetime | None],
+        analyze_error: Exception | None,
+    ) -> None:
+        self._statements = statements
+        self._candidates = candidates
+        self._last_analyze = last_analyze
+        self._analyze_error = analyze_error
+        self._result: list[tuple[Any, ...]] = []
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._statements.append((sql, params))
+        if "timescaledb_information.chunks" in sql:
+            assert params == (autopipe.STATS_GUARD_MIN_MODS,)
+            self._result = list(self._candidates)
+        elif sql.startswith("ANALYZE"):
+            if self._analyze_error is not None:
+                raise self._analyze_error
+        elif "pg_stat_user_tables" in sql:
+            self._result = [(self._last_analyze[f"{params[0]}.{params[1]}"],)]
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._result
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._result[0] if self._result else None
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+        self.autocommit = False
+        self.closed = False
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _install_fake_db(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    candidates: list[tuple[str, str, int, datetime | None]],
+    last_analyze: dict[str, datetime | None] | None = None,
+    analyze_error: Exception | None = None,
+) -> tuple[list[tuple[str, Any]], list[str], list[_FakeConnection]]:
+    statements: list[tuple[str, Any]] = []
+    dsns: list[str] = []
+    connections: list[_FakeConnection] = []
+    reads = dict(last_analyze or {f"{row[0]}.{row[1]}": _AFTER for row in candidates})
+
+    def connect(database_url: str) -> _FakeConnection:
+        dsns.append(database_url)
+        connection = _FakeConnection(_FakeCursor(statements, candidates, reads, analyze_error))
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(autopipe.psycopg2, "connect", connect)
+    return statements, dsns, connections
+
+
+def test_stats_guard_analyzes_a_touched_frontier_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    statements, dsns, connections = _install_fake_db(
+        monkeypatch,
+        candidates=[(CHUNK_SCHEMA, "_hyper_1_58_chunk", 6_800_000, _BEFORE)],
+    )
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    assert dsns == [NODE27_DATABASE_URL]
+    # ANALYZE reports its statistics at commit; a read-back inside the same
+    # transaction would report the pre-ANALYZE value.
+    assert connections[0].autocommit is True
+    assert connections[0].closed is True
+    assert [sql for sql, _params in statements][1:3] == [
+        f"SET statement_timeout = {autopipe.STATS_GUARD_TIMEOUT_MS}",
+        f'ANALYZE "{CHUNK_SCHEMA}"."_hyper_1_58_chunk"',
+    ]
+    assert guard["status"] == "completed"
+    assert guard["deferred"] == []
+    (entry,) = guard["analyzed"]
+    assert entry["chunk"] == f"{CHUNK_SCHEMA}._hyper_1_58_chunk"
+    assert entry["n_mod_since_analyze"] == 6_800_000
+    assert entry["status"] == "ok"
+    assert entry["last_analyze"] == _AFTER.isoformat()
+    assert isinstance(entry["seconds"], float)
+
+
+def test_stats_guard_below_the_floor_does_no_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    statements, _dsns, _connections = _install_fake_db(monkeypatch, candidates=[])
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    assert [sql for sql, _params in statements if sql.startswith("ANALYZE")] == []
+    assert guard == {
+        "status": "completed",
+        "min_mods": autopipe.STATS_GUARD_MIN_MODS,
+        "max_chunks": autopipe.STATS_GUARD_MAX_CHUNKS,
+        "analyzed": [],
+        "deferred": [],
+    }
+
+
+def test_stats_guard_without_ingest_never_touches_the_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A tick that only re-published earlier runs wrote no rows and moved no frontier.
+
+    Deliberately NOT the publish predicate, which also fires on
+    ``already_ingested``: the guard's trigger is rows this tick actually wrote.
+    """
+    object_store_root, _calls, published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
+    analyze_calls: list[str] = []
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_frontier_chunks",
+        lambda database_url: analyze_calls.append(database_url) or _stats_guard_result(),
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["already_ingested"] == 1
+    assert summary["runs"]["ingested"] == 0
+    assert published == [NODE27_DATABASE_URL]
+    assert analyze_calls == []
+    assert summary["stats_guard"]["status"] == "not_triggered"
+    assert summary["stats_guard"]["reason"] == "no_run_ingested"
+
+
+def test_stats_guard_defers_everything_past_the_per_tick_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidates = [
+        (CHUNK_SCHEMA, f"_hyper_1_{index}_chunk", 900_000 - index, _BEFORE)
+        for index in range(5)
+    ]
+    statements, _dsns, _connections = _install_fake_db(monkeypatch, candidates=candidates)
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    # The ordering that makes "first 3" mean "the 3 driftiest" lives in SQL.
+    assert "ORDER BY s.n_mod_since_analyze DESC" in statements[0][0]
+    assert [sql for sql, _params in statements if sql.startswith("ANALYZE")] == [
+        f'ANALYZE "{CHUNK_SCHEMA}"."_hyper_1_{index}_chunk"' for index in range(autopipe.STATS_GUARD_MAX_CHUNKS)
+    ]
+    assert [entry["chunk"] for entry in guard["analyzed"]] == [
+        f"{CHUNK_SCHEMA}._hyper_1_{index}_chunk" for index in range(autopipe.STATS_GUARD_MAX_CHUNKS)
+    ]
+    assert guard["deferred"] == [
+        f"{CHUNK_SCHEMA}._hyper_1_3_chunk",
+        f"{CHUNK_SCHEMA}._hyper_1_4_chunk",
+    ]
+
+
+def test_stats_guard_reports_an_unrefreshed_last_analyze_as_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PG15 has no MAINTAIN bit: a non-owner ANALYZE warns and returns success."""
+
+    _install_fake_db(
+        monkeypatch,
+        candidates=[
+            (CHUNK_SCHEMA, "_hyper_1_58_chunk", 6_800_000, _BEFORE),
+            (CHUNK_SCHEMA, "_hyper_1_62_chunk", 6_700_000, None),
+        ],
+        last_analyze={
+            f"{CHUNK_SCHEMA}._hyper_1_58_chunk": _BEFORE,
+            f"{CHUNK_SCHEMA}._hyper_1_62_chunk": None,
+        },
+    )
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    assert guard["status"] == "completed"
+    assert [entry["status"] for entry in guard["analyzed"]] == ["warning", "warning"]
+
+
+def test_stats_guard_analyze_failure_is_recorded_without_failing_the_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fake_db(
+        monkeypatch,
+        candidates=[(CHUNK_SCHEMA, "_hyper_1_58_chunk", 6_800_000, _BEFORE)],
+        analyze_error=RuntimeError("canceling statement due to statement timeout"),
+    )
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    assert guard["status"] == "failed"
+    assert "statement timeout" in guard["error"]
+    assert guard["analyzed"] == []
+
+    # ... and the same failure reaching main() leaves the tick's own verdict alone.
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+
+    def explode(_database_url: str) -> dict[str, Any]:
+        raise RuntimeError("guard exploded")
+
+    monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", explode)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["runs"]["ingested"] == 1
+    assert summary["stats_guard"]["status"] == "failed"
+    assert "guard exploded" in summary["stats_guard"]["error"]
+
+
+def test_stats_guard_switch_off_skips_the_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    analyze_calls: list[str] = []
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_frontier_chunks",
+        lambda database_url: analyze_calls.append(database_url) or _stats_guard_result(),
+    )
+    monkeypatch.setenv("NODE27_AUTOPIPE_STATS_GUARD", "off")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["ingested"] == 1
+    assert analyze_calls == []
+    assert summary["stats_guard"]["status"] == "skipped"
+    assert summary["stats_guard"]["reason"] == "NODE27_AUTOPIPE_STATS_GUARD=off"
