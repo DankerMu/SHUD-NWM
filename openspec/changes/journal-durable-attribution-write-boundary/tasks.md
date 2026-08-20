@@ -34,6 +34,8 @@
       （断言 journal 序列号不前进）。docstring 标注该几何为**单元构造、生产不可达**。
 - [ ] 1.9 **J10（P2-1）**：手动重试 round-trip（`_record_manual_retry_submission_success`）后
       durable `log_uri` 为 `None` 而非字面量——把 D8 的翻转钉成有意行为。改动前红。
+      **docstring 须标注"单元构造"**（同 J9）：`_create_pending_manual_retry_job:7410` 把
+      `log_uri` 置 `None`，完整 `attempt_manual_retry` 流程够不到该点（D8 可达性更正）。
 - [ ] 1.10 **J11（现状锁，两条既有用例）**：`tests/test_file_orchestration_migration.py:263`
       的子串存活、`tests/test_file_orchestration_journal.py:9068` 的 master frozen 大声拒绝，
       改动后必须仍绿。**若已被既有用例覆盖则直接引用，不重复造。**
@@ -43,7 +45,14 @@
 - [ ] 2.1 在 `_journal_record_for_write` 内加 `_strip_redaction_placeholders`，
       **置于现有 `_redact_durable_error_message_fields` 之前**——与
       `_append_validated_record_unlocked` 里 `:6280`→`:6281` 的现有顺序一致（must-preserve 6）。
-- [ ] 2.2 `:6280` 的原调用点**保留不删**（D2）。若实现中发现保留会产生任何语义差，
+- [ ] 2.1b **event lane carve-out（D2b，实现期裁定）**：咽喉 strip 跳过 `pipeline_event`。
+      就地注释必须写**原则**（"strip 清除的是从调用方来的占位符，绝不跑在 journal 自己的公共
+      渲染下游"），**不得**只写"跳过 event"——后者会诱使下一个人加第二个渲染器时再次踩坏。
+- [ ] 2.1c **J12（D2b 的 oracle）**：`tests/test_file_orchestration_migration.py:1637`
+      （`test_historical_pipeline_event_runtime_roots_are_redacted_but_retry_recoverable`）
+      改动后必须**仍绿**——它就是 D2b 的现状锁。变异表新增一行：删掉 carve-out → J12 红。
+- [ ] 2.2 `:6280` 的原调用点**保留不删**（D2）。它是 event lane **唯一**的反洗白层（D2b），
+      删它等于让 event lane 裸奔。若实现中发现保留会产生任何语义差，
       **停下来报告**，不得自行改裁定。
 - [ ] 2.3 `_write_pipeline_job_unlocked` 返回值未 strip 的已知边界：就地加一行注释指明该值
       非 durable 态、二次回写会在写边界被兜住（D2 尾）。**不改行为。**

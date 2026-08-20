@@ -55,7 +55,7 @@ F-a 先行的额外机械理由：本单会挪动 8700+ 行文件的行号，F-b
 
 | 写路径 | payload 来源 |
 |---|---|
-| `_append_validated_record_unlocked:6286` | 通用（已另有 `:6280` 的 strip） |
+| `_append_validated_record_unlocked:6286` | **event lane 例外，见 D2b**——该调用点在 `:6284` 的公共渲染**之后**，不适用咽喉 strip |
 | `project_forecast_cohort_tasks` payloads 循环 `:3429` | **旁路 A** |
 | `_write_pipeline_job_unlocked:6154` | **旁路 B**（含 defer 腿；本身有 16 个调用方） |
 | `:2601` submission_failed 拒收 | event details，评审逐条读过，无 URI 类字段 |
@@ -85,6 +85,9 @@ inventory（`:5711-5728`）只写 `schema_version / job_id / source_id / cycle_t
 散成 N 份拷贝，下一条新写路径照样会漏——正是本 issue 的成因本身。
 
 ## D2（#1592）：`:6280` 的原调用点**保留**，不删
+
+> **D2 的幂等论断只对 `pipeline_job` 成立**——实现期实测推翻了它对 `pipeline_event` 的适用性，
+> 更正见 **D2b**。以下段落的"双层无语义差"仅在 `pipeline_job` lane 内有效。
 
 同族 sanitizer `_redact_durable_error_message_fields` 今天就是**双层布放**：
 `_append_validated_record_unlocked:6281` 与 `_journal_record_for_write:8023` 各一次
@@ -386,3 +389,71 @@ AST 守卫（断言无第二处构造含 `{schema_version, sequence, record_type
 | **P3-E** J9 的"生产不可达"承诺 spec 未兑现 | 采纳：spec 场景补 unit-constructed 限定 |
 | **P3-F** spec 场景 1 无限定的 "store `None`" 与新场景拉扯 | 采纳：场景 1 补"行上原本无真值"限定 + 指向 displacement 规则，消除又一处 J4 式负判别力 |
 | 复核"未能核实"：两条 Note 的 issue 号 | 由 issue-scribe 另路交付，号回来后补进本表 |
+
+## D2b（实现期更正）：strip 绝不跑在 journal 自己的公共渲染下游
+
+**D2 初版论断「strip 是幂等的，双层不产生任何语义差」对 `pipeline_event` 为假。**
+`_append_validated_record_unlocked` 的实际顺序是：
+
+```
+:6280  payload = _strip_redaction_placeholders(payload)     # 原有：作用于**原始调用方 payload**
+:6281  payload = _redact_durable_error_message_fields(...)
+:6284  payload = _public_pipeline_event_payload(payload)     # ← 在这里**制造**占位符
+:6286  record  = _journal_record_for_write(...)              # ← 本单新加的 strip
+```
+
+`_sanitize_public_field`（`:8907-8916`）会**主动把真值渲染成** `[object-uri]` / `[local-path]`
+——那是 event lane 有意的、要落盘的公共值，不是调用方洗白。咽喉 strip 跑在它下游，
+会把 `"s3://nhms-historical"` 渲染出的 `"[object-uri]"` 抹成 `null`，
+实测打红 `tests/test_file_orchestration_migration.py:1637`。
+两层看到的**不是同一个 payload**，中间隔着一个会新造占位符的 sanitizer——幂等前提不成立。
+
+**裁定：咽喉 strip 跳过 `pipeline_event`。** 但落地要写成**原则**而非例外：
+
+> 反洗白 strip 清除的是**从调用方来的**占位符。它绝不能跑在 journal 自己的公共渲染下游，
+> 因为那个渲染是**有意产出**占位符作为 durable 公共值的。
+
+由此得到的分层是自洽的，不是丑陋的补丁：
+**event lane 在调用方边界 strip（`:6280`，作用于未 sanitize 的原始 payload——对 event 而言那才是
+真正的洗白面）；job lane 在 record 构造点 strip。**
+
+**被拒方案（B）**：接受该翻转、照 D8 模式认领为"修复生效"并改掉 `:1637` 的断言。
+拒因：(a) 与 must-preserve 5 和 proposal Non-Goals 字面冲突；(b) 这里根本不是洗白——
+无调用方 round-trip，是 journal 规范的公共渲染；(c) `[object-uri]`→`null` 在此是**丢信息**
+（"这里曾有个对象 URI" 变成 "这里什么都没有"），与 D8 认领的调用方 round-trip 翻转性质不同。
+
+**A 的代价，声明不掩饰**：carve-out 意味着 `pipeline_event` 的**结构性保证弱于** `pipeline_job`
+——将来若有写路径不经 `_append_validated_record_unlocked` 直接发 event，就没有 strip。
+今天安全（投影腿 event 分支的 details 取自 `ACCEPTED_PROJECTION_FIELDS`
+= `{array_task_id, array_task_outcome, candidate_id, model_id, native_shud_resubmitted,
+restart_stage, run_id}`，无 URI 类字段；`:2601/:2706/:2931` 三处审计同口径）。
+记为**已声明的已知边界**。
+
+### D8 可达性更正（实现期实测）
+
+`_create_pending_manual_retry_job:7410` 显式把 `log_uri` 置 `None`，因此完整
+`attempt_manual_retry` 流程**够不到**那个洗白点。D8 原文「真实 URI 今天就已被字面量顶掉」
+是**单元可构造**而非流程可达。J10 按 tasks 1.9 的字面（点名的是
+`_record_manual_retry_submission_success` 这个函数）直调构造，**docstring 须与 J9 同样标注
+「单元构造」**——不放第二条过诺的可达性进来。
+
+### 实现期第 3 轮处置（implementer STOP-and-report）
+
+| finding | 处置 |
+|---|---|
+| D2 幂等论断对 `pipeline_event` 为假，打红 `test_file_orchestration_migration.py:1637` | 采纳方案 A，见本节 D2b；D1 表相应条目改写；must-preserve 5 与 Non-Goals 由 A **保住**而非违反 |
+| D8 可达性过诺 | 采纳更正，J10 标注单元构造 |
+| 另立 issue 号回填 | `cancelled` 无 status 粘性 → **#1629**；`_mark_master_permanently_failed` 的 `error_message` 回灌 → **#1630** |
+
+**#1630 的口径更正（issue 复验实测，比初版更硬）**：被洗白的**不是**整值 `[redacted]`
+（`error_message` 非 sensitive key，且耐久路径与公共路径共用 `redact_payload`，重放是幂等空操作），
+而是**嵌在文本里的** `[local-path]` / `[object-uri]` 子串：
+
+```
+durable BEFORE : 'sbatch stderr at /ghdc/.../slurm-99.err and s3://nhms/logs/99.out'
+durable AFTER  : 'sbatch stderr at [local-path] and [object-uri]'
+```
+
+本单**不碰也不该碰**这条路径：strip 是整串相等匹配，must-preserve 10 明确要求嵌入子串存活，
+且该写路径（`:2706/:2722/:2727`）既不经 `:6280` 也不经 `_write_pipeline_job_unlocked`。
+只能在调用方侧（`:7234`）修 —— 归 #1630。
