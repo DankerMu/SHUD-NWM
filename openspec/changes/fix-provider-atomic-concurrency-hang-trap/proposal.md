@@ -32,15 +32,19 @@ no backstop: locally the whole pytest session hangs until a human sends
 #1513 fixed only the trigger (it pinned `SHARED_PROVIDER_MODE` on the seed
 so `provider_destination_access_invalid` stops firing). The trap itself was
 left standing as a declared report-don't-fix (archived
-`2026-08-19-pin-provider-destination-modes/tasks.md` §6 item 1). This change
+`openspec/changes/archive/2026-08-20-fix-permissive-umask-dir-mode/tasks.md`
+§6 item 1 — which, notably, proposes exactly the insufficient fix D2 refutes). This change
 closes the trap.
 
 ## What Changes
 
-- Conform the test to the **house concurrency pattern already used twice in
-  this same file** (`:796-818`, `:1929-1941`): collect thread exceptions into
-  an `errors` list, signal completion from a `finally`, join with a bounded
-  timeout, then assert `not errors` and `not thread.is_alive()`.
+- Adopt the **house concurrency pattern already used twice in this same file**
+  (`:796-818`, `:1929-1943`): collect thread exceptions into an `errors` list,
+  join with a bounded timeout, then assert `not errors` and
+  `not thread.is_alive()`.
+- Add the two elements the house pattern does **not** have, because neither
+  house instance uses a completion sentinel: set the sentinel from a `finally`,
+  and bound the spin-loop with its own deadline. These are new, not conformance.
 - Bound the main-thread busy-loop with a deadline, per the
   `tests/test_file_orchestration_journal.py:7894` precedent.
 - Add a failure-injection test proving the harness now surfaces a writer

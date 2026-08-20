@@ -11,8 +11,13 @@
 - [ ] 1.2 Bound the main-thread busy-loop with a deadline
   (`time.monotonic()` based, per the `tests/test_file_orchestration_journal.py:7894`
   precedent) so the loop cannot spin unbounded even if `finished` is never set.
+  **Pin the value at >= 30s.** The semantics are a *hang backstop*, not a
+  performance assertion: 40 real `atomic_replace_provider_bytes` calls each
+  fsync, and a loaded CI runner must never trip this. A tight value would make
+  the new `assert not thread.is_alive()` (1.4) a fresh flake source — this fix
+  must not introduce one.
 - [ ] 1.3 Replace the bare `thread.join()` with a bounded
-  `thread.join(timeout=...)`.
+  `thread.join(timeout=...)`, using the same >= 30s hang-backstop value as 1.2.
 - [ ] 1.4 Add `assert not errors, errors` and `assert not thread.is_alive()`,
   **before** the three existing substantive assertions (design D3).
 - [ ] 1.5 Update the `:827-830` comment: after this change the test fails
@@ -33,8 +38,13 @@
   patched to raise, the same harness shape surfaces a **clean, bounded
   failure** — the assertion fires, the exception identity is visible in the
   failure, and the call returns within the deadline rather than hanging.
-  Inline duplication of the ~10-line harness or a small local helper are both
-  acceptable; the scenario is what is required, not the shape.
+  **Required shape: one shared harness.** Factor the harness into a single
+  module-level helper parameterized by the worker body, and have the real test
+  (2.1) and the injection tests (2.2/2.3c) all call it. Inline duplication is
+  rejected: a copied harness drifts, and then deleting the `finally` or the
+  `errors` assertion from the real test leaves the injection test green — the
+  guard would stop guarding the thing it exists to guard. The shared helper must
+  not disturb MP2 (the real test still makes 40 real calls).
   **Seam constraint (design D6):** `atomic_replace_provider_bytes` is imported
   directly at `:23`, so patching it on `provider_atomic_module` is INERT and
   would make this test pass vacuously. Patch an inner function the real call
@@ -43,6 +53,16 @@
 - [ ] 2.3 The failure-injection test must prove the *ordering* of D3: when the
   writer raises on the first iteration, the surfaced failure names the writer
   exception, not an empty-`observed` symptom.
+- [ ] 2.3c **Blocked-worker deadline test** (covers the spec's "A blocked worker
+  is caught by the loop deadline" scenario, which 2.2/2.3 do NOT reach). 2.2/2.3
+  inject an *exception*, which runs the `finally` and sets the sentinel — so the
+  deadline never fires and 1.2 would be untested. Add a case where the worker
+  **blocks instead of raising** (e.g. waits on a test-controlled `Event`), so
+  the `finally` is never reached and the sentinel is never set; assert the
+  spin-loop exits at its deadline and the failure is attributed to the timeout.
+  The test must release the blocking Event and join the worker before returning
+  so no thread outlives it. Use a short, explicitly-passed deadline for this
+  case rather than the 30s production value, so the test stays fast.
 - [ ] 2.3b **Anti-vacuity:** demonstrate the injection test FAILS when the
   harness fix is absent, not merely that it passes when present (design D6).
 - [ ] 2.4 Whole-file green: `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`.
@@ -92,8 +112,10 @@ All three are already filed; the implementer must not touch them.
   class, weaker trigger. Both reach an unbounded `threading.Barrier` *after* a
   constructor that can raise (`_StoreRepo(PipelineStore(Session(engine)))` and
   `FileOrchestrationJournalRepository(...)` respectively), with an unbounded
-  `join()` / `ThreadPoolExecutor` exit. These are the two known exceptions named
-  in the spec delta.
+  `join()` / `ThreadPoolExecutor` exit. Under the narrowed trigger (design D7)
+  these are *adjacent* to the requirement rather than governed by it — a Barrier
+  strand is not a spin-wait — so the spec routes them to #1645 explicitly
+  instead of grandfathering them.
 - **#1646** — the repo-wide guard decision: `filterwarnings =
   ["error::pytest.PytestUnhandledThreadExceptionWarning"]` (cheap, closes the
   silent-pass half) versus `pytest-timeout` (closes the hang half, but needs
@@ -123,8 +145,11 @@ non-conforming at a glance:
 - `tests/test_display_coverage_parallel.py:32` — `threading.Barrier(2, timeout=2)`.
 - `tests/test_scheduler_file_provider_refresh.py:788`, `:1926` — the house pattern.
 - `tests/test_file_orchestration_journal.py:7894` — deadline-bounded loop.
-- `tests/test_gateway_reconcile.py:5231` — daemon thread with `try/finally`; the
-  main thread never waits on it.
+- `tests/test_gateway_reconcile.py:5231` — daemon thread with `try/finally`. It
+  *is* awaited (`FakeProcess.wait()` at `:5253` calls `self.thread.join(timeout)`
+  at `:5254` and sets `reaped` from `is_alive()` at `:5255`), so "not awaited" would be the wrong
+  reason; it is out of the class because that join is bounded by the timeout the
+  production caller passes.
 - `tests/test_display_catalog_cache.py:213` — daemon thread plus a documented
   unconditional `finally` release.
 - `tests/test_scheduler_generation.py:1196` — bare `join()`, no synchronization

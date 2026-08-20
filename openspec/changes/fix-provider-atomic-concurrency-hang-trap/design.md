@@ -57,9 +57,15 @@ assert not errors
 assert all(not thread.is_alive() for thread in threads)
 ```
 
-(`:796-818`, and again at `:1929-1941`.) The target test at `:823-848` is the
-odd one out in its own file. The fix is to conform it, which is why this change
-adds no new vocabulary, no helper module, and no fixture.
+(`:796-818`, and again at `:1929-1943`.) The target test at `:823-848` is the
+odd one out in its own file.
+
+Scope of the borrowing, stated precisely: the `errors` list, the catch-all, the
+bounded join, and the two closing assertions are **conformance** — they already
+exist here. The `finally`-set sentinel and the spin-loop deadline are **new**;
+neither house instance has a completion sentinel at all (both gate on a
+`Barrier` and simply join). Calling the whole fix "conforming to the house
+pattern" would overstate it.
 
 ## D2 — The issue's proposed fix is insufficient; recorded, not silently absorbed
 
@@ -187,26 +193,41 @@ Incidental: `time` is **not** currently imported in this file (imports at
 `:1-23`). The D-1 deadline needs it added in isort order — `ruff check .` is the
 gate.
 
-## D7 — Scope of the spec requirement, and why it is narrowed
+## D7 — Scope of the spec requirement, and why it is narrowed twice
 
-An earlier draft of the spec delta governed any test that "hands work to a
-thread and waits on a completion sentinel". Sweeping the tree showed that is
-**overreach**: the population is 12 `threading.Barrier(` sites and roughly 20
-`threading.Event()` sites, and a broad requirement would be false against the
-tree the moment it merged — including against the two sites this change
-deliberately does not fix.
+The first draft governed any test that "hands work to a thread and waits on a
+completion sentinel". Sweeping the tree showed that is **overreach**: the
+population is 12 `threading.Barrier(` sites and roughly 20 `threading.Event()`
+sites, and a requirement that broad would be false against the tree the moment
+it merged.
 
-The requirement is therefore scoped to **blocking dependence**: the main thread
-cannot progress until a worker reaches a synchronization point (`Event` it must
-set, `Barrier` it must reach). This correctly **excludes** a bare
-`thread.join()`, where a raising worker simply dies and the join returns, so no
-hang is possible — which is why `tests/test_scheduler_generation.py:1196` is out
-of scope rather than a violation.
+A second draft scoped it to "blocking dependence" — the main thread cannot
+progress until a worker reaches a synchronization point. Still too broad. It
+swept in bounded waiters such as `tests/test_gateway_reconcile.py:6297` and
+`:7713`, where the main thread does `assert entered.wait(timeout=5)`. Those have
+no catch-all and so would violate the "captured exceptions" bullet, yet they
+cannot hang: the bounded wait returns, the assert fails, the test ends. Marking
+them violations would be false.
 
-Under that scoping the non-conforming set is exactly two sites
-(`tests/test_gateway_reconcile.py:3574` and `:10028`), both named in the spec as
-tracked known exceptions against #1645. A spec with two named exceptions is
-honest; a spec silently false in ~2 places is not.
+The requirement is therefore scoped to **spin-wait on a self-set sentinel**: the
+main thread's only exit condition is a sentinel the worker must set, and it
+burns CPU until then. Excluded, explicitly:
+
+- bounded `event.wait(timeout=N)` — terminates on its own;
+- bare `thread.join()` — a raising worker dies and the join returns, so
+  `tests/test_scheduler_generation.py:1196` is out of scope rather than a
+  violation.
+
+Under this trigger the only site in the tree today is the one this change fixes,
+so **after the fix the tree conforms with zero exceptions**. That is the point:
+a spec with no exceptions is worth more than a broader spec carrying a list of
+things it silently tolerates.
+
+The two `tests/test_gateway_reconcile.py` Barrier strands are real hangs of the
+same family but are not spin-waits, so rather than grandfather them the spec
+names them as an adjacent hazard routed to #1645, expected to come under a
+widened form of the requirement when fixed. #1646 carries the shape-independent
+backstops.
 
 ## Expected collateral
 
