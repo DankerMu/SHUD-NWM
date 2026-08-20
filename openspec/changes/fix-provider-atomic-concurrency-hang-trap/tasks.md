@@ -12,7 +12,9 @@
   (`time.monotonic()` based, per the `tests/test_file_orchestration_journal.py:7894`
   precedent) so the loop cannot spin unbounded even if `finished` is never set.
   **Pin the value at >= 30s.** The semantics are a *hang backstop*, not a
-  performance assertion: 40 real `atomic_replace_provider_bytes` calls each
+  performance assertion. Note `time` is NOT imported in this file (`:3-13`); add
+  `import time` in isort order — `ruff` has `I` enabled, so a misplacement fails
+  E7. Rationale for the wide bound: 40 real `atomic_replace_provider_bytes` calls each
   fsync, and a loaded CI runner must never trip this. A tight value would make
   the new `assert not thread.is_alive()` (1.4) a fresh flake source — this fix
   must not introduce one.
@@ -45,11 +47,12 @@
   `errors` assertion from the real test leaves the injection test green — the
   guard would stop guarding the thing it exists to guard. The shared helper must
   not disturb MP2 (the real test still makes 40 real calls).
-  **Seam constraint (design D6):** `atomic_replace_provider_bytes` is imported
-  directly at `:23`, so patching it on `provider_atomic_module` is INERT and
-  would make this test pass vacuously. Patch an inner function the real call
-  resolves at call time (precedent `:713-721`, `:689-699`) or drive a raising
-  callable directly.
+  **Seam constraint (design D6):** do NOT patch. `atomic_replace_provider_bytes`
+  is imported directly at `:23`, so patching it on `provider_atomic_module` is
+  INERT (vacuous pass); and patching an inner function instead converts the
+  injected exception into `ProviderAtomicError` (see `:725`), defeating 2.3.
+  Pass the worker body to the shared helper as a callable. If any case is
+  nevertheless patch-based, it MUST assert the injected callable actually ran.
 - [ ] 2.3 The failure-injection test must prove the *ordering* of D3: when the
   writer raises on the first iteration, the surfaced failure names the writer
   exception, not an empty-`observed` symptom.

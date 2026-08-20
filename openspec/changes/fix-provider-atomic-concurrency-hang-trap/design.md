@@ -172,15 +172,28 @@ its own already-bound reference — the patch is **inert**, no exception is
 raised, the harness is never exercised, and tasks 2.2/2.3 pass **vacuously**.
 A green test that proves nothing is a worse outcome than the bug.
 
-Two valid seams:
+**Primary seam — do not patch at all.** Factor the harness into a module-level
+helper whose worker body is a **callable parameter**: the real test passes the
+body doing 40 real `atomic_replace_provider_bytes` calls; the injection tests
+pass a body that raises, or one that blocks. This is the chosen seam because it
+solves three problems at once — it removes the vacuity trap by construction (no
+patch, so no inert patch), it preserves the injected exception's identity, and
+it satisfies the shared-harness requirement that stops a duplicated harness from
+drifting green.
 
-- **(a) Patch an inner dependency** that the real `atomic_replace_provider_bytes`
-  resolves at call time. Precedent in this same file: `:713-721` patches
-  `provider_atomic_module.atomic_write_bytes_no_follow`, and `:689-699` patches
-  `provider_atomic_module.read_bytes_limited_no_follow`. This exercises the real
-  code path and is preferred.
-- **(b) Drive the harness with an explicitly raising callable**, no monkeypatch
-  at all — acceptable when the test's subject is the harness shape itself.
+**Why the obvious alternative is wrong.** Patching an inner dependency the real
+call resolves at call time (`:713`/`:721` patch
+`provider_atomic_module.atomic_write_bytes_no_follow`; `:689`/`:699` patch
+`read_bytes_limited_no_follow`) does make the call fail — but
+`atomic_replace_provider_bytes` **catches inner failures and converts them into
+`ProviderAtomicError`**. `:725` in this same file asserts exactly that:
+`error_info.value.reason == "provider_restored_previous"`. So the injected
+exception never reaches the harness by its own identity, which contradicts the
+requirement that the surfaced failure name the worker's exception.
+
+**If any case does end up patch-based**, that case MUST additionally assert the
+injected callable was actually invoked (a call counter). Otherwise an inert
+patch passes silently in a second way — the same vacuity in different clothing.
 
 **Prohibited:** patching the module attribute for the directly-imported name and
 assuming it takes effect.

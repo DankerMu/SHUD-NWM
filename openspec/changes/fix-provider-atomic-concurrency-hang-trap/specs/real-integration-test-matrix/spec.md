@@ -13,27 +13,39 @@ spin-wait and is not governed — it already terminates on its own. A
 bare `thread.join()` is not governed either: a worker that raises
 simply dies and the join returns, so no hang is possible.
 
-For a governed harness, all of the following hold:
+For a governed harness the obligations are stated as **outcomes**, not
+as a mandated code shape:
 
-- the sentinel is set from a `finally`, so an exception in the worker
-  cannot skip it;
-- worker exceptions are collected (catch-all `except BaseException`)
-  rather than left to die inside the thread;
-- the spin-loop carries an independent deadline, so it terminates even
-  if the sentinel is never set at all — which is the only backstop when
-  a worker *blocks* rather than raises, since a blocked worker never
-  reaches its `finally`;
-- the join is bounded (`join(timeout=)`);
-- the assertions include an empty-error-list assertion and a
-  no-thread-still-alive assertion, and **the error assertion comes
-  first**, before any assertion on data the worker produced — a worker
-  that fails on its first iteration leaves that data empty, and a
-  data-first ordering reports the symptom instead of the cause.
+- **(a) Release** — every exit path from the worker releases the main
+  thread's wait, so no worker outcome can strand it;
+- **(b) Bound** — the main thread's wait carries its own upper bound,
+  independent of the worker doing anything, so it terminates even if the
+  release in (a) never happens;
+- **(c) Attribute** — a worker exception is surfaced and attributed, and
+  that surfacing comes **before** any assertion on data the worker
+  produced. A worker that fails on its first iteration leaves that data
+  empty, and a data-first ordering reports the symptom instead of the
+  cause.
 
-Both the `finally` and the captured-exception assertion are required;
-neither alone suffices. The `finally` alone converts the hang into a
-silent pass or a misattributed failure, because `threading.Thread`
-swallows exceptions, pytest downgrades them to
+Mechanism is deliberately not prescribed, because prescribing it
+misjudges correct code. This repo's own house pattern is the proof: at
+`tests/test_scheduler_file_provider_refresh.py:798` the worker waits on
+an **unbounded** `threading.Barrier(20)`, which any mechanism-level rule
+would flag — yet the test is correct, because `:815`'s `join(timeout=5)`
+and `:818`'s `assert all(not thread.is_alive(...))` supply (b) and (c).
+Likewise a `ThreadPoolExecutor` whose `Future.result(timeout=N)`
+re-raises satisfies (a), (b) and (c) with no error list anywhere.
+
+One conforming implementation, and the one this change adopts: set the
+sentinel from a `finally` (a); give the spin-loop its own deadline and
+the join a `timeout=` (b); collect worker exceptions via a catch-all
+`except BaseException` into a list, and assert that list is empty — and
+that no thread is still alive — before the substantive assertions (c).
+
+Both the `finally` and the captured-exception assertion are required in
+that implementation; neither alone suffices. The `finally` alone
+converts the hang into a silent pass or a misattributed failure, because
+`threading.Thread` swallows exceptions, pytest downgrades them to
 `PytestUnhandledThreadExceptionWarning`, and this repo declares no
 `filterwarnings`, so that warning fails nothing.
 
@@ -48,7 +60,13 @@ Adjacent hazards, routed rather than grandfathered: the
 unbounded `threading.Barrier`, stranding its peers — is the same failure
 class but is not a spin-wait and so falls outside this requirement's
 trigger; it is tracked in issue #1645 and is expected to come under a
-widened form of this requirement when fixed. The repo-wide backstops
+widened form of this requirement when fixed. Recorded reason for not
+closing it here: those sites lie outside the blast radius of this
+test-only, single-file change, and fixing them requires touching a
+different suite with its own DB-backed setup. Residual risk, disclosed
+rather than implied absent: until #1645 lands, a constructor failure in
+either of those two tests still strands its peers and hangs the run —
+this requirement does not currently protect them. The repo-wide backstops
 that would close the class independently of harness shape
 (`filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]`,
 `pytest-timeout`) are tracked in issue #1646.
