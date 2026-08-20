@@ -194,31 +194,64 @@
       **绝不裸跑 `uv run --python 3.11`**（会重建项目 `.venv`）。
       矩阵覆盖 #1544 / #1545 / #1546 三组几何，before 与 after 均贴 PR body。
 - [x] C.4 `openspec validate path-expansion-throw-face-closure --strict --no-interactive`
-- [ ] C.5 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，
+- [x] C.5 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，
       **不碰 `/home/nwm/NWM` 主树**。判读口径「相对 master 基线**不新增红**」，
       master 已知红：`test_entropy_audit_script.py::…hard_gate…`、
       `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`、
-      以及 #1613 那条顺序依赖。**node-27 是 3.11.15，该 receipt 顺带就是 ≤3.12 的实机 oracle。**
-- [ ] C.6 node-22 全程不跑任何东西（本单纯逻辑，无 Slurm/SHUD 面）。
+      以及 #1613 那条顺序依赖。
+      **口径更正（实机实测推翻本条原文）**：原文写「node-27 是 3.11.15，该 receipt 顺带就是
+      ≤3.12 的实机 oracle」——**只对主树成立，对 receipt 不成立**。`/home/nwm/NWM` 主树的
+      `.venv` 确实是 3.11.15，但 C.5 按纪律跑在**独立 detached worktree** 里，其 `uv sync`
+      解析到的是节点上最新的 **3.14.5**（实测 `/home/nwm/NWM-1624/.venv/bin/python -V`
+      = `Python 3.14.5`；系统 `python3` 另是 3.10.12）。故 C.5 拆成两段：
+      - **C.5(a)** 全量 receipt 跑 3.14.5 —— 与已有的 3.14 真父基线**同臂可比**，
+        用途是「相对 master 基线不新增红」的回归判读。
+      - **C.5(b)** Evidence Floor 定向套件另跑一次 **3.11.15**（node-27 本地已装该 toolchain，
+        `UV_PROJECT_ENVIRONMENT=/home/nwm/NWM-1624/.venv311` 隔离，不动该树的 3.14 `.venv`，
+        更不碰主树）—— 这才是本单真正要的 ≤3.12 实机 oracle，因为五处里有三处
+        （#1544/#1545/#1546）的判别力只在 ≤3.12 臂上。
+
+      **实测结果（`/home/nwm/NWM-1624` @ master `f087f08d`，`umask 022`，
+      detached worktree，`/home/nwm/NWM` 主树全程未动，分支仍是
+      `feat/issue-1341-river-ts-read-path-surrogate-keys`）**：
+
+      | 段 | 解释器 | 结果 |
+      |---|---|---|
+      | C.5(a) 全量 `-m "not e2e and not grib"` | 3.14.5 | `2 failed, 12751 passed, 153 skipped, 18 deselected in 4588.01s` |
+      | C.5(b) Evidence Floor 四文件定向 | **3.11.15** | `1 failed, 2037 passed, 6 skipped in 479.33s` |
+
+      两段的红**全部**落在 master 已知红集内，**零新增红**：
+      - 3.14.5 段两条 = `test_entropy_audit_script.py::…hard_gate…` +
+        `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`，
+        与 3.14 真父基线（`29892932`：`2 failed, 12673 passed`）**逐条同一红集**。
+      - 3.11.15 段唯一那条 = 上面第二条（定向套件不含 entropy audit 文件）。
+
+      隔离核验：跑完后 `/home/nwm/NWM-1624/.venv/bin/python -V` 仍是 `Python 3.14.5`，
+      `.venv311` 未污染主 venv。
+
+      **顺带的跨臂观察（只记不追）**：同一四文件在 3.11.15/Linux 上收集到 2043 条
+      （2037 passed + 6 skipped），本地 3.14.2/Darwin 上是 2011 条（2005 + 6）。
+      差 32 条属平台/版本条件收集，非本单引入；未逐条核对，如实标注为未追查项。
+- [x] C.6 node-22 全程不跑任何东西（本单纯逻辑，无 Slurm/SHUD 面）。
 
 ## D. 记账与承接（必须进 PR body）
 
-- [ ] D.1 **口径更正 1（我的初稿被 fixture 审推翻）**：初稿声称「#1549 漏数第三处、
+- [x] D.1 **口径更正 1（我的初稿被 fixture 审推翻）**：初稿声称「#1549 漏数第三处、
       `_config_path_preserve_final_component` 在 db-backed 臂活跃可达」——**假的**。
       `scheduler_config.py:269` 更早 re-raise，该站点 tilde 非活，属兼容面。
       真正走到本模块裸 expanduser 的生产字段**只有两个**：`allowed_storage_roots`、`log_root`。
-- [ ] D.2 **口径更正 2**：#1546 的「仓内零调用方」成立，但要说准 ——
+- [x] D.2 **口径更正 2**：#1546 的「仓内零调用方」成立，但要说准 ——
       `scheduler_config.py` 的 7 处形似调用走的是 `_resolve_config_path_for_mode`，
       **不经过** `_scheduler._resolve_optional_config_path`。
-- [ ] D.3 **口径更正 3（#1547 前提 stale）**：`tests/test_safe_fs.py` 已存在，
+- [x] D.3 **口径更正 3（#1547 前提 stale）**：`tests/test_safe_fs.py` 已存在，
       新测试并入该文件；「CI selector 路由核查」那条验收项随之不适用（不是跳过）。
-- [ ] D.4 **`chain_runtime_utils.py` `_absolute_configured_path` 立单承接** ——
+- [x] D.4 **`chain_runtime_utils.py` `_absolute_configured_path` 立单承接** ——
       与 `_expand_path` 逐字同形，跨 lane、语义可能不同，**本单不修**。
       站点是 `services/orchestrator/chain_runtime_utils.py:487-489`
       （#1547 正文写 `:438-440`，master 已漂；fixture 审实测确认与 `_expand_path` **逐字同形**）。
       已开 **#1621** 承接。
       （#1547 验收标准明文要求，防重演 #1423「仅登记不修、无单承接」。）
-- [ ] D.5 **归档口径不改写**（design D3）：承接关系记在本 change 的 proposal 与关闭 issue 时的评论里，
+- [x] D.5 **归档口径不改写**（design D3）：承接关系记在本 change 的 proposal 与关闭 issue 时的评论里，
       **不重写 archive 文件**。
       **且这条「更正」本身要限定范围**（初稿写成了一刀切，fixture 审 P1-2 推翻）：
       归档的 `2026-08-18-expanduser-throw-face-residue/proposal.md:27-32` **已经按字段分开写对了** ——
@@ -226,52 +259,57 @@
       `allowed_storage_roots` 与 `log_root` 这两条链路**；其余九个字段的
       `_expanduser_for_mode` 归因**仍然正确**，不得在 PR body / issue 评论里写成一刀切
       —— 那会把一条假陈述写进永久记录。
-- [ ] D.6 **oracle 改写预声明**（design D2）：B.4(a) 改的是 PR #1541 精确等值 pin 的
+- [x] D.6 **oracle 改写预声明**（design D2）：B.4(a) 改的是 PR #1541 精确等值 pin 的
       `WORKSPACE_ROOT` 那一行，授权来源是 #1545 本身（`runtime-roots-resolve-residue` 的 Non-Goal 2
       明文承诺立单承接，归档 `proposal.md:34-35` 已回填 `#1545`）。PR body 必须列出
       旧期望串 → 新期望串，否则会撞合并硬门的「不得削弱 oracle」条款。
       **同时必须写明护栏**：同一条旧文案在 `tests/test_production_scheduler.py:30460` 与 `:30591`
       还有另外两处 pin，那两处是**非环**几何（普通文件 / mode 0600），经同一个 `except OSError` 代码臂，
       **逐字保持绿** —— 这就是 A.3(b) 要求「按 `errno.ELOOP` 分流而非整臂改写」的原因。
-- [ ] D.7 家族账目结清：PR body 附机械 grep 表 ——
+- [x] D.7 家族账目结清：PR body 附机械 grep 表 ——
       `scheduler_runtime_roots.py` 内**每一处** `resolve(` / `expanduser(` / `realpath(` 及其处置
       （已治 / 本单治 / 已双接不动 / **裸但 tilde 非活**），四处非 scope 站点（`:271 :332 :504 :578`）
       必须逐条带理由出现在表里；`packages/common/safe_fs.py` 同样列（该文件只有 `_expand_path` 一处）。
       声明 `#1332→#1423→#1520→#1544→#1546` 这条链上两个文件**再无**未收敛裸站点，或列出保留者与理由。
-- [ ] D.10 **round-1 裁定：S_ISLNK 臂是两分岔，不是三分岔**（implementer D-1，orchestrator 实测采纳）。
+- [x] D.10 **round-1 裁定：S_ISLNK 臂是两分岔，不是三分岔**（implementer D-1，orchestrator 实测采纳）。
       fixture 初稿的「其余 real-path 失败保持既有拒绝」是**按 lstat 臂**写的，被错误地一并套到了
       S_ISLNK 臂上；后者不存在非环的既有拒绝。实测证据（master，3.14.2）：
       `EACCES(13)` 与 `ENOTDIR(20)` 两种几何**今天都 ACCEPT**，字面三分岔会把它们翻成拒绝。
       裁定：S_ISLNK 臂 `ELOOP → 拒绝 / 其余 OSError → 非 strict 兜底`；lstat 臂维持 errno 分流 +
       非环文案逐字不变。PR body 必须记这条裁定与实测。
-- [ ] D.11 **B.1(d) 的可达性前提是假的**（implementer D-3，已实测）：`EvidenceWriter.prepare()`
+- [x] D.11 **B.1(d) 的可达性前提是假的**（implementer D-3，已实测）：`EvidenceWriter.prepare()`
       在自己的 containment 闸（`resolved_lane.relative_to(self.evidence_root)`）上就拒了，
       **走不到任何 safe_fs 原语**；而经 `from_env` / `validate_met` 的那条路，裸 `RuntimeError`
       来自 `services/production_closure/met_validation.py:1926` **自己的** `expanduser()`，在本单 allowlist 之外。
       spec scenario 按字面仍成立（该 lane 确实产结构化码），但**不是**靠 A.1 的修复成立的。
       处置：保留该用例并在测试里写明 HONEST LIMIT，spec 已补限定句，`:1926` 已开 **#1622** 承接。
-- [ ] D.12 **另两条只报不修**（implementer 观察 2/3）：
+- [x] D.12 **另两条只报不修**（implementer 观察 2/3）：
       (a) 守卫 `resolved.exists()` 闸上的 EACCES 跨版本分歧（3.11 抛 `PermissionError`、3.12+ 吞掉）——
       #1544 家族在另一行的残留，五个 issue 都没覆盖，本单未触碰：已开 **#1623** 承接（旁系同型 #1554）。
       (b) `scheduler_runtime_roots.py:242` / `:255` 两处裸 expanduser，tilde 非活
       （输入是构造期已归一的绝对值，探针跑通全 preflight 无抛）——与 `:504`/`:578` 同类，
       属 D.7 表的文档面，已补入表中，不另立单。
-- [ ] D.13 **对 implementer brief 的事实更正**（implementer D-5）：`:30460` / `:30591` 两条护栏 pin 是
+- [x] D.13 **对 implementer brief 的事实更正**（implementer D-5）：`:30460` / `:30591` 两条护栏 pin 是
       `pytest.raises(ValueError, match=...)` **正则匹配**，不是精确等值。结论不变（非环文案逐字保留、两条均绿），
       但 PR body 不得把它们描述成精确等值 pin。
-- [ ] D.9 **新 capability 的 Purpose**：`safe-filesystem-primitive-contract` 归档后会带
+- [x] D.9 **新 capability 的 Purpose**：`safe-filesystem-primitive-contract` 归档后会带
       `Purpose: TBD - created by archiving change …` —— 正是 D5 拿来否掉
       `data-integrity-storage-contract` 的那条毛病。仓内无先例在 delta 里写 `## Purpose`
       （归档才物化 `openspec/specs/<cap>/spec.md`），故**归档 chore PR 里补一句真 Purpose**，
       别让它以 TBD 落地。
-- [ ] D.14 **round-1 交叉评审 + 独立裁决 + 修复轮记账**（必须进 PR body）：
+- [x] D.14 **round-1 交叉评审 + 独立裁决 + 修复轮记账**（必须进 PR body）：
       lens A 无 P0/P1/P2；lens B 3×P2 + 1×P3；两批独立 verifier 共 8 条裁决 ——
       **5 条 CONFIRMED/FIX_NOW 已修，2 条 DISCARD，1 条 DEFER**。
       - **F1（P2）**：`_canonical_path` 换成恒等函数，`1692 passed` **全绿存活**（两个解释器臂皆然）。
         三条 compat-surface 用例都先把入参 canonical 化再断言 `f(x) == x`，恒等函数照样满足；
         spec R4 卖的「normalized」从没被检查过。**比 PR 已声明的限制严格更强**——已声明的判别器
-        （回退 `value.resolve()`）只在 3.11 红，恒等 mutant 两臂全绿。已补
+        （回退 `value.resolve()`）只在 3.11 红，恒等 mutant 两臂全绿。修复轮已补
         `_resolve_optional_config_path(loop/"y"/".."/"z") == loop/"z"`，两臂验证。
+        **终审（Phase 7）复核发现该修复只覆盖两个 helper 中的一个**（spec R4 明写「两个」，
+        场景 1 明写「绝对值与相对值」）：恒等 mutant 单独打在 `_optional_config_path_relative_to`
+        上仍 `1682 passed` **全绿存活**。这是 orchestrator 的修复 brief 写漏，不是 implementer 偏离。
+        `f776b393` 已补两条断言（绝对拼法 + 相对拼法），终审独立复核两条**各自见红**
+        （M1 下 `1 failed, 1681 passed`；禁用绝对那条后相对那条独立红 `1 failed, 2 passed`），判 CLEAN。
       - **F2（P3）**：`_expanduser_or_verbatim` 退化成「永不展开」，`1692 passed` + Evidence Floor 其余
         `310 passed` 全绿存活。原因：文件里每条 tilde 用例都用**故意不可展开**的 tilde。
         master 用的是 stdlib `.expanduser()`（无需栅栏），本单换成手写两分支包装却只钉了异常分支，
@@ -306,5 +344,5 @@
         实测每种几何 filename 都有值，保留只为避免打印 `at None`。
       - **fix pass deviation 7（记过）**：首个 mutant 改写误用了裸 `python3`（项目规则是 uv-only），
         后续全部改回 `uv run python`；无状态影响，还原经 sha256 核验。
-- [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
+- [x] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
       而非当下崩溃修复；#1547 触发条件少见但影响面是共享底座。

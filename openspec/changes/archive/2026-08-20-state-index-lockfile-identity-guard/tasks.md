@@ -121,11 +121,40 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 - [x] C.3 `uv run ruff check $(git ls-files '*.py')`
 - [x] C.4 `openspec validate state-index-lockfile-identity-guard --strict --no-interactive`
 - [x] C.5 B.1(d) / B.2(b) / D.2 三组 mutant 判别力实测，计数贴 PR body
-- [ ] C.6 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，**不碰 `/home/nwm/NWM` 主树**。
+- [x] C.6 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，**不碰 `/home/nwm/NWM` 主树**。
       **判读口径：相对 master 基线「不新增红」**，不是「零红」—— master 已知三条红：
       `test_entropy_audit_script.py::…hard_gate…`、
       `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`、
       以及 #1613 那条顺序依赖。
+
+      **判读：PASS（零新增红），但过程不平——第一次读数是错的，这里把两次都记下来。**
+
+      | 运行（均 `umask 022`、独立 detached worktree、`/home/nwm/NWM` 主树全程未动） | 结果 |
+      |---|---|
+      | merge commit `a968c91b` 全量 | `3 failed, 12691 passed, 153 skipped in 4850.37s` |
+      | **真父 `29892932`** 全量（拓扑已核：确是 `a968c91b` 的第一父，delta 恰为本单 18 个新测试） | `2 failed, 12673 passed, 153 skipped in 4499.90s` |
+      | **含本单的当前 master `f087f08d`** 全量（单跑，无并发） | `2 failed, 12751 passed, 153 skipped in 4588.01s` |
+
+      多出的第三条是 `tests/test_warm_start_chaining.py::test_cohort_reservation_records_each_models_warm_start_identity`。
+      六道探针把它证伪为**竞争/时序产物**，非本单引入：
+
+      | 探针（均在 `a968c91b`） | 结果 |
+      |---|---|
+      | `test_state_manager.py` + victim | 247 passed / 38.96s |
+      | 四个新测试文件（不含 `state_manager`）+ victim | 306 passed / 46.86s |
+      | Y1：forcing + run_tree + state_manager + victim | 313 passed / 46.15s |
+      | Y2：replay + state_manager + tile_publisher + victim | 377 passed / 40.95s |
+      | 六文件全组合（第 1 次） | **1 failed** / 224.42s |
+      | 六文件全组合（第 2 次，同命令） | 443 passed / 48.55s |
+      | 同六文件 @ 真父 | 424 passed / 48.51s |
+
+      第 1 次那 224 秒与真父全量基线**并发**（victim 本身是 9.7s 量级的定时敏感用例，
+      `--durations` 实测），机器双跑时被拉长翻红；单跑即绿。决定性证据是含本单的当前
+      master 单跑全量与真父**逐条同一红集**，victim 不复现。
+      结论：**本单零新增红**；victim 归 #1613 那一类顺序/时序脆弱，证据已回帖 #1613。
+
+      **教训（写进流程）**：长跑期间**不得并行第二个全量 pytest** —— 竞争会把定时敏感
+      用例打红，制造出一条本不存在的「新增红」，并诱导错误定责。
 - [x] C.7 **node-22 不跑任何东西**（#1192 的死锁探针禁令继续有效）。死锁红证只在本地/CI 的有界壳里跑。
 
 ## D. #1610 探针姿态补测（零生产改动）
