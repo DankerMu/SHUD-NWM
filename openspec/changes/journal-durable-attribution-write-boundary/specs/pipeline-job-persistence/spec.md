@@ -9,7 +9,7 @@ Object-URI display placeholders (`[object-uri]`, `[uri]`) are produced by public
 #### Scenario: A cohort projection write cannot launder a placeholder
 
 - **WHEN** the accepted-submit cohort terminal projection writes a row whose evidence field carries an object-URI placeholder, through either the batched projection path or the deferred single-row path
-- **THEN** the durable journal record and the direct row file store `None` for that field, and no literal placeholder text is persisted by either path
+- **THEN** the durable journal record and the direct row file store `None` for that field — the row held no real value for it beforehand — and no literal placeholder text is persisted by either path. Where the row did already hold a real value, the separate rule below governs and the real value survives instead
 
 #### Scenario: Deliberately persisted placeholders survive
 
@@ -57,5 +57,5 @@ Object-URI display placeholders (`[object-uri]`, `[uri]`) are produced by public
 
 #### Scenario: Stickiness produces no empty write
 
-- **WHEN** stickiness suppresses the only field that would otherwise have changed
+- **WHEN** stickiness suppresses the only field that would otherwise have changed — a unit-constructed geometry, since a production row reaching this path always carries a changed per-task projection alongside
 - **THEN** the projection detects no change and writes no record

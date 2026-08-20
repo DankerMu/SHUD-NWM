@@ -66,7 +66,8 @@ F-a 先行的额外机械理由：本单会挪动 8700+ 行文件的行号，F-b
 上表的 payload 审计就是它们的证据。
 
 **充分性已实测查实**：`_write_pipeline_job_unlocked` 里除 `record` 之外还有 `row` 的下游——
-`_sync_reconcile_inventory_for_row_unlocked(row)`（`:5718` 与 `:6205` 两次）、
+`_sync_reconcile_inventory_for_row_unlocked(row)`（调用点 `:6173` 与 `:6205` 两次；
+`:5718` 是该函数**内部**的 `_atomic_write_json_unlocked`，不是调用点——第 2 轮 P3-D 更正）、
 `:6193` 的 direct 路径选择、`return _public_scheduler_row(row)`。
 inventory（`:5711-5728`）只写 `schema_version / job_id / source_id / cycle_time / row_kind`
 五个身份字段，路径选择同样只用身份字段，**均不携带任何可被占位符化的字段**；
@@ -220,7 +221,12 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 ## Must-preserve（评审红线）
 
 1. `_defer_forecast_cohort_projection_unlocked` 的整行短路（`:3539`）行为逐字节不变。
-2. `permanently_failed` 之外的 master 状态，投影腿的写入行为逐字节不变（含 `error_code`）。
+2. `permanently_failed` 之外的 master 状态，投影腿的**粘性语义**不变——`error_code` /
+   `error_message` 照常被本趟派生值覆写，不得因本单获得任何粘性。
+   **该红线不覆盖证据谓词**：D3 对所有状态的行都改条件谓词（占位符不再算真值），
+   那是本单有意的行为变更、已在 D3 尾段声明。初版把本条写成"写入行为逐字节不变"，
+   与 D3 直接互否（fixture review 第 2 轮 P2-B）——红线清单里放一条实现必然违反的项，
+   会让评审无法判断"是不是真红"。
 3. **终态行的 `finished_at` / `exit_code` / `log_uri` 继续刷新**（D4 观测族）——这条一旦转红
    就是 D4 被误实现成 B 方案。
 4. `[local-path]` / `[redacted]` 继续被持久化，**不**被 strip 掉（`_PERSISTED_REDACTION_PLACEHOLDERS`
@@ -304,8 +310,13 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 - **J7**：同上 → `finished_at` / `exit_code` / `log_uri`（真值，非占位符）**确实被刷新**
   （must-preserve 3 的反向钉）。
 - **J8（按 P3-5 参数化）**：**三个派生终态各一**（`succeeded` / `partially_failed` / `failed`）
-  → `error_code` 照常被派生值覆写。参数化同时杀死"扩成 `in TERMINAL_PIPELINE_STATUSES`"
-  与"窄扩成 `{"permanently_failed","cancelled"}`"两类变异；只用 `failed` 一个代表抓不住后者。
+  → `error_code` 照常被派生值覆写。参数化杀死"扩成 `in TERMINAL_PIPELINE_STATUSES`"这类变异
+  （三臂全红），只用 `failed` 一个代表则只能抓到其中一臂。
+  **诚实更正（fixture review 第 2 轮 P2-A）**：初版声称参数化"同时杀死窄扩成
+  `{"permanently_failed","cancelled"}`"——**为假**。J8 三臂里没有 `cancelled`，该变异下
+  J8 必然全绿、零判别力。真实状况是：**`cancelled` 窄扩没有 oracle，而按 D5 我们也不想要它**
+  （`cancelled` 是声明的既存缺口，扩粘性去修属越界）。变异表里那一行是**防误伤的守卫**
+  （断言 J8 仍绿），不是杀伤测试。
 - **J9**：粘性触发且无其它字段变化时 `cohort_changed` 为 False，不产生空写（must-preserve 7）。
   该几何为**单元构造、生产不可达**（评审 P3-5：要求 `candidate_projections` 不变，
   而那意味着投影已全、行根本不会被扫到）——docstring 须标注，spec 场景亦然。
@@ -362,3 +373,16 @@ AST 守卫（断言无第二处构造含 `{schema_version, sequence, record_type
 | 评审"验证缺口" 2（`latest/` 无落盘对照） | 采纳为 must-preserve 12，实现须给对照 |
 | 评审"验证缺口" 3（SQL 版 `chain_repository.py` 未审） | 无动作：proposal 已声明不改，评审亦确认证据面为 file-journal 独有 |
 | 评审"验证缺口" 4（`cancelled` 完整生产链路未回溯） | 转入新立的 `cancelled` issue，由它承担 |
+
+### fixture review 第 2 轮（delta 复核）处置
+
+| finding | 处置 |
+|---|---|
+| **P2（不对称写反）** tasks 3.1 收尾句称"两条腿的 `error_code`/`error_message` 都无条件"，与同 bullet 上方三行及 D3 表互否 | 采纳：3.1 收尾句重写，明确"不在射程的只有投影腿 `error_code` + defer 腿 `error_code`/`error_message`；**投影腿 `error_message`（`:3381`）是条件写，在 7 处之内**" |
+| **P2-A** J8 参数化"同时杀 `cancelled` 窄扩"为假 | 采纳：J8 条目与 tasks 1.7 都改成诚实措辞——三臂无 `cancelled`，该变异下 J8 必然全绿；**`cancelled` 窄扩没有 oracle，按 D5 也不想要**，变异表那行是**防误伤守卫**不是杀伤测试 |
+| **P2-B** must-preserve 2 与 D3 直接互否 | 采纳：收窄到**粘性语义**（`error_code`/`error_message` 不得获得粘性），显式把证据谓词排除出该红线 |
+| **P3-C** defer 腿谓词新引入差-1 | **本轮复核前已自核修正**（`a1c25b96`，`:3563/:3565/:3567`、range `:3563-3568`）——复核读的是 `8daa5097` |
+| **P3-D** `:5718` 被当成 inventory 的调用点 | 采纳：调用点是 `:6173`/`:6205`，`:5718` 是该函数内部的 atomic write |
+| **P3-E** J9 的"生产不可达"承诺 spec 未兑现 | 采纳：spec 场景补 unit-constructed 限定 |
+| **P3-F** spec 场景 1 无限定的 "store `None`" 与新场景拉扯 | 采纳：场景 1 补"行上原本无真值"限定 + 指向 displacement 规则，消除又一处 J4 式负判别力 |
+| 复核"未能核实"：两条 Note 的 issue 号 | 由 issue-scribe 另路交付，号回来后补进本表 |

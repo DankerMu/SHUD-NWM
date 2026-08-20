@@ -27,7 +27,9 @@
       三者确实被刷新。改动前**绿**（现状锁，防 D4 被误实现成整行短路）。
 - [ ] 1.7 J8（反向钉，**参数化三个派生终态** `succeeded`/`partially_failed`/`failed`）：
       重投影给出不同派生 `error_code` → 照常被覆写。改动前**绿**。
-      参数化同时杀"扩成全 `TERMINAL_PIPELINE_STATUSES`"与"窄扩到含 `cancelled`"两类变异。
+      参数化杀"扩成全 `TERMINAL_PIPELINE_STATUSES`"这类变异（三臂全红）。
+      **它抓不到"窄扩到含 `cancelled`"**——三臂里没有 `cancelled`，该变异下 J8 必然全绿。
+      那条变异行是**防误伤守卫**（见 5.4 末句），不是杀伤测试。
 - [ ] 1.8 J9：粘性抑制掉唯一会变的字段时 `cohort_changed` 为 False、零写入
       （断言 journal 序列号不前进）。docstring 标注该几何为**单元构造、生产不可达**。
 - [ ] 1.9 **J10（P2-1）**：手动重试 round-trip（`_record_manual_retry_submission_success`）后
@@ -56,8 +58,11 @@
       - **defer 腿 `_defer_forecast_cohort_projection_unlocked` `:3563-3568` 的 3 个条件字段**
         （`finished_at`/`exit_code`/`log_uri`）—— fixture review P1，漏了它本单就在这条腿上
         交付 design 判定为"比现状更糟"的终值
-      同腿内字段**一致处理**，不得只改 `log_uri`。两条腿的 `error_code`/`error_message` 是
-      **无条件**写、没有谓词可修，不在本项射程（占位符由咽喉兜底）。
+      同腿内字段**一致处理**，不得只改 `log_uri`。
+      **两腿的无条件写形状不对称，不可照抄**（第 2 轮复核 P2）：不在本项射程的只有
+      投影腿的 `error_code`（`:3373`）与 defer 腿的 `error_code`+`error_message`
+      （`:3558-3559`）——它们是无条件写、没有谓词可修，占位符由咽喉兜底。
+      **投影腿的 `error_message` 是条件写（`:3381`），在本项的 7 处之内。**
 - [ ] 3.2 D4：粘性分支触发时（`sticky_master_status != projected_master_status`），
       `error_code`（`:3373` 无条件写）与 `error_message`（`:3381` 条件写）均保持 `existing` 值。
       两者形状不同，实现不可照抄同一段。
