@@ -18,7 +18,7 @@
   正常并发写因此被判成 containment 故障，抛
   `SafeFilesystemError: Target file changed while being opened`。实测饱和微基准
   **37 224 次成功读中 142 次触发（约 0.38%）**。后果被 32 个 `except FileOrchestrationJournalError`
-  分流成三种互不一致的结局：静默跳投（`:569`/`:577` 返回 `True`）、
+  分流成三种互不一致的结局：静默跳投（`:571`/`:579` 的 `return True`，读点在 `:569`/`:577`）、
   伪造 `"pipeline_status": "running"`（`candidate_state` → `_file_journal_blocked_candidate_state`）、
   整趟 `submission_failed`（`load_model_context` → `OrchestratorError`）。
 

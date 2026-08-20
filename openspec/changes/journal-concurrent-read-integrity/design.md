@@ -29,7 +29,7 @@
 ## Seams under test
 
 - `_cycle_rows`（`:4080`）的写窗判据 —— 可由两线程共享同一 repository 实例 + 屏障驱动。
-- `_locked_cycle_write`（`:6947`）—— cycle 写窗的唯一上下文管理器，可被屏障挂住。
+- `_locked_cycle_write`（def `:6948`，`with self._write_lock:` 在 `:6949`）—— cycle 写窗的唯一上下文管理器，可被屏障挂住。
 - `_read_bytes_limited_cached`（`:4563`）—— journal 读的唯一 chokepoint，
   `_read_optional_json:4620` 与 `_read_jsonl:4643` 都经它。
 - `safe_fs.open_file_no_follow`（`:257`）的 `:265` stat ↔ `:275` open 窗口 ——
@@ -73,7 +73,7 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
 | `:5096` | `_require_reconcile_inventory_rollback_prepared`（`:5081`） | 否 | 否 |
 | `:5127` | `current_generation_scheduler_rollback_blocker`（`:5124`） | 否 | 否 |
 | `:5158` | `_complete_reconcile_inventory_rollforward_under_scheduler_lease`（`:5148`） | 否 | 否 |
-| `:6582` | `_next_sequence`（`:6582`） | 否 | 否 |
+| `:6583` | `_next_sequence`（def `:6582`） | 否 | 否 |
 
 该表由 AST 遍历产出（对每个含 `with self._write_lock:` 的函数扫 `_cycle_rows*` /
 `_cycle_file_lock*` 调用），不是肉眼枚举；实现者须以同一手法复核而非采信本表。
@@ -83,14 +83,30 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
 只是恰好没有读点在这 7 个窗口内调 `_cycle_rows`（已核：这 7 处内部无 `_cycle_rows` 调用），
 所以今天没爆。
 
-因此正确的判据不是「我是否持有 `_write_lock`」，而是「**我是否在 cycle 写窗内**」。
-一个 `self._cycle_write_owner: int | None`，只由 `_locked_cycle_write` 在
-`with self._write_lock:` 内置为 `threading.get_ident()`、在 `finally` 清空，
-同时修掉 ownership 盲和 scope 盲，且**只有一个站点需要维护成对性**。
+因此正确的判据不是「我是否持有 `_write_lock`」，而是「**我是否在这个 cycle 的写窗内**」。
+
+**标记形状：`self._cycle_write_owner: tuple[int, str, str] | None`
+= `(threading.get_ident(), source_id, cycle_segment)`，不是裸线程 id。**
+
+裸 ident 会留下第三种「判据为真但理由不对」：owner 线程在 C1 的写窗内读 **C2** 的行，
+判据仍返回真、仍免指纹，而 C1 的 flock **不保护 C2**——另一进程可以正在写 C2。
+今天在生产上不可达（17 个 `_cycle_rows` 调用点都显式传 cycle 参数，
+窗内读点读的都是本窗那个 cycle），但这正是本 change 要根除的缺陷类：
+一个判据恰好为真、而它声称的前提并不成立。keyed 标记比裸 ident 只多两个元素，
+却让判据字面等于它的含义，故采纳。
+
+**放置位置：标记必须是既有 `try:`（`:6953`）内的第一条语句。**
+`_ensure_root_unlocked()`（`:6952`）在 `try` **之外**且会抛
+（`:7113-7121` → `OrchestratorError("FILE_JOURNAL_WRITE_FAILED")`）。
+若在它之前置标记，那条路径永不进 `finally`，标记就带着一个即将被线程池回收的 ident 泄漏出去——
+正是 #1595 验收项 4 与本 change spec 明令禁止的形态。
+置于 `try` 内第一条，既由既有 `finally` 兜底、又不需要新开 try/finally；
+锁获取与 `try` 之间的那两句（cache clear、root ensure）本身不读 cache，无快路径可发。
 
 - 采纳该收窄后，#1595 验收项「所有 `with self._write_lock:` 站点的 owner 标记成对性」
   的满足方式变为：**只有一个站点参与，成对性由单一 contextmanager 的 `finally` 结构性保证**，
-  另加一条结构守卫断言 `_cycle_write_owner` 的赋值语句只出现在 `_locked_cycle_write` 内。
+  另加一条结构守卫断言 `_cycle_write_owner` 的赋值只出现在 `_locked_cycle_write`
+  与 `__init__` 内（`__init__` 只置 `None`）。
 - `_write_lock` 是普通 `Lock`（`:544`），不可重入，因此 `_locked_cycle_write` 不可能嵌套
   （嵌套即死锁），**朴素 set/clear 成立，不需要计数器**。这一点必须由测试锁死
   （若将来换成 `RLock`，朴素 set/clear 会在嵌套退出时提前清空标记）。
@@ -98,22 +114,49 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
 **未采纳的备选**：`threading.RLock` + `_is_owned()`。依赖 CPython 私有 API，
 且 RLock 的可重入语义会掩盖真实的重入 bug（今天的 `Lock` 让嵌套立刻死锁暴露，是特性不是缺陷）。
 
-### D2 — #1595 附带项：`_locked_cycle_write` 的全局 `.clear()` **保留不动**
+### D2 — `_locked_cycle_write` 的两次全局 `.clear()`：**保留，且入口那次是正确性前提而非性能项**
 
-`:6950-6951` 与 `:6957-6958` 各做一次全局 `self._cycle_rows_cache.clear()`，
+`:6950-6951`（入口）与 `:6957-6958`（`finally`）各做一次全局 `self._cycle_rows_cache.clear()`，
 与 source/cycle 无关，cohort X 的写会打空 cohort Y、Z 的 entry。
 
-**裁定：保留全局 clear。** 理由：
+**本条裁定在 fixture 评审中被推翻过一次，此处是更正后的版本。**
+初版写「正确性由 fingerprint 校验保证，不依赖 clear 粒度，所以 clear 是纯性能项」。
+**这句是假的**，实测依据：
 
-1. 它是**语义中性**的——clear 只会导致重算，永远不会给出错值。
-2. 修复后正确性由 fingerprint 校验保证，**不依赖 clear 粒度**；
-   这一点必须由一条断言锁死（见 tasks 3.4），锁死之后 clear 粒度就是纯性能选择。
-3. issue #1595 自己写明「若它引入任何语义风险，优先保留全局 clear」。
-   收窄成前缀失效要在 `_cycle_rows_cache` 的 4 元组 key 上做前缀匹配，
-   与 `_apply_record_to_cycle_rows_cache:6816-6839` 已有的按 key 遍历逻辑交叠，
-   属于 KISS 意义上不该在正确性修复里夹带的改动。
+`_cycle_rows_cache` 的 entry 可以带 `fingerprint=None`，而 `None` **永远无法通过**
+`:4111` 的 `cached[0] == fingerprint` 比较（右侧是真元组时恒假）。三个存入点：
 
-性能收窄另行立 issue，不在本 change 做。
+| 存入点 | 何时存 `None` |
+|---|---|
+| `:4162` `_cache_cycle_rows(..., fingerprint=fingerprint)` | `in_write_window` 为真时（`:4104-4108`） |
+| `:4233-4237` `_cycle_rows_by_model_unlocked` | **无条件**——窗内窗外都存 `None` |
+| `:6839` append hook | 无条件 `(None, updated)` |
+
+于是这些 entry **只能**经 `:4111` 的 `in_write_window` 那一支被命中，
+而那一支**不做任何校验**。让 owner 快路径安全的不是「重算指纹」，
+而是**入口那次 clear 把进窗前的一切 entry 抹掉了**。反例（单线程、同 cycle）：
+
+1. 窗外 `_cycle_rows(C1)` 算出真指纹 F1，miss，存 `(F1, rows_old)`；
+2. 另一进程（#1600 列举的 CLI 路径）写 C1 的 journal；
+3. 同一线程进 `_locked_cycle_write(C1)`。若入口 clear 被停掉，缓存仍持 `(F1, rows_old)`，
+   此时该线程是 owner → 判据为真 → 免指纹 → `:4111` 返回 `rows_old`，**陈旧且未校验**。
+
+**更正后的裁定**（三条，须分开读）：
+
+1. **入口 clear（`:6950-6951`）是 owner 快路径的正确性前提**，不是性能项。
+   任何收窄都必须保证：进窗时该 cycle 的既有 entry 被清掉。**不得以「纯性能」为由改动它。**
+2. **出口 clear（`:6957-6958`）才是粒度自由的**——它只影响窗后的重算量。
+3. 二者**都保留不动**。收窄成前缀失效要在 4 元组 key 上做前缀匹配，
+   与 `_apply_record_to_cycle_rows_cache:6819-6826` 已有的按 key 遍历交叠，
+   属于 KISS 意义上不该在正确性修复里夹带的改动；
+   issue #1595 也自己写明「若它引入任何语义风险，优先保留全局 clear」。
+
+该缺陷**pre-existing 且非本 change 引入**（初版 D2 的错误是把它描述反了，不是造出来的）。
+出口 clear 的性能收窄可另行立 issue，**该 issue 必须把上面第 1 条作为约束写进去**——
+否则执行那个 follow-up 的人会在一个假前提上收窄入口 clear，那才是真会出事的地方。
+
+对应地，tasks 3.4 与 spec 的对应 scenario 必须限定在**非 owner 读**上：
+「正确性不依赖 clear 粒度」这句只对非 owner 读成立，对 owner 快路径为假。
 
 ### D3 — #1600 修复形状：journal 读 chokepoint 有界重试 + `safe_fs` 结构化判别位
 
@@ -205,7 +248,7 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 并给出备选「承认写窗内 flock 已排除外部写者、篡改场景不适用，在注释里钉死」。
 
 **本 change 使该备选在修复后成立，但成立范围比 #1567 设想的窄得多。**
-修复后 `in_write_window` 为真当且仅当**本线程正在 cycle 写窗内**，
+修复后 `in_write_window` 为真当且仅当**本线程正在这个 cycle 的写窗内**，
 此时 cycle flock 确实排除了其他写者（含跨进程），append hook 确实维持了 cache 相干——
 `#1567` 那句「flock 已排除外部写者」对**这一个**线程成立。
 对任何其他线程，判据现在返回假，走完整 fingerprint 校验，
@@ -236,3 +279,21 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 3. 本 change 不改变「读者不取 flock」这一架构选择。跨进程读 vs 写的竞态被重试**吸收**，
    不是被**消除**；攻击者仍可通过持续 replace 把重试耗尽，此时行为是 fail-closed。
 4. 0.38% 是饱和微基准数字，**不是生产命中率**。生产真实频次未测量，本 change 不声称改善幅度。
+5. `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None`
+   的 entry，窗外也存。这类 entry 在窗外恒 miss（`None == <tuple>` 恒假）——
+   即一段永远命不中的缓存写入。本 change 不动它（改它会牵动 model-scoped 读路径的
+   缓存语义），但它是 D2 那条「入口 clear 是正确性前提」的成因之一，
+   报告立 issue。
+
+### D11 — fixture 评审中被推翻/收紧的裁定（保留记录，避免后续重新发明）
+
+| 初版 | 终版 | 推翻依据 |
+|---|---|---|
+| owner 标记置于 `_ensure_root_unlocked()` 之前 | 置于既有 `try:` 内第一条 | `_ensure_root_unlocked`（`:6952`）在 `try`（`:6953`）之外且会抛，那条路径永不进 `finally`，标记泄漏给线程池复用的下一个任务——违反本 change 自己的 spec |
+| owner 标记 = 裸 `threading.get_ident()` | `(ident, source_id, cycle_segment)` | 裸 ident 下「C1 窗内读 C2」判据仍为真而 C1 的 flock 不保护 C2；今天不可达，但正是本 change 要根除的「判据为真、前提不成立」缺陷类 |
+| D2「正确性不依赖 clear 粒度，clear 是纯性能项」 | 入口 clear 是正确性前提，仅出口 clear 粒度自由 | 窗内 entry 带 `fingerprint=None`、只能经免校验支命中；让 owner 快路径安全的是入口 clear 而非重算指纹（反例见 D2） |
+| 红证：B 读「已热 cache key」 | 预热必须发生在 A 进窗**之后** | `_locked_cycle_write` 入口就 clear，进窗前预热的 entry 已被抹掉，构造 pre-fix 即绿、变异体结构性不可能红 |
+
+前两条与第四条来自 fixture 评审，第三条推翻的是我自己写的裁定。
+第四条的陷阱是从 #1595 验收标准原文（「已热 cache key」）照抄来的——
+**验收标准里的构造描述同样要当作待验证的断言，不能照抄进 tasks**。
