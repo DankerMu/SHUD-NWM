@@ -673,6 +673,13 @@ def _compact_retention(value: Any) -> Any:
             # keeping it verbatim means the exemption evidence survives the
             # size compaction that strips the per-entry skipped detail.
             "frontier",
+            # Issue #1318, same rationale: a bounded scalar block (gate, window,
+            # cutoff, at most a handful of roots). A compacted receipt reports a
+            # single ``retention_days`` and one cross-root ``freed_bytes``, so
+            # without this block the reader cannot tell which window governed
+            # the additional roots -- and compaction is triggered by exactly the
+            # large additional-root sweeps that most need to be read.
+            "extra_roots",
         ),
     )
     counts = value.get("counts")

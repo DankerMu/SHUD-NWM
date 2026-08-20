@@ -230,6 +230,26 @@ NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 NHMS_RETENTION_ENABLED=true
 NHMS_RETENTION_DRY_RUN=false
 NHMS_RETENTION_DAYS=14
+# Issue #1318: a scheduler pass historically swept OBJECT_STORE_ROOT only, so
+# the run workspaces under WORKSPACE_ROOT/runs and
+# NHMS_OBJECT_STORE_COPYBACK_ROOT/runs were never reclaimed. When the switch
+# below is on, those two roots are swept as well -- runs/ ONLY. Their raw/,
+# canonical/ and forcing/ trees are never touched: the copyback root's forcing/
+# tree is node-27's live display serving surface, and its queryable window is
+# exactly the cycle directories still on that disk.
+# Default off: turning it on is an operational decision, because the first
+# enforcing sweep deletes thousands of run directories at once. Before setting
+# it true here, run one pass with NHMS_RETENTION_ENABLED=true +
+# NHMS_RETENTION_DRY_RUN=true and review the planned list (each entry carries
+# the root it belongs to). Rollback is this one switch.
+NHMS_RETENTION_EXTRA_ROOTS_ENABLED=false
+# Independent window for those additional roots; NHMS_RETENTION_DAYS keeps
+# governing OBJECT_STORE_ROOT. Longer on purpose: a run workspace is the only
+# post-mortem record of a failed run, and node-27's ingest reads copyback run
+# trees off the same NFS export (steady-state lag is minutes, so 30 days leaves
+# ample margin). `nhms-pipeline cleanup --retention-days N` overrides the
+# object-store window only; this one always comes from here.
+NHMS_RETENTION_EXTRA_ROOTS_DAYS=30
 # Manual `cleanup` runs outside a scheduler pass have no in-memory frontier, so
 # since issue #1407 they read the active lower bound from the newest pass
 # receipt under NHMS_SCHEDULER_EVIDENCE_ROOT. A receipt whose start time is

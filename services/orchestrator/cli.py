@@ -132,10 +132,26 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
     with ``NHMS_RETENTION_ENABLED=true`` and ``NHMS_RETENTION_DRY_RUN=true`` --
     the pass deletes nothing but writes a fresh frontier block, after which this
     cleanup reads a bound again.
+
+    Additional-root scope (issue #1318): ``retention_days`` overrides the
+    object-store window **only**. The additional ``runs/``-only roots keep
+    ``NHMS_RETENTION_EXTRA_ROOTS_DAYS``, so ``cleanup --retention-days 1
+    --execute`` cannot turn into a one-day mass deletion across the workspace
+    and copyback roots. Those roots are read from ``WORKSPACE_ROOT`` and
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` as explicitly set: an unset or blank
+    value means that root is not swept, and the relative ``.nhms-workspace``
+    default used elsewhere is deliberately *not* applied to a deletion surface.
+    The whole additional-root behaviour stays behind
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED``, which defaults to off.
     """
     now = datetime.now(UTC)
     base = RetentionConfig.from_env()
-    config = RetentionConfig(
+    # ``replace`` on the env-derived base, never a fresh construction: the
+    # additional-root fields carry dataclass defaults, so building a new
+    # RetentionConfig here would silently substitute them for the operator's
+    # environment (issue #1318 task 1.9a).
+    config = replace(
+        base,
         enabled=True,
         dry_run=dry_run,
         retention_days=retention_days if retention_days is not None else base.retention_days,
@@ -150,6 +166,12 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
         published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"),
         active_lower_bound=frontier.active_lower_bound,
         active_lower_bound_source=frontier.source,
+        # Blank/unset values are discarded inside run_retention before any path
+        # resolution, and the whole sequence is dropped when the gate is closed.
+        runs_only_roots=(
+            os.getenv("WORKSPACE_ROOT"),
+            os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"),
+        ),
     )
     payload = result.to_dict()
     if frontier.status == "ok":
@@ -523,7 +545,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(1) from error
 
     @cli.command("cleanup")
-    @click.option("--retention-days", default=None, type=int)
+    @click.option(
+        "--retention-days",
+        default=None,
+        type=int,
+        help=(
+            "Override the object-store retention window only. Additional "
+            "runs/-only roots keep NHMS_RETENTION_EXTRA_ROOTS_DAYS."
+        ),
+    )
     @click.option("--dry-run", "dry_run", flag_value=True, default=True, show_default=True)
     @click.option("--execute", "dry_run", flag_value=False, help="Actually delete aged artifacts.")
     def cleanup(retention_days: int | None, dry_run: bool) -> None:
@@ -762,7 +792,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     publish_qdown_parser = subparsers.add_parser("publish-qdown")
     publish_qdown_parser.add_argument("--cycle-id", required=True)
     cleanup_parser = subparsers.add_parser("cleanup")
-    cleanup_parser.add_argument("--retention-days", type=int, default=None)
+    cleanup_parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help=(
+            "Override the object-store retention window only. Additional "
+            "runs/-only roots keep NHMS_RETENTION_EXTRA_ROOTS_DAYS."
+        ),
+    )
     cleanup_parser.add_argument("--dry-run", action="store_true", default=True)
     cleanup_parser.add_argument("--execute", action="store_false", dest="dry_run")
     migrate_parser = subparsers.add_parser("migrate-scheduler-state")

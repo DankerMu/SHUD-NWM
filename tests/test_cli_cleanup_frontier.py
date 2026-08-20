@@ -75,6 +75,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(store))
     monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
     monkeypatch.delenv("NHMS_RETENTION_FRONTIER_MAX_AGE_HOURS", raising=False)
+    # Issue #1318: keep the additional-root knobs out of the ambient
+    # environment so every test states its own gate and window.
+    monkeypatch.delenv("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", raising=False)
+    monkeypatch.delenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", raising=False)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
     return {"workspace": workspace, "evidence_dir": evidence_dir, "store": store}
 
 
@@ -425,3 +430,77 @@ def test_blocker_evidence_dir_is_the_absolute_path_the_relative_default_derived(
         Path(disclosed).resolve()
         == (tmp_path / "ws-relative" / "scheduler" / "evidence").resolve()
     )
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1318) - `--retention-days` scopes to the object-store window only.
+#
+# The additional runs/-only roots keep NHMS_RETENTION_EXTRA_ROOTS_DAYS, so
+# `cleanup --retention-days 1 --execute` cannot turn into a one-day mass
+# deletion across the workspace and copyback roots. The expected window here is
+# deliberately 7 -- not the 30-day default -- because a test written against
+# the default stays green even if the env value is never read at all.
+# ---------------------------------------------------------------------------
+def _write_run_workspace(root: Path, cycle: datetime) -> str:
+    run_id = f"fcst_gfs_{_cycle_name(cycle)}_model_a"
+    path = root / "runs" / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "out.nc").write_bytes(b"x")
+    return f"runs/{run_id}"
+
+
+def test_cleanup_retention_days_overrides_only_the_object_store_window(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    copyback = tmp_path / "copyback"
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", "7")
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
+    ten_days = NOW - timedelta(days=10)
+    copyback_key = _write_run_workspace(copyback, ten_days)
+    workspace_key = _write_run_workspace(env["workspace"], ten_days)
+    aged_cycle = _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=3)))
+    # a fresh receipt with a null bound => pure wall-clock, exactly as the pass
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(None))
+
+    payload = cli._run_cleanup(retention_days=1, dry_run=True)
+
+    assert "frontier_blocker" not in payload
+    assert payload["retention_days"] == 1
+    assert payload["extra_roots"]["retention_days"] == 7
+    assert payload["extra_roots"]["enabled"] is True
+    assert set(payload["extra_roots"]["roots"]) == {
+        str(env["workspace"].resolve()),
+        str(copyback.resolve()),
+    }
+    planned = {(entry["root"], entry["key"]) for entry in payload["planned"]}
+    # the 10-day-old runs fall outside the 7-day additional window; a fallback
+    # to the 30-day default would have skipped them as within_retention_window
+    assert (str(copyback.resolve()), copyback_key) in planned
+    assert (str(env["workspace"].resolve()), workspace_key) in planned
+    # the object-store root still answers to --retention-days
+    assert (str(env["store"].resolve()), "raw/gfs/" + aged_cycle.name) in planned
+    assert payload["dry_run"] is True
+    assert (copyback / copyback_key).exists()
+
+
+def test_cleanup_with_the_gate_closed_sweeps_no_additional_root(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    copyback = tmp_path / "copyback"
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", "7")
+    ancient = NOW - timedelta(days=400)
+    copyback_key = _write_run_workspace(copyback, ancient)
+    workspace_key = _write_run_workspace(env["workspace"], ancient)
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(None))
+
+    payload = cli._run_cleanup(retention_days=1, dry_run=False)
+
+    assert payload["extra_roots"]["enabled"] is False
+    assert payload["extra_roots"]["roots"] == []
+    roots = {entry["root"] for entry in [*payload["planned"], *payload["skipped"]]}
+    assert str(copyback.resolve()) not in roots
+    assert str(env["workspace"].resolve()) not in roots
+    assert (copyback / copyback_key).exists()
+    assert (env["workspace"] / workspace_key).exists()

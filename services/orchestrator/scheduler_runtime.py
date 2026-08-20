@@ -1982,6 +1982,14 @@ def _run_retention(
     ``active_lower_bound`` (issue #1307) exempts cycles that are still in
     flight from wall-clock deletion; the default ``None`` keeps the previous
     behaviour for callers that have no pass context.
+
+    The scheduler workspace root and the object-store copyback root are
+    forwarded as additional ``runs/``-only roots (issue #1318). Both come from
+    the already-validated ``SchedulerConfig`` -- the copyback root is
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` as consumed by the db-free topology
+    preflight -- rather than from a fresh ``os.getenv`` here, which would
+    bypass that preflight. They are swept only when
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
@@ -1999,6 +2007,10 @@ def _run_retention(
             published_artifact_root=self.config.published_artifact_root,
             active_lower_bound=active_lower_bound,
             active_lower_bound_source=active_lower_bound_source,
+            runs_only_roots=(
+                self.config.workspace_root,
+                self.config.object_store_copyback_root,
+            ),
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}
