@@ -1,5 +1,13 @@
 # Tasks: artifact-probe-file-kind-and-key-framing
 
+> **坐标取景（读本文件前先看这句）**：本文件所有 `:NNNN` 均为**规划期坐标**，量于实现前基线
+> `aafb50f9`，**有意不随实现漂移**——它们记录的是"当时在哪里决定的什么"，不是终态位置。
+> 实现落地后多数已平移（例如 2.2 的探针 `:1201` 现为 `:1257`、2.6 的
+> `_RAW_MANIFEST_ABSTENTION_REASONS` `:25522` 现为 `tests:26056`、3.13 的
+> `_ARTIFACT_GUARD_LANE_FUNCTIONS` `:15288-15297` 现为 `tests:15819`）。
+> 要定位终态代码请按**符号名**grep，不要按本文件的行号。
+> （design.md 文末「坐标勘误」同框；**生产代码与测试里的注释坐标不适用本豁免**，那些必须是终态值。）
+
 > 已按 fixture review round 1（`.workplans/batch-p1/review/fixture-review.md`）修订：
 > 坐标勘误、新增 sidecar / raw-manifest / 文档三族任务，删除基于误判的原 4.2。
 
@@ -54,10 +62,15 @@
 
 ## 3. 测试（`tests/test_production_scheduler.py`）
 
-- [x] 3.1 object 腿目录用例：URI **深于 pattern 段数** + root **已配置** + 目录连**整条父链**建
+- [x] 3.1 object 腿非常规入口用例：URI **深于 pattern 段数** + root **已配置** + 占位者连**整条父链**建
       （`mkdir -p`，否则 O8 抢先）+ root **先 realpath**（否则 macOS `/var` 使 O4/O9 抢先），
       断言 `(True, "artifact_target_not_a_file")`。
-- [x] 3.2 local 腿目录用例：目录坐在**允许收容根之内**（绕开 L5 抢先），断言同一元组。
+      （round-1 F-COV-2 实测更正：**只测目录不够**——把 `_NON_REGULAR_OBJECT_KINDS` 收窄成只认
+      `directory` 时 1839 全绿。已参数化到 `("directory", mkdir)` 与 `("other", os.mkfifo)`，
+      与 spec delta 的「or any other non-regular entry」对齐。）
+- [x] 3.2 local 腿非常规入口用例：占位者坐在**允许收容根之内**（绕开 L5 抢先），断言同一元组。
+      （同 3.1：`return not S_ISREG(mode)` 改成 `return S_ISDIR(mode)` 时原目录用例全绿，
+      故同样参数化到 FIFO。）
 - [x] 3.3 seam 契约用例（D1 约束 2 的守门人）：monkeypatch
       **`scheduler_state_failure_module._object_manifest_is_missing`**（**不是 facade**——
       compat 传播只在 facade 调用期间生效，见 design.md D1 实测）→ False，
@@ -88,6 +101,14 @@
       陈旧坐标会产出假的"变异体存活"），记录每条的转红 oracle 与形态；
       **M1 与 M3 按 design.md 记为预期连坐**（M1 一删则 3.1/3.10/3.11 同红；M3 连坐
       `:24435` helper 家族），二者均**不主张独占证死**。
+- [x] 3.15 **D4「分类器不得构造 store / 不得抛」的钉**（round-1 F-COV-1 新增）：
+      `OBJECT_STORE_ROOT` 指向**符号链接目录**（`LocalObjectStore.__post_init__` 的
+      `ensure_directory_no_follow` 在该根上抛 `ObjectStoreError`——`RuntimeError` 子类，
+      分类器的 `except ValueError` 折不住），断言
+      (a) 分类器对 prefix 形与 file-key 形分别答 `True` / `False` 且不抛；
+      (b) `_candidate_state_decision` 端到端仍产出**被收容的** `artifact_probe_error` blocker，
+      而非中断整趟 pass。用例名
+      `test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink`。
 
 ## 4. spec 与登记
 
@@ -95,8 +116,15 @@
       新增 key 取景要求、local 腿 symlink carve-out、sidecar 层一句、
       以及"positive-determination-only"的场景。
       **显式记录**：另两条新 SHALL——「分类器不得构造 store / 不得抛」与「归一化须是单一共享推导」
-      ——**有意只作 prose，不配场景**：前者是"永不发生"的否定式（场景只能写成同义反复，
-      其真实 oracle 是 3.6 与代码评审），后者是**代码评审属性而非测试属性**（design.md M5 已记）。
+      ——在 spec 中**只作 prose，不配场景**。
+      **round-1 F-COV-1 更正：前者原先给的理由（"场景只能写成同义反复，其真实 oracle 是 3.6 与
+      代码评审"）是错的，已被实测推翻。** 把分类器改写成 D4 禁止的形状
+      （`_local_object_store_for(candidate)` + `store.normalize_key(stripped)`，其余语义等价）时
+      **1839 例全绿**——3.6 并不能证它死；而把 `OBJECT_STORE_ROOT` 指向**符号链接目录**后，
+      禁止形状逃出 `ObjectStoreError`、真实分类器照常返回 bool，这是**可观测且非同义反复**的场景。
+      该 SHALL 现由新增的 3.15 钉住（spec 侧仍不加场景，回归钉在测试层）。
+      后者仍属代码评审属性，但口径按 1.1 收窄为：**跨仓库**的单一推导是代码评审属性，
+      `normalize_key` 这一站点的委托由 3.8 钉住。
 - [x] 4.2 `openspec validate artifact-probe-file-kind-and-key-framing --strict --no-interactive` 通过。
 
 > 原 4.2「为 local 腿收容/存在性错位开 issue」**已删**：该缺陷经 fixture review F1 实证**不存在**

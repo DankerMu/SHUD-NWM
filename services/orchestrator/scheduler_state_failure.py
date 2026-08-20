@@ -1100,10 +1100,15 @@ def _needs_package_manifest_witness(candidate: SchedulerCandidateLike, value: st
     (``services/production_closure/object_store_validation.py`` ``_operational_prefix``
     keeps ``parsed.path``) -- the validator saw the leftover prefix segment,
     rejected a physically present FILE key as prefix-shaped, and a witness was
-    fabricated BENEATH the file (``<file>.nc/forcing_package.json``); the store
-    then raised ``NotADirectoryError`` and the candidate was refused repair as
-    ``forcing_artifact_reference_unsafe``.  Percent-encoded ``s3://`` references
-    had the same framing mismatch.
+    fabricated BENEATH the file (``<file>.nc/forcing_package.json``); the kernel's
+    ``ENOTDIR`` came back as an ``ObjectStoreError`` (``stat_no_follow`` raises
+    ``SafeFilesystemError``, which the store wraps -- the bare
+    ``NotADirectoryError`` never reaches the probe), so the probe contained it as
+    ``artifact_probe_error`` and the candidate was refused repair as
+    ``forcing_artifact_reference_unsafe``.  The distinction is load-bearing: an
+    ``OSError`` would have been folded by the ``except (OSError, ValueError)``
+    leg into the null-reason repair-ELIGIBLE residual instead.  Percent-encoded
+    ``s3://`` references had the same framing mismatch.
 
     The prefix is read through the store-free ``_object_store_prefix_for`` rather
     than a bare ``candidate.resource_profile.get(...)``, and no store is
@@ -1252,10 +1257,16 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
             if not missing and _object_artifact_target_is_not_a_file(candidate, value):
                 # #1394: "present" from the existence probe only means the store
                 # could stat something there.  A directory squatting on a file key
-                # stats fine and is unreadable as an artifact, so the three
-                # consumer legs (forcing, copyback, raw-manifest repair) used to
-                # lose the blocker they owed -- the fail-OPEN mirror image of the
-                # #1365 fail-closed ruling.
+                # stats fine and is unreadable as an artifact, so the three legs
+                # that BLOCK on this probe -- sidecar (``:669``), forcing
+                # (``:749``), copyback (``:843``) -- used to lose the blocker they
+                # owed: the fail-OPEN mirror image of the #1365 fail-closed
+                # ruling.  Neither raw-manifest leg ever owed one, and they are
+                # named here so the enumeration cannot be read as covering them:
+                # the repair leg (``:1657``) abstains on a directory both before
+                # and after this change, and the downstream-retry leg (``:1725``)
+                # merely stops VOUCHING (``manifest_exists: true``) for a target
+                # it never probed as a file.
                 return True, _ARTIFACT_TARGET_NOT_A_FILE_REASON
             return missing, None
         except ObjectStoreError:

@@ -7771,9 +7771,11 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
     assert state["restart_from_stage"] == "parse"
 
     # (b) the cohort-derived attempt values, as absolutes, read through the COMBINATION production
-    # uses (``scheduler_state_failure.py:1950,1969``): the stage axis is the derived failed stage,
-    # never a literal, so the counter that reaches ``retry_policy.attempt`` /
-    # ``manual_retry.previous_attempt`` is the cohort ``parse`` row's, not the flat 1.
+    # uses (``scheduler_state_failure.py:2088`` in ``_cancelled_state_evidence`` and ``:2107`` in
+    # ``_manual_retry_state_evidence`` -- names given because line numbers go stale): the stage axis
+    # is the derived failed stage, never a literal, so the counter that reaches
+    # ``retry_policy.attempt`` / ``manual_retry.previous_attempt`` is the cohort ``parse`` row's,
+    # not the flat 1.
     derived_stage = scheduler_state_failure_module._candidate_failed_stage(state)
     assert derived_stage == "parse"
     previous_attempt = scheduler_state_rows_module._state_retry_attempt(state, stage=derived_stage)
@@ -12268,10 +12270,42 @@ def test_journal_tier_probe_store_error_blocks_fail_closed_and_the_pass_survives
 #: reaches the store (gate O6 does not pre-empt).
 _SQUATTED_OBJECT_FILE_KEY = "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
 
+#: Both non-regular kinds the two legs must refuse alike.  The store answers
+#: ``directory`` for one and ``other`` for the FIFO, and the spec delta says "a
+#: directory squatting on a file key, or any other non-regular entry" -- so a
+#: parametrization over directories alone would let ``other`` be dropped from
+#: ``_NON_REGULAR_OBJECT_KINDS`` (object leg) or the local leg's ``S_ISREG``
+#: narrowed to ``S_ISDIR`` without a single case turning red (round-1 F-COV-2).
+#: The predicate is carried alongside so each case pins the kind it actually
+#: created rather than trusting the parameter name.
+_NON_REGULAR_SQUATTER_KINDS = (
+    pytest.param("directory", stat.S_ISDIR, id="directory"),
+    pytest.param("other", stat.S_ISFIFO, id="fifo"),
+)
 
-def test_object_leg_reports_a_directory_standing_on_a_file_key_as_missing(
+
+def _create_non_regular_squatter(path: Path, kind: str) -> None:
+    """Create the named non-regular entry at ``path``, WHOLE parent chain included.
+
+    The parent chain matters for both kinds (gate O8 on the object leg): a
+    missing ancestor is a ``FileNotFoundError``, which the store reports as
+    ``absent`` and the probe as ``(True, None)`` -- a different tuple that would
+    make the case prove nothing.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        path.mkdir()
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
+def test_object_leg_reports_a_non_regular_entry_on_a_file_key_as_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    squatter_kind: str,
+    is_expected_kind: Any,
 ) -> None:
     # #1394 AC-1, object leg.  Every pre-emption gate ahead of the file-kind check
     # is disarmed on purpose and pinned below, because each of them produces a
@@ -12280,8 +12314,8 @@ def test_object_leg_reports_a_directory_standing_on_a_file_key_as_missing(
     # is not itself an unsafe path (O4/O9 -- a bare ``tempfile.mkdtemp()`` on macOS
     # carries ``/var -> /private/var`` and turns every object-leg case into
     # ``artifact_probe_error``), the key is deep enough for the validator (O6), and
-    # the squatting directory is created with its WHOLE parent chain (O8 -- a
-    # missing ancestor is ``FileNotFoundError`` and yields ``(True, None)``).
+    # the squatter is created with its WHOLE parent chain (O8 -- a missing ancestor
+    # is ``FileNotFoundError`` and yields ``(True, None)``).
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     assert Path(os.path.realpath(object_store_root)) == object_store_root
@@ -12289,14 +12323,16 @@ def test_object_leg_reports_a_directory_standing_on_a_file_key_as_missing(
     monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
     candidate = _scheduler_candidate_fixture()
     squatter = object_store_root / _SQUATTED_OBJECT_FILE_KEY
-    squatter.mkdir(parents=True)
+    _create_non_regular_squatter(squatter, squatter_kind)
 
-    # Independent oracles for the two gates the verdict actually depends on: the
-    # validator admits the key, and the existence probe alone still says "present".
+    # Independent oracles for the three gates the verdict actually depends on: the
+    # validator admits the key, the entry really is the kind this case claims, and
+    # the existence probe alone still says "present".
     from packages.common.storage import validate_object_path
 
     assert validate_object_path(_SQUATTED_OBJECT_FILE_KEY).valid is True
-    assert squatter.is_dir() is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
+    assert LocalObjectStore(object_store_root, "").object_kind(_SQUATTED_OBJECT_FILE_KEY) == squatter_kind
     assert (
         scheduler_state_failure_module._object_manifest_is_missing(candidate, _SQUATTED_OBJECT_FILE_KEY) is False
     )
@@ -12306,34 +12342,41 @@ def test_object_leg_reports_a_directory_standing_on_a_file_key_as_missing(
         _SQUATTED_OBJECT_FILE_KEY,
     ) == (True, "artifact_target_not_a_file")
     # Distinguishable from every other verdict this branch can reach, which is the
-    # whole point of a new token: a rebuild cannot clear a squatting directory.
-    assert "artifact_target_not_a_file" not in {
+    # whole point of a new token: a rebuild cannot clear a squatting entry.  Read
+    # off the module's own constants, so collapsing two of them into one literal
+    # is caught here rather than silently satisfying the tuple above.
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON == "artifact_target_not_a_file"
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON not in {
         None,
         "object_store_root_unconfigured",
-        "artifact_probe_error",
+        scheduler_state_failure_module._ARTIFACT_PROBE_ERROR_REASON,
     }
 
 
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
 @pytest.mark.parametrize("as_file_uri", [False, True])
-def test_local_leg_reports_a_contained_directory_with_the_same_reason(
+def test_local_leg_reports_a_contained_non_regular_entry_with_the_same_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     as_file_uri: bool,
+    squatter_kind: str,
+    is_expected_kind: Any,
 ) -> None:
-    # #1394 AC-1, local leg: ``Path.exists()`` is True for a directory too.  The
-    # directory must sit INSIDE an allowed containment root or gate L5 pre-empts
-    # with ``local_artifact_path_outside_allowed_roots``, so the root is configured
-    # and the containment verdict is pinned independently first.
+    # #1394 AC-1, local leg: ``Path.exists()`` is True for a directory (and for a
+    # FIFO) too.  The entry must sit INSIDE an allowed containment root or gate L5
+    # pre-empts with ``local_artifact_path_outside_allowed_roots``, so the root is
+    # configured and the containment verdict is pinned independently first.
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     candidate = _scheduler_candidate_fixture()
     squatter = object_store_root / "runs" / "run_a" / "output" / "basin_a"
-    squatter.mkdir(parents=True)
+    _create_non_regular_squatter(squatter, squatter_kind)
     value = f"file://{squatter}" if as_file_uri else str(squatter)
 
     assert scheduler_state_failure_module._local_artifact_path_is_allowed(candidate, squatter) == (True, None)
     assert squatter.exists() is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
 
     assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, value) == (
         True,
@@ -12536,6 +12579,74 @@ def test_foreign_bucket_reference_keeps_its_repair_eligible_null_residual(
 
     assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
     assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, recorded) == (True, None)
+
+
+#: The package PREFIX the witness derivation is built for: the same five canonical
+#: segments as ``_SQUATTED_OBJECT_FILE_KEY``'s parent, trailing ``/`` included, so
+#: the closed-world validator refuses it as a file key and the classifier must
+#: answer True.
+_PACKAGE_PREFIX_URI = f"{_SQUATTED_OBJECT_FILE_KEY.rsplit('/', 1)[0]}/"
+
+
+def test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D4 / spec: the shape classifier must never construct a store and
+    # must never raise.  A SYMLINKED store ROOT is the non-tautological oracle for
+    # it: ``LocalObjectStore.__post_init__`` runs ``ensure_directory_no_follow`` on
+    # the root, and the resulting ``SafeFilesystemError`` becomes an
+    # ``ObjectStoreError`` -- a ``RuntimeError``, which the classifier's
+    # ``except ValueError`` cannot fold.  A classifier that asked the store instead
+    # of the pure normalizer would therefore ESCAPE from here, and because this
+    # classification runs OUTSIDE the probe's containment it would abort the whole
+    # scheduler pass for every remaining candidate -- the exact #1365 fault.
+    #
+    # tasks.md 4.1 originally recorded this SHALL as deliberately prose-only on the
+    # grounds that any scenario "could only be a tautology".  That rationale is
+    # wrong, and this case is the counterexample: nothing here asserts "no store was
+    # constructed", it asserts an OBSERVABLE that only the store-free derivation can
+    # produce under a root no store can be built on.
+    real_root = tmp_path / "real-object-store"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-object-store"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(linked_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+
+    # Independent oracle: the store really cannot be built on this root, and the
+    # fault really is outside every ``except ValueError`` the classifier owns.
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(linked_root, "")
+
+    # Both classifier answers, exactly as under a healthy root: a package prefix
+    # needs its witness, an admissible file key does not.
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, _PACKAGE_PREFIX_URI) is True
+    assert (
+        scheduler_state_failure_module._needs_package_manifest_witness(candidate, _SQUATTED_OBJECT_FILE_KEY)
+        is False
+    )
+
+    # End to end: the PROBE does construct a store, so the same unsafe root surfaces
+    # as this candidate's contained ``artifact_probe_error`` blocker -- one blocked
+    # candidate with evidence, not an aborted pass.
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, _PACKAGE_PREFIX_URI),
+    )
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=_PACKAGE_PREFIX_URI,
+        unsafe_reason="artifact_probe_error",
+    )
+    # The witness really was derived (``probe = manifest``), which is what proves
+    # the classifier's True answer above reached production framing.
+    assert decision.evidence["forcing_provenance"]["probe"] == "manifest"
+    assert decision.evidence["forcing_provenance"]["probe_key"] == (
+        f"{_PACKAGE_PREFIX_URI.rstrip('/')}/forcing_package.json"
+    )
 
 
 def test_normalize_key_follows_the_shared_pure_normalizer_at_runtime(
