@@ -11563,6 +11563,96 @@ def test_update_pipeline_job_status_placeholder_does_not_displace_a_real_log_uri
     assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
 
 
+_DEFER_REAL_ERROR_CODE = "SLURM_TASK_ACCOUNTING_INCOMPLETE"
+_DEFER_REAL_ERROR_MESSAGE = "terminal Slurm array task accounting was incomplete"
+_DEFER_URI_VALUED_ERROR = "s3://nhms/logs/cycle_gfs_2026072000/forecast-master-failure.log"
+_DEFER_ERROR_FAMILY = ("error_code", "error_message")
+
+
+def _defer_cohort_projection_errors(
+    repository: Any,
+    record: Mapping[str, Any],
+    *,
+    error_code: str = _DEFER_REAL_ERROR_CODE,
+    error_message: str = _DEFER_REAL_ERROR_MESSAGE,
+) -> Any:
+    """Drive the defer leg with its error family under the caller's control.
+
+    ``_defer_cohort_projection`` hardcodes both error fields because it exists to
+    vary ``log_uri``; this one varies the other half of the evidence family.
+    """
+
+    return repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+@pytest.mark.parametrize("field", _DEFER_ERROR_FAMILY)
+def test_defer_projection_placeholder_error_replay_stops_appending_records(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    """#1589 J21: the defer leg's error family must converge on a replay too.
+
+    ``log_uri``/``finished_at``/``exit_code`` were resolved on this leg already;
+    ``error_code``/``error_message`` were not, and they are written
+    UNCONDITIONALLY and then compared by the same ``changed_fields`` gate.  A raw
+    placeholder therefore differs from stripped durable state on every pass, so
+    every pass answers ``applied`` and appends another record -- unbounded growth
+    towards the journal's segment/byte ceilings, on a row parked at
+    ``reconcile_unverified``, which is not terminal and so is not stopped by the
+    whole-row short circuit above the gate.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    before = _durable_write_count(repository, job_id)
+
+    outcomes = [
+        _defer_cohort_projection_errors(repository, record, **{field: _LAUNDERED_URI}).outcome
+        for _ in range(3)
+    ]
+
+    assert outcomes == ["applied", "idempotent", "idempotent"]
+    assert _durable_write_count(repository, job_id) == before + 1
+    assert _durable_master_payload(repository, record)[field] is None
+
+
+@pytest.mark.parametrize("field", _DEFER_ERROR_FAMILY)
+def test_defer_projection_placeholder_does_not_displace_a_real_error_family(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    """#1589 J22: withheld means keep, on the defer leg's unconditional pair.
+
+    Seeded with a URI-valued error field, because that is exactly the shape the
+    public projection renders as a bare ``[object-uri]`` -- pinned below by
+    reading the field back through ``get_pipeline_job`` rather than asserted in
+    a comment.  A caller round-tripping that public row hands the placeholder
+    straight back, and this leg has no ``is not None`` guard to decline with, so
+    only resolving against the persisted row keeps the value alive.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    assert _defer_cohort_projection_errors(repository, record, **{field: _DEFER_URI_VALUED_ERROR}).outcome == (
+        "applied"
+    )
+    assert _durable_master_payload(repository, record)[field] == _DEFER_URI_VALUED_ERROR
+    assert repository.get_pipeline_job(job_id)[field] == _LAUNDERED_URI
+    before = _durable_write_count(repository, job_id)
+
+    replay = _defer_cohort_projection_errors(repository, record, **{field: _LAUNDERED_URI})
+
+    assert replay.outcome == "idempotent"
+    assert _durable_write_count(repository, job_id) == before
+    assert _durable_master_payload(repository, record)[field] == _DEFER_URI_VALUED_ERROR
+
+
 def _project_cohort(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
     return _reproject_cohort(repository, record, log_uri=log_uri)
 
@@ -11739,6 +11829,19 @@ def test_log_uri_write_leg_table_covers_every_log_uri_taking_method() -> None:
     exclusions -- so a new caller-``log_uri`` write leg turns this RED until
     someone either parametrizes it or records why it is excluded.  The two
     directions are asserted separately so the failure says which happened.
+
+    Field boundary, stated rather than implied: this pins the ``log_uri`` family
+    ONLY.  The error family (``error_code``/``error_message``) is subject to the
+    same D3 contract and is structurally invisible here -- and a name scan could
+    not be widened to cover it honestly either, because
+    ``project_forecast_cohort_tasks`` spells its parameter
+    ``master_error_message``, so a parameter-name scan would silently miss a real
+    leg while looking complete.  Error-family coverage is therefore per leg, not
+    a class property: see the J13-J20 tests plus
+    ``test_defer_projection_placeholder_error_replay_stops_appending_records``
+    and
+    ``test_defer_projection_placeholder_does_not_displace_a_real_error_family``.
+    ``mark_pipeline_job_permanently_failed`` is the known uncovered leg (#1630).
 
     Mechanism boundary, stated rather than implied: this scans for a ``log_uri``
     PARAMETER.  Row-taking writers such as ``upsert_pipeline_job`` and

@@ -562,7 +562,7 @@ _resolved_caller_evidence(value, *, durable=None)   # :8899 附近
 | 3 | `reserve_pipeline_job` | 是 | 构造时把 `log_uri`/`error_*`/时间族全部强制 `None` | 不受累 |
 | 4 | `reclaim_pipeline_job_reservation` | 是（身份字段回填，`not in (None,"")` 守卫） | 有守卫；无相等闸门 | 不受累：回填集合内**无任何 URI 类字段**（已逐字段核） |
 | 5 | `bind_pipeline_job_reservation` | 是（`slurm_job_id`/`status`/`array_task_id`） | `is not None` 守卫 | 不受累：无 URI 类字段；第二趟被 `slurm_job_id` 已绑挡回 |
-| 6 | `commit_pipeline_job_submit_attempt` | **是**（`exit_code`/`error_code`/`error_message`/`log_uri`） | **无条件写**；有绑定后幂等闸（不含这些字段） | **已修（统一性）**：传 `durable=`。实际不可位移（reserved 行这一族恒为 `None`），但规则不留例外 |
+| 6 | `commit_pipeline_job_submit_attempt` | **是**（`exit_code`/`error_code`/`error_message`/`log_uri`） | **无条件写**；有绑定后幂等闸（不含这些字段） | **已修，且经实证为承重**：传 `durable=`。原判「实际不可位移」**已被证伪**——`reclaim_pipeline_job_reservation:1959-1977` 不 null `log_uri`，被 reclaim 的预约把上一次 attempt 的 URI 带进本腿；中和 `:2171` 后恰好只有 J20 第 7 臂转红。已纳入 J20 表内 |
 | 7 | `transition_pipeline_job_submit_evidence` | **是**（6 个证据参数） | 6 个 `is not None` 谓词 + `changed_fields` **相等闸门** | **已修**：谓词腿解析，落在闸门之前。J15/J16 |
 | 8 | `transition_pipeline_job_runtime_status` | **是**（6 个） | 同上 | **已修**。J13/J14 |
 | 9 | `request_pipeline_job_cancellation` | 是（`reason` → `error_message`） | 无条件写；`cancellation_pending` 状态闸**在写之前**答 idempotent | **不修，裁定见 D9.3** |
@@ -648,9 +648,8 @@ update_status / defer / project）：先用真值喂一趟，再用同一个占�
 durable 真值**两趟都不动**，且（除 `update_pipeline_job_status` 外）第二趟**不追加记录**。
 它约束的是**类**，不是七个实例；新增写腿必须进这张表。
 
-**两处显式排除，不假装覆盖**：`commit_pipeline_job_submit_attempt` 的前置行按预留契约
-恒无 `log_uri`，构造不出可位移的真值；`upsert_pipeline_job` 的证据是以**整行 record**
-而非 `log_uri=` 关键字进来的，由 J10 单独钉。
+**排除表为空，且不假装覆盖**（本段已按终审 P3-a 更正）：`commit_pipeline_job_submit_attempt` 原被判「前置行按预留契约恒无 `log_uri`」而排除——**该判断为假**，`reclaim_pipeline_job_reservation` 保留 `log_uri`，它现在是表内**第 7 条臂**。
+`upsert_pipeline_job` / `reserve_pipeline_job` 是**收整行 record** 的写方，不带 `log_uri=` 关键字，因此不出现在参数内省集合里、**不被本守卫覆盖**（由 AST 单一构造点守卫与 J10 分别钉）；该边界写在完备性用例的 docstring 里，且排除机制无法被用来伪装成覆盖（stale-exclusion 方向单独断言并已证明会咬）。
 
 ### D9.6 变异证死（round-2 新增行）
 
@@ -702,7 +701,7 @@ round-1 已修的腿上不误报**。
 | 类守卫 | `…converge_on_a_replayed_placeholder[complete_pipeline_job_cancellation]` | FAILED | PASSED |
 | 类守卫 | `…converge_on_a_replayed_placeholder[update_pipeline_job_status]` | FAILED | PASSED |
 
-`commit_pipeline_job_submit_attempt`（#6）无对应红——它按预留契约不可位移，J20 已显式排除，
+`commit_pipeline_job_submit_attempt`（#6）**已补红**——原判「不可位移、J20 已排除」被证伪并推翻，它现在是 J20 第 7 条臂，
 这条修改是**统一性**改动、没有 oracle，如实记账。
 
 定向四套件全量：改源前 `949 passed`，改源后 `962 passed`（+13 = 新增 7 条单腿用例 + 6 个参数臂），
@@ -782,3 +781,82 @@ implementer 没有照单全收评审结论而是回源码核实，这条纠正�
 `upsert_pipeline_job` / `reserve_pipeline_job` 是**收 row 的写方**，不出现在参数内省集合里，
 故**不被该守卫覆盖**（覆盖它们的是 AST 单一构造点守卫）——这条边界写进了完备性用例的 docstring，
 且排除机制无法被用来伪装成覆盖（上面那次 stale-exclusion 探针就是证明）。
+
+## D11（Phase 7 终审处置）
+
+终审判**可合并、无 P1**，并独立重做了 census（8 条腿 / 5 个等值闸，计数确认）、自行探针复核了
+frozen 红线与 `durable=` 布放。以下是它找出的、已在本轮处置的项。
+
+### P2：R2 的全称句为假——defer 腿的错误族没修完（**本节是我自己写错的**）
+
+round-2 修 spec 时我把 R2 的作用域从「every **cohort** write path」扩成
+「**every** durable write path that admits caller-supplied evidence」。**这句话当时不成立**：
+`_defer_forecast_cohort_projection_unlocked` 的 `error_code` / `error_message` 是**无条件写且未
+resolve**，两者都在 `changed_fields` 闸内。终审实测同参连调：
+
+| 字段 | 修前 | 修后 |
+|---|---|---|
+| `error_message="[object-uri]"` | `['applied','applied','applied']`，记录 2→5，durable `None` | `['applied','idempotent','idempotent']`，记录 2→3 |
+| `error_code="[object-uri]"` | 同上 | 同上 |
+| displacement（durable 已有真值） | replay `applied`，记录 3→4，durable **变 `None`** | replay `idempotent`，记录 3→3，durable **保住真值** |
+
+**这与 round-1 P1 是同一个错误：枚举不完整。** 我们修了这条腿的 3 个字段、漏了 2 个。
+**处置：修代码，不缩窄 spec。** 在刚修过的同一个函数里留一条已知不收敛的腿、还把不变量写成
+「每一条」，是明知故犯。落地形如 `complete_pipeline_job_cancellation`：`durable=` 解析在
+`_durable_error_message` 包裹**之前**、`changed_fields` 闸**之上**；受谓词保护的三元组不传 `durable=`。
+
+变异证死（逐条单独施加，sha256 拷回核验）：
+
+| 变异 | 转红 |
+|---|---|
+| defer `error_message` 去掉 `durable=` | `…does_not_displace_a_real_error_family[error_message]` |
+| defer `error_code` 去掉 `durable=` | `…does_not_displace_a_real_error_family[error_code]` |
+| defer `error_message` 完全不 resolve | `…replay_stops_appending_records[error_message]` + displacement 臂 |
+| defer `error_code` 完全不 resolve | `…replay_stops_appending_records[error_code]` + displacement 臂 |
+
+前两条只杀 displacement 臂是**预期而非弱点**：replay 用例里 durable 值本就是 `None`，
+传不传 `durable=` 在那里重合。两条用例咬的是修复的两半。
+
+### 兄弟腿的处置（逐条给理由，不含糊）
+
+| 腿 | 处置 | 理由 |
+|---|---|---|
+| `_defer_forecast_cohort_projection_unlocked` | **修** | 上文 P2 |
+| `reject_pipeline_job_submit_attempt` | **留** | 终审给的「无前值可毁」理由**过宽**（unbound submit-evidence 转换确实会往仍为 `reserved` 的行写错误族——正是证伪 `:2152` 注释的同一形状）。站得住的理由是：幂等分支只比 `submission_attempt`/`submit_outcome`/`status`，不比错误族，无追加病；且拒收自带的**必填**错误就是该 attempt 的权威结论，覆写是意图不是位移 |
+| `update_forecast_cycle_status` | **留** | 构造全新行字面量，从不读持久行；没有可 `durable=` 的对象，加一次 durable 读是另一件事 |
+| `mark_pipeline_job_permanently_failed` | **留** | 已由 **#1630** 跟踪 |
+| `update_hydro_run_status` | **尝试后回退** | 见下 |
+
+### `update_hydro_run_status`：尝试修 → 前提被证伪 → 如实回退（报告不修）
+
+implementer 实现了对称的 caller-side resolution，**测试仍红**。根因不在谓词：
+`_hydro_run_for:6180-6194` 返回的是 `_public_scheduler_row(rows.hydro_run)`——`existing`
+**本身就是公共投影**，`row = dict(existing)` 把 `[object-uri]` 抄进来，写边界再抹掉。
+caller 侧 resolve 对此是**可证的空转**。实测：
+
+```
+update_hydro_run_status(run_id,"failed", error_message="s3://nhms/logs/run.log") -> durable 's3://nhms/logs/run.log'
+update_hydro_run_status(run_id,"failed")   # 完全不带错误参数           -> durable None
+```
+
+**这是既存缺陷，不是本 PR 引入**：在咽喉 strip 之前，同一个读写环把值洗成字面量
+`"[object-uri]"`；之后变成抹成 `None`。同样的信息损失，换了个表现形式——本 PR 改的是它的
+**样貌**，不是它的存在。修法在**读路径**（从 durable 行合并，而不是公共投影），是另一件事。
+implementer 没有留下一个带着假注释的空转补丁，而是回退并上报——这是对的。已另立 issue 跟踪。
+
+### 三处被本 PR 自己的发现证伪的注释，已改
+
+`:2155-2174`（原称 reserve 会 null 整族故 `durable=` 只是「统一性」——被 `reclaim` 保留
+`log_uri` 证伪，现改为明写「承重，别简化掉」并给出中和 `:2171` 只红第 7 臂的实证）；
+`:8196-8218`（内联 payload 循环枚举错误：`permit_pipeline_job_retry` 根本不发 event，
+`project_forecast_cohort_tasks` 发**两个**却没列——已改为按方法名列全四条，行号会腐烂）；
+`_resolved_caller_evidence` 的 docstring（原文读起来像完备性声明，现列出四条有意不 resolve
+的腿及各自理由）。
+
+### 为什么**不**给错误族加类守卫（拒绝造假守卫）
+
+`log_uri` 那条完备性守卫按参数名内省，对错误族**结构性失效**：
+`project_forecast_cohort_tasks` 把参数拼作 `master_error_message`，名字扫描会**漏掉一条真腿
+却报告完备**——比没有守卫更糟。故不加，改为在完备性用例的 docstring 里写明它只钉
+`log_uri` 族、错误族受同一 D3 契约但对本机制不可见、错误族的覆盖是逐腿的（并点名
+`mark_pipeline_job_permanently_failed` 是已知未覆盖腿，#1630）。

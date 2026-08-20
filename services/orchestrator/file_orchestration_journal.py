@@ -1633,6 +1633,16 @@ class FileOrchestrationJournalRepository:
             if existing is None:
                 raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
             row = dict(existing)
+            # #1589 (design D3): deliberately NOT resolved here, and the reason is
+            # not "benign".  ``_hydro_run_for`` returns ``_public_scheduler_row``,
+            # so ``existing`` is already the PUBLIC projection: a URI-valued
+            # ``error_message`` arrives as ``[object-uri]`` and the write boundary
+            # strips it, so even a bare ``update_hydro_run_status(run_id,
+            # "failed")`` that supplies no error at all drops the durable value.
+            # That is a read-path defect, not a caller-evidence one -- resolving
+            # the two parameters below would be a pure no-op against it, so this
+            # leg is deliberately left alone.  Fixing it means giving this leg a
+            # durable read, which is out of #1589's scope.
             safe_error_message = _durable_error_message(error_message)
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
             for key, value in (("slurm_job_id", slurm_job_id),):
@@ -2154,9 +2164,16 @@ class FileOrchestrationJournalRepository:
             row = apply_accepted_submit_transition(existing, transition)
             # #1589 (design D3): unconditional writes of caller evidence, so
             # withheld resolves against the persisted row rather than erasing
-            # it.  A reservation carries no evidence today (``reserve`` nulls
-            # the whole family), so this is uniformity rather than a live
-            # displacement -- the rule holds without a per-leg exception.
+            # it.  These ``durable=`` arguments are LOAD BEARING, not uniformity:
+            # a ``reserved`` row is not necessarily evidence-free.  ``reserve``
+            # nulls the whole family, but ``reclaim_pipeline_job_reservation``
+            # nulls ``exit_code``/``error_code``/``error_message`` and NOT
+            # ``log_uri``, so a reclaimed reservation carries the previous
+            # attempt's URI into this leg; and an unbound submit-evidence
+            # transition writes evidence onto a row that stays ``reserved``.
+            # Neutralizing the ``log_uri`` resolution below turns exactly the
+            # ``commit_pipeline_job_submit_attempt`` arm of the J20 replay table
+            # red -- do not "simplify" these away.
             row.update(
                 {
                     "slurm_job_id": requested_id,
@@ -3643,21 +3660,36 @@ class FileOrchestrationJournalRepository:
                 status="reconcile_unverified",
             ),
         )
-        row.update(
-            {
-                "status": "reconcile_unverified",
-                "error_code": error_code,
-                "error_message": _durable_error_message(error_message),
-                "updated_at": _format_utc(_utcnow()),
-            }
-        )
         # #1589 (design D3): same rule as the batched projection leg -- a
         # display placeholder is a withheld value, not an overwrite.  This leg
         # is separately reachable: pass 1 parks the row on
         # ``reconcile_unverified``, which is not terminal, so the whole-row
         # short circuit above does not stop a pass 2 carrying a placeholder.
-        # Resolved above the guards and therefore above the ``changed_fields``
-        # equality gate below.
+        # Everything below is resolved above the ``changed_fields`` equality
+        # gate, so the value compared is the value persisted.
+        #
+        # The leg has TWO regimes and they take different resolutions.  The
+        # error family here is written UNCONDITIONALLY, so declining is not an
+        # option and a withheld value resolving to ``None`` would destroy the
+        # persisted one -- and the gate would then compare a raw placeholder
+        # against erased durable state and never converge, appending a record
+        # per replay.  Hence ``durable=``, resolved BEFORE the
+        # ``_durable_error_message`` wrap, exactly as
+        # ``complete_pipeline_job_cancellation`` does it.  The trio below is
+        # guarded by ``is not None``, where ``None`` makes the guard decline and
+        # declining IS keeping, so it takes no ``durable=``.
+        resolved_error_code = _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
+        resolved_error_message = _durable_error_message(
+            _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+        )
+        row.update(
+            {
+                "status": "reconcile_unverified",
+                "error_code": resolved_error_code,
+                "error_message": resolved_error_message,
+                "updated_at": _format_utc(_utcnow()),
+            }
+        )
         finished_at = _resolved_caller_evidence(finished_at)
         exit_code = _resolved_caller_evidence(exit_code)
         log_uri = _resolved_caller_evidence(log_uri)
@@ -8165,15 +8197,26 @@ def _journal_record_for_write(
     # The layering that follows is therefore: an event that goes through
     # ``_append_validated_record_unlocked`` strips at that caller boundary,
     # where its raw un-sanitized payload still exists; the job lane strips here,
-    # at the record constructor.  That is NOT a guarantee for every event -- the
-    # three inline payload loops (the submission-failed rejection, the
-    # permanent-failure mark, the reservation-lost release) build their event
-    # dict and call this function directly, so they get neither the
-    # caller-boundary strip nor ``_public_pipeline_event_payload``.  They are
-    # safe only because their ``details`` carry no URI-bearing field, audited
-    # field by field in design D1; that is the declared cost of the carve-out,
-    # not a structural property.  Anyone adding a second renderer must apply the
-    # same rule to it, not add another record_type here.
+    # at the record constructor.  That is NOT a guarantee for every event -- four
+    # inline payload loops build their payload dicts and call this function
+    # directly, so whatever they emit gets neither the caller-boundary strip nor
+    # ``_public_pipeline_event_payload``:
+    #
+    #   * ``reject_pipeline_job_submit_attempt`` (submission-failed rejection)
+    #     -- one ``submission`` event;
+    #   * ``mark_pipeline_job_permanently_failed`` (permanent-failure mark)
+    #     -- one ``permanently_failed`` event;
+    #   * ``permit_pipeline_job_retry`` (reservation-lost release) -- NO event
+    #     payload at all, only ``hydro_run``/``pipeline_job`` rows;
+    #   * ``project_forecast_cohort_tasks`` (cohort task projection) -- TWO
+    #     events, ``array_task_reconciled`` and ``status_change``.
+    #
+    # The three that do emit events are safe only because their ``details`` carry
+    # no URI-bearing field, audited field by field in design D1 and re-audited
+    # for both projection payloads; that is the declared cost of the carve-out,
+    # not a structural property.  Anyone adding a fifth loop, or a second
+    # renderer, must apply the same rule to it rather than add another
+    # record_type here.
     if record_type != "pipeline_event":
         payload = _strip_redaction_placeholders(payload)
     payload = _redact_durable_error_message_fields(record_type, payload)
@@ -9002,6 +9045,17 @@ def _resolved_caller_evidence(value: Any, *, durable: Any = None) -> Any:
       said "no value", and legs that persist that as a clear must keep doing so;
       only a placeholder was ever withheld.
     * anything else -> unchanged (non-string evidence included).
+
+    The "every write leg" above is the RULE, not a claim that every leg obeys it
+    today.  Four legs deliberately still write a caller error family unresolved:
+    ``update_forecast_cycle_status`` builds a fresh row and never reads the
+    persisted one, so it has nothing to resolve against;
+    ``reject_pipeline_job_submit_attempt`` writes the rejection's own required
+    error as the attempt's authoritative outcome and its idempotent branch never
+    compares the error fields, so neither displacement nor append growth bites;
+    ``update_hydro_run_status`` reads the PUBLIC projection as its base row, so
+    resolving its parameters would not save the value that read already lost;
+    ``mark_pipeline_job_permanently_failed`` is a real open gap tracked as #1630.
     """
 
     stripped = _strip_redaction_placeholders(value)

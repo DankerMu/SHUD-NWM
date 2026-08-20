@@ -73,8 +73,8 @@ Replaying an identical call SHALL therefore converge: the second and later calls
 
 #### Scenario: An identical replay carrying a withheld value converges
 
-- **WHEN** a durable write path is called twice with identical arguments in which an evidence field carries a display placeholder
-- **THEN** the second call reports the state as already recorded, appends no further durable record, and consumes no further sequence number
+- **WHEN** a durable write path **that decides its outcome by comparison** is called twice with identical arguments in which an evidence field carries a display placeholder
+- **THEN** the second call reports the state as already recorded, appends no further durable record, and consumes no further sequence number. A path that deliberately has no such comparison and appends on every call is outside this scenario
 
 #### Scenario: A cancellation receipt replay stays committed
 
