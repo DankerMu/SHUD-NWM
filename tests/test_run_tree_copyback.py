@@ -1349,12 +1349,15 @@ def test_copyback_run_trees_state_index_lock_collision_is_classified_failed_clos
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
 
-    # The umask has to cover the whole construction, not just the call: the
-    # publish below takes a provider lock whose parent `ensure_directory_no_follow`
-    # creates with a bare `os.mkdir` (safe_fs.py:68), i.e. `0o777 & ~umask`. Under
-    # an ambient `umask 002` that is 0o775 and `provider_lock_parent_unsafe`
-    # (provider_atomic.py:209-210) fires during setup, before this test has proved
-    # anything. Everything is inside the `try` so a mid-construction raise cannot
+    # This wrapper is load-bearing -- do NOT delete it as a #1513 leftover. #1513
+    # pinned safe_fs's `os.mkdir` to an explicit 0o755, but that pin cannot reach
+    # these lock parents, because safe_fs does not create them: the two bare
+    # `mkdir(parents=True)` calls below (:1366 and :1375) do, i.e. `0o777 & ~umask`,
+    # and safe_fs never chmods an already-existing directory. Under an ambient
+    # `umask 002` the source parent lands 0o775 and `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) fires inside the publish at :1367 -- before the
+    # `chmod(0o700)` calls at :1378-:1379 can run, so those cannot rescue it
+    # either. Everything is inside the `try` so a mid-construction raise cannot
     # leak 0o077 into the rest of the session.
     previous_umask = os.umask(0o077)
     try:

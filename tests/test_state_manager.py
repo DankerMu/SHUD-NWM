@@ -3677,14 +3677,17 @@ def test_state_index_copyback_refuses_hardlinked_provider_lockfiles(
     # passes; the merge then takes the source lock and asks for the destination
     # lock, which is the same file, and `provider_destination_lock` is blocking
     # and not reentrant.  Before this change that is a permanent hang.
-    # The umask has to cover the *construction*: `_CopybackRoots` publishes both
-    # indexes, and each publish takes a provider lock whose parent
-    # `ensure_directory_no_follow` creates with a bare `os.mkdir` (safe_fs.py:68),
-    # i.e. `0o777 & ~umask`.  Under an ambient `umask 002` that is 0o775 and
-    # `provider_lock_parent_unsafe` (provider_atomic.py:209-210) fires inside the
-    # fixture, before this test has proved anything.  The construction is inside
-    # the `try` so a mid-construction raise cannot leak 0o077 into the rest of the
-    # session.
+    # The umask no longer decides the lock parents: `_CopybackRoots` creates both
+    # of them only through `publish_state_snapshot_index` ->
+    # `ensure_directory_no_follow`, and #1513 pinned that `os.mkdir` to an explicit
+    # 0o755 (safe_fs.py:68), so `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) passes under any ambient umask and this wrapper
+    # is no longer load-bearing for that gate (measured: the suite is green with the
+    # wrapper neutralized).  It is kept because it is behavior-neutral --
+    # `0o755 & ~0o077 == 0o700`, the same private mode it always produced -- and
+    # because it keeps this test's private-mode posture explicit rather than
+    # implicit in safe_fs's pin.  The construction is inside the `try` so a
+    # mid-construction raise cannot leak 0o077 into the rest of the session.
     previous_umask = os.umask(0o077)
     try:
         roots = _CopybackRoots(tmp_path)
