@@ -165,6 +165,12 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     QUARANTINE_RERUN_PROVENANCE_FIELD,
 )
 
+# The derived per-model row's own frozen evidence (#1187). Deliberately
+# minimal: a candidate row owns no master authority state, only the single
+# lineage entry copied out of the master map at projection time, and that entry
+# is exactly as un-rewritable as the master's map it came from.
+ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS = (INIT_STATE_IDENTITY_FIELD,)
+
 # Deliberately WITHOUT the init-state identity: member projection feeds
 # ``forecast_cohort_digest``, and adding a field there would recompute every
 # historical row's digest into a mismatch (#1183 F3).
@@ -419,6 +425,21 @@ def accepted_submit_master_ordinary_upsert_state(row: Mapping[str, Any]) -> dict
     return {
         field: normalized.get(field)
         for field in ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS
+    }
+
+
+def accepted_submit_candidate_immutable_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the frozen evidence of one derived per-model accepted-submit row."""
+
+    normalized = normalize_accepted_submit_evidence(row)
+    if accepted_submit_row_kind(normalized) != "candidate":
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid",
+            field="accepted_submit_row_kind",
+        )
+    return {
+        field: normalized.get(field)
+        for field in ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS
     }
 
 
@@ -1075,6 +1096,7 @@ def forecast_cohort_identity_is_valid(identity: Mapping[str, Any]) -> bool:
 
 
 __all__ = (
+    "ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
@@ -1095,6 +1117,7 @@ __all__ = (
     "MAX_FORECAST_COHORT_MEMBERS",
     "QUARANTINE_RERUN_PROVENANCE_FIELD",
     "accepted_submit_pipeline_job_model_id",
+    "accepted_submit_candidate_immutable_evidence",
     "accepted_submit_contract_is_current",
     "accepted_submit_master_identity_is_structural",
     "accepted_submit_master_immutable_identity",
