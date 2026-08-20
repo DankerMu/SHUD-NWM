@@ -161,12 +161,45 @@ def _is_raw_manifest_object_uri(manifest_uri: str) -> bool:
         return path.startswith("raw/") and path.endswith("/manifest.json")
     return value.startswith("raw/") and value.endswith("/manifest.json")
 
-def _object_manifest_is_missing(candidate: SchedulerCandidateLike, manifest_uri: str) -> bool:
+def _object_store_prefix_for(candidate: SchedulerCandidateLike) -> str:
+    """The deployment object-store prefix for ``candidate`` -- store-free and never raising.
+
+    Shared by ``_local_object_store_for`` below and by the failure-state shape
+    classifier (``_needs_package_manifest_witness``), so the classifier normalizes
+    a recorded reference with exactly the prefix the probe's store will use
+    (#1397).  The classifier runs OUTSIDE the probe's containment and its only
+    permitted throw face is the pure normalizer's ``ValueError``, so this reader
+    is defensive in the same posture as ``_object_store_root_configured``
+    (``getattr`` + ``isinstance(Mapping)`` + ``str``) rather than the bare
+    ``candidate.resource_profile.get(...)`` used below: a bare ``.get`` raises
+    ``AttributeError``/``TypeError`` on a candidate whose resource profile is not
+    a mapping, and neither is foldable by the classifier's ``except ValueError``.
+    """
+
+    resource_profile = getattr(candidate, "resource_profile", None)
+    prefix = resource_profile.get("object_store_prefix") if isinstance(resource_profile, Mapping) else None
+    return str(prefix or os.getenv("OBJECT_STORE_PREFIX", "") or "")
+
+
+def _local_object_store_for(candidate: SchedulerCandidateLike) -> LocalObjectStore | None:
+    """The store the failure-state probe resolves keys against, or None when unconfigured.
+
+    Construction touches the filesystem (``ensure_directory_no_follow`` on the
+    root) and may raise ``ObjectStoreError``, so this factory is for probe-side
+    callers only -- the shape classifier must never call it (#1397 D4).
+    """
+
     object_root = candidate.resource_profile.get("object_store_root") or os.getenv("OBJECT_STORE_ROOT")
     if object_root in (None, ""):
+        return None
+    return LocalObjectStore(str(object_root), object_store_prefix=_object_store_prefix_for(candidate))
+
+
+def _object_manifest_is_missing(candidate: SchedulerCandidateLike, manifest_uri: str) -> bool:
+    store = _local_object_store_for(candidate)
+    if store is None:
         return False
-    prefix = str(candidate.resource_profile.get("object_store_prefix") or os.getenv("OBJECT_STORE_PREFIX", ""))
-    return not LocalObjectStore(str(object_root), object_store_prefix=prefix).exists(manifest_uri)
+    return not store.exists(manifest_uri)
 
 def _first_nested_state_value(payload: Mapping[str, Any], aliases: Sequence[tuple[str, ...]]) -> Any:
     for path in aliases:

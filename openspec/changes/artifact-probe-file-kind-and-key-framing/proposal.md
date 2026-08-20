@@ -4,7 +4,7 @@
 
 Batch P1 合并交付两个缺口。两者同族：都落在 `services/orchestrator/scheduler_state_failure.py`
 的**同一条 artifact 存在性探针**（`_artifact_uri_missing_status`，`:1183-1233`）上，都是
-#1365 那轮「fail-closed + 可区分 reason」治理**没覆盖到的反向敞口**——#1365 治的是
+issue #1365 那轮「fail-closed + 可区分 reason」治理**没覆盖到的反向敞口**——#1365 治的是
 「探不了却声称存在」，这两条治的是「探到了但答错」。
 
 1. **#1394 目录被当成"存在的产物"（两条腿同病）**：

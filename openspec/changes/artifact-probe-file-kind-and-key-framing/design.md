@@ -116,7 +116,7 @@ sibling **不入** compat re-export 名单（`SCHEDULER_STATE_COMPAT_REEXPORT_NA
 
 ### D4 —— 分类器**绝不构造 `LocalObjectStore`**（issue 首选方案是陷阱）
 
-#1397 正文首列的方案「复用 `LocalObjectStore.normalize_key`」会踩坑：
+issue #1397 正文首列的方案「复用 `LocalObjectStore.normalize_key`」会踩坑：
 `LocalObjectStore.__post_init__` 跑 `ensure_directory_no_follow(root)`（`object_store.py:63`）
 ——一次**真实文件系统触碰**，抛的是 `ObjectStoreError`（`RuntimeError` 子类，`:57-65`），
 分类器的 `except ValueError` **接不住**；而分类器自己的 docstring（`:1069-1079`）明写它跑在
