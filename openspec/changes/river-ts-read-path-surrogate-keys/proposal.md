@@ -24,18 +24,27 @@ named-identity 分支存在 1583x 计划翻转。本 issue 是 epic M2 的读取
   文本输出，响应逐字段等价；**同时保留 `run_id` /
   `river_network_version_id` / `variable` 三个冗余文本下推谓词**
   （与键谓词同一合取，压缩 chunk segmentby/orderby 下推辅助，
-  round-1 评审 P1 的用户裁定补救，#1342 删列时一并移除，design D1）：
+  round-1 评审 P1 的用户裁定补救，#1342 删列时一并移除，design D1）。
+  **round-3 增补**：node-27 部署门 EXPLAIN 拦到 national 两腿 0.77s →
+  34.7s 回归（集合 join 丢失逐段探针路径），两腿改 per-segment
+  `CROSS JOIN LATERAL (... LIMIT 1)` 探针（实测 0.69s）；探针体内额外
+  受批 `river_segment_id` 文本等值——位置性例外，仅限两个 LATERAL 体
+  内，体外禁令不变，随 #1342 一并移除（design D1 / spec delta
+  round-3 amendment；该扩面提请用户事后复核）：
   - `services/tiles/mvt.py`：hydro 图层 source CTE、hydro-national
     identity stats 探针与 **typed_values / untyped_ranked 两腿**
-    （mvt.py:603-652，UNION ALL 同源，必须同切，禁混文本/键谓词）、
+    （`typed_values` / `untyped_ranked`，UNION ALL 同源，必须同切，禁混
+    文本/键谓词；round-3 后两腿改 per-segment `CROSS JOIN LATERAL`
+    探针，见 design D1）、
     `valid_times_for_layer` named-identity 分支（#1378 病灶）与无具名
     分支（variable 谓词切 enum，fixture 复审补钉）。`feature_id` 拼接
     `rnv || '::' || segment` 字节不变。
   - `packages/common/display_coverage.py`：river 覆盖扫描按键 GROUP BY
     后 join 还原文本（join-and-reconstruct，非改名）。
   - `apps/api/routes/hydro_display.py`：存在性探针切键。
-  - `services/production_closure/`：按实际读形态处置——identity 谓词
-    查询切键；表级 deny-write 探针不动（列无关，记录）；
+  - `services/production_closure/`：按实际读形态处置——**实测该目录无
+    identity 谓词 fact 查询**（终审 P3 纠偏：原文"identity 谓词查询切键"
+    是空集声称）；表级 deny-write 探针不动（列无关，记录）；
     `scale_validation.py` 静态 plan_lines 与新索引计划对齐（现引用
     已不存在的 `river_timeseries_run_valid_idx`，顺带修复在册陈债）。
 - **node-27 运维前置（回填战役，用户裁定路线）**：先强制 stop 压缩

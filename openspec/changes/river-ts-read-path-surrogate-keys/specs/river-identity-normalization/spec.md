@@ -7,9 +7,13 @@
 Display-boundary readers of `hydro.river_timeseries` SHALL filter by the surrogate key and enum columns as the row-selection authority, and SHALL additionally retain redundant text pushdown predicates on exactly `run_id`, `river_network_version_id`, and `variable` — each conjoined (AND) with its key or enum counterpart — in every fact query whose plan can reach compressed chunks, as declared transitional aids for compressed-chunk `segmentby`/`orderby` predicate pushdown while compression settings remain text-based (user-adjudicated remedy, issue #1341 comment thread; removed together with the text-column drop in #1342, where any missed removal fails loudly because the columns are gone). These pushdown predicates are strict no-ops for key-carrying rows and MUST NOT widen results: NULL-key rows stay excluded by the key predicates. No other text column may appear as a fact predicate, with one positional exception below. The aids apply where the identity arrives as a bound literal; identity that reaches the fact table through an authority-table join stays key-joined only — text-column fact joins remain forbidden outside the sanctioned probe bodies — so such query legs carry only the aids whose identity is bound (typically `variable` alone).
 Round-3 amendment (P1 EXPLAIN-gate interception, PR #1443: the set-based national legs lost the per-segment probe path and regressed 0.77s→34.7s): inside the two `hydro-national` `CROSS JOIN LATERAL` probe bodies in `services/tiles/mvt.py` — and only there — correlated text equalities on `run_id`, `river_network_version_id`, and `river_segment_id` are sanctioned as the same class of transitional pushdown aids: each is conjoined (AND) with its surrogate-key counterpart in the same probe, each is a strict no-op for key-carrying rows (all three are NOT NULL primary-key columns), and all are removed together with the text-column drop in #1342. This positionally widens the user-adjudicated three-column literal-aid set by `river_segment_id` for the lateral probe bodies only — recorded as a deviation in the PR 偏离记录 for user review, since the three-column set was a user-adjudicated remedy. Outside a lateral probe body the prohibition on text-column fact joins stands unchanged, and the shape oracle (`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` vs `FORBIDDEN_TEXT_FACT_COLUMNS`) enforces exactly this positional split.
 This covers `services/tiles/mvt.py`,
-`packages/common/display_coverage.py`,
-`apps/api/routes/hydro_display.py`, and the identity-predicated
-validation queries under `services/production_closure/`: resolving caller-supplied text
+`packages/common/display_coverage.py`, and
+`apps/api/routes/hydro_display.py`. It also governs any future
+identity-predicated fact query under `services/production_closure/`; that set is
+empty at delivery time — the directory's `river_timeseries` references are
+table-level deny-write probes, an evidence-token string, and one static plan
+fixture, none of which carry an identity predicate (per-file disposition in
+design.md). The requirement is: resolving caller-supplied text
 identity through the four authority tables and restoring text output
 via authority joins or enum-to-text casts, so that external responses
 remain field-identical to the text-predicate era: JSON responses

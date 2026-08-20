@@ -1947,8 +1947,9 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
 RULE_GAP_REASON_TOKENS: frozenset[str] = frozenset({"fn-gated", "redirect", "edge-consumer", "runtime-budget"})
 
 # The #1452 audit's verdicts, made checkable. 211 pairs derived at d02b4edb;
-# 156 of them are now closed by rules and these 55 are the reasoned remainder
-# (44 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated).
+# 156 of them are now closed by rules and these 56 are the reasoned remainder
+# (45 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated) — #1443 added the
+# scale_validation.py -> read-path shape-pin pair at the end of the table.
 # Keys are per-pair on purpose — a wildcard would blunt exactly the staleness
 # check this table exists for, and the churn a new module causes here is the
 # point. Every wall-clock number below was measured once with

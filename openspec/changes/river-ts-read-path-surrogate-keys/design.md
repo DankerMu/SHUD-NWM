@@ -50,7 +50,11 @@
   的文本表达式**上——整型键序 ≠ 文本序，按键排序会打乱响应数组顺序，
   破坏逐字段等价。
 - hydro-national 的 DISTINCT ON 选身份子查询本就 join 权威表：同一子
-  查询同时取出文本（输出）与键（fact 谓词），零额外 join。
+  查询同时取出文本（输出）与键（fact 谓词）。**唯一新增的 join 是
+  `core.river_network_version`**（终审 P3 纠偏——原文写"零额外 join"
+  不实）：`core.model_instance` 带网络文本 id 但不带键，故须补这一跳；
+  该 join 落在 PK 上、1:1、inner，且 `river_network_version_id` 已被
+  上游 `IS NOT NULL` 守卫，行数不变。
 - **UNION ALL 两腿同切不变量（fixture 复审 round-1 补钉）**：
   hydro-national 的 `typed_values`（mvt.py:603-623）与
   `untyped_ranked`（mvt.py:624-652）是同一 source_cte 里 UNION ALL 的

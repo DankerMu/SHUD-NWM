@@ -35,14 +35,16 @@
       `tests/test_migrations.py` RETAINED_RIVER_TIMESERIES_INDEXES +1；
       **改钉** `test_selected_run_valid_time_discovery_migration_
       matches_strict_identity_predicates`（tests/test_migrations.py:
-      354-383）：索引列元组断言改指 000051 的 `(run_key,
+      `test_migrations.py` 内该函数，行号随 master 漂移故不钉）：索引列
+      元组断言改指 000051 的 `(run_key,
       basin_version_key, river_network_version_key, variable_e,
       valid_time DESC)`，源码谓词断言改为键解析子查询形态，并加
       negative pin——文本谓词 `run_id = :run_id` 等不再出现于
       `valid_times_for_layer` 切片（防回潮；禁止以删钉代改钉）
 - [x] 1.2 `services/tiles/mvt.py`：hydro source CTE、hydro-national
       identity stats + **typed_values 与 untyped_ranked 两腿同切**
-      （mvt.py:603-652，UNION ALL 禁混文本/键谓词，design D1 不变量）、
+      （`typed_values` / `untyped_ranked`，UNION ALL 禁混文本/键谓词，
+      design D1 不变量）、
       valid_times named-identity 分支切键 + 无具名分支 variable 谓词切
       enum（design D1 处置）（D1 形态：InitPlan 键解析 + enum_range
       variable 谓词 + join 还原 + ORDER BY 落文本表达式 + feature_id
