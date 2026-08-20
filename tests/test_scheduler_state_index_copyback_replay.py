@@ -888,19 +888,39 @@ def _call_without_hanging(call: Any) -> Any:
     for exactly the thread that never finishes.  A thread stuck here goes on
     holding whatever fd it took for the rest of this pytest session.
 
-    It **cannot** reproduce the `fcntl.flock` self-deadlock that motivates the
-    guard (provider_atomic.py:219 takes the blocking path without LOCK_NB).
+    The two caller shapes in this file differ in whether that can actually
+    happen, so the bound means different things to each.
+
+    For the **probe-seam** caller
+    (`test_replay_refuses_alias_roots_reporting_one_filesystem_identity`) the
+    helper cannot reproduce the `fcntl.flock` self-deadlock that motivates the
+    guard (provider_atomic.py:221 takes the blocking path without LOCK_NB).
     That deadlock is real in production, where a bind-mount alias makes two
     realpaths name one directory, so the scoped merge locks one lockfile twice.
-    Here the alias is injected at the probe seam, so on the real filesystem the
-    two roots stay genuinely distinct directories; the provider lock is
+    There the alias is injected at the probe seam, so on the real filesystem
+    the two roots stay genuinely distinct directories; the provider lock is
     path-keyed (`provider_lock_path`, and the in-process gate keys on
     `os.path.abspath`), so even a regressed guard that reaches the merge takes
     two distinct lockfiles and returns.  Measured: under a string-compare
-    mutant these tests red in ~0.3s on an ordinary assertion or
-    `FileNotFoundError`, never by hanging.  Reproducing the deadlock would need
+    mutant that test reds in ~0.3s on an ordinary assertion or
+    `FileNotFoundError`.  Reproducing the deadlock through that seam would need
     a real bind mount, which has no portable root-free construction (see the
     honest limit in tests/test_safe_fs.py).
+
+    For the **hardlink** caller
+    (`test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit`)
+    it is the other way round: nothing is injected, `os.link` puts the
+    destination lockfile on the source inode, so the two lock names reach one
+    file and the blocking `flock` genuinely self-deadlocks.  The 5s join is a
+    real tripwire there and must not be removed.  Measured under the branch-B
+    deletion mutant (state_manager.py:1980-1983 -> `return`): that test and its
+    `run_tree_copyback` sibling both consume the whole join budget -- `2 failed
+    in 10.28s` with four hang-regression occurrences and zero
+    `provider_lock_parent_unsafe`, against a `2 passed in 0.45s` pristine
+    baseline.  pyproject.toml carries no `pytest-timeout` and no `addopts`, so
+    this `thread.join(5.0)` is the only bound in the process: drop it and a
+    regression wedges the local session and burns the CI unit-test job's full
+    `timeout-minutes: 35`.
     """
 
     outcome: dict[str, Any] = {}
@@ -1134,8 +1154,29 @@ def _valid_state_bytes(seed: bytes) -> bytes:
     ).encode()
 
 
+@pytest.fixture(name="private_umask_fixture")
+def private_umask_fixture_factory(tmp_path: Path) -> Fixture:
+    """`fixture`, but built under `umask 0o077` so the lock parents come out private.
+
+    `Fixture.__init__` publishes both indexes, and each publish takes a provider
+    lock whose parent `ensure_directory_no_follow` creates with a bare `os.mkdir`
+    (safe_fs.py:68), i.e. `0o777 & ~umask`.  Under an ambient `umask 002` that is
+    0o775 and `provider_lock_parent_unsafe` (provider_atomic.py:209-210) fires in
+    fixture setup -- an error, not a failure, and nothing about the guard under
+    test.  A `chmod` in the test body is too late for that, so the umask has to be
+    in place here; the construction sits inside the `try` so a raise cannot leak
+    0o077 into the rest of the session.
+    """
+
+    previous_umask = os.umask(0o077)
+    try:
+        return Fixture(tmp_path)
+    finally:
+        os.umask(previous_umask)
+
+
 def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
-    fixture: Fixture,
+    private_umask_fixture: Fixture,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1149,16 +1190,16 @@ def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
     checks individual reasons and has no coverage test over the allowlist.
     """
 
-    _apply_env(monkeypatch, fixture)
+    _apply_env(monkeypatch, private_umask_fixture)
     assert "state_snapshot_index_copyback_lock_identical" in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
-    source_lock = provider_atomic.provider_lock_path(fixture.source_index)
-    destination_lock = provider_atomic.provider_lock_path(fixture.destination_index)
+    source_lock = provider_atomic.provider_lock_path(private_umask_fixture.source_index)
+    destination_lock = provider_atomic.provider_lock_path(private_umask_fixture.destination_index)
     # Both lock parents private, or `provider_lock_parent_unsafe` fires first.
     source_lock.parent.chmod(0o700)
     destination_lock.parent.chmod(0o700)
     destination_lock.unlink()
     os.link(source_lock, destination_lock)
-    index_before = fixture.destination_index.read_bytes()
+    index_before = private_umask_fixture.destination_index.read_bytes()
 
     previous_umask = os.umask(0o077)
     try:
@@ -1176,9 +1217,9 @@ def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
     assert error["error_reason"] == "state_snapshot_index_copyback_lock_identical"
     # The committed tail never ran: no receipt, no uncertain verdict, no
     # read-back of a destination nothing wrote.
-    assert not (fixture.receipt_root / "latest.json").exists()
-    assert fixture.destination_index.read_bytes() == index_before
-    assert not fixture.new_shared_object.exists()
+    assert not (private_umask_fixture.receipt_root / "latest.json").exists()
+    assert private_umask_fixture.destination_index.read_bytes() == index_before
+    assert not private_umask_fixture.new_shared_object.exists()
 
 
 def test_replay_root_identity_probe_failure_stays_root_unavailable(

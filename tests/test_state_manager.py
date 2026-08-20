@@ -3676,29 +3676,37 @@ def test_state_index_copyback_refuses_hardlinked_provider_lockfiles(
     # passes; the merge then takes the source lock and asks for the destination
     # lock, which is the same file, and `provider_destination_lock` is blocking
     # and not reentrant.  Before this change that is a permanent hang.
-    roots = _CopybackRoots(tmp_path)
-    source_lock = provider_lock_path(roots.source_index)
-    destination_lock = provider_lock_path(roots.destination_index)
-    # Both lock parents must be private, or `provider_lock_parent_unsafe` fires
-    # on the *source* acquisition and the mutant would red for the wrong reason.
-    source_lock.parent.chmod(0o700)
-    destination_lock.parent.chmod(0o700)
-    # Publishing each index already took its provider lock, so both lockfiles
-    # exist; hardlinking the destination one onto the source inode is the whole
-    # construction -- no injection, no root, portable.
-    assert source_lock.exists()
-    assert destination_lock.exists()
-    destination_lock.unlink()
-    os.link(source_lock, destination_lock)
-    assert source_lock.stat().st_ino == destination_lock.stat().st_ino
-    assert os.path.abspath(source_lock) != os.path.abspath(destination_lock)
-
-    requested_locks = _record_provider_lock_requests(monkeypatch)
-    source_before = roots.source_index.read_bytes()
-    destination_before = roots.destination_index.read_bytes()
-
+    # The umask has to cover the *construction*: `_CopybackRoots` publishes both
+    # indexes, and each publish takes a provider lock whose parent
+    # `ensure_directory_no_follow` creates with a bare `os.mkdir` (safe_fs.py:68),
+    # i.e. `0o777 & ~umask`.  Under an ambient `umask 002` that is 0o775 and
+    # `provider_lock_parent_unsafe` (provider_atomic.py:209-210) fires inside the
+    # fixture, before this test has proved anything.  The construction is inside
+    # the `try` so a mid-construction raise cannot leak 0o077 into the rest of the
+    # session.
     previous_umask = os.umask(0o077)
     try:
+        roots = _CopybackRoots(tmp_path)
+        source_lock = provider_lock_path(roots.source_index)
+        destination_lock = provider_lock_path(roots.destination_index)
+        # Both lock parents must be private, or `provider_lock_parent_unsafe` fires
+        # on the *source* acquisition and the mutant would red for the wrong reason.
+        source_lock.parent.chmod(0o700)
+        destination_lock.parent.chmod(0o700)
+        # Publishing each index already took its provider lock, so both lockfiles
+        # exist; hardlinking the destination one onto the source inode is the whole
+        # construction -- no injection, no root, portable.
+        assert source_lock.exists()
+        assert destination_lock.exists()
+        destination_lock.unlink()
+        os.link(source_lock, destination_lock)
+        assert source_lock.stat().st_ino == destination_lock.stat().st_ino
+        assert os.path.abspath(source_lock) != os.path.abspath(destination_lock)
+
+        requested_locks = _record_provider_lock_requests(monkeypatch)
+        source_before = roots.source_index.read_bytes()
+        destination_before = roots.destination_index.read_bytes()
+
         with pytest.raises(StateManagerError) as error_info:
             _merge_without_hanging(roots.merge)
     finally:

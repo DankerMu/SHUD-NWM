@@ -1279,19 +1279,38 @@ def _call_without_hanging(call: Any) -> Any:
     for exactly the thread that never finishes. A thread stuck here goes on
     holding whatever fd it took for the rest of this pytest session.
 
-    It **cannot** reproduce the `fcntl.flock` self-deadlock that motivates the
-    guard (provider_atomic.py:219 takes the blocking path without LOCK_NB).
+    The two caller shapes in this file differ in whether that can actually
+    happen, so the bound means different things to each.
+
+    For the **probe-seam** caller
+    (`test_copyback_run_trees_skips_alias_root_reporting_one_filesystem_identity`)
+    the helper cannot reproduce the `fcntl.flock` self-deadlock that motivates
+    the guard (provider_atomic.py:221 takes the blocking path without LOCK_NB).
     That deadlock is real in production, where a bind-mount alias makes two
     realpaths name one directory, so the scoped merge locks one lockfile twice.
-    Here the alias is injected at the probe seam, so on the real filesystem the
+    There the alias is injected at the probe seam, so on the real filesystem the
     two roots stay genuinely distinct directories; the provider lock is
     path-keyed (`provider_lock_path`, and the in-process gate keys on
     `os.path.abspath`), so even a regressed guard that reaches the merge takes
     two distinct lockfiles and returns. Measured: under a string-compare mutant
-    these tests red in ~0.3s on an ordinary assertion or `FileNotFoundError`,
-    never by hanging. Reproducing the deadlock would need a real bind mount,
+    that test reds in ~0.3s on an ordinary assertion or `FileNotFoundError`.
+    Reproducing the deadlock through that seam would need a real bind mount,
     which has no portable root-free construction (see the honest limit in
     tests/test_safe_fs.py).
+
+    For the **hardlink** caller
+    (`test_copyback_run_trees_state_index_lock_collision_is_classified_failed_closed`)
+    it is the other way round: nothing is injected, `os.link` puts the
+    destination lockfile on the source inode, so the two lock names reach one
+    file and the blocking `flock` genuinely self-deadlocks. The 5s join is a
+    real tripwire there and must not be removed. Measured under the branch-B
+    deletion mutant (state_manager.py:1980-1983 -> `return`): that test and its
+    replay sibling both consume the whole join budget -- `2 failed in 10.28s`
+    with four hang-regression occurrences and zero `provider_lock_parent_unsafe`,
+    against a `2 passed in 0.45s` pristine baseline. pyproject.toml carries no
+    `pytest-timeout` and no `addopts`, so this `thread.join(5.0)` is the only
+    bound in the process: drop it and a regression wedges the local session and
+    burns the CI unit-test job's full `timeout-minutes: 35`.
     """
 
     outcome: dict[str, Any] = {}
@@ -1328,27 +1347,35 @@ def test_copyback_run_trees_state_index_lock_collision_is_classified_failed_clos
     run_id = "fcst_gfs_2026062700_basins_heihe_shud"
     object_root = tmp_path / "object-store"
     copyback_root = tmp_path / "shared-object-store"
-    _write_run(object_root, run_id, output_text="new\n")
-    state_index = object_root / "scheduler" / "state-index" / "index-last.json"
-    state_index.parent.mkdir(parents=True)
-    publish_state_snapshot_index(
-        [],
-        state_index,
-        object_store_root=object_root,
-        object_store_prefix="s3://nhms",
-        generated_at=datetime(2026, 6, 27, tzinfo=UTC),
-    )
-    destination_index = copyback_root / "scheduler" / "state-index" / "index-last.json"
-    destination_index.parent.mkdir(parents=True)
-    # Both lock parents private, or `provider_lock_parent_unsafe` would fire on
-    # the source acquisition and this would prove nothing about the guard.
-    state_index.parent.chmod(0o700)
-    destination_index.parent.chmod(0o700)
-    source_lock = provider_lock_path(state_index)
-    os.link(source_lock, provider_lock_path(destination_index))
 
+    # The umask has to cover the whole construction, not just the call: the
+    # publish below takes a provider lock whose parent `ensure_directory_no_follow`
+    # creates with a bare `os.mkdir` (safe_fs.py:68), i.e. `0o777 & ~umask`. Under
+    # an ambient `umask 002` that is 0o775 and `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) fires during setup, before this test has proved
+    # anything. Everything is inside the `try` so a mid-construction raise cannot
+    # leak 0o077 into the rest of the session.
     previous_umask = os.umask(0o077)
     try:
+        _write_run(object_root, run_id, output_text="new\n")
+        state_index = object_root / "scheduler" / "state-index" / "index-last.json"
+        state_index.parent.mkdir(parents=True)
+        publish_state_snapshot_index(
+            [],
+            state_index,
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+        destination_index = copyback_root / "scheduler" / "state-index" / "index-last.json"
+        destination_index.parent.mkdir(parents=True)
+        # Both lock parents private, or `provider_lock_parent_unsafe` would fire on
+        # the source acquisition and this would prove nothing about the guard.
+        state_index.parent.chmod(0o700)
+        destination_index.parent.chmod(0o700)
+        source_lock = provider_lock_path(state_index)
+        os.link(source_lock, provider_lock_path(destination_index))
+
         with pytest.raises(RunTreeCopybackError) as error_info:
             _call_without_hanging(
                 lambda: copyback_run_trees(

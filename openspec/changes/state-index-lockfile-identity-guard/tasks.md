@@ -64,9 +64,24 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 - [x] B.1(a) 两个真实不同目录各放一个 index 文件，用 `os.link` 把两者的 `.<name>.lock` **硬链到同一 inode**
       → 断言 `state_snapshot_index_copyback_lock_identical`、**两个 index 都未被修改**、**未取到任何 provider 锁**。
 - [x] B.1(b) **umask/权限必须钉死（round-0 P2）**：两侧 lockfile 父目录都要 `umask 077` + `chmod 0o700`。
-      否则 `provider_atomic.py:206-208` 的 `provider_lock_parent_unsafe`
+      否则 `provider_atomic.py:209-210` 的 `provider_lock_parent_unsafe`
       （`st_uid != geteuid()` 或 `S_IMODE & 0o022`）会在**取源锁时**先抛，mutant 就变成「因为别的原因红」。
       既有套件已有先例：`tests/test_run_tree_copyback.py:212` 显式 `os.umask(0o077)`。
+      **round-1 P3 更正——「钉死」必须覆盖 fixture 构造，否则整条钉子是空的**：
+      `ensure_directory_no_follow` 用裸 `os.mkdir`（`packages/common/safe_fs.py:68`）建 lock 父目录，
+      模式即 `0o777 & ~umask`，所以判定完全由**环境 umask**决定：
+      `022 → 0755`（`S_IMODE & 0o022 == 0`，闸不响，chmod 是 no-op）；`002 → 0775` / `000 → 0777`（闸响）；
+      `077 → 0700`（闸不响）。而 `chmod` 与 `os.umask(0o077)` 原本都排在 `_CopybackRoots(...)` / `_write_run` /
+      replay `Fixture(...)` **之后**——闸真要响时，是在**构造里**先响的，钉子还没执行。
+      结论：原措辞把 mutant 证据的成立**归因错了**（真正兜底的是 oracle 环境的 ambient `umask 022`）。
+      修法：`previous_umask = os.umask(0o077)` 上移到构造**之前**，且构造本身放进同一个 `try`
+      （否则构造中途抛异常会把 077 泄漏给后续整个 pytest 进程），`finally` 沿用既有还原。
+      三处均已修：`tests/test_state_manager.py:3670-3712`、`tests/test_run_tree_copyback.py:1334-1375`、
+      `tests/test_scheduler_state_index_copyback_replay.py:1157-1176`（replay 侧新增专用 fixture
+      `private_umask_fixture`，**不动**共享 `fixture_factory`——动它会顺带遮掉 #1513 的既有红，污染基线计数）。
+      实测：`umask 002` 下三条硬链用例由「2 failed + 1 error（`provider_lock_parent_unsafe`）」转 `3 passed in 0.29s`；
+      `umask 022` 下 `186 passed` 不变。三文件在 `umask 002` 下剩余 `39 failed + 27 errors` 属 **#1513** 既有面，
+      本单未触碰（改前 `41 failed + 28 errors`，差值恰为这三条）。
 - [x] B.1(c) **「不 hang」断言，这次有判别力**：`threading.Thread(..., daemon=True)` + `join(5.0)` + `pytest.fail`。
       **禁止裸调用** —— 与 #1192 不同，**修前这条是真的会永久挂**（round-0 已 `subprocess timeout=25` 实测证实：
       `same lock inode: True` / `abspath keys differ: True` / `TIMEOUT -> deadlock confirmed`）。
@@ -137,15 +152,33 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 
 ## E. 诚实记账（必须进 PR body）
 
-- [ ] E.1 支 A 看不见 hardlink；支 B 只在两侧 lockfile 都已存在时可判。
+- [x] E.1 支 A 看不见 hardlink；支 B 只在两侧 lockfile 都已存在时可判。
       **「两个不同目录 + lockfile 尚不存在 + 未来才被硬链」无法预判**——物理上也无从判起。
-- [ ] E.2 `(st_dev, st_ino)` 仍只覆盖 same-superblock 别名（`nosharecache` 双挂载仍绕过），同 #1192。
-- [ ] E.3 **支 B 的红证是真的**（硬链 lockfile，免 root 可移植，round-0 已实测确认死锁），
+- [x] E.2 `(st_dev, st_ino)` 仍只覆盖 same-superblock 别名（`nosharecache` 双挂载仍绕过），同 #1192。
+- [x] E.3 **支 B 的红证是真的**（硬链 lockfile，免 root 可移植，round-0 已实测确认死锁），
       所以本单的「不 hang」断言**有判别力**——与 #1192 那条不同，那条已在 PR #1608 就地更正为通用「不返回」网。
       支 A 仍是探针注入（真实 bind mount 需 root，未实机验证）。
-- [ ] E.4 node-27 收据判读口径是「相对 master 基线不新增红」，master 已知三条红逐条列明。
-- [ ] E.5 **evidence 实际不外露**：两个调用方都只读 `["phase"]`
+- [x] E.4 node-27 收据判读口径是「相对 master 基线不新增红」，master 已知三条红逐条列明。
+- [x] E.5 **evidence 实际不外露**：两个调用方都只读 `["phase"]`
       （`run_tree_copyback.py:139`、`scheduler_file_provider_refresh.py:1094`），不外露 `.evidence`；
       操作员诊断实际只靠 reason 名，这是 reason 起成自解释名字的理由。
-- [ ] E.6 **round-0 推翻了我 design 的一句断言**：原写「replay 侧同理…符合既有形状」是错的 ——
+- [x] E.6 **round-0 推翻了我 design 的一句断言**：原写「replay 侧同理…符合既有形状」是错的 ——
       replay 按 reason 白名单分类、不看 phase，新 reason 默认掉进 commit-uncertain 尾。已改为 A.7 的显式白名单登记 + B.3(b) 的钉子。
+- [x] E.7 **round-1 又推翻了我一条归因（P3，已修）**：PR body 原写「旁路已被预先钉死：两侧 lock 父目录
+      `chmod 0o700` + `os.umask(0o077)`」——**钉子排在 fixture 构造之后，任何 ambient umask 下都不起作用**。
+      真正让 mutant 证据成立的是 oracle 环境的 ambient `umask 022`（+ tripwire 本身）。已按 B.1(b) 上移修正；
+      口径与实测见 B.1(b)。**结论不变，证据链更强**：verifier 在钉子被证明为 no-op 的 `umask 022` régime 下
+      独立复现，红因 100% 是 tripwire（`hang regression` ×4 / `provider_lock_parent_unsafe` ×0，
+      `2 failed in 10.28s` vs 洁净 `2 passed in 0.45s`），faulthandler 栈定位阻塞点为
+      `packages/common/provider_atomic.py:221` 的 `fcntl.flock`。
+- [x] E.8 **本单让 #1608 的两条 `_call_without_hanging` docstring 变成假的（P2，已修）**：
+      `tests/test_run_tree_copyback.py` / `tests/test_scheduler_state_index_copyback_replay.py` 的 helper
+      docstring 原写「它**不可能**复现 `fcntl.flock` 自死锁……别名是在探针缝位注入的……绝不会以挂起形式红」——
+      那是 #1192 时期「所有调用方都走探针缝位」的事实。本单新增的两个调用方用 `os.link` 造**真硬链**
+      （同一 inode），helper 在那里**真的会挂**。已把 docstring 按调用方形状拆开：探针缝位段按用例名限定，
+      硬链段点名两条新用例、写明 5s join 是真 tripwire 不得删除，并记明 `pyproject.toml` 无 `pytest-timeout`
+      / 无 `addopts`——这个 join 是唯一的界，删了本地 pytest 会话会无限挂死、CI 烧满
+      `.github/workflows/ci.yml:226` 的 `timeout-minutes: 35`。
+- [x] E.9 **out-of-scope，只报不修**：三个测试文件在 `umask 002` 下仍有 `39 failed + 27 errors`，
+      根因是 `safe_fs.ensure_directory_no_follow` 裸 `os.mkdir` 建 lock 父目录（`packages/common/safe_fs.py:68`）
+      撞 `provider_lock_parent_unsafe` 闸——即既有 **#1513**（OPEN），不另开单，本单未触碰。
