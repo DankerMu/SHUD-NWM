@@ -746,15 +746,45 @@ def _require_hydro_mvt_source_identity(
     basin_version_id: str,
     river_network_version_id: str,
 ) -> None:
+    # Issue #1341: the existence probe filters on the integer surrogate keys /
+    # enum column served by migration 000051, resolving the caller's text
+    # identity through the authority tables inside the query. An unknown
+    # identity or an out-of-vocabulary variable makes a resolution subquery
+    # NULL, so the probe finds no row and the route still answers 404 —
+    # the same outcome the text predicates produced, never a SQL error.
+    #
+    # The run_id / river_network_version_id / variable text conjuncts are the
+    # transitional compressed-chunk pushdown aids: compression still keys
+    # compressed chunks on the text columns, so a pure-key predicate cannot be
+    # pushed into them. They are AND-ed with their key counterparts, so they
+    # only narrow (NULL-key rows stay excluded), and they are removed together
+    # with the text columns in #1342.
     row = session.execute(
         text(
             """
             SELECT 1
             FROM hydro.river_timeseries
+            -- transitional compressed-chunk pushdown aid, remove with #1342
             WHERE run_id = :run_id
-              AND basin_version_id = :basin_version_id
+              AND run_key = (
+                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+                  )
+              AND basin_version_key = (
+                      SELECT basin_version_key FROM core.basin_version
+                      WHERE basin_version_id = :basin_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
               AND river_network_version_id = :river_network_version_id
+              AND river_network_version_key = (
+                      SELECT river_network_version_key FROM core.river_network_version
+                      WHERE river_network_version_id = :river_network_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
               AND variable = :variable
+              AND variable_e = (
+                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                      WHERE e::text = :variable
+                  )
               AND valid_time = :valid_time
             LIMIT 1
             """

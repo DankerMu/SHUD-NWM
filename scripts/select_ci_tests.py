@@ -195,7 +195,26 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
 )
 
 
+# tests/test_sql_shape_helpers.py is both a test module and the SQL-shape
+# ORACLE the #1341 read-path negative pins are written against
+# (`strip_scalar_subqueries`). Its own self-tests run because it self-selects,
+# but a helper-only diff would otherwise leave the three consumer files
+# unselected — and a silently over-eager stripper makes those pins vacuous
+# without failing anything here. The rule pulls the consumers in with it.
+SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
+    "tests/test_sql_shape_helpers.py",
+    "tests/test_river_ts_read_path_surrogate_keys.py",
+    "tests/test_display_coverage_refresh.py",
+    "tests/test_migrations.py",
+)
+
+
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        "tests/test_sql_shape_helpers.py",
+        SQL_SHAPE_ORACLE_TESTS,
+        stop_on_match=True,
+    ),
     PathTestRule(
         "tests/test_orchestration_chain.py",
         FILE_JOURNAL_READ_STATE_TESTS,
@@ -646,7 +665,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_display_publish_status_only.py",
             "tests/test_migrations.py",
             "tests/test_openapi_drift.py",
+            # The #1341 surrogate-key / transitional-pushdown shape pins live
+            # here; an mvt.py diff that quietly drops a predicate pairing must
+            # not reach CI green without them.
+            "tests/test_river_ts_read_path_surrogate_keys.py",
         ),
+    ),
+    # The other two #1341 switched surfaces. Both are covered by broad rules
+    # (packages/common/** and the API route rules) that do not include the
+    # read-path shape pins, so without these entries a diff that drops a
+    # pushdown pairing or reintroduces a text fact predicate in either file
+    # reaches CI green unchallenged.
+    PathTestRule(
+        "apps/api/routes/hydro_display.py",
+        ("tests/test_river_ts_read_path_surrogate_keys.py",),
     ),
     PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
@@ -696,11 +728,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # in the PR lane, so listing it buys constant skips and zero assertions.
         # tests/test_select_ci_tests.py derives this closure from the tracked
         # tree and reddens if a new non-gated importer suite appears here.
+        #
+        # #1443 merge consolidation: this module also carries the #1341
+        # read-path shape pins. That surface's broad rules (packages/common/**
+        # and the API route rules) do not include them, so a diff dropping a
+        # pushdown pairing or reintroducing a text fact predicate here would
+        # reach CI green unchallenged. The pins joined this rule instead of
+        # getting a second entry for the same pattern — a duplicate pattern
+        # splits the module's ownership across two rules with nothing saying so
+        # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
         "packages/common/display_coverage.py",
         (
             "tests/test_display_coverage_refresh.py",
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",
+            "tests/test_river_ts_read_path_surrogate_keys.py",
         ),
     ),
     PathTestRule(

@@ -43,6 +43,7 @@ from tests.integration_helpers import (
     SOURCE_ID,
     VALID_TIME_2,
     apply_migrations_from_zero,
+    insert_river_timeseries_dual_written,
     seed_issue_126_data,
 )
 
@@ -149,24 +150,31 @@ def test_out_of_band_write_without_updated_at_bump_backstop_visibility(
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
         assert autopipe._publish_display_runs(throwaway_database_url) == 1
 
-        _execute(
-            connection,
-            """
-            INSERT INTO hydro.river_timeseries (
-                run_id, basin_version_id, river_network_version_id, river_segment_id,
-                valid_time, lead_time_hours, variable, value, unit, quality_flag
+        # Dual-write shape, like every other river_timeseries row this fixture
+        # writes. What is being measured is whether a data write that does not
+        # bump `updated_at` is visible to the staleness backstop — the row's
+        # column shape is incidental to that, but seeding the pre-#1340 shape
+        # here would leave the fixture writing rows production no longer
+        # writes, which is precisely the drift that broke the parity test
+        # above.
+        with connection.cursor() as cursor:
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        FORECAST_RUN_ID,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        f"{ISSUE_126_PREFIX}_seg_inside",
+                        VALID_TIME_2 + timedelta(hours=1),
+                        3,
+                        "q_down",
+                        275.0,
+                        "m3/s",
+                        "ok",
+                    ),
+                ],
             )
-            VALUES (%s, %s, %s, %s, %s, %s, 'q_down', 275.0, 'm3/s', 'ok')
-            """,
-            (
-                FORECAST_RUN_ID,
-                BASIN_VERSION_ID,
-                RIVER_NETWORK_VERSION_ID,
-                f"{ISSUE_126_PREFIX}_seg_inside",
-                VALID_TIME_2 + timedelta(hours=1),
-                3,
-            ),
-        )
 
         # Recorded observation (receipt input, no pass threshold): repeat the
         # measurement so the result is known to be deterministic rather than racy.

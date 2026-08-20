@@ -6,6 +6,7 @@
     "openspec/changes/*/design.md",
     "openspec/changes/*/specs/**",
     "openspec/specs/*/spec.md",
+    "services/tiles/mvt.py",
     "db/seeds/seed_demo.py",
     "packages/common/forcing_domain_handoff_apply.py",
     "workers/output_parser/parser.py",

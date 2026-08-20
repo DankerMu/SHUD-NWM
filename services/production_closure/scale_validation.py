@@ -139,10 +139,17 @@ QUERY_TARGETS = {
         "row_count": 21_000,
         "latency_samples_ms": (205.0, 214.0, 221.0, 218.0, 224.0),
         "threshold_key": "hydro_map_ms",
+        # Plan fixture for the hydro tile point lookup. Both index names track
+        # the query's current shape: issue #1341 moved the fact predicates onto
+        # the integer surrogate keys served by migration 000051's
+        # river_ts_selected_identity_key_valid_time_idx, and moved the segment
+        # join onto core.river_segment's river_segment_key unique index. The
+        # previous fixture still named river_timeseries_run_valid_idx, an index
+        # no in-repo migration creates and that node-27 does not carry.
         "plan_lines": (
             "Nested Loop  (cost=480.00..850.00 rows=21000 width=256)",
-            "  -> Index Scan using river_timeseries_run_valid_idx on hydro.river_timeseries",
-            "  -> Index Scan using river_segment_pkey on core.river_segment",
+            "  -> Index Scan using river_ts_selected_identity_key_valid_time_idx on hydro.river_timeseries",
+            "  -> Index Scan using river_segment_river_segment_key_key on core.river_segment",
         ),
     },
     "forecast_series": {

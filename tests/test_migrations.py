@@ -2,6 +2,11 @@ import re
 from pathlib import Path
 
 from packages.common.migrate import split_sql_statements
+from tests.test_sql_shape_helpers import (
+    FORBIDDEN_TEXT_FACT_COLUMNS,
+    outer_predicates,
+    sql_literals,
+)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
 
@@ -274,7 +279,13 @@ RETAINED_RIVER_TIMESERIES_INDEXES = (
     "river_ts_segment_time_idx",
     "river_timeseries_valid_time_idx",
     "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+    # 000051 (issue #1341): the integer discovery index that serves the switched
+    # display-boundary reads. It joins the keep-list on day one — nothing may
+    # drop it, and the text indexes above stay for rollback and for the
+    # out-of-boundary text readers until #1342 retires them.
+    "river_ts_selected_identity_key_valid_time_idx",
 )
+SURROGATE_KEY_READ_INDEX_MIGRATION = "000051_river_ts_surrogate_key_read_index.sql"
 
 
 def test_drop_redundant_river_index_migration_drops_exactly_the_two_measured_indexes() -> None:
@@ -352,36 +363,152 @@ def test_drop_redundant_river_index_migration_never_executes_its_recorded_rollba
 
 
 def test_selected_run_valid_time_discovery_migration_matches_strict_identity_predicates() -> None:
-    migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
+    """The named-identity discovery branch matches its serving index, column for column.
+
+    Re-pinned by issue #1341: the branch now filters on the surrogate keys, so
+    the index it must match is 000051's integer one, not 000021's text one
+    (which stays in the database for the out-of-boundary text readers — see
+    RETAINED_RIVER_TIMESERIES_INDEXES). The row-selection authority is the key
+    prefix; the sanctioned text conjuncts beside it are the transitional
+    compressed-chunk pushdown aids and do not participate in index matching
+    (this index has no text column), which is exactly why the four-column key
+    prefix still has to be spelled out here.
+
+    Both halves of the pin run on ``outer_predicates``: the key-resolution
+    sub-selects legitimately contain ``run_id = :run_id`` against the authority
+    table, and a raw-source check would therefore pass on code that never
+    switched.
+    """
+    migration = dict(_migration_sql())[SURROGATE_KEY_READ_INDEX_MIGRATION]
+    text_migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
     mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
         encoding="utf-8"
     )
     valid_time_source = mvt_source[
-        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
+        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def national_discharge_valid_times")
     ]
+    named_branch_sql, no_named_branch_sql = sql_literals(valid_time_source)
     hydro_columns = _index_columns_by_name(
         migration,
-        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+        "river_ts_selected_identity_key_valid_time_idx",
     )
 
     assert hydro_columns == (
+        "run_key",
+        "basin_version_key",
+        "river_network_version_key",
+        "variable_e",
+        "valid_time DESC",
+    )
+    # Key form and text form are the same identity in the same order: the
+    # switched branch is a strict prefix of the new index exactly as the old
+    # branch was of the old one.
+    assert _index_columns_by_name(
+        text_migration,
+        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+    ) == (
         "run_id",
         "basin_version_id",
         "river_network_version_id",
         "variable",
         "valid_time DESC",
     )
+
     for expected in (
-        "run_id = :run_id",
-        "basin_version_id = :basin_version_id",
-        "river_network_version_id = :river_network_version_id",
+        "AND run_key = (",
+        "SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id",
+        "AND basin_version_key = (",
+        "SELECT basin_version_key FROM core.basin_version",
+        "WHERE basin_version_id = :basin_version_id",
+        "AND river_network_version_key = (",
+        "SELECT river_network_version_key FROM core.river_network_version",
+        "WHERE river_network_version_id = :river_network_version_id",
+        "variable_e = (",
+        "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e",
+        "WHERE e::text = :variable",
+        "ORDER BY valid_time DESC",
     ):
-        assert expected in valid_time_source
-    assert "variable = :variable" in valid_time_source
+        assert expected in named_branch_sql, expected
+
+    # The whole outer query, spelled out. Equality rather than a list of `in`
+    # checks: it pins the four key columns in the index's own order, pins each
+    # sanctioned text aid as ADJACENT to its counterpart (a pair split across
+    # the query stops being a self-evident no-op), and is red the moment any
+    # other predicate — text or key — appears.
+    assert outer_predicates(named_branch_sql) == (
+        "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
+        "WHERE run_id = :run_id AND run_key = "
+        "AND basin_version_key = "
+        "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
+        "AND variable = :variable AND variable_e = "
+        "ORDER BY valid_time DESC LIMIT :limit"
+    )
+
+    # Negative pin (never delete, only re-point): the text columns that
+    # compression does NOT let us push down stay off the fact table entirely,
+    # in either branch, and neither branch keeps the old IS-NULL-or-equals
+    # text guards.
+    #
+    # Word-boundary matching, not bare substrings: these two branches are
+    # single-table queries with no alias to qualify on, and `unit` /
+    # `quality_flag` are prefixes of the legitimate `unit_e` /
+    # `quality_flag_e`. A bare `in` check would false-red the moment either
+    # enum column is projected here, and would false-red on correct post-#1342
+    # code for the same reason.
+    for branch in (named_branch_sql, no_named_branch_sql):
+        outer = outer_predicates(branch)
+        for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
+            assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
     assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
     assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
         valid_time_source
     )
+
+
+def test_surrogate_key_read_index_migration_adds_one_plain_index_and_drops_nothing() -> None:
+    """000051 is exactly one non-concurrent CREATE INDEX, and it removes nothing.
+
+    ``CREATE INDEX CONCURRENTLY`` is rejected on this hypertable (measured on
+    node-27 during #1338), so the statement must stay plain — and because a
+    plain build holds a SHARE lock that blocks ingest for its whole duration,
+    the header has to carry that operational constraint for the operator who
+    schedules it.
+    """
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration_sql = dict(_migration_sql())
+
+    assert SURROGATE_KEY_READ_INDEX_MIGRATION in migration_sql
+    assert [name for name in migration_names if name.startswith("000051")] == [
+        SURROGATE_KEY_READ_INDEX_MIGRATION
+    ]
+    # The index is on columns 000050 adds, so it must apply after it.
+    assert migration_names.index("000050_river_identity_normalization.sql") < migration_names.index(
+        SURROGATE_KEY_READ_INDEX_MIGRATION
+    )
+
+    migration = migration_sql[SURROGATE_KEY_READ_INDEX_MIGRATION]
+    statements = split_sql_statements(migration)
+    assert len(statements) == 1, f"expected exactly one executable statement, got {len(statements)}"
+    executable = "\n".join(
+        line for line in statements[0].splitlines() if not line.lstrip().startswith("--")
+    ).strip()
+    assert executable.startswith(
+        "CREATE INDEX IF NOT EXISTS river_ts_selected_identity_key_valid_time_idx"
+    ), executable
+    assert "CONCURRENTLY" not in executable, (
+        "hypertables reject CREATE INDEX CONCURRENTLY; the build is deliberately plain"
+    )
+    assert "DROP" not in executable.upper(), (
+        "000051 adds an index; retiring the text indexes is issue #1342"
+    )
+    for retained_index in RETAINED_RIVER_TIMESERIES_INDEXES:
+        if retained_index == "river_ts_selected_identity_key_valid_time_idx":
+            continue
+        assert retained_index not in executable, retained_index
+
+    comment_body = "\n".join(line for line in migration.splitlines() if line.lstrip().startswith("--"))
+    for operational_note in ("CONCURRENTLY", "SHARE lock", "ingest", "cycle"):
+        assert operational_note in comment_body, operational_note
 
 
 def test_qhh_latest_display_product_migration_matches_candidate_and_window_queries() -> None:

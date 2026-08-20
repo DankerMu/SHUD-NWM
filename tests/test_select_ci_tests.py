@@ -287,8 +287,50 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_display_publish_status_only.py",
         "tests/test_migrations.py",
         "tests/test_openapi_drift.py",
+        # Issue #1341 added the surrogate-key / transitional-pushdown shape
+        # pins for this exact file.
+        "tests/test_river_ts_read_path_surrogate_keys.py",
     ]
     assert not fallback_only_tests & set(selected)
+
+
+def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> None:
+    """A helper-only diff must run the pins that trust the helper.
+
+    ``tests/test_sql_shape_helpers.py`` is the oracle behind the #1341 negative
+    pins. Without this rule the diff self-selects only the helper, so an
+    over-eager stripper — the round-1 defect, which made five pins vacuous —
+    could land with every selected test green.
+    """
+    selected = select_tests(["tests/test_sql_shape_helpers.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_migrations.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+        # Every changed test suite drags the meta-guard suite along, because a
+        # test-file PR is exactly the change class that can invalidate the
+        # tree-derived guards. Not part of the oracle closure; asserted here so
+        # the closure itself stays exact.
+        SELECTOR_META_GUARD_TEST,
+        "tests/test_sql_shape_helpers.py",
+    ]
+
+
+def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
+    """The #1341 switch touches three production files; all three must select the pins.
+
+    ``services/tiles/mvt.py`` had its rule extended above. The coverage scan
+    and the existence probe were matching only broad rules that do not include
+    the shape pins, so a diff dropping a pushdown pairing in either file went
+    unchallenged.
+    """
+    coverage_selected = select_tests(["packages/common/display_coverage.py"], repo_root=Path("."))
+    probe_selected = select_tests(["apps/api/routes/hydro_display.py"], repo_root=Path("."))
+
+    assert "tests/test_display_coverage_refresh.py" in coverage_selected
+    assert "tests/test_river_ts_read_path_surrogate_keys.py" in coverage_selected
+    assert "tests/test_river_ts_read_path_surrogate_keys.py" in probe_selected
 
 
 def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:
@@ -1905,8 +1947,9 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
 RULE_GAP_REASON_TOKENS: frozenset[str] = frozenset({"fn-gated", "redirect", "edge-consumer", "runtime-budget"})
 
 # The #1452 audit's verdicts, made checkable. 211 pairs derived at d02b4edb;
-# 156 of them are now closed by rules and these 55 are the reasoned remainder
-# (44 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated).
+# 156 of them are now closed by rules and these 56 are the reasoned remainder
+# (45 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated) — #1443 added the
+# scale_validation.py -> read-path shape-pin pair at the end of the table.
 # Keys are per-pair on purpose — a wildcard would blunt exactly the staleness
 # check this table exists for, and the churn a new module causes here is the
 # point. Every wall-clock number below was measured once with
@@ -2033,6 +2076,18 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/shud_runtime/runtime.py", "tests/test_production_scheduler.py"): "edge-consumer",
     ("workers/forcing_producer/producer.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
     ("workers/model_registry/basins_geometry.py", "tests/test_production_object_store_validation.py"): "edge-consumer",
+    # -- edge-consumer: #1341 read-path shape pins --------------------------
+    # tests/test_river_ts_read_path_surrogate_keys.py belongs to the #1341
+    # display-boundary read surface (services/tiles/mvt.py,
+    # packages/common/display_coverage.py, apps/api/routes/hydro_display.py all
+    # select it whole). It imports scale_validation only to pin that module's
+    # identity-predicated QUERY_TARGETS against the same surrogate-key oracle;
+    # copying it into `services/production_closure/**` would make every
+    # production-closure PR pay for the display read-path pins.
+    (
+        "services/production_closure/scale_validation.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+    ): "edge-consumer",
 }
 
 

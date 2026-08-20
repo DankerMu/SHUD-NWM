@@ -14,6 +14,16 @@ stores the result. ``forecast_store`` then reads them back through a cheap
 materialized values, the cheap path is a byte-for-byte stand-in for the CTE
 path — verified by the parity test.
 
+Issue #1341 introduced one deliberate divergence from that verbatim copy: the
+river leg here filters and groups ``hydro.river_timeseries`` by the integer
+surrogate keys (this module is inside the display boundary), while
+``forecast_store``'s fallback copy stays on the text identity columns (it is
+outside the boundary and its static index evidence is pinned by
+``tests/test_forecast_api.py``). The two produce the same numbers for every row
+that carries surrogate keys — which is every row the dual write has produced
+since #1340 — and differ only on legacy NULL-key rows, which the key form
+excludes by design until the text columns retire in #1342.
+
 Refresh is scoped to one ``run_id`` (or all parsed/finished QHH forecast runs).
 It never touches node-22; it runs against whichever DB ``DATABASE_URL`` points
 at (node-27 local).
@@ -49,8 +59,9 @@ from packages.common.forecast_store import (
 #     at 180M forcing + 730M river rows). ``_refresh`` prefetches the single
 #     run's scalar identity/window and binds it here, enabling chunk exclusion
 #     and the existing (forcing_version_id, basin_version_id, lower(source_id),
-#     variable, valid_time) / (run_id, basin_version_id,
-#     river_network_version_id, variable, valid_time) indexes. The values are
+#     variable, valid_time) index on the station side and, since issue #1341,
+#     000051's (run_key, basin_version_key, river_network_version_key,
+#     variable_e, valid_time DESC) index on the river side. The values are
 #     exactly the join equalities for that run, so the result set is identical;
 #     with NULL bindings the guards fold away and the query is unchanged.
 # Keeping the arithmetic identical is what guarantees parity with the CTE path.
@@ -64,6 +75,13 @@ _CANDIDATE_RUNS_SQL = """
                 h.source_id,
                 h.cycle_time,
                 mi.river_network_version_id,
+                -- Surrogate keys for the river fact-table join (issue #1341).
+                -- candidate_runs already reads all three authority tables, so
+                -- the keys cost no extra join; the river scan below joins on
+                -- them instead of on the repeated text identity columns.
+                h.run_key,
+                bv.basin_version_key,
+                rnv.river_network_version_key,
                 COALESCE(
                     CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
                         THEN (mi.resource_profile->>'output_segment_count')::integer END,
@@ -350,28 +368,58 @@ _COVERAGE_CTES = (
                 identity_stats.basin_version_id,
                 identity_stats.station_source_id
         ),
+        -- River scan on the surrogate keys (issue #1341, index 000051). The
+        -- scan_* pushdown parameters keep their text semantics — they are
+        -- still the run's scalar text identity, resolved to keys inside the
+        -- query by a scalar subquery the planner runs once. A NULL binding
+        -- folds the guard away exactly as before; a text value that resolves
+        -- to nothing yields the empty scan the text predicate yielded.
+        -- The whole river chain groups by keys and the text identity is
+        -- reconstructed once, at the rollup, by joining the authority tables
+        -- (join-and-reconstruct), so `coverage` below is untouched.
+        -- Do not spell a psycopg2 placeholder inside a comment in this string:
+        -- psycopg2 interpolates the entire statement, comments included, and
+        -- an unbound name there raises at execute time.
+        -- The rt.run_id / rt.river_network_version_id / rt.variable conjuncts
+        -- below are the transitional compressed-chunk pushdown aids (#1341):
+        -- compression still segments compressed chunks by the text columns, so
+        -- a pure-key predicate cannot be pushed into them. Each sits in the
+        -- same conjunction as its key counterpart, so it only narrows, and all
+        -- of them are removed with the text columns in #1342. They are
+        -- CONSTANT-valued predicates on purpose; the join to candidate_runs is
+        -- key-only, because a text join equality is not pushdown material and
+        -- a text fact join is forbidden.
         river_sample_rows AS (
             SELECT
-                rt.run_id,
-                rt.basin_version_id,
-                rt.river_network_version_id,
-                rt.river_segment_id,
+                rt.run_key,
+                rt.basin_version_key,
+                rt.river_network_version_key,
+                rt.river_segment_key,
                 cr.expected_segment_count,
                 rt.valid_time,
                 rt.lead_time_hours
             FROM hydro.river_timeseries rt
             JOIN candidate_runs cr
-              ON cr.run_id = rt.run_id
-             AND cr.basin_version_id = rt.basin_version_id
-             AND cr.river_network_version_id = rt.river_network_version_id
+              ON cr.run_key = rt.run_key
+             AND cr.basin_version_key = rt.basin_version_key
+             AND cr.river_network_version_key = rt.river_network_version_key
             WHERE rt.variable = 'q_down'
+              AND rt.variable_e = 'q_down'::hydro.river_variable
               AND rt.valid_time >= cr.display_start_time
               AND rt.valid_time <= cr.display_end_time
-              AND (%(scan_run_id)s IS NULL OR rt.run_id = %(scan_run_id)s)
+              AND (%(scan_run_id)s IS NULL
+                   OR (rt.run_id = %(scan_run_id)s
+                       AND rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                         WHERE run_id = %(scan_run_id)s)))
               AND (%(scan_basin_version_id)s IS NULL
-                   OR rt.basin_version_id = %(scan_basin_version_id)s)
+                   OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
+                                              WHERE basin_version_id = %(scan_basin_version_id)s))
               AND (%(scan_river_network_version_id)s IS NULL
-                   OR rt.river_network_version_id = %(scan_river_network_version_id)s)
+                   OR (rt.river_network_version_id = %(scan_river_network_version_id)s
+                       AND rt.river_network_version_key = (SELECT river_network_version_key
+                                                           FROM core.river_network_version
+                                                           WHERE river_network_version_id
+                                                                 = %(scan_river_network_version_id)s)))
               AND (%(scan_display_start)s IS NULL
                    OR rt.valid_time >= %(scan_display_start)s)
               AND (%(scan_display_end)s IS NULL
@@ -379,48 +427,49 @@ _COVERAGE_CTES = (
         ),
         river_identity_coverage AS (
             SELECT
-                run_id, basin_version_id, river_network_version_id, river_segment_id,
+                run_key, basin_version_key, river_network_version_key, river_segment_key,
                 COUNT(*) AS sample_count,
                 MIN(valid_time) AS valid_time_start,
                 MAX(valid_time) AS valid_time_end,
                 MIN(lead_time_hours) AS min_lead_time_hours,
                 MAX(lead_time_hours) AS max_lead_time_hours
             FROM river_sample_rows
-            GROUP BY run_id, basin_version_id, river_network_version_id, river_segment_id
+            GROUP BY run_key, basin_version_key, river_network_version_key, river_segment_key
         ),
         river_time_coverage AS (
             SELECT
-                run_id, basin_version_id, river_network_version_id,
+                run_key, basin_version_key, river_network_version_key,
                 expected_segment_count, valid_time,
-                COUNT(DISTINCT river_segment_id) AS segment_count
+                COUNT(DISTINCT river_segment_key) AS segment_count
             FROM river_sample_rows
-            GROUP BY run_id, basin_version_id, river_network_version_id, expected_segment_count, valid_time
+            GROUP BY run_key, basin_version_key, river_network_version_key,
+                     expected_segment_count, valid_time
         ),
         river_common_window AS (
             SELECT
-                run_id, basin_version_id, river_network_version_id,
+                run_key, basin_version_key, river_network_version_key,
                 MIN(valid_time) AS river_valid_time_start,
                 MAX(valid_time) AS river_valid_time_end
             FROM river_time_coverage
             WHERE expected_segment_count IS NOT NULL
               AND segment_count = expected_segment_count
-            GROUP BY run_id, basin_version_id, river_network_version_id
+            GROUP BY run_key, basin_version_key, river_network_version_key
         ),
         river_identity_rollup AS (
             SELECT
-                run_id, basin_version_id, river_network_version_id,
-                COUNT(DISTINCT river_segment_id) AS segment_count,
+                run_key, basin_version_key, river_network_version_key,
+                COUNT(DISTINCT river_segment_key) AS segment_count,
                 SUM(sample_count) AS river_sample_count,
                 MAX(min_lead_time_hours) AS min_lead_time_hours,
                 MIN(max_lead_time_hours) AS max_lead_time_hours
             FROM river_identity_coverage
-            GROUP BY run_id, basin_version_id, river_network_version_id
+            GROUP BY run_key, basin_version_key, river_network_version_key
         ),
         hydro_coverage AS (
             SELECT
-                rollup.run_id,
-                rollup.basin_version_id,
-                rollup.river_network_version_id,
+                rollup_run.run_id,
+                rollup_basin.basin_version_id,
+                rollup_network.river_network_version_id,
                 rollup.segment_count,
                 rollup.river_sample_count,
                 common_window.river_valid_time_start,
@@ -429,9 +478,15 @@ _COVERAGE_CTES = (
                 rollup.max_lead_time_hours
             FROM river_identity_rollup rollup
             LEFT JOIN river_common_window common_window
-              ON common_window.run_id = rollup.run_id
-             AND common_window.basin_version_id = rollup.basin_version_id
-             AND common_window.river_network_version_id = rollup.river_network_version_id
+              ON common_window.run_key = rollup.run_key
+             AND common_window.basin_version_key = rollup.basin_version_key
+             AND common_window.river_network_version_key = rollup.river_network_version_key
+            JOIN hydro.hydro_run rollup_run
+              ON rollup_run.run_key = rollup.run_key
+            JOIN core.basin_version rollup_basin
+              ON rollup_basin.basin_version_key = rollup.basin_version_key
+            JOIN core.river_network_version rollup_network
+              ON rollup_network.river_network_version_key = rollup.river_network_version_key
         ),
         coverage AS (
             SELECT
