@@ -184,3 +184,36 @@ materially changed attribution ratio.
   首轮"这一读法相容，但**单个数据点不足以支持撤镜**。另：三轮全部漏掉的 F-1
   （tasks 5.2/5.5 勾了，而承接单 #1627 里三项义务一条都没有）是 Phase 7 终审抓的——
   这条支持的是"保留独立终审"，不是"轮换"。
+
+- 2026-08-20（PR #1625 / issue #1513 合并后 audit 再次 DECIDABLE）：样本扩至 **85** 个
+  多轮 merged PR，later-round catches **core=45 vs rotated=205**。本 PR 边际为
+  **core +0 / rotated +3**。
+
+  **维持 keep。** 但这条边际的成色需要拆开说，因为它是本序列里**第一个真轮换**的
+  数据点：
+
+  round-1 用双镜 `{correctness-invariant, production-blast-radius}`；round-2 我换成
+  单镜 `completeness-second-order`，与 round-1 两镜**完全不相交**——不是 #1602/#1626
+  那种"收缩为子集"，也不是复用。所以这 3 条 rotated 里有 2 条（两条被本 PR 自己
+  证伪的注释、一条 master 合并后变陈的测量）**确实来自轮换进来的镜**，是这条比值
+  第一次拿到未被伪影污染的增量。第 3 条仍是老伪影：Phase 7 终审被计进 `rotated`
+  （与 #1624 同型），工具缺口未修。
+
+  **然而这条"干净的 +2"恰恰不支持把 keep 读强。** 轮换镜产出的 2 条全是 P3 文档
+  准确性，零行为缺陷；本 PR 唯一的 **P1——也是整单最大价值的一条**——出自 round-1 的
+  `production-blast-radius` 镜（`test_publish_scheduler_file_registry` 在 umask 002 下
+  仍红，不在我测的 12 个文件里）。也就是说：**轮换买到的是文档精度，首轮买到的是
+  正确性。**
+
+  更值得记的是，那条 P1 的真正来源**不是镜的选择，而是枚举方法**：我按失败 trace
+  反查文件，reviewer 按"模式断言 / provider lock / `SHARED_PROVIDER_MODE` / `LocalObjectStore`"
+  grep 出候选再扫 47 个 suite。同一个"生产影响面"镜，换一种候选枚举法，结果差一条 P1。
+  round-2 把这一点推到极致：用 AST 建全仓库对 `provider_atomic` 的反向 import 闭包
+  （86 个文件）实跑，得到"扫干净了"的**可证伪结论**，而不是"我看了一圈没发现"。
+
+  **对 keep/cut 的实质启示**（与那条被污染的比值无关）：真正决定 later-round 产出的
+  变量可能不是"镜是否轮换"，而是"该镜是否被要求给出可证伪的枚举"。若要让这条 ADR
+  的比值有判别力，除已登记的两条工具修复方向外，建议再记一条**度量方向**：区分
+  catch 是来自"新视角"还是来自"同视角 + 更强的枚举方法"。本 PR 提供的读法是后者权重
+  更大，但**单个数据点不足以支持撤镜**，在工具缺口修好之前 keep/cut 翻转仍须
+  maintainer 人的裁定，不走 autonomous default。
