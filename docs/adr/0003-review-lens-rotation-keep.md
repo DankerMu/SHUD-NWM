@@ -154,3 +154,33 @@ materially changed attribution ratio.
   各有产出（判别力镜 3 条、正确性镜 3 条），无单镜独大；真正买到修复的两条
   P2 都出自判别力镜（恒等 mutant 存活、`except` 吞掉被测步骤），与 keep 的原始
   理由方向一致。
+
+- 2026-08-20（PR #1626 / issues #1400+#1427 合并后 audit 再次 DECIDABLE）：样本扩至
+  **84** 个多轮 merged PR，later-round catches **core=45 vs rotated=202**。相对上一条
+  （PR #1624 之后的 83 PR / core=40 / rotated=200）本 PR 边际为 **core +5 / rotated +2**
+  ——core 增量方向与 keep 相反（同序列内 #1602 为 +18、#1618 为 +6，本条不是最大的一次）。
+
+  **维持 keep，并把这条边际明确记为不可采信。** 理由：本 PR 是**第一个同时触发上面
+  登记的两种度量伪影**的数据点（#1602/#1618 只呈现前者，#1624 只呈现后者）：
+  - round-2 的透镜集 `{correctness-live-probe, artifact-doc-consistency}` 是 round-1
+    三镜集的**真子集**（覆盖/变异镜在 round-1 的覆盖缺口修完后被我撤下），属于
+    **收缩而非轮换**；`rotation_attribution()` 把这 5 条 later-round catches 全判进
+    `core`——与 PR #1602 同一伪影。
+  - round-3 的 Phase 7 独立终审（`round_lenses` 记作 `final-review`）贡献的 2 条被判进
+    `rotated`——与 PR #1624 同一伪影。
+
+  也就是说 **core +5 / rotated +2 这个比值里，7 条没有一条来自"轮换与否"的对照**，
+  它完整地由两个与轮换无关的编排选择决定。工具缺口的两条修复方向（`round_lenses`
+  为 round-1 子集/相同时不计入分母；Phase 7 终审轮排除出轮换归因或单列 `final_review`
+  桶）在此得到合并验证：**任一未修，比值即被污染；两者都未修时，同一个 PR 可以同时
+  向两个方向拉。** 在修好之前，基于该比值的 keep/cut 翻转仍须 maintainer 人的裁定，
+  不走 autonomous default。
+
+  附本 PR 与 keep 之实质相关的证据分布（与上面那个被污染的比值无关）：round-1 三镜
+  各有 load-bearing 产出（正确性镜 1、覆盖/变异镜 2、文档一致性镜 3），真正**买到**
+  修复 pass 的是覆盖/变异镜的一条覆盖缺口（errno 映射表三个规范输出只钉了一个，
+  2208 全绿）——按门规则"覆盖缺口一律买 pass"，与 keep 的原始理由方向一致；撤掉该镜后的
+  round-2 仍产出 4 条 P2（全为文案/口径类，零行为缺陷），与"覆盖镜的边际价值集中在
+  首轮"这一读法相容，但**单个数据点不足以支持撤镜**。另：三轮全部漏掉的 F-1
+  （tasks 5.2/5.5 勾了，而承接单 #1627 里三项义务一条都没有）是 Phase 7 终审抓的——
+  这条支持的是"保留独立终审"，不是"轮换"。
