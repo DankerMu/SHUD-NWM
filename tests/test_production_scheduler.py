@@ -26892,6 +26892,9 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
 
     The friction is deliberate: adding or renaming a module-level constant legitimately
     also fails this test, once, until the pinned mapping is updated in the same change.
+    So does legitimately renaming a CONSUMING FUNCTION, because the mapping's values are
+    function names -- measured, and easy to miss because the other two spellings of this
+    friction only named constants.
     A guard that stayed green for a legitimate addition could not fail for a renamed
     refusal list either -- structurally they are the same event.
 

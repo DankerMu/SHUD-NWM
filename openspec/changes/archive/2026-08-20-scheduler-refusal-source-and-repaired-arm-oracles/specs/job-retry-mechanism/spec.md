@@ -107,9 +107,10 @@ legitimate single source, preserved verbatim under the placeholder ruling.
 The structural guard's friction is deliberate and SHALL be treated as part
 of the contract rather than as a defect: a legitimate addition or rename of
 a module-level constant also fails the guard, once, until the pinned
-expected mapping is updated in the same change. A guard that stayed green
-for legitimate additions could not fail for a renamed refusal list either —
-they are structurally the same event.
+expected mapping is updated in the same change — and so does a legitimate
+rename of a **consuming function**, since the mapping's values are function
+names. A guard that stayed green for legitimate additions could not fail for
+a renamed refusal list either — they are structurally the same event.
 
 #### Scenario: a re-added refusal list fails the suite regardless of spelling
 

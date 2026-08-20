@@ -191,6 +191,8 @@
         （修复前：判据 `True → False`，同一 113 条选择器下全绿）。
       每条还须记录**修复在 pristine HEAD 上不产生假红**：100/100、`__` 前缀非 dunder 名空集、
       59 个 `def` 全 `FunctionType` + 1 个 `class` 是 `type`。
+      （该测量为真，但 round-2 起交付实现钉的是**可调用性**而非 `FunctionType`——
+      钉后者会让给既有纯函数加 `@functools.lru_cache` 打假红。Phase 7 终审 F1b。）
 - [x] 5.2e **M16 同名同 kind 反射式改绑**（`setattr(sys.modules[__name__], "<已有常量名>", 更宽的值)`）
       由 1.5b 的第五条取值断言打红，且**只**红在那一条上（同一 113 条选择器：`1 failed, 112 passed`；
       修复前全绿）。

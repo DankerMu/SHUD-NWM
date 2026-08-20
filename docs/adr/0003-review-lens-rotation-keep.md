@@ -291,3 +291,61 @@ code-after-impl / 实机 oracle）。在这三类与前两条 revisit 提出的�
 store，任何 import 图都必然漏掉。闭包需要第三条腿：grep 出把源码当数据读的
 消费者。同理，`file:line` 引用核对必须按**锚点内容**而非行数范围——本单证明
 范围扫描是安全错觉（change 自己的编辑推移引用后，引用仍在文件范围内）。
+
+---
+
+## 2026-08-20 复访（PR #1637，#1418 + #1451 纯 oracle 合批）
+
+样本 87 → 多轮 merged PR，later-round catches **core=46 / rotated=222**
+（上次 84 / 45 / 202）。本条 PR 贡献 later-round 11 条（round 2 八条 + 终审三条），
+按脚本口径**全部**记为 rotated、core 增 0。
+
+**但这次不能照 DECIDABLE 的字面结论走——rotated 这个数本身有测量缺陷，且量级不小。**
+
+`loop_log_audit.py:63-76` 的 `rotation_attribution` 只把 `round_lenses[0]` 当作
+「钉住的 core 镜」：
+
+```python
+core_lenses = set(lenses[0]) if lenses else set()
+```
+
+实测全语料（96 条多轮、catches 为字典型的记录）：
+
+| 形状 | 条数 | 其 later-round catches | 后果 |
+|---|---|---|---|
+| `round_lenses[0]` 是**裸字符串** | **50** | **163** | `set("fixture-review")` 把字符串**按字符**拆成 `{'f','i','x',…}`，任何镜名都匹配不上 → core 恒为 0，全部强制记入 rotated |
+| `round_lenses[0]` 是单元素 `["fixture-review"]` | 2（含本条）| 14 | 形式正确，但 core 集合 = {fixture 评审镜}，后续交叉评审镜结构上**不可能**是 core |
+
+**222 条 rotated 里有 177 条（80%）来自这两类。** 也就是说
+"catches concentrate in rotated-in lenses" 这个 DECIDABLE 的标题句，
+大部分是**记录 schema 不一致 + 索引 0 取的是 fixture 镜**这两件事的产物，
+不是"轮换镜真的更能抓"的证据。
+
+一个具体的误记例子就在本条：本 PR 的 `round_lenses` 是
+`[[fixture-review], [A, B, C], [A', C], [final-review]]`，其中
+`durable-text-truth` 这面镜**在 round 1 与 round 2 都在**——它是**被钉住的**，
+不是轮换进来的；而它在 round 2 抓的 4 条全部被记成 rotated。
+
+**裁定：维持 keep，但理由与前几次不同。**
+前几次是"rotated 高但分类不足以支持撤镜"；这次是"**rotated 这个数在修好之前
+不能用来支持任何方向的决定**"。撤镜与保镜都不该以它为据。
+
+**度量修复建议（第四条，且这条是先决条件）：**
+
+1. **先修 schema**：`round_lenses` 的每一项必须是**列表**。`evidence_check.py`
+   目前不校验这一层（它放行了本条 PR 最初写成字符串 `catches` 的版本，也放行了
+   那 50 条裸字符串 `round_lenses[0]`），应补两条校验：`round_lenses` 元素为
+   list[str]，`catches` 元素为 `{round, lens, class, severity}` 字典。
+2. **core 的定义要改**：应是「**在 round 1 出现过、且在 later round 仍在**的镜」，
+   即 `set(lenses[1]) & set(lenses[i])`（当 index 0 是 fixture 评审时），
+   而不是无条件取 `lenses[0]`。现口径把"前置 fixture 门"错当成了"钉住的 core 镜"。
+3. 在 1 与 2 落地并**回填**已有记录之前，本 ADR 的 keep/cut 只能维持 keep。
+
+**本单在镜有效性上的实际观察（与上条 revisit 的"门读什么工件"一致）：**
+Phase 0.5 fixture 评审（读规格、在实现之前）两轮各出 P1，其中一条指出
+fail-closed 只钉了拒绝清单、从未钉放行集——**这类缺陷在代码写出来之后就不再是
+缺陷**。Phase 4 round 1 抓到三条真实覆盖缺口（各自活过全量 1773 且翻转生产判据），
+Phase 4 round 2 抓到的最贵一条是**round 1 的修复自己制造的假红**
+（钉 `FunctionType` 会让 `@functools.lru_cache` 装饰既有函数打红）。
+后者是"**修复审查**"这一类门的价值证据：它读的既不是规格也不是原始代码，
+而是**上一轮的修复**。建议把它作为第四类工件单独计数。
