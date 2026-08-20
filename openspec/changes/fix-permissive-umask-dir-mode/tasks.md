@@ -175,10 +175,11 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
       and `test_nfs_raw_ready_candidate_stages_raw_before_convert_submit`, and
       breaking nothing. This is the evidence for issue #1513's acceptance
       criterion 3 ("只交付 (a) 的 PR 不得视为完成").
-- [x] Post-fix, umask `002`: all eight files 0 failed (§3 table), reproduced
-      independently by the orchestrator after integrating the implementer's
-      branch.
-- [x] Post-fix, default umask `022`: the same eight files, identical counts — no
+- [x] Post-fix, umask `002`: all **thirteen** files in the §3 table 0 failed,
+      reproduced independently by the orchestrator — twelve after integrating
+      the implementer's branch, and `tests/test_publish_scheduler_file_registry.py`
+      after fix round 1 added it (`4 failed, 39 passed` -> `43 passed`).
+- [x] Post-fix, default umask `022`: the same files, identical counts — no
       normal-side regression.
 - [x] Post-fix: strict-side assertions green, specifically
       `tests/test_run_tree_copyback.py:302-303` (`0o664` / `0o775`) and
