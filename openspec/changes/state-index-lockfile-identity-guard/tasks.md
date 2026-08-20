@@ -5,18 +5,18 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 
 ## A. 实现（#1609）
 
-- [ ] A.1 `packages/common/state_manager.py` 的 safe_fs import 块里**只需补** `directory_identity_no_follow`
+- [x] A.1 `packages/common/state_manager.py` 的 safe_fs import 块里**只需补** `directory_identity_no_follow`
       —— `stat_no_follow` 已在 `:31` 导入（round-0 iteration-2 核实）。必须导入到**自身命名空间**
       （patch 点必须就是产线调用点，否则 B.2 的支 A 红证作废）。
-- [ ] A.2 新增私有判据函数（本文件内，不导出），实现 design 的两支：
+- [x] A.2 新增私有判据函数（本文件内，不导出），实现 design 的两支：
       - 支 A：两侧 `index 文件父目录`身份相等 **且** 两侧 `provider_lock_path(...).name` 相等；
       - 支 B：**两侧 lockfile 都存在**时，`stat_no_follow` 的 `(st_dev, st_ino)` 相等。
       **`FileNotFoundError` 一律使该支「不适用」，两支皆然、两侧皆然**（不存在的路径没有 inode，
       不可能与已存在者互为别名）。`except FileNotFoundError` 必须**先于** `except OSError`。
       任一支成立即判「同一 lockfile」。
-- [ ] A.3 在 `merge_state_snapshot_index_copyback`（`:1867`）函数体**最顶端**调用该判据，
+- [x] A.3 在 `merge_state_snapshot_index_copyback`（`:1867`）函数体**最顶端**调用该判据，
       早于 `:1894` 的 `with provider_destination_lock(source_path, ...)`。
-- [ ] A.4 **两个 reason 名（写死，实现不得自造）**，沿用既有 `state_snapshot_index_*` 命名族：
+- [x] A.4 **两个 reason 名（写死，实现不得自造）**，沿用既有 `state_snapshot_index_*` 命名族：
       - 拒绝：`state_snapshot_index_copyback_lock_identical`
       - 探针失败包裹：`state_snapshot_index_copyback_lock_identity_unavailable`
       **必须用 `_state_index_error(reason, field=..., evidence={...})`**（`state_manager.py:3141`）构造 ——
@@ -24,27 +24,27 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
       **禁止**裸 `StateManagerError("...路径...")`：那样 `.reason` 为空，
       `run_tree_copyback.py:141` 拿到 `error_reason=None`，replay 会合成
       `merge_unexpected_exception:StateManagerError`。
-- [ ] A.5 **路径进 `evidence`，不进 message**（message 就是 reason）。裸路径塞进 message 会经 `str(error)`
+- [x] A.5 **路径进 `evidence`，不进 message**（message 就是 reason）。裸路径塞进 message 会经 `str(error)`
       泄进 `RunTreeCopybackError.details["error"]` 与 replay stderr，绕过该模块的脱敏约定。
       **脱敏必须显式做**：`_state_index_error`（`:3141-3146`）只 `dict(evidence or {})`，
       **不会**自动调用 `_state_index_evidence_safe`（`:3090`）—— 实现要自己把 evidence 过一遍它。
-- [ ] A.6 **新 raise 点不得带 `phase`**（`_state_index_error` 天然不设，别手动加）。
+- [x] A.6 **新 raise 点不得带 `phase`**（`_state_index_error` 天然不设，别手动加）。
       它在取锁之前，是 `run_tree_copyback.py:117-136` 那条已审计不变量的新成员，
       必须落 `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（fail-closed）桶。
-- [ ] A.7 **replay 侧分类必须同步修**（round-0 P1）：`scripts/scheduler_state_index_copyback_replay.py`
+- [x] A.7 **replay 侧分类必须同步修**（round-0 P1）：`scripts/scheduler_state_index_copyback_replay.py`
       按 **reason 白名单**分类（`:405` `error_reason in MERGE_PRE_COMMIT_REFUSAL_REASONS`），**不看 phase**；
       白名单自己的 docstring（`:183-190`）写明「a reason added to the merge later」默认归 commit-uncertain。
       故 **A.4 的两个 reason 都必须加进 `_PRE_COMMIT_INDEX_REASONS`（`:152`）**。
       不加 = 把一个「什么都没碰」的前置拒绝报成 exit 3 + `merge_commit_state: "uncertain"` + 跑
       `_verify_committed_destination` + 写 receipt。
-- [ ] A.8 探针的其它失败（非 `FileNotFoundError` 的 `OSError`/`SafeFilesystemError`）→
+- [x] A.8 探针的其它失败（非 `FileNotFoundError` 的 `OSError`/`SafeFilesystemError`）→
       用 A.4 的第二个 reason 包成 `_state_index_error`、fail-closed。
       **不得吞、不得「判不出就放行」**——放行等于把死锁留在原地。
-- [ ] A.9 `packages/common/provider_atomic.py` **一字不动**。
-- [ ] A.10 `merge_state_snapshot_index_copyback` / `_merge_state_snapshot_index_copyback_locked`
+- [x] A.9 `packages/common/provider_atomic.py` **一字不动**。
+- [x] A.10 `merge_state_snapshot_index_copyback` / `_merge_state_snapshot_index_copyback_locked`
       **签名不变**；两个生产调用点的**调用形式**不改（replay 工具**只允许**改 A.7 那个白名单常量，
       不得改其分类逻辑、退出码或 receipt 结构）。
-- [ ] A.11 #1192 交付的**五处 root 级守卫一字不动**（`git diff` 核验）。
+- [x] A.11 #1192 交付的**五处 root 级守卫一字不动**（`git diff` 核验）。
 
 ### 全 PR 改动 allowlist（替代原 D.3，可机械核验）
 
@@ -52,7 +52,7 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 `packages/common/state_manager.py`、`scripts/scheduler_state_index_copyback_replay.py`（仅白名单常量）、
 `docs/runbooks/current-production-ops.md`（仅 A.12 那一行）。其余任何生产文件出现在 diff 里即为越界。
 
-- [ ] A.12 **同步 runbook**（round-0 iteration-2 P2）：`docs/runbooks/current-production-ops.md:1979`
+- [x] A.12 **同步 runbook**（round-0 iteration-2 P2）：`docs/runbooks/current-production-ops.md:1979`
       的 exit-code 解码表写着「allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3
       …**不会**出现在 exit 2 里」。本单新增两个 reason 后该括注**变成假的**——把两个新 reason 补进该行的
       allowlist 举例，并把括注改成「allowlist 之外的 reason 归 commit-uncertain」（去掉「含未来新增」的绝对化措辞）。
@@ -61,61 +61,61 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 
 ### B.1 真红证（支 B，真实 FS，免 root，可移植）
 
-- [ ] B.1(a) 两个真实不同目录各放一个 index 文件，用 `os.link` 把两者的 `.<name>.lock` **硬链到同一 inode**
+- [x] B.1(a) 两个真实不同目录各放一个 index 文件，用 `os.link` 把两者的 `.<name>.lock` **硬链到同一 inode**
       → 断言 `state_snapshot_index_copyback_lock_identical`、**两个 index 都未被修改**、**未取到任何 provider 锁**。
-- [ ] B.1(b) **umask/权限必须钉死（round-0 P2）**：两侧 lockfile 父目录都要 `umask 077` + `chmod 0o700`。
+- [x] B.1(b) **umask/权限必须钉死（round-0 P2）**：两侧 lockfile 父目录都要 `umask 077` + `chmod 0o700`。
       否则 `provider_atomic.py:206-208` 的 `provider_lock_parent_unsafe`
       （`st_uid != geteuid()` 或 `S_IMODE & 0o022`）会在**取源锁时**先抛，mutant 就变成「因为别的原因红」。
       既有套件已有先例：`tests/test_run_tree_copyback.py:212` 显式 `os.umask(0o077)`。
-- [ ] B.1(c) **「不 hang」断言，这次有判别力**：`threading.Thread(..., daemon=True)` + `join(5.0)` + `pytest.fail`。
+- [x] B.1(c) **「不 hang」断言，这次有判别力**：`threading.Thread(..., daemon=True)` + `join(5.0)` + `pytest.fail`。
       **禁止裸调用** —— 与 #1192 不同，**修前这条是真的会永久挂**（round-0 已 `subprocess timeout=25` 实测证实：
       `same lock inode: True` / `abspath keys differ: True` / `TIMEOUT -> deadlock confirmed`）。
       裸调用会挂死整个 pytest 进程。`daemon=True` 不可省。
-- [ ] B.1(d) **判别力自证**：去掉支 B 的 mutant 下，B.1(a) 必须**被 join-timeout tripwire 判红**，
+- [x] B.1(d) **判别力自证**：去掉支 B 的 mutant 下，B.1(a) 必须**被 join-timeout tripwire 判红**，
       而不是「红了就算」——必须断言红因是 tripwire（挂起），不是 `provider_lock_parent_unsafe` 之类的旁路。
       贴出 mutant 前后实测。
 
 ### B.2 支 A 红证（探针注入）
 
-- [ ] B.2(a) monkeypatch `state_manager.directory_identity_no_follow`，让两个**真实不同**的父目录报同一身份
+- [x] B.2(a) monkeypatch `state_manager.directory_identity_no_follow`，让两个**真实不同**的父目录报同一身份
       → 断言同一个 reason，且**在 lockfile 尚不存在**时同样成立。
-- [ ] B.2(b) 判别力自证：去掉支 A 的 mutant 下 B.2(a) 必红。
+- [x] B.2(b) 判别力自证：去掉支 A 的 mutant 下 B.2(a) 必红。
 
 ### B.3 分类不变量（两个调用方都要）
 
-- [ ] B.3(a) 经 `copyback_run_trees` 触发拒绝 → 断言
+- [x] B.3(a) 经 `copyback_run_trees` 触发拒绝 → 断言
       `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`，**不是** `..._COMMIT_UNCERTAIN`。
-- [ ] B.3(b) **经 replay 工具触发拒绝** → 断言 **exit 2 / `status: "refused"` / `reason: "merge_failed"`**，
+- [x] B.3(b) **经 replay 工具触发拒绝** → 断言 **exit 2 / `status: "refused"` / `reason: "merge_failed"`**，
       **未跑** `_verify_committed_destination`、**未写** `merge_commit_state: "uncertain"` 的 receipt。
       这条直接钉 A.7；没有它，白名单漏加就是假绿（现有套件只逐条抽查个别 reason，
       `tests/test_scheduler_state_index_copyback_replay.py:564/648/691`，**无**白名单覆盖度测试）。
 
 ### B.4 不回归
 
-- [ ] B.4(a) 两侧 lockfile 确实不同（不同父目录、非硬链）→ merge 行为逐字不变，既有用例全绿。
-- [ ] B.4(b) **bootstrap 用例（round-0 P1，必做）**：destination index 的父目录
+- [x] B.4(a) 两侧 lockfile 确实不同（不同父目录、非硬链）→ merge 行为逐字不变，既有用例全绿。
+- [x] B.4(b) **bootstrap 用例（round-0 P1，必做）**：destination index 的父目录
       （`<copyback_root>/scheduler/state-index/`）**尚不存在** → 正常取锁、正常合并、正常创建。
       既有 `tests/test_run_tree_copyback.py:198`
       `test_copyback_run_trees_copies_extra_state_index_object` 正是这个形状，**必须保持绿**。
-- [ ] B.4(c) `tests/test_state_manager.py -k copyback` 既有断言**不得修改**。
+- [x] B.4(c) `tests/test_state_manager.py -k copyback` 既有断言**不得修改**。
 
 ## C. 验证（Evidence Floor）
 
-- [ ] C.1 `uv run pytest -q tests/test_state_manager.py tests/test_run_tree_copyback.py tests/test_scheduler_state_index_copyback_replay.py`
-- [ ] C.2 `uv run pytest -q tests/test_forcing_copyback_backfill.py tests/test_tile_publisher.py tests/test_safe_fs.py`（#1610 落点）
-- [ ] C.3 `uv run ruff check $(git ls-files '*.py')`
-- [ ] C.4 `openspec validate state-index-lockfile-identity-guard --strict --no-interactive`
-- [ ] C.5 B.1(d) / B.2(b) / D.2 三组 mutant 判别力实测，计数贴 PR body
+- [x] C.1 `uv run pytest -q tests/test_state_manager.py tests/test_run_tree_copyback.py tests/test_scheduler_state_index_copyback_replay.py`
+- [x] C.2 `uv run pytest -q tests/test_forcing_copyback_backfill.py tests/test_tile_publisher.py tests/test_safe_fs.py`（#1610 落点）
+- [x] C.3 `uv run ruff check $(git ls-files '*.py')`
+- [x] C.4 `openspec validate state-index-lockfile-identity-guard --strict --no-interactive`
+- [x] C.5 B.1(d) / B.2(b) / D.2 三组 mutant 判别力实测，计数贴 PR body
 - [ ] C.6 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，**不碰 `/home/nwm/NWM` 主树**。
       **判读口径：相对 master 基线「不新增红」**，不是「零红」—— master 已知三条红：
       `test_entropy_audit_script.py::…hard_gate…`、
       `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`、
       以及 #1613 那条顺序依赖。
-- [ ] C.7 **node-22 不跑任何东西**（#1192 的死锁探针禁令继续有效）。死锁红证只在本地/CI 的有界壳里跑。
+- [x] C.7 **node-22 不跑任何东西**（#1192 的死锁探针禁令继续有效）。死锁红证只在本地/CI 的有界壳里跑。
 
 ## D. #1610 探针姿态补测（零生产改动）
 
-- [ ] D.1 逐条补 posture 测试，monkeypatch **各模块自身命名空间**里的
+- [x] D.1 逐条补 posture 测试，monkeypatch **各模块自身命名空间**里的
       `directory_identity_no_follow` 使其抛异常，断言该站点自己的 code：
 
       | 站点 | 期望 |
@@ -129,9 +129,9 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
       | backfill 宽松预检（`:401-408`） | **静默 `return`**，不 raise |
 
       apply 路径（`:185`）已有覆盖，**不重复造**。
-- [ ] D.2 **sentinel 复测**：把上述任一探针失败处理器换成 `raise AssertionError(...)` 必红；
+- [x] D.2 **sentinel 复测**：把上述任一探针失败处理器换成 `raise AssertionError(...)` 必红；
       把探针移出其 try 块的变异必红。（#1610 的原始证据是这套 sentinel 下 `192 passed` 无一触发。）
-- [ ] D.3 D 段**不改任何生产姿态**（#1192 已逐点核实姿态表与设计一致）。
+- [x] D.3 D 段**不改任何生产姿态**（#1192 已逐点核实姿态表与设计一致）。
       机械核验落在上面那条「全 PR 改动 allowlist」上，不按段切分 diff
       （`tests/test_run_tree_copyback.py` 被 B.3 与 D.1 共用，按段归属不可判）。
 

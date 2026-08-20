@@ -1153,6 +1153,68 @@ def test_copyback_qdown_products_skips_alias_root_reporting_one_filesystem_ident
     assert list(copyback_root.iterdir()) == []
 
 
+def _inject_probe_failure(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make the guards' probe fail for `target` only, on the publisher namespace.
+
+    Only the copyback side fails, so a handler that blamed the wrong root -- or
+    let the raw `OSError` escape into whatever generic handler is upstream --
+    cannot pass by accident.
+    """
+
+    resolved = target.resolve()
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == resolved:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(publisher_module, "directory_identity_no_follow", probe)
+
+
+def test_copyback_run_products_probe_failure_is_diagnosed_as_an_unsafe_staging_root(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1610: the same-root guard's own failure posture.  A bare OSError here
+    # would escape `_copyback_run_products` and lose the copyback diagnosis.
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    copyback_root.mkdir()
+    _inject_probe_failure(monkeypatch, copyback_root)
+
+    with pytest.raises(PublishError) as error:
+        publisher._copyback_run_products(["run-a"])
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["copyback_root"] == str(copyback_root)
+    assert "probe blocked" in error.value.details["error"]
+    assert list(copyback_root.iterdir()) == []
+
+
+def test_copyback_qdown_products_probe_failure_is_diagnosed_as_an_unsafe_staging_root(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _inject_probe_failure(monkeypatch, copyback_root)
+
+    with _store(create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["copyback_root"] == str(copyback_root)
+    assert "probe blocked" in error.value.details["error"]
+    assert list(copyback_root.iterdir()) == []
+
+
 def test_publish_qdown_copyback_exact_root_rejects_incomplete_run_tree(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
     publisher.object_store.write_bytes_atomic("runs/run-a/input/manifest.json", b'{"run_id": "run-a"}')

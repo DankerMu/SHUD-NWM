@@ -154,6 +154,8 @@ _PRE_COMMIT_INDEX_REASONS = frozenset(
         "state_snapshot_index_checksum_mismatch",
         "state_snapshot_index_checksum_missing",
         "state_snapshot_index_copyback_conflict",
+        "state_snapshot_index_copyback_lock_identical",
+        "state_snapshot_index_copyback_lock_identity_unavailable",
         "state_snapshot_index_duplicate_identity",
         "state_snapshot_index_duplicate_state_id",
         "state_snapshot_index_entries_invalid",

@@ -21,11 +21,13 @@ from packages.common.provider_atomic import (
     ProviderPreimage,
     atomic_replace_provider_bytes,
     provider_destination_lock,
+    provider_lock_path,
     read_provider_snapshot,
 )
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
+    directory_identity_no_follow,
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
@@ -1864,6 +1866,123 @@ def publish_state_snapshot_index(
     )
 
 
+def _copyback_lock_probe_error(path: Path, *, field: str, probe: str, error: BaseException) -> StateManagerError:
+    """Fail closed on a lockfile-identity probe that could not answer.
+
+    Not being able to tell whether the two lockfiles are one file is not a
+    licence to proceed: proceeding is exactly what deadlocks.  The evidence goes
+    through `_state_index_evidence_safe` explicitly -- `_state_index_error` only
+    copies the mapping -- and carries the exception *type* rather than its
+    message, because an `OSError` message embeds the raw path the redaction is
+    there to keep out.
+    """
+
+    return _state_index_error(
+        "state_snapshot_index_copyback_lock_identity_unavailable",
+        field=field,
+        evidence=_state_index_evidence_safe(
+            {"probe": probe, "path": str(path), "error_type": type(error).__name__}
+        ),
+    )
+
+
+def _copyback_lock_parent_identity(path: Path, *, field: str) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` of an index file's parent, or `None` when it is absent.
+
+    An absent directory has no inode and so cannot alias one that exists: its
+    absence makes this test inapplicable, not failed.  That carve-out is what
+    keeps the bootstrap copyback working -- `<copyback_root>/scheduler/state-index/`
+    is created by the lock acquisition itself and does not exist yet when the
+    guard runs.  `except FileNotFoundError` must precede `except OSError`; it is
+    a subclass, and the broad clause would otherwise swallow the carve-out and
+    turn the first-ever copyback into a refusal.
+    """
+
+    try:
+        return directory_identity_no_follow(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, SafeFilesystemError) as error:
+        raise _copyback_lock_probe_error(path, field=field, probe="lock_parent", error=error) from error
+
+
+def _copyback_lockfile_identity(lock_path: Path, *, field: str) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` of a provider lockfile, or `None` when it is absent.
+
+    Same carve-out as the parent probe, for the same reason: on a first merge
+    neither lockfile exists yet, and `provider_destination_lock` is what creates
+    them.
+    """
+
+    try:
+        info = stat_no_follow(lock_path)
+    except FileNotFoundError:
+        return None
+    except (OSError, SafeFilesystemError) as error:
+        raise _copyback_lock_probe_error(lock_path, field=field, probe="lockfile", error=error) from error
+    return info.st_dev, info.st_ino
+
+
+def _copyback_lock_identical_error(source_lock: Path, destination_lock: Path, *, branch: str) -> StateManagerError:
+    return _state_index_error(
+        "state_snapshot_index_copyback_lock_identical",
+        field="copyback_destination",
+        evidence=_state_index_evidence_safe(
+            {
+                "branch": branch,
+                "lock_name": source_lock.name,
+                "source_lock": str(source_lock),
+                "destination_lock": str(destination_lock),
+            }
+        ),
+    )
+
+
+def _refuse_identical_copyback_lockfiles(source_path: Path, destination_path: Path) -> None:
+    """Refuse before any lock is taken when both provider lockfiles are one file.
+
+    `provider_destination_lock` is blocking by default and not reentrant, and its
+    in-process registry keys on `os.path.abspath` -- a *string* -- so two paths
+    that name one lockfile inode make this merge wait forever on a lock it
+    already holds: `merge_state_snapshot_index_copyback` takes the source lock
+    and `_merge_state_snapshot_index_copyback_locked` then takes the destination
+    one (#1609).  #1192's guard cannot see this: it compares whole *roots*, and
+    the aliasing can live below two genuinely distinct roots.
+
+    Two complementary tests, either sufficient:
+
+    * parent-directory identity plus lockfile basename -- covers the real threat
+      shape (an export mounted under the destination root) and holds whether or
+      not the lockfiles have been created yet;
+    * the lockfiles' own identity -- covers lockfiles hardlinked across two
+      genuinely distinct directories, which the first test structurally cannot
+      see, and applies only when both already exist.
+
+    Neither sees "two distinct directories whose lockfiles do not exist yet and
+    will be hardlinked later"; there is nothing to stat, so nothing to judge.
+    And `(st_dev, st_ino)` still only covers same-superblock aliases -- a
+    `nosharecache` double mount reports distinct `st_dev` and slips through, as
+    it does for #1192.
+
+    The raised error carries a reason but deliberately no `phase`: nothing has
+    been read, written or locked, so both callers must classify it pre-commit
+    (`run_tree_copyback.py:117-136` by phase, the replay tool by its reason
+    allowlist).
+    """
+
+    source_lock = provider_lock_path(source_path)
+    destination_lock = provider_lock_path(destination_path)
+    if source_lock.name == destination_lock.name:
+        source_parent = _copyback_lock_parent_identity(source_path.parent, field="copyback_source")
+        destination_parent = _copyback_lock_parent_identity(destination_path.parent, field="copyback_destination")
+        if source_parent is not None and source_parent == destination_parent:
+            raise _copyback_lock_identical_error(source_lock, destination_lock, branch="lock_parent_identity")
+    source_identity = _copyback_lockfile_identity(source_lock, field="copyback_source")
+    destination_identity = _copyback_lockfile_identity(destination_lock, field="copyback_destination")
+    if source_identity is not None and source_identity == destination_identity:
+        raise _copyback_lock_identical_error(source_lock, destination_lock, branch="lockfile_identity")
+
+
 def merge_state_snapshot_index_copyback(
     *,
     source_path: Path,
@@ -1891,6 +2010,7 @@ def merge_state_snapshot_index_copyback(
     publishes byte-identically are copied (#1189).
     """
 
+    _refuse_identical_copyback_lockfiles(source_path, destination_path)
     with provider_destination_lock(
         source_path,
         containment_root=source_containment_root,

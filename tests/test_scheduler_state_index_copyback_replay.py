@@ -1132,3 +1132,86 @@ def _valid_state_bytes(seed: bytes) -> bytes:
         "2\t0.1\t0.1\t0.1\t0.1\t0.1\n"
         "1\t0.5\n"
     ).encode()
+
+
+def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1609 A.7: this tool classifies by reason allowlist, not by phase.
+
+    A phase-free error is enough for `run_tree_copyback`, but here an unlisted
+    reason falls through to commit-uncertain -- exit 3, `merge_commit_state:
+    "uncertain"`, the committed-tail verification and a receipt -- for a refusal
+    that took no lock and touched nothing.  This is the nail that makes forgetting
+    the allowlist a red instead of a false green: the suite otherwise only spot
+    checks individual reasons and has no coverage test over the allowlist.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    assert "state_snapshot_index_copyback_lock_identical" in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    source_lock = provider_atomic.provider_lock_path(fixture.source_index)
+    destination_lock = provider_atomic.provider_lock_path(fixture.destination_index)
+    # Both lock parents private, or `provider_lock_parent_unsafe` fires first.
+    source_lock.parent.chmod(0o700)
+    destination_lock.parent.chmod(0o700)
+    destination_lock.unlink()
+    os.link(source_lock, destination_lock)
+    index_before = fixture.destination_index.read_bytes()
+
+    previous_umask = os.umask(0o077)
+    try:
+        exit_code = _call_without_hanging(lambda: replay.main(["--cycle", "gfs_2026072000", "--enforce"]))
+    finally:
+        os.umask(previous_umask)
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert exit_code != 3
+    assert error["status"] == "refused"
+    assert error["status"] != "merge_committed_incomplete"
+    assert error["reason"] == "merge_failed"
+    assert error["error_reason"] == "state_snapshot_index_copyback_lock_identical"
+    # The committed tail never ran: no receipt, no uncertain verdict, no
+    # read-back of a destination nothing wrote.
+    assert not (fixture.receipt_root / "latest.json").exists()
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not fixture.new_shared_object.exists()
+
+
+def test_replay_root_identity_probe_failure_stays_root_unavailable(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1610: `_root_identity`'s own failure posture, previously unenforced.
+
+    A probe failure must reuse `root_unavailable` and name the field, not escape
+    as a bare OSError traceback (rc 1, no stderr payload) and not degrade into a
+    permissive pass.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    real_probe = safe_fs.directory_identity_no_follow
+    target = fixture.destination_root.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(replay, "directory_identity_no_follow", probe)
+    index_before = fixture.destination_index.read_bytes()
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert exit_code != 1
+    assert payload["reason"] == "root_unavailable"
+    assert payload["field"] == "destination_root"
+    assert payload["path"] == str(target)
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not (fixture.receipt_root / "latest.json").exists()
