@@ -16500,6 +16500,13 @@ def test_compatibility_surface_helpers_normalize_a_loop(tmp_path: Path) -> None:
     # traversal through it collapses, which is what the old Path.resolve()
     # produced on 3.13+ and what it refused to produce at all on <=3.12.
     assert scheduler_module._resolve_optional_config_path(loop / "y" / ".." / "z") == loop / "z"
+    # The sibling helper carries its own copy of the paradigm, so it needs its
+    # own normalisation fence: fixing one of the two leaves the other handing
+    # the value back untouched.  Both spellings of the same value are pinned --
+    # absolute, and relative, where the base join is what goes through the
+    # canonicalisation.
+    assert scheduler_module._optional_config_path_relative_to(loop / "y" / ".." / "z", canonical_tmp) == loop / "z"
+    assert scheduler_module._optional_config_path_relative_to(f"{loop.name}/y/../z", canonical_tmp) == loop / "z"
 
 
 def test_compatibility_surface_helpers_keep_their_existing_contract(tmp_path: Path) -> None:

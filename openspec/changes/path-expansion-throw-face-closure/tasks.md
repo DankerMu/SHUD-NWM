@@ -289,6 +289,13 @@
         且 `:30889-30899` 的既有金丝雀在 root 下会**响亮失败**而非静默通过。
       - **DISCARD 2**：「verbatim 只按子串强制」—— 那条 `raise` 在 diff 里是 **context 行**、与 master 逐字相同，
         只有 ELOOP 在它之前被分流走，所以行为上本来就是 verbatim，无输入可造出非 verbatim 消息。
+      - **DEFER 2（Note，终审新增）**：另一条几何 —— workspace **内部**的 symlink，其目标穿过一个位于
+        workspace **外部**的环 —— 是 refuse→refuse（master 报 `must be under workspace_root`，
+        HEAD 报环路拒绝），无放行回归；但按 `error.filename` 归因会把一条 **workspace 外的绝对路径**
+        原样写进消息。`_symlink_loop_refusal` 的 docstring 预声明的「不脱敏」只覆盖 `{path}`
+        （恒为 config 派生、workspace 内），`error.filename` 是新的无界来源。影响极小
+        （那是运维自己放的 symlink 的目标），且环路归因比它替掉的 containment 判定更可操作。
+        已在 PR body 的修后几何表补一行披露。
       - **DEFER 1（P4）**：`via_midloop` 几何在 3.14 上 master ACCEPT、HEAD REFUSE 是 accept→refuse 翻转。
         它在 #1544 的**要求层**意图之内（「环不得被静默收编」，且 3.11 上 master 本来就抛），
         缺的只是**场景/表格层**的披露 —— 已在 PR body 的修后几何表补一行。
@@ -299,5 +306,5 @@
         实测每种几何 filename 都有值，保留只为避免打印 `at None`。
       - **fix pass deviation 7（记过）**：首个 mutant 改写误用了裸 `python3`（项目规则是 uv-only），
         后续全部改回 `uv run python`；无状态影响，还原经 sha256 核验。
-- [ ] D.8 诚实记账：- [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
+- [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
       而非当下崩溃修复；#1547 触发条件少见但影响面是共享底座。
