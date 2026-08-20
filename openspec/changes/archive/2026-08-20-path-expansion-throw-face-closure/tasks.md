@@ -194,11 +194,44 @@
       **绝不裸跑 `uv run --python 3.11`**（会重建项目 `.venv`）。
       矩阵覆盖 #1544 / #1545 / #1546 三组几何，before 与 after 均贴 PR body。
 - [x] C.4 `openspec validate path-expansion-throw-face-closure --strict --no-interactive`
-- [ ] C.5 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，
+- [x] C.5 merge 后 node-27 全量 receipt，`umask 022`，独立 detached worktree，
       **不碰 `/home/nwm/NWM` 主树**。判读口径「相对 master 基线**不新增红**」，
       master 已知红：`test_entropy_audit_script.py::…hard_gate…`、
       `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`、
-      以及 #1613 那条顺序依赖。**node-27 是 3.11.15，该 receipt 顺带就是 ≤3.12 的实机 oracle。**
+      以及 #1613 那条顺序依赖。
+      **口径更正（实机实测推翻本条原文）**：原文写「node-27 是 3.11.15，该 receipt 顺带就是
+      ≤3.12 的实机 oracle」——**只对主树成立，对 receipt 不成立**。`/home/nwm/NWM` 主树的
+      `.venv` 确实是 3.11.15，但 C.5 按纪律跑在**独立 detached worktree** 里，其 `uv sync`
+      解析到的是节点上最新的 **3.14.5**（实测 `/home/nwm/NWM-1624/.venv/bin/python -V`
+      = `Python 3.14.5`；系统 `python3` 另是 3.10.12）。故 C.5 拆成两段：
+      - **C.5(a)** 全量 receipt 跑 3.14.5 —— 与已有的 3.14 真父基线**同臂可比**，
+        用途是「相对 master 基线不新增红」的回归判读。
+      - **C.5(b)** Evidence Floor 定向套件另跑一次 **3.11.15**（node-27 本地已装该 toolchain，
+        `UV_PROJECT_ENVIRONMENT=/home/nwm/NWM-1624/.venv311` 隔离，不动该树的 3.14 `.venv`，
+        更不碰主树）—— 这才是本单真正要的 ≤3.12 实机 oracle，因为五处里有三处
+        （#1544/#1545/#1546）的判别力只在 ≤3.12 臂上。
+
+      **实测结果（`/home/nwm/NWM-1624` @ master `f087f08d`，`umask 022`，
+      detached worktree，`/home/nwm/NWM` 主树全程未动，分支仍是
+      `feat/issue-1341-river-ts-read-path-surrogate-keys`）**：
+
+      | 段 | 解释器 | 结果 |
+      |---|---|---|
+      | C.5(a) 全量 `-m "not e2e and not grib"` | 3.14.5 | `2 failed, 12751 passed, 153 skipped, 18 deselected in 4588.01s` |
+      | C.5(b) Evidence Floor 四文件定向 | **3.11.15** | `1 failed, 2037 passed, 6 skipped in 479.33s` |
+
+      两段的红**全部**落在 master 已知红集内，**零新增红**：
+      - 3.14.5 段两条 = `test_entropy_audit_script.py::…hard_gate…` +
+        `test_scheduler_file_provider_refresh.py::test_provider_snapshot_rejects_replacement_between_metadata_and_read`，
+        与 3.14 真父基线（`29892932`：`2 failed, 12673 passed`）**逐条同一红集**。
+      - 3.11.15 段唯一那条 = 上面第二条（定向套件不含 entropy audit 文件）。
+
+      隔离核验：跑完后 `/home/nwm/NWM-1624/.venv/bin/python -V` 仍是 `Python 3.14.5`，
+      `.venv311` 未污染主 venv。
+
+      **顺带的跨臂观察（只记不追）**：同一四文件在 3.11.15/Linux 上收集到 2043 条
+      （2037 passed + 6 skipped），本地 3.14.2/Darwin 上是 2011 条（2005 + 6）。
+      差 32 条属平台/版本条件收集，非本单引入；未逐条核对，如实标注为未追查项。
 - [x] C.6 node-22 全程不跑任何东西（本单纯逻辑，无 Slurm/SHUD 面）。
 
 ## D. 记账与承接（必须进 PR body）
