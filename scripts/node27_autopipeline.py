@@ -47,6 +47,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +90,17 @@ DEFAULT_RUN_WORKERS = 1
 MAX_RUN_WORKERS = 8
 
 INGEST_ROLE = "node27_data_plane_ingest"
+# Phase 3.5 statistics guard (issue #1378). Every cycle's run_id/run_key is a
+# value the frontier chunk's planner statistics have never seen, so estimated
+# rows collapse to ~0 and the valid-times query flips off the identity index —
+# a plan regression no row-count threshold predicts. The floor exists only to
+# skip chunks this tick never touched (one real run writes segments x timesteps
+# rows, orders of magnitude above it), never to postpone the refresh.
+STATS_GUARD_MIN_MODS = 10_000
+STATS_GUARD_MAX_CHUNKS = 3
+# 6x the measured worst case (~20 s for a 250M-row chunk; 64 s for three on
+# 2026-08-19), and 3 x 120 s still fits inside the 10 min tick cadence.
+STATS_GUARD_TIMEOUT_MS = 120_000
 INGEST_SUMMARY_SCHEMA = "nhms.node27_ingest.autopipeline.v1"
 INGEST_PREFLIGHT_SCHEMA = "nhms.node27_ingest.preflight.v1"
 PREFLIGHT_BLOCKED_RC = 2
@@ -1116,6 +1128,156 @@ def _publish_display_runs(database_url: str) -> int:
         conn.close()
 
 
+_STATS_GUARD_CANDIDATES_SQL = """
+SELECT c.chunk_schema, c.chunk_name, s.n_mod_since_analyze, s.last_analyze
+FROM timescaledb_information.chunks c
+JOIN pg_stat_user_tables s
+  ON s.schemaname = c.chunk_schema
+ AND s.relname = c.chunk_name
+WHERE (c.hypertable_schema, c.hypertable_name) IN (
+    ('hydro', 'river_timeseries'),
+    ('met', 'forcing_station_timeseries')
+)
+  AND c.is_compressed = false
+  AND s.n_mod_since_analyze >= %s
+ORDER BY s.n_mod_since_analyze DESC, c.chunk_schema, c.chunk_name
+"""
+
+_STATS_GUARD_LAST_ANALYZE_SQL = """
+SELECT last_analyze
+FROM pg_stat_user_tables
+WHERE schemaname = %s AND relname = %s
+"""
+
+# Chunk identifiers come from the TimescaleDB catalog, but ANALYZE takes no
+# bind parameters -- refuse to interpolate anything that is not a bare
+# identifier rather than quote-escaping by hand.
+_STATS_GUARD_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _stats_guard_error(exc: Exception) -> str:
+    """Always a non-empty, credential-free string -- some DB errors carry no message."""
+
+    return f"{type(exc).__name__}: {redact_text(str(exc))}".rstrip(": ")
+
+
+def _analyze_one_frontier_chunk(
+    cur: Any,
+    chunk_schema: str,
+    chunk_name: str,
+    n_mod: int,
+    last_analyze_before: Any,
+) -> dict[str, Any]:
+    """ANALYZE one chunk and read its statistics back -- failures stay local.
+
+    Per-chunk isolation (design D1): a chunk held by the compression lock or
+    dropped between the candidate query and the ANALYZE must not swallow the
+    rest of the batch. A failed ANALYZE leaves ``n_mod_since_analyze``
+    untouched, so that same chunk stays on top of the next tick's descending
+    candidate list and would starve every other frontier chunk forever.
+
+    Safe because the caller's connection is autocommit: an error leaves no
+    aborted transaction for the remaining chunks to trip over.
+
+    The returned entry always carries the same keys; a failure is
+    ``status: "failed"`` plus a non-empty ``error`` string, so the summary's
+    ``analyzed`` list is one flat, uniformly shaped record of every attempt.
+    """
+    entry: dict[str, Any] = {
+        "chunk": f"{chunk_schema}.{chunk_name}",
+        "n_mod_since_analyze": int(n_mod),
+    }
+    try:
+        if not (_STATS_GUARD_IDENT_RE.match(chunk_schema) and _STATS_GUARD_IDENT_RE.match(chunk_name)):
+            raise ValueError(f"refusing to ANALYZE non-identifier chunk name: {chunk_schema}.{chunk_name}")
+        cur.execute(f"SET statement_timeout = {STATS_GUARD_TIMEOUT_MS}")
+        started = time.monotonic()
+        cur.execute(f'ANALYZE "{chunk_schema}"."{chunk_name}"')
+        seconds = round(time.monotonic() - started, 3)
+        cur.execute(_STATS_GUARD_LAST_ANALYZE_SQL, (chunk_schema, chunk_name))
+        row = cur.fetchone()
+        last_analyze = row[0] if row else None
+        refreshed = last_analyze is not None and (last_analyze_before is None or last_analyze > last_analyze_before)
+        entry["seconds"] = seconds
+        entry["last_analyze"] = last_analyze.isoformat() if last_analyze is not None else None
+        entry["status"] = "ok" if refreshed else "warning"
+    except Exception as exc:  # noqa: BLE001 - deliberate per-chunk isolation
+        entry["seconds"] = None
+        entry["last_analyze"] = None
+        entry["status"] = "failed"
+        entry["error"] = _stats_guard_error(exc)
+    return entry
+
+
+def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
+    """ANALYZE the uncompressed frontier chunks this tick's ingest touched.
+
+    Runs on an autocommit connection because the cumulative statistics an
+    ANALYZE reports are only visible to a *later* transaction: reading
+    ``last_analyze`` back inside the ANALYZE's own transaction would report the
+    previous value and fake a PG15 non-owner silent skip. The read-back is the
+    only evidence that the ANALYZE did anything at all -- PG15 has no MAINTAIN
+    privilege bit, so a non-owner gets a WARNING and a successful return.
+
+    Two failure levels: a single chunk's ANALYZE or read-back is isolated to
+    its own ``analyzed`` entry (``status: "failed"`` + ``error``) and the
+    remaining selected chunks are still attempted; only a guard-level failure
+    (connect, candidate query) sets ``status: "failed"`` on the summary itself.
+    Neither changes the tick's return code.
+    """
+    summary: dict[str, Any] = {
+        "status": "completed",
+        "min_mods": STATS_GUARD_MIN_MODS,
+        "max_chunks": STATS_GUARD_MAX_CHUNKS,
+        "analyzed": [],
+        "deferred": [],
+    }
+    conn = None
+    try:
+        conn = psycopg2.connect(database_url)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(_STATS_GUARD_CANDIDATES_SQL, (STATS_GUARD_MIN_MODS,))
+            candidates = cur.fetchall()
+            selected = candidates[:STATS_GUARD_MAX_CHUNKS]
+            # Truncation is never silent: the leftovers are a named backlog the
+            # next tick picks up (statistics drift is progressive, not acute).
+            summary["deferred"] = [f"{row[0]}.{row[1]}" for row in candidates[STATS_GUARD_MAX_CHUNKS:]]
+            for chunk_schema, chunk_name, n_mod, last_analyze_before in selected:
+                summary["analyzed"].append(
+                    _analyze_one_frontier_chunk(cur, chunk_schema, chunk_name, n_mod, last_analyze_before)
+                )
+    # Guard-level failure only (connect / candidate query); per-chunk failures
+    # never reach here. Statistics drift is a progressive illness, not an acute
+    # one: report the failure honestly, keep whatever was refreshed, and let the
+    # next tick retry rather than failing an otherwise successful ingest tick.
+    except Exception as exc:  # noqa: BLE001 - deliberate blanket isolation
+        summary["status"] = "failed"
+        summary["error"] = _stats_guard_error(exc)
+    finally:
+        if conn is not None:
+            conn.close()
+    return summary
+
+
+def _stats_guard(database_url: str, *, ingested_runs: int, env: Mapping[str, str]) -> dict[str, Any]:
+    """Phase 3.5 gate: only a tick that actually ingested rows moved the frontier."""
+    skeleton: dict[str, Any] = {
+        "min_mods": STATS_GUARD_MIN_MODS,
+        "max_chunks": STATS_GUARD_MAX_CHUNKS,
+        "analyzed": [],
+        "deferred": [],
+    }
+    if (env.get("NODE27_AUTOPIPE_STATS_GUARD") or "").strip().lower() == "off":
+        return {"status": "skipped", "reason": "NODE27_AUTOPIPE_STATS_GUARD=off", **skeleton}
+    if ingested_runs < 1:
+        return {"status": "not_triggered", "reason": "no_run_ingested", **skeleton}
+    try:
+        return _analyze_frontier_chunks(database_url)
+    except Exception as exc:  # noqa: BLE001 - same isolation as coverage refresh
+        return {"status": "failed", "error": _stats_guard_error(exc), **skeleton}
+
+
 # --------------------------------------------------------------------------- #
 # subprocess plumbing
 # --------------------------------------------------------------------------- #
@@ -1815,6 +1977,27 @@ def main(argv: list[str] | None = None) -> int:
     def by(outcome: str) -> list[dict[str, Any]]:
         return [r for r in run_results if r["outcome"] == outcome]
 
+    # ---- phase 3.5: refresh planner statistics on the chunks this tick wrote -
+    # Deliberately keyed on runs ingested *by this tick* (not the publish
+    # predicate, which also fires for runs ingested earlier): a tick that wrote
+    # no rows moved no frontier and has nothing to refresh.
+    stats_guard = _stats_guard(
+        database_url,
+        ingested_runs=0 if args.seed_only else len(by("ingested")),
+        env=env,
+    )
+    if args.progress and stats_guard["status"] not in ("skipped", "not_triggered"):
+        # Per-status, never a bare count: ``analyzed`` records every attempt, so
+        # an all-failed tick would otherwise read like a success.
+        statuses = [entry["status"] for entry in stats_guard["analyzed"]]
+        print(
+            f"[stats-guard] {stats_guard['status']}: ok {statuses.count('ok')}"
+            f", warning {statuses.count('warning')}, failed {statuses.count('failed')}"
+            f", deferred {len(stats_guard['deferred'])}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     summary = {
         "schema": INGEST_SUMMARY_SCHEMA,
         "status": "completed",
@@ -1850,7 +2033,10 @@ def main(argv: list[str] | None = None) -> int:
                 {"run_id": r["run_id"], "stage": r.get("stage"), "error": r.get("error")} for r in by("failed")
             ],
         },
+        "stats_guard": stats_guard,
     }
+    # stats_guard is deliberately absent from this expression: a statistics
+    # refresh failure never turns a successful ingest tick red.
     rc = 0 if (not seed_failed and not by("failed")) else 1
     summary["status"] = "completed" if rc == 0 else "completed_with_failures"
     summary["return_code"] = rc

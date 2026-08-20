@@ -1781,7 +1781,10 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
          receipt.get("budget"), receipt.get("per_tick_bound"))
 
    # (1) is there a post-#1351 receipt here at all? Not a budget verdict.
-   assert version == "2.1", (
+   # Every version that carries `budget` counts — "2.1" (#1351) onwards;
+   # an ordered lower bound survives any future bump that has nothing to do
+   # with budgets, without needing an edit here.
+   assert tuple(map(int, version.split("."))) >= (2, 1), (
        f"no post-#1351 default tick at this path yet (schema_version={version})"
    )
 
@@ -2102,6 +2105,88 @@ survive the cutover (measured:
 cutover and the text-column-retirement issue, the fact table has no
 database-enforced referential link to `core.river_segment`. Recorded in the
 ADR 0002 amendment.
+
+### 4.7 ingest 前沿 chunk 统计漂移 (`#1378`)
+
+生产 display 的 `GET /api/v1/layers/discharge/valid-times`（named-identity 分支）
+在 node-27 上从 0.56 ms 退化到 887 ms。索引全在场且 `indisvalid=t`，查询形状没变——
+病灶是**前沿 chunk 的 planner 统计**。
+
+#### 成因：新值不可见
+
+每个新 cycle 写入的 `run_id`/`run_key` 是该 chunk 统计里**不存在的值**。planner 对
+未见过的值估行 ≈ 0，于是在 `DISTINCT … ORDER BY valid_time DESC LIMIT` 下判定
+"顺 `valid_time` 索引逐行过滤很快就能凑够 LIMIT"，翻转掉 identity 键索引；实际前沿
+之外全是别的 run 的行，执行器一路扫（实测 `Rows Removed by Filter: 2,715,324`）。
+
+关键是**翻转由新 cycle 的第一批行触发，与修改行数体量无关**。整条 ingest 链
+（`scripts/node27_autopipeline.py`、`workers/output_parser`、
+`scripts/node27_timeseries_compression.py`）原本一个 ANALYZE 都没有，统计新鲜度
+完全押在 autovacuum 的 10% scale factor 上——250M 行的 chunk 允许 ~25M 行修改才触发
+autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_analyze`
+（2.7%/5.5%），远不到线。所以**不能用体量阈值治**：任何高阈值都会在每次刷新后留下
+一段"新 cycle 已进、统计未见"的必然复发窗口。
+
+#### 看护：一处显式 ANALYZE
+
+| 位置 | 触发 | 目标 | 上限 / 超时 |
+|---|---|---|---|
+| autopipe tick phase 3.5（publish 之后、summary 之前） | 本 tick **实际 ingest ≥ 1 个 run**（`already_ingested` 不算——那种 tick 没写行） | 两张 hypertable 的**未压缩** chunk 中 `n_mod_since_analyze >= 10_000` 者 | 每 tick 至多 3 个（按 `n_mod` 降序），逐条 `statement_timeout = 120 s`；被裁掉的进 `stats_guard.deferred`，下个 tick 补 |
+
+`10_000` 的下限不是"攒够才刷"：一个真实 run 写入的行数 = 段数 × 时步 ≫ 10⁴，被本 tick
+触及的 chunk 必然过槛；下限只用来跳过仅有零星迟到写入、本 tick 根本没碰的 chunk。
+压缩 chunk **不在**目标集合内——初稿曾在压缩 runner 里搭车 ANALYZE，终审否决撤除，
+理由见下面的陷阱一节。
+
+看护**不改 tick 的成败判定**：失败分两级——单 chunk 的 ANALYZE
+失败逐 chunk 隔离（该条目在 `stats_guard.analyzed` 里记 `status: "failed"` +
+`error`，剩余 chunk 照常尝试），guard 级失败（连接/候选查询）才写
+`stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码——统计漂移是渐进病，
+下个 tick 重试即可，没资格把 unit 染红。停用开关：
+`NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。
+
+#### 复核（`pg_stat_user_tables`）
+
+```sql
+-- 前沿漂移量：哪些未压缩 chunk 攒着未被统计看见的修改
+SELECT c.chunk_name, s.n_mod_since_analyze, s.last_analyze, s.last_autoanalyze
+FROM timescaledb_information.chunks c
+JOIN pg_stat_user_tables s
+  ON s.schemaname = c.chunk_schema AND s.relname = c.chunk_name
+WHERE (c.hypertable_schema, c.hypertable_name) IN (
+    ('hydro', 'river_timeseries'),
+    ('met', 'forcing_station_timeseries')
+)
+  AND c.is_compressed = false
+ORDER BY s.n_mod_since_analyze DESC;
+```
+
+一个真跑过 guard 的 tick，其 summary JSON 的 `stats_guard.analyzed` 非空（逐**尝试**
+一条，`status` 为 `ok`/`warning`/`failed`）；只有 `status: "ok"` 的条目承诺上面 SQL
+里对应 chunk 的 `last_analyze` 刷到该 tick 时刻——`warning` 正是"发了 ANALYZE 但
+`last_analyze` 未刷"（见下节陷阱），`failed` 是没执行成。
+
+#### 陷阱：PG15 非 owner 的 ANALYZE 是静默跳过
+
+PG 15 没有 `MAINTAIN` 权限位。非 owner（node-27 的 ingest 角色不一定是 chunk 的
+owner）执行 `ANALYZE` **只发一条 WARNING 然后"成功"返回**——rc 是 0，统计没动。
+所以 guard 在每条 ANALYZE 之后回读 `pg_stat_user_tables.last_analyze` 与执行前比对，
+没刷新就把该条目记 `status: "warning"`（如实上报，不改 tick 返回码）。看到 warning
+一律按"权限问题"查，别按"ANALYZE 没跑"查。回读走 autocommit 连接：ANALYZE 的累计
+统计要到事务提交后才对后续事务可见，同事务内回读只会读到旧值。统计上报还可能有
+亚秒级延迟，所以极快的 ANALYZE 偶发一次 warning 属正常——**连续**出现才是权限问题。
+
+#### 陷阱：不要对裸压缩 chunk 名 ANALYZE
+
+TimescaleDB 压缩时**特意保存** origin chunk 的 `pg_class` 统计
+（`capture_pgclass_stats` → `restore_pgclass_stats`）：heap 被清空但 `reltuples`
+保留——node-27 chunk 55 实证 heap 0 bytes 而 `reltuples = 266,888,192`。而
+`ANALYZE <裸 chunk 名>` **绕过 hypertable 重定向**（`process_vacuum` 只在目标是
+hypertable 时改道 compressed 兄弟表），落在那个空堆上把保留的统计清零。收益是零：
+planner 对压缩 chunk 的成本估算读的是 **compressed 兄弟表**的统计。所以对压缩
+chunk 只有一种正确写法——`ANALYZE <hypertable>`（走
+`update_compressed_chunk_relstats`）。压缩 chunk 无 DML，autoanalyze 永不触发，
+一旦清零就只能靠这条语句修回来。
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 

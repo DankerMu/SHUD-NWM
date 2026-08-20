@@ -1279,6 +1279,16 @@ def test_schema_rejects_per_table_totals_missing_forcing_key() -> None:
 
 def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     receipt = _example_receipt()
+    # Pin the refusal outcome and its zeroed totals explicitly rather than
+    # inheriting them from the example: an example that ever becomes a mutating
+    # tick would otherwise make the totals a second, unrelated violation, and
+    # this test would pass without ever exercising ``selected``.
+    receipt["outcome"] = "refused_lock"
+    receipt["per_table_totals"]["hydro.river_timeseries"] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
     receipt["selected"] = [
         {
             "hypertable_schema": "hydro",
@@ -1293,6 +1303,12 @@ def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     ]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
+    # The sole surviving violation names this test's target.
+    errors = list(jsonschema.Draft202012Validator(_load_schema()).iter_errors(receipt))
+    assert errors
+    assert all(list(error.absolute_path)[:1] == ["selected"] for error in errors), [
+        list(error.absolute_path) for error in errors
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1441,6 +1457,15 @@ def test_schema_rejects_budget_on_a_legacy_receipt(legacy_version: str) -> None:
         del receipt["head_sha"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
+    # The prohibition this test is about lives on the receipt root, not on an
+    # entry -- so ``['selected', 0]`` errors would mean it passed for the
+    # wrong reason.
+    errors = list(jsonschema.Draft202012Validator(_load_schema()).iter_errors(receipt))
+    assert errors
+    assert all(list(error.absolute_path) == [] for error in errors), [
+        list(error.absolute_path) for error in errors
+    ]
+    assert all("budget" in error.message for error in errors), [error.message for error in errors]
 
 
 @pytest.mark.parametrize("legacy_version", ["1.0", "2.0"])
