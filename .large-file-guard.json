@@ -53,6 +53,7 @@
     "tests/test_forcing_copyback_backfill.py",
     "tests/test_run_tree_copyback.py",
     "tests/test_scheduler_state_index_copyback_replay.py",
+    "tests/test_state_manager.py",
     "tests/test_select_ci_tests.py",
     "tests/test_tile_publisher.py",
     ".review-gate-issues.json"

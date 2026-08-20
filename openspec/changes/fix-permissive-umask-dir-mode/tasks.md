@@ -32,25 +32,25 @@ OpenSpec change: fix-permissive-umask-dir-mode (generated)
 
 ## 1. Implementation
 
-- [ ] 1.1 `packages/common/safe_fs.py:68` — `os.mkdir(part, 0o755, dir_fd=fd)`.
+- [x] 1.1 `packages/common/safe_fs.py:68` — `os.mkdir(part, 0o755, dir_fd=fd)`.
       No `fchmod`, no new `mode` parameter, no chmod of existing directories
       (design D1, D2).
-- [ ] 1.2 Add a shared test helper that creates a directory tree with an explicit
+- [x] 1.2 Add a shared test helper that creates a directory tree with an explicit
       mode on every component it creates, mirroring
       `state_manager._ensure_copyback_state_parent`. Place it where the CI
       selector still routes to real suites — **not** in `tests/conftest.py` or
       `tests/integration_helpers.py` (design D5).
-- [ ] 1.3 Route `_scheduler_env_roots` in `tests/test_production_scheduler.py`
+- [x] 1.3 Route `_scheduler_env_roots` in `tests/test_production_scheduler.py`
       through the helper.
-- [ ] 1.4 Route `_set_db_free_scheduler_env` (the `db-free` / object-index
+- [x] 1.4 Route `_set_db_free_scheduler_env` (the `db-free` / object-index
       directories and the `NHMS_SCHEDULER_JOURNAL_ROOT` mkdir) through the helper.
-- [ ] 1.5 Re-run `(umask 002; uv run pytest -q --tb=no -rf tests/test_production_scheduler.py)`,
+- [x] 1.5 Re-run `(umask 002; uv run pytest -q --tb=no -rf tests/test_production_scheduler.py)`,
       and route each still-failing site's directory creation through the helper.
       Repeat until zero failures. Do **not** blanket-rewrite the ~1398 mode-less
       `mkdir` calls in `tests/` (design D4).
-- [ ] 1.6 Apply the same treatment to any other suite the full-tree umask-`002`
+- [x] 1.6 Apply the same treatment to any other suite the full-tree umask-`002`
       run implicates, using the same empirical loop.
-- [ ] 1.7 Record the ACL boundary (design D7) in source, so a future reader does
+- [x] 1.7 Record the ACL boundary (design D7) in source, so a future reader does
       not undo it by accident:
       - a comment at the `safe_fs` mkdir explaining that the explicit mode clamps
         an inherited POSIX ACL mask, so safe_fs must not be the creator of
@@ -70,25 +70,25 @@ safe_fs-mode tests in `tests/test_safe_fs.py` so this PR's diff selects them.
 There is no `tests/test_provider_atomic.py`; provider_atomic coverage lives in
 `tests/test_scheduler_file_provider_refresh.py`.
 
-- [ ] 2.1 `tests/test_safe_fs.py`: safe_fs creates a directory under
+- [x] 2.1 `tests/test_safe_fs.py`: safe_fs creates a directory under
       `os.umask(0o002)` -> landed mode is `0o755` and `S_IMODE & 0o022 == 0`.
-- [ ] 2.2 `tests/test_safe_fs.py`: safe_fs creates a directory under
+- [x] 2.2 `tests/test_safe_fs.py`: safe_fs creates a directory under
       `os.umask(0o077)` -> landed mode is `0o700`. This is **new** coverage, not
       a pre-existing guard: no test in the repository currently pins a directory
       mode under `0o077` (design D2), so the `fchmod` variant would have widened
       these silently.
-- [ ] 2.3 `tests/test_safe_fs.py`: a provider lock whose parent was created by
+- [x] 2.3 `tests/test_safe_fs.py`: a provider lock whose parent was created by
       safe_fs under `os.umask(0o002)` is acquired successfully — the
       permissive-side twin of
       `test_provider_atomic_publishes_shared_mode_under_private_umask`.
-- [ ] 2.4 Extend the existing
+- [x] 2.4 Extend the existing
       `tests/test_scheduler_file_provider_refresh.py:832-847`
       (`test_provider_lock_rejects_writable_parent_and_preserves_body_errors`),
       which already pins `0o777` parent -> refused and `0o755` parent -> acquired,
       with the `0o775` case. Do **not** add a third near-twin test.
-- [ ] 2.5 `tests/test_safe_fs.py`: `ensure_directory_no_follow` on an existing
+- [x] 2.5 `tests/test_safe_fs.py`: `ensure_directory_no_follow` on an existing
       `0o775` directory leaves its mode unchanged.
-- [ ] 2.6 Red-proof for 2.1-2.4 against pre-change source, batched.
+- [x] 2.6 Red-proof for 2.1-2.4 against pre-change source, batched.
 
 ## 3. Verification matrix
 

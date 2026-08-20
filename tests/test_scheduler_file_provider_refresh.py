@@ -39,6 +39,7 @@ from services.orchestrator.scheduler_file_providers import (
     validate_catalog_bound_readiness_entries,
     validate_readiness_registry_model_set,
 )
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import required_standard_variables_for_source
 
 
@@ -53,9 +54,15 @@ def _config(tmp_path: Path) -> refresh.RefreshConfig:
     for path in (work, receipts, emergency, tmp_path / "private"):
         path.chmod(0o700)
     scheduler = objects / "scheduler"
-    (scheduler / "registry").mkdir(parents=True)
-    (scheduler / "canonical-readiness").mkdir()
-    (scheduler / "state-index").mkdir()
+    # Explicit mode, not the ambient umask (#1513): these three are the DIRECT
+    # parents of the registry / readiness / state provider locks, and
+    # `provider_atomic`'s gate is fail-closed on any 0o022 bit there. A bare
+    # mkdir lands 0o775 under umask 0002 and every lane below raises
+    # provider_lock_parent_unsafe. (`work` / `receipts` / `emergency` above are
+    # already safe -- they are explicitly chmod-ed to 0o700.)
+    make_directory_with_explicit_mode(scheduler / "registry")
+    make_directory_with_explicit_mode(scheduler / "canonical-readiness")
+    make_directory_with_explicit_mode(scheduler / "state-index")
     return refresh.RefreshConfig(
         basins_root=basins,
         registry_uri=str(scheduler / "registry" / "manifest-last.json"),
@@ -478,13 +485,18 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
     provider_paths.extend((("readiness", config.readiness_uri), ("state", config.state_uri)))
     for name, uri in provider_paths:
         path = Path(uri)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Explicit modes, not the ambient umask (#1513): `path.parent` is the
+        # DIRECT parent of this lane's provider lock (gate refuses any 0o022
+        # bit) and `path` is the provider destination itself (publish refuses
+        # anything but SHARED_PROVIDER_MODE). Bare mkdir/write land 0o775/0o664
+        # under umask 0002 and fail both.
+        make_directory_with_explicit_mode(path.parent)
         if name in {"registry", "registry_worker_mirror"}:
             # Use shape-valid manifest bytes so the #1080 gate can parse the
             # previous canonical without treating it as provider_invalid.
-            path.write_bytes(_minimal_registry_manifest_bytes("registry"))
+            write_provider_destination(path, _minimal_registry_manifest_bytes("registry"))
         else:
-            path.write_text(name + "\n", encoding="utf-8")
+            write_provider_destination(path, name + "\n")
         preimage = capture_scheduler_provider_preimage(path)
         providers.append(
             {
@@ -619,7 +631,11 @@ def _stub_catalog_bound_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_provider_atomic_expected_preimage_preserves_concurrent_update(tmp_path: Path) -> None:
     destination = tmp_path / "index-last.json"
-    destination.write_bytes(b"old")
+    # Seeded at SHARED_PROVIDER_MODE, not the ambient umask (#1513): under umask
+    # 0002 a bare write_bytes lands 0o664 and the publish below raises
+    # provider_destination_access_invalid instead of reaching the preimage check
+    # this test is about.
+    write_provider_destination(destination, b"old")
     expected = capture_provider_preimage(destination, max_bytes=1024)
     destination.write_bytes(b"authoritative-new")
     before = os.stat(destination)
@@ -682,7 +698,7 @@ def test_provider_atomic_postread_failure_restores_validated_previous_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "index-last.json"
-    destination.write_bytes(b"old")
+    write_provider_destination(destination, b"old")  # SHARED_PROVIDER_MODE, not the umask (#1513)
     expected = capture_provider_preimage(destination, max_bytes=1024)
     real_write = provider_atomic_module.atomic_write_bytes_no_follow
     calls = 0
@@ -704,7 +720,7 @@ def test_provider_atomic_durable_replace_uncertainty_is_not_reported_as_preserve
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "index-last.json"
-    destination.write_bytes(b"old")
+    write_provider_destination(destination, b"old")  # SHARED_PROVIDER_MODE, not the umask (#1513)
 
     def uncertain(*args: object, **kwargs: object) -> Path:
         del args, kwargs
@@ -798,7 +814,11 @@ def test_provider_atomic_readers_observe_only_complete_old_or_new_json(tmp_path:
     destination = tmp_path / "manifest-last.json"
     old = json.dumps({"generation": "old", "rows": list(range(50))}).encode()
     new = json.dumps({"generation": "new", "rows": list(range(100))}).encode()
-    destination.write_bytes(old)
+    # SHARED_PROVIDER_MODE, not the umask (#1513). This one HANGS rather than
+    # fails when it is wrong: a 0o664 seed makes the writer thread raise
+    # provider_destination_access_invalid before `finished.set()`, and the
+    # reader loop below then spins forever.
+    write_provider_destination(destination, old)
     finished = threading.Event()
     observed: list[bytes] = []
 
@@ -838,6 +858,23 @@ def test_provider_lock_rejects_writable_parent_and_preserves_body_errors(tmp_pat
         with provider_destination_lock(unsafe / "manifest.json"):
             pass
     assert error_info.value.reason == "provider_lock_parent_unsafe"
+
+    # The 0o775 case (#1513) sits between the two above and is the one that
+    # actually bites: it is what a bare `mkdir` lands under umask 0002, so it
+    # arrives by accident rather than by an explicit 0o777. The gate stays
+    # FAIL-CLOSED on it regardless of who created the directory -- the fix for
+    # #1513 pins the creators' modes, it does not relax this check (design D3).
+    group_writable = tmp_path / "group-writable"
+    group_writable.mkdir(mode=0o775)
+    group_writable.chmod(0o775)
+    group_writable_destination = group_writable / "manifest.json"
+    with pytest.raises(ProviderAtomicError) as group_error_info:
+        with provider_destination_lock(group_writable_destination):
+            pass
+    assert group_error_info.value.reason == "provider_lock_parent_unsafe"
+    assert group_error_info.value.phase == "precommit"
+    # Refused before the lock inode exists, not after.
+    assert not provider_atomic_module.provider_lock_path(group_writable_destination).exists()
 
     shared = tmp_path / "shared"
     shared.mkdir(mode=0o755)
@@ -879,7 +916,7 @@ def test_provider_postreplace_read_exception_is_not_precommit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "manifest-last.json"
-    destination.write_bytes(b"old")
+    write_provider_destination(destination, b"old")  # SHARED_PROVIDER_MODE, not the umask (#1513)
     real_capture = provider_atomic_module.capture_provider_preimage
     calls = 0
 
@@ -1076,9 +1113,9 @@ def test_refresh_dry_run_rejects_existing_worker_registry_generation_mismatch(
     worker = Path(config.worker_registry_uri)
     # Both files must be shape-valid so the #1080 gate does not refuse
     # earlier than the shared/mirror generation-mismatch check.
-    shared.write_bytes(_minimal_registry_manifest_bytes("shared"))
-    worker.parent.mkdir(parents=True)
-    worker.write_bytes(_minimal_registry_manifest_bytes("worker-old"))
+    write_provider_destination(shared, _minimal_registry_manifest_bytes("shared"))
+    make_directory_with_explicit_mode(worker.parent)  # lock parent, #1513
+    write_provider_destination(worker, _minimal_registry_manifest_bytes("worker-old"))
     _stub_provider_pipeline(monkeypatch)
     monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage)
 
@@ -1094,8 +1131,8 @@ def test_worker_registry_restore_uses_committed_preimage_and_restores_exact_byte
         worker_registry_uri=str(tmp_path / "objects/scheduler/registry/manifest-last.json"),
     )
     worker = Path(config.worker_registry_uri)
-    worker.parent.mkdir(parents=True, exist_ok=True)
-    worker.write_bytes(b"old-generation")
+    make_directory_with_explicit_mode(worker.parent)  # lock parent, #1513
+    write_provider_destination(worker, b"old-generation")
     before = capture_scheduler_provider_preimage(worker)
     committed = atomic_replace_provider_bytes(
         worker,
@@ -1149,8 +1186,10 @@ def _tracked_transaction_fixture(
         "state": b"old-state-generation",
     }
     for name, path in paths.items():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(old[name])
+        # Explicit modes, not the ambient umask (#1513): lock parent and
+        # provider destination both feed a fail-closed mode gate.
+        make_directory_with_explicit_mode(path.parent)
+        write_provider_destination(path, old[name])
     _stub_provider_pipeline(monkeypatch)
     monkeypatch.setattr(refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage)
 
@@ -4574,8 +4613,9 @@ def test_provider_atomic_cas_refuses_concurrent_authoritative_swap(
     invariant D3 relies on for the registry lane.
     """
     canonical = tmp_path / "registry" / "manifest-last.json"
-    canonical.parent.mkdir()
-    canonical.write_bytes(b"old\n")
+    # Explicit modes, not the ambient umask (#1513).
+    make_directory_with_explicit_mode(canonical.parent)
+    write_provider_destination(canonical, b"old\n")
     snapshot = capture_provider_preimage(canonical, max_bytes=1024)
     # Concurrent authoritative writer swaps the bytes.
     canonical.write_bytes(b"authoritative-new\n")

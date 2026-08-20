@@ -65,7 +65,32 @@ def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = No
                 next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 try:
-                    os.mkdir(part, dir_fd=fd)
+                    # Explicit base mode, never the implicit 0o777 (#1513).  Without
+                    # it the landed permission is `0o777 & ~umask`, decided by the
+                    # ambient environment rather than by this code: on a umask-0002
+                    # host that is 0o775, and `provider_atomic`'s fail-closed lock
+                    # gate refuses such a directory as a lock parent
+                    # (`0o775 & 0o022 != 0`).
+                    #
+                    # Deliberately NO follow-up `fchmod`, and never a chmod of an
+                    # already-existing component.  The kernel applies the umask to
+                    # an explicit mode exactly as it does to the implicit one, and
+                    # a umask can only CLEAR bits, so 0o755 alone already satisfies
+                    # the gate under every umask.  An `fchmod` would additionally
+                    # turn the umask-0077 case from 0o700 into 0o755 -- silently
+                    # widening private directories on the strictest hosts.  The
+                    # governing rule: the umask may further restrict a safe_fs
+                    # directory, it may never loosen it.
+                    #
+                    # ACL boundary.  When the parent carries a default POSIX ACL the
+                    # umask is ignored entirely and this mode argument clamps the
+                    # inherited ACL *mask* instead, degrading a `default:user:X:rwx`
+                    # grant to `#effective:r-x`.  No mode both clears the 0o022 bits
+                    # and preserves that mask -- the mask IS the group bits -- so
+                    # safe_fs must not be the creator of ACL-shared directories.  A
+                    # caller needing cross-uid write has to widen after creation,
+                    # the way `state_manager._ensure_copyback_state_parent` does.
+                    os.mkdir(part, 0o755, dir_fd=fd)
                 except FileExistsError:
                     pass
                 except OSError as error:

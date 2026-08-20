@@ -23,6 +23,7 @@ from packages.common.state_manager import (
 )
 from services.orchestrator import run_tree_copyback as run_tree_copyback_module
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
+from tests.provider_mode_helpers import make_directory_with_explicit_mode
 from tests.test_state_manager import _LockReleaseSeam
 
 
@@ -200,7 +201,7 @@ def test_copyback_run_trees_copies_extra_state_index_object(tmp_path: Path) -> N
     copyback_root = tmp_path / "shared-object-store"
     _write_run(object_root, "fcst_gfs_2026062700_basins_heihe_shud", output_text="new\n")
     state_index = object_root / "scheduler" / "state-index" / "index-last.json"
-    state_index.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(state_index.parent)  # lock parent, #1513
     publish_state_snapshot_index(
         [],
         state_index,
@@ -1212,7 +1213,7 @@ def test_copyback_run_trees_skips_alias_root_reporting_one_filesystem_identity(
     copyback_root = tmp_path / "shared-object-store"
     _write_run(object_root, run_id)
     state_index = object_root / "scheduler" / "state-index" / "index-last.json"
-    state_index.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(state_index.parent)  # lock parent, #1513
     publish_state_snapshot_index(
         [],
         state_index,

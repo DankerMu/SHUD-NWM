@@ -258,6 +258,22 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # Pins the modes `provider_atomic`'s two fail-closed gates inspect, for
+        # tests that PRE-create a lock parent or a provider destination (#1513).
+        # Its whole purpose is to make those tests independent of the ambient
+        # umask, so the breakage it prevents is invisible on the umask-0022 CI
+        # runner and shows up only on node-27 (umask 0002) -- exactly the class
+        # the meta-guard collapse cannot catch, since import/syntax succeeds
+        # either way.
+        "tests/provider_mode_helpers.py",
+        (
+            "tests/test_production_scheduler.py",
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_state_manager.py",
+            "tests/test_run_tree_copyback.py",
+        ),
+    ),
+    PathTestRule(
         # A 0-byte package file with a rule looks wrong until you follow the
         # import: `from tests import X` contributes the base name `tests`, and
         # the repo's derivation authority deliberately aliases a package
