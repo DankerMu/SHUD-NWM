@@ -11,23 +11,22 @@ Do not hand-edit this file.
 - 技术栈：Python/FastAPI · pnpm/TypeScript · PostgreSQL+TimescaleDB+PostGIS · MinIO · Slurm · SHUD · OpenSpec
 - 关键命令：test `uv run pytest -q` · lint `uv run ruff check .` · build `cd apps/frontend && pnpm build` · spec `openspec validate <change> --strict --no-interactive`
 - 目录约定：`apps/api/`(FastAPI) · `apps/frontend/`(pnpm/TS) · `packages/`(共享库) · `services/`/`workers/`(后端服务) · `tests/`(pytest) · `schemas/`(JSON Schema) · `db/`(迁移) · `openspec/`(规格) · `docs/`(文档)
+- 气象代站时间序列直读 object-store，路径口径见 `docs/runbooks/object-store-forcing-series-read.md`
 
-## 双端开发流程
+## 三端协作
 
-本项目采用 **本地开发 + 远端测试** 模式；三端协作：
+**本地开发 + 远端测试**：代码只在本地编辑与 commit，经 GitHub (`DankerMu/SHUD-NWM`) 中转到两个远端验证。
 
-- **本地 (macOS)**: 代码编辑、commit、push、ruff、openspec validate、前端 tsc/pnpm test
-  - 仓库路径: `/Users/danker/Desktop/Hydro-SHUD/NWM`
-- **node-22 (210.77.77.22:32099, user=frd_muziyao)**:
-  **纯计算节点**（Slurm/SHUD/forcing wrapper），**不连任何活 DB**；产物写 NFS
-  `/ghdc/data/nwm/`（与 27 `/home/ghdc/nwm/` 同一份 NFS，零延迟无 rsync）；
-  承担**调度 oracle**（Slurm/SHUD runtime 行为），**数据 + display oracle 在 27**。
-  注：22 host 本地 historical PG :55433 已 archived/stopped，仅作显式 rollback archive，**不要连**
-  - 仓库路径: `/scratch/frd_muziyao/NWM`（唯一工作树，必须保留 ff-only 同步）
-- **node-27 (210.77.77.27:32099, user=nwm)**: 当前 active **primary PostgreSQL（本机 :55432）+ ingest 进程 + display API（:8080）+ 前端**都在本机；27 自己读 NFS 上的 22 产物、自己写入自己的 PG；basin 源数据在 `/home/ghdc/nwm/Basins` —— **所有真实数据 oracle、后端真实 DB pytest oracle、display/前端 live 验证 oracle**
-  - 仓库路径: `/home/nwm/NWM`
-  - readonly 是 role-level（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本
-- **同步方式**: GitHub (`DankerMu/SHUD-NWM`) 做中转，三端 push/pull
+| 端 | 地址 / 仓库路径 | 角色 | DB |
+|---|---|---|---|
+| 本地 Mac | `/Users/danker/Desktop/Hydro-SHUD/NWM` | 编辑、commit、push、ruff、openspec、前端 tsc/test | 不连远端 DB |
+| node-22 | `ssh -p 32099 frd_muziyao@210.77.77.22`，`/scratch/frd_muziyao/NWM` | 纯计算（Slurm/SHUD/forcing wrapper），产物写 NFS `/ghdc/data/nwm/` | **不连任何活 DB**；本机 :55433 已 archived/stopped，仅作 rollback archive，**不要连** |
+| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上 22 的产物 | **本机 PG :55432**（自写自读） |
+
+- 22 的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
+- node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
+- 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
+- node-27 DB 数据文件全部在 `pg_default`（`/home/nwm/nhms-pgdata`，与 object store 共用 1.7 TB 卷）；容量核查一律 `df -h /home` + `psql` 实测，不引用文档里的历史数字。容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
 
 ### 验证 oracle 路由（改了什么 -> 在哪验）
 
@@ -48,195 +47,65 @@ Do not hand-edit this file.
 -> 失败则本地修复 -> 重复
 ```
 
-### 远端 SSH 连接
-
-```bash
-ssh -p 32099 frd_muziyao@210.77.77.22   # node-22 compute_control
-ssh -p 32099 nwm@210.77.77.27           # node-27 display_readonly
-```
-
 ### 远端同步纪律（ff-only，绝不吞 stash）
 
 - 两端工作树共享、可能有未提交内容；pull 前先 `git status --porcelain` 把关，用 `git pull --ff-only`，**绝不自动 `git stash pop`**（吞掉冲突会静默丢工作）。
-- node-27 历史落后较多时，ff 合并可能因 **untracked 同名文件**中止（master 新跟踪的文件本地有同名 untracked）。处置：先确认内容与 master 一致（`diff` 为 0 / 备份到 `~/NWM-presync-backup-<date>/`），再清理冲突 untracked 后 ff；**绝不动** gitignored 数据/证据目录（`artifacts/`、`.nhms-*`、`data/Basins/` 等），有价值的本地证据先 `git stash push -- <file>` 保全。
+- ff 合并可能因 **untracked 同名文件**中止。处置：先确认内容与 master 一致（`diff` 为 0 / 备份到 `~/NWM-presync-backup-<date>/`），再清理冲突 untracked 后 ff；**绝不动** gitignored 数据/证据目录（`artifacts/`、`.nhms-*`、`data/Basins/` 等），有价值的本地证据先 `git stash push -- <file>` 保全。
+- 远端投送脚本/SQL 用 `ssh 'cat > file' < local`，不要靠嵌套引号传 SQL（单引号会被吃、`$` 会被远端展开）；长作业 `{ setsid nohup ... & }` 分离并把输出写文件。
 
 ### 环境隔离原则
 
-- **不同步** `.venv/`、`node_modules/`、`.nhms-*`、`pgdata/`、`minio-data/`、`infra/env/compute.env`
-- 两端系统不同（macOS vs Ubuntu），运行环境各自独立初始化
-- `.env.example` 和 `infra/env/*.example` 是模板，可以同步；实际 `.env` 和 `compute.env` 不同步
+**不同步** `.venv/`、`node_modules/`、`.nhms-*`、`pgdata/`、`minio-data/`、`infra/env/compute.env`；两端系统不同（macOS vs Ubuntu），运行环境各自初始化。`.env.example` 和 `infra/env/*.example` 是模板可同步，实际 `.env` / `compute.env` 不同步。Linux 端首次初始化与迁移后验证清单见 `docs/runbooks/two-node-deployment-overview.md`。
 
 ## 开发环境约定
 
-### Python
-
-- **一律用 `uv`**（`uv run`、`uv pip` 等），禁止裸 `python` / `python3` / `pip`。
-- 安装/刷新依赖：`uv sync --all-extras --dev`
-- 运行命令示例：
-
-```bash
-uv run pytest -q
-uv run ruff check .
-uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### 前端
-
-```bash
-cd apps/frontend
-pnpm install
-pnpm test
-pnpm build
-```
-
-### Linux / 生产环境迁移
-
-macOS 的 `.venv` 和 `node_modules` 不可复用到 Linux，必须删除重建。初始化顺序：
-
-1. `uv sync --all-extras --dev`
-2. `corepack prepare pnpm@10.11.0 --activate`
-3. `CI=true corepack pnpm install --frozen-lockfile`
-
-迁移后验证：
-
-- `uv run ruff check .` 必须通过
-- `uv run pytest -q tests/test_api.py tests/test_gateway.py` 必须通过
-- `cd apps/frontend && corepack pnpm test` 必须通过
-- `cd apps/frontend && corepack pnpm build` 必须通过
+- **Python 一律用 `uv`**（`uv run`、`uv pip`），禁止裸 `python` / `python3` / `pip`；装依赖 `uv sync --all-extras --dev`。node-27 上需 `export PATH=$HOME/.local/bin:$PATH`。
+- 前端：`cd apps/frontend && pnpm install && pnpm test && pnpm build`；Linux 端用 `corepack pnpm`（版本以 `package.json` 的 `packageManager` 为准）。
 
 ## Issue 驱动开发
 
-每个 issue 的验证标准写在 `openspec/changes/<change>/tasks.md` 的 "Evidence Floor" 中。
-
-### 当前优先事项
-
-本节只列**跨窗口长线**优先项；条目完结后必须随手删除（本节是 stale 高发区，以 GitHub open issues 为准）：
-
-- **river_timeseries 表瘦身 Epic #1336**：#1338/#1339/#1340 已交付；剩 #1341（读路径代理键切换，**等用户裁定**回填/排水/混合）→ #1342（旧文本列下线终态验收，下游阻塞）。
-- **node-27 display 性能 #1378**：valid_times named-identity 查询计划翻转（0.56ms → 887ms），待排期。
-
-### Issue 验证模板
-
-每个 issue 的验证命令在其 GitHub issue body 的 `Verification:` 字段中定义。通用格式：
-
-```bash
-# 1. 单元/集成测试
-uv run pytest -q tests/<相关测试文件>.py
-
-# 2. 代码风格
-uv run ruff check .
-
-# 3. OpenSpec 规格验证
-openspec validate <change-name> --strict --no-interactive
-```
-
-当前 issue 的验证命令以其 GitHub issue body 的 `Verification:` 字段为准。
+- 每个 issue 的验证标准写在 `openspec/changes/<change>/tasks.md` 的 **Evidence Floor**；具体验证命令以该 issue body 的 `Verification:` 字段为准。
+- 跨窗口优先级**以 GitHub open issues 为准**，本文件不再维护优先项清单（历来是 stale 高发区）。
 
 ## 文档更新要求
 
-文档权威状态与冲突解决顺序见 [`docs/governance/DOC_STATUS.md`](docs/governance/DOC_STATUS.md)。
+文档权威状态与冲突解决顺序见 [`docs/governance/DOC_STATUS.md`](docs/governance/DOC_STATUS.md)。开发过程中必须同步维护：
 
-开发过程中必须同步维护以下文档：
-
-1. **OpenSpec tasks.md**: 完成一个 task 后立即勾选对应 checkbox
-2. **Issue Evidence Floor**: PR 提交前确保所有 evidence 项可满足
-3. **AGENTS.md / CLAUDE.md**: 环境变更、新工具引入时更新源（`instructions/agents/`）并重新生成
+1. **OpenSpec tasks.md**：完成一个 task 后立即勾选
+2. **Issue Evidence Floor**：PR 提交前确保所有 evidence 项可满足
+3. **AGENTS.md / CLAUDE.md**：环境变更、新工具引入时改源（`instructions/agents/`）并重新生成，勿手改生成文件
 
 ## PR 规范
 
-- 分支命名: `feat/issue-<N>-<short-desc>`
-- PR body 包含: 变更摘要、测试证据、Evidence Floor 覆盖声明
-- 合并前必须通过 issue 指定的全部验证命令
+- 分支命名 `feat/issue-<N>-<short-desc>`；PR body 含变更摘要、测试证据、Evidence Floor 覆盖声明、偏离记录；合并前通过 issue 指定的全部验证命令。
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 
-`.github/workflows/ci.yml` 触发于 push master + PR 的 opened/synchronize/reopened（`on.pull_request` 无 `types:`，见下"draft -> ready 不触发新 run"）。**2026-06-07 起改为按路径 scope + PR 定向测试**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
+- **文档/规格更新必须并入触发合并门 CI 的最后一次 push**（worklog、`openspec/**`、`*.md` 随活儿一起 commit）。
+- **不得在等 CI 绿期间再补 docs-only 的尾随 commit**——那会重置合并门、白跑 CI。一个 PR 的"最后一推"应已是完整终态。
+- `openspec/` **不可** gitignore——它是规格源 + `openspec validate` 对象 + 双端同步内容；成本问题用上面的提交纪律解决。
 
-- **文档/规格更新必须并入触发合并门 CI 的最后一次 push** —— worklog、`openspec/**`、`*.md` 等随活儿一起 commit，或在最后一次代码推送之前推完。
-- **不得在等 CI 绿期间再补 docs-only 的尾随 commit**（如"补个 worklog"）——那会重置合并门、白跑 CI。
-- 一个 PR 的"最后一推"应已是完整终态；该推之后只等 CI 与 merge，不再追加任何 commit。
-- 注：openspec/ **不可** gitignore——它是规格源 + `openspec validate` 对象 + 双端同步内容，忽略它会破坏 spec-driven 工作流（治错了病）。成本问题用上面的提交纪律解决。
+### CI 门控要点
 
-### CI 范围与门控（路径 scope + PR 定向测试）
+规则以 `.github/workflows/ci.yml`（+ `governance.yml` 的 report-only 审计）为准；下面只是读结果时必须知道的四条：
 
-CI 是**人工合并门**（master 无 branch protection / required checks），不是机器强制；下面是"哪个改动触发哪个 job"的约定：
-
-- **按路径 scope**：`changes` job（`dorny/paths-filter`）先判改动区，下游 job 仅在相关路径变化时跑。纯前端 / 纯 docs PR **不跑**后端 pytest；纯后端 PR 不跑前端构建。
-  - `backend` filter（喂 `unit-test` / `unit-test-targeted`）：`**/*.py`、`pyproject.toml`、`uv.lock`、`tests/**`、`packages/**`、`apps/api/**`、`services/**`、`workers/**`、`infra/**`、`schemas/**`、`db/**`、`scripts/validate_*.py`。
-  - `database` filter（喂 `real-db-integration`，**独立于 `backend` 且窄得多**）：
-    - `db/**`、`packages/common/migrate.py`、`scripts/node27_timeseries_decompression_replay.py`、`pyproject.toml`、`uv.lock`、`tests/conftest.py`、`tests/integration_helpers.py`、`tests/*integration*.py`、`tests/**/*integration*.py`，外加一小串显式真实-DB 测试文件。
-    - 只改 `apps/api/**` 之类的后端 PR 命中 `backend` 但不命中 `database`，**永不**起 TimescaleDB，转不转 ready 都一样。
-  - 前端门（`frontend-build`）：`apps/frontend/**`、`openapi/**`。
-  - lint 门：`markdown-lint`<-`docs/**`、`openapi-validate`<-`openapi/**`、`json-schema-validate`<-`schemas/**`。
-- **PR 上后端只跑定向测试，与 draft/ready 无关**：
-  - 命中 `backend` filter 的**所有** PR（draft 或 ready 一视同仁），后端单测一律只有 `unit-test-targeted`（显示名 **"Unit Tests"**，timeout 35min）：由 `scripts/select_ci_tests.py` 按本 PR diff 选出测试文件再 `pytest -q`；选不出文件时降级为 `pytest tests/ -q --collect-only` 冒烟——只验 import/语法，**不执行任何断言**，该分支带 `::warning` 注解 + step summary 显式标注本次 0 断言执行。
-  - **Unit Tests 的第三种模式（塌缩）**：当定向选择塌缩为只剩 selector meta-guard 套件（`meta_guard_only=true`——删掉一个 `tests/test_*.py`、只改**未路由的** `tests/` 支持模块（carve-out 的 `conftest.py`/`integration_helpers.py`，或无非门控 importer 套件的支持模块；有 importer 套件的支持模块已按 #1487 路由到其真实套件，不塌缩），或改 selector 自身的 PR），该套件照常执行断言，**并额外**跑一次全树 `pytest tests/ -q --collect-only`；这一分支的 `::warning` / step summary **不**声称"0 断言执行"（定向那次确实执行了）。此类 PR 的绿只等于"meta-guard 断言通过 + 全树 import/语法通过"，**不**代表被删/被改模块的下游断言跑过。
-  - 全量 `unit-test`（显示名 **"Unit Tests (full)"**，`-m "not e2e and not grib and not integration"`）**只在 push master（即 merge 之后）或手动 `workflow_dispatch` 跑**，`pull_request` 事件下永不触发。
-  - `real-db-integration`（显示名 **"SQL Migration Dry Run"**）在 PR/push 上需同时满足：命中上面那个窄 `database` filter **且** 非 draft（push 视同非 draft）。draft 状态只影响这一个 job。例外：手动 `workflow_dispatch` **绕过 filter 无条件跑**——这是显式的真实-DB dry-run 逃生门。
-- **PR 上的 CI 绿 ≠ 全量 pytest 通过**：PR 只证明"被选中的那几个测试文件通过"；全量回归要到 merge 后的 master run（或手动 `workflow_dispatch`）才跑，回归是**事后**发现的。真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。
-- **draft -> ready 不触发新 run**：`on.pull_request` 没写 `types:`，只监听 opened/synchronize/reopened，转 ready 不产生任何 CI run。若要让 `real-db-integration` 在转 ready 后真的跑起来，必须**再推一个 commit** 或 close/reopen PR。
-- **`concurrency: cancel-in-progress`**：同一 PR 连推多次，自动取消被取代的旧 run。
-- **M15 visual evidence 已从自动 CI 移出**：历史 M15 Playwright 视觉证据现在只通过 `.github/workflows/m15-visual-evidence.yml` 手动触发，运行 `test:e2e:m15-visual` / `mocked-regression-chromium`，并校验输入 SHA；它是历史 mocked 视觉证据，不是 node-27 live display proof。
-
-## 技术栈速查
-
-| 组件 | 技术 | 备注 |
-|------|------|------|
-| 后端 | Python, FastAPI | `uv run` 执行 |
-| 前端 | pnpm, TypeScript | `apps/frontend/` |
-| 数据库 | PostgreSQL + TimescaleDB + PostGIS | 远端有实例 |
-| 对象存储 | MinIO (dev) / S3 | 远端有实例 |
-| 气象代站时间序列 | 直读 object-store | `/home/ghdc/nwm/object-store/forcing/<source>/<cycle>/<basin>/<dg_variant>/shud/station_<n>.csv`（#1176 后流域中性命名；旧 `X<lon>Y<lat>.csv` 是 legacy CMFD 命名，mapping_builder 拒收）；读取口径见 `docs/runbooks/object-store-forcing-series-read.md` |
-| HPC 调度 | Slurm | 仅远端可用 |
-| 水文模型 | SHUD | 仅远端可用 |
-| 规格管理 | OpenSpec | `openspec validate` |
-| 代码检查 | ruff | `uv run ruff check .` |
-
-## 服务器拓扑
-
-| 节点 | 地址 | 角色 | DB |
-|------|------|------|----|
-| Node-22 | 210.77.77.22:32099 | 纯计算（Slurm/SHUD/forcing） | **不连任何活 DB**（本机 :55433 PG 已 archived/stopped，仅作显式 rollback archive） |
-| Node-27 | 210.77.77.27:32099 | active primary PG + ingest + display API + 前端 | **本机 PG :55432**（自写自读），数据文件全部在 `/home`（见下） |
-| 本地 Mac | localhost | 开发编辑 | 不连远端 DB |
-
-node-27 DB 数据文件**全部**位于 `pg_default`，即 `/home/nwm/nhms-pgdata`
-（1.7 TB 卷，与 object store 共用；2026-08-16 实测 310 GB——#1338/#1339 索引瘦身后自 389 GB 回落）。曾承载
-`river_timeseries` / `forcing_station_timeseries` 大 chunk 的 `ghdc` 表空间
-（`/data/GHDC/nwm-archive/nhms-tablespace`，`/dev/md0`，与归档层共用文件系统 ——
-该例外见 ADR 0002）**已退役**：集群 `pg_tablespace` 只剩 `pg_default` / `pg_global`，
-容器第三个 bind mount `/home/nwm/nhms-tablespace-ghdc-stub -> …/tablespaces/ghdc`
-只是 `/home` 上的空壳，`/data/GHDC` 不再挂进容器（退役时间与原因仓库无记录；
-以上为 2026-08-10 实测现状）。**推论：活库不受 `/dev/md0` 健康度影响**，md0 只
-关系归档层。
-容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit），三个 bind
-mount 缺一不可；重建流程见
-`docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3。DB 容量核查以
-`df -h /home` 为准；`df -h /data/GHDC` 只反映归档层（归档车道已随
-#1370 永久退役，治理 receipt 不再有 `archive_root` 块；该块历史上报
-`/dev/md0` 余量，口径偏差记在 issue #1290）。
-
-生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
-
-**非平凡改动前必读：**
-
-- `docs/runbooks/two-node-deployment-overview.md` — 部署拓扑（注：M22 设计意图文档；当前与设计的差异见 banner）
-- `docs/governance/ROLE_BOUNDARY.md` — 服务角色边界（注："node-22 owns database mutation" 是设计意图措辞；当前物理部署不同——见 banner）
+- **按路径 scope**：`changes` job 先判改动区，纯前端/纯 docs PR 不跑后端 pytest；`real-db-integration`（显示名 "SQL Migration Dry Run"）有独立且窄得多的 `database` filter，且 PR 上还要求非 draft。
+- **PR 上后端只跑定向测试**：`unit-test-targeted`（显示名 "Unit Tests"）按本 PR diff 由 `scripts/select_ci_tests.py` 选文件；选不出时降级为 `--collect-only` 冒烟（**零断言执行**，step summary 会标注）。全量 `unit-test`（"Unit Tests (full)"）只在 push master 或手动 `workflow_dispatch` 跑。
+- **PR 绿 ≠ 全量 pytest 通过**：全量回归是 merge 后 master run 才跑的**事后**发现；迭代 oracle 仍是 node-27 真实 DB，不是 CI。
+- **draft -> ready 不触发新 run**（`on.pull_request` 未声明 `types:`）；要让 draft 期间跳过的 job 真跑起来，必须再推一个 commit 或 close/reopen。
 
 ## 已装能力
 
 **Packs**：`agentic-issue-delivery`、`codebase-stewardship`
 
-**Skills**（投影在 `.claude/skills/`（Claude）或 `.agents/skills/`（Codex））：
+**Skills**：
 
 - 核心工作流：`subagent-workflow`（issue 实现全流程）· `stage-change-pipeline`（设计到 issue 全流水线）· `risk-adaptive-cross-review`（审核语义源）
-- 执行编排：由 native 子代理（`implementer`/`reviewer`/`verifier`）执行，编排见 `subagent-workflow`
 - 设计与澄清：`clarify` · `grill-me` · `grill-with-docs` · `future-aware-architecture` · `implementation-planning` · `blind-spot-pass`
 - 代码质量与诊断：`entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor` · `diagnosing-bugs`
 - 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `deep-research` · `codeagent` · `handoff` · `ask-danker` · `project-instruction-bootstrap`（本文件生成器）
-- legacy：`dual-end-issue-workflow`（与 `subagent-workflow` 重叠时以后者为准）
 
-**Agents**（投影在 `.claude/agents/`（Claude）或 `.codex/agents/`（Codex））：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor` · `issue-scribe`
+**Agents**：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor` · `issue-scribe`——实现/修复、交叉审查、发现裁决、只读勘察、长作业看守、立单，由 `subagent-workflow` 编排。
 
 ## 项目本地适配（living 文件，均已存在）
 
@@ -246,14 +115,8 @@ mount 缺一不可；重建流程见
 
 ## 反熵约定
 
-根指令保持精简。包/能力的操作细节下沉到各自 `SKILL.md` / pack `README.md` / `CHANGELOG.md`，不在本文件展开；子树需细化时就近新增 scoped 指令文件。
+根指令保持精简：只放**跨子树的纪律与路由**。操作细则下沉到 runbook / `SKILL.md` / pack `README.md`，历史考古下沉到 ADR；绝对数字（容量、行数、耗时）一律以实测为准，不写进本文件。子树需细化时就近新增 scoped 指令文件。
 
 ## Observable Completion
 
 完工附一行 `Execution Summary: agents=...; skills=...; tools=...; verification=...; limits=...`；保持事实、不展开隐藏推理。
-
-## Claude Code Notes
-
-- 知识域类 skill（如调试方法论）自动触发率低，优先显式 `/skill-name` 调用。
-- 安装重叠 skill 时剪枝旧/被取代项，保持技能列表清晰。
-- `dual-end-issue-workflow` 是项目特有的旧 skill，与 `subagent-workflow` 功能重叠时以后者为准。
