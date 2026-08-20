@@ -1039,6 +1039,75 @@ def test_retry_db_free_runtime_rejects_file_selectors_outside_allowed_roots(
         )
 
 
+def test_retry_db_free_runtime_rejects_symlink_loop_file_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1400 AC-1, second clause: the loop value never reaches the manifest.
+
+    The adjudicator-level tests live in ``tests/test_production_scheduler.py``;
+    this one closes the loop end to end -- the rejected selector is replaced by
+    the environment value, the loop path is absent from the submitted manifest,
+    and the structured rejection survives instead of the whole submission
+    degrading into ``SBATCH_SUBMISSION_FAILED`` through a broad handler.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_db_free_retry_env(monkeypatch)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    contract_root = Path(os.path.realpath(tmp_path)) / "contract-root"
+    contract_root.mkdir()
+    loop = contract_root / "ring-a"
+    loop.symlink_to(contract_root / "ring-b")
+    (contract_root / "ring-b").symlink_to(loop)
+    with pytest.raises(OSError):
+        os.path.realpath(loop, strict=True)
+    with _store() as store:
+        failed = _create_job(
+            store,
+            job_id="job_fcst_gfs_2026062912_model_a_forecast",
+            run_id="fcst_gfs_2026062912_model_a",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="gfs_2026062912",
+            job_type="run_shud_forecast_array",
+            stage="forecast",
+        )
+        loop_contract = {
+            **_db_free_retry_contract(),
+            "scheduler_allowed_roots": str(contract_root),
+            "scheduler_registry_manifest": str(loop / "manifest-last.json"),
+            "scheduler_canonical_readiness_index": str(loop / "index-last.json"),
+            "scheduler_state_index": str(loop),
+        }
+        _insert_submission_event(store, failed, loop_contract)
+        gateway = _RecordingGateway(job_id="slurm_retry_env_contract")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry(failed.run_id, gateway=gateway, trusted_internal=True)
+
+        manifest = gateway.submissions[0].manifest
+        assert retry.status == "submitted"
+        assert manifest["scheduler_registry_manifest"] == "/env/nhms/object-store/scheduler/registry/manifest-last.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
+        assert manifest["scheduler_state_index"] == "/env/nhms/object-store/scheduler/state-index/index-last.json"
+        assert "ring-a" not in json.dumps(manifest)
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        rejected = evidence["rejected"]
+        for field in (
+            "scheduler_registry_manifest",
+            "scheduler_canonical_readiness_index",
+            "scheduler_state_index",
+        ):
+            assert any(
+                item["field"] == field and item["reason"] == "db_free_selector_path_unresolvable"
+                for item in rejected
+            ), field
+            assert evidence["db_free_runtime"]["resolved"][field]["source"] == "runtime_config:environment"
+
+
 def test_retry_source_cycle_identity_keeps_uppercase_canonical_sources() -> None:
     manifest = _RetrySubmissionJob(
         job_id="job_cycle_era5_2026053106_download_retry_1",

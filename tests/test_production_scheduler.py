@@ -16525,12 +16525,54 @@ def test_db_backed_config_resolve_canonicalises_unresolvable_paths_without_raisi
 
 
 def test_db_free_config_resolve_arm_keeps_graceful_degradation_for_symlink_loop(tmp_path: Path) -> None:
-    # Control for the arm #1423 declares out of scope (#1400 territory): its
-    # `except (OSError, RuntimeError)` fallback hands back the configured path
-    # untouched, and the fix must not drift it.
+    # The arm #1423 declared out of scope has since been drifted BY #1400, which
+    # aligned it with the database-backed arm above (strict ``os.path.realpath``
+    # falling back to the non-strict form).  The product is unchanged and the
+    # degradation is still graceful -- construction returns a Path and lets the
+    # storage preflight classify it -- but the reason changed: it is now the
+    # non-strict realpath returning a loop component verbatim, not an
+    # ``except (OSError, RuntimeError)`` arm handing back the input.
     loop = _symlink_loop_dir(tmp_path, "db-free-control-loop")
 
     assert scheduler_config_module._resolve_config_path_for_mode(loop, db_free_required=True) == loop
+
+
+def test_db_free_and_db_backed_config_resolve_arms_agree_on_one_canonical_form(tmp_path: Path) -> None:
+    """#1400 AC-6, stated as what it actually requires: one canonical form.
+
+    A foldable prefix is mandatory for this to have any content -- a bare
+    ``<realdir>/<loop>`` is already its own canonical form, so both arms return
+    it whatever they do internally.  ``<symdir>/<loop>`` and
+    ``<dir>/../<loop>`` are the shapes where the two primitives could disagree.
+
+    Honest scope of this test on THIS interpreter: on CPython 3.13+
+    ``Path.resolve(strict=False)`` IS non-strict ``os.path.realpath``, so the
+    two arms agreed before the change as well and this assertion cannot fail
+    locally.  Its discriminating power is on the CI 3.11 arm, where the old
+    db-free arm caught an errno-less ``RuntimeError`` and returned the value
+    unresolved while the database-backed arm returned the folded form.  Locally
+    the guarantee is structural instead, carried by
+    ``test_db_free_normalization_modules_call_resolve_only_where_allowlisted``:
+    with no ``.resolve()`` left in either arm, both can only reach the same
+    realpath primitive.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    real_dir = canonical_tmp / "real-dir"
+    real_dir.mkdir()
+    loop = _symlink_loop_dir(real_dir, "arm-parity-ring")
+    sym_dir = canonical_tmp / "sym-dir"
+    sym_dir.symlink_to(real_dir)
+    foldable = (sym_dir / loop.name, real_dir / "gone" / ".." / loop.name)
+    # Guard the discriminators: neither foldable input is already canonical, so
+    # the equalities below cannot be satisfied by lexical pass-through.
+    assert all(shape != loop for shape in foldable)
+    for value in (*foldable, loop):
+        db_free_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=True)
+        db_backed_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=False)
+
+        assert db_free_arm == db_backed_arm, value
+        assert db_free_arm == loop, value
 
 
 @pytest.mark.parametrize(
@@ -17705,8 +17747,14 @@ def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoen
     # that a merely missing root never produces a blocker -- admits it anchored at
     # the cwd.  That cwd-anchored phantom root is the ACCEPTED new state of this
     # change (issue #1436 acceptance 2's "or tolerated by the existing arm"
-    # branch); its geometry is the separately tracked #1427 adjacency and is
-    # recorded here, not changed.
+    # branch); its geometry is the #1427 adjacency and is recorded here, not
+    # changed.  Scope sync: the PR carrying #1400/#1427 closes both, so
+    # "separately tracked" would stop naming a live tracker.  The
+    # geometry itself is untouched -- this arm is ``scheduler_preflight``'s, and
+    # that change treats only the ``retry`` leg -- and its live tracker is now
+    # #1627, the family-level ruling on whether every ENOENT non-strict fallback
+    # needs a loop-filtered re-check, whose payload carries this site
+    # (``scheduler_preflight``'s allowed-roots ENOENT arm) explicitly.
     anchor = tmp_path / "cwd-anchor"
     anchor.mkdir()
     monkeypatch.chdir(anchor)
@@ -17830,10 +17878,11 @@ def test_tilde_residue_db_free_selector_path_rejection_falls_closed_as_relative(
     tmp_path: Path,
     face: str,
 ) -> None:
-    # Task 0 probe, measured terminal state.  The neighbouring
-    # ``path.resolve(strict=False)`` line is #1400's territory and is deliberately
-    # untouched, so this value must fall closed BEFORE reaching it -- which the
-    # non-absolute arm does.
+    # Task 0 probe, measured terminal state.  The neighbouring normalization
+    # step -- #1400 has since replaced that ``path.resolve(strict=False)`` line
+    # with a strict ``os.path.realpath`` and a loop-filtered ENOENT fallback --
+    # must still never be reached by this value: the non-absolute arm answers
+    # first, which is what keeps an unexpandable tilde falling closed.
     allowed = tmp_path / "allowed-root"
     allowed.mkdir()
     anchor = tmp_path / "cwd-anchor"
@@ -18062,9 +18111,10 @@ def test_tilde_residue_lane_expands_tilde_only_through_os_path_expanduser() -> N
     # The #1424 receiver discriminant, extended to the four #1436 sites: no
     # function in this lane may reach the raising expansion form again.  This lane
     # carries the expanduser pin ONLY -- it is deliberately NOT fed to
-    # ``_resolve_call_names``, because ``_db_free_selector_path_rejection`` keeps a
-    # ``path.resolve(strict=False)`` line that belongs to #1400 and is pinned as
-    # PRESENT just below.
+    # ``_resolve_call_names``.  Two of its members are ``scheduler_preflight``
+    # functions that are out of #1400's scope, and ``.resolve()`` coverage is
+    # carried instead by the module-level guard below, which asserts the
+    # OFFENDERS rather than a membership list.
     for module, names in _TILDE_RESIDUE_EXPANDUSER_LANES:
         lane = _module_lane_function_nodes(module, names)
 
@@ -18080,13 +18130,54 @@ def test_tilde_residue_lane_expands_tilde_only_through_os_path_expanduser() -> N
             )
 
 
-def test_tilde_residue_change_leaves_the_issue_1400_resolve_line_in_place() -> None:
-    # Scope pin in the other direction: #1400 owns
-    # ``_db_free_selector_path_rejection``'s ``path.resolve(strict=False)`` and its
-    # ``except OSError``.  This change must not have "helpfully" migrated it.
+def test_issue_1400_removed_the_db_free_selector_path_resolve_line() -> None:
+    # Terminal state of #1436's scope fence, which named its own demolisher:
+    # "#1400 owns ``_db_free_selector_path_rejection``'s
+    # ``path.resolve(strict=False)`` and its ``except OSError``.  This change
+    # must not have 'helpfully' migrated it."  #1400 has now landed, so the pin
+    # flips from PRESENT to ABSENT.  That is an oracle STRENGTHENING, not a
+    # weakening: the fence was never a behaviour assertion, it carried its own
+    # retirement condition.  It is flipped rather than deleted so that #1436's
+    # lineage anchor survives; the module-level guard below states the same fact
+    # for every function in the two modules at once.
     lane = _module_lane_function_nodes(retry_module, ("_db_free_selector_path_rejection",))
 
-    assert _resolve_call_names(lane["_db_free_selector_path_rejection"]) == ["resolve"]
+    assert _resolve_call_names(lane["_db_free_selector_path_rejection"]) == []
+
+
+def _functions_calling_resolve(module: Any) -> set[str]:
+    """Every function in ``module`` that still calls ``.resolve()``, in any form."""
+
+    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    return {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _resolve_call_names(node)
+    }
+
+
+def test_db_free_normalization_modules_call_resolve_only_where_allowlisted() -> None:
+    # Built as "assert the OFFENDERS", not "assert the members": a membership
+    # tuple filtered out of the module cannot detect its own name being dropped
+    # (both sides shrink together), which is exactly the move that would smuggle
+    # a ``.resolve()`` back into this lane.  Enumerating every offender and
+    # comparing against an explicit allowlist has no name to drop.
+    #
+    # Scope ruling (deliberate, not a side effect): pinning ``retry`` as a WHOLE
+    # module is stronger than either issue asks for -- #1400 and #1427 only own
+    # the db-free selector adjudicators.  It is adopted because it is the only
+    # shape that cannot be neutralised by editing the guard's own input, and
+    # because the module measurably has zero remaining sites.  The cost is that
+    # any future ``.resolve()`` anywhere in ``retry`` must be justified into the
+    # allowlist below.
+    #
+    # The single allowlisted entry is a deliberate retention, not an oversight:
+    # ``_safe_preserve_final_component`` belongs to a different sub-family (a
+    # ``path.parent.resolve(strict=False)`` reachable through
+    # ``_confined_path_for_mode``'s fallback arm) that these two issues declare
+    # out of scope and that is routed for a family-level ruling of its own.
+    assert _functions_calling_resolve(retry_module) == set()
+    assert _functions_calling_resolve(scheduler_config_module) == {"_safe_preserve_final_component"}
 
 
 #: The one in-domain input class where the two primitives genuinely disagree and
@@ -34951,6 +35042,105 @@ def test_db_free_required_path_symlink_loop_blocks_without_crash(
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
+# ---------------------------------------------------------------------------
+# #1400 site 2: the required-path check attributes a symlink loop as unsafe
+# instead of folding it lexically and letting a downstream gate call it "not
+# created".  These cases call the adjudicator directly and assert the
+# ``(code, reason)`` PAIR: the code alone is blind on some of these geometries
+# (a path under a loop already carried ``db_free_required_path_unsafe``, from
+# the parent-lstat gate), and the directory names deliberately avoid every word
+# in ``_DB_FREE_CREDENTIAL_WORDS`` -- the loop test above never reaches the
+# resolution step at all, because its ``secret-token-loop`` component is
+# answered by the credential gate first.
+# ---------------------------------------------------------------------------
+
+
+def _db_free_required_path_verdict(value: Path | str, allowed_roots: tuple[Path, ...]) -> tuple[str, str] | None:
+    _check, blocker = scheduler_config_module._db_free_path_check(
+        "NHMS_SCHEDULER_JOURNAL_ROOT",
+        str(value),
+        kind="directory",
+        allowed_roots=allowed_roots,
+    )
+    return None if blocker is None else (blocker["code"], blocker["reason"])
+
+
+@pytest.mark.parametrize("shape", ["the_loop_itself", "under_the_loop"])
+def test_db_free_required_path_symlink_loop_is_attributed_as_unsafe_path(tmp_path: Path, shape: str) -> None:
+    """#1400 AC-2: a loop reports the errno-derived reason.
+
+    ``the_loop_itself`` was ``('db_free_required_path_not_found','not_found')``
+    before this change -- the lexical fold produced the loop path, containment
+    passed, and the broken symlink's ``exists()`` answered False, sending
+    operators to "create the path" for a path that cannot be created.
+    ``under_the_loop`` was already blocked, but with the generic ``unsafe`` from
+    the parent-lstat gate; the resolution step now answers first with the
+    errno-derived value.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "required-ring")
+    value = loop if shape == "the_loop_itself" else loop / "child"
+
+    assert _db_free_required_path_verdict(value, (root,)) == ("db_free_required_path_unsafe", "unsafe_path")
+
+
+def test_db_free_required_path_indirect_phantom_loop_is_rejected_by_the_recheck(tmp_path: Path) -> None:
+    """The ONLY geometry that reaches the required-path check's re-check arm.
+
+    A literal ``..`` component never gets that far: the component gate answers
+    ``('db_free_required_path_unsafe','traversal')`` on the configured value's
+    own lexical parts.  A symlink whose TARGET TEXT carries the phantom shape
+    has no ``..`` of its own, so the gate stays silent, strict resolution stops
+    at the missing component with ENOENT, and only re-resolving the non-strict
+    fallback finds the loop.  Without this case the re-check can be deleted with
+    every test still green.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "required-ring")
+    indirect = root / "indirect"
+    indirect.symlink_to(f"never-created/../{loop.name}")
+    # Guard every step of the geometry, so the case cannot silently degrade into
+    # one of the earlier gates.
+    assert scheduler_config_module._db_free_local_path_component_reason(indirect) is None
+    assert _allowed_root_errno(indirect) == errno.ENOENT
+    assert Path(os.path.realpath(indirect)) == loop
+    assert _allowed_root_errno(loop) == errno.ELOOP
+
+    assert _db_free_required_path_verdict(indirect, (root,)) == ("db_free_required_path_unsafe", "unsafe_path")
+
+
+def test_db_free_required_path_not_yet_created_keeps_downstream_adjudication(tmp_path: Path) -> None:
+    """ENOENT stays admitted by the resolution step, verdict stays downstream.
+
+    Existence is not this step's business: a required path whose final
+    components do not exist yet is answered by the pre-existing missing-parent
+    and not-found blockers, exactly as before.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    missing_leaf = root / "journal"
+    missing_parent = root / "not-made-yet" / "journal"
+    assert _allowed_root_errno(missing_leaf) == errno.ENOENT
+    assert Path(os.path.realpath(missing_leaf)) == missing_leaf.resolve(strict=False)
+
+    assert _db_free_required_path_verdict(missing_leaf, (root,)) == (
+        "db_free_required_path_not_found",
+        "not_found",
+    )
+    assert _db_free_required_path_verdict(missing_parent, (root,)) == (
+        "db_free_required_path_parent_missing",
+        "parent_missing",
+    )
+
+
 @pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
 @pytest.mark.parametrize("path_case", ["outside_boundary", "traversal_sensitive_component"])
 def test_db_free_required_local_path_blocks_without_raw_path_leak(
@@ -40050,10 +40240,14 @@ def test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_roo
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B5: the db-free arm is a declared non-goal and must not drift.
+    """B5: a pre-existing loop root is still tolerated, never turned into a raise.
 
-    `_optional_config_path_for_mode` never reaches `_optional_config_path` on
-    this arm, so the PR #831 lexical tolerance keeps producing the root itself.
+    The db-free arm was a declared non-goal for #1423; #1400 has since aligned it
+    with the database-backed arm, so `_optional_config_path_for_mode` now reaches
+    a strict `os.path.realpath` and falls back to the non-strict form. The
+    product is the same root PR #831's lexical tolerance produced -- non-strict
+    realpath returns a loop component verbatim -- so config construction still
+    hands the value down for the preflight to classify.
     """
 
     _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
@@ -40939,6 +41133,312 @@ def test_db_free_selector_path_rejection_when_every_allowed_root_is_unresolvable
     assert [item["reason"] for item in rejected] == ["db_free_allowed_root_unresolvable"]
     assert rejection is not None
     assert rejection["reason"] == "db_free_allowed_roots_missing"
+
+
+# ---------------------------------------------------------------------------
+# #1427 (selector ROOT level) + #1400 (selector PATH level): the ENOENT
+# admission at both levels is loop-filtered, not errno-scoped alone.  Strict
+# resolution stops at the first missing component, so a "<missing>/../<loop>"
+# phantom fails with ENOENT while its non-strict fallback still lands on the
+# loop -- the two levels would otherwise hand one physical target two opposite
+# verdicts, and the path level is judged against the root level's product.
+# Unless a case is explicitly about out-of-root values, every geometry below
+# keeps the loop lexically UNDER a cleanly resolving root, so that a containment
+# rejection can never stand in for a resolution one.
+# ---------------------------------------------------------------------------
+
+
+def test_db_free_selector_allowed_roots_rejects_phantom_loop_root(tmp_path: Path) -> None:
+    """#1427 AC-1: `<missing>/../<loop>` draws the bare loop's verdict.
+
+    The direct form is already rejected by the ELOOP arm above; this form is the
+    one the errno split alone admitted, and it is the ONLY carrier of the defect
+    (a phantom root that resolves cleanly is legitimately admitted).
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(canonical_tmp, "phantom-ring")
+    phantom_root = canonical_tmp / "gone" / ".." / loop.name
+    # Guard the geometry: strict resolution really does answer ENOENT here (not
+    # ELOOP), and the non-strict fallback really does land on the loop.
+    assert _allowed_root_errno(phantom_root) == errno.ENOENT
+    assert Path(os.path.realpath(phantom_root)) == loop
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(phantom_root))
+
+    assert roots == ()
+    assert rejected == [
+        {
+            "field": "scheduler_allowed_roots",
+            "source": "runtime_manifest",
+            "reason": "db_free_allowed_root_unresolvable",
+            "value": str(phantom_root),
+        }
+    ]
+
+
+def test_db_free_selector_allowed_roots_admits_never_created_root(tmp_path: Path) -> None:
+    """The second-ENOENT arm keeps its admitted semantics.
+
+    ``test_db_free_selector_allowed_roots_admits_missing_root`` above cannot
+    carry this: its `<missing>/../<realdir>` form re-resolves CLEANLY, so the
+    re-check's errno predicate is never evaluated there and a mutation that
+    makes the predicate vacuous stays invisible.  A root that simply has not
+    been created yet (an unmounted share) is the shape that evaluates it.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    not_yet = canonical_tmp / "not-yet" / "roots"
+    # Both resolutions answer ENOENT: the strict one and the strict re-check of
+    # the non-strict fallback.
+    assert _allowed_root_errno(not_yet) == errno.ENOENT
+    assert _allowed_root_errno(Path(os.path.realpath(not_yet))) == errno.ENOENT
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(not_yet))
+
+    assert roots == (not_yet,)
+    assert rejected == []
+
+
+def test_db_free_selector_path_rejection_admits_never_created_path(tmp_path: Path) -> None:
+    """Submission-time adjudication still performs no existence check.
+
+    The equality below is the byte-compatibility anchor: the primitive this lane
+    now normalizes through reproduces the product of the removed
+    ``path.resolve(strict=False)`` verbatim, so the admitted value did not drift.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    never_created = root / "never-created" / "state.json"
+    assert _allowed_root_errno(never_created) == errno.ENOENT
+    assert Path(os.path.realpath(never_created)) == never_created.resolve(strict=False)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(never_created),
+        allowed_roots=(root,),
+    )
+
+    assert rejection is None
+
+
+@pytest.mark.parametrize("shape", ["the_loop_itself", "under_the_loop"])
+def test_db_free_selector_path_rejection_rejects_symlink_loop_path(tmp_path: Path, shape: str) -> None:
+    """#1400 AC-1: the dead `db_free_selector_path_unresolvable` really fires.
+
+    It was dead on both interpreter arms -- `except OSError` could not catch the
+    errno-less RuntimeError strict ``Path.resolve()`` raised on <=3.12, and the
+    non-strict form stopped raising at all on 3.13+, so the loop was admitted by
+    a purely lexical containment comparison.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "selector-ring")
+    value = loop if shape == "the_loop_itself" else loop / "state.json"
+    # The loop is lexically inside the configured root, so containment cannot be
+    # the reason for the rejection.
+    assert value.is_relative_to(root)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(value),
+        allowed_roots=(root,),
+    )
+
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(value),
+    }
+
+
+def test_db_free_selector_path_rejection_rejects_phantom_loop_path(tmp_path: Path) -> None:
+    """The path level carries the same loop-filtered admission as the root level.
+
+    Without the re-check this value takes the ENOENT arm and is admitted, which
+    would reproduce one level down the fail-open #1427 removes one level up.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "selector-ring")
+    phantom = root / "never-created" / ".." / loop.name
+    assert _allowed_root_errno(phantom) == errno.ENOENT
+    assert Path(os.path.realpath(phantom)) == loop
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(phantom),
+        allowed_roots=(root,),
+    )
+
+    # The COMPLETE record, matching the sibling loop case above: the reason
+    # alone would not catch a rejection routed with the wrong field, source or
+    # echoed value.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(phantom),
+    }
+
+
+def test_db_free_selector_path_rejection_rejects_every_non_enoent_errno(tmp_path: Path) -> None:
+    """The rejection is errno-scoped, not loop-scoped.
+
+    ENOTDIR is the non-loop errno provokable without a real NFS server or a
+    permission trick; ESTALE and EACCES land on the same arm by construction.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    plainfile = root / "plainfile"
+    plainfile.write_text("not a directory", encoding="utf-8")
+    value = plainfile / "state.json"
+    assert _allowed_root_errno(value) == errno.ENOTDIR
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(value),
+        allowed_roots=(root,),
+    )
+
+    # The COMPLETE record, matching the sibling loop case above.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(value),
+    }
+
+
+def test_db_free_lanes_report_the_resolution_reason_for_out_of_root_loops(tmp_path: Path) -> None:
+    """Resolution now precedes containment, so the reason changes for one subclass.
+
+    A value that is BOTH a loop and outside the bases now reports the resolution
+    reason rather than the containment one -- an unresolvable value has no
+    trustworthy location to compare against.  Both were already rejections, so
+    the verdict is unchanged; a cleanly resolving out-of-root value (the control
+    below) keeps the containment reason untouched.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    outside = canonical_tmp / "outside"
+    outside.mkdir()
+    outside_loop = _symlink_loop_dir(outside, "outside-ring")
+    outside_clean = outside / "plain"
+    outside_clean.mkdir()
+
+    def _selector_reason(value: Path) -> str | None:
+        rejection = retry_module._db_free_selector_path_rejection(
+            "scheduler_state_index",
+            "runtime_manifest",
+            str(value),
+            allowed_roots=(root,),
+        )
+        return None if rejection is None else rejection["reason"]
+
+    assert _selector_reason(outside_loop) == "db_free_selector_path_unresolvable"
+    assert _selector_reason(outside_clean) == "db_free_selector_path_outside_allowed_roots"
+    assert _db_free_required_path_verdict(outside_loop, (root,)) == (
+        "db_free_required_path_unsafe",
+        "unsafe_path",
+    )
+    assert _db_free_required_path_verdict(outside_clean, (root,)) == (
+        "db_free_required_path_outside_boundary",
+        "outside_boundary",
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions, so EACCES cannot be provoked")
+def test_db_free_required_path_permission_fault_is_attributed_as_not_writable(tmp_path: Path) -> None:
+    """The reason mapper's EACCES/EPERM arm, which no other case reaches.
+
+    ``db_free_required_path_unsafe`` now carries the shared errno
+    classification, and the loop cases above only ever witness its
+    ``unsafe_path`` value -- with them alone the whole mapper is
+    indistinguishable from a constant. EACCES is the one non-loop errno
+    provokable without a real NFS server (an unreadable parent directory);
+    EPERM and the ``unavailable`` catch-all land on the same mapping by
+    construction, the latter witnessed by the NUL case below.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    blocked_parent = root / "blocked-parent"
+    blocked_parent.mkdir()
+    value = blocked_parent / "journal"
+    blocked_parent.chmod(0o000)
+    try:
+        # Independent oracle for the geometry: the kernel really does refuse
+        # this canonicalization with EACCES (so neither the ENOENT fallback nor
+        # the ELOOP/ENOTDIR mapping is what answers), and the earlier component
+        # gate stays silent, so the resolution step is what adjudicates.
+        assert scheduler_config_module._db_free_local_path_component_reason(value) is None
+        assert _allowed_root_errno(value) == errno.EACCES
+
+        assert _db_free_required_path_verdict(value, (root,)) == (
+            "db_free_required_path_unsafe",
+            "not_writable",
+        )
+    finally:
+        # Restore before pytest's tmp_path cleanup walks the tree.
+        blocked_parent.chmod(0o700)
+
+
+def test_db_free_normalization_folds_embedded_nul_into_existing_rejections(tmp_path: Path) -> None:
+    """An unrepresentable path string is rejected, not raised, at all three sites.
+
+    Every resolution primitive raises ``ValueError`` (not ``OSError``) for an
+    embedded NUL, so before this change it escaped each adjudicator: measured
+    ``ValueError: lstat: embedded null character in path``.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    nul_value = f"{root}/state\x00.json"
+
+    roots, root_rejections = retry_module._db_free_selector_allowed_roots("runtime_manifest", nul_value)
+    path_rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        nul_value,
+        allowed_roots=(root,),
+    )
+    _check, required_path_blocker = scheduler_config_module._db_free_path_check(
+        "NHMS_SCHEDULER_STATE_INDEX",
+        nul_value,
+        kind="file",
+        allowed_roots=(root,),
+    )
+
+    assert roots == ()
+    assert [item["reason"] for item in root_rejections] == ["db_free_allowed_root_unresolvable"]
+    assert path_rejection is not None
+    assert path_rejection["reason"] == "db_free_selector_path_unresolvable"
+    assert required_path_blocker is not None
+    assert required_path_blocker["code"] == "db_free_required_path_unsafe"
+    # The reason too, not just the code: a ValueError carries no errno, so it
+    # takes the mapper's ``unavailable`` catch-all rather than the ``unsafe_path``
+    # the loop cases produce. Without this pin that arm of the mapper is
+    # unwitnessed.
+    assert required_path_blocker["reason"] == "unavailable"
+    assert required_path_blocker["error_type"] == "ValueError"
 
 
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(

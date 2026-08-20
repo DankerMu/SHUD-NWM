@@ -173,8 +173,10 @@ THEN `_slurm_preflight` returns its structured status/blockers result — no
 RuntimeError escapes — and the affected root flows through the existing
 ENOENT tolerance arm and is admitted as a cwd-anchored containment root
 with no blocker (the existing arm never produces a blocker for
-not-yet-existing roots; the resulting phantom-root geometry is the
-already-tracked #1427 adjacency and is documented, not changed, here)
+not-yet-existing roots; the resulting phantom-root geometry on this preflight
+leg is tracked by #1627, the family-level ruling on whether an ENOENT
+non-strict fallback must be loop-filtered, and is documented, not changed,
+here — #1427 covers the same geometry on the retry selector leg only)
 
 #### Scenario: unexpandable tilde in a storage root field yields the existing check verdict
 
