@@ -876,7 +876,9 @@ def test_stats_guard_candidate_query_pins_the_selection_contract() -> None:
     # Drifty chunks are the ones ABOVE the floor -- a flipped comparison would
     # analyze exactly the chunks that need nothing.
     assert "n_mod_since_analyze >= %s" in sql
-    # Compressed chunks belong to the compression runner's ride-along.
+    # Compressed chunks are out of scope (#1596/#1468): ANALYZE on a bare
+    # compressed-chunk name would zero the relstats TimescaleDB preserves at
+    # compression time — see runbook §4.7 陷阱 and the change's design D3.
     assert "is_compressed = false" in sql
     assert "('hydro', 'river_timeseries')" in sql
     assert "('met', 'forcing_station_timeseries')" in sql

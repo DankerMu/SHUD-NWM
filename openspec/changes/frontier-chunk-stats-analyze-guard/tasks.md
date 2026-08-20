@@ -34,7 +34,13 @@
       tests/test_node27_timeseries_compression_live_evidence.py`（含新增用例）PASS
 - [x] E2 `uv run ruff check .` PASS
 - [x] E3 `openspec validate frontier-chunk-stats-analyze-guard --strict --no-interactive` PASS
-- [ ] E4 **硬门**，node-27 实机，须观测到一个**实际触发** guard 的 tick：
+- [x] E4 **硬门**，node-27 实机，须观测到一个**实际触发** guard 的 tick：
+      ——2026-08-20T18:34:40Z tick（ingest 17）达成：analyzed 三条全 ok
+      （_hyper_3_62 16.4M mods/4.67s、_hyper_3_58 6.8M/4.01s、_hyper_1_61
+      1.1M/4.62s），_hyper_1_57 按 cap 记 deferred；last_analyze SQL 实证刷新；
+      guard 后以刚 ingest 的新 run 重跑 Q2：Execution Time 2.296 ms，
+      SkipScan→selected_identity 键索引，无百万级 Rows Removed。
+      证据：/home/nwm/nwm-1378-e4/{tick-summary-excerpt.txt,e4-recheck.out}。
       (i) tick summary JSON 的 `stats_guard.analyzed` 含至少一条
       `status: "ok"` 条目（`analyzed` 记录的是尝试，failed/warning 不算数）；
       (ii) `pg_stat_user_tables.last_analyze` 实刷（SQL 复核，防 PG15 非 owner
@@ -42,6 +48,6 @@
       (iii) guard 后重跑 issue 验收项 2 的 Q2（当前键形态）EXPLAIN ANALYZE：
       Execution Time < 50 ms、被执行节点无百万级 `Rows Removed by Filter`、
       计划走 selected-identity 键索引——计划全文进 receipt。
-- [ ] E5 issue #1378 验收项 3/4 的诊断 receipt 已发（兄弟面健康、header 旁路
-      wall time）；验收项 2 由 E4(iii) 的**修复后**实测覆盖；本 change 落地后在
-      issue 记录关闭依据。
+- [x] E5 issue #1378 验收项 3/4 的诊断 receipt 已发（兄弟面健康、header 旁路
+      wall time）——issuecomment-5359643158，2026-08-20；验收项 2 由 E4(iii) 的
+      **修复后**实测覆盖；关闭依据随 merge 后的收尾评论落 issue。
