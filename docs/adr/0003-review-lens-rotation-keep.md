@@ -349,3 +349,40 @@ Phase 4 round 2 抓到的最贵一条是**round 1 的修复自己制造的假红
 （钉 `FunctionType` 会让 `@functools.lru_cache` 装饰既有函数打红）。
 后者是"**修复审查**"这一类门的价值证据：它读的既不是规格也不是原始代码，
 而是**上一轮的修复**。建议把它作为第四类工件单独计数。
+
+---
+
+## 2026-08-20 复访（PR #1636，#1592 + #1589 durable 写边界）
+
+样本 88 → 多轮 merged PR，later-round catches **core=46 / rotated=223**
+（上次 87 / 46 / 222）。本 PR 边际 **core +0 / rotated +1**。
+
+**这 +1 暴露了同一个测量缺陷的第三种机制，前一条没点出来。**
+
+本 PR 的 `round_lenses` 是
+`[[fixture-review, fixture-review-2], [correctness-durable-state, blast-radius-oracle-integrity],
+[repair-two-sidedness, durable-text-truth], [phase7-final-and-delta]]`。
+`rotation_attribution` 只数 `round >= 2` 的 catch，本 PR 落在该区间的只有终审那一条
+（`phase7-final-and-delta`）。它被记为 rotated。
+
+但 **Phase 7 终审在结构上永远不可能是 core**：core 集合取自 `round_lenses[0]`，
+而索引 0 恒为 fixture 评审轮；`final-review` / `phase7-*` 这类镜按工作流定义只出现在最后一轮，
+**任何 PR 的终审 catch 都必然记入 rotated，与轮换策略是否有效完全无关**。
+这不是前一条记录的两种形状（裸字符串按字符拆解、索引 0 取 fixture 镜）中的任何一种，
+是第三条独立通道：**轮次角色被当成了镜身份**。
+
+前一条统计过 222 条 rotated 里 177 条（80%）来自前两种形状。加上这一条：
+终审轮的 catch 是**系统性**记入 rotated 的第三个来源，进一步稀释
+"catches concentrate in rotated-in lenses" 这句话的信息量。
+
+**裁定：维持 keep，理由同前一条——rotated 这个数在修好之前不构成撤镜的证据。**
+本 PR 自身的经验也不支持撤镜：真正值钱的那条（咽喉 strip 在比较侧缺失导致重放永不收敛，critical）
+是 round 1 的 `correctness-durable-state` 抓的，那面镜在本 PR 里只上过一轮，
+按脚本口径连 `round >= 2` 的门都进不去，**根本没进这个统计**。
+⇒ 该指标不仅高估 rotated，还漏掉了最高价值的那一类 catch（首轮 critical）。
+
+**修复口径的前置条件（累计三条，仍未排期）**：
+(1) `round_lenses[0]` 的 schema 统一为数组（50 条裸字符串记录需回填或标注不可用）；
+(2) core 集合不能取 fixture 轮，应取"首个交叉评审轮"的镜集；
+(3) 轮次角色镜（`final-review` / `phase7-*` / `fixture-review*`）从 core/rotated 二分里剔出，
+单独成类——它们是轮次属性，不是轮换选择。
