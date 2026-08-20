@@ -290,3 +290,15 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
    0002.** Every number in §3 comes from an unmarked run; the marked lanes were
    never executed under umask 0002 on either host, so any provider-gate surface
    they pre-create is unmeasured, not known-green.
+7. **Two "both lock parents must be private" comments are imprecise on this
+   head** — `tests/test_state_manager.py:3699-3700` and
+   `tests/test_run_tree_copyback.py:1379-1380`. They present the following
+   `chmod(0o700)` as *required*, or `provider_lock_parent_unsafe` fires. After
+   D1 that is no longer true for the safe_fs-created case: `0o755` already
+   satisfies the gate (`0o755 & 0o022 == 0`), so the chmod is defensive rather
+   than load-bearing. At the `test_run_tree_copyback` site it is additionally
+   misleading in a second way — those chmods run *after* the publish that would
+   already have raised. Reported by fix round 2 and deliberately left: both are
+   in master-owned blocks this change has no other reason to touch, and neither
+   invites the delete-the-wrapper edit that §6 item 4's rewrite closed.
+

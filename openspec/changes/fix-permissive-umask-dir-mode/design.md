@@ -49,8 +49,8 @@ Note the widening would have landed **silently**: no test in the repository pins
 a *directory* mode under `0o077`. Re-counted on the merged head there are **ten**
 pre-existing `os.umask(0o077)` sites across four files —
 `tests/test_scheduler_file_provider_refresh.py:853`, `:967`;
-`tests/test_state_manager.py:3688`, `:3897`, `:3922`, `:3964`;
-`tests/test_run_tree_copyback.py:213`, `:1359`;
+`tests/test_state_manager.py:3691`, `:3900`, `:3925`, `:3967`;
+`tests/test_run_tree_copyback.py:213`, `:1362`;
 `tests/test_scheduler_state_index_copyback_replay.py:1177`, `:1210` — and every
 one of them asserts a *file* mode or no mode at all. (An earlier revision of this
 section said "three"; that count predated the `origin/master f087f08d` merge,
