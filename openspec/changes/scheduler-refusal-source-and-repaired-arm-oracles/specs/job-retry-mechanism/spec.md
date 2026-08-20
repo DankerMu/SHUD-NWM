@@ -30,13 +30,20 @@ Permanence". The coverage is two conjoined guards over
   later). Because a syntactic subject cannot see a name bound at run time
   rather than in the module body — a `global` install being the measured
   example — the guard SHALL additionally cross-check the source inventory
-  against the imported module object: every module-level name the module
-  object carries SHALL have been inventoried from the source, every
-  inventoried constant SHALL be present on the module object, and every
-  inventoried name SHALL carry a runtime object of the kind its binding form
-  declares, since a `def` name resolving to a data value is a run-time rebind
-  and not a definition. The guard SHALL also refuse a star-import, whose bound
-  names no source inventory can enumerate; and
+  against the imported module object, in three clauses. First, every name the
+  module object carries that is not a dunder SHALL have been inventoried from
+  the source, where "dunder" means delimited by `__` at **both** ends: a
+  `__`-prefix test instead of a dunder test silently drops an install named
+  `__SECOND_REFUSAL_CODES` and reopens the channel, which has been measured.
+  Second, every inventoried constant SHALL be present on the module object.
+  Third, every inventoried name **not bound by an import** SHALL carry a
+  runtime object of the kind its binding form declares — a `def` name a
+  callable, a `class` name a class — since a `def` name resolving to a data
+  value is a run-time rebind and not a definition. Import names are exempt
+  because an import may bind an object of any kind, and pinning a kind to them
+  would fail on unmutated source; that exemption is a declared opening, not an
+  oversight. The guard SHALL also refuse a star-import, whose bound names no
+  source inventory can enumerate; and
 - a **behavioural** guard asserting that, on the recorded-code domain
   (`code_recorded=True`), `_downstream_failure_restartable`'s verdict is
   determined by `limit_exhausted` and `permanent` alone and is constant
@@ -63,16 +70,31 @@ module nor consulted on that leg — for example a function-local literal on
 the raw-manifest or model-package leg, or a list living in another module —
 is outside this requirement. Two further bounds are stated rather than
 closed. First, the run-time cross-check closes installs under a name the
-module body does not bind and rebinds that change a name's kind; a
-reflective rebind of an already-inventoried constant to a same-kind value
-(the name reaching the module object only as a string literal, so no
-syntactic reference exists to inventory) is closed only by the constant-value
-assertions the guard pins, and those name five of the module's eighteen
-module-level constants. The `global` spelling of that same rebind is caught,
-because its assignment target is a syntactic reference and therefore changes
-the constant's consumer set. Second, the accept-set's catch-all refuses any
-statement form the language grows next, but it cannot refuse a form the
-interpreter rejects before parsing completes. Source-text literal comparison against
+module body does not bind and rebinds that change a name's observed kind.
+Three mechanisms are measured to survive it, and this list is **what
+measurement found, not a proof that nothing else survives**. (a) A reflective
+rebind of an already-inventoried **name** — constant, function or class alike,
+not constants alone — to a value of the same observed kind, the name reaching
+the module object only as a string literal so that no syntactic reference
+exists to inventory. On the constant leg the constant-value assertions close
+it, and those name five of the module's eighteen module-level constants; on
+the function and class legs nothing closes it. (b) An install onto an
+**import-bound** name, exempt from the kind clause for the reason stated
+above. (c) An install under a name shaped like a **dunder**, which the first
+clause's dunder filter removes from consideration before the comparison
+runs; that filter is itself required, because the module object carries
+interpreter-owned dunders no source inventory binds. By contrast the `global`
+spelling of a constant rebind IS caught, because its assignment target is a
+syntactic reference and therefore changes the constant's consumer set.
+The function clause pins **callability** rather than `FunctionType`
+deliberately: pinning `FunctionType` reds on an ordinary `functools.lru_cache`
+decoration of an existing helper, which has been measured. The trade is real
+and is also measured — a `def` rebound to a `functools.partial`, a
+`staticmethod`, or an instance of a callable class defined outside the module
+body goes from caught to uncaught — but no refusal list is itself callable, so
+no kill this change demonstrates is lost. Second, the accept-set's catch-all
+refuses any statement form the language grows next, but it cannot refuse a
+form the interpreter rejects before parsing completes. Source-text literal comparison against
 production source SHALL NOT be used to discharge this obligation: the
 retired guard's scan admitted a re-added blacklist written on one line, at a
 different indent, under a different name, or reordered so that neither

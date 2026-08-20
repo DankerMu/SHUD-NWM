@@ -54,8 +54,10 @@
       写成相等既不可实现也会误报。
       纯语法主体对 **`global` 安装式绑定完全失明**——变异后 body 只多出 `FunctionDef` 与
       `Expr`(调用)，两者都是已识别形式，既不入主体也不触发拒绝，且消费映射不变。
-      实测：HEAD 上两侧均为 18、双向差集为空（无假阳性）；`global` 变异下运行时 19 vs AST 18，
-      指名多出 `_DOWNSTREAM_EXTRA_REFUSAL_CODES` → 红。
+      实测：HEAD 上两侧均为 **131**（18 常量 + 59 `def` + 1 `class` + 53 import）、双向差集为空、
+      kind 字典相等（无假阳性）；`global` 变异下运行时多出 `_DOWNSTREAM_EXTRA_REFUSAL_CODES` → 红。
+      （初稿写的"两侧均为 18 / 19 vs 18"只对 `set(consumers) - runtime_names` 这一条从句成立，
+      不是交叉核对两侧的规模；round-2 C2 校正。）
 - [x] 1.4 改写 `test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list`
       （base `tests/test_production_scheduler.py:26690`）：**删除**其中
       `for retired_literal in (...)` / `assert retired_literal not in source` /
@@ -73,7 +75,9 @@
       （对 `d53cff4a` 逐字核过）。理由：同名同 kind 的**反射式**改绑
       （`setattr(sys.modules[__name__], "<名>", 新值)`）穿过结构映射、穿过 dunder 修复、
       也穿过 kind 感知交叉核对——名字只以字符串字面量出现，kind 也没变；**只有取值断言看得见**。
-      实测该常量被这样改宽时判据 `True → False` 而守卫子集 44 passed 全绿。
+      实测该常量被这样改宽时判据 `True → False`，而守卫子集全绿
+      （选择器 `-k "no_second_permanent_code_refusal_list or module_level_constant_subject or
+      downstream_failure_restartable"`，HEAD 收集 113 条；round-1 稿写的"44"不注选择器、不可复现）。
       它是 #1418 主题族（permanence refusal source）里唯一没钉值的一条。
       **其余 13 条不钉**：全量钉 18 条值是不欠的摩擦，走 follow-up issue。
 - [x] 1.6 测试注释写明这条守卫钉的是什么不变量（"被咨询的 refusal 判据源只有一个"）、
@@ -184,11 +188,12 @@
         （修复前：判据 `True → False`，全量 **1773 passed**）。
       - **M15 `def` 名跨 kind 改绑**：`def _second_codes(): ...` + 模块级调用
         `global _second_codes; _second_codes = frozenset({…})` → 由 1.3c 的 kind 感知打红
-        （修复前：判据 `True → False`，守卫子集 43 passed）。
+        （修复前：判据 `True → False`，同一 113 条选择器下全绿）。
       每条还须记录**修复在 pristine HEAD 上不产生假红**：100/100、`__` 前缀非 dunder 名空集、
       59 个 `def` 全 `FunctionType` + 1 个 `class` 是 `type`。
 - [x] 5.2e **M16 同名同 kind 反射式改绑**（`setattr(sys.modules[__name__], "<已有常量名>", 更宽的值)`）
-      由 1.5b 的第五条取值断言打红（修复前：判据 `True → False`，守卫子集 44 passed）。
+      由 1.5b 的第五条取值断言打红，且**只**红在那一条上（同一 113 条选择器：`1 failed, 112 passed`；
+      修复前全绿）。
       **同时记录残留**：该形状对另外 13 条未钉值常量仍然隐形——这是**声明的边界**，不是缺口。
 - [x] 5.3 M8（**函数内联**码清单）、M9 各自由行为守卫打红。
 - [x] 5.4 M10（`ruff format` 语义不变）**保持绿**——AC-4 的反向用例。

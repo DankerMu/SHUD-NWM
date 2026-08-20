@@ -26706,12 +26706,37 @@ def _runtime_binding_kind(value: object) -> str:
     name.  ``import`` is deliberately not among them: an import can bind an object of any
     kind (``scheduler_state_failure``'s own import names resolve to modules, functions,
     classes and metaclasses alike), so import names are exempt from the comparison.
+
+    ``function`` is CALLABILITY, not ``inspect.isfunction``.  Under the narrower test a
+    ``def`` decorated with ``functools.lru_cache`` observes as ``constant`` -- the wrapper
+    is a ``functools._lru_cache_wrapper``, not a ``FunctionType`` -- so decorating the
+    existing pure helper ``_sidecar_manifest_probe_key``, which adds and renames no
+    constant and changes no semantics, was measured to fail the caller with
+    ``{'_sidecar_manifest_probe_key': 'constant'} != {...: 'function'}``.  That false red
+    has no pinned mapping to update (a declared kind is derived from the module's AST, not
+    pinned here) and it reads as though a refusal list had been installed at run time,
+    which is a worse failure mode than the friction this guard means to charge.
+
+    The trade is deliberate and it is real: a ``def`` rebound at run time to another
+    CALLABLE now observes as ``function`` and no longer reds.  Three such rebinds of
+    ``_remedy_permits_permanent_failure``, each carrying an ``INVALID_MANIFEST`` refusal
+    and each measured to flip that judge's verdict from ``True`` to ``False`` on a real
+    input, go from red under ``inspect.isfunction`` to green here: a ``functools.partial``,
+    a ``staticmethod`` object, and an instance of a callable class defined INSIDE the
+    installing function.  (Written at module level that carrier class is refused by the
+    class accept-set and the caller reds anyway -- measured -- so the escape needs a class
+    the module body does not declare: nested, as measured here, or imported.)  What the
+    rule buys back is that no legitimate decoration reds.  No kill this change
+    demonstrates is lost: a refusal list is a ``frozenset``, a ``frozenset`` is not
+    callable, so a ``def`` rebound to one still observes ``constant`` against a declared
+    ``function`` -- measured red under both rules.
     """
 
-    if inspect.isfunction(value):
-        return "function"
+    # Classes are callable, so the class test has to run before the callable test.
     if isinstance(value, type):
         return "class"
+    if callable(value):
+        return "function"
     return "constant"
 
 
@@ -26753,9 +26778,13 @@ def _module_level_constant_consumers(
     module, a decorator that mutates ``globals()``) is left to the caller's
     source-versus-module cross-check instead, which sees an install under a name the
     module body does not bind, and -- because the kinds travel with the names -- a
-    rebinding of a ``def`` or ``class`` name to a value of some other kind.  What that
-    cross-check does NOT see is a same-name, same-kind rebinding of an already
-    inventoried constant; only a constant-VALUE assertion catches that one.  A
+    rebinding of a ``def`` or ``class`` name to a value of a DIFFERENT kind.  Three
+    install shapes were measured to survive that cross-check anyway; they are enumerated,
+    with their measurements, in
+    ``test_module_level_constant_subject_refuses_star_import``'s docstring.  The first
+    of them is a same-name, same-kind rebinding of an already inventoried NAME -- constant,
+    function or class, not constants alone -- and only the constant leg has a backstop,
+    the constant-VALUE assertions, and only for the five constants they name.  A
     star-import is refused here explicitly because it is the one channel for which name
     comparison is constitutionally unavailable: the names it binds are not knowable from
     this module's source at all.
@@ -27026,7 +27055,8 @@ def test_module_level_constant_subject_admits_every_supported_form() -> None:
         "_Provenance": "class",
         "_judge": "function",
         # ``async def`` binds a name of kind ``function`` like any other ``def``: at run
-        # time a coroutine function IS a ``FunctionType``.
+        # time a coroutine function is callable, which is what ``_runtime_binding_kind``
+        # keys on.
         "_judge_async": "function",
     }
 
@@ -27099,13 +27129,37 @@ def test_module_level_constant_subject_refuses_star_import() -> None:
     An install under a name the module body does not bind -- a call that runs
     ``globals()["_NEW"] = ...`` or ``setattr`` on the module object, a
     ``globals()``-mutating decorator -- surfaces as a stray name on the imported module,
-    and a rebinding of a name the body binds as a ``def`` or ``class`` surfaces as a kind
-    mismatch.  Neither is what a star-import does:
+    and a rebinding of a name the body binds as a ``def`` or ``class`` TO A VALUE OF A
+    DIFFERENT KIND surfaces as a kind mismatch.  Neither is what a star-import does:
     the names it binds are not knowable from this module's source AT ALL, so there is no
-    inventory to compare against and refusal is the only available closure.  (The channel
-    that survives all of it is a same-name, same-kind rebinding of an inventoried
-    constant; that one is held by the constant-VALUE assertions above, for the five
-    constants they name.)
+    inventory to compare against and refusal is the only available closure.
+
+    Three install shapes were MEASURED to survive the whole cross-check.  Each carries an
+    ``INVALID_MANIFEST`` refusal that ``_remedy_permits_permanent_failure`` consults, each
+    flips that judge's verdict from ``True`` to ``False`` on a real input, and each leaves
+    this file's #1418 guard subset green.  The list is what measurement found, not a proof
+    that nothing else survives:
+
+    * a same-name, same-OBSERVED-kind rebinding of an already inventoried NAME -- not just
+      a constant.  ``setattr(sys.modules[__name__], "_remedy_permits_permanent_failure",
+      <wrapper>)`` keeps the observed kind ``function``; replacing the admitted
+      ``_ForcingSidecarProvenance`` with a subclass whose attribute carries the refusal
+      keeps it ``class``.  Only the constant leg has a backstop, the constant-VALUE
+      assertions above, and only for the five constants they name.  The ``function`` leg
+      widened with the callability rule argued in ``_runtime_binding_kind``.
+    * an install onto an IMPORT-bound name: ``from json import dumps as _PERMANENT_CODE_REFUSAL``
+      consumed in the remedy leg, then ``global``-rebound to a ``frozenset`` by a
+      module-level call.  Its declared kind is ``import``, and the kind comparison exempts
+      import names deliberately: an import binds an object of any kind, so no single
+      declared label can match -- this module's own ``from datetime import UTC`` observes
+      ``constant`` and its ``from collections.abc import Mapping`` observes ``class``,
+      while the ``dumps`` above observes ``function``.  Not false-redding on all three is
+      what the exemption buys, and this shape is its price.
+    * an install under a name shaped like a DUNDER (``globals()["__x__"] = ...``).  The
+      stray-name check filters ``__``-both-ends names because the module object carries
+      interpreter-owned ones (``__name__``, ``__spec__``, ...) that no source inventory
+      binds.  A ``__``-prefixed name that is NOT a dunder stays visible, which is why the
+      filter is spelled both ways round; a true dunder does not.
     """
 
     with pytest.raises(AssertionError, match="star-import"):

@@ -192,27 +192,39 @@ _install_extra_refusal()
 赋值在语法上**不是**模块级绑定形式，是函数体语句在运行时绑定模块级名字。
 所以那句话**没有被字面证伪，被绕过的是它的目的**——本役第三次遇到"标题为真、意图为假"。
 
-**修法（已实测）**：在语法主体之外加一条**运行时交叉核对**——AST 盘点出的名字集合，
-必须等于**导入后模块对象上实际存在的模块级常量名**集合（`vars(module)` 去掉 dunder、
-去掉本模块 AST 里的 import 名与 `def`/`class` 名、去掉模块对象与本模块定义的可调用对象）。
+**修法（已实测；round-2 交叉评审 C2 指出下面这段初稿写成了"集合相等"，已按交付实现改正）**：
+在语法主体之外加一条**运行时交叉核对**，三条从句：
+
+1. 模块对象上每个**非 dunder**（前后都是 `__` 才算）的名字，都必须被源码盘点过；
+2. 每个被盘点的**常量**都必须在模块对象上；
+3. 每个被盘点的**非 import** 名，运行时必须是其绑定形式所声明的种类
+   （`def` → 可调用，`class` → 类）。
+
+**本条不是"AST 常量名集合等于运行时常量名集合"。** `bound` 侧**刻意**含
+import / `def` / `class` 名，运行时侧也**不**过滤成常量——写成相等既不可实现也会误报。
+初稿那句"必须等于……模块级常量名集合"描述的是一个从未交付的形状，已删。
 
 | 情形 | AST 盘点 | 运行时 | 结论 |
 |---|---|---|---|
-| HEAD 未变异 | 18 | 18 | 双向差集为空 → 绿（无假阳性） |
-| `global` 安装变异 | 18 | **19** | 运行时多出 `_DOWNSTREAM_EXTRA_REFUSAL_CODES` → **红** |
+| HEAD 未变异 | **131**（18 常量 + 59 `def` + 1 `class` + 53 import）| **131** | 双向差集为空、kind 字典相等 → 绿（无假阳性）|
+| `global` 安装变异 | 同上 | 多出 `_DOWNSTREAM_EXTRA_REFUSAL_CODES` | **红**（traceback 落在 `tests/test_production_scheduler.py:26912`）|
+
+（"18 vs 19"那组数只对 `set(consumers) - runtime_names` 这一条从句成立，
+不是交叉核对两侧的规模——初稿把单条从句的数当成了整条机制的数。）
 
 round-2 独立复核把这条的射程测全（同一形状、四种造名通道，均在隔离副本内）。
 **Phase 4/4.5 的交叉评审把下表证伪了两格，Phase 6 修好了实现并重测**——
 原表把"造新名"的结论错当成了整个运行时改绑类的结论：
 
-**读表前的前提，漏了它整张表都会被误读**：下面每一行的"安装"都指**由模块级调用驱动**
+**读表前的前提，漏了它整张表都会被误读**：下面每一条**安装/改绑**行都指**由模块级调用驱动**
+（末行 star-import **不属此列**——它是裸 `from x import *` 语句，不经交叉核对，由显式拒 `*` 关闭）
 （`def _install(): …` + 模块级 `_install()`——`FunctionDef` 与 `Expr` 都是放行形式，所以进不了主体
 也不触发拒绝）。写成**裸模块级语句**的 `globals()["_X"] = …` 根本到不了交叉核对：
 它是 `Assign(targets=[Subscript])`，而放行集只收**单 `Name` 目标**的 `Assign`，
 当场被 catch-all 拒（`unadmitted module-level statement form Assign`）。
 Phase 6 实施者在复现时发现编排者的 brief 把这两种拼法混写了，已按实测口径改正。
 
-| 运行时改绑通道（均为调用驱动）| round-2 原结论 | Phase 4.5 实测 | Phase 6 修复后 |
+| 运行时改绑通道 | round-2 原结论 | Phase 4.5 实测 | Phase 6 修复后 |
 |---|---|---|---|
 | `global` 安装**新名** | STRAY → 红 | 同 | 红 |
 | `globals()["_X"] = …`（新名，非 `__` 前缀）| STRAY → 红 | 同 | 红 |
@@ -226,25 +238,55 @@ Phase 6 实施者在复现时发现编排者的 brief 把这两种拼法混写�
 | star-import | **名字比对关不掉** | 同 | 由显式拒 `*` 关闭 |
 
 两个实现要点（否则这条会误报）：AST 侧的"已绑定名字"集合**必须**把
-`Import`/`ImportFrom`/`FunctionDef`/`ClassDef` 绑定的名字也算进去，否则会吐出 11 个
-假 stray（`ACTIVE_PIPELINE_STATUSES`、`ENOENT`、`UTC`、`annotations` 之类全是 import 进来的）；
+`Import`/`ImportFrom`/`FunctionDef`/`ClassDef` 绑定的名字也算进去，否则会吐出 **113 个**
+假 stray（131 个非 dunder 运行时名 − 18 个常量；`ACTIVE_PIPELINE_STATUSES`、`ENOENT`、`UTC`、
+`annotations` 之类全是 import 进来的，还有 59 个 `def` 与 1 个 `class`）；
+（初稿写"11 个"——那是只把 import 名漏掉时的数，没算 `def`/`class`，round-2 C2 实测校正。）
 加上之后 `运行时 − 已绑定` 在 HEAD 上恰为空。第二，`ImportFrom` 的 `*` 必须**显式拒**，
 那是本条靠名字比对关不掉的唯一支路。
 
 把主体从"语法形状枚举"升级成"语法与运行时一致性"之后，关闭的是
 **运行时在模块体未绑定的名字上造名**，以及**改变已绑定名字之种类**的改绑。
-**不是整类。** 残留一格，实测且刻意不关：
+**不是整类。** 残留**三种机制**，均已实测，刻意不关。
+**这份清单是测出来的，不是「再无其它」的证明**——round-2 里我先写成「三条通道」并漏掉了
+下面的 (c)，正是本役那个「更正引入新假句」的形状在更正里第 N 次发作；实施者在落笔前实测抓出。
+（下面每条都注明 `-k` 选择器与收集数，`tasks.md` 5.0 要求变异记录可复现；
+选择器 `-k "no_second_permanent_code_refusal_list or module_level_constant_subject or
+downstream_failure_restartable"` 在 HEAD 上收集 **113** 条。round-1 稿里"44 passed"
+"43 passed"两个数不注选择器、不可复现，round-2 C 镜头的声明缺口 #2 指出，已换成上面这组。）
 
-> **同名同 kind 的反射式改绑**——`setattr(sys.modules[__name__], "_已有常量名", 新值)` 或
-> `globals()["_已有常量名"] = 新值`。名字只以**字符串字面量**出现，不产生 `ast.Name`，
-> 映射逐字节不变；名字本来就在两个集合里，kind `frozenset → frozenset` 也没变。
-> 实测：把 `_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS` 这样改宽，判据 `True → False`，
-> 守卫子集 **44 passed 全绿**。
+**(a) 同名同 kind 的反射式改绑**——`setattr(sys.modules[__name__], "<已有名字>", 新值)` 或
+`globals()["<已有名字>"] = 新值`。名字只以**字符串字面量**出现，不产生 `ast.Name`，映射逐字节不变；
+名字本来就在两个集合里，kind 也没变。**注意主体是"名字"不是"常量"**：round-1 稿把这一格写成
+"已有**常量**名"，round-2 实测证伪——用 `setattr` 把 `_remedy_permits_permanent_failure`
+换成一个更严格的同名函数，observed kind 仍是 `function`、非 stray、不入任何消费者集合、
+也没有任何取值断言点名它，判据 `True → False` 而 **113 条守卫子集全绿**。
+常量这一支由取值断言挡住（**5 钉 / 13 未钉**）；**函数与类这一支没有任何东西挡**。
 
-挡住它的**只有**取值断言。Phase 6 因此把该常量补进取值断言（5 钉 / 13 未钉），
-它是 #1418 主题族里唯一没钉值的一条；**其余 13 条不钉**——全量钉 18 条值是不欠的摩擦，
-按 follow-up issue 处置。注意 `global` 拼法**不**在这一格里：它的赋值目标是语法引用，
-会改消费者集合，已经红（实测 `1 failed, 43 passed`）。写这两者时不得混为一谈。
+**(b) 装到 import 绑定的名字上**——`from json import dumps as _X`，在判据里咨询 `_X`，
+再由模块级调用 `global` 把它改绑成 frozenset。kind 从句对 import 名**豁免**，
+所以既不是 stray、也不触发 kind 失配、也不改消费映射。实测判据 `True → False` 而全量绿。
+**这条不能关**：给 import 名钉 kind 会当场假红（`from datetime import UTC` 绑数据、
+`from collections.abc import Mapping` 绑类）。它是**声明的开口**。
+
+**(c) 装到一个「真 dunder 形状」的名字上**——`globals()["__permanent_refusal__"] = frozenset({...})`
+由模块级调用安装，再在判据里咨询。第一条从句的 dunder 过滤在比较**之前**就把它剔除了，
+所以它对谁都不是 stray；它不在 `bound_kinds` 里，kind 从句根本不看它；它不点名任何常量，
+消费映射也不动。实测：判据 `True → False`，守卫子集**全绿**。
+**这条不能关**：dunder 过滤本身是必需的——模块对象上带着 `__name__`/`__spec__`/`__loader__`
+这些解释器自有的 dunder，没有任何源码盘点会绑定它们，钉它们既依赖版本又要自证不假红。
+与 import 豁免在结构上是同一个论证。**报而不修**（round-2 实施者发现）。
+
+**关于「可调用性」这条取舍**（不是第四条通道，是 (a) 的判据选择）：kind 从句钉的是**可调用性**
+而非 `FunctionType`。钉 `FunctionType` 会让给既有纯函数加一句 `@functools.lru_cache` 这种
+**完全正当**的重构打红（实测）。代价是实打实的、也已实测——`def` 被改绑成 `functools.partial`、
+`staticmethod`、或**模块体之外**定义的可调用类的实例，三种都由红变绿
+（若那个载体类写在模块级，`ClassDef` 放行集会拒掉它，仍红）。
+但拒绝清单本身不可调用，所以**本 change 演示过的杀伤一条没丢**。
+注意「没丢掉已演示的杀伤」与「没丢判别力」是两句不同的话，只有前一句为真。
+
+对照：`global` 拼法改绑**常量**名**不**在残留里——它的赋值目标是语法引用，会改消费者集合，
+本来就红。写这几者时不得混为一谈。**全量钉 18 条值**是不欠的摩擦，按 follow-up issue 处置。
 
 **`AnnAssign` 不是可选项。** 本模块最要害的两份清单载体
 `_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE` / `_REMEDY_NON_CAUSAL_CODE_TABLE`（`:218` / `:222`）
