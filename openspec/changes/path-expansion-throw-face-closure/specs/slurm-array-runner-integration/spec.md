@@ -30,7 +30,7 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 
 - **GIVEN** a configuration constructed from such a value
 - **WHEN** the storage preflight runs
-- **THEN** it returns its structured result carrying a blocker for that field rather than raising
+- **THEN** it returns its structured blocked result rather than raising, the unusable root being admitted by the tolerance arm for a merely missing path and classified through the consequential root blockers
 
 ### Requirement: The safe-directory guard SHALL resolve a final-segment symlink identically on every supported interpreter
 

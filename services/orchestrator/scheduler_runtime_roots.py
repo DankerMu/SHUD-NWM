@@ -829,10 +829,18 @@ def _require_safe_directory_final_component(path: Path, workspace_root: Path, fi
             resolved = Path(os.path.realpath(path, strict=True))
         except OSError as error:
             if error.errno == ELOOP:
+                # ELOOP fires for a cycle ANYWHERE in the resolution, not only
+                # in the final component: this link's target may itself
+                # traverse a loop that lives elsewhere, and the lstat arm above
+                # only cleared the parent segment of *path*.  The kernel names
+                # the looping component in error.filename -- byte-identically
+                # on every supported CPython -- so the attribution follows it
+                # instead of asserting a geometry that may not hold; naming the
+                # wrong link is the misattribution #1545 exists to remove.
                 raise _symlink_loop_refusal(
                     field_name,
                     path,
-                    "the final component is a symlink loop",
+                    f"the symlink loop is at {error.filename or path}",
                 ) from error
             # Every other strict failure falls back to the non-strict product
             # this arm has always used, so only the loop changes verdict.  The

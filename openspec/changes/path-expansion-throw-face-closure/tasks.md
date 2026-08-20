@@ -264,5 +264,40 @@
       `data-integrity-storage-contract` 的那条毛病。仓内无先例在 delta 里写 `## Purpose`
       （归档才物化 `openspec/specs/<cap>/spec.md`），故**归档 chore PR 里补一句真 Purpose**，
       别让它以 TBD 落地。
-- [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
+- [ ] D.14 **round-1 交叉评审 + 独立裁决 + 修复轮记账**（必须进 PR body）：
+      lens A 无 P0/P1/P2；lens B 3×P2 + 1×P3；两批独立 verifier 共 8 条裁决 ——
+      **5 条 CONFIRMED/FIX_NOW 已修，2 条 DISCARD，1 条 DEFER**。
+      - **F1（P2）**：`_canonical_path` 换成恒等函数，`1692 passed` **全绿存活**（两个解释器臂皆然）。
+        三条 compat-surface 用例都先把入参 canonical 化再断言 `f(x) == x`，恒等函数照样满足；
+        spec R4 卖的「normalized」从没被检查过。**比 PR 已声明的限制严格更强**——已声明的判别器
+        （回退 `value.resolve()`）只在 3.11 红，恒等 mutant 两臂全绿。已补
+        `_resolve_optional_config_path(loop/"y"/".."/"z") == loop/"z"`，两臂验证。
+      - **F2（P3）**：`_expanduser_or_verbatim` 退化成「永不展开」，`1692 passed` + Evidence Floor 其余
+        `310 passed` 全绿存活。原因：文件里每条 tilde 用例都用**故意不可展开**的 tilde。
+        master 用的是 stdlib `.expanduser()`（无需栅栏），本单换成手写两分支包装却只钉了异常分支，
+        **每个真实运维配置都走的 happy 分支无人看守**。已补展开断言。
+      - **F3（P2）**：EACCES 用例的裸 `except PermissionError` 把本单**自己负责**的 strict-realpath 步骤
+        也一并吞了——strict-only mutant 下另外三条红、**它自己绿**。已按解释器版本设闸：
+        3.12+ 裸调断言，`< 3.12` 才保留容忍（那半是 #1623 的面）。
+      - **F4（P3）**：ELOOP 文案硬编码「the final component is a symlink loop」，但 strict realpath
+        对**解析链上任何位置**的环都抛 ELOOP。实测 `via_midloop -> midloop/tail` 几何下末段是健康 symlink，
+        文案却把运维指向错的链接——正是 #1545 要消除的那类归因错误。已改为按 `error.filename` 归因
+        （verifier 更正了 reviewer 的数据：filename 在两臂上都是**成环的那个组件**，故跨臂逐字一致）。
+      - **F5（P3）**：spec R2 场景 1 写的是「构造路径」，九条用例却全在直调守卫。已补构造路径用例。
+      - **DISCARD 1**：root-UID 下 EACCES 栅栏空转 —— 任何 oracle 都不以 root 跑
+        （CI `runs-on: ubuntu-latest` 无 job 级 `container:`；node-27 是 `nwm`；本机 euid 501），
+        且 `:30889-30899` 的既有金丝雀在 root 下会**响亮失败**而非静默通过。
+      - **DISCARD 2**：「verbatim 只按子串强制」—— 那条 `raise` 在 diff 里是 **context 行**、与 master 逐字相同，
+        只有 ELOOP 在它之前被分流走，所以行为上本来就是 verbatim，无输入可造出非 verbatim 消息。
+      - **DEFER 1（P4）**：`via_midloop` 几何在 3.14 上 master ACCEPT、HEAD REFUSE 是 accept→refuse 翻转。
+        它在 #1544 的**要求层**意图之内（「环不得被静默收编」，且 3.11 上 master 本来就抛），
+        缺的只是**场景/表格层**的披露 —— 已在 PR body 的修后几何表补一行。
+      - **对我 brief 的一处更正（fix pass deviation 1）**：我要求顺带补的「相对拼接半边无断言」是**假前提**——
+        把 `_optional_config_path_relative_to` 的 `base` 换成 `Path.cwd()`，**既有用例已经红**
+        （用例不 chdir，cwd 是仓库根、base 是 tmp_path）。未补，避免冗余。
+      - **fix pass deviation 4（保留）**：`error.filename or path` 的 `or path` 半边是防御性未测表达式；
+        实测每种几何 filename 都有值，保留只为避免打印 `at None`。
+      - **fix pass deviation 7（记过）**：首个 mutant 改写误用了裸 `python3`（项目规则是 uv-only），
+        后续全部改回 `uv run python`；无状态影响，还原经 sha256 核验。
+- [ ] D.8 诚实记账：- [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
       而非当下崩溃修复；#1547 触发条件少见但影响面是共享底座。

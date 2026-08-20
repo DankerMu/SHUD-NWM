@@ -16230,6 +16230,25 @@ def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
     assert product == Path(os.path.realpath(tmp_path)) / _UNKNOWN_HOME_WORKSPACE
 
 
+def test_expanduser_helpers_still_expand_a_determinable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The other half of the #1549 contract.  Every tilde above is deliberately
+    # UNEXPANDABLE, so all of it stays green even if the expansion is dropped
+    # altogether -- and master could leave that unpinned because it called
+    # stdlib expanduser() directly, while this change substitutes a hand-written
+    # wrapper whose happy branch is the one every real operator config takes.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    home = canonical_tmp / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._config_path_preserve_final_component("~/x") == home / "x"
+    assert scheduler_module._optional_config_path_relative_to("~/x", canonical_tmp) == home / "x"
+
+
 def test_expanduser_residue_preflight_classifies_structurally(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -16289,7 +16308,27 @@ def test_final_segment_loop_inside_workspace_is_a_structured_refusal(tmp_path: P
 
     assert str(excinfo.value) == (
         f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
-        "(the final component is a symlink loop)"
+        f"(the symlink loop is at {loop})"
+    )
+
+
+def test_final_segment_symlink_whose_target_traverses_a_loop_names_the_looping_link(tmp_path: Path) -> None:
+    # ELOOP does not mean "the final component loops": here the final component
+    # is an ordinary, non-looping symlink and the cycle sits in the path its
+    # TARGET traverses.  The refusal must send the operator to the link that
+    # actually loops, not to the innocent one they configured.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    midloop = workspace_root / "midloop"
+    midloop.symlink_to(midloop)
+    link = workspace_root / "via-midloop"
+    link.symlink_to(midloop / "tail", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {link} "
+        f"(the symlink loop is at {midloop})"
     )
 
 
@@ -16384,9 +16423,9 @@ def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(
     # is not interpreter-independent, and that predates this change and lies
     # outside it: `Path.exists()` swallows EACCES from 3.12 on but propagates
     # PermissionError on 3.11, so master already accepts this on 3.14 and raises
-    # PermissionError on 3.11 at that later gate.  What this change owns is the
-    # real-path step, which must not turn EACCES into the loop refusal -- a
-    # ValueError from here fails this test on both arms.
+    # PermissionError on 3.11 at that later gate (tracked as #1623).  What this
+    # change owns is the real-path step, which must not turn EACCES into the
+    # loop refusal, and must not let it escape either.
     workspace_root, _ = _guard_workspace(tmp_path)
     blocker = workspace_root / "unreadable"
     blocker.mkdir()
@@ -16395,13 +16434,50 @@ def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(
     link.symlink_to(blocker / "leaf", target_is_directory=True)
     blocker.chmod(0o600)
     try:
-        verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
-    except PermissionError:
-        verdict = None
+        if sys.version_info >= (3, 12):
+            # The CI interpreter gets NO tolerance: a blanket `except
+            # PermissionError` here would also swallow EACCES escaping the
+            # strict real-path step this change owns, i.e. it would stay green
+            # under exactly the regression it exists to fence.
+            verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+        else:
+            # 3.11 alone keeps the tolerance, for the later `Path.exists()`
+            # gate named above -- a divergence this change does not own.
+            try:
+                verdict = scheduler_module._require_safe_directory_final_component(
+                    link,
+                    workspace_root,
+                    "evidence_dir",
+                )
+            except PermissionError:
+                verdict = None
     finally:
         blocker.chmod(0o755)
 
     assert verdict is None
+
+
+def test_final_segment_loop_refuses_on_the_database_backed_construction_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Every assertion above calls the guard directly, but the acceptance
+    # scenario is phrased about the CONFIGURATION being constructed.  The
+    # guard's only two call sites are both `evidence_dir` in scheduler_config,
+    # so this is the route an operator actually travels.
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(workspace_root, "loop-evidence")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(loop))
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
 
 
 # --- Compatibility-surface path helpers (#1546) --------------------------------
@@ -16417,6 +16493,13 @@ def test_compatibility_surface_helpers_normalize_a_loop(tmp_path: Path) -> None:
     assert scheduler_module._resolve_optional_config_path(loop) == loop
     assert scheduler_module._optional_config_path_relative_to(loop, canonical_tmp) == loop
     assert scheduler_module._optional_config_path_relative_to(loop.name, canonical_tmp) == loop
+    # Normalisation itself, which the three equalities above cannot see: on an
+    # already-canonical input they are all satisfied by handing the value
+    # straight back.  This also pins the documented POSIX order -- symlinks
+    # first, `..` afterwards -- so the loop segment survives while the
+    # traversal through it collapses, which is what the old Path.resolve()
+    # produced on 3.13+ and what it refused to produce at all on <=3.12.
+    assert scheduler_module._resolve_optional_config_path(loop / "y" / ".." / "z") == loop / "z"
 
 
 def test_compatibility_surface_helpers_keep_their_existing_contract(tmp_path: Path) -> None:
