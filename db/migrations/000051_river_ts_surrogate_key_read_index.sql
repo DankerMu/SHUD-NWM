@@ -40,6 +40,26 @@
 -- billion-row index ahead of a measured need is not free. The post-cutover
 -- index set is decided in #1342.
 --
+-- Round-3 amendment (2026-08-19, PR #1443) -- the paragraph above describes a
+-- shape that no longer exists. The node-27 EXPLAIN gate caught the set-based
+-- national legs regressing 0.77s -> 34.7s (planner materialised the run-slice
+-- and join-filtered it against the tile's segments), so both legs were
+-- rewritten as per-segment CROSS JOIN LATERAL probes. Each probe now binds
+-- run_key + river_network_version_key + river_segment_key + variable_e +
+-- valid_time plus the correlated text triplet, and its live plan uses the TEXT
+-- primary key on uncompressed chunks (0.086ms/loop) and the compressed
+-- segmentby index on compressed chunks (0.013ms/loop) -- this migration's index
+-- is not on their path at all. "No second index" still holds, for that new
+-- reason rather than the run_key-prefix one.
+--
+-- ORDERING CONSTRAINT FOR #1342: the #1339 cutover (key-based primary key and
+-- key-based segmentby, hydro.cutover_river_identity_normalization() defined in
+-- 000050) MUST land BEFORE the text columns and the transitional text
+-- predicates are removed. The cutover PK covers exactly the columns these
+-- probes bind, so they keep their probe plan across it; dropping the text side
+-- first leaves both legs without an index path and the 34.7s-class regression
+-- returns in a different costume.
+--
 -- ---------------------------------------------------------------------------
 -- OPERATIONAL CONSTRAINT -- READ BEFORE APPLYING ON node-27
 -- ---------------------------------------------------------------------------

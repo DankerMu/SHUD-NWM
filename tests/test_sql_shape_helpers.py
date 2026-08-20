@@ -65,8 +65,13 @@ in-boundary fact read. The pins therefore assert two things that a plain
 vocabulary:
 
 * :data:`SANCTIONED_TEXT_PUSHDOWN_COLUMNS` / :data:`FORBIDDEN_TEXT_FACT_COLUMNS`
-  — one definition of the boundary, so a surface cannot quietly grow a fourth
-  text predicate by having its own private list.
+  / :data:`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` — one definition of the
+  boundary, so a surface cannot quietly grow an extra text predicate by having
+  its own private list. The third set exists because the boundary is
+  positional: inside the national legs' correlated ``CROSS JOIN LATERAL``
+  probe, ``river_segment_id`` is a per-loop constant that really does push
+  down, while on every constant-binding surface it would still be the
+  forbidden text fact join.
 * :func:`outer_predicates` — sub-selects stripped, comments removed and
   whitespace collapsed, so an "immediately followed by its key counterpart"
   adjacency assertion can be written as one exact substring and stays readable
@@ -98,8 +103,9 @@ _WHITESPACE = re.compile(r"\s+")
 # segmentby run_id, river_network_version_id, river_segment_id; orderby
 # variable, valid_time) and TimescaleDB 2.10.2 cannot push an integer-key
 # predicate through that. `river_segment_id` is a segmentby column too but is
-# NOT sanctioned: no switched shape binds it as a constant, so it could only
-# appear as a fact join, which the delta forbids outright.
+# NOT sanctioned on these surfaces: they bind identity as a constant and reach
+# the fact table once, so a `river_segment_id` predicate could only be a text
+# fact join, which the delta forbids outright.
 SANCTIONED_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = (
     "run_id",
     "river_network_version_id",
@@ -111,6 +117,18 @@ FORBIDDEN_TEXT_FACT_COLUMNS: tuple[str, ...] = (
     "unit",
     "quality_flag",
 )
+# Position-dependent extension (#1341 round-3 P1 remedy). The two national
+# legs no longer join the fact table set-based: they drive from tile_segments
+# and probe it once per segment through a `CROSS JOIN LATERAL (... LIMIT 1)`.
+# Inside that probe the correlated `lr.` / `seg.` values are constants for the
+# duration of one loop, so `river_segment_id` behaves exactly like the other
+# three aids — it reaches the compressed segmentby index and the text primary
+# key — rather than being the unpushable text fact join the classification
+# above rules out. It is sanctioned in that position ONLY: it stays in
+# FORBIDDEN_TEXT_FACT_COLUMNS so every constant-bound surface keeps rejecting
+# it, and the national pins additionally assert that no `ts.` reference of
+# either leg lives outside the lateral body.
+LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
 TEXT_IDENTITY_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + FORBIDDEN_TEXT_FACT_COLUMNS
 
 
@@ -543,10 +561,25 @@ def test_sanctioned_and_forbidden_column_sets_are_disjoint_and_complete() -> Non
     assert set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS).isdisjoint(FORBIDDEN_TEXT_FACT_COLUMNS)
     assert set(TEXT_IDENTITY_COLUMNS) == set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) | set(FORBIDDEN_TEXT_FACT_COLUMNS)
     # The sanctioned set is exactly the compression segmentby/orderby columns
-    # that a switched shape binds to a constant. river_segment_id is segmentby
-    # too, but no switched shape binds it, so it stays forbidden.
+    # that a constant-binding switched shape can push down. river_segment_id is
+    # segmentby too, but those shapes never bind it, so it stays forbidden
+    # there.
     assert set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) == {"run_id", "river_network_version_id", "variable"}
     assert "river_segment_id" in FORBIDDEN_TEXT_FACT_COLUMNS
+
+
+def test_lateral_probe_set_extends_the_sanctioned_set_by_exactly_river_segment_id() -> None:
+    """The correlated-probe position is the one place river_segment_id is allowed.
+
+    Keeping it in FORBIDDEN as well is deliberate, not a contradiction: the
+    classification is positional, and every consumer that is not a lateral
+    probe must keep reading it as forbidden.
+    """
+    assert set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) < set(LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS)
+    assert set(LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS) - set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) == {"river_segment_id"}
+    # And the widened set is still a subset of what text_fact_columns can see,
+    # so a national pin written against it cannot be unsatisfiable.
+    assert set(LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS) <= set(TEXT_IDENTITY_COLUMNS)
 
 
 def test_production_tile_sql_keeps_its_fact_predicates_after_stripping() -> None:

@@ -91,6 +91,33 @@
   该形态对压缩 chunk 无有效辅助，但与 master 等价**非回归**
   （master 的 CTE join 文本等值同样不可下推，模块头注释自证），
   据此记录为不入 2.5 形态集的理由。
+- **national 两腿改 LATERAL 逐段探针（round-3 P1 补救，node-27 EXPLAIN
+  实测在案）**：`typed_values`/`untyped_ranked` 原为
+  `latest_runs × river_timeseries` 集合 join 再与 `tile_segments`
+  join-filter。`tile_segments` 是空间 CTE，基数不可估（z4 实测 est ~50
+  vs actual 3,500，ANALYZE 无效），planner 物化整条 run 切片后逐段过滤
+  ——56,567 × 3,500 = 1.98 亿次比较、**34.7s**（切换前文本 pkey 形态
+  0.77s）。补救：两腿改为**从 `tile_segments` 驱动 + `JOIN latest_runs
+  ON lr.river_network_version_id = seg.river_network_version_id` +
+  `CROSS JOIN LATERAL (... LIMIT 1) v`**。实测 z4 uncompressed
+  34.7s → 1.07s（探针 0.086ms/loop）；compressed 腿 0.013ms/loop（走
+  segmentby 索引）。语义等价三条：(a) fact 表 PK 恰为
+  `(run_id, river_network_version_id, river_segment_id, variable,
+  valid_time)`，探针五列全绑 → 至多 1 行，`LIMIT 1` 结果集中性，其
+  作用是**阻止 planner 把子查询 pull-up** 回集合 join；(b) lr↔seg 的
+  network 等值边保序保数——段的 fact 行只可能存在于本网络的 run 下，
+  该边只消除 (段, 外网络) 无效探针；(c) 两腿探针文本完全相同，NULL
+  键可见性在 z<9 / z>=9 仍不可分裂。**该形态使受批集合出现位置性例外**：
+  LATERAL 体内 `lr.`/`seg.` 关联值对单次探针是常量，`river_segment_id`
+  文本谓词在此**可下推**（segmentby 第 3 列 + 文本 pkey），因此这两腿
+  受批四列（三列 + `river_segment_id`）；例外**仅限 LATERAL 探针体内**，
+  绑定常量的其余形态该列仍为负向钉子（oracle 侧
+  `LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` 与
+  `FORBIDDEN_TEXT_FACT_COLUMNS` 并存即此意），且钉死"两腿 `ts.` 引用
+  不得出现在 LATERAL 体外"。残余：compressed pin 上 ~33s 属
+  `source_identity_stats` CTE，**切换前 26s 同样存在**，非本 change
+  引入，不在本次范围（另立跟踪 **#1596**，其验收项承接"z4 压缩时次
+  整块 tile 进秒级"的端到端闸）。
 
 ## D2 索引（000051）
 
@@ -198,12 +225,17 @@
   "每形态 segmentby 下推" 对 national 三形态物理不可满足）：绑定
   字面量四形态（tile 点查、valid_times named、coverage run 域、
   存在性探针）须显示文本 segmentby 下推（compression 内部关系上有
-  Index/Filter Cond）；national 三形态（identity-stats、typed/
-  untyped 腿）身份经 latest_runs join 到达、无 segmentby 字面量，
-  判据为**不得全解压 Seq Scan**——batch 消除通道是 orderby 第 2 列
-  `valid_time` 等值绑定的 min/max 元数据（`variable` 单值 q_down、
-  其元数据不消 batch，受批辅助在这三形态是声明性 no-op，如实进
-  receipt）。这与 spec delta 的 "segmentby/orderby columns" 措辞
+  Index/Filter Cond）；national **identity-stats 探针**身份经
+  latest_runs join 到达、无 segmentby 字面量，判据为**不得全解压
+  Seq Scan**——batch 消除通道是 orderby 第 2 列 `valid_time` 等值
+  绑定的 min/max 元数据（`variable` 单值 q_down、其元数据不消
+  batch，受批辅助在该形态是声明性 no-op，如实进 receipt）。
+  **national typed/untyped 两腿改 LATERAL 后判据升级**（round-3
+  修正）：探针体内关联值是单次循环常量，故须显示 (i) 逐段 Nested
+  Loop + 每 loop 一次 pkey/segmentby 探针（**不得**回落成集合 join
+  或 Materialize 整条 run 切片）、(ii) 压缩腿走 segmentby 索引（三
+  文本列全绑），(iii) z4 national tile 延迟回到秒级以内（34.7s 回归
+  的判据边界）。这与 spec delta 的 "segmentby/orderby columns" 措辞
   一致。
 - deny-write（AC-5）与 `/`、`/ops` 浏览器 e2e（AC-4）照 C1-C4 惯例。
 
@@ -212,7 +244,12 @@
 - unit：切换后 SQL 形态断言（谓词含键解析子查询、ORDER BY 落文本
   表达式、feature_id 拼接不变）；文本谓词断言按混合口径重写：受批
   下推三列必须与键对应物成对出现，`basin_version_id` /
-  `river_segment_id` 文本 fact 谓词与文本列 fact join 为负向钉子；
+  `river_segment_id` 文本 fact 谓词与文本列 fact join 为负向钉子
+  （唯一例外：national 两腿 LATERAL 探针体内的 `river_segment_id`，
+  由 `LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` 显式放行，并以"体外无
+  `ts.` 引用"补钉住位置）；national 两腿另钉 LATERAL + `LIMIT 1`
+  探针形态与 lr↔seg network 等值边——那是 34.7s 回归的形态解，
+  纯谓词断言钉不住；
   OOV variable →空结果路径；`scale_validation.py` plan_lines 新旧
   对齐。红证配对：新断言在 pre-change 代码上必红（stash 法）。
 - **`tests/test_sql_shape_helpers.py`（自 `tests/sql_shape_helpers.py` 迁址，pytest 可采集）是测试 oracle，本身必须有自测**

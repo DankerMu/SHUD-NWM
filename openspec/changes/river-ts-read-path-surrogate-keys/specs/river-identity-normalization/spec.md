@@ -4,7 +4,8 @@
 
 ### Requirement: in-boundary river_timeseries readers SHALL filter by surrogate keys with field-identical external responses
 
-Display-boundary readers of `hydro.river_timeseries` SHALL filter by the surrogate key and enum columns as the row-selection authority, and SHALL additionally retain redundant text pushdown predicates on exactly `run_id`, `river_network_version_id`, and `variable` — each conjoined (AND) with its key or enum counterpart — in every fact query whose plan can reach compressed chunks, as declared transitional aids for compressed-chunk `segmentby`/`orderby` predicate pushdown while compression settings remain text-based (user-adjudicated remedy, issue #1341 comment thread; removed together with the text-column drop in #1342, where any missed removal fails loudly because the columns are gone). These pushdown predicates are strict no-ops for key-carrying rows and MUST NOT widen results: NULL-key rows stay excluded by the key predicates. No other text column may appear as a fact predicate. The aids apply where the identity arrives as a bound literal; identity that reaches the fact table through an authority-table join stays key-joined only — text-column fact joins remain forbidden — so such query legs carry only the aids whose identity is bound (typically `variable` alone).
+Display-boundary readers of `hydro.river_timeseries` SHALL filter by the surrogate key and enum columns as the row-selection authority, and SHALL additionally retain redundant text pushdown predicates on exactly `run_id`, `river_network_version_id`, and `variable` — each conjoined (AND) with its key or enum counterpart — in every fact query whose plan can reach compressed chunks, as declared transitional aids for compressed-chunk `segmentby`/`orderby` predicate pushdown while compression settings remain text-based (user-adjudicated remedy, issue #1341 comment thread; removed together with the text-column drop in #1342, where any missed removal fails loudly because the columns are gone). These pushdown predicates are strict no-ops for key-carrying rows and MUST NOT widen results: NULL-key rows stay excluded by the key predicates. No other text column may appear as a fact predicate, with one positional exception below. The aids apply where the identity arrives as a bound literal; identity that reaches the fact table through an authority-table join stays key-joined only — text-column fact joins remain forbidden outside the sanctioned probe bodies — so such query legs carry only the aids whose identity is bound (typically `variable` alone).
+Round-3 amendment (P1 EXPLAIN-gate interception, PR #1443: the set-based national legs lost the per-segment probe path and regressed 0.77s→34.7s): inside the two `hydro-national` `CROSS JOIN LATERAL` probe bodies in `services/tiles/mvt.py` — and only there — correlated text equalities on `run_id`, `river_network_version_id`, and `river_segment_id` are sanctioned as the same class of transitional pushdown aids: each is conjoined (AND) with its surrogate-key counterpart in the same probe, each is a strict no-op for key-carrying rows (all three are NOT NULL primary-key columns), and all are removed together with the text-column drop in #1342. This positionally widens the user-adjudicated three-column literal-aid set by `river_segment_id` for the lateral probe bodies only — recorded as a deviation in the PR 偏离记录 for user review, since the three-column set was a user-adjudicated remedy. Outside a lateral probe body the prohibition on text-column fact joins stands unchanged, and the shape oracle (`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` vs `FORBIDDEN_TEXT_FACT_COLUMNS`) enforces exactly this positional split.
 This covers `services/tiles/mvt.py`,
 `packages/common/display_coverage.py`,
 `apps/api/routes/hydro_display.py`, and the identity-predicated
@@ -63,7 +64,13 @@ silent data loss.
   or `variable` only, appears in the same conjunction as its surrogate
   key or enum counterpart, and no text predicate on
   `basin_version_id` or `river_segment_id` (nor any text-column join
-  into the fact table) exists in any in-boundary read shape
+  into the fact table) exists in any in-boundary read shape — except
+  inside the two `hydro-national` `CROSS JOIN LATERAL` probe bodies,
+  where the round-3 amendment above additionally sanctions correlated
+  text equalities on `run_id`, `river_network_version_id`, and
+  `river_segment_id`, each key-paired, removed with #1342; no `ts.`
+  fact reference may appear outside those probe bodies in the national
+  legs
 
 #### Scenario: Switched shapes are served by the integer index without text-read regression
 
@@ -72,7 +79,13 @@ silent data loss.
 - **THEN** `EXPLAIN (ANALYZE, BUFFERS)` shows them planned on the
   integer index with no sequential scan of `hydro.river_timeseries`
   and latency no worse than the text-index baseline, while retained
-  text indexes keep serving out-of-boundary text readers unchanged
+  text indexes keep serving out-of-boundary text readers unchanged;
+  shape carve-out (round 3): the two `hydro-national` lateral probe
+  legs instead plan as per-segment parameterized probes on the text
+  primary key (uncompressed chunks) and the compressed `segmentby`
+  index (compressed chunks) — the integer index remains the planned
+  path for every other switched shape, and #1342 owns the post-cutover
+  index set that replaces the text plans for these two legs
 
 #### Scenario: Compressed-chunk portions keep predicate pushdown via the transitional text predicates
 

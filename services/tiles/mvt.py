@@ -681,73 +681,130 @@ def postgis_tile_sql(layer: str) -> str:
             ),
             -- typed_values and untyped_ranked are the SAME fact read under two
             -- zoom branches (z>=9 vs z<9). Issue #1341 switches BOTH to the
-            -- surrogate keys in one step: leaving either leg on the text
+            -- surrogate keys in one step: leaving either leg on the old text
             -- predicates would make NULL-key legacy rows visible at one zoom
             -- and invisible at the other for one and the same national
-            -- identity. Both join the fact table on keys ONLY: the identity
-            -- comes from latest_runs, not from a bound constant, so a text join
-            -- equality would buy no compressed-chunk pushdown while being
-            -- exactly the text fact join the change forbids. `variable` is the
-            -- one sanctioned pushdown aid available here and both legs carry it.
+            -- identity. The two legs therefore stay symmetric — same probe,
+            -- same predicates, same fact columns — and only their zoom guard,
+            -- projection tail and percent-rank window differ.
+            --
+            -- Both legs drive from tile_segments and probe the fact table once
+            -- per segment through a LATERAL, instead of joining latest_runs to
+            -- the fact table set-based and filtering the result against the
+            -- segments. tile_segments is a spatial CTE the planner cannot
+            -- estimate (node-27 z4: est ~50 rows vs 3,500 actual, and ANALYZE
+            -- does not move it), so the set-based shape materialised the whole
+            -- run slice and join-filtered it: 56,567 x 3,500 = 198M row
+            -- comparisons, 34.7s against 0.77s for the pre-switch text query.
+            -- The per-segment probe is 0.086ms/loop on uncompressed chunks and
+            -- 0.013ms/loop through the compressed segmentby index.
+            --   * LIMIT 1 is REQUIRED and semantically neutral: the fact
+            --     PRIMARY KEY is (run_id, river_network_version_id,
+            --     river_segment_id, variable, valid_time), all five of which
+            --     the probe binds, so it can match at most one row anyway. Its
+            --     job is to fence the subquery against planner pull-up, which
+            --     is what keeps the probe from collapsing back into the join.
+            --   * The lr <-> seg equality on river_network_version_id is
+            --     semantics-preserving: a segment's fact rows only ever exist
+            --     under its own network's run, so the edge can neither drop
+            --     nor duplicate rows — it only stops the probe from running
+            --     once per (segment, foreign network) pair.
+            --   * The text predicates are transitional pushdown aids removed
+            --     with #1342. Unlike in the set-based shape they are not dead
+            --     weight here: inside the LATERAL the correlated lr./seg.
+            --     values are constants for one probe, so they do reach the
+            --     compressed-chunk segmentby index (segmentby run_id,
+            --     river_network_version_id, river_segment_id) and the text
+            --     primary key on uncompressed chunks. Each one sits in the
+            --     same conjunction as its key counterpart, so it is a strict
+            --     no-op on keyed rows.
             typed_values AS (
                 SELECT seg.river_segment_id,
                        seg.river_segment_key,
-                       lr.river_network_version_id,
-                       ts.basin_version_key,
-                       ts.value,
-                       ts.unit_e::text AS unit,
-                       ts.quality_flag_e::text AS quality_flag,
+                       seg.river_network_version_id,
+                       v.basin_version_key,
+                       v.value,
+                       v.unit,
+                       v.quality_flag,
                        lr.run_id,
-                       ts.variable_e::text AS variable,
-                       ts.valid_time
-                FROM latest_runs lr
-                JOIN hydro.river_timeseries ts
-                  ON ts.run_key = lr.run_key
-                 AND ts.river_network_version_key = lr.river_network_version_key
-                JOIN tile_segments seg
-                  ON seg.river_segment_key = ts.river_segment_key
-                -- transitional compressed-chunk pushdown aid, remove with #1342
-                WHERE ts.variable = :variable
-                  AND ts.variable_e = (
-                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                          WHERE e::text = :variable
-                      )
-                  AND ts.valid_time = :valid_time
-                  AND (:z >= 9 OR seg.stream_type IS NOT NULL)
+                       v.variable,
+                       v.valid_time
+                FROM tile_segments seg
+                JOIN latest_runs lr
+                  ON lr.river_network_version_id = seg.river_network_version_id
+                CROSS JOIN LATERAL (
+                    SELECT ts.basin_version_key,
+                           ts.value,
+                           ts.unit_e::text AS unit,
+                           ts.quality_flag_e::text AS quality_flag,
+                           ts.variable_e::text AS variable,
+                           ts.valid_time
+                    FROM hydro.river_timeseries ts
+                    WHERE ts.run_key = lr.run_key
+                      AND ts.river_network_version_key = lr.river_network_version_key
+                      AND ts.river_segment_key = seg.river_segment_key
+                      -- transitional compressed-chunk / text-pkey pushdown
+                      -- aids, remove with #1342
+                      AND ts.run_id = lr.run_id
+                      AND ts.river_network_version_id = lr.river_network_version_id
+                      AND ts.river_segment_id = seg.river_segment_id
+                      AND ts.variable = :variable
+                      AND ts.variable_e = (
+                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                              WHERE e::text = :variable
+                          )
+                      AND ts.valid_time = :valid_time
+                    LIMIT 1
+                ) v
+                WHERE (:z >= 9 OR seg.stream_type IS NOT NULL)
             ),
             untyped_ranked AS (
                 SELECT seg.river_segment_id,
                        seg.river_segment_key,
-                       lr.river_network_version_id,
-                       ts.basin_version_key,
-                       ts.value,
-                       ts.unit_e::text AS unit,
-                       ts.quality_flag_e::text AS quality_flag,
+                       seg.river_network_version_id,
+                       v.basin_version_key,
+                       v.value,
+                       v.unit,
+                       v.quality_flag,
                        lr.run_id,
-                       ts.variable_e::text AS variable,
-                       ts.valid_time,
+                       v.variable,
+                       v.valid_time,
                        CASE
-                           WHEN ts.value IS NULL THEN NULL
+                           WHEN v.value IS NULL THEN NULL
                            ELSE PERCENT_RANK() OVER (
-                               PARTITION BY ts.river_network_version_key
-                               ORDER BY ts.value
+                               PARTITION BY lr.river_network_version_key
+                               ORDER BY v.value
                            )
                        END AS value_percent_rank
-                FROM latest_runs lr
-                JOIN hydro.river_timeseries ts
-                  ON ts.run_key = lr.run_key
-                 AND ts.river_network_version_key = lr.river_network_version_key
-                JOIN tile_segments seg
-                  ON seg.river_segment_key = ts.river_segment_key
+                FROM tile_segments seg
+                JOIN latest_runs lr
+                  ON lr.river_network_version_id = seg.river_network_version_id
+                CROSS JOIN LATERAL (
+                    SELECT ts.basin_version_key,
+                           ts.value,
+                           ts.unit_e::text AS unit,
+                           ts.quality_flag_e::text AS quality_flag,
+                           ts.variable_e::text AS variable,
+                           ts.valid_time
+                    FROM hydro.river_timeseries ts
+                    WHERE ts.run_key = lr.run_key
+                      AND ts.river_network_version_key = lr.river_network_version_key
+                      AND ts.river_segment_key = seg.river_segment_key
+                      -- transitional compressed-chunk / text-pkey pushdown
+                      -- aids, remove with #1342
+                      AND ts.run_id = lr.run_id
+                      AND ts.river_network_version_id = lr.river_network_version_id
+                      AND ts.river_segment_id = seg.river_segment_id
+                      AND ts.variable = :variable
+                      AND ts.variable_e = (
+                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                              WHERE e::text = :variable
+                          )
+                      AND ts.valid_time = :valid_time
+                    LIMIT 1
+                ) v
                 WHERE :z < 9
                   AND seg.stream_type IS NULL
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND ts.variable = :variable
-                  AND ts.variable_e = (
-                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                          WHERE e::text = :variable
-                      )
-                  AND ts.valid_time = :valid_time
             ),
             selected_values AS (
                 SELECT river_segment_id, river_segment_key, river_network_version_id,

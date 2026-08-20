@@ -47,6 +47,7 @@ from services.production_closure.scale_validation import QUERY_TARGETS
 from services.tiles.mvt import _mvt_tile_order_by, postgis_tile_sql
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
+    LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     outer_predicates,
     sql_from_python,
@@ -100,7 +101,13 @@ def _identity_stats_cte(layer: str) -> str:
     return _slice(postgis_tile_sql(layer), "source_identity_stats AS (", "bounded_rows AS (")
 
 
-def _assert_text_fact_columns(sql: str, alias: str, expected: set[str], label: str) -> None:
+def _assert_text_fact_columns(
+    sql: str,
+    alias: str,
+    expected: set[str],
+    label: str,
+    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+) -> None:
     """The surface's text fact-column references are EXACTLY ``expected``.
 
     Equality rather than "none of the forbidden ones": it is red both when a
@@ -108,8 +115,14 @@ def _assert_text_fact_columns(sql: str, alias: str, expected: set[str], label: s
     ``quality_flag``) reappears and when a sanctioned pushdown aid is silently
     dropped, which would reintroduce the compressed-chunk collapse this change
     was amended to avoid.
+
+    ``allowed`` is the ceiling the expectation itself is checked against, so a
+    future edit cannot widen a surface just by widening its expectation. It is
+    the constant-bound sanctioned set everywhere except the two national legs,
+    whose correlated lateral probe may additionally bind ``river_segment_id``
+    (see ``LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS``).
     """
-    assert expected <= set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), f"{label}: expectation exceeds the sanctioned set"
+    assert expected <= set(allowed), f"{label}: expectation exceeds the allowed pushdown set"
     assert text_fact_columns(sql, alias) == expected, label
 
 
@@ -241,27 +254,137 @@ def test_variable_predicates_are_enum_range_matches_not_casts_on_every_switched_
 # ---------------------------------------------------------------------------
 
 
-def _national_legs() -> tuple[str, str]:
+def _national_legs() -> tuple[tuple[str, str], ...]:
     national_cte = _source_cte("hydro-national")
     typed = _slice(national_cte, "typed_values AS (", "untyped_ranked AS (")
     untyped = _slice(national_cte, "untyped_ranked AS (", "selected_values AS (")
-    return typed, untyped
+    return (("typed_values", typed), ("untyped_ranked", untyped))
+
+
+def _lateral_probe(leg: str) -> str:
+    """The leg's ``CROSS JOIN LATERAL`` body — the only place ``ts`` may appear."""
+    return _slice(leg, "CROSS JOIN LATERAL (", ") v")
+
+
+# The probe's whole conjunction, canonicalised (comments gone, whitespace
+# collapsed, the enum sub-select stripped). ONE substring, not eleven `in`
+# checks: what has to hold is that every key predicate and its transitional
+# text aid live in the SAME `AND` chain of the SAME correlated probe, and that
+# the `LIMIT 1` fence terminates it. Split any pair across the query and the
+# text aid stops being a self-evident no-op; drop the fence and the planner is
+# free to pull the subquery up into the join this replaced.
+NATIONAL_LATERAL_PROBE_PREDICATES = (
+    "FROM hydro.river_timeseries ts "
+    "WHERE ts.run_key = lr.run_key "
+    "AND ts.river_network_version_key = lr.river_network_version_key "
+    "AND ts.river_segment_key = seg.river_segment_key "
+    "AND ts.run_id = lr.run_id "
+    "AND ts.river_network_version_id = lr.river_network_version_id "
+    "AND ts.river_segment_id = seg.river_segment_id "
+    "AND ts.variable = :variable "
+    "AND ts.variable_e = "
+    "AND ts.valid_time = :valid_time "
+    "LIMIT 1"
+)
+# The keys the probe binds are exactly the fact PRIMARY KEY's columns in their
+# surrogate spelling, which is why `LIMIT 1` cannot change the result set.
+NATIONAL_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "river_segment_id", "variable"}
+
+
+def test_national_tile_probes_the_fact_table_once_per_segment_through_a_lateral() -> None:
+    """Both legs read the fact table as a per-segment correlated probe.
+
+    The set-based ``latest_runs JOIN river_timeseries JOIN tile_segments``
+    shape this replaced was a verified P1 regression: ``tile_segments`` is a
+    spatial CTE the planner cannot estimate (node-27 z4: est ~50 rows vs 3,500
+    actual, unchanged by ANALYZE), so it materialised the whole run slice and
+    join-filtered it segment by segment — 56,567 x 3,500 comparisons, 34.7s
+    against 0.77s for the pre-switch text query. Only the drive order plus the
+    ``LIMIT 1`` fence make the plan deterministic, so the shape itself is
+    pinned here, not merely the predicates it carries.
+    """
+    for name, leg in _national_legs():
+        collapsed = outer_predicates(leg)
+
+        assert (
+            "FROM tile_segments seg JOIN latest_runs lr "
+            "ON lr.river_network_version_id = seg.river_network_version_id "
+            "CROSS JOIN LATERAL (" in collapsed
+        ), name
+        assert NATIONAL_LATERAL_PROBE_PREDICATES in outer_predicates(_lateral_probe(leg)), name
+        # The old set-based fact join is gone, not merely supplemented.
+        assert "JOIN hydro.river_timeseries" not in leg, name
+        # And nothing reads the fact table outside the probe: a second, uncorrelated
+        # `ts` reference would be the unestimable join creeping back in.
+        assert "ts." not in leg.replace(_lateral_probe(leg), ""), name
+
+
+def test_national_leg_projections_and_percent_rank_read_the_probe_result() -> None:
+    """The payload comes out of the lateral alias, the ranking window with it.
+
+    ``untyped_ranked`` ranks by value inside one national identity, so its
+    window must partition on the network key ``latest_runs`` already carries
+    and order by the probed value — reaching back to the fact table for either
+    would be the second, uncorrelated scan the lateral exists to prevent.
+    """
+    (_typed_name, typed), (_untyped_name, untyped) = _national_legs()
+
+    for name, leg in _national_legs():
+        for projection in (
+            "v.basin_version_key,",
+            "v.value,",
+            "v.unit,",
+            "v.quality_flag,",
+            "v.variable,",
+            "v.valid_time",
+        ):
+            assert projection in leg, f"{name}: {projection}"
+
+    assert "value_percent_rank" not in typed
+    assert (
+        "CASE WHEN v.value IS NULL THEN NULL "
+        "ELSE PERCENT_RANK() OVER ( PARTITION BY lr.river_network_version_key ORDER BY v.value ) "
+        "END AS value_percent_rank" in outer_predicates(untyped)
+    )
+
+
+def test_per_basin_hydro_layer_keeps_its_single_point_lookup_shape() -> None:
+    """The lateral remedy is national-only; the per-basin tile is untouched.
+
+    That tile binds one (run, basin, network, segment-set) identity as
+    constants and already reads the fact table through a single indexed point
+    lookup, so it never had the unestimable-cardinality join and must not grow
+    a per-segment probe here.
+    """
+    hydro_cte = _source_cte("hydro")
+
+    assert "LATERAL" not in hydro_cte
+    assert "LIMIT 1" not in hydro_cte
+    assert "FROM hydro.river_timeseries ts" in hydro_cte
+    assert hydro_cte.count("FROM hydro.river_timeseries") == 1
 
 
 def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
-    typed, untyped = _national_legs()
+    for name, leg in _national_legs():
+        probe = _lateral_probe(leg)
 
-    for name, leg in (("typed_values", typed), ("untyped_ranked", untyped)):
-        assert "ON ts.run_key = lr.run_key" in leg, name
-        assert "AND ts.river_network_version_key = lr.river_network_version_key" in leg, name
-        assert "ON seg.river_segment_key = ts.river_segment_key" in leg, name
-        assert "ts.variable_e = (" in leg, name
-        assert ENUM_VARIABLE_RESOLUTION in leg, name
-        assert "ts.valid_time = :valid_time" in leg, name
-        # Identity arrives from latest_runs, so `variable` is the only
-        # sanctioned aid this surface can bind as a constant; run/network must
-        # join on keys only.
-        _assert_text_fact_columns(leg, "ts", {"variable"}, name)
+        assert "ts.run_key = lr.run_key" in probe, name
+        assert "AND ts.river_network_version_key = lr.river_network_version_key" in probe, name
+        assert "AND ts.river_segment_key = seg.river_segment_key" in probe, name
+        assert "ts.variable_e = (" in probe, name
+        assert ENUM_VARIABLE_RESOLUTION in probe, name
+        assert "ts.valid_time = :valid_time" in probe, name
+        # Identity still arrives from latest_runs rather than as a bound
+        # constant, but inside the probe the correlated `lr.` / `seg.` values
+        # are per-loop constants, so all four segmentby/orderby text columns —
+        # `river_segment_id` included — are sanctioned pushdown aids here.
+        _assert_text_fact_columns(
+            leg,
+            "ts",
+            NATIONAL_PROBE_TEXT_AIDS,
+            name,
+            allowed=LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
+        )
         assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(leg), name
 
     # latest_runs hands both legs the keys AND the text it will echo back out,
@@ -283,17 +406,40 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
     legs' complete set of fact-table column references, rather than a list of
     literals, is what makes a one-sided edit red.
     """
-    typed, untyped = _national_legs()
+    (_typed_name, typed), (_untyped_name, untyped) = _national_legs()
 
     typed_columns = set(re.findall(r"\bts\.[a-z_]+", typed))
     untyped_columns = set(re.findall(r"\bts\.[a-z_]+", untyped))
     assert typed_columns == untyped_columns, (typed_columns ^ untyped_columns)
-    assert "ts.run_key" in typed_columns
-    assert not any(column.endswith(("_id",)) for column in typed_columns), typed_columns
-    # The one sanctioned pushdown aid is on BOTH legs or neither: carrying it
-    # on one side only is the same visibility split by another route, since a
-    # text `variable` predicate can narrow away rows the other leg keeps.
-    assert "ts.variable" in typed_columns
+    # Exact set, not "no `_id` column": the lateral probe legitimately binds
+    # text identity as a per-loop constant, so a blanket ban on text columns
+    # would be wrong here, while an exact set still catches a leg growing a
+    # predicate the other one lacks.
+    assert typed_columns == {
+        "ts.run_key",
+        "ts.river_network_version_key",
+        "ts.river_segment_key",
+        "ts.basin_version_key",
+        "ts.run_id",
+        "ts.river_network_version_id",
+        "ts.river_segment_id",
+        "ts.variable",
+        "ts.variable_e",
+        "ts.valid_time",
+        "ts.value",
+        "ts.unit_e",
+        "ts.quality_flag_e",
+    }, typed_columns
+    # The keys are the row-selection authority on both legs; the text aids are
+    # on BOTH legs or neither, since a text predicate carried on one side only
+    # can narrow away rows the other side keeps — the same visibility split by
+    # another route.
+    assert {"ts.run_key", "ts.river_network_version_key", "ts.river_segment_key"} <= typed_columns
+    assert {f"ts.{column}" for column in NATIONAL_PROBE_TEXT_AIDS} <= typed_columns
+
+    # The two probes are literally the same text, so no predicate can drift
+    # between them at all.
+    assert _lateral_probe(typed) == _lateral_probe(untyped)
 
     # Non-vacuity: the legs really are the two zoom branches, not a copy-paste
     # of one clause into a variable.
@@ -320,9 +466,11 @@ def test_national_output_and_ordering_stay_on_restored_text_expressions() -> Non
 
     national_cte = _source_cte("hydro-national")
     # The ordered columns are produced from the authority tables' text, not
-    # from the keys the fact predicates use.
-    assert "lr.river_network_version_id," in national_cte
+    # from the keys the fact predicates use. Both now come off `tile_segments`,
+    # which the lateral probe drives from; `lr` still supplies `run_id`.
+    assert "seg.river_network_version_id," in national_cte
     assert "SELECT seg.river_segment_id," in national_cte
+    assert "lr.run_id," in national_cte
     assert "sv.river_network_version_id," in national_cte
     assert "sv.river_segment_id AS segment_id," in national_cte
     assert "bv.basin_version_id," in national_cte

@@ -72,6 +72,14 @@
       `variable` 文本谓词，逐处代码注释标注 "#1342 删列时一并移除"；
       unit 形态断言与负向钉子按混合口径重写（受批三列成对出现；
       `basin_version_id`/`river_segment_id` 文本 fact 谓词禁入）
+- [x] 1F.7 (P1, round-3) national 两腿改 LATERAL 逐段探针（design D1
+      末条）：`tile_segments` 驱动 + `JOIN latest_runs ON
+      lr.river_network_version_id = seg.river_network_version_id` +
+      `CROSS JOIN LATERAL (... LIMIT 1) v`，修 z4 34.7s（切换前
+      0.77s）集合 join 回归；受批集合在探针体内扩到四列
+      （+`river_segment_id`，位置性例外）；unit 钉死 LATERAL/`LIMIT 1`/
+      network 等值边/体外无 `ts.` 引用/两腿探针文本全等，并钉 per-basin
+      `hydro` 图层不受影响
 - [x] 1F.3 (P2) coverage legacy run 刷新行为显式钉死：integration 用
       `_ALL_LEGACY_RUN_ID` 独立断言 segment_count 归零 + valid_time
       边界丢失；ops 禁令（legacy run 不得无 `--skip-fresh` 重扫）落
@@ -105,10 +113,19 @@
       压缩 chunk 命中绑定；压缩段判据分形态**（round-2 裁决修正）：
       绑定字面量四形态（tile 点查、valid_times named、coverage run
       域、存在性探针）须显示文本 segmentby 下推（compression 内部
-      关系 Index/Filter Cond）；national 三形态身份经 join 到达、无
-      segmentby 字面量可下推，判据改为**无全解压 Seq Scan**——batch
-      消除依赖 orderby 第 2 列 valid_time 等值绑定的 min/max 元数据
-      （q_down 单值、variable 元数据不消 batch，如实记录）（AC-1）
+      关系 Index/Filter Cond）；national identity-stats 探针身份经
+      join 到达、无 segmentby 字面量可下推，判据改为**无全解压 Seq
+      Scan**——batch 消除依赖 orderby 第 2 列 valid_time 等值绑定的
+      min/max 元数据（q_down 单值、variable 元数据不消 batch，如实
+      记录）；**national typed/untyped 两腿（round-3 改 LATERAL）判据
+      升级**：逐段 Nested Loop + 每 loop 一次 pkey/segmentby 探针
+      （不得回落集合 join / 整片 Materialize；探针均摊 ≤1ms/loop）、
+      压缩腿走 segmentby 索引；时延闸**只量两腿自身**（round-3 F2
+      裁决修正）：z4 未压缩 pin 整块 tile ≤5s（回归基线 34.7s 的判据
+      边界，实测 1.07s）；压缩 pin 整块 tile 时延须先扣除同一语句内
+      `source_identity_stats` CTE 的 pre-existing 残余（~26-33s，
+      #1596 追踪，切换前同在），扣除后两腿贡献 ≤5s——整块进秒级的
+      闸属于 #1596 验收，不属本 change（AC-1）
 - [ ] 2.6 node-27：`/` 与 `/ops` 浏览器 e2e + MVT 渲染正常（AC-4）；
       deny-write 校验通过（AC-5）；定向真实 DB pytest（integration 子集）
 - [x] 2.7 issue-scribe 立"边界外 river_timeseries 文本读者改造"跟踪单，
