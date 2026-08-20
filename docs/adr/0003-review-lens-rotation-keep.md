@@ -127,3 +127,30 @@ materially changed attribution ratio.
   附：本 PR 自身的证据分布与"轮换未被检验"一致——round-2 的 6 条 later-round catches
   全部出自与 round-1 相同的三个透镜（其中 discriminative-power 镜 round-2 为 CLEAN），
   唯一的 P1 级发现出自 round-1，Phase 7 独立终审零阻塞。
+
+- 2026-08-20（PR #1624 / issues #1547+#1549+#1544+#1546+#1545 合并后 audit 再次
+  DECIDABLE）：样本扩至 **83** 个多轮 merged PR，later-round catches
+  **core=40 vs rotated=200**。相对上一条（PR #1602 之后的 81 PR / core=34 /
+  rotated=197）本 PR 边际为 **core +0 / rotated +3**。
+
+  **维持 keep**，但与上一条同理，本数据点**同样不检验轮换**——而且是**反方向**的
+  同一个度量伪影：本 PR 的 3 条 later-round catches 全部出自 **Phase 7 独立终审**
+  （`round_lenses` 记作 `final-review`），那不是「轮换进来的交叉评审透镜」，而是
+  工作流里本来就独立于 round-1 透镜集的终审环节。`rotation_attribution()` 只按
+  「round-K 透镜 ∉ round-1 透镜集」判定，于是把它整段计进 `rotated`。
+
+  上一条登记的工具缺口因此得到**第二种独立的表现形式**，且方向相反：
+  - PR #1602：**没轮换**（round-2 复用 round-1 同一组透镜）被计进 `core`，把 core 推高；
+  - PR #1624：**Phase 7 终审**（结构上不属于轮换）被计进 `rotated`，把 rotated 推高。
+
+  两者叠加意味着这条比值**同时受两个与轮换无关的编排选择污染**，比上一条估计的更不
+  可信。修复方向随之扩一条：除「`round_lenses` 相同时不计入分母 / 单列
+  `rotation_applied: false`」外，还需**把 Phase 7 终审轮从轮换归因中排除**（或单列
+  `final_review` 桶），否则任何长期做 Phase 7 的项目都会自动积累 `rotated`。
+  在修好之前，**基于该比值的 keep/cut 翻转仍须 maintainer 人的裁定**，不走
+  autonomous default。
+
+  另附一条本 PR 的证据分布：round-1 双透镜共 6 条 later-round-可比的 catch，两侧
+  各有产出（判别力镜 3 条、正确性镜 3 条），无单镜独大；真正买到修复的两条
+  P2 都出自判别力镜（恒等 mutant 存活、`except` 吞掉被测步骤），与 keep 的原始
+  理由方向一致。
