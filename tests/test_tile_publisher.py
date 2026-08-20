@@ -69,16 +69,27 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
+        # #1442: the discovery aggregate restores river_network_version_id from
+        # the authority table, so `core` must be reachable on this connection too.
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS core")
 
 
 def _create_hydro_tables(connection: Any) -> None:
     # F8: river_timeseries carries the real composite primary key and hydro_run
     # run_manifest_uri is NOT NULL to match the production schema fidelity.
+    #
+    # #1442: both tables also carry migration 000050's surrogate keys and enum
+    # twins, and the network authority table exists, because the discovery
+    # aggregate now filters/groups on the keys and restores the network text by
+    # joining the authority. sqlite has no enum type, so `*_e` are TEXT columns
+    # holding the same labels 000050's enums do (the labels are byte-equal to the
+    # text values by construction, migration 000050:126-152).
     connection.execute(
         text(
             """
             CREATE TABLE hydro.hydro_run (
                 run_id TEXT PRIMARY KEY,
+                run_key INTEGER,
                 run_type TEXT NOT NULL,
                 scenario_id TEXT,
                 model_id TEXT,
@@ -108,7 +119,24 @@ def _create_hydro_tables(connection: Any) -> None:
                 value REAL NOT NULL,
                 unit TEXT,
                 quality_flag TEXT DEFAULT 'ok',
+                run_key INTEGER,
+                basin_version_key INTEGER,
+                river_network_version_key INTEGER,
+                river_segment_key INTEGER,
+                variable_e TEXT,
+                unit_e TEXT,
+                quality_flag_e TEXT,
                 PRIMARY KEY (run_id, river_network_version_id, river_segment_id, variable, valid_time)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE core.river_network_version (
+                river_network_version_id TEXT PRIMARY KEY,
+                river_network_version_key INTEGER UNIQUE
             )
             """
         )
@@ -216,6 +244,23 @@ def _publisher(
     )
 
 
+_SURROGATE_KEYS: dict[str, int] = {}
+
+
+def _surrogate_key(kind: str, value: str | None) -> int | None:
+    """A stable integer surrogate for one text identity in the sqlite harness.
+
+    Production allocates these with ``GENERATED ALWAYS AS IDENTITY`` (000050);
+    the harness only needs the property the queries rely on — same text, same
+    key, distinct texts, distinct keys — so a process-wide registry is enough
+    and keeps the fixtures readable. ``None`` in, ``None`` out: a nullable text
+    identity must not silently acquire a key.
+    """
+    if value is None:
+        return None
+    return _SURROGATE_KEYS.setdefault(f"{kind}:{value}", len(_SURROGATE_KEYS) + 1)
+
+
 def _insert_run(
     session: Session,
     *,
@@ -242,11 +287,11 @@ def _insert_run(
             text(
                 """
                 INSERT INTO hydro.hydro_run (
-                    run_id, run_type, scenario_id, model_id, basin_version_id,
+                    run_id, run_key, run_type, scenario_id, model_id, basin_version_id,
                     forcing_version_id, source_id, cycle_time, start_time, end_time,
                     status, run_manifest_uri, output_uri
                 ) VALUES (
-                    :run_id, :run_type, 'scn', :model_id, :basin_version_id,
+                    :run_id, :run_key, :run_type, 'scn', :model_id, :basin_version_id,
                     :forcing_version_id, :source_id, :cycle_time, :cycle_time, :cycle_time,
                     :status, :run_manifest_uri, :output_uri
                 )
@@ -254,6 +299,7 @@ def _insert_run(
             ),
             {
                 "run_id": run_id,
+                "run_key": _surrogate_key("run", run_id),
                 "run_type": run_type,
                 "model_id": model_id,
                 "basin_version_id": basin_version_id,
@@ -265,16 +311,35 @@ def _insert_run(
                 "output_uri": output_uri,
             },
         )
+    if river_network_version_id is not None:
+        session.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO core.river_network_version (
+                    river_network_version_id, river_network_version_key
+                ) VALUES (:river_network_version_id, :river_network_version_key)
+                """
+            ),
+            {
+                "river_network_version_id": river_network_version_id,
+                "river_network_version_key": _surrogate_key("network", river_network_version_id),
+            },
+        )
     for index in range(segments):
+        segment_id = f"seg-{index}"
         session.execute(
             text(
                 """
                 INSERT INTO hydro.river_timeseries (
                     run_id, basin_version_id, river_network_version_id,
-                    river_segment_id, valid_time, variable, value, unit, quality_flag
+                    river_segment_id, valid_time, variable, value, unit, quality_flag,
+                    run_key, basin_version_key, river_network_version_key, river_segment_key,
+                    variable_e, unit_e, quality_flag_e
                 ) VALUES (
                     :run_id, :basin_version_id, :river_network_version_id,
-                    :segment, :valid_time, 'q_down', :value, 'm3/s', 'ok'
+                    :segment, :valid_time, 'q_down', :value, 'm3/s', 'ok',
+                    :run_key, :basin_version_key, :river_network_version_key, :river_segment_key,
+                    'q_down', 'm3/s', 'ok'
                 )
                 """
             ),
@@ -282,9 +347,15 @@ def _insert_run(
                 "run_id": run_id,
                 "basin_version_id": basin_version_id,
                 "river_network_version_id": river_network_version_id,
-                "segment": f"seg-{index}",
+                "segment": segment_id,
                 "valid_time": CYCLE_TIME,
                 "value": float(index + 1),
+                "run_key": _surrogate_key("run", run_id),
+                "basin_version_key": _surrogate_key("basin", basin_version_id),
+                "river_network_version_key": _surrogate_key("network", river_network_version_id),
+                # The segment key is unique per (network, segment) pair, exactly
+                # like core.river_segment's own primary key.
+                "river_segment_key": _surrogate_key("segment", f"{river_network_version_id}::{segment_id}"),
             },
         )
     session.commit()
@@ -2028,7 +2099,9 @@ def test_publish_qdown_all_runs_incomplete_raises(tmp_path: Any) -> None:
 # finally block to avoid polluting other fixtures/tests.
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_cycle_public_entry_happy_path(tmp_path: Any) -> None:
-    schemas = ("hydro", "ops", "map")
+    # `core` joined the list with #1442: the discovery aggregate restores the
+    # network text from core.river_network_version.
+    schemas = ("hydro", "ops", "map", "core")
     schema_files = {name: tmp_path / f"{name}.db" for name in schemas}
     db_url = f"sqlite:///{tmp_path / 'main.db'}"
 

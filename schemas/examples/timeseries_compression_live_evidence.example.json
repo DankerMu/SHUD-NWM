@@ -547,6 +547,8 @@
             "basin-v1",
             "model_shud_riv_000001",
             "network-v1",
+            "network-v1",
+            "network-v1",
             "2026-05-28T00:00:00Z",
             "2026-05-28T00:00:00Z",
             "2026-06-04T00:00:00Z",
@@ -561,6 +563,8 @@
           "parameter_names": [
             "basin_version_id",
             "river_segment_id",
+            "river_network_version_id",
+            "river_network_version_id",
             "river_network_version_id",
             "issue_time",
             "start_time",

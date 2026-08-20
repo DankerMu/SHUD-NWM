@@ -639,6 +639,30 @@ def _resolved_run_identity(run_identity: RunIdentityKeys | None) -> tuple[int, i
     )
 
 
+def _replacement_key_bindings(
+    replacement_key: tuple[str, str, str],
+    run_key: int,
+    river_network_version_key: int,
+) -> tuple[int, int, str]:
+    """Surrogate-key bindings for one replacement group's three statements (#1442).
+
+    The replacement groups are still keyed by the row's text
+    (run_id, river_network_version_id, variable) because that is what the rows
+    carry per row; but the run and network keys are BATCH scalars — one
+    ``HydroRunContext`` per parse, already validated non-NULL by
+    ``_resolved_run_identity`` — so the group's key form is those two scalars
+    plus the group's own variable. That is exactly the identity the INSERT below
+    writes for every row of the batch, so the DELETE window and the rows it
+    makes room for cannot describe different runs.
+
+    ``variable`` binds as text against the ``variable_e`` enum column: psycopg2
+    adapts it to an unknown-typed literal that PostgreSQL coerces to
+    ``hydro.river_variable``, and an out-of-vocabulary value fails the
+    transaction closed rather than silently deleting nothing.
+    """
+    return (run_key, river_network_version_key, replacement_key[2])
+
+
 def _resolved_segment_keys(
     rows: tuple[RiverTimeseriesRow, ...],
     segment_keys: Mapping[str, int | None] | None,
@@ -838,12 +862,12 @@ class PsycopgOutputParserRepository:
                 cursor.execute(
                     """
                     SELECT 1 FROM hydro.river_timeseries
-                    WHERE run_id = %s
-                      AND river_network_version_id = %s
-                      AND variable = %s
+                    WHERE run_key = %s
+                      AND river_network_version_key = %s
+                      AND variable_e = %s
                     LIMIT 1
                     """,
-                    replacement_key,
+                    _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                 )
                 if cursor.fetchone() is None:
                     existing_window = (None, None)
@@ -853,15 +877,15 @@ class PsycopgOutputParserRepository:
                         WITH existing AS MATERIALIZED (
                             SELECT valid_time
                             FROM hydro.river_timeseries
-                            WHERE run_id = %s
-                              AND river_network_version_id = %s
-                              AND variable = %s
+                            WHERE run_key = %s
+                              AND river_network_version_key = %s
+                              AND variable_e = %s
                         )
                         SELECT MIN(valid_time) AS valid_time_min,
                                MAX(valid_time) AS valid_time_max
                         FROM existing
                         """,
-                        replacement_key,
+                        _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                     )
                     existing_window = cursor.fetchone()
             incoming_min, incoming_max = incoming_windows[replacement_key]
@@ -881,20 +905,22 @@ class PsycopgOutputParserRepository:
                 valid_time_min=valid_time_min,
                 valid_time_max=valid_time_max,
             )
-        for run_id, river_network_version_id, variable in replacement_keys:
-            replacement_min, replacement_max = replacement_windows[
-                (run_id, river_network_version_id, variable)
-            ]
+        for replacement_key in replacement_keys:
+            replacement_min, replacement_max = replacement_windows[replacement_key]
             self._fetch_all(
                 """
                 DELETE FROM hydro.river_timeseries
-                WHERE run_id = %s
-                  AND river_network_version_id = %s
-                  AND variable = %s
+                WHERE run_key = %s
+                  AND river_network_version_key = %s
+                  AND variable_e = %s
                   AND valid_time >= %s
                   AND valid_time <= %s
                 """,
-                (run_id, river_network_version_id, variable, replacement_min, replacement_max),
+                (
+                    *_replacement_key_bindings(replacement_key, run_key, river_network_version_key),
+                    replacement_min,
+                    replacement_max,
+                ),
             )
         value_rows = [
             (

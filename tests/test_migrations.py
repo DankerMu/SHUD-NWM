@@ -616,16 +616,21 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     ):
         assert index_name in index_evidence_source
 
-    # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx, so the river leg
-    # of the evidence payload must name the retained 000021 index whose leading columns
-    # are an exact prefix match for the river window query (4 equality binds + a
-    # valid_time range) — not the pkey, whose usable prefix stops at two columns.
-    # Matched on the payload key/value pairs rather than a bare substring, so the drop
-    # rationale may keep naming the dropped index in a comment.
+    # #1442 switched the latest-product river leg onto the surrogate keys and the
+    # enum, so the evidence payload must name migration 000051's key index — the
+    # leg's four equality binds plus the valid_time range are exactly its columns,
+    # in order. Both superseded text indexes must be absent: the 000021 discovery
+    # index (its leading run_id is no longer bound at all) and the 000049-dropped
+    # mvt_identity_lookup. The pkey is still not the successor either.
+    # Matched on the payload key/value pairs rather than a bare substring, so the
+    # rationale comments may keep naming the superseded indexes in prose.
+    assert '"index": "river_ts_selected_identity_key_valid_time_idx"' in index_evidence_source
+    assert '"status": "covered_by_selected_identity_key_valid_time_index"' in index_evidence_source
     assert (
-        '"index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx"' in index_evidence_source
+        '"index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx"'
+        not in index_evidence_source
     )
-    assert '"status": "covered_by_selected_identity_valid_time_discovery_index"' in index_evidence_source
+    assert '"status": "covered_by_selected_identity_valid_time_discovery_index"' not in index_evidence_source
     assert '"index": "river_timeseries_mvt_identity_lookup_idx"' not in index_evidence_source
     assert '"status": "covered_by_mvt_identity_lookup_index"' not in index_evidence_source
     assert '"index": "river_timeseries_pkey"' not in index_evidence_source
@@ -675,7 +680,9 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "river_identity_coverage AS" in query_source
     assert "river_time_coverage AS" in query_source
     assert "river_common_window AS" in query_source
-    assert "river_segment_id" in query_source
+    # Since #1442 the river chain counts distinct SEGMENT KEYS, not segment text.
+    assert "COUNT(DISTINCT river_segment_key)" in query_source
+    assert "rt.river_segment_id" not in query_source
     assert "cr.expected_segment_count" in query_source
     assert "segment_count = expected_segment_count" in query_source
     assert "MIN(valid_time) AS river_valid_time_start" in query_source

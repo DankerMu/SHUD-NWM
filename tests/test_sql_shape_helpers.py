@@ -229,6 +229,49 @@ def strip_scalar_subqueries(sql: str) -> str:
     return "".join(kept)
 
 
+def strip_all_subqueries(sql: str) -> str:
+    """Return ``sql`` with EVERY parenthesized sub-``SELECT`` removed.
+
+    The blunt companion to :func:`strip_scalar_subqueries`, added for #1442's
+    bare-fragment face. Those call sites resolve identity with an ``IN``
+    sub-select — ``run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id
+    = %s)`` — which is deliberately NOT comparison position, so the precise
+    stripper keeps it and the authority table's own ``WHERE run_id = %s`` reads
+    as a regression.
+
+    Only safe where the fragment has no CTE and no derived table, because this
+    deletes those too. That is exactly the shape of a WHERE fragment or a single
+    flat statement; anything with a ``WITH`` must keep using
+    :func:`outer_predicates`, or its body vanishes and its pins go vacuous.
+    """
+    kept: list[str] = []
+    index = 0
+    length = len(sql)
+    while index < length:
+        character = sql[index]
+        if character in "'\"":
+            end = _scan_quoted(sql, index, character)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("--", index):
+            end = _scan_line_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("/*", index):
+            end = _scan_block_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if character == "(" and _SUBQUERY_START.match(sql, index):
+            index = _skip_balanced(sql, index)
+            continue
+        kept.append(character)
+        index += 1
+    return "".join(kept)
+
+
 def strip_comments(sql: str) -> str:
     """Return ``sql`` with both comment styles replaced by a single space.
 
@@ -330,6 +373,36 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
         for column in TEXT_IDENTITY_COLUMNS
         if re.search(rf"\b{re.escape(alias)}\.{column}\b", outer) is not None
     }
+
+
+def assert_text_fact_columns(
+    sql: str,
+    alias: str,
+    expected: set[str],
+    label: str,
+    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+) -> None:
+    """The surface's text fact-column references are EXACTLY ``expected``.
+
+    Equality rather than "none of the forbidden ones": it is red both when a
+    forbidden column (``basin_version_id`` / ``river_segment_id`` / ``unit`` /
+    ``quality_flag``) reappears and when a sanctioned pushdown aid is silently
+    dropped, which would reintroduce the compressed-chunk collapse this change
+    was amended to avoid.
+
+    ``allowed`` is the ceiling the expectation itself is checked against, so a
+    future edit cannot widen a surface just by widening its expectation. It is
+    the constant-bound sanctioned set everywhere except the two national legs,
+    whose correlated lateral probe may additionally bind ``river_segment_id``
+    (see :data:`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS`).
+
+    Lives here rather than in one consumer (it was private to
+    ``tests/test_river_ts_read_path_surrogate_keys.py`` until #1442) because the
+    out-of-boundary cleanup oracle asserts the very same invariant on a second
+    set of surfaces: two copies of a ceiling check are two ceilings.
+    """
+    assert expected <= set(allowed), f"{label}: expectation exceeds the allowed pushdown set"
+    assert text_fact_columns(sql, alias) == expected, label
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +628,50 @@ def test_text_fact_columns_ignores_columns_inside_key_resolution_subqueries() ->
     )
 
     assert text_fact_columns(sql, "ts") == set()
+
+
+def test_strip_all_subqueries_removes_an_in_position_key_resolution() -> None:
+    """The precise stripper keeps it (not comparison position); this one must not."""
+    fragment = "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
+
+    assert "run_id = ANY(%s)" in strip_scalar_subqueries(fragment)
+    assert strip_all_subqueries(fragment) == "run_key IN "
+
+
+def test_strip_all_subqueries_leaves_a_bare_text_predicate_visible() -> None:
+    """Non-vacuity: the regression it exists to catch must survive stripping."""
+    assert strip_all_subqueries("run_id = ANY(%s)") == "run_id = ANY(%s)"
+
+
+def test_strip_all_subqueries_also_eats_cte_bodies_which_is_why_it_is_fragment_only() -> None:
+    """Documented hazard, pinned so the docstring cannot drift from behaviour."""
+    sql = "WITH existing AS MATERIALIZED (SELECT valid_time FROM t WHERE run_id = %s) SELECT 1"
+
+    assert "run_id = %s" not in strip_all_subqueries(sql)
+    assert "run_id = %s" in outer_predicates(sql)
+
+
+def test_assert_text_fact_columns_rejects_an_expectation_above_the_ceiling() -> None:
+    """Widening a surface by widening its own expectation must not be possible."""
+    sql = "FROM hydro.river_timeseries ts WHERE ts.river_segment_id = :segment_id"
+
+    try:
+        assert_text_fact_columns(sql, "ts", {"river_segment_id"}, "widened surface")
+    except AssertionError as error:
+        assert "exceeds the allowed pushdown set" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("assert_text_fact_columns accepted a forbidden expectation")
+
+
+def test_assert_text_fact_columns_is_red_when_a_sanctioned_aid_disappears() -> None:
+    sql = "FROM hydro.river_timeseries ts WHERE ts.run_key = 1"
+
+    try:
+        assert_text_fact_columns(sql, "ts", {"run_id"}, "aid dropped")
+    except AssertionError as error:
+        assert "aid dropped" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("assert_text_fact_columns accepted a dropped pushdown aid")
 
 
 def test_sanctioned_and_forbidden_column_sets_are_disjoint_and_complete() -> None:

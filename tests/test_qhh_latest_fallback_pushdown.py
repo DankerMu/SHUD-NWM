@@ -165,9 +165,19 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     assert "LOWER(fst.source_id) = %(scan_source_id_lower)s" in station_cte
     assert "fst.valid_time >= %(scan_display_start)s" in station_cte
     assert "fst.valid_time <= %(scan_display_end)s" in station_cte
-    assert "(%(scan_run_id)s IS NULL OR rt.run_id = %(scan_run_id)s)" in river_cte
-    assert "rt.basin_version_id = %(scan_basin_version_id)s" in river_cte
+    # The river leg filters on the surrogate keys since #1442. Each scan_* guard
+    # keeps its text binding — resolved to a key by an authority sub-select — so
+    # a NULL binding still folds the guard away and an unknown text value still
+    # yields the empty scan. run_id / river_network_version_id additionally keep
+    # their text conjunct as the transitional compressed-chunk pushdown aid;
+    # basin_version_id does not (it is not a segmentby column).
+    assert "(%(scan_run_id)s IS NULL" in river_cte
+    assert "rt.run_id = %(scan_run_id)s" in river_cte
+    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in river_cte
+    assert "rt.basin_version_id = %(scan_basin_version_id)s" not in river_cte
+    assert "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version" in river_cte
     assert "rt.river_network_version_id = %(scan_river_network_version_id)s" in river_cte
+    assert "rt.river_network_version_key = (SELECT river_network_version_key" in river_cte
     assert "rt.valid_time >= %(scan_display_start)s" in river_cte
     assert "rt.valid_time <= %(scan_display_end)s" in river_cte
 

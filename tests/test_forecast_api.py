@@ -1766,28 +1766,30 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
+        "river_ts_selected_identity_key_valid_time_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
     }
-    # 000049 (#1338) dropped river_timeseries_mvt_identity_lookup_idx; the river leg of
-    # the evidence payload must report the retained 000021 discovery index — the river
-    # window query's 4 equality binds plus valid_time range are an exact prefix of it,
-    # while the pkey (no basin_version_id, unbound river_segment_id at position 3) only
-    # yields a 2-column prefix. Confirmed by the #1338 post-drop EXPLAIN receipt (PR #1377,
-    # 2026-08-14): the Q6 shape still plans on this retained index after the drop.
+    # #1442 switched the river leg of the latest-product fallback onto the surrogate
+    # keys and the enum, so the evidence payload must name migration 000051's key
+    # index — its columns are exactly the leg's four equality binds plus the
+    # valid_time range, in order. The 000021 text discovery index this pin used to
+    # name is no longer applicable at all: its leading column run_id is not bound by
+    # the switched query. The pkey is still not the successor (no basin_version_id,
+    # unbound river_segment_id at position 3). Measured provenance for the repin is
+    # the E4(ii) node-27 EXPLAIN receipt on the #1442 PR.
     assert [
         item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"
     ] == [
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
-            "status": "covered_by_selected_identity_valid_time_discovery_index",
+            "index": "river_ts_selected_identity_key_valid_time_idx",
+            "status": "covered_by_selected_identity_key_valid_time_index",
             "columns": [
-                "run_id",
-                "basin_version_id",
-                "river_network_version_id",
-                "variable",
+                "run_key",
+                "basin_version_key",
+                "river_network_version_key",
+                "variable_e",
                 "valid_time DESC",
             ],
         }
@@ -2781,13 +2783,17 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "AND svc.model_id = cr.model_id" in final_joins
     assert "AND svc.display_start_time = cr.display_start_time" in final_joins
     assert "AND svc.display_end_time = cr.display_end_time" in final_joins
-    assert "cr.run_id = rt.run_id" in statement
+    # #1442: the fact-table join is key-only — a `cr.run_id = rt.run_id` text
+    # equality would be the forbidden text fact join, not a pushdown aid.
+    assert "cr.run_key = rt.run_key" in statement
+    assert "cr.run_id = rt.run_id" not in statement
     assert "rt.valid_time >= cr.display_start_time" in hydro_cte
     assert "rt.valid_time <= cr.display_end_time" in hydro_cte
     assert "river_identity_coverage AS" in hydro_cte
     assert "river_time_coverage AS" in hydro_cte
     assert "river_common_window AS" in hydro_cte
-    assert "river_segment_id" in hydro_cte
+    assert "COUNT(DISTINCT river_segment_key)" in hydro_cte
+    assert "rt.river_segment_id" not in hydro_cte
     assert "cr.expected_segment_count" in hydro_cte
     assert "segment_count = expected_segment_count" in hydro_cte
     assert "MIN(valid_time) AS river_valid_time_start" in hydro_cte

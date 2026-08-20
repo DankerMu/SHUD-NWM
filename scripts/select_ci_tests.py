@@ -198,12 +198,18 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
 # tests/test_sql_shape_helpers.py is both a test module and the SQL-shape
 # ORACLE the #1341 read-path negative pins are written against
 # (`strip_scalar_subqueries`). Its own self-tests run because it self-selects,
-# but a helper-only diff would otherwise leave the three consumer files
-# unselected — and a silently over-eager stripper makes those pins vacuous
-# without failing anything here. The rule pulls the consumers in with it.
+# but a helper-only diff would otherwise leave the consumer files unselected —
+# and a silently over-eager stripper makes those pins vacuous without failing
+# anything here. The rule pulls the consumers in with it.
+#
+# #1442 added a fourth consumer, tests/test_river_ts_text_identity_cleanup.py,
+# and moved two more pieces of shared vocabulary into the helper
+# (`assert_text_fact_columns`, `strip_all_subqueries`), so a helper-only diff can
+# now blunt the out-of-boundary cleanup oracle too.
 SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
     "tests/test_sql_shape_helpers.py",
     "tests/test_river_ts_read_path_surrogate_keys.py",
+    "tests/test_river_ts_text_identity_cleanup.py",
     "tests/test_display_coverage_refresh.py",
     "tests/test_migrations.py",
 )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import textwrap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,91 @@ QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
+
+
+# ---------------------------------------------------------------------------
+# The (basin, segment, network, variable) identity predicate shared by the eight
+# segment-scoped ``hydro.river_timeseries`` reads of ``forecast_series`` (#1442).
+#
+# All eight bind the same three text identities as constants and filter the same
+# way, so they render from ONE constant: eight hand-copied five-placeholder
+# blocks is exactly the drift a surrogate-key migration cannot afford, and the
+# positional parameter tuple is built by ``_segment_identity_params`` so text and
+# bindings can only move together.
+#
+# Shape (issue #1341 idiom, migration 000050/000051):
+#
+# * the caller's text identity is resolved to keys by authority-table scalar
+#   sub-selects the planner hoists into InitPlans. An unknown identity makes a
+#   sub-select NULL, so the predicate matches nothing — the same empty result the
+#   text predicate produced, never an error.
+# * the segment resolution binds the NETWORK as well: ``core.river_segment``'s
+#   primary key is (river_segment_id, river_network_version_id), so a bare
+#   segment-id lookup can return more than one row and would raise 21000.
+# * ``river_network_version_id`` and ``variable`` additionally survive as
+#   transitional TEXT conjuncts: compression still segments compressed chunks by
+#   the text columns (000047), so a pure-key predicate cannot be pushed into
+#   them. Each is AND-ed with its key/enum counterpart, so it only ever narrows,
+#   and both are removed with the text columns in #1342. ``basin_version_id`` and
+#   ``river_segment_id`` get NO text conjunct: the delta forbids them outright.
+# * ``run_id`` gets none either — these queries never bind a run as a constant,
+#   they reach it through the ``hydro_run`` join, and a text fact join is
+#   forbidden (a join equality is not pushdown material anyway).
+# ---------------------------------------------------------------------------
+_SEGMENT_IDENTITY_PREDICATE_SQL = """\
+rt.basin_version_key = (
+      SELECT basin_version_key FROM core.basin_version
+      WHERE basin_version_id = %s
+  )
+  AND rt.river_segment_key = (
+      SELECT river_segment_key FROM core.river_segment
+      WHERE river_segment_id = %s
+        AND river_network_version_id = %s
+  )
+  -- transitional compressed-chunk pushdown aid, remove with #1342
+  AND rt.river_network_version_id = %s
+  AND rt.river_network_version_key = (
+      SELECT river_network_version_key FROM core.river_network_version
+      WHERE river_network_version_id = %s
+  )
+  -- transitional compressed-chunk pushdown aid, remove with #1342
+  AND rt.variable = 'q_down'
+  AND rt.variable_e = 'q_down'::hydro.river_variable"""
+
+
+def _segment_identity_predicates(indent: int) -> str:
+    """``_SEGMENT_IDENTITY_PREDICATE_SQL`` re-indented for its embedding query.
+
+    Rendered right after a literal ``WHERE ``, so the first line keeps the
+    caller's own indentation and every continuation line gets ``indent`` spaces.
+    """
+    return textwrap.indent(_SEGMENT_IDENTITY_PREDICATE_SQL, " " * indent).lstrip()
+
+
+# The two embedding depths in use: six blocks sit directly in a method body, the
+# selected-cycles forecast block one level deeper inside its own WITH.
+_SEGMENT_IDENTITY_PREDICATES = _segment_identity_predicates(14)
+_SEGMENT_IDENTITY_PREDICATES_NESTED = _segment_identity_predicates(18)
+
+
+def _segment_identity_params(
+    basin_version_id: str,
+    segment_id: str,
+    river_network_version_id: str,
+) -> tuple[str, ...]:
+    """Positional bindings for ``_SEGMENT_IDENTITY_PREDICATE_SQL``, in text order.
+
+    Five placeholders, three values: the network is bound three times (segment
+    resolution, transitional text aid, own resolution). Kept adjacent to the SQL
+    it feeds so a predicate edit that forgets a binding is a one-file change.
+    """
+    return (
+        basin_version_id,
+        segment_id,
+        river_network_version_id,
+        river_network_version_id,
+        river_network_version_id,
+    )
 
 
 class ForecastStoreError(RuntimeError):
@@ -126,6 +212,14 @@ _QHH_LATEST_CANDIDATE_RUNS_SQL = """
                     mi.basin_version_id AS model_basin_version_id,
                     bv.basin_id,
                     rnv.basin_version_id AS river_network_basin_version_id,
+                    -- Surrogate keys for the river fact-table join (#1442, same
+                    -- shape as packages/common/display_coverage.py's twin). This
+                    -- CTE already reads all three authority tables, so the keys
+                    -- cost no extra join; the river scan below joins on them
+                    -- instead of on the repeated text identity columns.
+                    h.run_key,
+                    bv.basin_version_key,
+                    rnv.river_network_version_key,
                     COALESCE(
                         CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
                             THEN (mi.resource_profile->>'output_segment_count')::integer END,
@@ -416,17 +510,17 @@ class PsycopgForecastStore:
             f"""
             SELECT h.cycle_time
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND h.cycle_time IS NOT NULL
               {scenario_filter.sql}
             ORDER BY h.cycle_time DESC
             LIMIT 1
             """,
-            (basin_version_id, segment_id, river_network_version_id, *scenario_filter.params),
+            (
+                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                *scenario_filter.params,
+            ),
         )
         return _ensure_utc(row["cycle_time"]) if row is not None else None
 
@@ -447,11 +541,8 @@ class PsycopgForecastStore:
                 h.scenario_id,
                 MAX(h.cycle_time) AS cycle_time
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND h.run_type = 'forecast'
               AND h.cycle_time IS NOT NULL
               {scenario_filter.sql}
@@ -460,9 +551,7 @@ class PsycopgForecastStore:
             ORDER BY h.scenario_id
             """,
             (
-                basin_version_id,
-                segment_id,
-                river_network_version_id,
+                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
                 *scenario_filter.params,
                 *identity_filter.params,
             ),
@@ -483,20 +572,17 @@ class PsycopgForecastStore:
     ) -> datetime | None:
         row = self._fetch_optional(
             cursor,
-            """
+            f"""
             SELECT h.end_time
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND h.scenario_id = 'analysis_true_field'
               AND h.end_time IS NOT NULL
             ORDER BY h.end_time DESC, h.created_at DESC
             LIMIT 1
             """,
-            (basin_version_id, segment_id, river_network_version_id),
+            _segment_identity_params(basin_version_id, segment_id, river_network_version_id),
         )
         return _ensure_utc(row["end_time"]) if row is not None else None
 
@@ -514,26 +600,27 @@ class PsycopgForecastStore:
             cursor,
             self._fetch_all(
                 cursor,
-                """
+                f"""
             SELECT DISTINCT ON (rt.valid_time)
                 h.scenario_id,
                 h.source_id,
                 h.forcing_version_id,
                 rt.valid_time,
                 rt.value,
-                rt.unit
+                rt.unit_e::text AS unit
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND h.scenario_id = 'analysis_true_field'
               AND rt.valid_time >= %s
               AND rt.valid_time < %s
             ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC
             """,
-                (basin_version_id, segment_id, river_network_version_id, start_time, end_time),
+                (
+                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                    start_time,
+                    end_time,
+                ),
             ),
         )
 
@@ -572,19 +659,18 @@ class PsycopgForecastStore:
                     h.cycle_time,
                     h.end_time AS run_end_time,
                     h.forcing_version_id,
-                    rt.river_network_version_id,
+                    rnv.river_network_version_id,
                     rt.valid_time,
                     rt.value,
-                    rt.unit
+                    rt.unit_e::text AS unit
                 FROM hydro.river_timeseries rt
-                JOIN hydro.hydro_run h ON h.run_id = rt.run_id
+                JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_key = rt.river_network_version_key
                 JOIN selected_cycles sc
                   ON sc.scenario_id = h.scenario_id
                  AND sc.cycle_time = h.cycle_time
-                WHERE rt.basin_version_id = %s
-                  AND rt.river_segment_id = %s
-                  AND rt.river_network_version_id = %s
-                  AND rt.variable = 'q_down'
+                WHERE {_SEGMENT_IDENTITY_PREDICATES_NESTED}
                   AND h.run_type = 'forecast'
                   AND rt.valid_time >= h.cycle_time
                   AND rt.valid_time <= h.cycle_time + INTERVAL '7 days'
@@ -594,9 +680,7 @@ class PsycopgForecastStore:
                 """,
                     (
                         *selected_cycle_params,
-                        basin_version_id,
-                        segment_id,
-                        river_network_version_id,
+                        *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
                         *scenario_filter.params,
                         *identity_filter.params,
                     ),
@@ -616,16 +700,15 @@ class PsycopgForecastStore:
                 h.cycle_time,
                 h.end_time AS run_end_time,
                 h.forcing_version_id,
-                rt.river_network_version_id,
+                rnv.river_network_version_id,
                 rt.valid_time,
                 rt.value,
-                rt.unit
+                rt.unit_e::text AS unit
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_key = rt.river_network_version_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND h.run_type = 'forecast'
               AND h.cycle_time = %s
               AND rt.valid_time >= %s
@@ -635,9 +718,7 @@ class PsycopgForecastStore:
             ORDER BY h.scenario_id, rt.valid_time
             """,
                 (
-                    basin_version_id,
-                    segment_id,
-                    river_network_version_id,
+                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
                     issue_time,
                     issue_time,
                     forecast_end,
@@ -658,17 +739,17 @@ class PsycopgForecastStore:
     ) -> datetime | None:
         row = self._fetch_optional(
             cursor,
-            """
+            f"""
             SELECT MAX(rt.valid_time) AS valid_time
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND LOWER(h.run_type) = ANY(%s)
             """,
-            (basin_version_id, segment_id, river_network_version_id, list(run_types)),
+            (
+                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                list(run_types),
+            ),
         )
         return _ensure_utc(row["valid_time"]) if row is not None and row.get("valid_time") is not None else None
 
@@ -687,7 +768,7 @@ class PsycopgForecastStore:
             cursor,
             self._fetch_all(
                 cursor,
-                """
+                f"""
             SELECT
                 h.scenario_id,
                 h.model_id,
@@ -695,22 +776,26 @@ class PsycopgForecastStore:
                 h.cycle_time,
                 h.end_time AS run_end_time,
                 h.forcing_version_id,
-                rt.river_network_version_id,
+                rnv.river_network_version_id,
                 rt.valid_time,
                 rt.value,
-                rt.unit
+                rt.unit_e::text AS unit
             FROM hydro.river_timeseries rt
-            JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            WHERE rt.basin_version_id = %s
-              AND rt.river_segment_id = %s
-              AND rt.river_network_version_id = %s
-              AND rt.variable = 'q_down'
+            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+            JOIN core.river_network_version rnv
+              ON rnv.river_network_version_key = rt.river_network_version_key
+            WHERE {_SEGMENT_IDENTITY_PREDICATES}
               AND LOWER(h.run_type) = ANY(%s)
               AND rt.valid_time >= %s
               AND rt.valid_time <= %s
             ORDER BY h.scenario_id, rt.valid_time
             """,
-                (basin_version_id, segment_id, river_network_version_id, list(run_types), start_time, end_time),
+                (
+                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                    list(run_types),
+                    start_time,
+                    end_time,
+                ),
             ),
         )
 
@@ -1713,28 +1798,64 @@ class PsycopgForecastStore:
                     identity_stats.basin_version_id,
                     identity_stats.station_source_id
             ),
+            -- River scan on the surrogate keys (#1442; identical in shape to the
+            -- already-migrated twin at packages/common/display_coverage.py:392+
+            -- and its pin
+            -- test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup).
+            -- The scan_* pushdown parameters keep their text semantics — they
+            -- are still the candidate's scalar text identity, resolved to keys
+            -- inside the query by a scalar subquery the planner runs once. A
+            -- NULL binding folds the guard away exactly as before; a text value
+            -- that resolves to nothing yields the empty scan the text predicate
+            -- yielded. The whole river chain groups by keys and the text
+            -- identity is reconstructed once, at the rollup, by joining the
+            -- authority tables, so the final SELECT below is untouched.
+            -- Do not spell a psycopg2 placeholder inside a comment in this
+            -- string: psycopg2 interpolates the entire statement, comments
+            -- included, and an unbound name there raises at execute time.
+            -- The rt.run_id / rt.river_network_version_id / rt.variable
+            -- conjuncts below are the transitional compressed-chunk pushdown
+            -- aids: compression still segments compressed chunks by the text
+            -- columns, so a pure-key predicate cannot be pushed into them. Each
+            -- sits in the same conjunction as its key counterpart, so it only
+            -- narrows, and all of them are removed with the text columns in
+            -- #1342. They are CONSTANT-valued predicates on purpose; the join to
+            -- candidate_runs is key-only, because a text join equality is not
+            -- pushdown material and a text fact join is forbidden.
             river_sample_rows AS (
                 SELECT
-                    rt.run_id,
-                    rt.basin_version_id,
-                    rt.river_network_version_id,
-                    rt.river_segment_id,
+                    rt.run_key,
+                    rt.basin_version_key,
+                    rt.river_network_version_key,
+                    rt.river_segment_key,
                     cr.expected_segment_count,
                     rt.valid_time,
                     rt.lead_time_hours
                 FROM hydro.river_timeseries rt
                 JOIN candidate_runs cr
-                  ON cr.run_id = rt.run_id
-                 AND cr.basin_version_id = rt.basin_version_id
-                 AND cr.river_network_version_id = rt.river_network_version_id
+                  ON cr.run_key = rt.run_key
+                 AND cr.basin_version_key = rt.basin_version_key
+                 AND cr.river_network_version_key = rt.river_network_version_key
+                -- transitional compressed-chunk pushdown aid, remove with #1342
                 WHERE rt.variable = 'q_down'
+                  AND rt.variable_e = 'q_down'::hydro.river_variable
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
-                  AND (%(scan_run_id)s IS NULL OR rt.run_id = %(scan_run_id)s)
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND (%(scan_run_id)s IS NULL
+                       OR (rt.run_id = %(scan_run_id)s
+                           AND rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                             WHERE run_id = %(scan_run_id)s)))
                   AND (%(scan_basin_version_id)s IS NULL
-                       OR rt.basin_version_id = %(scan_basin_version_id)s)
+                       OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
+                                                  WHERE basin_version_id = %(scan_basin_version_id)s))
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
                   AND (%(scan_river_network_version_id)s IS NULL
-                       OR rt.river_network_version_id = %(scan_river_network_version_id)s)
+                       OR (rt.river_network_version_id = %(scan_river_network_version_id)s
+                           AND rt.river_network_version_key = (SELECT river_network_version_key
+                                                               FROM core.river_network_version
+                                                               WHERE river_network_version_id
+                                                                     = %(scan_river_network_version_id)s)))
                   AND (%(scan_display_start)s IS NULL
                        OR rt.valid_time >= %(scan_display_start)s)
                   AND (%(scan_display_end)s IS NULL
@@ -1742,58 +1863,58 @@ class PsycopgForecastStore:
             ),
             river_identity_coverage AS (
                 SELECT
-                    run_id,
-                    basin_version_id,
-                    river_network_version_id,
-                    river_segment_id,
+                    run_key,
+                    basin_version_key,
+                    river_network_version_key,
+                    river_segment_key,
                     COUNT(*) AS sample_count,
                     MIN(valid_time) AS valid_time_start,
                     MAX(valid_time) AS valid_time_end,
                     MIN(lead_time_hours) AS min_lead_time_hours,
                     MAX(lead_time_hours) AS max_lead_time_hours
                 FROM river_sample_rows
-                GROUP BY run_id, basin_version_id, river_network_version_id, river_segment_id
+                GROUP BY run_key, basin_version_key, river_network_version_key, river_segment_key
             ),
             river_time_coverage AS (
                 SELECT
-                    run_id,
-                    basin_version_id,
-                    river_network_version_id,
+                    run_key,
+                    basin_version_key,
+                    river_network_version_key,
                     expected_segment_count,
                     valid_time,
-                    COUNT(DISTINCT river_segment_id) AS segment_count
+                    COUNT(DISTINCT river_segment_key) AS segment_count
                 FROM river_sample_rows
-                GROUP BY run_id, basin_version_id, river_network_version_id, expected_segment_count, valid_time
+                GROUP BY run_key, basin_version_key, river_network_version_key, expected_segment_count, valid_time
             ),
             river_common_window AS (
                 SELECT
-                    run_id,
-                    basin_version_id,
-                    river_network_version_id,
+                    run_key,
+                    basin_version_key,
+                    river_network_version_key,
                     MIN(valid_time) AS river_valid_time_start,
                     MAX(valid_time) AS river_valid_time_end
                 FROM river_time_coverage
                 WHERE expected_segment_count IS NOT NULL
                   AND segment_count = expected_segment_count
-                GROUP BY run_id, basin_version_id, river_network_version_id
+                GROUP BY run_key, basin_version_key, river_network_version_key
             ),
             river_identity_rollup AS (
                 SELECT
-                    run_id,
-                    basin_version_id,
-                    river_network_version_id,
-                    COUNT(DISTINCT river_segment_id) AS segment_count,
+                    run_key,
+                    basin_version_key,
+                    river_network_version_key,
+                    COUNT(DISTINCT river_segment_key) AS segment_count,
                     SUM(sample_count) AS river_sample_count,
                     MAX(min_lead_time_hours) AS min_lead_time_hours,
                     MIN(max_lead_time_hours) AS max_lead_time_hours
                 FROM river_identity_coverage
-                GROUP BY run_id, basin_version_id, river_network_version_id
+                GROUP BY run_key, basin_version_key, river_network_version_key
             ),
             hydro_coverage AS (
                 SELECT
-                    rollup.run_id,
-                    rollup.basin_version_id,
-                    rollup.river_network_version_id,
+                    rollup_run.run_id,
+                    rollup_basin.basin_version_id,
+                    rollup_network.river_network_version_id,
                     rollup.segment_count,
                     rollup.river_sample_count,
                     common_window.river_valid_time_start,
@@ -1802,9 +1923,15 @@ class PsycopgForecastStore:
                     rollup.max_lead_time_hours
                 FROM river_identity_rollup rollup
                 LEFT JOIN river_common_window common_window
-                  ON common_window.run_id = rollup.run_id
-                 AND common_window.basin_version_id = rollup.basin_version_id
-                 AND common_window.river_network_version_id = rollup.river_network_version_id
+                  ON common_window.run_key = rollup.run_key
+                 AND common_window.basin_version_key = rollup.basin_version_key
+                 AND common_window.river_network_version_key = rollup.river_network_version_key
+                JOIN hydro.hydro_run rollup_run
+                  ON rollup_run.run_key = rollup.run_key
+                JOIN core.basin_version rollup_basin
+                  ON rollup_basin.basin_version_key = rollup.basin_version_key
+                JOIN core.river_network_version rollup_network
+                  ON rollup_network.river_network_version_key = rollup.river_network_version_key
             )
             SELECT
                 cr.*,
@@ -3566,31 +3693,37 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "status": "covered_by_latest_product_basin_lookup_index",
             "columns": ["basin_id", "basin_version_id"],
         },
-        # river_timeseries_mvt_identity_lookup_idx was dropped by migration 000049
-        # (#1338); the retained 000021 index named below is a PRE-DROP MEASUREMENT,
-        # not a static guess: baseline Q6 — a single-table shape capture of
-        # river_sample_rows' ts window predicates, whereas the real query joins
-        # candidate_runs with correlated bounds — recorded Index Scans on this index's
-        # chunk indexes already serving that shape pre-drop, which matches the river
-        # leg's predicates: run_id + basin_version_id + river_network_version_id +
-        # variable equality-bound with a valid_time range, an exact prefix of it. The
-        # dropped index does not appear in that plan at all, so the plan is expected
-        # unchanged post-drop. (Baseline provenance: the #1338 pre-drop EXPLAIN receipt
-        # posted on PR #1377, 2026-08-14.) The pkey is not the successor — it carries no
-        # basin_version_id and its third column river_segment_id is unbound, so its
-        # usable prefix stops at two columns. The post-drop EXPLAIN (receipt posted on
-        # PR #1377, 2026-08-14) confirmed the plan unchanged: the Q6 shape still scans
-        # this index's chunk indexes after migration 000049 dropped
-        # mvt_identity_lookup.
+        # This payload is a claim about the plan the river leg actually gets, so it
+        # moves with the predicates. Until #1442 the leg bound run_id +
+        # basin_version_id + river_network_version_id + variable as TEXT and the
+        # answer was the retained 000021 text index
+        # river_timeseries_mvt_selected_identity_valid_time_discovery_idx (its
+        # provenance: the #1338 pre/post-drop EXPLAIN receipts on PR #1377,
+        # 2026-08-14, which showed the Q6 shape still scanning that index's chunk
+        # indexes after 000049 dropped river_timeseries_mvt_identity_lookup_idx).
+        #
+        # #1442 switched the leg to the surrogate keys and the enum, so the text
+        # index is no longer even applicable: its leading column run_id is not
+        # bound at all any more. The successor is migration 000051's
+        # river_ts_selected_identity_key_valid_time_idx, whose columns are exactly
+        # the leg's four equality binds plus the valid_time range, in order. The
+        # text pkey is still not the successor for the same reason as before: it
+        # carries no basin_version_id and its third column river_segment_id is
+        # unbound.
+        #
+        # Measured provenance for the repin: the E4(ii) EXPLAIN (ANALYZE, BUFFERS)
+        # receipt taken on node-27 for this change (before/after comparison of the
+        # representative A-group query and the publisher aggregate), recorded on
+        # the #1442 PR. Refresh this comment's pointer whenever the shape moves.
         {
             "table": "hydro.river_timeseries",
-            "index": "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
-            "status": "covered_by_selected_identity_valid_time_discovery_index",
+            "index": "river_ts_selected_identity_key_valid_time_idx",
+            "status": "covered_by_selected_identity_key_valid_time_index",
             "columns": [
-                "run_id",
-                "basin_version_id",
-                "river_network_version_id",
-                "variable",
+                "run_key",
+                "basin_version_key",
+                "river_network_version_key",
+                "variable_e",
                 "valid_time DESC",
             ],
         },

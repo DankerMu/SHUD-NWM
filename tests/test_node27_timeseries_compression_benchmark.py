@@ -177,10 +177,17 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
     assert [query["name"] for query in document["queries"]] == ["curve", "mvt"]
     assert "FROM hydro.river_timeseries rt" in curve["query_text"]
     assert "JOIN hydro.hydro_run h" in curve["query_text"]
-    assert curve["query_text"].count("%s") == 8
+    # #1442 repin: the curve statement now resolves the caller's text identity to
+    # surrogate keys in-statement, so the network id binds three times — segment-key
+    # resolution (core.river_segment's PK is (segment, network)), the transitional
+    # text pushdown aid, and its own key resolution. Ten placeholders, same three
+    # caller-supplied text values.
+    assert curve["query_text"].count("%s") == 10
     assert curve["binding"]["parameter_names"] == [
         "basin_version_id",
         "river_segment_id",
+        "river_network_version_id",
+        "river_network_version_id",
         "river_network_version_id",
         "issue_time",
         "start_time",
@@ -191,6 +198,8 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
     assert curve["binding"]["bound_parameters"] == [
         "basin-heihe-v1",
         "heihe_shud_riv_000001",
+        "heihe-network-v1",
+        "heihe-network-v1",
         "heihe-network-v1",
         "2026-07-05T00:00:00Z",
         "2026-07-05T00:00:00Z",

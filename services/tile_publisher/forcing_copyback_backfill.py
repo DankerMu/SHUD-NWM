@@ -66,11 +66,22 @@ _DISCOVER_BACKFILL_RUNS_SQL = """
     LEFT JOIN met.forcing_version fv
       ON fv.forcing_version_id = h.forcing_version_id
     WHERE h.status IN ('succeeded', 'parsed', 'published')
+      -- #1442: the run's identity arrives through the correlated hydro_run row,
+      -- so the probe correlates on the surrogate key. Correlating on the text
+      -- run identity instead would be a text fact join — forbidden, and not
+      -- pushdown material either, since a join equality is not a constant.
       AND EXISTS (
           SELECT 1
           FROM hydro.river_timeseries rt
-          WHERE rt.run_id = h.run_id
+          WHERE rt.run_key = h.run_key
+            -- transitional compressed-chunk pushdown aid, remove with #1342
             AND rt.variable = 'q_down'
+            -- Deliberately no explicit enum cast on the literal: this statement
+            -- is also parsed by the sqlite harness in
+            -- tests/test_forcing_copyback_backfill.py, and PostgreSQL coerces
+            -- the unknown-typed literal to the enum anyway, so the predicate is
+            -- equally sargable without one.
+            AND rt.variable_e = 'q_down'
             AND rt.value IS NOT NULL
       )
     ORDER BY h.run_id

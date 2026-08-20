@@ -308,6 +308,10 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
         "tests/test_display_coverage_refresh.py",
         "tests/test_migrations.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        # #1442's out-of-boundary cleanup oracle is the fourth consumer: it
+        # imports assert_text_fact_columns / strip_all_subqueries from the
+        # helper, so a helper-only diff can blunt it the same way.
+        "tests/test_river_ts_text_identity_cleanup.py",
         # Every changed test suite drags the meta-guard suite along, because a
         # test-file PR is exactly the change class that can invalidate the
         # tree-derived guards. Not part of the oracle closure; asserted here so
