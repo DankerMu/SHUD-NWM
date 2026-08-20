@@ -271,6 +271,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_state_manager.py",
             "tests/test_run_tree_copyback.py",
+            "tests/test_source_cycle_raw_manifest.py",
         ),
     ),
     PathTestRule(
