@@ -66,11 +66,11 @@ contained fault carries its own distinguishable unsafe reason
 established no-witness contract (`forcing_version_row_absent` with a
 `tier_status` read-fault detail, repair-eligible per the #1203 ruling — the
 `tier_status` field, not `unsafe_reason`, is what tells the operator the
-rebuild cannot clear it). Should a classification fault escape despite the
-prohibition above, it is such a store-side fault and carries
-`artifact_probe_error`; a classification input the pure normalizer merely
-rejects is not a fault and stays on the repair-eligible null-reason residual.
-A non-regular target that the store does **not** raise
+rebuild cannot clear it). Classification faults are contained by answering
+"not prefix-shaped", so the reference is probed as recorded and the probe's own
+unresolvable-reference leg yields the repair-eligible null-reason residual;
+there is no route by which a classification fault becomes
+`artifact_probe_error`. A non-regular target that the store does **not** raise
 on is not such a fault and carries `artifact_target_not_a_file` instead, so an
 operator can tell "the filesystem misbehaved" from "something is standing where
 the file should be". Because a non-regular target is a determination rather

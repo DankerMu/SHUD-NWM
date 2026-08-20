@@ -80,9 +80,10 @@
 - [ ] 3.13 把新的 local 腿种类 helper 加进
       `tests/test_production_scheduler.py:15288-15297` 的 `_ARTIFACT_GUARD_LANE_FUNCTIONS`
       meta-guard 元组（该元组枚举"local artifact guard 归一化流经的每个函数"并禁用 `Path.resolve()`）。
-- [ ] 3.14 M1-M6 逐条实测：**用精确源文本匹配施加变异并断言 `count == 1`**（不用行号——
+- [ ] 3.14 M1-M5 逐条实测：**用精确源文本匹配施加变异并断言 `count == 1`**（不用行号——
       陈旧坐标会产出假的"变异体存活"），记录每条的转红 oracle 与形态；
-      **M3 按 design.md 预期连坐记录**（不主张独占证死）。
+      **M1 与 M3 按 design.md 记为预期连坐**（M1 一删则 3.1/3.10/3.11 同红；M3 连坐
+      `:24435` helper 家族），二者均**不主张独占证死**。
 
 ## 4. spec 与登记
 
@@ -108,6 +109,6 @@
 | `tests/test_object_store_roots.py`、`tests/test_state_manager.py` | 上面第一行已含；它们是仓库里覆盖 `normalize_key` / `exists` 的现有套件，充当语义未变的守门 |
 | `uv run ruff check .` | All checks passed |
 | `openspec validate artifact-probe-file-kind-and-key-framing --strict --no-interactive` | valid |
-| M1-M6 变异 | 逐条转红并由 3.1-3.11 中指定的 oracle 证死；**M3 允许 `:24435` helper 家族连坐**（design.md 已记） |
+| M1-M5 变异 | 逐条转红并由 3.1-3.11 中指定的 oracle 证死；**M1 与 M3 允许预期连坐**（M1→3.10/3.11，M3→`:24435` helper 家族；design.md 已记） |
 
 db-free 纯文件态逻辑，本地 pytest 闭环；不涉 node-27 真实 DB，不涉 node-22 实机。

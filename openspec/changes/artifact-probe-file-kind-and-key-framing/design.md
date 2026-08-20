@@ -155,6 +155,13 @@ sibling **不入** compat re-export 名单（`SCHEDULER_STATE_COMPAT_REEXPORT_NA
   于是 `scheduler_candidates.py:1617-1621` 按非空 reason **拒绝修复**——正是 D2 要的路由，
   且与 journal/direct 两层的形状**完全一致**。
 
+**更强的是机械论证**（评审 round-2 补，把语义判断变成被迫结论）：`:650` 那支调
+`_artifact_blocker_evidence(...)`（`:671-681`）时**根本不传 `unsafe_reason`**
+（全文件只有 `:696` 与 `:738` 传），参数默认 `None`——其注释 `:663-665` 也明说
+「still fail-closed, **still repair-eligible**」。所以把新 token 路由进 `:650` 会让它变成
+**repair-ELIGIBLE**，正是 D2 的反面。`:684` 不是偏好，是**唯一与 D2 自洽的落点**；
+`:650` 在机械层面就不可用，与如何解读 #1203 无关。
+
 → 不改 `:650`，不加 `tier_status`；用一条测试把 sidecar 层的这个终局钉死，spec 补一句。
 
 **这条同时补上 #1394 的 AC-2**（"forcing 腿：派生见证 key 落在目录上时不再返回'存在'"）：
@@ -217,14 +224,19 @@ L5 的根集不是任意的：resource-profile 的 `object_store_root`、`object
 
 | # | 变异 | 应转红的 oracle | 期望形态 |
 |---|---|---|---|
-| M1 | 删 object 腿的种类判定 | 3.1 object-leg 目录用例 | `(True,"artifact_target_not_a_file")` → `(False,None)` |
+| M1 | 删 object 腿的种类判定 | 3.1 object-leg 目录用例（**预期连坐** 3.10 / 3.11） | `(True,"artifact_target_not_a_file")` → `(False,None)` |
 | M2 | 删 local 腿的种类判定 | 3.2 local-leg 目录用例 | 同上 |
 | M3 | sibling 改成"absent 也翻" | 3.3 seam 契约用例 | `(False,None)` → `(True,…)`；**预期连坐**见下 |
 | M4 | 分类器回退到 raw 取景 | 3.4 带路径段 prefix 用例 | 复现伪造 witness 的 `artifact_probe_error` |
 | M5 | 扰动纯归一化函数 | 3.8 委托等价性用例 | `normalize_key` 随之变动 |
-| M6 | 删 sidecar 腿的种类判定路径 | 3.11 sidecar 用例 | 该层今日的 `(False,None)`「不发 blocker」复现 |
 
-两条配方按 round-1 F8 改写：
+**没有独立的 sibling 变异**（round-2 N1）：sidecar 腿**不改代码**，它经
+`_artifact_uri_missing_status(candidate, str(sidecar.manifest_probe_key))`（`:646`）
+走 `:1187` 的 object 分支拿到新裁决，所以"删 sidecar 种类判定"**没有对应源文本可删**——
+它的变异站点就是 M1 的站点。故 M1 一删，3.1、3.10（sidecar）、3.11（raw-manifest abstain）
+**同时转红**，这是预期连坐而非配方失效。
+
+三条配方按评审改写（F8 两条 + N1 一条）：
 
 - **M3 不是独占的**：`:24435` 的 helper 以 `manifest_missing=False` + 空 store 调用，该变异会让探针
   返回非空 reason，于是两条 raw-manifest 腿一起 abstain（`:1526`/`:1594`），
