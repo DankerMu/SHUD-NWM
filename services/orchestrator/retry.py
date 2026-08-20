@@ -1660,10 +1660,11 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
         # rejection instead of escaping the adjudicator.
         #
         # Deliberately NOT the local artifact leg's posture, which keeps phantom
-        # roots admitted as a recorded residual (PR #1618): these roots are the
-        # containment baseline that _db_free_selector_path_rejection below
-        # judges selector paths against, so admitting a phantom loop here would
-        # reproduce at the path level the very fail-open the root level rejects.
+        # roots admitted as a recorded residual (issue #1402 / PR #1422): these
+        # roots are the containment baseline that
+        # _db_free_selector_path_rejection below judges selector paths against,
+        # so admitting a phantom loop here would reproduce at the path level the
+        # very fail-open the root level rejects.
         try:
             resolved = Path(os.path.realpath(root, strict=True))
         except (OSError, ValueError) as error:

@@ -45,8 +45,15 @@ allowed-roots 一级（PR #1399）和 runtime-root 一级（PR #1426）。本 ch
   `test_tilde_residue_change_leaves_the_issue_1400_resolve_line_in_place` ——
   它是 #1436 立的**范围栅栏**，注释原文「#1400 owns this line」自带退休条件，
   本 change 正是被授权拆它者。PRESENT → ABSENT 是 oracle **增强**（见 design D6）。
-- 为 db-free selector 腿补 lane meta-guard 元组（artifact 腿已有
-  `_ARTIFACT_GUARD_LANE_FUNCTIONS`，`tests:15938`；本腿此前没有）。
+- 为 db-free 归一化面补一道 `.resolve()` meta-guard。**形状按 round-2 P1-1 裁定改过**
+  （初稿是「补一个 lane 成员元组」，仿 artifact 腿的 `_ARTIFACT_GUARD_LANE_FUNCTIONS`，
+  `tests:15938`）：元组式守卫在「元组侧掉名」这一向失明——`lane` 由同一个元组过滤构建，
+  摘名时两边同步收缩，完备性断言恒真。**实际交付的是「断言违规者」形状**——
+  `test_db_free_normalization_modules_call_resolve_only_where_allowlisted` 枚举
+  `retry` / `scheduler_config` 两个模块内所有仍调用 `.resolve()` 的函数，与显式 allowlist
+  （`{"_safe_preserve_final_component"}`，design D5 的唯一故意保留项）比对，**没有元组可摘名**。
+  范围裁定见 tasks 4.4/4.5：它把 `retry.py` 整模块钉成 `.resolve()`-free，强于两条 issue
+  各自所需，系有意采纳。
 
 ## Impact
 
@@ -73,7 +80,8 @@ allowed-roots 一级（PR #1399）和 runtime-root 一级（PR #1426）。本 ch
   #1424 `Path.expanduser()` 抛点。
 - **artifact 腿的 phantom 姿态不外扩**：`openspec/specs/job-retry-mechanism/spec.md:1484`
   那条要求把 phantom 根记作 artifact 腿的**已知残留**（「a known, recorded residual」），
-  与本 change 的 recheck 口径相反且已在 PR #1618 裁定过；本 change 不触碰该腿，也不改那句话。
+  与本 change 的 recheck 口径相反且已在 **issue #1402 / PR #1422** 裁定过（该句由
+  `03fdcbc7` 落入 live spec，PR #1618 未触碰该文件）；本 change 不触碰该腿，也不改那句话。
 - 不改任何出口类型、不改调用方签名。
 - **reason 词汇的准确口径**（fixture review P2-3 更正了初稿的过强表述）：
   - **blocker / rejection 的 code 集合不变**——`db_free_selector_path_unresolvable` 是**复活**

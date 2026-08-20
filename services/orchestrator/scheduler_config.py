@@ -966,6 +966,13 @@ def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path
     # again for an unrepresentable path string, so catching ValueError here
     # would turn a pre-existing escape into an escape from inside the handler.
     # That escape is retained exactly as it stands today.
+    #
+    # The two arms are now TEXTUALLY IDENTICAL, and the split is retained
+    # deliberately rather than collapsed into a single body: they rest on
+    # different written bases -- the db-backed arm on #1347 design D1, this one
+    # on this change's design D8 -- and either may be re-decided on its own.
+    # Collapsing them would erase the seam at which one of the two lanes can
+    # later take an errno split without disturbing the other.
     try:
         return Path(os.path.realpath(path, strict=True))
     except OSError:

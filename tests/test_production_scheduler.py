@@ -17350,8 +17350,14 @@ def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoen
     # that a merely missing root never produces a blocker -- admits it anchored at
     # the cwd.  That cwd-anchored phantom root is the ACCEPTED new state of this
     # change (issue #1436 acceptance 2's "or tolerated by the existing arm"
-    # branch); its geometry is the separately tracked #1427 adjacency and is
-    # recorded here, not changed.
+    # branch); its geometry is the #1427 adjacency and is recorded here, not
+    # changed.  Scope sync: #1400/#1427 have since landed and #1427 is closed by
+    # that PR, so "separately tracked" no longer names a live tracker.  The
+    # geometry itself is untouched -- this arm is ``scheduler_preflight``'s, and
+    # that change treats only the ``retry`` leg -- and its live tracker is now
+    # #1627, the family-level ruling on whether every ENOENT non-strict fallback
+    # needs a loop-filtered re-check, whose payload carries this site
+    # (``scheduler_preflight``'s allowed-roots ENOENT arm) explicitly.
     anchor = tmp_path / "cwd-anchor"
     anchor.mkdir()
     monkeypatch.chdir(anchor)
@@ -40878,8 +40884,15 @@ def test_db_free_selector_path_rejection_rejects_phantom_loop_path(tmp_path: Pat
         allowed_roots=(root,),
     )
 
-    assert rejection is not None
-    assert rejection["reason"] == "db_free_selector_path_unresolvable"
+    # The COMPLETE record, matching the sibling loop case above: the reason
+    # alone would not catch a rejection routed with the wrong field, source or
+    # echoed value.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(phantom),
+    }
 
 
 def test_db_free_selector_path_rejection_rejects_every_non_enoent_errno(tmp_path: Path) -> None:
@@ -40904,8 +40917,13 @@ def test_db_free_selector_path_rejection_rejects_every_non_enoent_errno(tmp_path
         allowed_roots=(root,),
     )
 
-    assert rejection is not None
-    assert rejection["reason"] == "db_free_selector_path_unresolvable"
+    # The COMPLETE record, matching the sibling loop case above.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(value),
+    }
 
 
 def test_db_free_lanes_report_the_resolution_reason_for_out_of_root_loops(tmp_path: Path) -> None:
@@ -40948,6 +40966,43 @@ def test_db_free_lanes_report_the_resolution_reason_for_out_of_root_loops(tmp_pa
     )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions, so EACCES cannot be provoked")
+def test_db_free_required_path_permission_fault_is_attributed_as_not_writable(tmp_path: Path) -> None:
+    """The reason mapper's EACCES/EPERM arm, which no other case reaches.
+
+    ``db_free_required_path_unsafe`` now carries the shared errno
+    classification, and the loop cases above only ever witness its
+    ``unsafe_path`` value -- with them alone the whole mapper is
+    indistinguishable from a constant. EACCES is the one non-loop errno
+    provokable without a real NFS server (an unreadable parent directory);
+    EPERM and the ``unavailable`` catch-all land on the same mapping by
+    construction, the latter witnessed by the NUL case below.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    blocked_parent = root / "blocked-parent"
+    blocked_parent.mkdir()
+    value = blocked_parent / "journal"
+    blocked_parent.chmod(0o000)
+    try:
+        # Independent oracle for the geometry: the kernel really does refuse
+        # this canonicalization with EACCES (so neither the ENOENT fallback nor
+        # the ELOOP/ENOTDIR mapping is what answers), and the earlier component
+        # gate stays silent, so the resolution step is what adjudicates.
+        assert scheduler_config_module._db_free_local_path_component_reason(value) is None
+        assert _allowed_root_errno(value) == errno.EACCES
+
+        assert _db_free_required_path_verdict(value, (root,)) == (
+            "db_free_required_path_unsafe",
+            "not_writable",
+        )
+    finally:
+        # Restore before pytest's tmp_path cleanup walks the tree.
+        blocked_parent.chmod(0o700)
+
+
 def test_db_free_normalization_folds_embedded_nul_into_existing_rejections(tmp_path: Path) -> None:
     """An unrepresentable path string is rejected, not raised, at all three sites.
 
@@ -40981,6 +41036,11 @@ def test_db_free_normalization_folds_embedded_nul_into_existing_rejections(tmp_p
     assert path_rejection["reason"] == "db_free_selector_path_unresolvable"
     assert required_path_blocker is not None
     assert required_path_blocker["code"] == "db_free_required_path_unsafe"
+    # The reason too, not just the code: a ValueError carries no errno, so it
+    # takes the mapper's ``unavailable`` catch-all rather than the ``unsafe_path``
+    # the loop cases produce. Without this pin that arm of the mapper is
+    # unwitnessed.
+    assert required_path_blocker["reason"] == "unavailable"
     assert required_path_blocker["error_type"] == "ValueError"
 
 

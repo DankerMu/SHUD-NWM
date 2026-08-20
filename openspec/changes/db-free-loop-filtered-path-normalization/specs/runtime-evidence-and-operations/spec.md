@@ -13,10 +13,15 @@ non-strict form stopped raising on symlink loops in CPython 3.13+, and the
 strict form raises an errno-less `RuntimeError` on 3.12 and earlier — so this
 lane SHALL normalize through `os.path.realpath`, whose strict form raises
 `OSError` carrying an errno on every supported version and whose non-strict
-form raises neither `OSError` nor `RuntimeError` on any of them. Neither form
-is total: an unrepresentable path string (one carrying an embedded NUL) raises
-`ValueError` from every resolution primitive, and each helper below states
-whether it folds that case or leaves it as a pre-existing escape.
+form raises neither `OSError` nor `RuntimeError` for the input classes this
+lane adjudicates — symlink loops and missing components — on any of them.
+That bound is deliberate: the non-strict form is not total either. An
+unrepresentable path string (one carrying an embedded NUL) raises `ValueError`
+from every resolution primitive, and a *relative* value raises `OSError` from
+the non-strict form when the process working directory is unavailable
+(measured on a deleted cwd: `FileNotFoundError`, errno `ENOENT`). Each helper
+below states whether it folds those cases or leaves them as a pre-existing
+escape.
 
 For the **required-path check**, which owns a structured blocker channel: a
 value whose strict resolution fails with an errno other than `ENOENT` — a
@@ -65,11 +70,18 @@ one shape instead of two.
 
 The path-identity comparison helper in the same lane SHALL likewise normalize
 through non-strict `os.path.realpath` so that its comparison verdicts do not
-depend on the interpreter version. Its pre-existing `ValueError` escape on an
-unrepresentable path string is explicitly retained, neither introduced nor
-removed by this requirement: the helper has no rejection channel and its
-callers compare only its own products, so folding that case would require a
-sentinel value this lane does not define. Values that resolve cleanly keep
+depend on the interpreter version. Its `ValueError` escape on an
+unrepresentable path string is pre-existing and explicitly retained, neither
+introduced nor removed by this requirement: the helper has no rejection channel
+and its callers compare only its own products, so folding that case would
+require a sentinel value this lane does not define. Dropping this helper's
+`try`/`except (OSError, RuntimeError)` also un-catches the second escape class
+registered above — an `OSError` from a *relative* value normalized while the
+working directory is unavailable, which the old handler folded by returning the
+input path. That class SHALL be recorded here rather than re-guarded: unlike
+the config-construction arm, this helper has no database-backed twin to be
+aligned with, so the change is a plain deletion of a guard whose reachability
+is nil at every current call site (all of them pass absolute values). Values that resolve cleanly keep
 their existing normalized values byte-for-byte in all of these helpers.
 
 #### Scenario: A symlink-loop required path is attributed as unsafe, not as missing
@@ -100,7 +112,11 @@ their existing normalized values byte-for-byte in all of these helpers.
 - **WHEN** the config construction helper canonicalizes it
 - **THEN** it returns the folded canonical form — the same value on CPython
   3.12 and earlier as on 3.13+, where 3.12 and earlier previously returned the
-  unresolved value — and no exception escapes construction
+  unresolved value — and no exception escapes construction for this input
+  class, the pre-existing `ValueError` escape on an unrepresentable path string
+  being retained unchanged (a relative value under an unavailable working
+  directory is not reached by this helper at all: the caller absolutizes with
+  `Path.cwd()` first, which already raised there before this change)
 
 #### Scenario: Path identity comparison is version-independent
 

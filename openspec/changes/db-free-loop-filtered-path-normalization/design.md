@@ -85,9 +85,22 @@ issue 的载荷，故必须准确，不得沿用 issue 原文坐标：
 `scheduler_config.py:934` `_safe_preserve_final_component` 的 `path.parent.resolve(strict=False)`，
 db-free 下经 `_confined_path_for_mode` 的回退臂（`:990-996`）可达。一并列入 5.2 载荷。
 
-**同源旁证**：`openspec/specs/runtime-evidence-and-operations/spec.md:176-177` 已把
-本 phantom 几何写作「the already-tracked #1427 adjacency and is documented, not changed, here」
-—— 因本 change 只治 retry 腿、不治 preflight 腿，**该句在本 change 后仍然为真**，不需更正。
+**同源旁证，及初稿在此处的一个错判**：
+`openspec/specs/runtime-evidence-and-operations/spec.md:176-177` 把本 phantom 几何写作
+「the **already-tracked** #1427 adjacency and is documented, not changed, here」。
+
+初稿据此裁定「该句在本 change 后仍然为真，不需更正」。**该裁定错了**（round-1 lens C P3-1，
+verifier V5 CONFIRMED）——它只审了句子的**几何**半边（preflight 腿确实没动，这半边为真），
+漏了句子真正的承重词是 **already-tracked**：本 PR 关闭 #1427，合并瞬间该几何就无人跟踪了。
+
+同类错判**在另一个 spec 文件里还有一处，而初稿连查都没查**：
+`openspec/specs/slurm-array-runner-integration/spec.md:106-109` 写着
+`_safe_preserve_final_component` 的 ≤3.12 残留「belongs to **issue #1400**」——本 PR 同样
+关闭 #1400 且同样不修该臂。初稿只 grep 了 `#1427` 的孪生指针，没 grep `#1400` 的。
+
+**处置**：家族级裁决 issue **#1627 已在合并前开出**（不再等 Phase 8），两条 live spec 均已
+改指它，并各留一句过去式历史陈述。教训记此：审「某句是否仍为真」时，必须逐个从句审，
+且必须对**本 PR 关闭的每一个 issue 号**做全仓指针扫描，而不只是当下正在讨论的那一个。
 
 ## D2 — path 级（B1/B2）的 ENOENT 回退**也**做 loop-filtered 复查
 
@@ -97,7 +110,7 @@ db-free 下经 `_confined_path_for_mode` 的回退臂（`:990-996`）可达。�
 
 - `openspec/specs/job-retry-mechanism/spec.md:1566`（runtime roots，PR #1426）：
   ENOENT 回退**必须**二次 strict 复查，phantom 形态**拒收**。
-- `openspec/specs/job-retry-mechanism/spec.md:1484`（artifact 腿，PR #1618）：
+- `openspec/specs/job-retry-mechanism/spec.md:1484`（artifact 腿，issue #1402 / PR #1422）：
   phantom 根**保持 admitted**，明文记作「a known, recorded residual」。
 
 **裁定：B1/B2 走 recheck 教条（`:1566` 侧）。**
@@ -178,15 +191,32 @@ NUL 用例钉住（**tasks 3.7**）。不登记的话 round-1 correctness 透镜
    回退臂（`:990-996`）可达。它属 5.2 载荷里的另一个子族，本 change **不动**——
    故它必须出现在 allowlist 里；漏掉它守卫落地即红。
 
-**代价与一处更正（fixture review P2-5）**：初稿写「非 strict realpath 永不抛」，**这是假的**。
-实测（3.14.2）：对嵌 NUL 的路径，`Path.resolve(strict=False)`、`os.path.realpath` 的 strict
-与非 strict 形态**三者都抛 `ValueError`**。准确表述是「非 strict realpath 不抛 `OSError`
-或 `RuntimeError`，但对不可表示的路径串仍抛 `ValueError`」。
+**代价与两处更正（fixture review P2-5；round-1 lens A 追加第二处）**：初稿写
+「非 strict realpath 永不抛」，**这是假的**，且假在两个方向上：
 
-该更正**不改变 D5 的结论**，但改变其论证：删掉 `except (OSError, RuntimeError)` 之后，
-`ValueError` 仍然逃逸——**而它今天也一样逃逸**（现有 except 元组同样接不住 `ValueError`）。
-即 B3 **保留这条既有逃逸**，本 change 不新增也不消除它。此处显式记录，避免把一句假的
-规范性陈述写进 `openspec/specs/`（spec delta 已同步改写）。
+1. **`ValueError`（P2-5 已捉）**：实测（3.14.2）对嵌 NUL 的路径，
+   `Path.resolve(strict=False)`、`os.path.realpath` 的 strict 与非 strict 形态
+   **三者都抛 `ValueError`**。
+2. **`OSError`（round-1 lens A）**：对**相对**路径，非 strict `os.path.realpath` 在 cwd
+   不可用（cwd 目录被删）时抛 `OSError`——实测 `FileNotFoundError`，errno `ENOENT`。
+   即「非 strict 形态不抛 `OSError`」这句只在本 lane 判别的输入类（symlink 环、缺失分量）
+   上成立，**不是无条件真**。
+
+准确表述是「非 strict realpath 对本 lane 判别的输入类不抛 `OSError` / `RuntimeError`，
+但对不可表示的路径串抛 `ValueError`、对 cwd 不可用时的相对路径抛 `OSError`」。
+
+两处更正**都不改变 D5 的结论**，但改变其论证：删掉 `except (OSError, RuntimeError)` 之后，
+
+- `ValueError` 仍然逃逸——**而它今天也一样逃逸**（现有 except 元组同样接不住 `ValueError`），
+  即 B3 **保留这条既有逃逸**，本 change 不新增也不消除它；
+- `OSError`（相对路径 + cwd 不可用）则是**本 change 新放开的一条**——旧 handler 会接住它
+  并原样返回入参。该类**登记而不重新加守卫**：B3 与 B4 不同，**没有 db-backed 臂可供取齐**
+  （其消费方只比较它自己的产物），故这一半是**纯粹的守卫删除**；且**当下可达性为零**——
+  现有全部调用点传入的都是绝对值。等价的相对值在 B4 那一侧根本到不了该 helper：
+  `_optional_config_path_for_mode` 先用 `Path.cwd() / path` 绝对化，
+  cwd 不可用时**在那一步就已抛**，改前改后同样。
+
+此处显式记录，避免把一句假的规范性陈述写进 `openspec/specs/`（spec delta 已同步改写）。
 
 ## D6 — 翻转 `:17686` 那条 pin 是 oracle **增强**，不是削弱
 
@@ -365,7 +395,10 @@ M9 在本地的证死由 **4.4 的违规者守卫独力承担**，6.6 已据此�
   sorted(names)` 恒真。实测（在既有 artifact 腿上）：FULL=True，MUTATED=True。
   **精确口径**：该断言并非全然无用——它能抓「模块侧函数被删/改名而元组仍列它」；
   瞎的只是**元组侧掉名**这一向，也就是「把函数从守卫里摘掉以绕过 `.resolve()` 禁令」。
-  （既有 artifact 腿守卫同形失明——PR #1618 交付面的既有缺口，**只报不修**，随 5.2 路由。）
+  （既有 artifact 腿守卫同形失明——该守卫源自 **issue #1402 / PR #1422**（`015318d2` 立
+  `_ARTIFACT_GUARD_LANE_FUNCTIONS`），后经 **#1424 / PR #1435**（`72b3892e`）与 **#1618**
+  （`8f386972` 加 `_local_artifact_target_is_not_a_file`）两次扩元组；失明是其**自诞生起**
+  的既有缺口，非 #1618 引入。**只报不修**，随 5.2 路由。）
 - **round-1 给的补救（按命名谓词反查）经 round-2 实测不可写**：4.4 原定的那四个
   scheduler_config 函数**既无共同前缀也无共同后缀**——`_db_free_path*` 多圈一个
   `_db_free_path_evidence_scalar`，`*_for_mode` 多圈八个，两者并集仍不等于那四个。

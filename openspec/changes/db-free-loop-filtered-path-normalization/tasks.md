@@ -165,7 +165,8 @@
       **保留而非删除的裁定**（round-2 P3-4 指出它已被 4.4 的模块级守卫蕴含）：
       翻转是一行改动且保住了 #1436 的谱系锚点，删除则要额外向 oracle-integrity 复核
       论证「删一条测试」；两者强度差为零时选不减少测试数的那个。
-- [x] 4.2 **同步全部 4 处失效的范围声明**（fixture review P2-1 —— 初稿只列了 2 处）。
+- [x] 4.2 **同步全部 5 处失效的范围声明**（fixture review P2-1 补到 4 处；round-1 lens C
+      再补第 5 处——它措辞是「separately tracked」而非「must not drift」，故前几轮 grep 漏掉）。
       断言全部存活，失效的是**理由/范围陈述**，属注释与 docstring 的同步义务：
       - `tests:17664-17670`——把 retry 腿排除在 `_resolve_call_names` 之外的理由；
       - `tests:17436-17439`——「#1400's territory and is deliberately untouched」；
@@ -173,6 +174,10 @@
         ——「the fix must not drift it」，**讲的正是 B4**；
       - `tests:39652-39660` `test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_root`
         ——「the db-free arm is a declared non-goal and must not drift」。
+      - `test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoent_arm`
+        ——「its geometry is the **separately tracked** #1427 adjacency」：本 PR 关闭 #1427，
+        该几何（`scheduler_preflight` 腿，本 change 不治）随之失去 tracker，须改指 5.2 的
+        Phase-8 家族裁决（该项载荷已含 `scheduler_preflight.py:541`）。
       **遗漏任何一条 = 在测试文件里留下一句被本 change 悄悄证伪的范围声明。**
 - [x] 4.3 **不要**扩展 `_TILDE_RESIDUE_EXPANDUSER_LANES`（`tests:17649-17652`）——
       round-2 P3-4 更正了 round-1 的建议：该元组自带注释声明它**只**承载 expanduser pin
@@ -200,8 +205,9 @@
 
 ## 5. 文档、留痕与路由
 
-- [ ] 5.1 PR body「oracle 完整性」段显式记录 4.1-4.2 的**全部 4 处**测试文本改动面，
-      并复述 design D6 的增强论证——**测试删除/改写面不得静默**。
+- [x] 5.1 PR body「oracle 完整性」段显式记录 4.1-4.2 的**全部**测试文本改动面
+      （4.1 的翻转 + 4.2 的 5 处范围声明同步），并复述 design D6 的增强论证——
+      **测试删除/改写面不得静默**。
 - [ ] 5.2 **Phase 8 必办**：经 issue-scribe 路由**家族级教条裁决** issue——
       「ENOENT 回退是否一律需要 loop-filtered 复查」。
       **坐标已按 fixture review P2-6 全部重量**（issue 原文那批有 6 处错，不得沿用）：
@@ -213,13 +219,21 @@
       另附一个**不同子族**的兄弟：`scheduler_config.py:934` `_safe_preserve_final_component`
       的 `path.parent.resolve(strict=False)`（P3-1）。
       **本 PR 关闭 #1427 会让该冲突失去 tracker，故此项不可省。**
-- [ ] 5.3 PR body 记录 **B3 的 evaluate-only 裁定**（#1400 AC-5 要求「改或不改都要留痕」）
+      **路由缺口（本 DEFER 买来的，必须随 issue 一并交出）**：若该家族裁决把
+      `_safe_preserve_final_component` 也一并治掉，4.4 守卫的 allowlist 就**清空**——
+      而那一项是该守卫**目前唯一的正控制**（两条断言里另一条是 `== set()`，全绿也可能
+      只是 AST 走查根本没在工作）。故裁决落地时**必须同时补一条不依赖 allowlist 的正控制**
+      （例如对一段含 `.resolve()` 的已知源码断言 `_functions_calling_resolve` 确实报出它），
+      否则守卫会退化成一对无法自证的空断言。
+- [x] 5.3 PR body 记录 **B3 的 evaluate-only 裁定**（#1400 AC-5 要求「改或不改都要留痕」）
       与 **B4 的裁定**（#1400 AC-6 要求「改同范式或显式记录不改裁定及理由」）。
-- [ ] 5.4 PR body 写入 **design D9 的论证性结清链**（AST 零 `.resolve()` + realpath 三臂一致 +
+- [x] 5.4 PR body 写入 **design D9 的论证性结清链**（AST 零 `.resolve()` + realpath 三臂一致 +
       CI 3.11 合并后执行），并说明它同时覆盖 **AC-3 与 B4**——两处都不存在本地可跑的测试。
-- [ ] 5.5 PR body 登记两项**范围外只报不修**：
-      (a) 既有 artifact 腿守卫（`tests:16005`）的完备性断言在「元组侧掉名」这一向失明，
-      系 PR #1618 交付面既有缺口；(b) NUL 值原样进入 rejection 证据 `value` 字段（P3-6）。
+- [x] 5.5 PR body 登记两项**范围外只报不修**：
+      (a) 既有 artifact 腿守卫（`tests:16005`）的完备性断言在「元组侧掉名」这一向失明——
+      该守卫源自 **issue #1402 / PR #1422**（`015318d2`），后由 **#1424 / PR #1435**
+      （`72b3892e`）与 **#1618**（`8f386972`）两次扩元组，失明系其**自诞生起**的既有缺口，
+      非 #1618 引入；(b) NUL 值原样进入 rejection 证据 `value` 字段（P3-6）。
       两项随 5.2 一并路由。
 
 ## 6. 验证（Evidence Floor）
