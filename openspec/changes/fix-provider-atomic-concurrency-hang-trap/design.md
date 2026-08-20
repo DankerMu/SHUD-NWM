@@ -1,5 +1,15 @@
 # Design: provider_atomic concurrency hang trap
 
+## Citation frame of reference
+
+Every `tests/test_scheduler_file_provider_refresh.py:NNN` citation in this
+fixture is against the **pre-change baseline** — `master` at `b8322301`, the
+commit this change branches from — because the fixture describes the edit to be
+made. Verify them with `git show master:<path>`, not against the working tree:
+the implementation moves these lines (the change is roughly +160 lines in that
+file), so a working-tree check will report false drift. Citations to every other
+file are frame-independent, since no other file is modified.
+
 ## Risk triage
 
 - **Fixture tier: `compact`.** Test-only, single file, one function rewritten
