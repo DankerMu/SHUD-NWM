@@ -1633,6 +1633,16 @@ class FileOrchestrationJournalRepository:
             if existing is None:
                 raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
             row = dict(existing)
+            # #1589 (design D3): deliberately NOT resolved here, and the reason is
+            # not "benign".  ``_hydro_run_for`` returns ``_public_scheduler_row``,
+            # so ``existing`` is already the PUBLIC projection: a URI-valued
+            # ``error_message`` arrives as ``[object-uri]`` and the write boundary
+            # strips it, so even a bare ``update_hydro_run_status(run_id,
+            # "failed")`` that supplies no error at all drops the durable value.
+            # That is a read-path defect, not a caller-evidence one -- resolving
+            # the two parameters below would be a pure no-op against it, so this
+            # leg is deliberately left alone.  Fixing it means giving this leg a
+            # durable read, which is out of #1589's scope.
             safe_error_message = _durable_error_message(error_message)
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
             for key, value in (("slurm_job_id", slurm_job_id),):
@@ -1723,9 +1733,20 @@ class FileOrchestrationJournalRepository:
                     # their pre-change behaviour.
                     persisted_candidate_evidence = _accepted_submit_candidate_evidence(existing)
                 row = dict(existing)
+                # #1589 (design D3/D8): the merge is an unconditional write of
+                # every explicitly carried field, so a caller that round-trips a
+                # public row hands in ``[object-uri]`` for anything the display
+                # projection redacted.  Resolving against the persisted value
+                # keeps the real URI instead of letting the write boundary erase
+                # it.  Frozen master evidence is unaffected: a mapping/list
+                # value never resolves (only a whole-value placeholder does), so
+                # a divergent ``init_state_identities`` map still REACHES the
+                # #1183/#1187 frozen check and is still loudly rejected.
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
-                        row[key] = incoming[key]
+                        row[key] = _resolved_caller_evidence(
+                            incoming[key], durable=existing.get(key)
+                        )
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
@@ -2141,16 +2162,30 @@ class FileOrchestrationJournalRepository:
             if str(existing.get("status") or "") != "reserved":
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = apply_accepted_submit_transition(existing, transition)
+            # #1589 (design D3): unconditional writes of caller evidence, so
+            # withheld resolves against the persisted row rather than erasing
+            # it.  These ``durable=`` arguments are LOAD BEARING, not uniformity:
+            # a ``reserved`` row is not necessarily evidence-free.  ``reserve``
+            # nulls the whole family, but ``reclaim_pipeline_job_reservation``
+            # nulls ``exit_code``/``error_code``/``error_message`` and NOT
+            # ``log_uri``, so a reclaimed reservation carries the previous
+            # attempt's URI into this leg; and an unbound submit-evidence
+            # transition writes evidence onto a row that stays ``reserved``.
+            # Neutralizing the ``log_uri`` resolution below turns exactly the
+            # ``commit_pipeline_job_submit_attempt`` arm of the J20 replay table
+            # red -- do not "simplify" these away.
             row.update(
                 {
                     "slurm_job_id": requested_id,
                     "submitted_at": _format_utc(submitted_at or _utcnow()),
                     "started_at": _format_utc(started_at) if started_at is not None else None,
                     "finished_at": _format_utc(finished_at) if finished_at is not None else None,
-                    "exit_code": exit_code,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                    "log_uri": log_uri,
+                    "exit_code": _resolved_caller_evidence(exit_code, durable=existing.get("exit_code")),
+                    "error_code": _resolved_caller_evidence(error_code, durable=existing.get("error_code")),
+                    "error_message": _resolved_caller_evidence(
+                        error_message, durable=existing.get("error_message")
+                    ),
+                    "log_uri": _resolved_caller_evidence(log_uri, durable=existing.get("log_uri")),
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -2250,6 +2285,18 @@ class FileOrchestrationJournalRepository:
             if require_unbound and existing.get("slurm_job_id") not in (None, ""):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = apply_accepted_submit_transition(existing, transition)
+            # #1589 (design D3): resolve BEFORE the guards, which puts it before
+            # the ``changed_fields`` equality gate below too -- that ordering is
+            # the whole fix.  The gate compares the row against durable state,
+            # and durable state has been stripped by the write boundary, so a
+            # raw placeholder here would make an identical replay differ from
+            # the row forever: every pass "applied", every pass another record.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if started_at is not None:
                 row["started_at"] = _format_utc(started_at)
             if finished_at is not None:
@@ -2333,6 +2380,17 @@ class FileOrchestrationJournalRepository:
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = dict(existing)
             row["status"] = status
+            # #1589 (design D3): same ordering requirement as the submit-evidence
+            # leg -- resolve before the guards and therefore before the equality
+            # gate.  ``running -> running`` is a legal self transition, so a raw
+            # placeholder here is an unbounded append loop: nothing else in this
+            # leg ever stops an identical poll from "changing" the row.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if started_at is not None:
                 row["started_at"] = _format_utc(started_at)
             if finished_at is not None:
@@ -2442,14 +2500,31 @@ class FileOrchestrationJournalRepository:
                 or not str(existing.get("slurm_job_id") or "").isdigit()
             ):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
-            desired_error_code = error_code or "SLURM_JOB_CANCELLED"
+            # #1589 (design D3): this leg writes its whole evidence family
+            # UNCONDITIONALLY, so a stripped placeholder does not decline the
+            # overwrite -- it destroys the value.  Withheld therefore resolves
+            # against the persisted row.  Resolved ONCE, above the comparator,
+            # so the value compared and the value persisted are literally the
+            # same expression: otherwise the second Gateway receipt compares a
+            # raw placeholder against erased durable state, answers ``stale``,
+            # and ``chain_forecast_control.cancel_active_cycle_jobs`` drops the
+            # cancellation event on an uncommitted result.
+            resolved_exit_code = _resolved_caller_evidence(exit_code, durable=existing.get("exit_code"))
+            resolved_error_message = _durable_error_message(
+                _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+            )
+            resolved_log_uri = _resolved_caller_evidence(log_uri, durable=existing.get("log_uri"))
+            desired_error_code = (
+                _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
+                or "SLURM_JOB_CANCELLED"
+            )
             if str(existing.get("status") or "") == "reconcile_unverified":
                 desired = {
                     "finished_at": _format_utc(finished_at),
-                    "exit_code": exit_code,
+                    "exit_code": resolved_exit_code,
                     "error_code": desired_error_code,
-                    "error_message": _durable_error_message(error_message),
-                    "log_uri": log_uri,
+                    "error_message": resolved_error_message,
+                    "log_uri": resolved_log_uri,
                     "cancellation_receipt_recorded": True,
                 }
                 if all(existing.get(field) == value for field, value in desired.items()):
@@ -2462,10 +2537,10 @@ class FileOrchestrationJournalRepository:
                 {
                     "status": "reconcile_unverified",
                     "finished_at": _format_utc(finished_at),
-                    "exit_code": exit_code,
+                    "exit_code": resolved_exit_code,
                     "error_code": desired_error_code,
-                    "error_message": _durable_error_message(error_message),
-                    "log_uri": log_uri,
+                    "error_message": resolved_error_message,
+                    "log_uri": resolved_log_uri,
                     "cancellation_receipt_recorded": True,
                     "updated_at": _format_utc(_utcnow()),
                 }
@@ -3344,17 +3419,34 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
-            # Terminal stickiness (#1312): a master already marked
-            # ``permanently_failed`` keeps that status while the projection
-            # still refreshes its evidence fields.  Without this, every later
-            # resume/reconcile pass would rewrite the derived
-            # ``{succeeded, partially_failed, failed}`` projection over the
-            # mark and oscillate.  Same shape as the defer path's terminal
-            # short-circuit in ``_defer_forecast_cohort_projection_unlocked``.
+            # Terminal stickiness (#1312, widened by #1589): a master already
+            # marked ``permanently_failed`` keeps that status AND the
+            # attribution family (``error_code``/``error_message``) it already
+            # carries, while the observational family (``finished_at`` /
+            # ``exit_code`` / ``log_uri``) still refreshes.  Without this, every
+            # later pass rewrote the derived
+            # ``{succeeded, partially_failed, failed}`` projection over the mark
+            # and oscillated; #1589 is the same disease one level down -- a row
+            # saying "permanently failed" while its error code is recomputed by
+            # the current pass is self-contradictory attribution.  Refreshing
+            # observational evidence under the mark is the intended behaviour
+            # and contradicts nothing, so it is deliberately NOT frozen (the
+            # defer path's whole-row short circuit is the rejected alternative).
+            #
+            # The trigger stays a literal ``permanently_failed`` comparison
+            # rather than ``in TERMINAL_PIPELINE_STATUSES``.  The criterion is a
+            # conjunction: the status must be externally applied -- not
+            # derivable by this projection, which yields only
+            # ``succeeded``/``partially_failed``/``failed`` -- AND already
+            # protected from status overwrite today.  ``permanently_failed`` is
+            # currently the only status meeting both; widening to the derived
+            # values would pin the first pass's conclusion forever, i.e. disable
+            # the projection.  ``cancelled`` meets the first condition but not
+            # the second (it has no status stickiness at all today); that is a
+            # pre-existing gap tracked separately, not something to fix here.
+            master_is_permanently_failed = str(existing.get("status") or "") == "permanently_failed"
             sticky_master_status = (
-                "permanently_failed"
-                if str(existing.get("status") or "") == "permanently_failed"
-                else projected_master_status
+                "permanently_failed" if master_is_permanently_failed else projected_master_status
             )
             cohort_row = apply_accepted_submit_transition(
                 existing,
@@ -3370,15 +3462,31 @@ class FileOrchestrationJournalRepository:
                     "candidate_projections": [
                         existing_projections[task_id] for task_id in sorted(existing_projections)
                     ],
-                    "error_code": projected_master_error_code,
+                    "error_code": (
+                        existing.get("error_code")
+                        if master_is_permanently_failed
+                        else projected_master_error_code
+                    ),
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
+            # #1589 (design D3): a display placeholder is a withheld value, not
+            # an instruction to overwrite.  Resolving the caller's evidence
+            # restores what these ``is not None`` guards were meant to ask --
+            # "did the caller supply a real value?" -- so a round-tripped public
+            # row can no longer displace a real durable value that the write
+            # boundary would then withhold, losing it outright.  Resolved here,
+            # above the guards, which also puts it above the ``cohort_changed``
+            # comparison below.
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            master_error_message = _resolved_caller_evidence(master_error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if finished_at is not None:
                 cohort_row["finished_at"] = _format_utc(finished_at)
             if exit_code is not None:
                 cohort_row["exit_code"] = exit_code
-            if master_error_message is not None:
+            if master_error_message is not None and not master_is_permanently_failed:
                 cohort_row["error_message"] = _durable_error_message(master_error_message)
             if log_uri is not None:
                 cohort_row["log_uri"] = log_uri
@@ -3552,14 +3660,39 @@ class FileOrchestrationJournalRepository:
                 status="reconcile_unverified",
             ),
         )
+        # #1589 (design D3): same rule as the batched projection leg -- a
+        # display placeholder is a withheld value, not an overwrite.  This leg
+        # is separately reachable: pass 1 parks the row on
+        # ``reconcile_unverified``, which is not terminal, so the whole-row
+        # short circuit above does not stop a pass 2 carrying a placeholder.
+        # Everything below is resolved above the ``changed_fields`` equality
+        # gate, so the value compared is the value persisted.
+        #
+        # The leg has TWO regimes and they take different resolutions.  The
+        # error family here is written UNCONDITIONALLY, so declining is not an
+        # option and a withheld value resolving to ``None`` would destroy the
+        # persisted one -- and the gate would then compare a raw placeholder
+        # against erased durable state and never converge, appending a record
+        # per replay.  Hence ``durable=``, resolved BEFORE the
+        # ``_durable_error_message`` wrap, exactly as
+        # ``complete_pipeline_job_cancellation`` does it.  The trio below is
+        # guarded by ``is not None``, where ``None`` makes the guard decline and
+        # declining IS keeping, so it takes no ``durable=``.
+        resolved_error_code = _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
+        resolved_error_message = _durable_error_message(
+            _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+        )
         row.update(
             {
                 "status": "reconcile_unverified",
-                "error_code": error_code,
-                "error_message": _durable_error_message(error_message),
+                "error_code": resolved_error_code,
+                "error_message": resolved_error_message,
                 "updated_at": _format_utc(_utcnow()),
             }
         )
+        finished_at = _resolved_caller_evidence(finished_at)
+        exit_code = _resolved_caller_evidence(exit_code)
+        log_uri = _resolved_caller_evidence(log_uri)
         if finished_at is not None:
             row["finished_at"] = _format_utc(finished_at)
         if exit_code is not None:
@@ -3627,6 +3760,19 @@ class FileOrchestrationJournalRepository:
                 return previous_status, _public_scheduler_row(existing)
             row = dict(existing)
             row["status"] = status
+            # #1589 (design D3): resolve before the guards below.  No ``durable=``
+            # fallback and no equality gate is added here on purpose: ``row``
+            # starts as a copy of ``existing``, so a guard that declines already
+            # keeps the persisted value, and this leg appending on every call --
+            # gate-free -- is pre-existing behaviour that is not this fix's to
+            # change.  What the fix owes is value convergence, and the guards
+            # give exactly that.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             safe_error_message = _durable_error_message(error_message)
             for key, value in (
                 ("started_at", started_at),
@@ -6180,6 +6326,11 @@ class FileOrchestrationJournalRepository:
         self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        # Known boundary (#1592): this projects the UNSTRIPPED ``row``.  It is a
+        # caller-facing return value, not durable state -- the durable record and
+        # direct row file were both built from the stripped record above.  A
+        # caller that round-trips this value back into a write is caught by the
+        # strip at the write boundary, so it cannot become persistent pollution.
         return _public_scheduler_row(row)
 
     def _write_pipeline_job_direct_unlocked(
@@ -6277,6 +6428,11 @@ class FileOrchestrationJournalRepository:
         materialize_model_id: str | None = None,
         sequence: int | None = None,
     ) -> None:
+        # Caller-boundary strip: this sees the RAW payload, before the public
+        # event rendering below.  For pipeline_event this is the only
+        # anti-laundering layer there is -- ``_journal_record_for_write``
+        # deliberately skips events so it cannot erase that rendering's
+        # intentional placeholders (#1592 design D2b).  Do not remove it.
         payload = _strip_redaction_placeholders(payload)
         payload = _redact_durable_error_message_fields(record_type, payload)
         private_recovery_payload = dict(payload) if record_type == "pipeline_event" else None
@@ -8020,6 +8176,49 @@ def _journal_record_for_write(
     model_id: str | None,
     sequence: int,
 ) -> dict[str, Any]:
+    # #1592: every journal record is constructed here, so the anti-laundering
+    # strip belongs here rather than at each write call site.  Two durable write
+    # paths -- the cohort projection payload loop and
+    # ``_write_pipeline_job_unlocked`` -- never reach
+    # ``_append_validated_record_unlocked``, so a caller round-tripping a public
+    # row used to launder ``[object-uri]``/``[uri]`` into durable state through
+    # them.  Placed before the sibling error-message sanitizer, matching the
+    # existing order at that outer call site.
+    #
+    # THE PRINCIPLE, not an exception list: the anti-laundering strip removes
+    # placeholders that came FROM A CALLER.  It must never run downstream of the
+    # journal's own public rendering, because that rendering DELIBERATELY
+    # produces ``[object-uri]``/``[local-path]`` as the durable public value.
+    # ``_append_validated_record_unlocked`` sanitizes pipeline_event payloads
+    # (``_public_pipeline_event_payload``) AFTER its own caller-boundary strip
+    # and immediately before calling this function, so stripping events here
+    # would erase deliberate evidence rather than laundering -- turning a
+    # rendered "there was an object URI here" into "there was nothing here".
+    # The layering that follows is therefore: an event that goes through
+    # ``_append_validated_record_unlocked`` strips at that caller boundary,
+    # where its raw un-sanitized payload still exists; the job lane strips here,
+    # at the record constructor.  That is NOT a guarantee for every event -- four
+    # inline payload loops build their payload dicts and call this function
+    # directly, so whatever they emit gets neither the caller-boundary strip nor
+    # ``_public_pipeline_event_payload``:
+    #
+    #   * ``reject_pipeline_job_submit_attempt`` (submission-failed rejection)
+    #     -- one ``submission`` event;
+    #   * ``mark_pipeline_job_permanently_failed`` (permanent-failure mark)
+    #     -- one ``permanently_failed`` event;
+    #   * ``permit_pipeline_job_retry`` (reservation-lost release) -- NO event
+    #     payload at all, only ``hydro_run``/``pipeline_job`` rows;
+    #   * ``project_forecast_cohort_tasks`` (cohort task projection) -- TWO
+    #     events, ``array_task_reconciled`` and ``status_change``.
+    #
+    # The three that do emit events are safe only because their ``details`` carry
+    # no URI-bearing field, audited field by field in design D1 and re-audited
+    # for both projection payloads; that is the declared cost of the carve-out,
+    # not a structural property.  Anyone adding a fifth loop, or a second
+    # renderer, must apply the same rule to it rather than add another
+    # record_type here.
+    if record_type != "pipeline_event":
+        payload = _strip_redaction_placeholders(payload)
     payload = _redact_durable_error_message_fields(record_type, payload)
     record: dict[str, Any] = {
         "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
@@ -8820,6 +9019,49 @@ def _strip_redaction_placeholders(value: Any) -> Any:
     if isinstance(value, str) and value in _PERSISTED_REDACTION_PLACEHOLDERS:
         return None
     return value
+
+
+def _resolved_caller_evidence(value: Any, *, durable: Any = None) -> Any:
+    """Resolve one caller-supplied evidence field against durable state (#1589 D3).
+
+    THE ONE PLACE the "a display placeholder is a WITHHELD value" rule is
+    spelled out.  Every write leg that lets a caller hand in evidence must send
+    it through here BEFORE both its overwrite guard and its equality gate,
+    because the write boundary (``_journal_record_for_write``) strips
+    placeholders out of durable state: a leg that compares raw caller input
+    against already-stripped durable state can never converge, and its guard
+    reads a placeholder as "the caller supplied a real value" when the caller
+    supplied nothing of the sort.
+
+    Withheld means KEEP.  ``durable`` is the value the row already carries:
+
+    * placeholder in  -> ``durable`` out.  Pass ``durable=`` at legs whose write
+      is UNCONDITIONAL, where declining is not an option and ``None`` would
+      destroy the value.  Omit it at legs guarded by ``is not None``: there,
+      ``None`` makes the guard decline, and declining IS keeping.  Omitting it
+      is also what keeps ``datetime``-typed parameters safe -- resolving one to
+      the row's already-formatted string would then hit ``_format_utc``.
+    * genuine ``None`` in -> ``None`` out.  A caller that really passed ``None``
+      said "no value", and legs that persist that as a clear must keep doing so;
+      only a placeholder was ever withheld.
+    * anything else -> unchanged (non-string evidence included).
+
+    The "every write leg" above is the RULE, not a claim that every leg obeys it
+    today.  Four legs deliberately still write a caller error family unresolved:
+    ``update_forecast_cycle_status`` builds a fresh row and never reads the
+    persisted one, so it has nothing to resolve against;
+    ``reject_pipeline_job_submit_attempt`` writes the rejection's own required
+    error as the attempt's authoritative outcome and its idempotent branch never
+    compares the error fields, so neither displacement nor append growth bites;
+    ``update_hydro_run_status`` reads the PUBLIC projection as its base row, so
+    resolving its parameters would not save the value that read already lost;
+    ``mark_pipeline_job_permanently_failed`` is a real open gap tracked as #1630.
+    """
+
+    stripped = _strip_redaction_placeholders(value)
+    if stripped is None and value is not None:
+        return durable
+    return stripped
 
 
 def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
