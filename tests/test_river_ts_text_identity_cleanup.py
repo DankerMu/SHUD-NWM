@@ -56,9 +56,23 @@ false-flagged by a second, differently-worded oracle. ``db/migrations/**`` and
 ``scripts/node27_river_identity_backfill.py`` read the text columns by
 definition and are out of register too.
 
+Two invariants are checked on every registered surface beyond "which text
+columns are referenced" (design D10.5/D10.6, added after cross-review):
+
+* **adjacency** — a sanctioned aid must be AND-ed in the same conjunction as the
+  key/enum predicate that supersedes it, and its ``remove with #1342`` marker
+  must be on its own line or the one immediately above. Both are what make the
+  aid deletable: an aid separated from its counterpart is load-bearing, and a
+  marker separated from its aid does not say which line to delete.
+* **census** — each registered file declares how many ``hydro.river_timeseries``
+  mentions it has, so a NEW statement in a registered file is red until it is
+  registered and given a shape pin. Without it the register only ever checked
+  the statements it already knew about.
+
 The oracle's own contract is pinned by the counter-example tests at the bottom:
-a forbidden predicate, an unmarked aid, a text fact join and a bare-column
-regression each have to turn it red.
+a forbidden predicate, an unmarked aid, a detached marker, a text fact join, an
+aid whose counterpart vanished or drifted out of its conjunction, and a
+bare-column regression each have to turn it red.
 """
 
 from __future__ import annotations
@@ -79,6 +93,7 @@ from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     TEXT_IDENTITY_COLUMNS,
+    assert_aid_is_conjoined_with_its_counterpart,
     assert_text_fact_columns,
     outer_predicates,
     strip_all_subqueries,
@@ -87,6 +102,67 @@ from tests.test_sql_shape_helpers import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# The register: every production file whose ``hydro.river_timeseries`` SQL this
+# oracle owns. Module-level rather than local to the register test because two
+# other guards derive from it — the statement census below, and
+# ``tests/test_select_ci_tests.py``'s wiring meta-test, which asserts that a diff
+# to each of these paths selects THIS file in the CI lane. A new registered file
+# therefore cannot be added without also being wired and censused.
+REGISTERED_SOURCES: tuple[str, ...] = (
+    "packages/common/forecast_store.py",
+    "services/tile_publisher/publisher.py",
+    "services/tile_publisher/forcing_copyback_backfill.py",
+    "scripts/node27_autopipeline.py",
+    "scripts/summarize_qhh_smoke_results.py",
+    "scripts/reset_qhh_smoke_db.py",
+    "db/seeds/seed_demo.py",
+    "workers/output_parser/parser.py",
+    "tests/integration_helpers.py",
+)
+
+RIVER_TABLE = "hydro.river_timeseries"
+
+# Statement census (design D10.6). Every register entry above pins the SHAPE of
+# the statements it knows about; nothing made a registered file declare how many
+# statements it has, so a NEW ``hydro.river_timeseries`` statement — a tenth
+# forecast_store method, a third autopipeline call site — landed with the whole
+# oracle green. The census closes that: the count of non-docstring string
+# mentions of the table is pinned per file, so any addition is red until the
+# register (and this number) is updated.
+#
+# Non-docstring string constants, not raw source occurrences: prose in a
+# docstring or a ``#`` comment that names the table is not a statement, and
+# making an explanatory paragraph red the census is noise nobody would keep.
+# Counted per OCCURRENCE, so two statements inside one constant both register.
+#
+# The breakdown, so an intentional change can be re-derived rather than guessed:
+#
+# * forecast_store.py 10 = the eight segment blocks + the latest-product
+#   fallback's river scan (A9) + ``_qhh_latest_query_indexes``'s
+#   ``"table": "hydro.river_timeseries"`` index-metadata literal.
+# * publisher.py 2 = the discovery aggregate + the PublishError message naming
+#   the required table.
+# * forcing_copyback_backfill.py 1 = the correlated EXISTS probe.
+# * node27_autopipeline.py 2 = the ingest and publish per-tick criteria.
+# * summarize_qhh_smoke_results.py 1 / reset_qhh_smoke_db.py 1 = one statement
+#   each; the reset one is the table NAME passed to its ``_delete`` helper,
+#   which is why the census counts bare mentions and not just SQL-shaped ones.
+# * seed_demo.py 5 = the seed INSERT + two verification counts + the two
+#   human-readable count LABELS.
+# * parser.py 4 = probe, window, DELETE, INSERT.
+# * integration_helpers.py 2 = the dual-write INSERT + the cleanup DELETE.
+RIVER_TABLE_CENSUS: dict[str, int] = {
+    "packages/common/forecast_store.py": 10,
+    "services/tile_publisher/publisher.py": 2,
+    "services/tile_publisher/forcing_copyback_backfill.py": 1,
+    "scripts/node27_autopipeline.py": 2,
+    "scripts/summarize_qhh_smoke_results.py": 1,
+    "scripts/reset_qhh_smoke_db.py": 1,
+    "db/seeds/seed_demo.py": 5,
+    "workers/output_parser/parser.py": 4,
+    "tests/integration_helpers.py": 2,
+}
 
 # The marker every retained transitional text predicate must carry, verbatim.
 # #1341 introduced the wording; #1342 removes every line that has it, so a
@@ -163,6 +239,40 @@ def _sql_constants(
     return tuple(node.value for node in found)
 
 
+def _docstring_constants(tree: ast.AST) -> set[int]:
+    """Identities of the ``ast.Constant`` nodes that are docstrings, not data."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        body = node.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            found.add(id(body[0].value))
+    return found
+
+
+def _river_table_mentions(source: str) -> int:
+    """Occurrences of ``hydro.river_timeseries`` in non-docstring string constants.
+
+    Parsed rather than grepped for the same reason ``_sql_constants`` is: raw
+    source counts every ``#`` comment and docstring paragraph that names the
+    table, which turns a prose edit into a census failure and teaches everyone
+    to bump the number without reading it.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_constants(tree)
+    return sum(
+        node.value.count(RIVER_TABLE)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+    )
+
+
 def _assert_no_text_identity_predicate(sql: str, label: str, *, resolves_keys_inline: bool = False) -> None:
     """No unaliased text identity column is compared to anything.
 
@@ -192,9 +302,18 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
     """Every sanctioned text conjunct of ``alias`` sits under the removal marker.
 
     Asserted per aid on the RAW sql (markers are comments, so they are gone from
-    ``outer_predicates``): the marker line must appear somewhere above the aid's
-    own line, and there must be at least one marker per aid so a single marker
-    cannot cover a predicate that quietly grew a second text column.
+    ``outer_predicates``): the marker must be ADJACENT to the aid — on the aid's
+    own line or on the line immediately above it — and there must be at least
+    one marker per aid so a single marker cannot cover a predicate that quietly
+    grew a second text column.
+
+    Adjacency, not "anywhere above" (#1442 round-2, ride-along F6). #1342's
+    removal is a per-LINE deletion driven by this marker: a marker two lines up,
+    or at the top of a constant, tells the reader nothing about which line to
+    delete, and deleting the marker's own line leaves the aid behind — a text
+    predicate on a column that no longer exists, i.e. a migration that fails at
+    the first query rather than at the ALTER. The looser rule also went green on
+    a statement whose aid had drifted away from its marker entirely.
 
     Alias-scoped, because these statements read more than one table: the
     latest-product fallback's station CTE carries ``fst.variable = ANY(...)`` on
@@ -205,7 +324,7 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
         assert PUSHDOWN_AID_MARKER not in sql, f"{label}: marker present but no aid is sanctioned here"
         return
     lines = sql.splitlines()
-    marker_lines = [index for index, line in enumerate(lines) if PUSHDOWN_AID_MARKER in line]
+    marker_lines = {index for index, line in enumerate(lines) if PUSHDOWN_AID_MARKER in line}
     assert len(marker_lines) >= len(expected_aids), f"{label}: fewer markers than sanctioned aids"
     for aid in expected_aids:
         aid_lines = [
@@ -215,7 +334,10 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
         ]
         assert aid_lines, f"{label}: sanctioned aid {aid} is not present at all"
         for aid_line in aid_lines:
-            assert any(marker < aid_line for marker in marker_lines), f"{label}: aid {aid} carries no marker"
+            assert marker_lines & {aid_line - 1, aid_line}, (
+                f"{label}: aid {aid} on line {aid_line + 1} carries no ADJACENT marker "
+                f"(markers on lines {sorted(index + 1 for index in marker_lines)})"
+            )
 
 
 def _assert_no_text_fact_join(sql: str, alias: str, label: str) -> None:
@@ -246,6 +368,11 @@ def _assert_switched_surface(
     assert_text_fact_columns(sql, alias, expected_aids, label)
     _assert_no_text_fact_join(sql, alias, label)
     _assert_aids_are_marked(sql, alias, expected_aids, label)
+    # Adjacency (#1442 round-2, design D10.5): presence of the aid is not
+    # enough — it must be AND-ed to the key/enum predicate that supersedes it,
+    # or it is load-bearing rather than redundant and #1342 cannot delete it.
+    for aid in sorted(expected_aids):
+        assert_aid_is_conjoined_with_its_counterpart(sql, alias, aid, label)
 
 
 # ---------------------------------------------------------------------------
@@ -502,21 +629,40 @@ def test_latest_product_fallback_river_chain_is_keyed_end_to_end() -> None:
 
 
 def test_latest_product_fallback_scan_guards_still_fold_away_on_a_null_binding() -> None:
-    """Each scan_* guard keeps its ``IS NULL`` escape, so an unpinned refresh is unchanged."""
+    """Each scan_* guard keeps its ``IS NULL`` escape, so an unpinned refresh is unchanged.
+
+    Pinned as five WHOLE-GUARD exact substrings (#1442 round-2, F5). Asserting
+    only that ``(%(scan_x)s IS NULL`` appears somewhere in the CTE is satisfied
+    by a guard whose OR branch has drifted to a different column, so the
+    fold-away contract — bind NULL, the guard disappears, the scan reverts to
+    the full window — could be broken with nothing red. Written against
+    ``outer_predicates`` (sub-selects stripped, comments removed, whitespace
+    collapsed) so re-indenting the CTE cannot break the pin, which is what makes
+    the verbatim form maintainable (#1341 idiom).
+    """
     sql = _latest_product_fallback_statement()
     river_cte = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]
+    outer = outer_predicates(river_cte)
 
-    for parameter in (
-        "scan_run_id",
-        "scan_basin_version_id",
-        "scan_river_network_version_id",
-        "scan_display_start",
-        "scan_display_end",
-    ):
-        assert f"(%({parameter})s IS NULL" in river_cte, parameter
-    # basin_version_id no longer appears as a fact predicate at all — only
-    # inside its authority resolution, which outer_predicates strips.
+    # run_id / river_network_version_id keep their transitional text conjunct
+    # INSIDE the guard, AND-ed with the key predicate that supersedes it; the
+    # `= )` tail is the key-resolution sub-select the stripper removed.
+    assert "AND (%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in outer
+    assert (
+        "AND (%(scan_river_network_version_id)s IS NULL "
+        "OR (rt.river_network_version_id = %(scan_river_network_version_id)s "
+        "AND rt.river_network_version_key = ))"
+    ) in outer
+    # basin_version_id is not a sanctioned aid, so its guard is key-only: it no
+    # longer appears as a fact predicate at all, only inside the authority
+    # resolution the stripper removes.
+    assert "AND (%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = )" in outer
+    assert "AND (%(scan_display_start)s IS NULL OR rt.valid_time >= %(scan_display_start)s)" in outer
+    assert "AND (%(scan_display_end)s IS NULL OR rt.valid_time <= %(scan_display_end)s)" in outer
+    # Non-vacuity for the stripped tails: the resolutions really are there.
+    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in river_cte
     assert "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version" in river_cte
+    assert "rt.river_network_version_key = (SELECT river_network_version_key" in river_cte
 
 
 # ---------------------------------------------------------------------------
@@ -702,15 +848,27 @@ def test_parser_dual_write_insert_still_writes_both_representations() -> None:
     If this ever goes red because the text columns were dropped from the INSERT,
     the rows stop being readable by anything still on text and #1342's ordering
     has been violated from the write side.
+
+    Asserted against the INSERT's column-list PARENTHETICAL, not against the
+    statement text (#1442 round-2, F4). A bare ``"run_id" in insert`` is
+    satisfied by the ``ON CONFLICT (run_id, ...)`` clause further down, so the
+    text columns could be deleted from the write list — the very regression this
+    test names — while every one of these assertions stayed green.
     """
     insert = _parser_river_statements()[3]
+    match = re.search(r"INSERT INTO hydro\.river_timeseries\s*\((?P<columns>[^)]*)\)\s*VALUES", insert, re.S)
+    assert match is not None, insert
+    columns = [column.strip() for column in match.group("columns").split(",") if column.strip()]
 
+    # Non-vacuity: the parenthetical really is the write list, not the conflict
+    # target (which names five columns, all of them also here).
+    assert len(columns) == 17, columns
     for column in ("run_id", "basin_version_id", "river_network_version_id", "river_segment_id"):
-        assert column in insert, column
+        assert column in columns, column
     for column in ("run_key", "basin_version_key", "river_network_version_key", "river_segment_key"):
-        assert column in insert, column
+        assert column in columns, column
     for column in ("variable_e", "unit_e", "quality_flag_e"):
-        assert column in insert, column
+        assert column in columns, column
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +1011,60 @@ def test_a_text_fact_join_is_red_even_where_that_column_is_a_sanctioned_aid() ->
         _assert_no_text_fact_join(mutated, "rt", "widened group")
 
 
+def test_an_aid_whose_counterpart_disappears_turns_the_oracle_red() -> None:
+    """M10/M30: delete the enum conjunct, keep the text one.
+
+    Every other check stays green — the aid set is unchanged, nothing forbidden
+    appeared, the marker is still adjacent — so before the adjacency invariant
+    this mutation shipped a surface that reads identity from the text column and
+    would break outright when #1342 drops it.
+    """
+    mutated = _SWITCHED_SPECIMEN.replace("\n      AND rt.variable_e = 'q_down'::hydro.river_variable", "")
+
+    assert_text_fact_columns(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
+    _assert_no_text_fact_join(mutated, "rt", "counterpart dropped")
+    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
+    with pytest.raises(AssertionError):
+        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
+
+
+def test_an_aid_separated_from_its_counterpart_turns_the_oracle_red() -> None:
+    """Both columns still present, but no longer the same conjunction."""
+    mutated = _SWITCHED_SPECIMEN.replace(
+        "AND rt.variable = 'q_down'\n",
+        "AND rt.variable = 'q_down'\n      AND rt.valid_time >= %s\n",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "separated aid")
+
+
+def test_a_marker_detached_from_its_aid_turns_the_oracle_red() -> None:
+    """F6: #1342 deletes BY LINE, so a marker that floats free is not a marker.
+
+    The mutation keeps both markers and both aids — it only hoists the markers
+    to the top of the block, which is exactly the shape the pre-#1442 "somewhere
+    above" rule accepted.
+    """
+    without_markers = _SWITCHED_SPECIMEN.replace(f"      {PUSHDOWN_AID_MARKER}\n", "")
+    mutated = f"    {PUSHDOWN_AID_MARKER}\n    {PUSHDOWN_AID_MARKER}\n{without_markers}"
+
+    assert mutated.count(PUSHDOWN_AID_MARKER) == 2
+    assert_text_fact_columns(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
+    with pytest.raises(AssertionError):
+        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
+
+
+def test_a_marker_on_the_aids_own_line_is_accepted() -> None:
+    """Adjacency is "same line or the line above", not "the line above" only."""
+    mutated = _SWITCHED_SPECIMEN.replace(
+        f"      {PUSHDOWN_AID_MARKER}\n      AND rt.variable = 'q_down'",
+        f"      AND rt.variable = 'q_down' {PUSHDOWN_AID_MARKER}",
+    )
+
+    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "inline marker")
+
+
 def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
     """The other direction: losing an aid silently reinstates the chunk collapse."""
     mutated = _SWITCHED_SPECIMEN.replace("AND rt.river_network_version_id = %s\n", "")
@@ -895,17 +1107,7 @@ def test_the_register_covers_every_file_this_change_switched() -> None:
     rather than a quiet gap. The display four are deliberately absent — they are
     #1341's register, watched by tests/test_river_ts_read_path_surrogate_keys.py.
     """
-    registered = (
-        ("packages", "common", "forecast_store.py"),
-        ("services", "tile_publisher", "publisher.py"),
-        ("services", "tile_publisher", "forcing_copyback_backfill.py"),
-        ("scripts", "node27_autopipeline.py"),
-        ("scripts", "summarize_qhh_smoke_results.py"),
-        ("scripts", "reset_qhh_smoke_db.py"),
-        ("db", "seeds", "seed_demo.py"),
-        ("workers", "output_parser", "parser.py"),
-        ("tests", "integration_helpers.py"),
-    )
+    registered = tuple(tuple(path.split("/")) for path in REGISTERED_SOURCES)
     for parts in registered:
         assert REPO_ROOT.joinpath(*parts).is_file(), "/".join(parts)
 
@@ -917,6 +1119,53 @@ def test_the_register_covers_every_file_this_change_switched() -> None:
     )
     for parts in unregistered:
         assert parts not in registered, "/".join(parts)
+
+
+def test_every_registered_file_declares_its_river_timeseries_statement_count() -> None:
+    """A new statement in a registered file must force a register update (D10.6).
+
+    Without this, the register is only as good as its own list of statements: a
+    tenth ``forecast_store`` method or a third ``node27_autopipeline`` call site
+    that reads the fact table by text identity is invisible to every shape
+    assertion above, because no assertion ever looks at it. The census makes the
+    ADDITION itself red, so the author has to come here, register the statement
+    and give it a shape pin.
+    """
+    assert set(RIVER_TABLE_CENSUS) == set(REGISTERED_SOURCES), "census and register must list the same files"
+    for path, expected in RIVER_TABLE_CENSUS.items():
+        source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
+        assert _river_table_mentions(source) == expected, (
+            f"{path}: {_river_table_mentions(source)} mentions of {RIVER_TABLE}, census says {expected}. "
+            "Register the new statement (and pin its shape) before updating this number."
+        )
+
+
+def test_the_census_counts_statements_and_ignores_prose() -> None:
+    """The census's own contract, on a synthetic module.
+
+    Two halves, because either failure makes it useless: a new statement must
+    raise the count (or the guard never bites), and a docstring / comment that
+    names the table must not (or the count is bumped reflexively).
+    """
+    prose_only = (
+        '"""Module docstring naming hydro.river_timeseries."""\n'
+        "# comment naming hydro.river_timeseries\n"
+        "def f():\n"
+        '    """Reads hydro.river_timeseries."""\n'
+        "    return 1\n"
+    )
+    assert _river_table_mentions(prose_only) == 0
+
+    with_statement = prose_only + 'SQL = "SELECT 1 FROM hydro.river_timeseries WHERE run_id = %s"\n'
+    assert _river_table_mentions(with_statement) == 1
+
+    # Two statements inside ONE constant are two, not one: a call site that
+    # grows a second statement in the same f-string is exactly the addition the
+    # per-file count exists to catch.
+    both = with_statement + (
+        'MORE = """\nDELETE FROM hydro.river_timeseries;\nSELECT 1 FROM hydro.river_timeseries;\n"""\n'
+    )
+    assert _river_table_mentions(both) == 3
 
 
 def test_the_sanctioned_ceiling_is_the_shared_one_not_a_private_copy() -> None:

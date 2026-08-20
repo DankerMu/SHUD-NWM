@@ -65,9 +65,29 @@ EXPECTED_TEXT_SET_COLUMNS = {
     "quality_flag",
 }
 # Mirror rule (design D3): every refreshed text column that HAS a surrogate
-# counterpart gets it re-set too. Conflict-target identity columns are re-set
-# on neither side.
-EXPECTED_SURROGATE_SET_COLUMNS = {"basin_version_key", "unit_e", "quality_flag_e"}
+# counterpart gets it re-set too. Since #1442 (design D10.3) the SET list also
+# refreshes the identity keys/enum that have no refreshed text counterpart —
+# a no-op for key-converged rows, and the only way a replay can still heal a
+# NULL-key sentinel row now that the pre-INSERT DELETE is keyed.
+EXPECTED_SURROGATE_SET_COLUMNS = {
+    "basin_version_key",
+    "unit_e",
+    "quality_flag_e",
+    "run_key",
+    "river_network_version_key",
+    "river_segment_key",
+    "variable_e",
+}
+# The text identity columns of the conflict target stay unwritten on both the
+# INSERT-conflict and the replay path: re-assigning a conflict-target column is
+# either a no-op or a lie about which row was matched.
+EXPECTED_NEVER_SET_COLUMNS = (
+    "run_id",
+    "river_network_version_id",
+    "river_segment_id",
+    "variable",
+    "valid_time",
+)
 
 
 def _t(hour: int) -> datetime:
@@ -312,7 +332,7 @@ def test_text_columns_of_each_value_row_are_unchanged(monkeypatch: pytest.Monkey
         )
 
 
-def test_on_conflict_set_mirrors_exactly_the_three_refreshable_surrogate_columns(
+def test_on_conflict_set_mirrors_every_refreshable_and_identity_surrogate_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _patch_execute_values(monkeypatch)
@@ -325,20 +345,13 @@ def test_on_conflict_set_mirrors_exactly_the_three_refreshable_surrogate_columns
     for column in assignments:
         assert assignments[column] == f"EXCLUDED.{column}"
 
-    # Conflict-target identity is re-set on NEITHER side.
+    # Text conflict-target identity is re-set on neither side; its surrogate
+    # counterparts are (design D10.3 — replay heals a NULL-key sentinel row).
     assert "ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)" in statement
-    for identity_column in (
-        "run_id",
-        "river_network_version_id",
-        "river_segment_id",
-        "variable",
-        "valid_time",
-        "run_key",
-        "river_network_version_key",
-        "river_segment_key",
-        "variable_e",
-    ):
+    for identity_column in EXPECTED_NEVER_SET_COLUMNS:
         assert identity_column not in assignments
+    for surrogate_column in ("run_key", "river_network_version_key", "river_segment_key", "variable_e"):
+        assert assignments[surrogate_column] == f"EXCLUDED.{surrogate_column}"
 
 
 def test_integration_replay_statement_stays_equivalent_to_the_production_insert(

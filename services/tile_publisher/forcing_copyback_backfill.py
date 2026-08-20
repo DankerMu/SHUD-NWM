@@ -285,9 +285,14 @@ def _require_backfill_schema(session: Session) -> None:
             details={"missing_tables": missing_tables},
         )
 
+    # Kept in lockstep with _CANDIDATE_RUNS_SQL: exactly the columns that
+    # statement references per relation (#1442). rt.run_id left the statement
+    # when the correlated probe moved to rt.run_key = h.run_key, and rt.variable
+    # stays only as the transitional pushdown aid (removed with #1342).
     required_columns = {
         ("hydro", "hydro_run"): {
             "run_id",
+            "run_key",
             "status",
             "model_id",
             "basin_version_id",
@@ -295,7 +300,7 @@ def _require_backfill_schema(session: Session) -> None:
             "source_id",
             "cycle_time",
         },
-        ("hydro", "river_timeseries"): {"run_id", "variable", "value"},
+        ("hydro", "river_timeseries"): {"run_key", "variable", "variable_e", "value"},
         ("met", "forcing_version"): {
             "forcing_version_id",
             "forcing_package_uri",

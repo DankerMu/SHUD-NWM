@@ -8,7 +8,7 @@
 
 文本谓词 MUST 限于受批过渡下推辅助列（`run_id`/`river_network_version_id`/`variable`），且仅当 (a) 该身份以字面量/绑定参数形态出现（经权威表 join 到达的身份保持 key-join only，文本 fact join 在受批探针体外禁止）且 (b) 查询可达压缩 chunk 时保留，带 `remove with #1342` 标记；`basin_version_id`/`river_segment_id` 文本谓词 MUST 清零。生产（PostgreSQL）路径的 segment 计数 MUST 用键的行元组 DISTINCT；`publisher.py` 的 sqlite 测试路径 MUST 用键基的方言等价构造（整型拼接计数、直取枚举列），语义一致。
 
-清零 MUST 由 `tests/test_river_ts_text_identity_cleanup.py` 看护：别名限定面用渲染 SQL 断言（复用 `tests/test_sql_shape_helpers.py` 机制），裸列/片段面用逐调用点定向断言；范围仅本单在册文件（display 面由既有 oracle 看护；`db/migrations/**` 与 `scripts/node27_river_identity_backfill.py` 按定义读文本列，不在册）。
+清零 MUST 由 `tests/test_river_ts_text_identity_cleanup.py` 看护：别名限定面用渲染 SQL 断言（复用 `tests/test_sql_shape_helpers.py` 机制），裸列/片段面用逐调用点定向断言；范围仅本单在册文件（display 面由既有 oracle 看护；`db/migrations/**` 与 `scripts/node27_river_identity_backfill.py` 按定义读文本列，不在册）。oracle 看护 MUST 满足三个接线维度：(1) 每个受批文本辅助 MUST 与其键/枚举对应物出现在同一合取式中（辅助单独存活即 oracle 红），`remove with #1342` 标记 MUST 与辅助行相邻；(2) 在册文件内新增的 `hydro.river_timeseries` 语句 MUST 强制 register 更新（普查断言，新语句未入册即红）；(3) `scripts/select_ci_tests.py` MUST 让任一被守护生产文件的 diff 选中本 oracle（沿 #1341 at-site 规则惯例）。
 
 #### Scenario: 曲线端点响应对键收敛 run 逐字段等价
 
@@ -35,6 +35,20 @@
   文本谓词，或受批辅助行缺 `remove with #1342` 标记
 - **WHEN** 运行 `tests/test_river_ts_text_identity_cleanup.py`
 - **THEN** 测试失败并指出调用点
+
+#### Scenario: 失去键伴随的辅助被 oracle 拒绝
+
+- **GIVEN** 在册文件的某条渲染 SQL 中，受批文本辅助（如 `rt.variable =
+  'q_down'`）仍在，而其同合取式的键/枚举对应物（如 `rt.variable_e`）被删除
+- **WHEN** 运行清零 oracle
+- **THEN** 测试失败（#1342 删列后该辅助将静默失去过滤或直接报错，二者都不可接受）
+
+#### Scenario: 在册文件新增文本身份语句被普查抓住
+
+- **GIVEN** 向在册文件新增一条含 `hydro.river_timeseries` 文本身份谓词的语句
+  而不更新 register
+- **WHEN** 运行清零 oracle 的普查断言
+- **THEN** 测试失败并指出该文件的语句清单已过期
 
 #### Scenario: 裸列面同受看护
 

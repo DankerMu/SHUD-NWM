@@ -35,6 +35,7 @@ from packages.common.forecast_store import (
     QHH_LATEST_SEARCH_LIMIT,
     PsycopgForecastStore,
 )
+from tests.test_sql_shape_helpers import outer_predicates
 
 _NAMED_PLACEHOLDER = re.compile(r"%\(([a-zA-Z_][a-zA-Z0-9_]*)\)s")
 _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
@@ -171,15 +172,30 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # yields the empty scan. run_id / river_network_version_id additionally keep
     # their text conjunct as the transitional compressed-chunk pushdown aid;
     # basin_version_id does not (it is not a segmentby column).
-    assert "(%(scan_run_id)s IS NULL" in river_cte
-    assert "rt.run_id = %(scan_run_id)s" in river_cte
-    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in river_cte
+    #
+    # Pinned WHOLE-GUARD rather than as separate "the escape is somewhere" /
+    # "the predicate is somewhere" assertions: split that way, an escape in one
+    # guard and a predicate in another satisfy the pair, and the fold-away
+    # property this suite exists for could be lost with nothing red. The
+    # comparison runs on `outer_predicates` — key-resolution sub-selects
+    # stripped (hence the `= )` tails), comments removed, whitespace collapsed —
+    # so re-indenting the CTE does not break it.
+    river_outer = outer_predicates(river_cte)
+    assert "AND (%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in river_outer
+    assert (
+        "AND (%(scan_river_network_version_id)s IS NULL "
+        "OR (rt.river_network_version_id = %(scan_river_network_version_id)s "
+        "AND rt.river_network_version_key = ))"
+    ) in river_outer
+    assert "AND (%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = )" in river_outer
+    assert "AND (%(scan_display_start)s IS NULL OR rt.valid_time >= %(scan_display_start)s)" in river_outer
+    assert "AND (%(scan_display_end)s IS NULL OR rt.valid_time <= %(scan_display_end)s)" in river_outer
+    # basin_version_id is resolved, never compared as a fact predicate.
     assert "rt.basin_version_id = %(scan_basin_version_id)s" not in river_cte
+    # Non-vacuity for the tails the stripper removed.
+    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in river_cte
     assert "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version" in river_cte
-    assert "rt.river_network_version_id = %(scan_river_network_version_id)s" in river_cte
     assert "rt.river_network_version_key = (SELECT river_network_version_key" in river_cte
-    assert "rt.valid_time >= %(scan_display_start)s" in river_cte
-    assert "rt.valid_time <= %(scan_display_end)s" in river_cte
 
 
 def test_heavy_statement_pins_candidate_runs_to_the_header_run_id() -> None:

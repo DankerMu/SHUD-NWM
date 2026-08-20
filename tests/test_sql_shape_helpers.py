@@ -131,6 +131,23 @@ FORBIDDEN_TEXT_FACT_COLUMNS: tuple[str, ...] = (
 LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
 TEXT_IDENTITY_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + FORBIDDEN_TEXT_FACT_COLUMNS
 
+# The key/enum column each text identity column is transitional FOR. A retained
+# text aid is only ever allowed to narrow, which is exactly the statement "it is
+# AND-ed with this column in the same conjunction" — see
+# :func:`assert_aid_is_conjoined_with_its_counterpart`.
+TEXT_AID_COUNTERPARTS: dict[str, str] = {
+    "run_id": "run_key",
+    "river_network_version_id": "river_network_version_key",
+    "river_segment_id": "river_segment_key",
+    "basin_version_id": "basin_version_key",
+    "variable": "variable_e",
+    # Not identity predicates on any switched surface, but 000050 gives them a
+    # twin too, and the map is asserted total against TEXT_IDENTITY_COLUMNS so a
+    # column cannot be classified without naming what makes it redundant.
+    "unit": "unit_e",
+    "quality_flag": "quality_flag_e",
+}
+
 
 def _scan_quoted(sql: str, start: int, quote: str) -> int:
     """Index just past the quoted run beginning at ``start`` (doubled quote escapes)."""
@@ -405,6 +422,46 @@ def assert_text_fact_columns(
     assert text_fact_columns(sql, alias) == expected, label
 
 
+def assert_aid_is_conjoined_with_its_counterpart(sql: str, alias: str, aid: str, label: str) -> None:
+    """The adjacency invariant: ``alias.aid`` is AND-ed directly to its key/enum twin.
+
+    A retained text predicate is sanctioned only as a REDUNDANT pushdown aid. It
+    is redundant precisely when the key (or enum) predicate that supersedes it is
+    in the same conjunction — then the aid can only narrow, and #1342 can delete
+    it without changing the result set. An aid that drifts into a different
+    conjunct (a separate ``OR`` branch, a different guard, or simply somewhere
+    else in the ``WHERE``) becomes load-bearing, and dropping its counterpart
+    turns the surface back into a text-identity consumer while every "is the
+    text column still there" pin stays green.
+
+    #1341 pinned this per surface as hand-written verbatim substrings (see
+    ``tests/test_river_ts_read_path_surrogate_keys.py``'s coverage-scan pins).
+    This is the same statement, computed instead of transcribed, so every
+    surface a register renders inherits it.
+
+    Checked on :func:`outer_predicates` output: key-resolution sub-selects are
+    stripped (so ``rt.run_key = (SELECT ...)`` reads as ``rt.run_key =``, which
+    is all this needs) and whitespace is collapsed, so re-indenting the SQL
+    cannot change the verdict. Either order counts — ``aid AND counterpart`` and
+    ``counterpart AND aid`` are the same conjunction.
+    """
+    counterpart = TEXT_AID_COUNTERPARTS[aid]
+    outer = outer_predicates(sql)
+    for first, second in ((aid, counterpart), (counterpart, aid)):
+        pattern = (
+            rf"\b{re.escape(alias)}\.{re.escape(first)}\b\s*(?:=|<>|!=)\s*"
+            rf"(.*?)\s+AND\s+{re.escape(alias)}\.{re.escape(second)}\b"
+        )
+        for match in re.finditer(pattern, outer):
+            # A value that itself spans an ``AND`` means another conjunct sits
+            # between the pair, so they are adjacent only by accident of text
+            # order. `%(scan_run_id)s` contains parentheses, so "no parens" is
+            # not usable as the separator test here.
+            if " AND " not in match.group(1):
+                return
+    raise AssertionError(f"{label}: text aid {alias}.{aid} is not AND-ed with {alias}.{counterpart}")
+
+
 # ---------------------------------------------------------------------------
 # Self-tests: the oracle's own contract
 # ---------------------------------------------------------------------------
@@ -672,6 +729,70 @@ def test_assert_text_fact_columns_is_red_when_a_sanctioned_aid_disappears() -> N
         assert "aid dropped" in str(error)
     else:  # pragma: no cover - the assertion above is the contract
         raise AssertionError("assert_text_fact_columns accepted a dropped pushdown aid")
+
+
+def test_adjacency_accepts_the_pair_in_either_order_across_a_reindent() -> None:
+    forward = "WHERE rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable"
+    reversed_order = "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'"
+
+    for sql in (forward, reversed_order):
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "pair")
+
+
+def test_adjacency_accepts_a_pair_whose_counterpart_is_a_stripped_key_resolution() -> None:
+    """The switched shape's counterpart is a sub-select, which the stripper eats."""
+    sql = (
+        "WHERE (%(scan_run_id)s IS NULL\n"
+        "       OR (rt.run_id = %(scan_run_id)s\n"
+        "           AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)))"
+    )
+
+    assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "run_id", "scan guard")
+
+
+def test_adjacency_is_red_when_the_counterpart_is_gone() -> None:
+    sql = "WHERE rt.variable = 'q_down' AND rt.valid_time >= %s"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "counterpart dropped")
+    except AssertionError as error:
+        assert "not AND-ed with rt.variable_e" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted an aid whose enum counterpart was deleted")
+
+
+def test_adjacency_is_red_when_another_conjunct_separates_the_pair() -> None:
+    """Same statement, different conjunction: the aid is no longer redundant.
+
+    This is the case a plain "both columns appear in the SQL" check cannot see,
+    and it is why the invariant is written as adjacency rather than presence.
+    """
+    sql = "WHERE rt.variable = 'q_down' AND rt.valid_time >= %s AND rt.variable_e = 'q_down'"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "separated pair")
+    except AssertionError as error:
+        assert "separated pair" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a pair split across conjuncts")
+
+
+def test_adjacency_is_alias_scoped() -> None:
+    """A counterpart on a DIFFERENT relation does not satisfy the fact table's aid."""
+    sql = "WHERE rt.variable = 'q_down' AND other.variable_e = 'q_down'"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "wrong alias")
+    except AssertionError as error:
+        assert "wrong alias" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a counterpart on another relation")
+
+
+def test_every_text_identity_column_has_a_declared_counterpart() -> None:
+    """No text column may be sanctioned somewhere with no twin to be redundant to."""
+    assert set(TEXT_AID_COUNTERPARTS) == set(TEXT_IDENTITY_COLUMNS)
+    assert set(LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS) <= set(TEXT_AID_COUNTERPARTS)
 
 
 def test_sanctioned_and_forbidden_column_sets_are_disjoint_and_complete() -> None:

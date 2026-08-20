@@ -144,3 +144,47 @@ sentinel 行的老 run 会把既定契约误判为回归。
   `river_ts_selected_identity_key_valid_time_idx` 形状，其实测依据由 E4(ii)
   的 EXPLAIN receipt 提供（沿用 #1338 两份 receipt 的注释惯例更新出处）。
 - node-27 真实 DB（E4 硬门）：见 tasks E4。
+
+## D10: 交叉审查裁决后的修订（PR #1655 Phase 4/4.5 产物）
+
+六项 CONFIRMED/PLAUSIBLE-FIX_NOW 发现的设计裁定：
+
+1. **fast/fallback 候选 CTE 等价恢复**（P1）：`_QHH_LATEST_CANDIDATE_RUNS_SQL`
+   新增的三列键（run_key/basin_version_key/river_network_version_key）必须
+   镜像进 fast path 的内联 CTE 副本——fast 路径已 join bv/rnv，零额外成本；
+   不得反向从共享常量剥离（fallback 的 river leg 按键 join 依赖它们）。
+   恢复 :1390-1392/:1996 的 field-for-field 注释契约与
+   `test_display_coverage_residual_debt_integration.py:112` 的 dict 等价断言。
+2. **copyback schema 守卫随查询列集走**（P2）：`_require_backfill_schema`
+   river_timeseries 集补 `run_key`/`variable_e`（`variable` 在 #1342 前仍是
+   查询列，保留），hydro_run 集补 `run_key`；补一条负路径测试钉
+   `BACKFILL_SCHEMA_MISSING` 的 missing_columns 结构化诊断（此前零覆盖）。
+3. **parser ON CONFLICT 回填身份键**（P2，D4 修订）：DO UPDATE SET 列表补
+   `run_key`/`river_network_version_key`/`river_segment_key`/`variable_e`。
+   依据：基线 spec 的 NULL-key 排除契约只覆盖"回填够不着的压缩 chunk"，
+   parser 重放窗恰在活跃 chunk，键化 DELETE 删除了旧文本链"重放即自愈"的
+   副作用；回填这四列对键收敛行是 no-op（EXCLUDED 值等于现值），不破坏
+   `test_river_ts_dual_write_integration.py:388-392` 的销钉。文本 fallback
+   DELETE 是错误修形（辅助只许收窄不许放宽）。
+4. **select_ci_tests 双向接线**（P1）：oracle 必须由九个被守护生产文件的
+   diff 拉起，按 #1341 at-site 惯例逐规则点追加（forecast_store、
+   tile_publisher 目录、autopipeline、parser），seed_demo 与两个 qhh 脚本
+   新增窄规则；`tests/integration_helpers.py` 属 #1487 范围切口，记录不强改。
+5. **邻接不变量入 oracle**（P2）：每个受批文本辅助必须与其键/枚举对应物
+   同一合取式 AND 相邻（#1341 先例 `test_river_ts_read_path_surrogate_keys
+   .py:620` 的 verbatim 钉法即此不变量）；M10（A9 丢 variable_e）/M30
+   （publisher ON 丢 variable_e）必须转红，带反用例。marker 同时收紧为
+   与辅助行相邻（搭车 F6：脱离的 marker 让 #1342 的按行删除失效）。
+6. **register 语句普查**（P2）：在册文件新增 `hydro.river_timeseries` 语句
+   必须强制 register 更新（N1 十号方法 / N2 第三调用点必须转红）；机制由
+   实现选定（源内出现次数普查或 `_sql_constants` 清点均可），判据是突变
+   转红。偏离 #9 的措辞随之修正："oracle 在其注册面更深，普查方向由本条
+   补齐"。
+
+同批小修：`_qhh_latest_query_indexes()` 等三处 provenance 注释引用的
+E4(ii) receipt 在合并前将真实落在 PR #1655 评论（F7 记录不改文案）；
+000050 迁移文件 :244-248 的 stale 注释（称 ON CONFLICT "knows nothing
+about _key/_e"）仅当迁移文件无 checksum 销钉时就地更正，否则记录留给
+#1342。D2 的等价性论证更正：`unit_e` 在 000050:222 为 nullable（cutover
+才 SET NOT NULL），逐字节等价真正依赖的是"七列整行写"不变量 +
+文本源列 NOT NULL（000006:53-54），不是枚举列自身的 NOT NULL。

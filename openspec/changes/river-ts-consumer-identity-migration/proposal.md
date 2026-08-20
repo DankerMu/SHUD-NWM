@@ -66,8 +66,9 @@ spec:195 禁令）：
   out-of-boundary 消费面键化；parser replace 全链键定位）。
 - Affected code: `packages/common/forecast_store.py`、
   `services/tile_publisher/{publisher.py,forcing_copyback_backfill.py}`、
-  `scripts/{node27_autopipeline.py,summarize_qhh_smoke_results.py,reset_qhh_smoke_db.py,node27_timeseries_compression_live_evidence.py}`、
+  `scripts/{node27_autopipeline.py,summarize_qhh_smoke_results.py,reset_qhh_smoke_db.py,node27_timeseries_compression_live_evidence.py,node27_timeseries_compression_benchmark.py,select_ci_tests.py}`、
   `db/seeds/seed_demo.py`、`workers/output_parser/parser.py`、
-  `tests/{integration_helpers.py,test_forecast_api.py,test_qhh_latest_fallback_pushdown.py,test_timescale_write_guard_wired.py,test_migrations.py,test_tile_publisher.py(骨架扩列)}`、
+  `schemas/examples/timeseries_compression_live_evidence.example.json`、
+  `tests/{integration_helpers.py,test_forecast_api.py,test_qhh_latest_fallback_pushdown.py,test_timescale_write_guard_wired.py,test_migrations.py,test_tile_publisher.py(骨架扩列),test_forcing_copyback_backfill.py(骨架扩列),test_node27_timeseries_compression_benchmark.py,test_select_ci_tests.py,test_sql_shape_helpers.py}`、
   新增 `tests/test_river_ts_text_identity_cleanup.py`。
 - 部署面：node-27 git pull 生效；无迁移、无 timer 改动。

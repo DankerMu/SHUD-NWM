@@ -970,6 +970,16 @@ class PsycopgOutputParserRepository:
                 quality_flag_e
             )
             VALUES %s
+            -- The conflict-update assignments below also refresh the identity
+            -- key/enum columns (#1442). For a key-converged row that is a no-op:
+            -- the excluded tuple carries exactly the keys the conflict target
+            -- resolved from. It restores the "replay heals" property the text
+            -- link used to give for free -- the keyed DELETE above only reaches
+            -- rows whose keys are already populated, so a NULL-key sentinel row
+            -- left by a pre-000050 write would otherwise survive replay
+            -- untouched. Keep the assignment list itself comment-free: the
+            -- shape tests parse it by splitting on commas
+            -- (tests/test_output_parser_dual_write.py).
             ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)
             DO UPDATE SET
                 basin_version_id = EXCLUDED.basin_version_id,
@@ -977,7 +987,11 @@ class PsycopgOutputParserRepository:
                 value = EXCLUDED.value,
                 unit = EXCLUDED.unit,
                 quality_flag = EXCLUDED.quality_flag,
+                run_key = EXCLUDED.run_key,
+                river_network_version_key = EXCLUDED.river_network_version_key,
                 basin_version_key = EXCLUDED.basin_version_key,
+                river_segment_key = EXCLUDED.river_segment_key,
+                variable_e = EXCLUDED.variable_e,
                 unit_e = EXCLUDED.unit_e,
                 quality_flag_e = EXCLUDED.quality_flag_e
             """,

@@ -56,6 +56,22 @@
 - [x] 2.4 F：三处语句参数元组断言；同窗重放幂等用例（mock/夹具）。
 - [x] 2.5 既有套件全绿：E1 全部文件。
 
+## 3. 交叉审查修复（design D10；PR #1655 Phase 5 清单）
+
+- [x] 3.1 (P1) fast path 内联 CTE 补 `h.run_key` / `bv.basin_version_key` /
+      `rnv.river_network_version_key` 三列，恢复 fast/fallback 逐字段等价。
+- [x] 3.2 (P2) `_require_backfill_schema` 列集随查询走（rt 补
+      `run_key`/`variable_e`，h 补 `run_key`）+ `BACKFILL_SCHEMA_MISSING`
+      负路径测试。
+- [x] 3.3 (P2) parser `ON CONFLICT DO UPDATE` SET 补四个身份键列。
+- [x] 3.4 (P1) `select_ci_tests.py` 九个被守护文件 at-site 追加清零 oracle
+      （integration_helpers 属 #1487 切口记录不改）+ pins 更新。
+- [x] 3.5 (P2) oracle 邻接不变量（辅助与键对应物同合取式；marker 相邻）
+      + 反用例；M10/M30/F6-detach 突变红证。
+- [x] 3.6 (P2) oracle 语句普查（在册文件新增 `hydro.river_timeseries` 语句
+      必须入册）；N1/N2 突变红证。搭车 F4：parser INSERT 列清单断言收紧、
+      F5：scan fold-away 恢复 verbatim 形状钉。
+
 ## Evidence Floor
 
 - [x] E1 `uv run pytest -q tests/test_forecast_api.py

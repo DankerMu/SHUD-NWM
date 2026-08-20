@@ -241,11 +241,17 @@ END $$;
 --
 -- The equality-audit count uses the same predicate as the backfill runner's
 -- receipt counter. It detects rows whose text columns drifted away from their
--- already-backfilled surrogate columns -- which the ingest writer's
--- `ON CONFLICT DO UPDATE` branch (parser.py) can cause, since it refreshes
--- basin_version_id / unit / quality_flag but knows nothing about the `_key` /
--- `_e` columns. A non-zero value is not corruption; it means a re-sweep is
--- required before the window.
+-- already-backfilled surrogate columns. Historical note: the pre-#1340 ingest
+-- writer's `ON CONFLICT DO UPDATE` branch (parser.py) refreshed
+-- basin_version_id / unit / quality_flag and nothing else, so a conflict
+-- update was itself a drift source. #1340 mirrored the refreshed text columns
+-- into basin_version_key / unit_e / quality_flag_e, and #1442 added the
+-- remaining identity columns (run_key, river_network_version_key,
+-- river_segment_key, variable_e) to the same SET list, so a replay of the
+-- current writer converges rather than drifts. The audit stays: rows written
+-- by an older deployment, or by anything other than that writer, can still
+-- drift. A non-zero value is not corruption; it means a re-sweep is required
+-- before the window.
 
 CREATE OR REPLACE FUNCTION hydro.verify_river_identity_normalization()
 RETURNS TABLE (

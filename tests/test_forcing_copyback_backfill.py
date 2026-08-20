@@ -350,6 +350,47 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
     assert "JOIN (\n" not in sql
 
 
+@pytest.mark.parametrize(
+    ("table_name", "column"),
+    [
+        ("river_timeseries", "run_key"),
+        ("river_timeseries", "variable_e"),
+        ("hydro_run", "run_key"),
+    ],
+)
+def test_backfill_schema_guard_names_the_missing_identity_column(
+    tmp_path: Path,
+    table_name: str,
+    column: str,
+) -> None:
+    """The guard's column set must track _DISCOVER_BACKFILL_RUNS_SQL (#1442).
+
+    A database that predates 000050 lacks the surrogate keys and the enum
+    column the discovery probe now reads; the run must stop with a structured
+    BACKFILL_SCHEMA_MISSING naming the exact column instead of failing deep
+    inside the query with an opaque driver error.
+    """
+
+    engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    object_store_root.mkdir()
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table_name} DROP COLUMN {column}"))
+
+    with pytest.raises(backfill_module.BackfillError) as excinfo:
+        run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+            )
+        )
+
+    assert excinfo.value.error_code == "BACKFILL_SCHEMA_MISSING"
+    assert excinfo.value.details == {"missing_columns": {f"hydro.{table_name}": [column]}}
+
+
 def test_cli_dry_run_emits_json_and_writes_nothing(tmp_path: Path) -> None:
     _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
 

@@ -1841,16 +1841,16 @@ class PsycopgForecastStore:
                   AND rt.variable_e = 'q_down'::hydro.river_variable
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
                   AND (%(scan_run_id)s IS NULL
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
                        OR (rt.run_id = %(scan_run_id)s
                            AND rt.run_key = (SELECT run_key FROM hydro.hydro_run
                                              WHERE run_id = %(scan_run_id)s)))
                   AND (%(scan_basin_version_id)s IS NULL
                        OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
                                                   WHERE basin_version_id = %(scan_basin_version_id)s))
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
                   AND (%(scan_river_network_version_id)s IS NULL
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
                        OR (rt.river_network_version_id = %(scan_river_network_version_id)s
                            AND rt.river_network_version_key = (SELECT river_network_version_key
                                                                FROM core.river_network_version
@@ -2023,6 +2023,15 @@ class PsycopgForecastStore:
                     mi.basin_version_id AS model_basin_version_id,
                     bv.basin_id,
                     rnv.basin_version_id AS river_network_basin_version_id,
+                    -- Surrogate keys mirrored from _QHH_LATEST_CANDIDATE_RUNS_SQL
+                    -- at the identical projection position (#1442): the fast path
+                    -- must stay field-for-field equal to the CTE path (see the
+                    -- docstring above and the dict-equality assertion in
+                    -- tests/test_display_coverage_residual_debt_integration.py).
+                    -- This CTE already joins bv/rnv, so the keys cost nothing.
+                    h.run_key,
+                    bv.basin_version_key,
+                    rnv.river_network_version_key,
                     COALESCE(
                         CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
                             THEN (mi.resource_profile->>'output_segment_count')::integer END,

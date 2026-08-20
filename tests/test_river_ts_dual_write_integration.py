@@ -301,7 +301,11 @@ _REPLAY_INSERT = """
         value = EXCLUDED.value,
         unit = EXCLUDED.unit,
         quality_flag = EXCLUDED.quality_flag,
+        run_key = EXCLUDED.run_key,
+        river_network_version_key = EXCLUDED.river_network_version_key,
         basin_version_key = EXCLUDED.basin_version_key,
+        river_segment_key = EXCLUDED.river_segment_key,
+        variable_e = EXCLUDED.variable_e,
         unit_e = EXCLUDED.unit_e,
         quality_flag_e = EXCLUDED.quality_flag_e
 """
