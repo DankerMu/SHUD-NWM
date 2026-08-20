@@ -308,6 +308,11 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
         "tests/test_display_coverage_refresh.py",
         "tests/test_migrations.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        # Every changed test suite drags the meta-guard suite along, because a
+        # test-file PR is exactly the change class that can invalidate the
+        # tree-derived guards. Not part of the oracle closure; asserted here so
+        # the closure itself stays exact.
+        SELECTOR_META_GUARD_TEST,
         "tests/test_sql_shape_helpers.py",
     ]
 
@@ -2070,6 +2075,18 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/shud_runtime/runtime.py", "tests/test_production_scheduler.py"): "edge-consumer",
     ("workers/forcing_producer/producer.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
     ("workers/model_registry/basins_geometry.py", "tests/test_production_object_store_validation.py"): "edge-consumer",
+    # -- edge-consumer: #1341 read-path shape pins --------------------------
+    # tests/test_river_ts_read_path_surrogate_keys.py belongs to the #1341
+    # display-boundary read surface (services/tiles/mvt.py,
+    # packages/common/display_coverage.py, apps/api/routes/hydro_display.py all
+    # select it whole). It imports scale_validation only to pin that module's
+    # identity-predicated QUERY_TARGETS against the same surrogate-key oracle;
+    # copying it into `services/production_closure/**` would make every
+    # production-closure PR pay for the display read-path pins.
+    (
+        "services/production_closure/scale_validation.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+    ): "edge-consumer",
 }
 
 

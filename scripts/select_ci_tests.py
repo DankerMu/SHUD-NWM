@@ -677,13 +677,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # pushdown pairing or reintroduces a text fact predicate in either file
     # reaches CI green unchallenged.
     PathTestRule(
-        "packages/common/display_coverage.py",
-        (
-            "tests/test_display_coverage_refresh.py",
-            "tests/test_river_ts_read_path_surrogate_keys.py",
-        ),
-    ),
-    PathTestRule(
         "apps/api/routes/hydro_display.py",
         ("tests/test_river_ts_read_path_surrogate_keys.py",),
     ),
@@ -735,11 +728,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # in the PR lane, so listing it buys constant skips and zero assertions.
         # tests/test_select_ci_tests.py derives this closure from the tracked
         # tree and reddens if a new non-gated importer suite appears here.
+        #
+        # #1443 merge consolidation: this module also carries the #1341
+        # read-path shape pins. That surface's broad rules (packages/common/**
+        # and the API route rules) do not include them, so a diff dropping a
+        # pushdown pairing or reintroducing a text fact predicate here would
+        # reach CI green unchallenged. The pins joined this rule instead of
+        # getting a second entry for the same pattern — a duplicate pattern
+        # splits the module's ownership across two rules with nothing saying so
+        # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
         "packages/common/display_coverage.py",
         (
             "tests/test_display_coverage_refresh.py",
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",
+            "tests/test_river_ts_read_path_surrogate_keys.py",
         ),
     ),
     PathTestRule(
