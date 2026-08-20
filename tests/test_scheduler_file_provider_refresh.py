@@ -490,13 +490,13 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
         # bit) and `path` is the provider destination itself (publish refuses
         # anything but SHARED_PROVIDER_MODE). Bare mkdir/write land 0o775/0o664
         # under umask 0002 and fail both.
-        make_directory_with_explicit_mode(path.parent)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if name in {"registry", "registry_worker_mirror"}:
             # Use shape-valid manifest bytes so the #1080 gate can parse the
             # previous canonical without treating it as provider_invalid.
-            write_provider_destination(path, _minimal_registry_manifest_bytes("registry"))
+            path.write_bytes(_minimal_registry_manifest_bytes("registry"))
         else:
-            write_provider_destination(path, name + "\n")
+            path.write_text(name + "\n", encoding="utf-8")
         preimage = capture_scheduler_provider_preimage(path)
         providers.append(
             {
