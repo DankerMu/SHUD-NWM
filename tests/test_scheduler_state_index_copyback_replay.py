@@ -1158,14 +1158,20 @@ def _valid_state_bytes(seed: bytes) -> bytes:
 def private_umask_fixture_factory(tmp_path: Path) -> Fixture:
     """`fixture`, but built under `umask 0o077` so the lock parents come out private.
 
-    `Fixture.__init__` publishes both indexes, and each publish takes a provider
-    lock whose parent `ensure_directory_no_follow` creates with a bare `os.mkdir`
-    (safe_fs.py:68), i.e. `0o777 & ~umask`.  Under an ambient `umask 002` that is
-    0o775 and `provider_lock_parent_unsafe` (provider_atomic.py:209-210) fires in
-    fixture setup -- an error, not a failure, and nothing about the guard under
-    test.  A `chmod` in the test body is too late for that, so the umask has to be
-    in place here; the construction sits inside the `try` so a raise cannot leak
-    0o077 into the rest of the session.
+    Written for #1609/#1610, when `ensure_directory_no_follow` created the lock
+    parent with a bare `os.mkdir` (`0o777 & ~umask`): under an ambient `umask 002`
+    that landed 0o775 and `provider_lock_parent_unsafe` (provider_atomic.py:209-210)
+    fired in fixture setup -- an error, not a failure, and nothing about the guard
+    under test.  #1513 pinned that `os.mkdir` to an explicit 0o755 (safe_fs.py:68),
+    so the lock-parent gate no longer depends on the ambient umask and this wrapper
+    is no longer load-bearing for it (measured: the suite is green with the wrapper
+    neutralized).
+
+    It is kept because it is behavior-neutral -- `0o755 & ~0o077 == 0o700`, the
+    same private mode it always produced -- and because it keeps the fixture's
+    private-mode posture explicit rather than implicit in safe_fs's pin.  The
+    construction sits inside the `try` so a raise cannot leak 0o077 into the rest
+    of the session.
     """
 
     previous_umask = os.umask(0o077)

@@ -48,8 +48,14 @@ OpenSpec change: fix-permissive-umask-dir-mode (generated)
       and route each still-failing site's directory creation through the helper.
       Repeat until zero failures. Do **not** blanket-rewrite the ~1398 mode-less
       `mkdir` calls in `tests/` (design D4).
-- [x] 1.6 Apply the same treatment to any other suite the full-tree umask-`002`
-      run implicates, using the same empirical loop.
+- [x] 1.6 Apply the same treatment to any other suite implicated at umask `002`.
+      **What was actually done** (the `[x]` originally overstated this): no
+      full-tree umask-`002` run was performed (see §4's struck-through item);
+      instead each of the named suites in §3 was measured individually and
+      repaired with the same empirical loop. That first pass missed exactly one
+      suite, `tests/test_publish_scheduler_file_registry.py`, which an
+      independent grep-based sweep of a further 47 suites / 3786 tests found —
+      not the full-tree run. It is now routed (§3) and green at both umasks.
 - [x] 1.7 Record the ACL boundary (design D7) in source, so a future reader does
       not undo it by accident:
       - a comment at the `safe_fs` mkdir explaining that the explicit mode clamps
@@ -111,12 +117,27 @@ change.
 | `tests/test_forcing_copyback_backfill.py` † | — | — | **42 passed** | 42 passed |
 | `tests/test_tile_publisher.py` † | — | — | **101 passed** | 101 passed |
 | `tests/test_select_ci_tests.py` | — | — | **151 passed** | 151 passed |
+| `tests/test_publish_scheduler_file_registry.py` ‡ | 17 failed, 26 passed | 4 failed, 39 passed | **43 passed** | 43 passed |
 
 The post-fix columns are measured on the **merged** head (`origin/master`
 `f087f08d` merged in), which is why they exceed the pre-fix totals: master's
 `#1609/#1610` and `#1547`-family work added cases to five of these files in the
 interim. † marks suites that master touched and this change does not, run as
 merge-regression controls.
+
+‡ This row was added in fix round 1 and its baseline column is **not** master
+`29892932` but master `f087f08d` (the merged-in head), because the suite was
+found late — by an independent grep-based sweep, not by the per-file loop that
+produced the rows above. Its `(a)`-only column is likewise "this branch's head
+before the round-1 test-side edits", which is exactly the `(a)`-only condition
+for this file: the PR contained no edit to it. That makes it an unusually clean
+**(a)-effectiveness** data point: the `safe_fs.py:68` pin alone took the file
+from 17 failed to 4 failed, healing 13 of 17 with zero test-side change. The
+remaining 4 needed three `mkdir` sites plus — measured, and the reason a
+mkdir-only fix still left one red — the destination seed at `:1720`
+(`test_manual_cli_allow_uncovered_bypasses_gate_with_warning`), which is gate 2
+(`SHARED_PROVIDER_MODE`), not gate 1. The 17-failed master baseline is the
+verifier's measurement, reproduced here rather than re-run.
 
 **Interaction with master `05fcc17d`.** That commit independently hit the same
 `safe_fs.py:68` root cause and worked around it by constructing its fixtures
@@ -225,6 +246,30 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
    `index_path.parent.mkdir` sites in `tests/test_state_manager.py` (measured:
    reverting all 11 leaves exactly 3 red). A future assertion added under them
    would redden only on umask-0002 hosts.
+   `_write_current_published_receipt`
+   (`tests/test_scheduler_file_provider_refresh.py:480`, comment at `:488`)
+   now carries a comment
+   saying so in place, so the next reader does not "fix" it by accident. The
+   mechanism recorded there is the corrected one: the site is green **not**
+   because its `exist_ok=True` mkdir is a no-op against `_config`'s pinned
+   directories, but because **none of its three callers (`:1692`, `:1735`,
+   `:6527`) ever takes a provider lock or publishes over these paths** — the only
+   consumers are `capture_scheduler_provider_preimage`
+   (`services/orchestrator/scheduler_file_providers.py:1751`) and
+   `refresh.validate_current_receipt`
+   (`scripts/scheduler_file_provider_refresh.py:1216`), both pure reads. The
+   `_config` story cannot explain the `registry_worker_mirror` lane at all:
+   `_config` creates `scheduler/registry`, `scheduler/canonical-readiness` and
+   `scheduler/state-index` but never `scheduler/worker-registry`, so that lane's
+   parent is created **only** in `_write_current_published_receipt`, at `0o775`
+   under umask 0002. Measured landed modes there: registry `0o755`/`0o664`,
+   mirror `0o775`/`0o664`, readiness `0o755`/`0o664`, state `0o755`/`0o664`.
+   Also latent and untouched for the same reason: 5 of the 7
+   `canonical.parent.mkdir(parents=True)` sites in
+   `tests/test_publish_scheduler_file_registry.py` (post-fix `:193`, `:297`,
+   `:343`, `:1634`, `:1830`) — measured green at umask 0002 because those tests
+   never reach a provider publish; only the three now routed through the helper
+   (post-fix `:1719`, `:1901`, `:2165`) did.
 3. **The `large-file-guard` hook cannot be satisfied from a worktree.**
    `.claude/hooks/large-file-guard/large-file-guard.sh:15` reads its config at
    `CLAUDE_PROJECT_DIR` (the main checkout) while collecting staged paths via
@@ -233,3 +278,14 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
 4. **`scheduler/direct-grid-candidates` is `1777` with no code reference**
    (operator residue, already noted in D7). Untouched: this change never chmods
    an existing directory.
+5. **Design D7's `published/` exclusion is literally true but must not be read
+   as "unreachable."** `NHMS_PUBLISHED_ARTIFACT_ROOT` has no direct reference
+   under `apps/`, which is what D7 asserts. It is nonetheless **transitively**
+   reachable from `apps/api/routes/state_snapshots.py` via
+   `StateManager.from_env` (`packages/common/state_manager.py:972`, `:2950`), so
+   a future reader must not turn "no direct reference" into "the API can never
+   create that tree."
+6. **`e2e` / `grib` / `integration`-marked suites are unmeasured at umask
+   0002.** Every number in §3 comes from an unmarked run; the marked lanes were
+   never executed under umask 0002 on either host, so any provider-gate surface
+   they pre-create is unmeasured, not known-green.

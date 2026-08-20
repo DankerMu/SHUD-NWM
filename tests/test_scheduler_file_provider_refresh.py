@@ -485,11 +485,21 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
     provider_paths.extend((("readiness", config.readiness_uri), ("state", config.state_uri)))
     for name, uri in provider_paths:
         path = Path(uri)
-        # Explicit modes, not the ambient umask (#1513): `path.parent` is the
-        # DIRECT parent of this lane's provider lock (gate refuses any 0o022
-        # bit) and `path` is the provider destination itself (publish refuses
-        # anything but SHARED_PROVIDER_MODE). Bare mkdir/write land 0o775/0o664
-        # under umask 0002 and fail both.
+        # Deliberately ambient-umask, NOT pinned (#1513, tasks.md §6 item 2).
+        # These four lanes are receipt *preimage* surfaces: no caller of this
+        # helper (:1692, :1735, :6527) ever takes a provider lock or publishes
+        # over them, and the only consumers are pure reads --
+        # `capture_scheduler_provider_preimage`
+        # (scheduler_file_providers.py:1751) and `refresh.validate_current_receipt`
+        # (scripts/scheduler_file_provider_refresh.py:1216, whose sole provider
+        # touch at :1251 is another preimage capture). So neither gate is
+        # reached and the landed modes are inert: under umask 0002 the files
+        # come out 0o664 and the `registry_worker_mirror` parent 0o775 -- that
+        # lane's parent is created ONLY here, whereas `registry`,
+        # `canonical-readiness` and `state-index` arrive pre-pinned to 0o755
+        # from `_config`. Left as-is on purpose; a future assertion that made
+        # one of these lanes actually publish would redden on umask-0002 hosts
+        # only, which is why the site is recorded as report-don't-fix.
         path.parent.mkdir(parents=True, exist_ok=True)
         if name in {"registry", "registry_worker_mirror"}:
             # Use shape-valid manifest bytes so the #1080 gate can parse the
