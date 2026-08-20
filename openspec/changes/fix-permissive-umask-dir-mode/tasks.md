@@ -92,39 +92,74 @@ There is no `tests/test_provider_atomic.py`; provider_atomic coverage lives in
 
 ## 3. Verification matrix
 
-| Surface | Command | Expected |
+Measured blast radius (Phase 0.5 assumed one file; the orchestrator's per-file
+measurement found six). All numbers below are on the local macOS host, each file
+run alone. `(a)`-only = `safe_fs.py:68` explicit mode with **no** test-side
+change.
+
+| File | master `29892932`, umask 002 | `(a)`-only, umask 002 | post-fix, umask 002 | post-fix, umask 022 |
+|---|---|---|---|---|
+| `tests/test_production_scheduler.py` | 76 failed, 1588 passed | 74 failed, 1590 passed | **1664 passed** | 1664 passed |
+| `tests/test_state_manager.py` | 19 failed | 7 failed | **129 passed** | 129 passed |
+| `tests/test_run_tree_copyback.py` | 16 failed, 5 passed | 2 failed, 19 passed | **21 passed** | 21 passed |
+| `tests/test_source_cycle_raw_manifest.py` | 5 failed | 1 failed | **30 passed** | 30 passed |
+| `tests/test_file_orchestration_journal.py` | 4 failed | 4 failed | **343 passed** | 343 passed |
+| `tests/test_scheduler_state_index_copyback_replay.py` | 26 errors | 26 passed | **26 passed** | 26 passed |
+| `tests/test_scheduler_file_provider_refresh.py` | *hung* (see below) | not measured | **281 passed** | 281 passed |
+| `tests/test_safe_fs.py` | n/a (new cases) | n/a | **11 passed** | 11 passed |
+
+`tests/test_file_orchestration_journal.py` needed **no** edit: it imports
+`_set_db_free_scheduler_env` from `tests/test_production_scheduler.py`
+(`:39`, `:44`) and calls it at exactly four sites (`:6748`, `:6807`, `:6855`,
+`:6915`) — matching its four failures. Task 1.4 healed them transitively.
+
+`tests/test_scheduler_file_provider_refresh.py` has **no** pre-fix number on
+purpose: under umask 002 it does not fail, it **hangs** (see §6), so no baseline
+count exists to record. Post-fix it runs in 6.7 s.
+
+| Other surface | Command | Result |
 |---|---|---|
-| Permissive-side regression (the bug) | `(umask 002; uv run pytest -q tests/test_production_scheduler.py)` | 0 failed (from 76) |
-| Normal-side non-regression | `uv run pytest -q tests/test_production_scheduler.py` | 0 failed |
-| Strict-side non-regression | `uv run pytest -q tests/test_scheduler_file_provider_refresh.py tests/test_run_tree_copyback.py` | 0 failed, incl. the `0o077` and `0o775`/`0o664` assertions |
-| Shared-helper consumers | `uv run pytest -q tests/test_safe_fs.py tests/test_state_manager.py` | 0 failed |
-| Full-tree blast radius | `(umask 002; uv run pytest -q -m "not e2e and not grib and not integration" tests/)` | 0 failed, compared against a clean pre-fix run of the same command. Accepted limit: the marker exclusion drops exactly the suites most likely to touch real shared roots, so this row bounds the *unit* blast radius only. |
+| Strict-side non-regression | `(umask 077; uv run pytest -q tests/test_safe_fs.py)` | 11 passed — `0o700` preserved, no `fchmod` widening |
+| Selector routing guard | `uv run pytest -q tests/test_select_ci_tests.py` | 151 passed |
 | Lint | `uv run ruff check .` | clean |
 | Spec | `openspec validate fix-permissive-umask-dir-mode --strict --no-interactive` | strict-valid |
 
+**CI is not the oracle for this change.** GitHub runners are umask `0022`, where
+every file above is green both before and after. The umask-`0002` column is the
+only evidence that the bug is fixed, and it is local + (post-merge) node-27.
+
 ## 4. Evidence Floor
 
-- [ ] Baseline recorded: master `29892932`, `(umask 002)` -> `76 failed, 1588 passed`.
-- [ ] `(a)`-alone measured on the same baseline -> `74 failed, 1590 passed`,
+- [x] Baseline recorded: master `29892932`, `(umask 002)` -> `76 failed, 1588 passed`.
+- [x] `(a)`-alone measured on the same baseline -> `74 failed, 1590 passed`,
       saving exactly `test_file_canonical_readiness_provider_infers_root_from_scheduler_index_path`
       and `test_nfs_raw_ready_candidate_stages_raw_before_convert_submit`, and
       breaking nothing. This is the evidence for issue #1513's acceptance
       criterion 3 ("只交付 (a) 的 PR 不得视为完成").
-- [ ] Post-fix: same command -> 0 failed, with the full `-rf` output captured.
-- [ ] Post-fix: default-umask run of the same file -> 0 failed (no normal-side regression).
-- [ ] Post-fix: strict-side files green, specifically
-      `tests/test_run_tree_copyback.py:301-302` (`0o664` / `0o775`) and
-      `tests/test_scheduler_file_provider_refresh.py:823`/`:920`.
-- [ ] Post-fix: full-tree umask-`002` run, compared against the pre-fix full-tree
-      run captured on master.
-- [ ] `uv run ruff check .` clean.
-- [ ] `openspec validate --strict --no-interactive` passes.
-- [ ] ACL enumeration recorded (design D7): the three `default:user:nwm:rwx`
+- [x] Post-fix, umask `002`: all eight files 0 failed (§3 table), reproduced
+      independently by the orchestrator after integrating the implementer's
+      branch.
+- [x] Post-fix, default umask `022`: the same eight files, identical counts — no
+      normal-side regression.
+- [x] Post-fix: strict-side assertions green, specifically
+      `tests/test_run_tree_copyback.py:302-303` (`0o664` / `0o775`) and
+      `test_provider_atomic_publishes_shared_mode_under_private_umask`.
+- [ ] ~~Full-tree umask-`002` run compared against a pre-fix full-tree run.~~
+      **Not performed.** Measured at ~3 h serial (no `pytest-xdist` installed),
+      and it would have required two such runs plus an implementation freeze
+      across both. Substituted: per-file measurement of the six affected suites
+      (§3), each with a default-umask control run to separate umask-conditional
+      failures from pre-existing ones. Recoverable at any time — master
+      `29892932` is immutable, so the baseline is a pure function of
+      (SHA, host, umask). **Stated as a limit, not claimed as coverage.**
+- [x] `uv run ruff check .` clean.
+- [x] `openspec validate --strict --no-interactive` passes.
+- [x] ACL enumeration recorded (design D7): the three `default:user:nwm:rwx`
       subtrees, their directory creators, and the `find`-verified zero
       `nwm`-owned entries that make `forcing/`'s exposure inert today.
 - [ ] Follow-up issue filed for the latent `provider_atomic`-gate-vs-ACL
-      incompatibility and for `forcing/`/`runs/`'s clamped grant.
-- [ ] Cross-uid boundary recorded rather than tested: no pre-merge command
+      incompatibility and for `forcing/`/`runs/`'s clamped grant. **Phase 8.**
+- [x] Cross-uid boundary recorded rather than tested: no pre-merge command
       exercises the two-uid NFS root, because D7 establishes the change is a
       no-op there (empty groups on `raw/`/`models/` children; unused ACL grant on
       `forcing/`/`runs/`/`states/`) and because the shared root cannot be
@@ -156,3 +191,27 @@ There is no `tests/test_provider_atomic.py`; provider_atomic coverage lives in
   rather than repository code, and cannot run on the macOS development host.
   The boundary is pinned by the D7 production enumeration plus task 1.7's source
   comments.
+
+## 6. Report-don't-fix findings (routed at Phase 8, not fixed here)
+
+1. **`test_provider_atomic_readers_observe_only_complete_old_or_new_json` hangs
+   instead of failing.** Its writer thread has no `try/finally`, so any
+   exception in `atomic_replace_provider_bytes` skips `finished.set()` and the
+   main thread's `while not finished.is_set()` loop spins forever. This is why
+   the suite was unrunnable rather than merely red under umask 002, and why it
+   has no pre-fix baseline count. This change fixes the trigger (the `0o664`
+   seed), not the trap; a `finally: finished.set()` would convert any future
+   failure into a clean one.
+2. **Latent umask-dependent sites left in place because `(a)` already clears
+   them**: `_write_current_published_receipt` and 8 of 11
+   `index_path.parent.mkdir` sites in `tests/test_state_manager.py` (measured:
+   reverting all 11 leaves exactly 3 red). A future assertion added under them
+   would redden only on umask-0002 hosts.
+3. **The `large-file-guard` hook cannot be satisfied from a worktree.**
+   `.claude/hooks/large-file-guard/large-file-guard.sh:15` reads its config at
+   `CLAUDE_PROJECT_DIR` (the main checkout) while collecting staged paths via
+   `git -C cwd` (the worktree), with no env disable — so a worktree agent's
+   config edit is invisible to the guard that is blocking it.
+4. **`scheduler/direct-grid-candidates` is `1777` with no code reference**
+   (operator residue, already noted in D7). Untouched: this change never chmods
+   an existing directory.

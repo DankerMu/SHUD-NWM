@@ -90,11 +90,21 @@ the existing strict side (`0o077`), pinning both the landed directory mode of a
 safe_fs-created directory and successful provider lock acquisition under such a
 parent.
 
-Test helpers that pre-create provider lock parents SHALL create them with an
-explicit mode rather than inheriting the ambient umask.
+Test helpers that pre-create either surface `provider_atomic` inspects — a
+provider lock's direct parent **directory**, or a provider **destination file**
+that a later publish writes over — SHALL create it with an explicit mode rather
+than inheriting the ambient umask. Both gates are fail-closed security
+properties and are never relaxed to accommodate a test.
 
 #### Scenario: the db-free scheduler suite is green under a permissive umask
 
 - **WHEN** `tests/test_production_scheduler.py` runs with the process umask set
   to `0o002`
 - **THEN** the run reports zero failures
+
+#### Scenario: a pre-created provider destination is seeded at the shared mode
+
+- **WHEN** a test pre-creates a provider destination file that a later
+  `atomic_replace_provider_bytes` publishes over, on a host at umask `0o002`
+- **THEN** the file's mode is `SHARED_PROVIDER_MODE`, so the publish reaches the
+  behavior under test instead of raising `provider_destination_access_invalid`

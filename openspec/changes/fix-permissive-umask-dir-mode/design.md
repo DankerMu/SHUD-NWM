@@ -316,3 +316,43 @@ Regression rows:
 - **Unchanged downstream consumers**: `provider_atomic`'s gate and its other
   fail-closed branches; `scheduler_lease`'s separate lock channel.
 - **CI boundary**: `scripts/select_ci_tests.py` routing (see D5).
+
+## D9 — post-approval addendum: the second gate the implementation surfaced
+
+**This section postdates the fixture review's `approve` (r2).** It records
+measured facts discovered during Phase 1; it changes no decision above.
+
+`provider_atomic` has **two** fail-closed mode gates, and the fixture modelled
+only the first:
+
+| # | Site | Checks | Refusal |
+|---|---|---|---|
+| 1 | `provider_atomic.py:209` | lock's **direct parent directory** carries no `0o022` bit | `provider_lock_parent_unsafe` |
+| 2 | `provider_atomic.py:362` | an **already-existing destination file** is exactly `SHARED_PROVIDER_MODE` (`0o644`) | `provider_destination_access_invalid` |
+
+Gate 2 accounted for **all 74** `tests/test_production_scheduler.py` failures
+that survived D1, plus failures in three further suites: a test that seeds a
+destination stub with a bare `write_text` lands `0o666 & ~umask` = `0o664` under
+umask `0o002`.
+
+**Production is immune, and this is why gate 2 needs no production change.**
+Every production destination is written by `atomic_replace_provider_bytes`
+itself, which passes `mode=SHARED_PROVIDER_MODE` to
+`atomic_write_bytes_no_follow`; that helper opens the temp file and then calls
+`os.fchmod(file_fd, mode)` (`safe_fs.py:141-143`). `fchmod` sets the mode
+absolutely — the umask applies only at *creation* — so a production destination
+lands exactly `0o644` under every umask. The umask-dependence exists solely
+where a **test** pre-creates the file.
+
+Consequences, all already reflected above and in §1/§2:
+
+- The repair for gate 2 is same-party and test-side only. Gate 2 is left
+  fail-closed, exactly as D3 leaves gate 1.
+- The shared helper is therefore `tests/provider_mode_helpers.py`, exposing
+  `write_provider_destination` alongside `make_directory_with_explicit_mode`;
+  it imports `SHARED_PROVIDER_MODE` from production so the two cannot drift.
+- The capability's coverage requirement names both inspected surfaces
+  (`specs/filesystem-permission-determinism/spec.md`), because coverage is the
+  half this change actually adds (D6). **No** new ADDED requirement was written
+  for gate 2's production behavior: that behavior is pre-existing and untouched,
+  so a requirement asserting it would document the wrong layer.
