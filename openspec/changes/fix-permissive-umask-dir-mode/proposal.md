@@ -43,7 +43,7 @@ touches `safe_fs`.
 - **(a) Production-side determinism.** `safe_fs`'s directory creation pins an
   explicit base mode `0o755` instead of relying on the implicit `0o777`. This
   mirrors the helper's own file path, which already passes an explicit `0o666`
-  base (`safe_fs.py:119`). The gate at `provider_atomic.py:209` is **not**
+  base (`safe_fs.py:142`). The gate at `provider_atomic.py:209` is **not**
   relaxed — it is a fail-closed security property and must not yield to the
   environment.
 - **(b) Test-side directory hygiene.** The test helpers that pre-create provider
@@ -62,7 +62,7 @@ route through this gate and is not claimed without a trace; the other
 
 ## Impact
 
-- Affected code: `packages/common/safe_fs.py` (shared helper, **119 production
+- Affected code: `packages/common/safe_fs.py` (shared helper, **122 production
   call sites** of `ensure_directory_no_follow`), the six `provider_atomic`
   importers as unchanged consumers, and the test helpers in `(b)`.
 - Affected specs: new capability `filesystem-permission-determinism`.

@@ -20,10 +20,10 @@ environment decide a permission that a security gate later depends on.
 `ensure_directory_no_follow`.
 
 Rationale: the only production caller that wants a *different* directory mode —
-`packages/common/state_manager.py:2145-2153`, `_ensure_copyback_state_parent` —
+`packages/common/state_manager.py:2265-2273`, `_ensure_copyback_state_parent` —
 already handles it by chmod-ing to `0o775` after creation, and deliberately only
 for components **it** created in that call. No caller needs a parameter, so
-adding one would be speculative surface on a shared helper with 119 call sites.
+adding one would be speculative surface on a shared helper with 122 call sites.
 
 ### D2: Explicit mode, and **no** `fchmod`
 
@@ -219,7 +219,7 @@ Two scoping statements, so the enumeration is not read as broader than it is:
   an existing directory — but it is a known exception to that row.
 
 Bounding the whole discussion: `ensure_directory_no_follow` never chmods an
-**existing** directory (`safe_fs.py:53-91` has no chmod path), so every prefix in
+**existing** directory (`safe_fs.py:53-116` has no chmod path), so every prefix in
 production today is untouched. The exposure is limited to newly created
 directories.
 
@@ -254,7 +254,7 @@ safe_fs-created directory, and the `0o022` predicate at `provider_atomic.py:209`
 
 Surfaces:
 
-- Producers: `packages/common/safe_fs.py:53-92` (`ensure_directory_no_follow`),
+- Producers: `packages/common/safe_fs.py:53-116` (`ensure_directory_no_follow`),
   reached from `atomic_write_bytes_no_follow` / `_open_parent_dir` with
   `create=True`.
 - Validators/preflight: `packages/common/provider_atomic.py:209` (unchanged).
@@ -262,7 +262,7 @@ Surfaces:
 - Public routes/entrypoints: none — internal helper only.
 - Frontend/downstream consumers: none.
 - Failure paths/rollback/stale state: `provider_atomic` `precommit` raising
-  `provider_lock_parent_unsafe`; `state_manager.py:2145-2153`
+  `provider_lock_parent_unsafe`; `state_manager.py:2265-2273`
   `_ensure_copyback_state_parent`, which re-widens to `0o775` after creation.
 - Evidence/audit/readiness: `services/production_closure/*` evidence and lane
   roots (`ops_validation`, `met_validation`, `scale_validation`,
@@ -297,7 +297,7 @@ Regression rows:
 
 ## Boundary-Surface Checklist
 
-- **Shared helper root**: `packages/common/safe_fs.py`, 119 production call
+- **Shared helper root**: `packages/common/safe_fs.py`, 122 production call
   sites. The mode change is global to all of them by construction — that is the
   point, and the reason repair intensity is `high`.
 - **Write/overwrite surfaces**: evidence/lane roots under
@@ -346,7 +346,7 @@ umask `0o002`.
 Every production destination is written by `atomic_replace_provider_bytes`
 itself, which passes `mode=SHARED_PROVIDER_MODE` to
 `atomic_write_bytes_no_follow`; that helper opens the temp file and then calls
-`os.fchmod(file_fd, mode)` (`safe_fs.py:141-143`). `fchmod` sets the mode
+`os.fchmod(file_fd, mode)` (`safe_fs.py:144`). `fchmod` sets the mode
 absolutely — the umask applies only at *creation* — so a production destination
 lands exactly `0o644` under every umask. The umask-dependence exists solely
 where a **test** pre-creates the file.

@@ -10,7 +10,7 @@ Fixture level: expanded
 Upstream suggested level: absent (hand-written issue #1513)
 Repair intensity: high
 Why:
-- Shared helper root: packages/common/safe_fs.py, 119 production call sites
+- Shared helper root: packages/common/safe_fs.py, 122 production call sites (measured at HEAD; 119 at the 29892932 baseline, before the origin/master f087f08d merge)
 - Mandatory expanded triggers hit: permission, path, temp, file output
 - The consumer is a fail-closed security gate (provider_atomic.py:209)
 - Directly governs the project's designated backend pytest oracle (node-27)
@@ -291,8 +291,8 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
    never executed under umask 0002 on either host, so any provider-gate surface
    they pre-create is unmeasured, not known-green.
 7. **Two "both lock parents must be private" comments are imprecise on this
-   head** — `tests/test_state_manager.py:3699-3700` and
-   `tests/test_run_tree_copyback.py:1379-1380`. They present the following
+   head** — `tests/test_state_manager.py:3696-3697` and
+   `tests/test_run_tree_copyback.py:1376-1377`. They present the following
    `chmod(0o700)` as *required*, or `provider_lock_parent_unsafe` fires. After
    D1 that is no longer true for the safe_fs-created case: `0o755` already
    satisfies the gate (`0o755 & 0o022 == 0`), so the chmod is defensive rather
@@ -300,5 +300,5 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
    misleading in a second way — those chmods run *after* the publish that would
    already have raised. Reported by fix round 2 and deliberately left: both are
    in master-owned blocks this change has no other reason to touch, and neither
-   invites the delete-the-wrapper edit that §6 item 4's rewrite closed.
+   invites the delete-the-wrapper edit that §6 item 2's rewrite closed.
 
