@@ -244,3 +244,50 @@ core=46 / rotated=211**（轮换占比 82%）。方向未变，**keep rotation �
 建议的度量修复不变，并追加一条：**区分 catch 来自"读代码/读规格"还是来自
 "在生产 oracle 上实测"**。在这三类被分开计数之前，比值只能支持"不撤镜"，
 不能支持"镜是主要功臣"。
+
+## Revisit 2026-08-20 (post PR #1639 / issue #1119)
+
+审计仍 DECIDABLE，样本与上一条 revisit 同量级（**86 个多轮 merged PR，后轮
+命中 core=46 / rotated=211**）。方向未变，**keep rotation 维持**（autonomous
+default-keep；翻转仍须 maintainer 裁定）。
+
+本单提供的是一个**此前未出现过的形状**：**综合交叉审查那一轮产出零发现，而
+全部 9 条 catch 来自它前后的两个门。**
+
+- **Phase 0.5 fixture 只读审查：6 条**，含本单唯一的 P1——我写的 Evidence
+  Floor 与 tasks 1.3 互斥（要求"证明没有断言被改"，而
+  `tests/test_timescale_write_guard_wired.py:413` 的
+  `assert delete_calls[0][1] == ("fv_a",)` 在 DELETE 加边界后必然红，因为
+  1-tuple 参数在语义上只能由无界 DELETE 满足）。按字面执行会把实现者逼向
+  "不加边界"。另有一条 P2 推翻了 design D1 的**假必要性论证**（声称扩展
+  `_replace_values` 是唯一过 meta-guard 的形状，实则把 bounded DELETE 搬进
+  `_guard` 同样全过），一条 P2 补上 purge 语义回归的 oracle 缺口。
+- **Phase 4 综合交叉审查（两路四包）：0 条。**
+- **Phase 7 终审：3 条**，全 P3，含 in-range 扫描查不出的引用漂移。
+
+**对这条 ADR 的度量启示（第三个候选变量）。** 前两条 revisit 已指出
+「镜是否新」判别力不足，并提出「是否有实机 oracle」「是否被要求可证伪枚举」
+两个更强的变量。本单再加一条：**门读的是什么工件**。
+
+- 读**规格、且在实现之前**的门（Phase 0.5），本单命中率最高且抓到唯一 P1。
+  它能抓到的是"规格自相矛盾/论证造假/覆盖缺口"——**这类缺陷在代码写出来之后
+  就不再是缺陷，而是既成事实**，任何读代码的镜都看不见它们（代码会忠实实现
+  一个错的规格，然后全绿）。
+- 读**代码、在实现之后**的门（Phase 4/7），本单只产出文档层 P3。合理的解释
+  是：因为 Phase 0.5 已经把规格修对了，实现照做即可，留给代码审查的只剩
+  文书。**这正是"前置门有效"的表现，而不是"后置门无用"的证据**——两者不可
+  由单点区分。
+
+⇒ 度量修复建议追加第三条：**按门读的工件分类计数**（spec-before-impl /
+code-after-impl / 实机 oracle）。在这三类与前两条 revisit 提出的分类被分开
+统计之前，rotated 比值仍只能支持"不撤镜"。
+
+**一条与本 ADR 相邻但独立的方法论账**（#1513 记在这里的爆炸半径方法，本单
+发现仍有缺口）：ADR 0003 引入的 AST 反向 import 闭包解决了"间接 importer"，
+但解决不了**内容耦合**——`tests/test_node27_timeseries_compression_capture.py`
+把 `workers/forcing_producer/store.py` 的字节拷进 fixture repo 并断言
+`"check_batch_targets_uncompressed" in source`
+（`scripts/node27_timeseries_compression_capture.py:400`），它**不 import**
+store，任何 import 图都必然漏掉。闭包需要第三条腿：grep 出把源码当数据读的
+消费者。同理，`file:line` 引用核对必须按**锚点内容**而非行数范围——本单证明
+范围扫描是安全错觉（change 自己的编辑推移引用后，引用仍在文件范围内）。

@@ -2,7 +2,7 @@
 
 ## Risk triage
 
-- Fixture level: **standard** (upstream `Suggested fixture level` absent;
+- Fixture level: **expanded** (upstream `Suggested fixture level` absent;
   issue estimates size **S**, arm A, local-only — triage agrees).
 - Risk surfaces touched: **data-integrity / destructive-SQL**
   (a DELETE's target set changes), **fail-closed guard contract**
