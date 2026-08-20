@@ -1645,18 +1645,46 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
         # on symlink loops in CPython 3.13+ and strict Path.resolve() raises an
         # errno-less RuntimeError on <=3.12, so this rejection only becomes
         # reachable through os.path.realpath(..., strict=True). ENOENT is not
-        # unresolvable -- a merely missing root keeps the admitted semantics.
+        # unresolvable -- a merely missing root keeps the admitted semantics --
+        # but that admission is loop-filtered, exactly as in
+        # _local_runtime_root_safety above: strict resolution stops at the first
+        # missing component, so a "<missing>/../<loop>" phantom fails with
+        # ENOENT while its non-strict fallback still lands on a symlink loop.
+        # Re-resolving the fallback strictly is what keeps that phantom out of
+        # the containment bases; without it one physical target draws two
+        # opposite verdicts (rejected as "<loop>", admitted as
+        # "<missing>/../<loop>"). Only a second ENOENT (the root genuinely does
+        # not exist yet) or a clean re-resolution ("<missing>/../<real>") keeps
+        # the admitted verdict. ValueError -- an unrepresentable path string,
+        # which no resolution primitive can canonicalise -- folds into the same
+        # rejection instead of escaping the adjudicator.
+        #
+        # Deliberately NOT the local artifact leg's posture, which keeps phantom
+        # roots admitted as a recorded residual (PR #1618): these roots are the
+        # containment baseline that _db_free_selector_path_rejection below
+        # judges selector paths against, so admitting a phantom loop here would
+        # reproduce at the path level the very fail-open the root level rejects.
         try:
             resolved = Path(os.path.realpath(root, strict=True))
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            unresolvable = _runtime_root_rejection(
+                "scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text
+            )
             if getattr(error, "errno", None) != ENOENT:
-                rejected.append(
-                    _runtime_root_rejection(
-                        "scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text
-                    )
-                )
+                rejected.append(unresolvable)
                 continue
-            resolved = Path(os.path.realpath(root))
+            try:
+                fallback = os.path.realpath(root)
+            except (OSError, ValueError):
+                rejected.append(unresolvable)
+                continue
+            try:
+                os.path.realpath(fallback, strict=True)
+            except (OSError, ValueError) as recheck_error:
+                if getattr(recheck_error, "errno", None) != ENOENT:
+                    rejected.append(unresolvable)
+                    continue
+            resolved = Path(fallback)
         if resolved not in roots:
             roots.append(resolved)
     return tuple(roots), rejected
@@ -1679,10 +1707,33 @@ def _db_free_selector_path_rejection(
     path = Path(os.path.expanduser(value))
     if not path.is_absolute():
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_relative", value)
+    # Same paradigm as _db_free_selector_allowed_roots above, because this leg
+    # consumes that leg's product: strict os.path.realpath is the only loop
+    # predicate that behaves the same on every supported CPython, and the ENOENT
+    # admission is loop-filtered rather than errno-scoped alone. Submission-time
+    # adjudication performs no existence check, so a not-yet-created selector
+    # path must stay admitted with a byte-identical normalized value; a fallback
+    # that still carries a loop must not. Any other errno (ELOOP, ENOTDIR,
+    # EACCES, ESTALE) and an unrepresentable path string (ValueError) take the
+    # existing rejection. Resolution now precedes the containment comparison
+    # below, so a value that is both unresolvable and out of root reports the
+    # resolution reason -- an unresolvable value has no trustworthy location to
+    # compare against.
     try:
-        resolved = path.resolve(strict=False)
-    except OSError:
-        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        resolved = Path(os.path.realpath(path, strict=True))
+    except (OSError, ValueError) as error:
+        if getattr(error, "errno", None) != ENOENT:
+            return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        try:
+            fallback = os.path.realpath(path)
+        except (OSError, ValueError):
+            return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        try:
+            os.path.realpath(fallback, strict=True)
+        except (OSError, ValueError) as recheck_error:
+            if getattr(recheck_error, "errno", None) != ENOENT:
+                return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        resolved = Path(fallback)
     if not any(_path_is_relative_to(resolved, root) for root in allowed_roots):
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_outside_allowed_roots", value)
     return None
