@@ -81,7 +81,17 @@ class _RecordingCursor:
         self.connection.executions.append((statement, tuple(parameters)))
         normalized = statement.lower().strip()
         if _CHUNKS_QUERY_MARKER in normalized:
-            self._last_fetchone = self.connection.compressed_chunk_row
+            self._last_fetchone = self._compressed_chunk_answer(tuple(parameters))
+            return
+        if "select 1 from met.forcing_station_timeseries" in " ".join(normalized.split()):
+            # Existence probe before the window read (met side), mirroring the
+            # hydro pair below: report a row only when the fixture models
+            # pre-existing rows for this forcing_version_id.
+            window = self.connection.existing_forcing_window
+            self._last_fetchone = (1,) if window and window[0] is not None else None
+            return
+        if "select min(valid_time), max(valid_time) from existing" in " ".join(normalized.split()):
+            self._last_fetchone = self.connection.existing_forcing_window
             return
         if "select 1 from hydro.river_timeseries" in " ".join(normalized.split()):
             # Existence probe before the window read: report a row only when
@@ -93,6 +103,29 @@ class _RecordingCursor:
             self._last_fetchone = self.connection.existing_river_window
             return
         self._last_fetchone = None
+
+    def _compressed_chunk_answer(self, parameters: tuple[Any, ...]) -> Any:
+        """Answer the guard's catalog lookup, optionally window-sensitively.
+
+        Default (``compressed_chunk_range is None``): return
+        ``connection.compressed_chunk_row`` unconditionally — the historical
+        behavior every pre-existing test in this module relies on. When a
+        fixture sets ``compressed_chunk_range`` it models a chunk that occupies
+        a specific ``[range_start, range_end)`` span, and the row is returned
+        only when the QUERIED window overlaps it, reproducing the guard SQL's
+        ``range_start <= valid_time_max AND range_end > valid_time_min``. That
+        is what makes "the union window trips the guard but the incoming batch
+        alone would not" an observable distinction rather than an assumption.
+        """
+        row = self.connection.compressed_chunk_row
+        chunk_range = self.connection.compressed_chunk_range
+        if row is None or chunk_range is None:
+            return row
+        # check_batch_targets_uncompressed binds
+        # (hypertable_schema, hypertable_name, valid_time_max, valid_time_min).
+        queried_max, queried_min = parameters[2], parameters[3]
+        range_start, range_end = chunk_range
+        return row if (range_start <= queried_max and range_end > queried_min) else None
 
     def fetchone(self) -> Any:
         return self._last_fetchone
@@ -114,7 +147,12 @@ class _RecordingConnection:
 
     ``compressed_chunk_row`` — set to a ``(chunk_schema, chunk_name)`` tuple
     to model "guard finds a compressed chunk"; keep ``None`` to model
-    "uncompressed, guard passes". ``close`` implicitly rolls back an
+    "uncompressed, guard passes". ``compressed_chunk_range`` optionally pins
+    that chunk to a ``[range_start, range_end)`` span so it is only reported
+    when the guard's queried window overlaps it.
+    ``existing_river_window`` / ``existing_forcing_window`` model rows already
+    stored for the replacement key, feeding each path's existence probe and
+    window read. ``close`` implicitly rolls back an
     uncommitted transaction to mirror psycopg2's documented semantics —
     the production write paths rely on this to roll back when the guard
     raises out of ``_replace_values``.
@@ -126,12 +164,16 @@ class _RecordingConnection:
         self,
         *,
         compressed_chunk_row: tuple[str, str] | None = None,
+        compressed_chunk_range: tuple[datetime, datetime] | None = None,
         existing_river_window: tuple[datetime, datetime] | None = None,
+        existing_forcing_window: tuple[datetime, datetime] | None = None,
     ) -> None:
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_values_calls: list[tuple[str, list[tuple[Any, ...]]]] = []
         self.compressed_chunk_row = compressed_chunk_row
+        self.compressed_chunk_range = compressed_chunk_range
         self.existing_river_window = existing_river_window
+        self.existing_forcing_window = existing_forcing_window
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
@@ -410,12 +452,146 @@ def test_forcing_producer_uncompressed_passes_batch_unchanged(
         if "DELETE FROM met.forcing_station_timeseries" in statement
     ]
     assert len(delete_calls) == 1
-    assert delete_calls[0][1] == ("fv_a",)
+    # No stored rows, so the union window is the incoming batch's own range and
+    # the DELETE is bounded to it (it used to be the unbounded ``("fv_a",)``).
+    assert delete_calls[0][1] == ("fv_a", _t(0), _t(2))
+    assert "valid_time >= %s" in delete_calls[0][0]
+    assert "valid_time <= %s" in delete_calls[0][0]
     assert len(execute_values_calls) == 1
     insert_statement = execute_values_calls[0][0]
     assert re.search(r"INSERT INTO met\.forcing_station_timeseries", insert_statement)
     assert len(execute_values_calls[0][1]) == len(rows)
     assert connection.commits == 1
+
+
+def _forcing_guard_call(connection: _RecordingConnection) -> tuple[str, tuple[Any, ...]]:
+    return next(
+        (statement, params)
+        for statement, params in connection.executions
+        if _CHUNKS_QUERY_MARKER in statement
+    )
+
+
+def _forcing_delete_calls(
+    connection: _RecordingConnection,
+) -> list[tuple[str, tuple[Any, ...]]]:
+    return [
+        (statement, params)
+        for statement, params in connection.executions
+        if "DELETE FROM met.forcing_station_timeseries" in statement
+    ]
+
+
+def test_forcing_producer_replacement_window_includes_existing_rows_before_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stored rows extending past the batch widen BOTH the guard window and the DELETE.
+
+    The defect this pins: the guard used to be handed the incoming batch's own
+    range while the DELETE targeted every row of the forcing_version — so rows
+    outside the batch were deleted without ever being certified uncompressed.
+    """
+    existing_min = datetime(2026, 5, 31, 21, tzinfo=UTC)
+    existing_max = datetime(2026, 6, 1, 9, tzinfo=UTC)
+    connection = _RecordingConnection(existing_forcing_window=(existing_min, existing_max))
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+    rows = _forcing_rows()
+    repository.replace_forcing_timeseries("fv_a", rows)
+
+    # Guard binds (schema, table, valid_time_max, valid_time_min) — the union of
+    # the stored range and the batch range, not the batch range alone.
+    guard_call = _forcing_guard_call(connection)
+    assert guard_call[1][-2:] == (existing_max, existing_min)
+    delete_calls = _forcing_delete_calls(connection)
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1] == ("fv_a", existing_min, existing_max)
+    assert len(execute_values_calls) == 1
+    assert len(execute_values_calls[0][1]) == len(rows)
+
+
+def test_forcing_producer_empty_batch_with_existing_rows_still_purges_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty batch still purges the forcing_version — bounded to the stored window.
+
+    ``replace_forcing_timeseries`` has no ``if not rows: return``; "replace with
+    nothing" means "purge". Adding a short-circuit would silently drop that.
+    """
+    existing_min = datetime(2026, 5, 31, 21, tzinfo=UTC)
+    existing_max = datetime(2026, 6, 1, 9, tzinfo=UTC)
+    connection = _RecordingConnection(existing_forcing_window=(existing_min, existing_max))
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+    repository.replace_forcing_timeseries("fv_a", ())
+
+    guard_call = _forcing_guard_call(connection)
+    assert guard_call[1][-2:] == (existing_max, existing_min)
+    delete_calls = _forcing_delete_calls(connection)
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1] == ("fv_a", existing_min, existing_max)
+    assert execute_values_calls == [], "INSERT MUST NOT fire for an empty batch"
+    assert connection.commits == 1
+
+
+def test_forcing_producer_empty_batch_without_existing_rows_skips_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored rows and an empty batch — no window exists, so no DELETE at all.
+
+    An unbounded DELETE is exactly what TimescaleDB rejects once any chunk of
+    the hypertable is compressed, even when zero rows match.
+    """
+    connection = _RecordingConnection()
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+    repository.replace_forcing_timeseries("fv_a", ())
+
+    delete_idx = _index_of_first(
+        connection.executions,
+        "DELETE FROM met.forcing_station_timeseries",
+    )
+    assert delete_idx == -1, "DELETE MUST NOT fire when there is no window to bound it"
+    # Empty window on both sides — the guard short-circuits before any catalog lookup.
+    assert _index_of_first(connection.executions, _CHUNKS_QUERY_MARKER) == -1
+    assert execute_values_calls == []
+
+
+def test_forcing_producer_guard_sees_compressed_chunk_only_the_union_reaches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1119's core complaint: guard PASSes while the DELETE still fails.
+
+    The compressed chunk sits inside the stored rows' range and outside the
+    incoming batch's range. With the batch-only guard window the catalog lookup
+    found nothing and the unbounded DELETE went on to hit the compressed chunk;
+    with the union window the guard refuses before any write.
+    """
+    existing_min = datetime(2026, 5, 30, tzinfo=UTC)
+    existing_max = datetime(2026, 5, 31, tzinfo=UTC)
+    connection = _RecordingConnection(
+        compressed_chunk_row=("_timescaledb_internal", "_hyper_2_7_chunk"),
+        compressed_chunk_range=(
+            datetime(2026, 5, 29, tzinfo=UTC),
+            datetime(2026, 5, 31, tzinfo=UTC),
+        ),
+        existing_forcing_window=(existing_min, existing_max),
+    )
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+    with pytest.raises(CompressedChunkWriteError) as exc_info:
+        repository.replace_forcing_timeseries("fv_a", _forcing_rows())
+
+    assert "_hyper_2_7_chunk" in str(exc_info.value)
+    assert "met.forcing_station_timeseries" in str(exc_info.value)
+    # The batch's own range (_t(0).._t(2)) misses the chunk entirely; only the
+    # union with the stored range reaches it.
+    guard_call = _forcing_guard_call(connection)
+    assert guard_call[1][-2:] == (_t(2), existing_min)
+    assert _forcing_delete_calls(connection) == [], "DELETE MUST NOT fire when guard raises"
+    assert execute_values_calls == [], "INSERT MUST NOT fire when guard raises"
+    assert connection.commits == 0
+    assert connection.rollbacks >= 1, "caller transaction MUST roll back"
 
 
 # ---------------------------------------------------------------------------

@@ -4,22 +4,22 @@ Issue: #1119 (arm A — fix the DELETE; arm B forbidden, see proposal § Non-Goa
 
 ## 1. Production fix
 
-- [ ] 1.1 Add `_coerce_valid_time`-equivalent handling in
+- [x] 1.1 Add `_coerce_valid_time`-equivalent handling in
       `workers/forcing_producer/store.py`, applied to **both** the incoming
       batch values and the cursor-returned window values (design D9 — the
       batch side is the one that can actually be naive).
-- [ ] 1.2 Rewrite `replace_forcing_timeseries`'s `_guard` to do the
+- [x] 1.2 Rewrite `replace_forcing_timeseries`'s `_guard` to do the
       existence probe → `AS MATERIALIZED` window read → union with the
       incoming batch → `check_batch_targets_uncompressed(union)` → stash
       the DELETE parameters in an enclosing cell (design D2), reproducing
       the reference's two explanatory comments in substance (design D4).
-- [ ] 1.3 Change the DELETE statement to
+- [x] 1.3 Change the DELETE statement to
       `... WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s`.
-- [ ] 1.4 Add `delete_parameters_factory: Callable[[], tuple[Any, ...] | None] | None = None`
+- [x] 1.4 Add `delete_parameters_factory: Callable[[], tuple[Any, ...] | None] | None = None`
       to `_replace_values`, invoked after the pre-write hook and after
       `pre_delete_statement`, immediately before the DELETE; a `None`
       return skips the DELETE (design D3).
-- [ ] 1.5 **Do NOT add an `if not rows: return` short-circuit.**
+- [x] 1.5 **Do NOT add an `if not rows: return` short-circuit.**
       `replace_forcing_timeseries` has no early return today, so an empty
       batch means "purge this forcing_version" and that semantics must
       survive. `workers/output_parser/parser.py:800` has exactly such a
@@ -27,38 +27,38 @@ Issue: #1119 (arm A — fix the DELETE; arm B forbidden, see proposal § Non-Goa
       the correct reference here is
       `forcing_domain_handoff_apply.py:744-797`, which does **not**
       short-circuit.
-- [ ] 1.6 The three other `_replace_values` call sites keep their argument
+- [x] 1.6 The three other `_replace_values` call sites keep their argument
       lists byte-for-byte unchanged (MP4).
 
 ## 2. Tests
 
 All in `tests/test_timescale_write_guard_wired.py`, mock-cursor oracle.
 
-- [ ] 2.1 Setup extension: add a met-side `existing_forcing_window` knob to
+- [x] 2.1 Setup extension: add a met-side `existing_forcing_window` knob to
       `_RecordingConnection` and the two matching probe branches to
       `_RecordingCursor.execute`, mirroring the existing
       `existing_river_window` pair at `:85-95`. **For the new tests only** —
       the three existing tests need no setup change (design § Expected
       collateral (2)).
-- [ ] 2.2 New: existing rows extend beyond the incoming batch → guard
+- [x] 2.2 New: existing rows extend beyond the incoming batch → guard
       receives the **union** window and the DELETE parameters equal that
       union. Red before the fix for the *guard* half of the bug.
-- [ ] 2.3 New: existing rows present + **empty** batch → guard receives the
+- [x] 2.3 New: existing rows present + **empty** batch → guard receives the
       existing-only window, the DELETE **is** issued bounded to it, and
       `execute_values` does not fire. This is the test that catches a
       1.5 violation; without it the purge regression is silent.
-- [ ] 2.4 New: no existing rows + empty batch → **no** DELETE statement in
+- [x] 2.4 New: no existing rows + empty batch → **no** DELETE statement in
       `connection.executions`.
-- [ ] 2.5 New: compressed chunk reported inside the **union** window while
+- [x] 2.5 New: compressed chunk reported inside the **union** window while
       the incoming batch alone would have been clean → `CompressedChunkWriteError`,
       no DELETE, no INSERT, rollback. This is the end-to-end discriminator
       for issue #1119's core complaint ("guard PASSes while the DELETE
       still fails"); the existing `:376` test cannot see it because its
       fixture has no existing rows.
-- [ ] 2.6 Tighten `:413`: `assert delete_calls[0][1] == ("fv_a",)` becomes
+- [x] 2.6 Tighten `:413`: `assert delete_calls[0][1] == ("fv_a",)` becomes
       the bounded triple. **Required** — see design § Expected collateral (1).
       No other assertion in this file may change.
-- [ ] 2.7 `tests/test_timescale_write_guard_wire_site_invariant.py` passes
+- [x] 2.7 `tests/test_timescale_write_guard_wire_site_invariant.py` passes
       **unmodified** (MP3).
 
 ## 3. Verification matrix
@@ -97,15 +97,15 @@ Known members to include explicitly:
 
 ## 5. Report, don't fix (out of scope)
 
-- [ ] 5.1 `replace_forcing_components` (`store.py:716`) has the same
+- [x] 5.1 `replace_forcing_components` (`store.py:716`) has the same
       unbounded-DELETE shape; its target `met.forcing_version_component` is
       a plain table (`db/migrations/000005_met.sql:112,126` create
       hypertables for `forcing_station_timeseries` and
       `best_available_selection` only), so it is currently harmless.
       Report if that changes.
-- [ ] 5.2 The union-window logic now exists in three copies
+- [x] 5.2 The union-window logic now exists in three copies
       (`forcing_domain_handoff_apply.py`, `workers/output_parser/parser.py`,
       `store.py`). Deduplication rejected here (design D6) — file a
       follow-up if a fourth appears.
-- [ ] 5.3 Anything discovered about the DB-mode producer's retirement
+- [x] 5.3 Anything discovered about the DB-mode producer's retirement
       belongs to the separate arm-B issue, not here.

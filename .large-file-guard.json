@@ -10,6 +10,7 @@
     "packages/common/forcing_domain_handoff_apply.py",
     "workers/output_parser/parser.py",
     "workers/forcing_producer/producer.py",
+    "workers/forcing_producer/store.py",
     "tests/test_forcing_producer.py",
     "workers/shud_runtime/runtime.py",
     "tests/test_shud_runtime.py",
