@@ -66,8 +66,8 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
 红证优先落在 `tests/test_file_orchestration_journal_read_cache.py`；新建并发文件须在 PR 中显式列出。
 
 **并发用例统一纪律（每条并发用例都适用）**：复用既有 harness
-`tests/test_file_orchestration_journal.py:7920` `_join_all`（daemon 线程 + 30s 总预算 + `stop` 事件）
-与 `:7935` 附近的 `_hammer_until`，**不要再造第三份 join-with-deadline 逻辑**。
+`tests/test_file_orchestration_journal.py:7921` `_join_all`（daemon 线程 + 30s 总预算 + `stop` 事件）
+与 `:7884` 的 `_hammer_until`（在 `_join_all` **之前**），**不要再造第三份 join-with-deadline 逻辑**。
 屏障本身也必须带 timeout（`threading.Barrier(2, timeout=…)` / `Event.wait(timeout=…)` 并断言未超时）：
 一个因对端提前死掉而永久停在 `Barrier.wait()` 的线程，会**持着 `_write_lock` 加 cycle flock
 直到解释器退出**，把后续整个套件拖死。禁止用 `time.sleep` 制造时序。
@@ -198,11 +198,8 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
   该 issue **必须把 design D2 的第 1 条作为硬约束写进正文**：
   **入口 clear（`:6950-6951`）是 owner 快路径的正确性前提，不得以「纯性能」为由收窄**。
   漏掉这句，执行 follow-up 的人会在假前提上动入口 clear——那才是真会出事的地方。
-- [ ] 4.5 `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None` 的 entry。
-  准确口径（**不得写成「永远命不中」**）：**窗外恒 miss**（`None == <tuple>` 恒假），
-  **窗内 owner 可命中**——它与 `_cycle_rows` 共用同一 4 元组 key 形状，
-  `_materialize_latest_unlocked` 就在同一窗内 `:6851` 读、`:6853` 存——**出口 clear 即失效**。
-  立 issue，本 change 不动（design D10.5）。
+- [ ] 4.5 **不立 issue**（原拟的 `_cycle_rows_by_model_unlocked` 死缓存项经复核不成立，见 design D10.5）。
+  本项保留只为记录该撤销：若实现中有人重新「发现」它，**不要立单**，回读 D10.5。
 
 ## 5. 验证（Evidence Floor）
 
