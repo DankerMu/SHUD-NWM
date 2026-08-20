@@ -197,14 +197,23 @@ not an oracle weakening. An implementer who refuses to touch it can only
 satisfy it by leaving the DELETE unbounded.
 
 **(2) No setup repair is needed for the three existing tests.**
-`_RecordingCursor.execute` (`:80-95`) special-cases only the
-`hydro.river_timeseries` probes; every other statement falls through to
+`_RecordingCursor.execute` special-cases only the `hydro.river_timeseries`
+probes; every other statement falls through to
 `self._last_fetchone = None`. For the met-side probes that fall-through
-*is* the correct answer — "no existing rows". The proof is in the same
-file: the handoff tests (`:444`, `:470`, `:498`) already drive the
-identical two probes in `forcing_domain_handoff_apply.py:763-777` through
-this same cursor with zero special-casing. So `:358` and `:376` keep
+*is* the correct answer — "no existing rows". So `:358` and `:376` keep
 passing untouched.
+
+*Post-implementation correction (kept, not silently edited, because the
+prediction above was right in outcome but wrong in mechanism).* The
+delivered fix adds met-side probe branches to `_RecordingCursor`, and the
+handoff path issues **byte-identical** probe SQL
+(`forcing_domain_handoff_apply.py:763-777`). Those branches therefore also
+intercept the handoff tests — the fall-through is no longer what answers
+them. Behaviour is preserved regardless: with `existing_forcing_window`
+unset the existence branch evaluates to `None`, exactly what the
+fall-through returned, so the handoff tests take `existing = (None, None)`
+and never reach the second statement. Equivalence, not non-interception,
+is what makes the three existing tests safe.
 
 Setup **extension** is still required, but only for the new tests: a
 met-side `existing_forcing_window` knob on `_RecordingConnection` plus the
