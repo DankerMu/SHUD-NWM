@@ -5,7 +5,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.met_store import MetStoreError, default_database_url
@@ -26,6 +26,17 @@ from .producer import (
 )
 
 DIRECT_GRID_CACHE_STATION_ROLE = "direct_grid_cache"
+
+
+def _coerce_valid_time(value: Any) -> datetime | None:
+    """Normalize a valid_time (datetime from the batch or the DB, ISO string from
+    a test double) into an aware UTC datetime so window min/max stay comparable."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -747,10 +758,51 @@ class PsycopgForcingRepository:
             )
             for row in rows
         ]
-        valid_time_min = min((row.valid_time for row in rows), default=None)
-        valid_time_max = max((row.valid_time for row in rows), default=None)
+        # The DELETE must carry a valid_time window so the planner can exclude
+        # compressed chunks: TimescaleDB rejects an unbounded DELETE on a
+        # hypertable with ANY compressed chunk, even when no row matches. Mirror
+        # packages/common/forcing_domain_handoff_apply.py: window = existing rows
+        # ∪ incoming batch, guard certifies that union, DELETE is bounded to it.
+        batch_times = [_coerce_valid_time(row.valid_time) for row in rows]
+        batch_min = min(batch_times, default=None)
+        batch_max = max(batch_times, default=None)
+        # Filled by _guard with the parameters for the bounded DELETE. The guard
+        # and the DELETE therefore read the SAME window object — recomputing it
+        # separately for the DELETE would reintroduce the guard/DELETE window
+        # divergence this fix removes.
+        delete_parameters_cell: list[tuple[Any, ...] | None] = [None]
 
         def _guard(cursor: Any) -> None:
+            valid_time_min = batch_min
+            valid_time_max = batch_max
+            # Existence probe first (pkey prefix descent). A bare min/max with
+            # this filter makes the planner walk valid_time_idx backward per
+            # chunk hunting for the first matching row — for a NEW
+            # forcing_version (0 rows) that is a full index scan of every chunk.
+            # The MATERIALIZED fence on the fallback blocks the same min/max
+            # transform so the window read stays on the pkey prefix and touches
+            # only this version's rows.
+            cursor.execute(
+                "SELECT 1 FROM met.forcing_station_timeseries WHERE forcing_version_id = %s LIMIT 1",
+                (forcing_version_id,),
+            )
+            if cursor.fetchone() is None:
+                existing = (None, None)
+            else:
+                cursor.execute(
+                    "WITH existing AS MATERIALIZED ("
+                    "    SELECT valid_time FROM met.forcing_station_timeseries"
+                    "    WHERE forcing_version_id = %s"
+                    ") SELECT min(valid_time), max(valid_time) FROM existing",
+                    (forcing_version_id,),
+                )
+                existing = cursor.fetchone() or (None, None)
+            existing_min = _coerce_valid_time(existing[0])
+            existing_max = _coerce_valid_time(existing[1])
+            if existing_min is not None:
+                valid_time_min = min(valid_time_min, existing_min) if valid_time_min is not None else existing_min
+            if existing_max is not None:
+                valid_time_max = max(valid_time_max, existing_max) if valid_time_max is not None else existing_max
             check_batch_targets_uncompressed(
                 cursor,
                 hypertable_schema="met",
@@ -758,12 +810,21 @@ class PsycopgForcingRepository:
                 valid_time_min=valid_time_min,
                 valid_time_max=valid_time_max,
             )
+            if valid_time_min is not None:
+                delete_parameters_cell[0] = (forcing_version_id, valid_time_min, valid_time_max)
+
+        def _delete_parameters() -> tuple[Any, ...] | None:
+            # ``None`` when neither existing rows nor an incoming batch produced
+            # a window: there is nothing to purge and an unbounded DELETE is
+            # exactly what TimescaleDB rejects, so the DELETE is skipped.
+            return delete_parameters_cell[0]
 
         self._replace_values(
             None,
             (),
-            "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
-            (forcing_version_id,),
+            "DELETE FROM met.forcing_station_timeseries "
+            "WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s",
+            (),
             """
             INSERT INTO met.forcing_station_timeseries (
                 forcing_version_id,
@@ -781,6 +842,7 @@ class PsycopgForcingRepository:
             """,
             value_rows,
             pre_write_cursor_hook=_guard,
+            delete_parameters_factory=_delete_parameters,
         )
 
     def find_registered_snapshot_bbox_by_identity(
@@ -912,6 +974,7 @@ class PsycopgForcingRepository:
         expected_insert_count: int | None = None,
         conflict_error: str | None = None,
         pre_write_cursor_hook: Callable[[Any], None] | None = None,
+        delete_parameters_factory: Callable[[], tuple[Any, ...] | None] | None = None,
     ) -> None:
         try:
             import psycopg2
@@ -933,7 +996,15 @@ class PsycopgForcingRepository:
                 if pre_delete_statement is not None:
                     cursor.execute(pre_delete_statement, pre_delete_parameters)
                 if delete_statement is not None:
-                    cursor.execute(delete_statement, delete_parameters)
+                    # Callers whose DELETE bounds are only knowable from the
+                    # cursor (see replace_forcing_timeseries) supply a factory
+                    # that runs AFTER the pre-write hook has read them; a
+                    # ``None`` return means "no window" and skips the DELETE.
+                    resolved_delete_parameters: tuple[Any, ...] | None = delete_parameters
+                    if delete_parameters_factory is not None:
+                        resolved_delete_parameters = delete_parameters_factory()
+                    if resolved_delete_parameters is not None:
+                        cursor.execute(delete_statement, resolved_delete_parameters)
                 if rows:
                     execute_values(
                         cursor,

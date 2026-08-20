@@ -10849,3 +10849,1085 @@ def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
             )
             is False
         )
+
+
+# ---------------------------------------------------------------------------
+# #1592 / #1589: durable attribution write boundary.
+#
+# Every assertion below reaches the DURABLE layer — the journal jsonl payload
+# and the ``pipeline-jobs/`` direct row file.  ``get_pipeline_job`` re-sanitizes
+# on the way out, so a placeholder and a correctly persisted URI are
+# indistinguishable there: an assertion on the public row has no discriminating
+# power for either issue.
+# ---------------------------------------------------------------------------
+
+
+_REAL_MASTER_LOG_URI = "s3://nhms/logs/cycle_gfs_2026072000/forecast-master.log"
+_LAUNDERED_URI = "[object-uri]"
+
+
+def _durable_master_payload(repository: Any, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Newest durable jsonl payload written for the cohort master row."""
+
+    payloads = _durable_pipeline_job_payloads(repository.root, str(record["job_id"]))
+    assert payloads, "expected at least one durable pipeline_job payload for the master"
+    return payloads[-1]
+
+
+def _direct_row_payload(repository: Any, job_id: str) -> dict[str, Any]:
+    """The ``pipeline-jobs/<job_id>.json`` direct row payload (non-candidate rows)."""
+
+    path = repository.root / "pipeline-jobs" / f"{job_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))["payload"]
+
+
+def _raw_journal_text(repository: Any) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((repository.root / "journal").rglob("*.jsonl"))
+    )
+
+
+def _bound_cohort_master(tmp_path: Path, *, member_count: int = 2) -> tuple[Any, dict[str, Any]]:
+    repository, record = _reserved_cohort_master(tmp_path, member_count=member_count)
+    _bind_cohort_master(repository, record)
+    return repository, record
+
+
+def _reproject_cohort(
+    repository: Any,
+    record: Mapping[str, Any],
+    *,
+    error_code: str = "OUT_OF_MEMORY",
+    outcomes: list[str] | None = None,
+    **evidence: Any,
+) -> dict[str, int]:
+    return repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, error_code=error_code, outcomes=outcomes),
+        complete=True,
+        master_status="failed",
+        master_error_code=error_code,
+        reconciliation_decision="matched_bound",
+        **evidence,
+    )
+
+
+def _mark_master_permanently_failed(
+    repository: Any,
+    record: Mapping[str, Any],
+    *,
+    error_code: str = "RETRY_LIMIT_EXHAUSTED",
+    error_message: str = "automatic retry declined for this cohort master",
+) -> dict[str, Any]:
+    result = repository.mark_pipeline_job_permanently_failed(
+        str(record["job_id"]),
+        error_code=error_code,
+        error_message=error_message,
+    )
+    assert result.outcome == "applied"
+    marked = _durable_master_payload(repository, record)
+    assert marked["status"] == "permanently_failed"
+    return marked
+
+
+# --- J1 / J2: the record constructor itself ------------------------------
+
+
+def test_journal_record_for_write_strips_object_uri_placeholders() -> None:
+    """#1592 J1: the single record constructor is the anti-laundering boundary.
+
+    Every durable journal record is built here, so a write path that never goes
+    through ``_append_validated_record_unlocked`` (the cohort projection loop
+    and ``_write_pipeline_job_unlocked``) inherits the guarantee instead of
+    having to re-declare it.
+    """
+
+    record = journal_module._journal_record_for_write(
+        "pipeline_job",
+        {
+            "job_id": "job_strip_probe",
+            "log_uri": "[object-uri]",
+            "output_uri": "[uri]",
+            "init_state_identities": [{"array_task_id": 0, "init_state_uri": "[object-uri]"}],
+        },
+        source_id="gfs",
+        cycle_time=_dt("2026-07-20T00:00:00Z"),
+        model_id=None,
+        sequence=1,
+    )
+
+    payload = record["payload"]
+    assert payload["log_uri"] is None
+    assert payload["output_uri"] is None
+    assert payload["init_state_identities"] == [{"array_task_id": 0, "init_state_uri": None}]
+
+
+def test_journal_record_for_write_keeps_deliberately_persisted_placeholders() -> None:
+    """#1592 J2 (must-preserve 4): the strip stays narrow.
+
+    ``[local-path]`` and ``[redacted]`` are deliberately persisted evidence for
+    runtime-root and secret redaction; only the object-URI placeholder set is
+    laundering.  A whole-value match also has to leave placeholder text that is
+    merely embedded in a longer string alone.
+    """
+
+    record = journal_module._journal_record_for_write(
+        "pipeline_job",
+        {
+            "job_id": "job_keep_probe",
+            "workspace_path": "[local-path]",
+            "runtime_root": "[local-path]",
+            "authorization": "[redacted]",
+            "message": "accounting read [object-uri] and [local-path]",
+        },
+        source_id="gfs",
+        cycle_time=_dt("2026-07-20T00:00:00Z"),
+        model_id=None,
+        sequence=1,
+    )
+
+    payload = record["payload"]
+    assert payload["workspace_path"] == "[local-path]"
+    assert payload["runtime_root"] == "[local-path]"
+    assert payload["authorization"] == "[redacted]"
+    assert payload["message"] == "accounting read [object-uri] and [local-path]"
+
+
+# --- J3 / J4: the two durable bypasses, end to end -----------------------
+
+
+def test_cohort_projection_cannot_launder_a_placeholder_into_durable_state(tmp_path: Path) -> None:
+    """#1592 J3: bypass A (``project_forecast_cohort_tasks`` payload loop).
+
+    The loop calls ``_journal_record_for_write`` directly, so before this change
+    a caller that round-tripped a public row laundered ``[object-uri]`` straight
+    into the durable master row and its direct row file.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+
+    _reproject_cohort(repository, record, log_uri=_LAUNDERED_URI)
+
+    durable = _durable_master_payload(repository, record)
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert durable["log_uri"] is None
+    assert direct["log_uri"] is None
+    assert _LAUNDERED_URI not in _raw_journal_text(repository)
+
+
+def test_deferred_cohort_projection_cannot_launder_a_placeholder(tmp_path: Path) -> None:
+    """#1592 J4: bypass B (defer leg → ``_write_pipeline_job_unlocked``).
+
+    Negative-discriminating on its own — ``None`` also satisfies "no literal
+    persisted", which is exactly the outcome design D3 forbids when the row
+    already held a real value.  Its displacement mirror below (J4b) is what
+    actually pins the defer leg.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+
+    result = repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code="SLURM_TASK_ACCOUNTING_INCOMPLETE",
+        error_message="terminal Slurm array task accounting was incomplete",
+        log_uri=_LAUNDERED_URI,
+    )
+
+    assert result.outcome == "applied"
+    durable = _durable_master_payload(repository, record)
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert durable["log_uri"] is None
+    assert direct["log_uri"] is None
+    assert _LAUNDERED_URI not in _raw_journal_text(repository)
+
+
+def test_deferred_projection_placeholder_does_not_displace_a_real_log_uri(tmp_path: Path) -> None:
+    """#1589 J4b (design D3, defer leg): a withheld value is not an overwrite.
+
+    Pass 1 parks the row on ``reconcile_unverified`` with a real log URI; that
+    status is NOT terminal, so the defer leg's whole-row short circuit does not
+    stop pass 2.  Pass 2 carries the display placeholder — the raw
+    ``is not None`` predicate treated it as a supplied value, displacing the
+    real URI, which the write-boundary strip then turned into ``None``.  Net
+    loss of durable evidence, i.e. worse than laundering.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    first = repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code="SLURM_TASK_ACCOUNTING_INCOMPLETE",
+        error_message="terminal Slurm array task accounting was incomplete",
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+    assert first.outcome == "applied"
+    assert _durable_master_payload(repository, record)["status"] == "reconcile_unverified"
+    assert _durable_master_payload(repository, record)["log_uri"] == _REAL_MASTER_LOG_URI
+
+    repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code="SLURM_MASTER_IDENTITY_MISMATCH",
+        error_message="a later deferred pass re-observed the same master",
+        log_uri=_LAUNDERED_URI,
+    )
+
+    assert _durable_master_payload(repository, record)["log_uri"] == _REAL_MASTER_LOG_URI
+    assert _direct_row_payload(repository, str(record["job_id"]))["log_uri"] == _REAL_MASTER_LOG_URI
+
+
+# --- J5: the projection leg's displacement oracle (core of this change) --
+
+
+def test_projection_placeholder_does_not_displace_a_real_log_uri(tmp_path: Path) -> None:
+    """#1589 J5 (design D3, projection leg): the interlock case.
+
+    The durable master already holds a real log URI.  A later reprojection
+    round-trips a public row, so ``log_uri`` arrives as ``[object-uri]``.  With
+    the raw predicate that placeholder displaces the real URI and the new write
+    boundary then withholds it — the real URI is lost outright, which is
+    strictly worse than the literal this change set out to remove.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    _reproject_cohort(repository, record, log_uri=_REAL_MASTER_LOG_URI)
+    assert _durable_master_payload(repository, record)["log_uri"] == _REAL_MASTER_LOG_URI
+    _mark_master_permanently_failed(repository, record)
+
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="NODE_FAILURE",
+        finished_at=_dt("2026-07-21T03:00:00Z"),
+        exit_code=137,
+        log_uri=_LAUNDERED_URI,
+    )
+
+    assert _durable_master_payload(repository, record)["log_uri"] == _REAL_MASTER_LOG_URI
+    assert _direct_row_payload(repository, str(record["job_id"]))["log_uri"] == _REAL_MASTER_LOG_URI
+
+
+# --- J6 / J7: attribution sticks, observation keeps refreshing -----------
+
+
+def test_permanently_failed_master_keeps_its_error_code_across_reprojection(tmp_path: Path) -> None:
+    """#1589 J6a: the attribution family sticks with the mark.
+
+    Reachability (design "D4 / #1589 可达性更正"): this is NOT reached on just
+    any resume/reconcile pass — the resume leg is gated by
+    ``settled_cohort_master`` and the reconcile leg by
+    ``_job_needs_restart_reconcile``.  The one production geometry that reaches
+    the sticky line is "durable projection incomplete + this pass carries
+    ``complete=True``", which is what this test constructs.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    marked = _mark_master_permanently_failed(repository, record)
+
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="NODE_FAILURE",
+        master_error_message="a later accounting pass derived a different cause",
+        finished_at=_dt("2026-07-21T03:00:00Z"),
+    )
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["status"] == "permanently_failed"
+    assert durable["error_code"] == marked["error_code"] == "RETRY_LIMIT_EXHAUSTED"
+    assert _direct_row_payload(repository, str(record["job_id"]))["error_code"] == "RETRY_LIMIT_EXHAUSTED"
+
+
+def test_permanently_failed_master_keeps_its_error_message_across_reprojection(tmp_path: Path) -> None:
+    """#1589 J6b: ``error_message`` is the same attribution family as the code.
+
+    Kept in its own test so a fix that sticks only ``error_code`` — the literal
+    scope of the issue title — is separately falsifiable.  Same reachability
+    limitation as J6a.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    marked = _mark_master_permanently_failed(repository, record)
+    assert marked["error_message"] == "automatic retry declined for this cohort master"
+
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="NODE_FAILURE",
+        master_error_message="a later accounting pass derived a different cause",
+        finished_at=_dt("2026-07-21T03:00:00Z"),
+    )
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["error_message"] == "automatic retry declined for this cohort master"
+    assert (
+        _direct_row_payload(repository, str(record["job_id"]))["error_message"]
+        == "automatic retry declined for this cohort master"
+    )
+
+
+def test_permanently_failed_master_still_refreshes_observational_evidence(tmp_path: Path) -> None:
+    """#1589 J7 (must-preserve 3): the reverse nail on design D4.
+
+    ``finished_at`` / ``exit_code`` / ``log_uri`` are facts about the master
+    Slurm job, not claims about why it was condemned.  Refreshing them under a
+    sticky status is the projection's stated intent; freezing them would be
+    design D4 mis-implemented as the rejected whole-row short circuit.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    marked = _mark_master_permanently_failed(repository, record)
+    finished_at = _dt("2026-07-21T03:00:00Z")
+
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="NODE_FAILURE",
+        finished_at=finished_at,
+        exit_code=137,
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["finished_at"] == journal_module._format_utc(finished_at)
+    assert durable["finished_at"] != marked["finished_at"]
+    assert durable["exit_code"] == 137
+    assert durable["log_uri"] == _REAL_MASTER_LOG_URI
+
+
+# --- J8: stickiness does not spread to the derived terminal statuses -----
+
+
+@pytest.mark.parametrize("status", ["succeeded", "partially_failed", "failed"])
+def test_derived_terminal_masters_still_take_the_reprojected_error_code(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    """#1589 J8 (design D5): the reverse nail on the trigger condition.
+
+    ``succeeded`` / ``partially_failed`` / ``failed`` are exactly the values the
+    projection derives for itself.  Making them sticky would pin the first
+    pass's conclusion forever, i.e. disable the projection rather than protect
+    it.  All three arms are parametrized so widening the trigger to
+    ``in TERMINAL_PIPELINE_STATUSES`` turns the whole set red.
+
+    This does NOT catch a narrow widening to ``{permanently_failed, cancelled}``
+    — there is no ``cancelled`` arm and by design D5 we do not want one
+    (``cancelled`` has no status stickiness at all today; that pre-existing gap
+    is tracked separately).
+    """
+
+    repository, record = _cohort_master_in_status(tmp_path, status)
+
+    _reproject_cohort(repository, record, error_code="NODE_FAILURE")
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["error_code"] == "NODE_FAILURE"
+    assert _direct_row_payload(repository, str(record["job_id"]))["error_code"] == "NODE_FAILURE"
+
+
+# --- J9: stickiness must not manufacture an empty write ------------------
+
+
+def test_stickiness_suppressing_the_only_change_writes_no_record(tmp_path: Path) -> None:
+    """#1589 J9 (must-preserve 7): ``cohort_changed`` turns False on its own.
+
+    The geometry is UNIT-CONSTRUCTED and not production reachable: it requires
+    ``candidate_projections`` to be unchanged, which means the durable
+    projection is already complete — and such a row is never scanned into this
+    path in the first place.  It exists to prove the change-detection list was
+    left alone rather than special-cased for stickiness.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    _mark_master_permanently_failed(repository, record)
+    payloads_before = len(_durable_pipeline_job_payloads(repository.root, str(record["job_id"])))
+    events_before = _master_events(repository, record)
+
+    counts = _reproject_cohort(repository, record, error_code="NODE_FAILURE")
+
+    assert counts == {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
+    assert len(_durable_pipeline_job_payloads(repository.root, str(record["job_id"]))) == payloads_before
+    assert _master_events(repository, record) == events_before
+
+
+# --- J10: the manual-retry round-trip residue ----------------------------
+
+
+def test_manual_retry_round_trip_keeps_the_real_log_uri(
+    tmp_path: Path,
+) -> None:
+    """#1592 J10 (design D8, restated round 2): the real URI SURVIVES.
+
+    ``_record_manual_retry_submission_success`` reads a PUBLIC row and writes it
+    straight back, so ``log_uri`` arrives as ``[object-uri]``.  D8 originally
+    claimed the durable residue as ``None`` -- "the only honest never
+    published".  Round 2 supersedes that: a placeholder is a WITHHELD value, and
+    the honest resolution of a withheld field is the value the row already
+    carries, not an erasure.  ``upsert_pipeline_job`` resolves it against the
+    persisted row, so the real ``s3://`` URI stays durable.
+
+    The geometry is UNIT-CONSTRUCTED, not flow reachable: the full
+    ``attempt_manual_retry`` flow mints its pending row with an explicit
+    ``log_uri=None`` (``_create_pending_manual_retry_job``), so it cannot reach
+    this laundering step.  The round-trip helper is therefore called directly,
+    and the reachability claim is kept at "unit-constructed" rather than
+    promoted to "production reachable".
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_retry_round_trip")
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="4242")
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "failed",
+        error_code="NODE_FAILURE",
+        error_message="node failed",
+        finished_at=cycle_time,
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+    assert _direct_row_payload(repository, record["job_id"])["log_uri"] == _REAL_MASTER_LOG_URI
+    assert repository.get_pipeline_job(record["job_id"])["log_uri"] == _LAUNDERED_URI
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    service._record_manual_retry_submission_success(
+        record["job_id"],
+        {"job_id": "7007", "status": "submitted"},
+    )
+
+    durable = _durable_pipeline_job_payloads(repository.root, record["job_id"])[-1]
+    assert durable["status"] == "submitted"
+    assert durable["log_uri"] == _REAL_MASTER_LOG_URI
+    assert _direct_row_payload(repository, record["job_id"])["log_uri"] == _REAL_MASTER_LOG_URI
+    assert _LAUNDERED_URI not in _raw_journal_text(repository)
+
+
+# --- J13-J20: every other write leg that admits caller evidence ----------
+#
+# Round-2 fix pass.  Putting the anti-laundering strip at the record
+# constructor made durable state stripped while caller input stayed raw, so any
+# leg that compares "what the caller asked for" against "what is on the row"
+# lost the ability to converge: its overwrite guard and its equality gate both
+# see a placeholder that the write boundary then erases.  The projection and
+# defer legs were fixed in round 1; these pin the rest of the class.
+
+
+def _reserved_unbound_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One versioned master still reserved and unbound (submit-evidence CAS)."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    return repository, record
+
+
+def _defer_submit_evidence(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    """One generic versioned submit-evidence transition that leaves status alone.
+
+    ``status=None`` keeps the row ``reserved`` and unbound, so the identical
+    replay still passes the CAS gates and actually reaches the equality gate --
+    which is the thing under test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    return repository.transition_pipeline_job_submit_evidence(
+        str(record["job_id"]),
+        AcceptedSubmitTransition.accounting(
+            "absence_deferred",
+            submit_outcome="submit_result_ambiguous",
+        ),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+        log_uri=log_uri,
+    )
+
+
+def _defer_cohort_projection(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    return repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code="SLURM_TASK_ACCOUNTING_INCOMPLETE",
+        error_message="terminal Slurm array task accounting was incomplete",
+        log_uri=log_uri,
+    )
+
+
+def _running_master_with_real_log_uri(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One bound master advanced to ``running`` carrying a real durable log URI."""
+
+    repository, record = _bound_cohort_master(tmp_path)
+    advanced = repository.transition_pipeline_job_runtime_status(
+        str(record["job_id"]),
+        "running",
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+    assert advanced.outcome == "applied"
+    assert _durable_master_payload(repository, record)["log_uri"] == _REAL_MASTER_LOG_URI
+    return repository, record
+
+
+def _durable_log_uri(repository: Any, job_id: str) -> Any:
+    return _durable_pipeline_job_payloads(repository.root, job_id)[-1]["log_uri"]
+
+
+def _durable_write_count(repository: Any, job_id: str) -> int:
+    return len(_durable_pipeline_job_payloads(repository.root, job_id))
+
+
+def test_runtime_status_placeholder_replay_stops_appending_records(tmp_path: Path) -> None:
+    """#1589 J13: an identical replay carrying a placeholder must settle.
+
+    The guard asks "did the caller supply a value?"; a placeholder answers yes
+    and the write boundary then erases it, so every pass sees a row that differs
+    from durable state and appends another record.  ``running -> running`` is a
+    legal self transition, so nothing else stops the loop: this is unbounded
+    append growth walking towards the journal's segment/byte ceilings.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    before = _durable_write_count(repository, job_id)
+
+    outcomes = [
+        repository.transition_pipeline_job_runtime_status(
+            job_id,
+            "running",
+            log_uri=_LAUNDERED_URI,
+        ).outcome
+        for _ in range(3)
+    ]
+
+    assert outcomes == ["applied", "idempotent", "idempotent"]
+    assert _durable_write_count(repository, job_id) == before + 1
+    assert _durable_log_uri(repository, job_id) is None
+
+
+def test_runtime_status_placeholder_does_not_displace_a_real_log_uri(tmp_path: Path) -> None:
+    """#1589 J14: withheld means keep, on the runtime-status leg."""
+
+    repository, record = _running_master_with_real_log_uri(tmp_path)
+    job_id = str(record["job_id"])
+    before = _durable_write_count(repository, job_id)
+
+    replay = repository.transition_pipeline_job_runtime_status(
+        job_id,
+        "running",
+        log_uri=_LAUNDERED_URI,
+    )
+
+    assert replay.outcome == "idempotent"
+    assert _durable_write_count(repository, job_id) == before
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
+
+
+def test_submit_evidence_placeholder_replay_stops_appending_records(tmp_path: Path) -> None:
+    """#1589 J15: the submit-evidence equality gate must be able to converge."""
+
+    repository, record = _reserved_unbound_master(tmp_path)
+    job_id = str(record["job_id"])
+    before = _durable_write_count(repository, job_id)
+
+    outcomes = [_defer_submit_evidence(repository, record, log_uri=_LAUNDERED_URI).outcome for _ in range(3)]
+
+    assert outcomes == ["applied", "idempotent", "idempotent"]
+    assert _durable_write_count(repository, job_id) == before + 1
+    assert _durable_log_uri(repository, job_id) is None
+
+
+def test_submit_evidence_placeholder_does_not_displace_a_real_log_uri(tmp_path: Path) -> None:
+    """#1589 J16: withheld means keep, on the submit-evidence leg."""
+
+    repository, record = _reserved_unbound_master(tmp_path)
+    job_id = str(record["job_id"])
+    assert _defer_submit_evidence(repository, record, log_uri=_REAL_MASTER_LOG_URI).outcome == "applied"
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
+    before = _durable_write_count(repository, job_id)
+
+    replay = _defer_submit_evidence(repository, record, log_uri=_LAUNDERED_URI)
+
+    assert replay.outcome == "idempotent"
+    assert _durable_write_count(repository, job_id) == before
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
+
+
+def _cancellation_pending_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    repository, record = _running_master_with_real_log_uri(tmp_path)
+    intent = repository.request_pipeline_job_cancellation(
+        str(record["job_id"]),
+        expected_statuses=("running",),
+        reason="operator_requested",
+    )
+    assert intent.outcome == "applied"
+    return repository, record
+
+
+def _complete_cancellation(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    return repository.complete_pipeline_job_cancellation(
+        str(record["job_id"]),
+        finished_at=_dt("2026-07-20T02:00:00Z"),
+        exit_code=0,
+        error_code=None,
+        error_message=None,
+        log_uri=log_uri,
+    )
+
+
+def test_cancellation_completion_placeholder_replay_is_idempotent(tmp_path: Path) -> None:
+    """#1589 J17: the Gateway cancellation receipt must still land twice-safely.
+
+    This leg writes ``log_uri`` UNCONDITIONALLY, so a stripped placeholder is
+    not merely "declined" -- it destroys the value.  The replay comparator at
+    the ``reconcile_unverified`` arm then compares the raw placeholder against
+    erased durable state and answers ``stale``, which makes
+    ``AcceptedSubmitCommitResult.committed`` False and makes
+    ``chain_forecast_control.cancel_active_cycle_jobs`` ``continue`` -- dropping
+    the cancellation event and the ``cancelled`` entry it owes its caller.
+    """
+
+    repository, record = _cancellation_pending_master(tmp_path)
+    job_id = str(record["job_id"])
+
+    first = _complete_cancellation(repository, record, log_uri=_LAUNDERED_URI)
+    after_first = _durable_write_count(repository, job_id)
+    second = _complete_cancellation(repository, record, log_uri=_LAUNDERED_URI)
+
+    assert (first.outcome, second.outcome) == ("applied", "idempotent")
+    assert _durable_write_count(repository, job_id) == after_first
+
+
+def test_cancellation_completion_placeholder_does_not_displace_a_real_log_uri(
+    tmp_path: Path,
+) -> None:
+    """#1589 J18: withheld means keep, on the unconditional cancellation write.
+
+    A strip alone is not enough here: the write has no ``is not None`` guard to
+    decline, so the placeholder has to resolve to the durable value instead.
+    """
+
+    repository, record = _cancellation_pending_master(tmp_path)
+    job_id = str(record["job_id"])
+
+    assert _complete_cancellation(repository, record, log_uri=_LAUNDERED_URI).outcome == "applied"
+
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
+
+
+def _plain_job_with_real_log_uri(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One non-master pipeline job carrying a real durable log URI."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_plain_log_uri_probe")
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        str(record["job_id"]),
+        "running",
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+    assert _durable_log_uri(repository, str(record["job_id"])) == _REAL_MASTER_LOG_URI
+    return repository, record
+
+
+def test_update_pipeline_job_status_placeholder_does_not_displace_a_real_log_uri(
+    tmp_path: Path,
+) -> None:
+    """#1589 J19: withheld means keep, on the untyped compatibility leg.
+
+    This leg has no equality gate and appends on every call -- base behaviour
+    that is deliberately left alone.  What must hold is that the VALUE
+    converges: two placeholder passes leave the real URI durable rather than
+    erasing it on the first one.
+    """
+
+    repository, record = _plain_job_with_real_log_uri(tmp_path)
+    job_id = str(record["job_id"])
+
+    repository.update_pipeline_job_status(job_id, "running", log_uri=_LAUNDERED_URI)
+    after_first = _durable_log_uri(repository, job_id)
+    repository.update_pipeline_job_status(job_id, "running", log_uri=_LAUNDERED_URI)
+
+    assert after_first == _REAL_MASTER_LOG_URI
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI
+
+
+_DEFER_REAL_ERROR_CODE = "SLURM_TASK_ACCOUNTING_INCOMPLETE"
+_DEFER_REAL_ERROR_MESSAGE = "terminal Slurm array task accounting was incomplete"
+_DEFER_URI_VALUED_ERROR = "s3://nhms/logs/cycle_gfs_2026072000/forecast-master-failure.log"
+_DEFER_ERROR_FAMILY = ("error_code", "error_message")
+
+
+def _defer_cohort_projection_errors(
+    repository: Any,
+    record: Mapping[str, Any],
+    *,
+    error_code: str = _DEFER_REAL_ERROR_CODE,
+    error_message: str = _DEFER_REAL_ERROR_MESSAGE,
+) -> Any:
+    """Drive the defer leg with its error family under the caller's control.
+
+    ``_defer_cohort_projection`` hardcodes both error fields because it exists to
+    vary ``log_uri``; this one varies the other half of the evidence family.
+    """
+
+    return repository.defer_forecast_cohort_projection(
+        str(record["job_id"]),
+        reconciliation_decision="accounting_unavailable",
+        reconciliation_reason_class="coverage_incomplete",
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+@pytest.mark.parametrize("field", _DEFER_ERROR_FAMILY)
+def test_defer_projection_placeholder_error_replay_stops_appending_records(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    """#1589 J21: the defer leg's error family must converge on a replay too.
+
+    ``log_uri``/``finished_at``/``exit_code`` were resolved on this leg already;
+    ``error_code``/``error_message`` were not, and they are written
+    UNCONDITIONALLY and then compared by the same ``changed_fields`` gate.  A raw
+    placeholder therefore differs from stripped durable state on every pass, so
+    every pass answers ``applied`` and appends another record -- unbounded growth
+    towards the journal's segment/byte ceilings, on a row parked at
+    ``reconcile_unverified``, which is not terminal and so is not stopped by the
+    whole-row short circuit above the gate.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    before = _durable_write_count(repository, job_id)
+
+    outcomes = [
+        _defer_cohort_projection_errors(repository, record, **{field: _LAUNDERED_URI}).outcome
+        for _ in range(3)
+    ]
+
+    assert outcomes == ["applied", "idempotent", "idempotent"]
+    assert _durable_write_count(repository, job_id) == before + 1
+    assert _durable_master_payload(repository, record)[field] is None
+
+
+@pytest.mark.parametrize("field", _DEFER_ERROR_FAMILY)
+def test_defer_projection_placeholder_does_not_displace_a_real_error_family(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    """#1589 J22: withheld means keep, on the defer leg's unconditional pair.
+
+    Seeded with a URI-valued error field, because that is exactly the shape the
+    public projection renders as a bare ``[object-uri]`` -- pinned below by
+    reading the field back through ``get_pipeline_job`` rather than asserted in
+    a comment.  A caller round-tripping that public row hands the placeholder
+    straight back, and this leg has no ``is not None`` guard to decline with, so
+    only resolving against the persisted row keeps the value alive.
+    """
+
+    repository, record = _bound_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    assert _defer_cohort_projection_errors(repository, record, **{field: _DEFER_URI_VALUED_ERROR}).outcome == (
+        "applied"
+    )
+    assert _durable_master_payload(repository, record)[field] == _DEFER_URI_VALUED_ERROR
+    assert repository.get_pipeline_job(job_id)[field] == _LAUNDERED_URI
+    before = _durable_write_count(repository, job_id)
+
+    replay = _defer_cohort_projection_errors(repository, record, **{field: _LAUNDERED_URI})
+
+    assert replay.outcome == "idempotent"
+    assert _durable_write_count(repository, job_id) == before
+    assert _durable_master_payload(repository, record)[field] == _DEFER_URI_VALUED_ERROR
+
+
+def _project_cohort(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    return _reproject_cohort(repository, record, log_uri=log_uri)
+
+
+def _reserved_master_with_real_log_uri(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One still-reserved, still-unbound master already carrying a real log URI.
+
+    ``reserve_pipeline_job`` nulls the whole evidence family, so a *fresh*
+    reservation cannot be displaced.  It is not the only producer of a
+    ``reserved`` row that ``commit_pipeline_job_submit_attempt`` will bind:
+    an unbound submit-evidence transition writes ``log_uri`` onto a row that
+    stays ``reserved``, and ``reclaim_pipeline_job_reservation`` nulls
+    ``exit_code`` / ``error_code`` / ``error_message`` but NOT ``log_uri``, so a
+    reclaimed reservation carries the previous attempt's URI forward.  This
+    seeds the first of those two shapes -- the state the commit leg's
+    ``_resolved_caller_evidence`` actually has to defend.
+    """
+
+    repository, record = _reserved_unbound_master(tmp_path)
+    _defer_submit_evidence(repository, record, log_uri=_REAL_MASTER_LOG_URI)
+    assert _durable_log_uri(repository, str(record["job_id"])) == _REAL_MASTER_LOG_URI
+    return repository, record
+
+
+def _commit_submit_attempt(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    """Bind the reserved master, asserting the write leg was actually reached.
+
+    The shared convergence assertions only read durable state, so a call that
+    declined at a CAS gate would look identical to a call that wrote and kept
+    the real URI.  Pinning the outcome here keeps this arm from passing
+    vacuously: the first pass must apply, the replay must settle as idempotent.
+    """
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+
+    result = repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=int(record.get("submission_attempt") or 1),
+        slurm_job_id=_COMMIT_ATTEMPT_SLURM_JOB_ID,
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+        log_uri=log_uri,
+    )
+    assert result.outcome in ("applied", "idempotent"), result.outcome
+    return result
+
+
+_COMMIT_ATTEMPT_SLURM_JOB_ID = "17667"
+
+
+_LOG_URI_WRITE_LEGS: tuple[tuple[str, Any, Any, bool], ...] = (
+    (
+        "transition_pipeline_job_submit_evidence",
+        lambda tmp_path: _seeded(_reserved_unbound_master(tmp_path), _defer_submit_evidence),
+        _defer_submit_evidence,
+        False,
+    ),
+    (
+        "transition_pipeline_job_runtime_status",
+        _running_master_with_real_log_uri,
+        lambda repository, record, *, log_uri: repository.transition_pipeline_job_runtime_status(
+            str(record["job_id"]), "running", log_uri=log_uri
+        ),
+        False,
+    ),
+    (
+        "complete_pipeline_job_cancellation",
+        _cancellation_pending_master,
+        _complete_cancellation,
+        False,
+    ),
+    (
+        "update_pipeline_job_status",
+        _plain_job_with_real_log_uri,
+        lambda repository, record, *, log_uri: repository.update_pipeline_job_status(
+            str(record["job_id"]), "running", log_uri=log_uri
+        ),
+        True,
+    ),
+    (
+        "defer_forecast_cohort_projection",
+        lambda tmp_path: _seeded(_bound_cohort_master(tmp_path), _defer_cohort_projection),
+        _defer_cohort_projection,
+        False,
+    ),
+    (
+        "project_forecast_cohort_tasks",
+        lambda tmp_path: _seeded(_bound_cohort_master(tmp_path), _project_cohort),
+        _project_cohort,
+        False,
+    ),
+    (
+        "commit_pipeline_job_submit_attempt",
+        _reserved_master_with_real_log_uri,
+        _commit_submit_attempt,
+        False,
+    ),
+)
+
+
+_LOG_URI_WRITE_LEG_EXCLUSIONS: dict[str, str] = {}
+"""Public ``log_uri``-taking methods deliberately outside the replay table.
+
+Empty by intent: every method the scan finds is currently held to the
+convergence contract.  A new leg that genuinely cannot be replayed goes here
+with its reason as the value, which is a reviewable decision rather than a
+silent omission from the table.
+"""
+
+
+def _seeded(
+    prepared: tuple[Any, dict[str, Any]],
+    seed: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Drive one leg once with a REAL log URI so a later replay has prey."""
+
+    repository, record = prepared
+    seed(repository, record, log_uri=_REAL_MASTER_LOG_URI)
+    assert _durable_log_uri(repository, str(record["job_id"])) == _REAL_MASTER_LOG_URI
+    return repository, record
+
+
+@pytest.mark.parametrize(
+    ("leg", "prepare", "write", "appends_on_replay"),
+    _LOG_URI_WRITE_LEGS,
+    ids=[leg for leg, _prepare, _write, _appends in _LOG_URI_WRITE_LEGS],
+)
+def test_log_uri_write_legs_converge_on_a_replayed_placeholder(
+    tmp_path: Path,
+    leg: str,
+    prepare: Any,
+    write: Any,
+    appends_on_replay: bool,
+) -> None:
+    """#1589 J20: the same contract on every leg in the table.
+
+    Every durable write leg that accepts a caller ``log_uri`` gets the same
+    contract: replaying the same display placeholder converges -- the durable
+    value stops moving and, where the leg has an equality gate, the replay stops
+    appending records.  ``update_pipeline_job_status`` is the one leg with no
+    equality gate (it appends on every call by design, unchanged here), so it
+    carries ``appends_on_replay`` and is held only to value convergence.
+
+    This test alone proves the contract for the legs listed in
+    ``_LOG_URI_WRITE_LEGS`` and nothing more.  What lifts it to a class property
+    is ``test_log_uri_write_leg_table_covers_every_log_uri_taking_method``,
+    which pins that list against the repository's actual public surface, so a
+    leg added later cannot stay silently untested.
+    """
+
+    repository, record = prepare(tmp_path)
+    job_id = str(record["job_id"])
+
+    write(repository, record, log_uri=_LAUNDERED_URI)
+    after_first = _durable_log_uri(repository, job_id)
+    count_after_first = _durable_write_count(repository, job_id)
+    write(repository, record, log_uri=_LAUNDERED_URI)
+
+    assert after_first == _REAL_MASTER_LOG_URI, leg
+    assert _durable_log_uri(repository, job_id) == _REAL_MASTER_LOG_URI, leg
+    if appends_on_replay:
+        assert _durable_write_count(repository, job_id) == count_after_first + 1, leg
+    else:
+        assert _durable_write_count(repository, job_id) == count_after_first, leg
+
+
+def test_log_uri_write_leg_table_covers_every_log_uri_taking_method() -> None:
+    """#1589 J20 completeness: bind the leg table to the real public surface.
+
+    ``_LOG_URI_WRITE_LEGS`` is hand written, so on its own it is N instances of
+    the convergence contract, not the contract.  This introspects every public
+    method of ``FileOrchestrationJournalRepository`` for a ``log_uri``
+    parameter and requires that set to equal the table plus the named
+    exclusions -- so a new caller-``log_uri`` write leg turns this RED until
+    someone either parametrizes it or records why it is excluded.  The two
+    directions are asserted separately so the failure says which happened.
+
+    Field boundary, stated rather than implied: this pins the ``log_uri`` family
+    ONLY.  The error family (``error_code``/``error_message``) is subject to the
+    same D3 contract and is structurally invisible here -- and a name scan could
+    not be widened to cover it honestly either, because
+    ``project_forecast_cohort_tasks`` spells its parameter
+    ``master_error_message``, so a parameter-name scan would silently miss a real
+    leg while looking complete.  Error-family coverage is therefore per leg, not
+    a class property: see the J13-J20 tests plus
+    ``test_defer_projection_placeholder_error_replay_stops_appending_records``
+    and
+    ``test_defer_projection_placeholder_does_not_displace_a_real_error_family``.
+    ``mark_pipeline_job_permanently_failed`` is the known uncovered leg (#1630).
+
+    Mechanism boundary, stated rather than implied: this scans for a ``log_uri``
+    PARAMETER.  Row-taking writers such as ``upsert_pipeline_job`` and
+    ``reserve_pipeline_job`` carry ``log_uri`` inside a record mapping, are
+    invisible to this scan, and are therefore neither covered by it nor
+    listable as exclusions -- listing one would itself turn this RED.  Their
+    anti-laundering guarantee comes from the single record-construction site
+    pinned by ``test_journal_records_have_exactly_one_construction_site``.
+    """
+
+    import inspect
+
+    taking_log_uri = set()
+    for name in dir(FileOrchestrationJournalRepository):
+        if name.startswith("_"):
+            continue
+        if not callable(inspect.getattr_static(FileOrchestrationJournalRepository, name)):
+            continue
+        signature = inspect.signature(getattr(FileOrchestrationJournalRepository, name))
+        if "log_uri" in signature.parameters:
+            taking_log_uri.add(name)
+
+    tabled = [leg for leg, _prepare, _write, _appends in _LOG_URI_WRITE_LEGS]
+    assert len(tabled) == len(set(tabled)), tabled
+    assert not set(tabled) & set(_LOG_URI_WRITE_LEG_EXCLUSIONS), "a leg cannot be both tabled and excluded"
+
+    assert not taking_log_uri - set(tabled) - set(_LOG_URI_WRITE_LEG_EXCLUSIONS), (
+        "new caller-log_uri write leg is neither in _LOG_URI_WRITE_LEGS nor excluded"
+    )
+    assert not (set(tabled) | set(_LOG_URI_WRITE_LEG_EXCLUSIONS)) - taking_log_uri, (
+        "_LOG_URI_WRITE_LEGS / exclusions name something that no longer takes a caller log_uri"
+    )
+
+
+def test_journal_records_have_exactly_one_construction_site() -> None:
+    """#1592 structural guard: no second record constructor in this module.
+
+    The whole point of putting the anti-laundering strip in
+    ``_journal_record_for_write`` is that a write path added later inherits it.
+    That only holds while this stays the ONE place a journal record dict is
+    built, so this walks the module's AST for any dict literal carrying the full
+    record key set and requires the sole hit to be inside that function.
+
+    Known limits, stated rather than papered over: it sees literal dict
+    construction in THIS module only.  A record assembled by ``dict()`` /
+    ``update()`` / a comprehension, or one built in another module, would slip
+    past.  It is a cheap guard against the most likely regression -- someone
+    copying the constructor next to a new write path -- not a proof of the
+    architectural constraint.
+
+    It keys on the innermost enclosing function NAME, which on its own a second
+    function of the same name would satisfy, so the definition count is asserted
+    too: one hit, inside the one definition.
+    """
+
+    import ast
+
+    record_keys = {"schema_version", "sequence", "record_type", "source_id", "cycle_time"}
+    module_path = Path(journal_module.__file__)
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+
+    sites: list[tuple[str, int]] = []
+    enclosing: list[str] = []
+    definitions: list[int] = []
+
+    def walk(node: ast.AST) -> None:
+        pushed = False
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            enclosing.append(node.name)
+            pushed = True
+            if node.name == "_journal_record_for_write":
+                definitions.append(node.lineno)
+        if isinstance(node, ast.Dict):
+            keys = {
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if record_keys <= keys:
+                sites.append((enclosing[-1] if enclosing else "<module>", node.lineno))
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+        if pushed:
+            enclosing.pop()
+
+    walk(tree)
+
+    assert [name for name, _line in sites] == ["_journal_record_for_write"], sites
+    assert len(definitions) == 1, definitions

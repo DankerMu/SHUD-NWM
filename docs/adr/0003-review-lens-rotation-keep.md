@@ -244,3 +244,108 @@ core=46 / rotated=211**（轮换占比 82%）。方向未变，**keep rotation �
 建议的度量修复不变，并追加一条：**区分 catch 来自"读代码/读规格"还是来自
 "在生产 oracle 上实测"**。在这三类被分开计数之前，比值只能支持"不撤镜"，
 不能支持"镜是主要功臣"。
+
+## Revisit 2026-08-20 (post PR #1639 / issue #1119)
+
+审计仍 DECIDABLE，样本与上一条 revisit 同量级（**86 个多轮 merged PR，后轮
+命中 core=46 / rotated=211**）。方向未变，**keep rotation 维持**（autonomous
+default-keep；翻转仍须 maintainer 裁定）。
+
+本单提供的是一个**此前未出现过的形状**：**综合交叉审查那一轮产出零发现，而
+全部 9 条 catch 来自它前后的两个门。**
+
+- **Phase 0.5 fixture 只读审查：6 条**，含本单唯一的 P1——我写的 Evidence
+  Floor 与 tasks 1.3 互斥（要求"证明没有断言被改"，而
+  `tests/test_timescale_write_guard_wired.py:413` 的
+  `assert delete_calls[0][1] == ("fv_a",)` 在 DELETE 加边界后必然红，因为
+  1-tuple 参数在语义上只能由无界 DELETE 满足）。按字面执行会把实现者逼向
+  "不加边界"。另有一条 P2 推翻了 design D1 的**假必要性论证**（声称扩展
+  `_replace_values` 是唯一过 meta-guard 的形状，实则把 bounded DELETE 搬进
+  `_guard` 同样全过），一条 P2 补上 purge 语义回归的 oracle 缺口。
+- **Phase 4 综合交叉审查（两路四包）：0 条。**
+- **Phase 7 终审：3 条**，全 P3，含 in-range 扫描查不出的引用漂移。
+
+**对这条 ADR 的度量启示（第三个候选变量）。** 前两条 revisit 已指出
+「镜是否新」判别力不足，并提出「是否有实机 oracle」「是否被要求可证伪枚举」
+两个更强的变量。本单再加一条：**门读的是什么工件**。
+
+- 读**规格、且在实现之前**的门（Phase 0.5），本单命中率最高且抓到唯一 P1。
+  它能抓到的是"规格自相矛盾/论证造假/覆盖缺口"——**这类缺陷在代码写出来之后
+  就不再是缺陷，而是既成事实**，任何读代码的镜都看不见它们（代码会忠实实现
+  一个错的规格，然后全绿）。
+- 读**代码、在实现之后**的门（Phase 4/7），本单只产出文档层 P3。合理的解释
+  是：因为 Phase 0.5 已经把规格修对了，实现照做即可，留给代码审查的只剩
+  文书。**这正是"前置门有效"的表现，而不是"后置门无用"的证据**——两者不可
+  由单点区分。
+
+⇒ 度量修复建议追加第三条：**按门读的工件分类计数**（spec-before-impl /
+code-after-impl / 实机 oracle）。在这三类与前两条 revisit 提出的分类被分开
+统计之前，rotated 比值仍只能支持"不撤镜"。
+
+**一条与本 ADR 相邻但独立的方法论账**（#1513 记在这里的爆炸半径方法，本单
+发现仍有缺口）：ADR 0003 引入的 AST 反向 import 闭包解决了"间接 importer"，
+但解决不了**内容耦合**——`tests/test_node27_timeseries_compression_capture.py`
+把 `workers/forcing_producer/store.py` 的字节拷进 fixture repo 并断言
+`"check_batch_targets_uncompressed" in source`
+（`scripts/node27_timeseries_compression_capture.py:400`），它**不 import**
+store，任何 import 图都必然漏掉。闭包需要第三条腿：grep 出把源码当数据读的
+消费者。同理，`file:line` 引用核对必须按**锚点内容**而非行数范围——本单证明
+范围扫描是安全错觉（change 自己的编辑推移引用后，引用仍在文件范围内）。
+
+---
+
+## 2026-08-20 复访（PR #1637，#1418 + #1451 纯 oracle 合批）
+
+样本 87 → 多轮 merged PR，later-round catches **core=46 / rotated=222**
+（上次 84 / 45 / 202）。本条 PR 贡献 later-round 11 条（round 2 八条 + 终审三条），
+按脚本口径**全部**记为 rotated、core 增 0。
+
+**但这次不能照 DECIDABLE 的字面结论走——rotated 这个数本身有测量缺陷，且量级不小。**
+
+`loop_log_audit.py:63-76` 的 `rotation_attribution` 只把 `round_lenses[0]` 当作
+「钉住的 core 镜」：
+
+```python
+core_lenses = set(lenses[0]) if lenses else set()
+```
+
+实测全语料（96 条多轮、catches 为字典型的记录）：
+
+| 形状 | 条数 | 其 later-round catches | 后果 |
+|---|---|---|---|
+| `round_lenses[0]` 是**裸字符串** | **50** | **163** | `set("fixture-review")` 把字符串**按字符**拆成 `{'f','i','x',…}`，任何镜名都匹配不上 → core 恒为 0，全部强制记入 rotated |
+| `round_lenses[0]` 是单元素 `["fixture-review"]` | 2（含本条）| 14 | 形式正确，但 core 集合 = {fixture 评审镜}，后续交叉评审镜结构上**不可能**是 core |
+
+**222 条 rotated 里有 177 条（80%）来自这两类。** 也就是说
+"catches concentrate in rotated-in lenses" 这个 DECIDABLE 的标题句，
+大部分是**记录 schema 不一致 + 索引 0 取的是 fixture 镜**这两件事的产物，
+不是"轮换镜真的更能抓"的证据。
+
+一个具体的误记例子就在本条：本 PR 的 `round_lenses` 是
+`[[fixture-review], [A, B, C], [A', C], [final-review]]`，其中
+`durable-text-truth` 这面镜**在 round 1 与 round 2 都在**——它是**被钉住的**，
+不是轮换进来的；而它在 round 2 抓的 4 条全部被记成 rotated。
+
+**裁定：维持 keep，但理由与前几次不同。**
+前几次是"rotated 高但分类不足以支持撤镜"；这次是"**rotated 这个数在修好之前
+不能用来支持任何方向的决定**"。撤镜与保镜都不该以它为据。
+
+**度量修复建议（第四条，且这条是先决条件）：**
+
+1. **先修 schema**：`round_lenses` 的每一项必须是**列表**。`evidence_check.py`
+   目前不校验这一层（它放行了本条 PR 最初写成字符串 `catches` 的版本，也放行了
+   那 50 条裸字符串 `round_lenses[0]`），应补两条校验：`round_lenses` 元素为
+   list[str]，`catches` 元素为 `{round, lens, class, severity}` 字典。
+2. **core 的定义要改**：应是「**在 round 1 出现过、且在 later round 仍在**的镜」，
+   即 `set(lenses[1]) & set(lenses[i])`（当 index 0 是 fixture 评审时），
+   而不是无条件取 `lenses[0]`。现口径把"前置 fixture 门"错当成了"钉住的 core 镜"。
+3. 在 1 与 2 落地并**回填**已有记录之前，本 ADR 的 keep/cut 只能维持 keep。
+
+**本单在镜有效性上的实际观察（与上条 revisit 的"门读什么工件"一致）：**
+Phase 0.5 fixture 评审（读规格、在实现之前）两轮各出 P1，其中一条指出
+fail-closed 只钉了拒绝清单、从未钉放行集——**这类缺陷在代码写出来之后就不再是
+缺陷**。Phase 4 round 1 抓到三条真实覆盖缺口（各自活过全量 1773 且翻转生产判据），
+Phase 4 round 2 抓到的最贵一条是**round 1 的修复自己制造的假红**
+（钉 `FunctionType` 会让 `@functools.lru_cache` 装饰既有函数打红）。
+后者是"**修复审查**"这一类门的价值证据：它读的既不是规格也不是原始代码，
+而是**上一轮的修复**。建议把它作为第四类工件单独计数。
