@@ -85,13 +85,26 @@
 ## 4. Evidence Floor
 
 - **E1 — Red-before, bounded.** Demonstrate the trap on the *pre-fix* code with
-  an injected writer exception, run under a shell `timeout 30` so the hang is
-  proven by the timeout's non-zero exit, **not** by waiting it out. Do not
-  reproduce the hang unbounded; its cost is already measured (10 min, #1513).
+  an injected writer exception, under an **external** time bound, so the hang is
+  proven by the bound firing rather than by waiting it out. Do not reproduce the
+  hang unbounded; its cost is already measured (10 min, #1513).
+  **Do not use `timeout 30`** — neither `timeout` nor `gtimeout` exists on this
+  machine (macOS, no coreutils; verified this session). Use a Python subprocess
+  bound instead:
+  `subprocess.Popen([...]); p.communicate(timeout=30)` catching
+  `subprocess.TimeoutExpired`. Note `uv run` spawns a child, so `p.kill()` may
+  not reap the inner pytest — kill the process group, or `pkill -f` the probe
+  path afterwards and confirm it is gone.
 - **E2 — Which existing assertion must go red?** *None.* This fix adds
   assertions and preserves all three substantive ones. The evidence is positive
   (new assertions fire on injected failure), not a red-to-green repair. If any
   pre-existing assertion goes red, the implementation is wrong.
+  **Refinement:** the risk to E2 is no longer design, it is refactor slip. Task
+  2.2 now moves the harness into a shared helper, which is a much larger edit
+  than prepending assertions. The three substantive assertions must still
+  observe the same thing they observe today: `observed` must still be filled by
+  the same main-thread polling loop, reading the same destination, while the
+  same 40 real writes run (MP1/MP2 unchanged).
 - **E3 — Green-after.** Target suite passes, with wall-clock time recorded.
 - **E4 — Silent-pass is closed.** Show that the injected-failure case now
   *fails* rather than passing with a `PytestUnhandledThreadExceptionWarning`
@@ -104,13 +117,19 @@
   by a line-number range check. Range sweeps are a known false negative once a
   change shifts its own cited lines.
 - **E7 — Lint + spec clean.**
-- **E8 — Anti-vacuity.** The failure-injection test is shown to FAIL with the
-  harness fix reverted — **reverting each half separately, one recorded failure
-  each**: (i) remove `finally: finished.set()`, keeping the loop deadline, so the
-  spin-loop exits at its deadline and `assert not errors` catches the exception;
-  (ii) remove the `errors` capture and its assertion, so the injection test's
-  expected failure never materializes. Keep the deadline in both cases —
-  reverting it too would reintroduce the hang rather than demonstrate a failure. A test that only passes-when-present cannot distinguish
+- **E8 — Anti-vacuity.** Revert each half of the harness fix separately and
+  record what is observed. The two halves do not both produce a literal pytest
+  FAIL, so name the observable per half rather than asserting "it fails":
+  - **(i) remove `finally: finished.set()`, keep the loop deadline.** Observable:
+    the spin-loop exits at its deadline and `assert not errors` reports the
+    injected exception — a clean FAIL. If the deadline is *also* removed the
+    observable becomes a hang instead, which is E1's instrument, not this one.
+  - **(ii) remove the `errors` capture and its assertion.** Observable: the
+    injection test's expected failure never materialises and the run reports
+    `1 passed, 1 warning` with `PytestUnhandledThreadExceptionWarning` — the
+    silent-pass signature from E4, not a FAIL.
+  Both observables must be recorded. A single "it went red" line does not
+  distinguish these and is not acceptable evidence. A test that only passes-when-present cannot distinguish
   "harness works" from "patch was inert" (design D6).
 
 ## 5. Report, don't fix — filed, do not fix in this PR
@@ -136,12 +155,25 @@ All three are already filed; the implementer must not touch them.
 
 ### Survey method and its bounds
 
-The class survey behind #1645 and the spec's exception list enumerated **all**
-`threading.Barrier(` constructions (12) and `threading.Event()` constructions
-(~20) under `tests/`, then classified each by the D7 hazard definition (main
-thread blocked until a worker reaches a synchronization point; a bare
-`thread.join()` is out of scope). This supersedes an earlier, narrower grep
-whose apparent exhaustiveness was an artifact of the search terms.
+Two sweeps were run, because they answer different questions and neither alone
+is sufficient:
+
+1. **Barrier/Event enumeration** — all 12 `threading.Barrier(` and ~20
+   `threading.Event()` constructions under `tests/`. This finds the
+   *synchronization-strand* class (#1645).
+2. **`while`-loop enumeration** — all 33 `while` loops under `tests/`, each
+   classified by whether its exit condition depends on a worker thread. **This
+   is the only sweep that can find the governed set**, and sweep 1 structurally
+   cannot: the sentinels at `tests/test_production_scheduler.py:44138` and
+   `tests/test_node27_timeseries_compression_supervisor.py:974` are an integer
+   inside a lock file and a filesystem path respectively — there is no `Event`
+   object to enumerate. An earlier draft of this section claimed exhaustiveness
+   on the strength of sweep 1 alone; that claim was unsupported.
+
+Sweep 2 result: 33 `while` loops, of which most are docstring prose, pure
+computation (`while stack:`, `while index < length:`), or shell strings inside
+subprocess payloads. Four are main-thread polls on a worker-set sentinel: the
+target test, plus the three routed to #1648.
 
 Known caliper limits of the sweep, stated so the next reader can widen it:
 it enumerated `threading.Event()` and `threading.Barrier(` textually, so it
@@ -152,8 +184,9 @@ plain attributes. The separate spin-wait sweep in design D7 covers the
 main-thread side by loop shape rather than by sentinel type, which is what makes
 the "one governed site" claim robust to this gap.
 
-**Not governed** by the requirement's trigger (no main-thread spin-wait on a
-worker-set sentinel), so conformance is not at issue:
+**Outside the trigger** — not main-thread polls on a worker-set sentinel — so
+these were never evaluated against (a)(b)(c) and no conformance is claimed for
+them:
 
 - `tests/test_production_scheduler.py:42190` — the `Barrier(2)` has no timeout
   at the construction site, but the wait does: `_BarrierOrchestrator.orchestrate_cycle`
@@ -161,14 +194,17 @@ worker-set sentinel), so conformance is not at issue:
   invisible to any proximity-based grep* — the timeout is ~60 lines from the
   construction, in a different class.
 - `tests/test_display_coverage_parallel.py:32` — `threading.Barrier(2, timeout=2)`.
-**Governed-adjacent and conforming** — these DO involve worker synchronization,
-and satisfy the outcome obligations:
+**Adjacent hazard, routed to #1645** — these were previously mislabelled here as
+a conforming control group:
 
-- `tests/test_scheduler_file_provider_refresh.py:788`, `:1926` — the house
-  pattern. Note both worker waits (`:798`, `:1931`) are themselves *unbounded*
-  `Barrier` waits; they satisfy (b) and (c) via `:815`/`:818` and `:1942`/`:1943`
-  instead. This is the concrete evidence behind the spec's refusal to prescribe
-  mechanism (design D7).
+- `tests/test_scheduler_file_provider_refresh.py:788` (`Barrier(20)`, unbounded
+  wait at `:798`) and `:1926` (`Barrier(40)`, unbounded wait at `:1931`). The
+  main thread's wait IS bounded, and the assertions DO fire — but stranded
+  non-daemon peers block `threading._shutdown()`, so the process never exits.
+  Reproduced: a reduced replica reports failure in ~2s then hangs past a 25s
+  bound. Risk window is narrow (each `wait()` is the first statement in its
+  `try`) but not empty. Not fixed here: correcting them changes barrier
+  semantics, outside this change's blast radius.
 - `tests/test_file_orchestration_journal.py:7894` — deadline-bounded loop.
 - `tests/test_gateway_reconcile.py:5231` — daemon thread with `try/finally`. It
   *is* awaited (`FakeProcess.wait()` at `:5253` calls `self.thread.join(timeout)`

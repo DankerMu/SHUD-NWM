@@ -6,12 +6,18 @@
 
 A test whose main thread spin-waits on a completion sentinel that a worker thread is expected to set SHALL guarantee the sentinel is set on every exit path from the worker, bound the spin-loop with its own deadline, bound the join, capture any exception the worker raised, and assert on it — so a worker failure surfaces as a bounded, attributed test failure instead of an unbounded hang or a run that passes carrying only a warning.
 
-The governed shape is narrow and deliberate: the main thread's only
-exit condition is a sentinel the worker itself must set, and it burns
-CPU until that happens. A bounded `event.wait(timeout=N)` is not a
-spin-wait and is not governed — it already terminates on its own. A
-bare `thread.join()` is not governed either: a worker that raises
-simply dies and the join returns, so no hang is possible.
+The governed shape is defined by **dependency**, not by CPU burn: the
+main thread's progress depends on a sentinel that a worker thread must
+set, and it waits by polling that sentinel — with or without a
+`time.sleep()` between reads. Carrying a deadline on that poll
+**satisfies (b); it does not exit the trigger.** Stating this matters:
+scoping the trigger to undeadlined loops would make (b) vacuous, since
+every loop that could violate it would fall outside by construction.
+
+Not governed: a blocking `event.wait(timeout=N)`, which terminates on
+its own without polling; and a bare `thread.join()` over workers that
+depend on no sentinel and on no synchronization point with each other,
+where a worker that raises simply dies and the join returns.
 
 For a governed harness the obligations are stated as **outcomes**, not
 as a mandated code shape:
@@ -20,7 +26,13 @@ as a mandated code shape:
   thread's wait, so no worker outcome can strand it;
 - **(b) Bound** — the main thread's wait carries its own upper bound,
   independent of the worker doing anything, so it terminates even if the
-  release in (a) never happens;
+  release in (a) never happens. The bound must make the **run**
+  terminable, not merely the asserting thread: if workers are left
+  stranded on a synchronization point and they are non-daemon threads,
+  `threading._shutdown()` joins them without limit at interpreter exit
+  and the process never exits, even though every assertion has already
+  reported. A bounded `join()` plus a fired assertion does NOT satisfy
+  (b) while a stranded non-daemon worker remains;
 - **(c) Attribute** — a worker exception is surfaced and attributed, and
   that surfacing comes **before** any assertion on data the worker
   produced. A worker that fails on its first iteration leaves that data
@@ -28,13 +40,10 @@ as a mandated code shape:
   cause.
 
 Mechanism is deliberately not prescribed, because prescribing it
-misjudges correct code. This repo's own house pattern is the proof: at
-`tests/test_scheduler_file_provider_refresh.py:798` the worker waits on
-an **unbounded** `threading.Barrier(20)`, which any mechanism-level rule
-would flag — yet the test is correct, because `:815`'s `join(timeout=5)`
-and `:818`'s `assert all(not thread.is_alive(...))` supply (b) and (c).
-Likewise a `ThreadPoolExecutor` whose `Future.result(timeout=N)`
-re-raises satisfies (a), (b) and (c) with no error list anywhere.
+misjudges correct code: a `ThreadPoolExecutor` whose
+`Future.result(timeout=N)` re-raises satisfies (a), (b) and (c) with no
+error list, no `finally`, and no liveness assertion anywhere. A rule
+written in terms of those constructs would flag it, wrongly.
 
 One conforming implementation, and the one this change adopts: set the
 sentinel from a `finally` (a); give the spin-loop its own deadline and
@@ -66,7 +75,18 @@ test-only, single-file change, and fixing them requires touching a
 different suite with its own DB-backed setup. Residual risk, disclosed
 rather than implied absent: until #1645 lands, a constructor failure in
 either of those two tests still strands its peers and hangs the run —
-this requirement does not currently protect them. The repo-wide backstops
+this requirement does not currently protect them. Three further sites are governed by this requirement and satisfy (a) and
+(b) but violate (c): `tests/test_production_scheduler.py:44138` and
+`:44149`, and
+`tests/test_node27_timeseries_compression_supervisor.py:974`. Each polls
+a sentinel set by a worker thread, captures no worker exception, and
+asserts on worker-produced data first. Recorded reason for not closing
+them here: they span two other suites with their own fixtures and thread
+models, outside this single-file change's blast radius. Residual risk:
+until issue #1648 lands, a worker failure in those three surfaces as a
+data-shaped assertion failure rather than the real exception — a
+debugging cost, not a correctness hole, since (b) holds and they neither
+hang nor pass silently. The repo-wide backstops
 that would close the class independently of harness shape
 (`filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]`,
 `pytest-timeout`) are tracked in issue #1646.
