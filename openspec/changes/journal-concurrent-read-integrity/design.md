@@ -86,7 +86,10 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
 因此正确的判据不是「我是否持有 `_write_lock`」，而是「**我是否在这个 cycle 的写窗内**」。
 
 **标记形状：`self._cycle_write_owner: tuple[int, str, str] | None`
-= `(threading.get_ident(), source_id, cycle_segment)`，不是裸线程 id。**
+= `(threading.get_ident(), <归一化后的 source_id>, cycle_segment)`，不是裸线程 id。**
+`source_id` 必须存 `_normalize_file_source_id`（`:9730`）的输出——该函数非恒等
+（`packages/common/source_identity.py:5-9`：`GFS→gfs`），比较侧 `:4090` 比的正是归一化值，
+且 flock 本身也键在归一化 id 上（`:6967`）。存原始参数会让非规范 id 开的窗静默失去快路径。
 
 裸 ident 会留下第三种「判据为真但理由不对」：owner 线程在 C1 的写窗内读 **C2** 的行，
 判据仍返回真、仍免指纹，而 C1 的 flock **不保护 C2**——另一进程可以正在写 C2。
@@ -279,11 +282,12 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 3. 本 change 不改变「读者不取 flock」这一架构选择。跨进程读 vs 写的竞态被重试**吸收**，
    不是被**消除**；攻击者仍可通过持续 replace 把重试耗尽，此时行为是 fail-closed。
 4. 0.38% 是饱和微基准数字，**不是生产命中率**。生产真实频次未测量，本 change 不声称改善幅度。
-5. `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None`
-   的 entry，窗外也存。这类 entry 在窗外恒 miss（`None == <tuple>` 恒假）——
-   即一段永远命不中的缓存写入。本 change 不动它（改它会牵动 model-scoped 读路径的
-   缓存语义），但它是 D2 那条「入口 clear 是正确性前提」的成因之一，
-   报告立 issue。
+5. `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None` 的 entry，
+   窗外也存。准确口径：**窗外恒 miss**（`None == <tuple>` 恒假），
+   **窗内 owner 可命中**（与 `_cycle_rows` 共用 4 元组 key 形状；
+   `_materialize_latest_unlocked` 同窗内 `:6851` 读、`:6853` 存），**出口 clear 即失效**。
+   本 change 不动它（改它会牵动 model-scoped 读路径的缓存语义），
+   但它是 D2 那条「入口 clear 是正确性前提」的成因之一，报告立 issue。
 
 ### D11 — fixture 评审中被推翻/收紧的裁定（保留记录，避免后续重新发明）
 
@@ -297,3 +301,18 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 前两条与第四条来自 fixture 评审，第三条推翻的是我自己写的裁定。
 第四条的陷阱是从 #1595 验收标准原文（「已热 cache key」）照抄来的——
 **验收标准里的构造描述同样要当作待验证的断言，不能照抄进 tasks**。
+
+### D12 — fixture 修复自身引入的缺陷（第二轮复核所得）
+
+第一轮修复在闭合 2 条 P1 的同时新造了 4 条，全部已在第二轮闭合。记录形状，因为它们是同一类错误：
+
+| 新造缺陷 | 形状 |
+|---|---|
+| 3.1 第 3 步未禁止经同一实例写 API 改写源文件 | 那会让 B 阻塞在 A 正持有的 `_write_lock` 上——**红证构造自己死锁**，吃满 30s 预算拖垮套件 |
+| 3.2b 未指定 oracle | 窗口以空缓存开始，窗内首读必然新鲜，用取值新鲜度当 oracle 会让 M2 恒绿——**与被它取代的 P1-2 是同一种说谎变异体** |
+| 标记存原始 `source_id` | 比较侧比的是归一化值，非规范 id 开的窗静默失去快路径 |
+| 4.5 写成「永远命不中」 | 窗内 owner 可命中；把假前提写进 follow-up issue 是 D2 刚踩过的坑 |
+
+**教训**：修复一个「构造在某条路径上不成立」的缺陷时，新构造必须**沿同一条路径重新走一遍**，
+而不是只检查它是否覆盖了原缺陷。前两条都是新构造在**另一条**路径上失效，
+第二条更是把刚拆掉的说谎变异体在隔壁重新装了一遍。

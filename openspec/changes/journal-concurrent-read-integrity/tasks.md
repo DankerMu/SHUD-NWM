@@ -10,7 +10,13 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
   **是三元组 `(thread_ident, source_id, cycle_segment)`，不是裸线程 id**（design D1）。
 - [ ] 1.2 `_locked_cycle_write`（def `:6948`）置标记：
   **必须是既有 `try:`（`:6953`）内的第一条语句**，
-  值为 `(threading.get_ident(), source_id, format_cycle_time(cycle_time))`；
+  值为 `(threading.get_ident(), _normalize_file_source_id(source_id, field="source_id"),
+  format_cycle_time(cycle_time))`。
+  **必须存归一化后的 id**：比较侧 `_cycle_rows:4090` 比的就是归一化后的值，
+  而 `_normalize_file_source_id`（`:9730`）非恒等（`packages/common/source_identity.py:5-9`
+  把 `GFS→gfs`）。存原始参数会让任何以非规范 id 开的窗**静默失去** owner 快路径——
+  方向安全但不可见，正是 #1595 警告的「漏一处 = 悄悄退化成永不免指纹」。
+  归一化后标记的身份空间也与 flock 一致（`_cycle_file_lock_unlocked:6967` 同样用归一化 id）。
   在**已有的 `finally` 块**（`:6956-6958`）内清空为 `None`。
   **不得**新开 try/finally，**也不得**置于 `_ensure_root_unlocked()`（`:6952`）之前——
   后者在 `try` 之外且会抛（`:7113-7121`），那条路径永不进 `finally`，标记会带着
@@ -45,9 +51,13 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
   `read_bytes_limited_no_follow(...)` 包进有界重试循环：
   仅当 `isinstance(error, SafeFilesystemError) and error.kind == "identity_changed"` 时重试，
   **无 sleep**；尝试用尽后原样抛出最后一次的异常。
-  重试前必须重取 stat 探针，且重取范围是 **`:4575-4582`**（含 `:4575` 的 `signature = None`）——
-  只重跑 `:4576-4582` 会让 `signature` 留着上一轮的值，配上新一轮为 `None` 的 `probe`
-  就在 `:4588` 的 `probe.st_size` 上炸。缓存查询（`:4583-4586`）留在循环外只做一次。
+  重试前必须重取 stat 探针**并重置 `signature`**（`:4575` 的 `signature = None` 必须包含在
+  重试体内）——否则 `signature` 留着上一轮的值，配上新一轮为 `None` 的 `probe`
+  就在 `:4588` 的 `probe.st_size` 上炸。
+  缓存查询（`:4583-4586`）**嵌在 `:4581` 的 `if` 内**，把它排除在重试体外需要拆那个 `if`；
+  留在重试体内也无害（重 stat 出的新 signature 必然 miss）。
+  **两种形状都可接受，选哪种由实现者定并在 PR 说明**——这里只约束
+  「`signature` 必须与 `probe` 同轮重置」。
 - [ ] 2.5 **禁令**：不得按异常 message 字符串分流；不得在 `safe_fs.open_file_no_follow`
   内部加重试；不得删除或弱化 `safe_fs.py:284` 的比对；不得给重试加 `time.sleep`。
 
@@ -68,7 +78,11 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
   1. 线程 A 进入 `_locked_cycle_write(C_x)` 并在带 timeout 的屏障上挂住；
   2. **在 A 的窗内**，线程 B 对**另一个** cycle `C_y` 调 `_cycle_rows` —— pre-fix 此次
      判据为真、存入 `fingerprint=None` 的 entry；
-  3. 带外改写 `C_y` 的源文件；
+  3. 带外改写 `C_y` 的源文件。**禁止经同一个 repository 实例的写 API**
+     （`ensure_forecast_cycle` / `upsert_pipeline_job` 等都要取 `_write_lock`，
+     而 A 正持着它等屏障 → 死锁 → 吃满 `_join_all` 的 30s 预算并拖垮套件）。
+     只允许：直接写文件，或另建**第二个** `FileOrchestrationJournalRepository`
+     指向同一 root（它有自己的 `_write_lock`；`C_y` 的 flock 与 `C_x` 的不冲突）；
   4. 线程 B 再次调 `_cycle_rows(C_y)` —— **pre-fix 吃下未校验的陈旧命中，post-fix 重算返回新鲜行**。
   **第 2 步必须在窗内**：`_locked_cycle_write` 在**入口**（`:6950-6951`）就 `clear()`，
   进窗前预热的 entry 已被抹掉，B 必然 miss→重算→返回新鲜行，构造 pre-fix 即绿、
@@ -83,8 +97,13 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
   第一次是 miss（必然算不出命中），第二次才是被断言的那次命中。
   只调一次会让"调用次数为 0"被一次纯 miss 满足，什么都没断言到。
 - [ ] 3.2b **keyed 标记的判别力**（design D1）：owner 在 `C_x` 的窗内读 **`C_y`** 时
-  判据必须为**假**（走 fingerprint 校验）。变异体：把标记退化成裸 `threading.get_ident()`
-  并把判据改成只比 ident —— 本条必须转红。
+  判据必须为**假**（走 fingerprint 校验）。
+  **oracle 必须是 `_cycle_rows_source_fingerprint` 的 spy 调用次数 ≥ 1，不是取值新鲜度。**
+  窗口以空缓存开始，所以窗内首次读 `C_y` 必然 miss→重算→返回新鲜值，
+  **M2 变异体下同样新鲜**——用新鲜度当 oracle 会让 M2 恒绿，
+  和原 P1-2 是同一种说谎变异体。若坚持用取值 oracle，就必须照 3.1 的四步
+  在窗内对 `C_y` 走一遍 预热/改写/重读。
+  变异体 M2：把标记退化成裸 `threading.get_ident()`、判据只比 ident —— 本条必须转红。
 
 ### 3.3 异常路径——两条，缺一不可
 
@@ -150,6 +169,9 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
   或 (b) 保留 carve-out 并写明理由（例如它是 #1380 的 dict-race hammer、oracle 不同），
   同时另建一个同 cycle 读写的用例承担本条。
   **只新建用例而不动那个 carve-out，等于让树里留着一条现在为假的注释**——不接受。
+  **证据要求**：选 (a) 时「post-fix 稳定绿」不是一次绿就算——去掉 carve-out 后
+  仍存在残余失败面（无节流写者 hammer 下连续三次尝试都撞进微秒窗口）。
+  须给出**重复 10 次全绿**的实测输出，不是单次。
 
 ### 3.11-3.12 结构守卫
 
@@ -176,8 +198,10 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
   该 issue **必须把 design D2 的第 1 条作为硬约束写进正文**：
   **入口 clear（`:6950-6951`）是 owner 快路径的正确性前提，不得以「纯性能」为由收窄**。
   漏掉这句，执行 follow-up 的人会在假前提上动入口 clear——那才是真会出事的地方。
-- [ ] 4.5 `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None`
-  的 entry，窗外恒 miss（`None == <tuple>` 恒假），是一段永远命不中的缓存写入——
+- [ ] 4.5 `_cycle_rows_by_model_unlocked`（`:4233-4237`）**无条件**存 `fingerprint=None` 的 entry。
+  准确口径（**不得写成「永远命不中」**）：**窗外恒 miss**（`None == <tuple>` 恒假），
+  **窗内 owner 可命中**——它与 `_cycle_rows` 共用同一 4 元组 key 形状，
+  `_materialize_latest_unlocked` 就在同一窗内 `:6851` 读、`:6853` 存——**出口 clear 即失效**。
   立 issue，本 change 不动（design D10.5）。
 
 ## 5. 验证（Evidence Floor）
