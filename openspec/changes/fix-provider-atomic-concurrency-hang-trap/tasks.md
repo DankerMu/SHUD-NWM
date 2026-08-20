@@ -4,10 +4,11 @@
 
 - [ ] 1.1 Rewrite the writer thread in
   `tests/test_scheduler_file_provider_refresh.py::test_provider_atomic_readers_observe_only_complete_old_or_new_json`
-  to the house pattern used at `:796-818` and `:1929-1941`: an
-  `errors: list[BaseException]` list, the 40-iteration loop inside `try`, an
-  `except BaseException as error: errors.append(error)`, and a
-  `finally: finished.set()`.
+  as follows. **From the house pattern** at `:796-818` and `:1929-1943`: an
+  `errors: list[BaseException]` list, the 40-iteration loop inside `try`, and an
+  `except BaseException as error: errors.append(error)`. **New, not house
+  pattern** — neither house instance has a completion sentinel at all, both
+  simply gate on a `Barrier` and join: a `finally: finished.set()`.
 - [ ] 1.2 Bound the main-thread busy-loop with a deadline
   (`time.monotonic()` based, per the `tests/test_file_orchestration_journal.py:7894`
   precedent) so the loop cannot spin unbounded even if `finished` is never set.
@@ -104,7 +105,12 @@
   change shifts its own cited lines.
 - **E7 — Lint + spec clean.**
 - **E8 — Anti-vacuity.** The failure-injection test is shown to FAIL with the
-  harness fix reverted. A test that only passes-when-present cannot distinguish
+  harness fix reverted — **reverting each half separately, one recorded failure
+  each**: (i) remove `finally: finished.set()`, keeping the loop deadline, so the
+  spin-loop exits at its deadline and `assert not errors` catches the exception;
+  (ii) remove the `errors` capture and its assertion, so the injection test's
+  expected failure never materializes. Keep the deadline in both cases —
+  reverting it too would reintroduce the hang rather than demonstrate a failure. A test that only passes-when-present cannot distinguish
   "harness works" from "patch was inert" (design D6).
 
 ## 5. Report, don't fix — filed, do not fix in this PR
@@ -137,8 +143,17 @@ thread blocked until a worker reaches a synchronization point; a bare
 `thread.join()` is out of scope). This supersedes an earlier, narrower grep
 whose apparent exhaustiveness was an artifact of the search terms.
 
-Confirmed **conforming**, no action — recorded because two of them look
-non-conforming at a glance:
+Known caliper limits of the sweep, stated so the next reader can widen it:
+it enumerated `threading.Event()` and `threading.Barrier(` textually, so it
+does **not** cover `multiprocessing` synchronization (e.g.
+`tests/test_file_orchestration_journal.py:2702` uses `context.Event()`),
+sentinels obtained from a factory or passed in as parameters, or spin-waits on
+plain attributes. The separate spin-wait sweep in design D7 covers the
+main-thread side by loop shape rather than by sentinel type, which is what makes
+the "one governed site" claim robust to this gap.
+
+**Not governed** by the requirement's trigger (no main-thread spin-wait on a
+worker-set sentinel), so conformance is not at issue:
 
 - `tests/test_production_scheduler.py:42190` — the `Barrier(2)` has no timeout
   at the construction site, but the wait does: `_BarrierOrchestrator.orchestrate_cycle`
@@ -146,7 +161,14 @@ non-conforming at a glance:
   invisible to any proximity-based grep* — the timeout is ~60 lines from the
   construction, in a different class.
 - `tests/test_display_coverage_parallel.py:32` — `threading.Barrier(2, timeout=2)`.
-- `tests/test_scheduler_file_provider_refresh.py:788`, `:1926` — the house pattern.
+**Governed-adjacent and conforming** — these DO involve worker synchronization,
+and satisfy the outcome obligations:
+
+- `tests/test_scheduler_file_provider_refresh.py:788`, `:1926` — the house
+  pattern. Note both worker waits (`:798`, `:1931`) are themselves *unbounded*
+  `Barrier` waits; they satisfy (b) and (c) via `:815`/`:818` and `:1942`/`:1943`
+  instead. This is the concrete evidence behind the spec's refusal to prescribe
+  mechanism (design D7).
 - `tests/test_file_orchestration_journal.py:7894` — deadline-bounded loop.
 - `tests/test_gateway_reconcile.py:5231` — daemon thread with `try/finally`. It
   *is* awaited (`FakeProcess.wait()` at `:5253` calls `self.thread.join(timeout)`

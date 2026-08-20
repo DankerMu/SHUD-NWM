@@ -96,14 +96,19 @@ that would close the class independently of harness shape
   test fails, because the `finally` is unreachable in this case and the
   deadline is the only backstop
 
-#### Scenario: Bounded waits and bare joins are not governed
+#### Scenario: Bounded waits and independent bare joins are not governed
 
 - **WHEN** a test's main thread waits via `event.wait(timeout=N)`, or
-  starts workers and only calls `thread.join()` with no sentinel it
-  depends on
+  starts workers and only calls `thread.join()` where the workers depend
+  on no sentinel **and on no synchronization point with each other**
 - **THEN** this requirement does not apply — the first already
   terminates on its own, and in the second a worker that raises dies and
   the join returns
+- **AND** the qualifier is load-bearing: a bare `join()` over workers
+  that DO share a synchronization point can still hang, because a worker
+  that dies early strands its peers there and the join never returns.
+  `tests/test_gateway_reconcile.py:3591` is exactly that shape, which is
+  why it is routed to #1645 rather than excluded here
 
 #### Scenario: Conforming a harness does not weaken its oracle
 
