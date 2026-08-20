@@ -10,8 +10,15 @@
 | **database 臂** | `db_free_required=True` vs `False` |
 | **代码臂** | 同一函数内的 `S_ISLNK` 分支 vs `except OSError` 分支 |
 
-**跨解释器臂一致**是本单的目标；**跨 database 臂一致**在本单 allowlist 下**不可实现**
-（db-free 包裹层 `scheduler_config.py:1020-1024` 一揽子吞异常，见 proposal Non-Goal）。
+**跨解释器臂一致**是本单的目标，五处皆然。跨 database 臂要分成两件事，**不可一概而论**：
+
+- **跨 database 臂的「构造产物」一致**（#1549，B.2(b)/B.2(d)）—— 是本单目标，且**可实现**
+  （fixture 审已模拟三处修法与今天 db-free 臂产物逐字相等）。
+- **跨 database 臂的「拒绝判定」一致**（#1544 那条 lane）—— 在本单 allowlist 下**不可实现**：
+  db-free 包裹层 `scheduler_config.py:1020-1024` 一揽子吞掉**全部**拒绝，而该文件 A.7 钉死零改动。
+
+（初稿这里写成一句无条件的「跨 database 臂一致不可实现」，与 D0.2 / B.2(b) / spec 的 parity 锚点冲突；
+fixture 审 round-1 P2-A 更正。）
 
 ## D0. 四种语义，禁止统一
 
@@ -79,7 +86,7 @@ if stat.S_ISLNK(path_stat.st_mode):
 ```
 
 几何是 **workspace 内部**的末段环（父段健康、containment 已过），是 #1520 矩阵的**补集** ——
-#1520 的用例把环造在 workspace 之外，`:731` 的 containment 先拒，这一臂永不执行。
+#1520 的用例把环造在 workspace 之外，父段 containment（master `:734`）先拒，这一臂永不执行。
 
 **修法**：`os.path.realpath(strict=True)` 优先。
 - **`errno.ELOOP` → 结构化 `ValueError` 拒绝**，两个**解释器臂**同类型同文案。
@@ -96,10 +103,12 @@ if stat.S_ISLNK(path_stat.st_mode):
 `must be a directory` ⇒ return）。天真地换成 strict-only 会把悬空 symlink 从「放行」变成「拒绝」——
 **静默打断 userspace**，且既有用例未必逮得到。
 
-**四条既有语义必须逐条锁成 spec scenario**（回归栅栏）：
+**六条既有语义必须逐条锁成 spec scenario**（回归栅栏，对应 B.3(b)–B.3(g)）：
 健康目录 symlink → 通过；symlink 指向文件 → `must be a directory`；
-symlink 逃出 workspace → `must be under workspace_root`；末段不存在（`FileNotFoundError`）→ 直接 return。
-**外加第五条**：悬空 symlink → 放行（今天的行为，上面那条兜底存在的理由）。
+symlink 逃出 workspace → `must be under workspace_root`；末段不存在（`FileNotFoundError`）→ 直接 return；
+**悬空 symlink 且目标在 workspace 内 → 放行**（今天的行为，上面那条 ENOENT 兜底存在的理由）；
+**悬空 symlink 且目标在 workspace 外 → 仍报 `must be under workspace_root`**
+（`:743` 的 containment 复查先于 `exists()` 闸触发 —— 少了这条限定，头号判别器 B.6(c) 会因为别的原因红）。
 
 **判定步数一致只能按解释器臂表述（初稿写错了，fixture 审 P0-3 推翻）**：
 初稿说「≤3.12 靠包裹层吞掉 `RuntimeError` 而跳过后续两步，3.13+ 跑完，修完两臂要一致」——

@@ -27,7 +27,7 @@
 | #1547 | `packages/common/safe_fs.py` `_expand_path` | **抛**：`SafeFilesystemError(kind="unsafe")` |
 | #1549 | `scheduler_runtime_roots.py` `_optional_config_path`（活，`allowed_storage_roots`）、`_config_path_relative_to_preserve_final`（活，`log_root`）、`_config_path_preserve_final_component`（兼容面，见下） | **不抛**：db-backed 臂收敛到 db-free 臂，构造成功、产物逐字相等，分类仍留给 preflight |
 | #1544 | 同文件 `_require_safe_directory_final_component` 的 **S_ISLNK 臂** | strict-realpath 范式：ELOOP → 两个解释器同一结构化 `ValueError`；ENOENT → 非 strict 兜底，**保住今天的悬空 symlink 放行** |
-| #1546 | 同文件 `_resolve_optional_config_path`、`_optional_config_path_relative_to` | 两臂收敛为规范化 `Path` 返回（同文件 `_canonical_parent` 已有的定型范式） |
+| #1546 | 同文件 `_resolve_optional_config_path`、`_optional_config_path_relative_to` | 两个**解释器臂**收敛为同一规范化 `Path` 返回（同文件 `_canonical_parent` 已有的定型范式） |
 | #1545 | 同文件 `_require_safe_directory_final_component` 的拒绝文案 | **只改消息内容**：类型仍 `ValueError`，`lock_path` 那条逐字不变 |
 
 ### 站点可达性口径（round-0 fixture 审实测所得；其中两条**推翻了我自己的初稿**）
@@ -44,7 +44,12 @@
    但定性改为**兼容面 / 家族账目**项，与 #1546 那一对同级，**不是**「#1549 漏数」。
 2. **#1546 的「仓内零调用方」成立，但要说准。** `_resolve_optional_config_path` 在 `scheduler_config.py`
    有 7 处形似调用，但那些走的是 `_resolve_optional_config_path_for_mode` → `_resolve_config_path_for_mode`
-   （`scheduler_config.py:939-961`，两臂各自已有 `except (OSError, RuntimeError)`），
+   （`scheduler_config.py:939-961`），两个 database 臂各自都安全，但**理由不同**：
+   db-free 臂有 `except (OSError, RuntimeError)`；**db-backed 臂没有**，它用的是
+   `os.path.realpath`，压根不产生无 errno 的 `RuntimeError`，所以不需要该 handler。
+   （初稿写「两臂各自已有 `except (OSError, RuntimeError)`」是**修复时新引入的假陈述**，
+   fixture 审 round-1 P2-B 更正；结论不变，理由不同。这句排在 D.2 要进 PR body 的清单里，
+   不改就会把假陈述写进永久记录 —— 与 round-0 P1-2 同类。）
    **不经过** `_scheduler._resolve_optional_config_path`。这一对只经
    `scheduler_candidate_runtime.py:557-558` 的 forwarder 对外暴露，属兼容面，今天不是活的崩溃路径。
 

@@ -77,7 +77,7 @@
 
 - [ ] A.6 非 `tests/**`、非 `openspec/**` 的改动**只允许**出现在：
       `packages/common/safe_fs.py`、`services/orchestrator/scheduler_runtime_roots.py`、
-      `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`（A.5(d) 一行）。
+      `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`（A.5(d)；**默认无需改动**）。
 - [ ] A.7 **`services/orchestrator/scheduler_config.py` 零改动**，两条各自的理由：
       (a) `_expanduser_for_mode`（`:850-857`）的「故意 re-raise」是 #1423/#1520 已裁定的设计决策；
       (b) `_require_safe_directory_final_component_for_mode`（`:1020-1024`）的 db-free 一揽子吞异常
@@ -116,8 +116,8 @@
       **两个**字段，在 **db-backed 臂**构造**成功**。
       **`workspace_root` 不在此列**（初稿写了，fixture 审 P0-1 实测推翻）：它在 `scheduler_config.py:269`
       的 `_expanduser_for_mode` 上更早 re-raise，而那是 A.7 钉死零改动的文件里的 Non-Goal。
-- [ ] B.2(b) **两臂产物逐字相等**（db-backed == db-free）。只断言「没抛」对
-      「抛型改了但产物错了」恒绿。
+- [ ] B.2(b) **跨 database 臂的构造产物逐字相等**（db-backed == db-free）。只断言「没抛」对
+      「抛型改了但产物错了」恒绿。（fixture 审已模拟确认三处修法都能达成 parity，非纸上要求。）
 - [ ] B.2(c) 同输入下 preflight 产出**结构化结果**（`status`/`blockers`）而非抛栈；
       具体 reason 以实现期探针实测为准（沿 #1424/#1548 记录法）。
 - [ ] B.2(d) A.2(c) 的兼容面站点：**直接调** `_config_path_preserve_final_component("~nosuchuser_zz/workspace")`，
@@ -227,5 +227,10 @@
       （已治 / 本单治 / 已双接不动 / **裸但 tilde 非活**），四处非 scope 站点（`:271 :332 :504 :578`）
       必须逐条带理由出现在表里；`packages/common/safe_fs.py` 同样列（该文件只有 `_expand_path` 一处）。
       声明 `#1332→#1423→#1520→#1544→#1546` 这条链上两个文件**再无**未收敛裸站点，或列出保留者与理由。
+- [ ] D.9 **新 capability 的 Purpose**：`safe-filesystem-primitive-contract` 归档后会带
+      `Purpose: TBD - created by archiving change …` —— 正是 D5 拿来否掉
+      `data-integrity-storage-contract` 的那条毛病。仓内无先例在 delta 里写 `## Purpose`
+      （归档才物化 `openspec/specs/<cap>/spec.md`），故**归档 chore PR 里补一句真 Purpose**，
+      别让它以 TBD 落地。
 - [ ] D.8 诚实记账：判别力只在 ≤3.12 臂；#1546 今天无活调用方，改它买的是家族账目结清
       而非当下崩溃修复；#1547 触发条件少见但影响面是共享底座。

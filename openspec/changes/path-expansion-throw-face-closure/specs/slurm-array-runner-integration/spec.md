@@ -21,7 +21,7 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 
 #### Scenario: The compatibility-surface expansion helper stops throwing bare on the same input
 
-- **GIVEN** the module's preserve-final-component helper called directly with `~<unknown user>/workspace`
+- **GIVEN** the module's non-relative preserve-final-component helper, `_config_path_preserve_final_component`, called directly with `~<unknown user>/workspace`
 - **WHEN** it expands the value
 - **THEN** it returns the same product the database-free arm would produce
 - **AND** it does not raise an errno-less `RuntimeError`
@@ -72,7 +72,7 @@ A target that does not exist SHALL fall back to non-strict real-path resolution 
 
 ### Requirement: A workspace-root loop refusal SHALL name the operator's own knob and carry the offending path
 
-The configuration refusal raised when the workspace root itself is a symlink loop SHALL carry the offending path under the module's existing redaction treatment and SHALL let an operator reach the workspace-root knob, because the refusal is currently attributed to a derived evidence-directory field the operator never configured and carries neither a path nor an environment variable name.
+The configuration refusal raised when the workspace root itself is a symlink loop SHALL carry the offending path as its sibling refusals in the same guard carry their operands and SHALL let an operator reach the workspace-root knob, because the refusal is currently attributed to a derived evidence-directory field the operator never configured and carries neither a path nor an environment variable name.
 
 The refusal SHALL remain a configuration `ValueError`, the message SHALL be identical on CPython 3.11 and 3.12 and on 3.13 and later, and the lock-root containment refusal SHALL keep its current wording verbatim. The path SHALL be carried as the guard's sibling refusals carry their operands, because that guard receives no evidence-redaction flag and cannot reproduce the preflight lane's redaction treatment. The non-loop geometries that reach the same handler — a workspace root that is a regular file, and one whose mode denies traversal — SHALL keep their existing message verbatim, so the enriched wording is reached only by the loop.
 
