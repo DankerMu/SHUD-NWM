@@ -43,6 +43,7 @@ from packages.common.state_manager import (
     state_snapshot_id,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 
 
 class FakeStateSnapshotRepository:
@@ -840,7 +841,7 @@ def test_file_state_snapshot_index_published_uri_publish_refuses_symlink_target(
     content = _valid_ic_bytes(b"published-symlink")
     state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
     symlink_path = published_root / "manifests" / "scheduler" / "state-index.json"
-    symlink_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(symlink_path.parent)  # lock parent, #1513
     target = tmp_path / "target-state-index.json"
     target.write_text("do-not-overwrite\n", encoding="utf-8")
     symlink_path.symlink_to(target)
@@ -3424,7 +3425,7 @@ def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_in
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
     )
-    destination_index.parent.mkdir(parents=True, exist_ok=True)
+    make_directory_with_explicit_mode(destination_index.parent)  # lock parent, #1513
     destination_index.write_text("[]\n", encoding="utf-8")
 
     with pytest.raises(StateManagerError) as error_info:
@@ -3554,7 +3555,7 @@ def test_provider_lock_release_failure_never_masks_the_body_precommit_error(
     # the compare-and-swap is stale, and the self-lock branch of
     # atomic_replace_provider_bytes is the lock under test.
     destination = tmp_path / "provider" / "manifest.json"
-    destination.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(destination.parent)  # lock parent, #1513
     stale_preimage = atomic_replace_provider_bytes(
         destination,
         b"generation-1\n",
@@ -3676,14 +3677,17 @@ def test_state_index_copyback_refuses_hardlinked_provider_lockfiles(
     # passes; the merge then takes the source lock and asks for the destination
     # lock, which is the same file, and `provider_destination_lock` is blocking
     # and not reentrant.  Before this change that is a permanent hang.
-    # The umask has to cover the *construction*: `_CopybackRoots` publishes both
-    # indexes, and each publish takes a provider lock whose parent
-    # `ensure_directory_no_follow` creates with a bare `os.mkdir` (safe_fs.py:68),
-    # i.e. `0o777 & ~umask`.  Under an ambient `umask 002` that is 0o775 and
-    # `provider_lock_parent_unsafe` (provider_atomic.py:209-210) fires inside the
-    # fixture, before this test has proved anything.  The construction is inside
-    # the `try` so a mid-construction raise cannot leak 0o077 into the rest of the
-    # session.
+    # The umask no longer decides the lock parents: `_CopybackRoots` creates both
+    # of them only through `publish_state_snapshot_index` ->
+    # `ensure_directory_no_follow`, and #1513 pinned that `os.mkdir` to an explicit
+    # 0o755 (safe_fs.py:68), so `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) passes under any ambient umask and this wrapper
+    # is no longer load-bearing for that gate (measured: the suite is green with the
+    # wrapper neutralized).  It is kept because it is behavior-neutral --
+    # `0o755 & ~0o077 == 0o700`, the same private mode it always produced -- and
+    # because it keeps this test's private-mode posture explicit rather than
+    # implicit in safe_fs's pin.  The construction is inside the `try` so a
+    # mid-construction raise cannot leak 0o077 into the rest of the session.
     previous_umask = os.umask(0o077)
     try:
         roots = _CopybackRoots(tmp_path)
@@ -4191,7 +4195,10 @@ def _write_state_index_payload(path: Path, entries: list[dict[str, Any]], *, gen
         "entries": entries,
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+    # SHARED_PROVIDER_MODE, not the ambient umask (#1513): this seeds a provider
+    # DESTINATION, and a later publish over it refuses any other mode. A bare
+    # write_text lands 0o664 under umask 0002.
+    write_provider_destination(path, json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n")
 
 
 def _payload_checksum(payload: Mapping[str, Any]) -> str:

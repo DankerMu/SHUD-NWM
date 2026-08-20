@@ -424,6 +424,19 @@ def _copy_tree_no_symlinks(source: Path, target: Path) -> dict[str, Any]:
         _reject_symlink(current)
         relative = current.relative_to(source)
         destination_dir = target / relative
+        # ACL-mask-preserving BY CONSTRUCTION -- do not "fix" this into
+        # `ensure_directory_no_follow` (#1513).  The copyback tree's shared root
+        # (`runs/`) carries a `default:user:nwm:rwx` POSIX ACL, and when such an
+        # ACL is present the umask is ignored and any explicit mode passed to
+        # `mkdir` clamps the inherited ACL *mask* instead -- degrading that grant
+        # to `#effective:r-x`.  A mode-less `mkdir` lets the ACL supply the mode
+        # and leaves `mask::rwx` intact.
+        #
+        # Do NOT go looking for a live consumer of that grant: there is none
+        # today (`find` reports zero nwm-owned entries under `runs/`; node-22 is
+        # the sole writer and node-27 only reads).  The point is that this site
+        # is already on the correct side of the incompatibility if one ever
+        # appears, not that something depends on it right now.
         destination_dir.mkdir(parents=True, exist_ok=True)
         for dirname in list(dirs):
             _reject_symlink(current / dirname)

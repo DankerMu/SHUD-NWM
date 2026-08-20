@@ -17,15 +17,24 @@ tests/test_scheduler_state_index_copyback_replay.py,
 tests/test_run_tree_copyback.py, tests/test_tile_publisher.py and
 tests/test_forcing_copyback_backfill.py, plus the POSIX same-superblock
 argument recorded in the change proposal.
+
+The file also carries safe_fs's **directory-mode determinism** cases (#1513) --
+see the section comment below.  Those live here rather than beside the
+provider_atomic coverage in tests/test_scheduler_file_provider_refresh.py
+because scripts/select_ci_tests.py routes packages/common/safe_fs.py to THIS
+suite and not to that one, so a safe_fs-only change would otherwise never run
+them in the PR lane.
 """
 
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
 
+from packages.common.provider_atomic import provider_destination_lock
 from packages.common.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
@@ -112,6 +121,89 @@ def test_directory_identity_refuses_symlink_components(tmp_path: Path, shape: st
         directory_identity_no_follow(probed)
 
 
+# Directory-mode determinism (#1513).
+#
+# `ensure_directory_no_follow` used to call `os.mkdir` with no mode, so the
+# landed permission was `0o777 & ~umask` -- a function of the ambient
+# environment rather than of the code.  `provider_atomic`'s lock gate is
+# fail-closed on any `0o022` bit in the lock's direct parent, so on a
+# umask-0002 host (node-27, the project's backend pytest oracle) every
+# safe_fs-created lock parent landed `0o775` and was refused.
+#
+# Both sides are pinned below on purpose: the repository's pre-existing umask
+# tests all pin the STRICT side, which is precisely the coverage shape that let
+# the permissive-side bug survive.  The `0o077` case is the guard against the
+# tempting "fix" of adding an `fchmod` after `mkdir` -- that would clear the
+# umask's influence in BOTH directions and silently widen `0o700` to `0o755`.
+
+
+def test_ensure_directory_pins_its_mode_under_a_permissive_umask(tmp_path: Path) -> None:
+    target = tmp_path / "permissive" / "child"
+
+    previous_umask = os.umask(0o002)
+    try:
+        ensure_directory_no_follow(target)
+    finally:
+        os.umask(previous_umask)
+
+    # Both components are safe_fs-created; the intermediate one matters just as
+    # much, because that is the one a lock's direct parent usually is.
+    for created in (target.parent, target):
+        landed = stat.S_IMODE(created.stat().st_mode)
+        assert landed == 0o755, f"{created} landed {landed:#o}"
+        assert landed & 0o022 == 0
+
+
+def test_ensure_directory_is_not_widened_under_a_restrictive_umask(tmp_path: Path) -> None:
+    # The umask may further RESTRICT a safe_fs directory; it may never loosen
+    # it.  0o755 & ~0o077 == 0o700, byte-identical to the mode-less behavior.
+    target = tmp_path / "restrictive" / "child"
+
+    previous_umask = os.umask(0o077)
+    try:
+        ensure_directory_no_follow(target)
+    finally:
+        os.umask(previous_umask)
+
+    for created in (target.parent, target):
+        landed = stat.S_IMODE(created.stat().st_mode)
+        assert landed == 0o700, f"{created} landed {landed:#o}"
+
+
+def test_provider_lock_acquires_under_a_safe_fs_parent_created_at_a_permissive_umask(
+    tmp_path: Path,
+) -> None:
+    # The permissive-side twin of
+    # tests/test_scheduler_file_provider_refresh.py's
+    # test_provider_atomic_publishes_shared_mode_under_private_umask, and the
+    # end-to-end shape of the bug: the gate is unchanged, the parent's mode is
+    # what changed.
+    destination = tmp_path / "provider" / "locks" / "manifest.json"
+
+    previous_umask = os.umask(0o002)
+    try:
+        parent = ensure_directory_no_follow(destination.parent)
+        with provider_destination_lock(destination):
+            pass
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(parent.stat().st_mode) & 0o022 == 0
+
+
+def test_ensure_directory_leaves_an_existing_directory_mode_alone(tmp_path: Path) -> None:
+    # Forward-only: the helper never chmods a prefix it did not create, so
+    # directories that predate this change keep their mode and no migration is
+    # implied.  Callers such as
+    # `state_manager._ensure_copyback_state_parent` rely on exactly this to own
+    # the widening themselves.
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    os.chmod(existing, 0o775)
+
+    ensure_directory_no_follow(existing)
+
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o775
 # --- Undeterminable home directory (#1547) -----------------------------------
 #
 # `Path.expanduser()` throws a bare, errno-less RuntimeError when no home

@@ -93,6 +93,7 @@ from services.orchestrator.scheduler_preflight import _production_slurm_env
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 from workers.shud_runtime import runtime as shud_runtime_module
@@ -33577,8 +33578,13 @@ def _scheduler_env_roots(root: Path) -> dict[str, Path]:
         "lock_root": workspace_root / "locks",
         "evidence_root": workspace_root / "evidence",
     }
+    # Explicit mode, not the ambient umask (#1513). These roots become the DIRECT
+    # parent of provider locks, and `provider_atomic`'s gate is fail-closed on any
+    # 0o022 bit there; a bare `Path.mkdir` lands 0o775 under umask 0002 and
+    # reddens this whole file on node-27. `Path.mkdir(mode=..., parents=True)`
+    # would not do -- it applies the mode to the leaf only.
     for path in roots.values():
-        path.mkdir(parents=True, exist_ok=True)
+        make_directory_with_explicit_mode(path)
     return roots
 
 
@@ -33657,8 +33663,10 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
         monkeypatch.setenv(key, "file")
     db_free_dir = roots["workspace_root"] / "db-free"
     object_index_dir = roots["object_store_root"] / "db-free"
-    db_free_dir.mkdir(parents=True, exist_ok=True)
-    object_index_dir.mkdir(parents=True, exist_ok=True)
+    # `object_index_dir` is the measured trip point (#1513): it is the direct
+    # parent of the canonical-readiness and state-index provider locks.
+    make_directory_with_explicit_mode(db_free_dir)
+    make_directory_with_explicit_mode(object_index_dir)
     paths = {
         "NHMS_SCHEDULER_REGISTRY_MANIFEST": db_free_dir / "registry-manifest.json",
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": object_index_dir / "canonical-readiness-index.json",
@@ -33670,9 +33678,14 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
             "NHMS_SCHEDULER_JOURNAL_ROOT",
             "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
         }:
-            path.mkdir(parents=True, exist_ok=True)
+            make_directory_with_explicit_mode(path)
         else:
-            path.write_text("{}", encoding="utf-8")
+            # Explicit 0o644, not the ambient umask (#1513): these stubs are
+            # provider DESTINATIONS, and `atomic_replace_provider_bytes` refuses
+            # to publish over an existing file whose mode is not exactly
+            # `SHARED_PROVIDER_MODE`. A bare `write_text` lands 0o664 under
+            # umask 0002.
+            write_provider_destination(path)
         monkeypatch.setenv(key, str(path))
     return roots, paths
 

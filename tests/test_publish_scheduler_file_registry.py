@@ -19,6 +19,7 @@ from services.orchestrator.scheduler_file_providers import (
     publish_canonical_readiness_index,
     publish_scheduler_registry_manifest,
 )
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import required_standard_variables_for_source
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
 from workers.model_registry.basins_soil_alpha_repair import repair_soil_alpha_calibration_for_basin
@@ -1715,8 +1716,9 @@ def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
         ),
     )
     canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
-    canonical.parent.mkdir(parents=True)
-    canonical.write_bytes(
+    make_directory_with_explicit_mode(canonical.parent)
+    write_provider_destination(
+        canonical,
         json.dumps(
             {
                 "schema_version": "nhms.scheduler.file_model_registry.v1",
@@ -1734,7 +1736,7 @@ def test_manual_cli_allow_uncovered_bypasses_gate_with_warning(
             },
             sort_keys=True,
         ).encode()
-        + b"\n"
+        + b"\n",
     )
     monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
 
@@ -1896,7 +1898,7 @@ _MALFORMED_CUTOVER_GATES: list[Any] = [
 
 def _registry_destination(tmp_path: Path) -> Path:
     destination = tmp_path / "shared/scheduler/registry/manifest-last.json"
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    make_directory_with_explicit_mode(destination.parent)
     return destination
 
 
@@ -2160,7 +2162,7 @@ def test_cli_prints_operator_gate_warning_on_successful_run(
         ),
     )
     canonical = tmp_path / "shared/scheduler/registry/manifest-last.json"
-    canonical.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(canonical.parent)
     monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
 
     argv = [
